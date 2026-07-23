@@ -12,10 +12,59 @@ use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     AGENT_TASK_AGGREGATE_SCHEMA,
 };
+use crate::agent_task_service::reconcile_stale_active_runs;
 use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStore, RemoteRunnerJobRequest};
 use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
+
+struct TerminalSnapshotProvider {
+    snapshot: Mutex<Option<homeboy_core::api_jobs::RunnerJobLogSnapshot>>,
+}
+
+impl RunnerContinuationProvider for TerminalSnapshotProvider {
+    fn runner_job_log_snapshot(
+        &self,
+        _runner_id: &str,
+        _job_id: &str,
+    ) -> Result<homeboy_core::api_jobs::RunnerJobLogSnapshot> {
+        self.snapshot
+            .lock()
+            .expect("terminal snapshot")
+            .take()
+            .ok_or_else(|| Error::internal_unexpected("terminal snapshot was already consumed"))
+    }
+
+    fn is_runner_connected(&self, _runner_id: &str) -> bool {
+        true
+    }
+
+    fn runner_exists(&self, _runner_id: &str) -> bool {
+        true
+    }
+
+    fn run_continuation_exec(
+        &self,
+        _runner_id: &str,
+        _cwd: &str,
+        _command: &[String],
+        _run_id: &str,
+    ) -> Result<i32> {
+        Err(Error::internal_unexpected(
+            "not used by terminal reconciliation",
+        ))
+    }
+
+    fn submit_reverse_broker_job(
+        &self,
+        _runner_id: &str,
+        _request: RemoteRunnerJobRequest,
+    ) -> Result<Job> {
+        Err(Error::internal_unexpected(
+            "not used by terminal reconciliation",
+        ))
+    }
+}
 
 #[cfg(unix)]
 #[test]
@@ -738,6 +787,70 @@ fn foreground_terminal_daemon_projection_finishes_success_and_failure_runs_once(
                 "projected"
             );
         }
+    });
+}
+
+#[test]
+fn stale_reconcile_imports_terminal_runner_aggregate_before_cancelling_controller_projection() {
+    with_isolated_home(|_| {
+        let run_id = "cook-9773-attempt-1-caller-loss";
+        let plan = test_plan();
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        })
+        .expect("daemon acceptance persists the runner identity before caller loss");
+
+        let mut aggregate = succeeded_aggregate(&plan);
+        aggregate.status = AgentTaskAggregateStatus::PartialRecoverable;
+        aggregate.totals.succeeded = 0;
+        aggregate.totals.candidate_recoverable = 1;
+        aggregate.outcomes[0].status = AgentTaskOutcomeStatus::CandidateRecoverable;
+        aggregate.outcomes[0].summary = Some("one recoverable patch candidate".to_string());
+        let mut snapshot = terminal_child_snapshot(&aggregate);
+        snapshot.events[0].data.as_mut().expect("event data")["identity"]["run_id"] = json!(run_id);
+        snapshot.events[0].data.as_mut().expect("event data")["identity"]["persisted_run_id"] =
+            json!(run_id);
+        let _provider = RunnerContinuationTestGuard::install(Box::new(TerminalSnapshotProvider {
+            snapshot: Mutex::new(Some(snapshot)),
+        }));
+
+        // The controller process disappeared after acceptance and before it
+        // received the aggregate. The local aggregate is intentionally absent.
+        rewrite_record_for_test(run_id, |record| {
+            record.annotate_stale_running();
+        })
+        .expect("persist stale local controller projection");
+        assert!(store::read_aggregate(run_id).is_err());
+
+        let report = reconcile_stale_active_runs(false).expect("reconcile stale projection");
+        assert_eq!(report.considered, 0);
+        assert_eq!(report.reconciled, 0);
+
+        let terminal = status(run_id).expect("authoritative aggregate imported");
+        assert_eq!(terminal.state, AgentTaskRunState::PartialRecoverable);
+        assert_eq!(terminal.runner_id(), Some("homeboy-lab"));
+        assert_eq!(
+            terminal.runner_job_id(),
+            Some("00000000-0000-0000-0000-000000000123")
+        );
+        assert!(store::read_aggregate(run_id).is_ok());
+        assert!(artifacts(run_id)
+            .expect("terminal artifacts mirrored")
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence.kind == "executor-input"));
+
+        let repeated = reconcile_stale_active_runs(false).expect("idempotent terminal reconcile");
+        assert_eq!(repeated.considered, 0);
+        assert_eq!(
+            status(run_id).expect("terminal state retained").state,
+            AgentTaskRunState::PartialRecoverable
+        );
     });
 }
 
