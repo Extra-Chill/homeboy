@@ -654,7 +654,7 @@ pub(crate) fn record_terminal_artifact_projection(
     record: &mut AgentTaskRunRecord,
     aggregate: &AgentTaskAggregate,
 ) -> Result<()> {
-    if record.runner_id().is_none() && aggregate_has_unresolved_actionable_patch(aggregate) {
+    if record.runner_id().is_none() && aggregate_has_runner_backed_actionable_patch(aggregate) {
         match runner_id_from_artifact_provenance(aggregate) {
             Ok(runner_id) => {
                 record
@@ -800,17 +800,17 @@ fn runner_id_from_artifact_provenance(aggregate: &AgentTaskAggregate) -> Result<
     }
 }
 
-fn aggregate_has_unresolved_actionable_patch(aggregate: &AgentTaskAggregate) -> bool {
+fn aggregate_has_runner_backed_actionable_patch(aggregate: &AgentTaskAggregate) -> bool {
     aggregate
         .outcomes
         .iter()
         .flat_map(|outcome| &outcome.artifacts)
         .any(|artifact| {
             crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact)
-                && artifact
-                    .path
-                    .as_deref()
-                    .is_some_and(|path| Path::new(path).is_absolute())
+                && artifact.path.as_deref().is_some_and(|path| {
+                    let path = Path::new(path);
+                    path.is_absolute() && !path.is_file()
+                })
                 && artifact.size_bytes.is_some()
                 && artifact.sha256.is_some()
         })
@@ -1115,11 +1115,15 @@ pub(crate) fn project_terminal_artifacts(
                             format!("agent-task-{:x}", controller_hash.finalize());
                         let mut metadata = metadata;
                         metadata["agent_task"]["projection"] = json!("controller_finalized");
-                        store.record_artifact_with_id(
+                        store.record_verified_artifact_with_id(
                             &record.run_id,
                             &artifact.kind,
                             path,
                             &controller_artifact_id,
+                            artifact
+                                .size_bytes
+                                .and_then(|size| i64::try_from(size).ok()),
+                            artifact.sha256.as_deref(),
                             metadata,
                         )?;
                     }
@@ -1193,11 +1197,13 @@ pub(crate) fn project_terminal_artifacts(
                                     let mut controller_metadata = metadata.clone();
                                     controller_metadata["agent_task"]["projection"] =
                                         json!("runner_mirrored");
-                                    store.record_artifact_with_id(
+                                    store.record_verified_artifact_with_id(
                                         &record.run_id,
                                         &artifact.kind,
                                         &download.output_path,
                                         &controller_artifact_id,
+                                        Some(expected_size as i64),
+                                        Some(expected_sha256),
                                         controller_metadata,
                                     )?;
                                     Ok(())
@@ -1232,11 +1238,15 @@ pub(crate) fn project_terminal_artifacts(
                     }
                 }
             } else {
-                store.record_artifact_with_id(
+                store.record_verified_artifact_with_id(
                     &record.run_id,
                     &artifact.kind,
                     path,
                     &artifact_id,
+                    artifact
+                        .size_bytes
+                        .and_then(|size| i64::try_from(size).ok()),
+                    artifact.sha256.as_deref(),
                     metadata,
                 )?;
             }
