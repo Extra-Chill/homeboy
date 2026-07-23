@@ -17,6 +17,13 @@ use super::types::RunnerJobLogStream;
 /// explicit `--tail` is supplied.
 pub(super) const DEFAULT_COMPACT_TAIL_BYTES: usize = 4096;
 
+/// Maximum number of lifecycle events retained in compact mode after heartbeat
+/// coalescing. Bounds the projection so a long-running job cannot return an
+/// unbounded event list even if it emits many distinct phase transitions. When
+/// exceeded, the oldest events are dropped and a synthetic marker records how
+/// many were elided (the full history stays durable and non-compact-requestable).
+pub(super) const COMPACT_MAX_EVENTS: usize = 40;
+
 /// Outcome of projecting a job-log snapshot's events.
 pub(super) struct JobLogProjection {
     pub events: Vec<JobEvent>,
@@ -78,6 +85,11 @@ pub(super) fn project_job_log(
                 JobEventKind::Status | JobEventKind::Progress | JobEventKind::Error
             )
         });
+        // Coalesce repeated heartbeat/resource-sample progress into a single
+        // latest sample plus count/time range, then bound the total event count.
+        // Status transitions, errors, and non-heartbeat phase transitions are
+        // preserved (#9765).
+        events = coalesce_compact_events(events);
     } else {
         // De-dup: the structured result event already carries stdout/stderr, so
         // drop the raw duplicate events whenever a result is present.
@@ -115,6 +127,99 @@ pub(super) fn project_job_log(
         stdout,
         stderr,
     }
+}
+
+/// True when a `Progress` event is a periodic heartbeat/resource sample rather
+/// than a meaningful phase transition. Heartbeats carry `data.phase ==
+/// "heartbeat"` (see `runner_command_heartbeat_data`); every other progress
+/// event — `started`, `finished`, provider/phase transitions — is meaningful.
+fn is_heartbeat_progress(event: &JobEvent) -> bool {
+    event.kind == JobEventKind::Progress
+        && event
+            .data
+            .as_ref()
+            .and_then(|data| data.get("phase"))
+            .and_then(Value::as_str)
+            == Some("heartbeat")
+}
+
+/// Collapse a run of heartbeat progress events into one representative event:
+/// the latest sample, annotated with how many heartbeats it summarizes and the
+/// elapsed span they covered. Preserves the operator-relevant "current
+/// resources" while dropping the near-identical intermediate samples (#9765).
+fn coalesce_heartbeats(run: Vec<JobEvent>) -> JobEvent {
+    let count = run.len();
+    let first_elapsed = run
+        .first()
+        .and_then(|event| event.data.as_ref())
+        .and_then(|data| data.get("elapsed_ms"))
+        .and_then(Value::as_u64);
+    let mut latest = run
+        .into_iter()
+        .next_back()
+        .expect("coalesce_heartbeats requires a non-empty run");
+    let last_elapsed = latest
+        .data
+        .as_ref()
+        .and_then(|data| data.get("elapsed_ms"))
+        .and_then(Value::as_u64);
+    if let Some(data) = latest.data.as_mut().and_then(Value::as_object_mut) {
+        data.insert(
+            "coalesced_heartbeats".to_string(),
+            serde_json::json!({
+                "count": count,
+                "first_elapsed_ms": first_elapsed,
+                "last_elapsed_ms": last_elapsed,
+            }),
+        );
+    }
+    latest
+}
+
+/// Coalesce consecutive heartbeat progress runs and bound the total compact
+/// event count. Non-heartbeat events pass through in order; each maximal run of
+/// heartbeats collapses to one summarized latest sample. If the result still
+/// exceeds [`COMPACT_MAX_EVENTS`], the oldest events are dropped and a synthetic
+/// `Status` marker records how many were elided so the projection stays bounded.
+fn coalesce_compact_events(events: Vec<JobEvent>) -> Vec<JobEvent> {
+    let mut coalesced: Vec<JobEvent> = Vec::with_capacity(events.len());
+    let mut heartbeat_run: Vec<JobEvent> = Vec::new();
+    for event in events {
+        if is_heartbeat_progress(&event) {
+            heartbeat_run.push(event);
+            continue;
+        }
+        if !heartbeat_run.is_empty() {
+            coalesced.push(coalesce_heartbeats(std::mem::take(&mut heartbeat_run)));
+        }
+        coalesced.push(event);
+    }
+    if !heartbeat_run.is_empty() {
+        coalesced.push(coalesce_heartbeats(heartbeat_run));
+    }
+
+    if coalesced.len() <= COMPACT_MAX_EVENTS {
+        return coalesced;
+    }
+
+    // Keep the most recent COMPACT_MAX_EVENTS - 1 events and prepend a marker
+    // noting how many older lifecycle events were elided.
+    let elided = coalesced.len() - (COMPACT_MAX_EVENTS - 1);
+    let tail_start = coalesced.len() - (COMPACT_MAX_EVENTS - 1);
+    let first_sequence = coalesced.first().map(|event| event.sequence).unwrap_or(0);
+    let mut bounded = Vec::with_capacity(COMPACT_MAX_EVENTS);
+    bounded.push(JobEvent {
+        sequence: first_sequence,
+        job_id: coalesced[0].job_id,
+        kind: JobEventKind::Status,
+        timestamp_ms: coalesced[0].timestamp_ms,
+        message: Some(format!(
+            "compact projection elided {elided} older lifecycle event(s); request full events for complete history"
+        )),
+        data: Some(serde_json::json!({ "phase": "compact_elided", "elided_events": elided })),
+    });
+    bounded.extend(coalesced.into_iter().skip(tail_start));
+    bounded
 }
 
 /// Clone the `data` of the last `Result` event, if any.
@@ -325,6 +430,161 @@ mod tests {
         assert_eq!(
             projection.orchestration_provenance.unwrap()["selected_runner_id"],
             "lab"
+        );
+    }
+
+    fn heartbeat_event(sequence: u64, elapsed_ms: u64, rss: u64) -> JobEvent {
+        event(
+            sequence,
+            JobEventKind::Progress,
+            None,
+            Some(json!({
+                "phase": "heartbeat",
+                "elapsed_ms": elapsed_ms,
+                "process": { "root_pid": 42, "resources": { "rss_bytes": rss } }
+            })),
+        )
+    }
+
+    #[test]
+    fn compact_coalesces_heartbeat_progress_into_latest_sample() {
+        // #9765: a long job emits many 30s heartbeat progress events. Compact
+        // mode must collapse them to one latest sample with a count/time range,
+        // while keeping status transitions and the terminal result's exit code.
+        let mut events = vec![
+            event(1, JobEventKind::Status, Some("running"), None),
+            event(
+                2,
+                JobEventKind::Progress,
+                None,
+                Some(json!({ "phase": "started" })),
+            ),
+        ];
+        for i in 0..50u64 {
+            events.push(heartbeat_event(10 + i, i * 30_000, 100 + i));
+        }
+        events.push(event(
+            80,
+            JobEventKind::Result,
+            None,
+            Some(json!({ "exit_code": 0, "stdout": "done", "stderr": "" })),
+        ));
+
+        let projection = project_job_log(events, true, None);
+
+        // All 50 heartbeats collapse to exactly one progress sample.
+        let heartbeats: Vec<&JobEvent> = projection
+            .events
+            .iter()
+            .filter(|event| is_heartbeat_progress(event))
+            .collect();
+        assert_eq!(
+            heartbeats.len(),
+            1,
+            "heartbeats must coalesce to one sample"
+        );
+
+        let summary = &heartbeats[0].data.as_ref().unwrap()["coalesced_heartbeats"];
+        assert_eq!(summary["count"], 50);
+        assert_eq!(summary["first_elapsed_ms"], 0);
+        assert_eq!(summary["last_elapsed_ms"], 49 * 30_000);
+        // The latest sample's resources are preserved (rss of the final beat).
+        assert_eq!(
+            heartbeats[0].data.as_ref().unwrap()["process"]["resources"]["rss_bytes"],
+            149
+        );
+
+        // Meaningful transitions survive.
+        assert!(projection
+            .events
+            .iter()
+            .any(|event| event.kind == JobEventKind::Status));
+        assert!(projection.events.iter().any(|event| event
+            .data
+            .as_ref()
+            .and_then(|data| data.get("phase"))
+            .and_then(Value::as_str)
+            == Some("started")));
+        assert_eq!(projection.exit_code, Some(0));
+    }
+
+    #[test]
+    fn compact_preserves_distinct_phase_transitions_between_heartbeats() {
+        // Non-heartbeat progress (phase transitions) must not be coalesced, even
+        // when interleaved with heartbeats.
+        let events = vec![
+            event(1, JobEventKind::Status, Some("running"), None),
+            heartbeat_event(2, 0, 100),
+            heartbeat_event(3, 30_000, 101),
+            event(
+                4,
+                JobEventKind::Progress,
+                None,
+                Some(json!({ "phase": "gate:test" })),
+            ),
+            heartbeat_event(5, 60_000, 102),
+            heartbeat_event(6, 90_000, 103),
+            event(7, JobEventKind::Error, Some("gate failed"), None),
+        ];
+
+        let projection = project_job_log(events, true, None);
+
+        // Two separate heartbeat runs → two coalesced samples.
+        assert_eq!(
+            projection
+                .events
+                .iter()
+                .filter(|event| is_heartbeat_progress(event))
+                .count(),
+            2
+        );
+        // The phase transition and error survive.
+        assert!(projection.events.iter().any(|event| event
+            .data
+            .as_ref()
+            .and_then(|data| data.get("phase"))
+            .and_then(Value::as_str)
+            == Some("gate:test")));
+        assert!(projection
+            .events
+            .iter()
+            .any(|event| event.kind == JobEventKind::Error));
+    }
+
+    #[test]
+    fn compact_bounds_event_count_with_elided_marker() {
+        // Many distinct phase transitions (not coalescible) must still be bounded.
+        let mut events = vec![event(0, JobEventKind::Status, Some("running"), None)];
+        for i in 0..100u64 {
+            events.push(event(
+                i + 1,
+                JobEventKind::Progress,
+                None,
+                Some(json!({ "phase": format!("step-{i}") })),
+            ));
+        }
+
+        let projection = project_job_log(events, true, None);
+
+        assert!(
+            projection.events.len() <= COMPACT_MAX_EVENTS,
+            "compact events must be bounded, got {}",
+            projection.events.len()
+        );
+        let marker = projection
+            .events
+            .first()
+            .expect("bounded projection has a leading marker");
+        assert_eq!(
+            marker.data.as_ref().unwrap()["phase"],
+            "compact_elided",
+            "an elision marker records dropped events"
+        );
+        assert!(
+            marker.data.as_ref().unwrap()["elided_events"]
+                .as_u64()
+                .unwrap()
+                > 0
         );
     }
 }
