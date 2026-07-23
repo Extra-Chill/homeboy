@@ -484,7 +484,7 @@ pub(crate) fn verify_lab_workspace(
     if lab.get("status").and_then(|value| value.as_str()) != Some("offloaded") {
         return Err("dispatch status is not `offloaded`".to_string());
     }
-    if serde_json::to_value(&snapshot).ok().as_ref() != Some(lab_snapshot) {
+    if !source_snapshot_matches_dispatch_evidence(&snapshot, lab_snapshot) {
         return Err("source snapshot does not match Lab dispatch evidence".to_string());
     }
     let verification = lab.get("workspace_verification");
@@ -930,6 +930,39 @@ fn env_json<T: serde::de::DeserializeOwned>(name: &str) -> Option<T> {
         .and_then(|raw| serde_json::from_str(&raw).ok())
 }
 
+/// Runner process preparation may enrich a staged snapshot with the original
+/// prepared-workspace identity and its update lineage. Those runner-local
+/// fields are not part of the controller's dispatched snapshot bytes; every
+/// path, content, and materialization field remains an exact match.
+fn source_snapshot_matches_dispatch_evidence(
+    snapshot: &SourceSnapshot,
+    dispatch_evidence: &serde_json::Value,
+) -> bool {
+    let Ok(mut dispatched_snapshot) =
+        serde_json::from_value::<SourceSnapshot>(dispatch_evidence.clone())
+    else {
+        return false;
+    };
+    if dispatched_snapshot == *snapshot {
+        return true;
+    }
+    if dispatched_snapshot
+        .prepared_workspace_original_snapshot_identity
+        .is_some()
+        || !dispatched_snapshot
+            .prepared_workspace_update_lineage
+            .is_empty()
+    {
+        return false;
+    }
+    dispatched_snapshot.prepared_workspace_original_snapshot_identity = snapshot
+        .prepared_workspace_original_snapshot_identity
+        .clone();
+    dispatched_snapshot.prepared_workspace_update_lineage =
+        snapshot.prepared_workspace_update_lineage.clone();
+    dispatched_snapshot == *snapshot
+}
+
 fn paths_equal(left: &str, right: &str) -> bool {
     matches!((Path::new(left).canonicalize(), Path::new(right).canonicalize()), (Ok(left), Ok(right)) if left == right)
 }
@@ -1030,6 +1063,38 @@ mod tests {
         snapshot.git_sha = Some(git(path, &["rev-parse", "HEAD"]).expect("source revision"));
         snapshot.sync_excludes = Vec::new();
         snapshot
+    }
+
+    #[test]
+    fn dispatch_snapshot_match_allows_only_runner_prepared_workspace_enrichment() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let dispatched = snapshot(workspace.path());
+        let evidence = serde_json::to_value(&dispatched).expect("dispatch evidence");
+        let mut runtime = dispatched.clone();
+        runtime.prepared_workspace_original_snapshot_identity =
+            Some("snapshot:prepared-parent".to_string());
+        runtime.prepared_workspace_update_lineage = vec!["snapshot:prepared-update".to_string()];
+
+        assert!(source_snapshot_matches_dispatch_evidence(
+            &runtime, &evidence
+        ));
+
+        let mut untrusted_evidence = dispatched;
+        untrusted_evidence.prepared_workspace_original_snapshot_identity =
+            Some("snapshot:untrusted-parent".to_string());
+        assert!(
+            !source_snapshot_matches_dispatch_evidence(
+                &runtime,
+                &serde_json::to_value(untrusted_evidence).expect("untrusted dispatch evidence")
+            ),
+            "caller-supplied prepared-workspace identity must not be normalized away"
+        );
+
+        runtime.local_path = Some("/runner/remapped-workspace".to_string());
+        assert!(
+            !source_snapshot_matches_dispatch_evidence(&runtime, &evidence),
+            "a runner-local prepared-workspace enrichment must not authorize a remapped source path"
+        );
     }
 
     fn git_lab(path: &Path, snapshot: &SourceSnapshot) -> serde_json::Value {
@@ -1612,14 +1677,24 @@ mod tests {
             let snapshot = snapshot(workspace.path());
             let mut lab = lab(workspace.path(), &snapshot);
             lab["sync_mode"] = serde_json::json!("filesystem_snapshot");
+            // Runner process preparation enriches the current snapshot after
+            // dispatch metadata has been projected for a nested Lab child.
+            // The snapshot's controller path and materialization identity stay
+            // bound to the dispatch; only prepared-workspace lineage is local.
+            let mut runtime_snapshot = snapshot;
+            runtime_snapshot.prepared_workspace_original_snapshot_identity =
+                Some("snapshot:outer-prepared-workspace".to_string());
+            runtime_snapshot.prepared_workspace_update_lineage = vec![
+                "snapshot:outer-update-1".to_string(),
+                "snapshot:outer-update-2".to_string(),
+            ];
             let dispatched = Arc::new(AtomicBool::new(false));
             let scheduler = AgentTaskScheduler::new(FilesystemSnapshotProvider {
                 change_workspace,
                 dispatched: Arc::clone(&dispatched),
             })
-            .with_run_id(format!("filesystem-snapshot-{change_workspace}"))
             .with_harvest_context(
-                HarvestExecutionContext::from_lab_transport(snapshot, lab)
+                HarvestExecutionContext::from_lab_transport(runtime_snapshot, lab)
                     .expect("paired Lab transport"),
             );
 
