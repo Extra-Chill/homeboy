@@ -855,6 +855,138 @@ fn stale_reconcile_imports_terminal_runner_aggregate_before_cancelling_controlle
 }
 
 #[test]
+fn terminal_transport_recovery_replaces_lossy_historical_compact_aggregate() {
+    with_isolated_home(|_| {
+        let run_id = "cook-ssi-510-after-9849-v5-attempt-1-4f0b66a4";
+        let runner_job_id = "00000000-0000-0000-0000-000000000123";
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--record-run-id".to_string(),
+            run_id.to_string(),
+        ];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id,
+            remote_workspace: "/runner/workspace/static-site-importer",
+            remote_command: &command,
+        })
+        .expect("accepted historical Lab handoff");
+        apply_runner_job_terminal_state(
+            &mut record,
+            homeboy_core::api_jobs::JobStatus::Succeeded,
+            &[],
+        );
+        store::write_record(&record).expect("legacy terminal controller projection");
+
+        let mut lossy = succeeded_aggregate(&test_plan());
+        lossy.outcomes.clear();
+        store::write_aggregate(run_id, &lossy).expect("legacy zero-outcome aggregate");
+
+        let compact = json!({
+            "schema": "homeboy/agent-task-aggregate/v1",
+            "view": "summary",
+            "plan_id": "plan-a",
+            "status": "succeeded",
+            "totals": { "skipped": 0, "succeeded": 1, "failed": 0 },
+            "tasks": [{
+                "task_id": "task-a",
+                "status": "succeeded",
+                "summary": "implemented WooCommerce registration",
+                "artifacts": [{
+                    "schema": "homeboy/agent-task-artifact/v1",
+                    "id": "patch",
+                    "kind": "patch",
+                    "name": "patch",
+                    "url": "homeboy://agent-task/run/cook-ssi-510-after-9849-v5-attempt-1-4f0b66a4/artifacts#task=cook-static-site-importer&artifact=patch",
+                    "size_bytes": 12704,
+                    "sha256": "b86157f2c3735b453880c486455b263dfdbd8e77541cb5846b89754065fc9d9a"
+                }, {
+                    "schema": "homeboy/agent-task-artifact/v1",
+                    "id": "transcript",
+                    "kind": "transcript",
+                    "name": "transcript",
+                    "size_bytes": 856519,
+                    "sha256": "52ba42791eed934b05ca8d1ead6e2520b31b1ec9a2477564d2cc7c41b34f759f"
+                }, {
+                    "schema": "homeboy/agent-task-artifact/v1",
+                    "id": "agent_result",
+                    "kind": "json",
+                    "name": "agent_result",
+                    "size_bytes": 516,
+                    "sha256": "b5a1e03af63b59f17b365cb00891ac488559edb928bf93879052ecfd8bf2e7dc"
+                }, {
+                    "schema": "homeboy/agent-task-artifact/v1",
+                    "id": "opencode-runtime-stdout",
+                    "kind": "runtime_log",
+                    "name": "opencode-runtime-stdout",
+                    "size_bytes": 856519,
+                    "sha256": "52ba42791eed934b05ca8d1ead6e2520b31b1ec9a2477564d2cc7c41b34f759f"
+                }],
+                "evidence_refs": [{
+                    "kind": "git-diff",
+                    "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/ssi.patch"
+                }, {
+                    "kind": "agent-runtime-transcript",
+                    "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/transcript.txt"
+                }, {
+                    "kind": "json",
+                    "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/result.json"
+                }, {
+                    "kind": "opencode-runtime-log",
+                    "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/runtime.log"
+                }, {
+                    "kind": "executor-input",
+                    "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-input.json"
+                }, {
+                    "kind": "executor-result",
+                    "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-result.json"
+                }]
+            }],
+            "tasks_omitted": 0,
+            "run_id": run_id,
+        });
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        snapshot.events[0].kind = JobEventKind::Result;
+        snapshot.events[0].data = Some(json!({
+            "exit_code": 0,
+            "command": command,
+            "stdout": format!("HOMEBOY_RUNNER_PROGRESS {{\"phase\":\"finished\"}}\n{}", json!({
+                "schema": "homeboy/command-result/v3",
+                "command": "agent-task",
+                "success": true,
+                "exit_code": 0,
+                "data": compact,
+            })),
+            "stderr": "",
+        }));
+        let _provider = RunnerContinuationTestGuard::install(Box::new(TerminalSnapshotProvider {
+            snapshot: Mutex::new(Some(snapshot)),
+        }));
+
+        assert!(recover_terminal_transport_proxy_evidence(run_id)
+            .expect("authenticated terminal evidence replayed"));
+
+        let aggregate = store::read_aggregate(run_id).expect("recovered aggregate persisted");
+        assert_eq!(aggregate.outcomes.len(), 1);
+        assert_eq!(
+            aggregate.outcomes[0].metadata["terminal_recovery"],
+            "authenticated_compact_summary"
+        );
+        let report = artifacts(run_id).expect("recovered artifact projection");
+        assert_eq!(report.artifacts.len(), 4);
+        assert_eq!(report.artifacts[0].id, "patch");
+        assert_eq!(report.artifacts[0].size_bytes, Some(12_704));
+        assert_eq!(
+            report.artifacts[0].sha256.as_deref(),
+            Some("b86157f2c3735b453880c486455b263dfdbd8e77541cb5846b89754065fc9d9a")
+        );
+    });
+}
+
+#[test]
 fn controller_proxy_becomes_terminal_when_handoff_fails_before_child_creation() {
     with_isolated_home(|_| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];

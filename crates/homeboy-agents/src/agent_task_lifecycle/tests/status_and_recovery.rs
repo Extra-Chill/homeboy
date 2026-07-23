@@ -1160,6 +1160,12 @@ fn terminal_proxy_reconciliation_hydrates_persisted_nested_result_idempotently()
             .evidence_refs
             .iter()
             .any(|reference| reference.kind == "transcript"));
+        let aggregate =
+            store::read_aggregate(&record.run_id).expect("persisted authoritative aggregate");
+        let review =
+            crate::agent_task_aggregate::AgentTaskAggregateReport::from(aggregate.outcomes);
+        assert_eq!(review.summary.apply_candidates, 1);
+        assert_eq!(review.apply_candidates[0].artifact_ids, vec!["final-patch"]);
 
         reconcile_runner_job_snapshot(&mut record, &snapshot).expect("idempotent replay");
         assert_eq!(
