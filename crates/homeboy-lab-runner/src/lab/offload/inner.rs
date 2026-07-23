@@ -1892,12 +1892,16 @@ pub(crate) fn run_lab_offload_inner(
             return Err(error);
         }
     };
+    let execution_bundle_build_identity = verified_execution_bundle_build_identity(
+        configured_build_identity.as_deref(),
+        runner_id,
+        homeboy_path,
+    )?;
     lab_metadata["execution_bundle"] = serde_json::json!({
         "schema": crate::execution_bundle::LAB_EXECUTION_BUNDLE_SCHEMA,
         "binary": {
             "path": homeboy_path,
-            "build_identity": runner_homeboy.get("job_command_binary_build_identity")
-                .or_else(|| runner_homeboy.get("active_daemon_build_identity")),
+            "build_identity": execution_bundle_build_identity,
         },
         // The materialized workspace deletes this artifact root on every known
         // terminal result, bounding content-addressed transport retention.
@@ -2291,6 +2295,28 @@ fn artifact_name_or_kind_is_fuzz_result(value: &str) -> bool {
     )
 }
 
+fn verified_execution_bundle_build_identity<'a>(
+    configured_build_identity: Option<&'a str>,
+    runner_id: &str,
+    homeboy_path: &str,
+) -> Result<&'a str> {
+    configured_build_identity
+        .map(str::trim)
+        .filter(|identity| !identity.is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "runner_homeboy_build_identity",
+                format!(
+                    "Lab offload cannot bind the execution bundle to configured runner binary `{homeboy_path}` because its immutable build identity is unavailable"
+                ),
+                None,
+                Some(vec![format!(
+                    "Run `{homeboy_path} self identity` on runner `{runner_id}`, then refresh and reconnect the runner before retrying."
+                )]),
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2298,6 +2324,46 @@ mod tests {
         RunnerActiveJobState, RunnerSessionState, RunnerStaleDaemonWarning, RunnerTunnelMode,
     };
     use std::sync::{Arc, Barrier, Mutex};
+
+    #[test]
+    fn execution_bundle_uses_verified_configured_binary_identity() {
+        let configured_build_identity = Some("homeboy 0.310.0+verified".to_string());
+        let runner_homeboy = serde_json::json!({
+            "job_command_binary_build_identity": null,
+            "active_daemon_build_identity": "homeboy 0.310.0+verified",
+        });
+
+        let identity = verified_execution_bundle_build_identity(
+            configured_build_identity.as_deref(),
+            "homeboy-lab",
+            "/runner/bin/homeboy",
+        )
+        .expect("verified configured identity");
+        let bundle = serde_json::json!({
+            "binary": {
+                "path": "/runner/bin/homeboy",
+                "build_identity": identity,
+            },
+        });
+
+        assert!(runner_homeboy["job_command_binary_build_identity"].is_null());
+        assert_eq!(
+            bundle["binary"]["build_identity"],
+            "homeboy 0.310.0+verified"
+        );
+    }
+
+    #[test]
+    fn execution_bundle_rejects_unavailable_configured_binary_identity() {
+        let error =
+            verified_execution_bundle_build_identity(None, "homeboy-lab", "/runner/bin/homeboy")
+                .expect_err("missing configured identity must fail closed");
+
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(error
+            .message
+            .contains("immutable build identity is unavailable"));
+    }
 
     #[test]
     fn concurrent_same_id_rigs_dispatch_from_their_admitted_registry_after_promotion() {
