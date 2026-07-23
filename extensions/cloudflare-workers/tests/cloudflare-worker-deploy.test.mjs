@@ -10,7 +10,7 @@ import { join, resolve } from 'node:path';
 const extension = resolve(import.meta.dirname, '..');
 const script = join(extension, 'scripts/cloudflare-worker-deploy.mjs');
 const root = mkdtempSync(join(os.tmpdir(), 'homeboy-cloudflare-test-')); const worker = join(root, 'worker'); const bin = join(root, 'bin'); mkdirSync(worker); mkdirSync(bin);
-writeFileSync(join(worker, 'wrangler.jsonc'), '{\n  // Real Wrangler JSONC uses `binding` for R2 and `name` for Durable Objects.\n  "name": "example-worker",\n  "r2_buckets": [{"binding": "CACHE", "bucket_name": "cache"}],\n  "durable_objects": {"bindings": [{"name": "STATE", "class_name": "State"}]},\n}\n');
+writeFileSync(join(worker, 'wrangler.jsonc'), '{\n  // Real Wrangler JSONC uses `binding` for R2 and `name` for Durable Objects.\n  "name": "example-worker",\n  "main": "src/**/*.mjs",\n  "documentation": "https://example.test/worker",\n  "rules": [{"globs": ["**/*.wasm"]}],\n  /* Bindings remain discoverable around block comments. */\n  "r2_buckets": [{"binding": "CACHE", "bucket_name": "cache"}],\n  "durable_objects": {"bindings": [{"name": "STATE", "class_name": "State"}]},\n}\n');
 writeFileSync(join(bin, 'wrangler'), `#!/usr/bin/env node
 const fs=require('fs'); const a=process.argv.slice(2); fs.appendFileSync(process.env.CALLS,JSON.stringify(a)+'\\n');
 if(a[0]==='whoami') process.stdout.write(JSON.stringify({accounts:[{id:'account-example'}]}));
