@@ -11,6 +11,7 @@
     "test": [
       "node tests/wp-codebox-canonical-cli-adapters-smoke.mjs",
       "bash scripts/test/wp-codebox-doctor-smoke.sh",
+      "bash tests/installed-test-helper-resolution-smoke.sh",
       "bash tests/extension-composer-vendor-integrity-smoke.sh",
       "node tests/wp-codebox-phpunit-multisite-smoke.mjs",
       "bash scripts/test/full-suite-no-phpunit-smoke.sh",
