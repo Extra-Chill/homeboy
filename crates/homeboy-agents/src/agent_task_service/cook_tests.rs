@@ -2849,6 +2849,8 @@ fn adoption_by_cook_id_rejects_conflicting_recipe_attempts_with_explicit_choices
         conflicting_plan.plan_id = "conflicting-plan".to_string();
         super::super::record_recipe_attempt(cook_id, 2, second_run_id, &conflicting_plan)
             .expect("persist conflicting second recipe attempt");
+        agent_task_lifecycle::submit_plan(&conflicting_plan, Some(second_run_id))
+            .expect("persist exact conflicting attempt record without Cook metadata");
 
         let error = resolve_adoption_target(cook_id)
             .expect_err("conflicting recipe adoption requires an explicit run id");
@@ -2861,7 +2863,7 @@ fn adoption_by_cook_id_rejects_conflicting_recipe_attempts_with_explicit_choices
             .contains(&format!("homeboy agent-task adopt {first_run_id}")));
 
         let (record, recipe) = resolve_adoption_target(second_run_id)
-            .expect("an exact orphaned attempt run id selects its recipe");
+            .expect("an exact existing attempt run id selects its owning recipe");
         assert_eq!(recipe.cook_id, cook_id);
         assert_eq!(record.run_id, second_run_id);
     });

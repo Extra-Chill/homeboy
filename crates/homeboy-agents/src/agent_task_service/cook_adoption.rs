@@ -854,6 +854,23 @@ pub(crate) fn resolve_adoption_target(
         return materialize_adoption_attempt(recipe, run_id);
     }
 
+    // Runner-side lifecycle projection can omit the controller's `cook_id`
+    // metadata. Resolve an explicit attempt through durable recipe membership
+    // before falling back to record metadata, otherwise the actionable exact
+    // run ID emitted for an ambiguous Cook is misread as a recipe directory.
+    if let Some(recipe) = super::load_recipe_for_attempt(cook_or_run_id)? {
+        let attempt = recipe
+            .attempts
+            .iter()
+            .find(|attempt| attempt.run_id == cook_or_run_id)
+            .expect("attempt lookup returns a recipe that declares the run id");
+        if agent_task_lifecycle::run_record_exists(&attempt.run_id)? {
+            return Ok((agent_task_lifecycle::status(&attempt.run_id)?, recipe));
+        }
+        let run_id = attempt.run_id.clone();
+        return materialize_adoption_attempt(recipe, run_id);
+    }
+
     if agent_task_lifecycle::run_record_exists(cook_or_run_id)? {
         let record = agent_task_lifecycle::status(cook_or_run_id)?;
         let cook_id = record
@@ -865,27 +882,12 @@ pub(crate) fn resolve_adoption_target(
         return Ok((record, super::load_recipe(&cook_id)?));
     }
 
-    let recipe = if let Some(recipe) = super::load_recipe_for_attempt(cook_or_run_id)? {
-        recipe
-    } else {
-        return Err(Error::validation_invalid_argument(
-            "run_or_cook_id",
-            "unknown agent-task run or durable cook id",
-            Some(cook_or_run_id.to_string()),
-            None,
-        ));
-    };
-    let attempt = recipe
-        .attempts
-        .iter()
-        .find(|attempt| attempt.run_id == cook_or_run_id)
-        .expect("attempt lookup returns a recipe that declares the run id");
-    if agent_task_lifecycle::run_record_exists(&attempt.run_id)? {
-        return Ok((agent_task_lifecycle::status(&attempt.run_id)?, recipe));
-    }
-
-    let run_id = attempt.run_id.clone();
-    materialize_adoption_attempt(recipe, run_id)
+    Err(Error::validation_invalid_argument(
+        "run_or_cook_id",
+        "unknown agent-task run or durable cook id",
+        Some(cook_or_run_id.to_string()),
+        None,
+    ))
 }
 
 fn materialize_adoption_attempt(
