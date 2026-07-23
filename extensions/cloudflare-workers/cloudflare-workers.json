@@ -36,7 +36,7 @@
         "secret_values_in_argv_or_artifacts": false,
         "requires_clean_immutable_source": true
       },
-      "capabilities": ["preflight", "secret-stdin", "post-deploy-http-gates", "rollback-on-failed-gate", "same-revision-durability"]
+      "capabilities": ["preflight", "bounded-predeploy-commands", "secret-stdin", "post-deploy-http-gates", "rollback-on-failed-gate", "same-revision-durability"]
     }
   ]
 }

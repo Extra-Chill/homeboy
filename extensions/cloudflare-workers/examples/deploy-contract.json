@@ -4,6 +4,9 @@
   "wrangler": { "binary": "wrangler", "config": "wrangler.toml", "config_ref": "wrangler.toml" },
   "target": { "worker": "example-edge-service", "account_id": "account-id" },
   "expected_bindings": ["CACHE", "API_ORIGIN"],
+  "predeploy_commands": [
+    { "id": "provision-artifacts", "executable": "npm", "args": ["run", "provision:artifacts", "--", "--remote"], "timeout_ms": 300000 }
+  ],
   "secrets": [
     { "name": "UPSTREAM_TOKEN", "env": "EXAMPLE_UPSTREAM_TOKEN" },
     { "name": "SIGNING_KEY", "file": "../secure-inputs/signing-key" }
