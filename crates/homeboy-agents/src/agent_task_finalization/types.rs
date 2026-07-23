@@ -112,7 +112,17 @@ pub struct AgentTaskPublicationProof {
     pub adapter_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_identity: Option<GitIdentityProof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_tracking: Option<AgentTaskPublicationGitTracking>,
     pub proof: HomeboyProof,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPublicationGitTracking {
+    pub local_branch: String,
+    pub remote: String,
+    pub upstream_ref: String,
+    pub verified_remote_sha: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -309,7 +319,7 @@ pub trait AgentTaskPrFinalizationBackend {
     /// Validates the host-scoped repository-local identity before publication mutates Git state.
     fn validate_publication_identity(&mut self, path: &str) -> Result<GitIdentityProof>;
     fn commit_all(&mut self, path: &str, message: &str) -> Result<()>;
-    fn push_branch(&mut self, path: &str, head: &str) -> Result<()>;
+    fn push_branch(&mut self, path: &str, head: &str) -> Result<AgentTaskPublicationGitTracking>;
     fn find_open_pr(
         &mut self,
         path: &str,
