@@ -295,12 +295,26 @@ pub fn sync_workspace(
             ))
         }
         RunnerWorkspaceSyncMode::Git => {
-            let git = git_snapshot(
+            let git = match git_snapshot(
                 &local_path,
                 options.changed_since_base.as_deref(),
                 options.git_fetch_refs.clone(),
                 options.controller_routed_git,
-            )?;
+            ) {
+                Ok(git) => git,
+                Err(error) if controller_object_closure_unavailable(&error) => {
+                    return materialize_git_fallback_filesystem_snapshot(
+                        &runner,
+                        workspace_root,
+                        &local_path,
+                        &excludes,
+                        &includes,
+                        &options,
+                        &error,
+                    );
+                }
+                Err(error) => return Err(error),
+            };
             let remote_path = deterministic_remote_path(
                 workspace_root,
                 &local_path,
@@ -321,24 +335,23 @@ pub fn sync_workspace(
                 &includes,
                 workspace_cleanliness,
             );
-            if options.controller_routed_git
+            let materialized = if options.controller_routed_git
                 || git.branch.is_none()
                 || source_materialization::requires_controller_routed_workspace_sync(
                     &git.remote_url,
+                ) {
+                materialize_git_from_controller_bundle(
+                    &runner,
+                    &local_path,
+                    &remote_path,
+                    &git.head,
+                    git.branch.as_deref(),
+                    &git.remote_url,
+                    git.changed_since_base.as_deref(),
+                    &git.git_fetch_refs,
+                    options.allow_dirty_lab_workspace,
                 )
-            {
-                materialization_plan.controller_git_bundle =
-                    Some(materialize_git_from_controller_bundle(
-                        &runner,
-                        &local_path,
-                        &remote_path,
-                        &git.head,
-                        git.branch.as_deref(),
-                        &git.remote_url,
-                        git.changed_since_base.as_deref(),
-                        &git.git_fetch_refs,
-                        options.allow_dirty_lab_workspace,
-                    )?);
+                .map(Some)
             } else {
                 if runner.kind != RunnerKind::Local {
                     source_materialization::validate_runner_git_materialization(
@@ -346,7 +359,7 @@ pub fn sync_workspace(
                         &runner.id,
                     )?;
                 }
-                if let Err(error) = materialize_git(
+                match materialize_git(
                     &runner,
                     &remote_path,
                     &git.remote_url,
@@ -356,22 +369,41 @@ pub fn sync_workspace(
                     &git.git_fetch_refs,
                     options.allow_dirty_lab_workspace,
                 ) {
-                    if !is_runner_git_auth_or_network_failure(&error) {
-                        return Err(error);
+                    Ok(()) => Ok(None),
+                    Err(error) => {
+                        if !is_runner_git_auth_or_network_failure(&error) {
+                            Err(error)
+                        } else {
+                            materialize_git_from_controller_bundle(
+                                &runner,
+                                &local_path,
+                                &remote_path,
+                                &git.head,
+                                git.branch.as_deref(),
+                                &git.remote_url,
+                                git.changed_since_base.as_deref(),
+                                &git.git_fetch_refs,
+                                options.allow_dirty_lab_workspace,
+                            )
+                            .map(Some)
+                        }
                     }
-                    materialization_plan.controller_git_bundle =
-                        Some(materialize_git_from_controller_bundle(
-                            &runner,
-                            &local_path,
-                            &remote_path,
-                            &git.head,
-                            git.branch.as_deref(),
-                            &git.remote_url,
-                            git.changed_since_base.as_deref(),
-                            &git.git_fetch_refs,
-                            options.allow_dirty_lab_workspace,
-                        )?);
                 }
+            };
+            match materialized {
+                Ok(provenance) => materialization_plan.controller_git_bundle = provenance,
+                Err(error) if controller_object_closure_unavailable(&error) => {
+                    return materialize_git_fallback_filesystem_snapshot(
+                        &runner,
+                        workspace_root,
+                        &local_path,
+                        &excludes,
+                        &includes,
+                        &options,
+                        &error,
+                    );
+                }
+                Err(error) => return Err(error),
             }
             let metadata = workspace_metadata(
                 &runner.id,
@@ -439,6 +471,134 @@ pub fn sync_workspace(
             ))
         }
     }
+}
+
+/// A promisor checkout can lack the object closure needed to build a controller
+/// bundle. Its working tree is still authoritative, so ship that content rather
+/// than failing before a read-only review can run. The caller removes any
+/// changed-since argument because this materialization has no Git baseline.
+fn materialize_git_fallback_filesystem_snapshot(
+    runner: &crate::Runner,
+    workspace_root: &str,
+    local_path: &Path,
+    excludes: &[String],
+    includes: &[String],
+    options: &RunnerWorkspaceSyncOptions,
+    _closure_error: &Error,
+) -> Result<(RunnerWorkspaceSyncOutput, i32)> {
+    ensure_no_runner_workspace_metadata_collision(local_path)?;
+    let snapshot = snapshot_identity(local_path, excludes, includes)?;
+    let remote_path = temp::unique_name(
+        &deterministic_remote_path(
+            workspace_root,
+            local_path,
+            &snapshot,
+            options.run_isolation_token.as_deref(),
+        ),
+        "",
+    );
+    let stats = local_snapshot_stats(local_path, excludes, includes)?;
+    let content_manifest = workspace_content_manifest_for_policy(
+        local_path,
+        excludes,
+        WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+    )?;
+    let workspace_cleanliness = "filesystem_snapshot_after_git_closure_failure";
+    let mut materialization_plan = workspace_materialization_plan(
+        workspace_root,
+        local_path,
+        &remote_path,
+        &snapshot,
+        options,
+        includes,
+        workspace_cleanliness,
+    );
+    materialization_plan
+        .declared_inputs
+        .requested_changed_since_base = options.changed_since_base.clone();
+    materialization_plan.declared_inputs.changed_since_base = None;
+    materialization_plan.declared_inputs.git_fetch_refs.clear();
+    if let Err(error) = materialize_snapshot(runner, local_path, &remote_path, excludes) {
+        rollback_materialized_workspace(runner, workspace_root, &remote_path);
+        return Err(error);
+    }
+    materialization_plan.actual_materialization_mode = Some("filesystem_snapshot".to_string());
+    materialization_plan.fallback_reason =
+        Some("controller_git_object_closure_unavailable".to_string());
+    materialization_plan.snapshot_transfer = Some(super::types::SnapshotTransferStats {
+        reused: ByteFileCounts::default(),
+        transferred: stats.clone(),
+        final_size: stats.clone(),
+    });
+    let metadata = workspace_metadata(
+        &runner.id,
+        local_path,
+        &remote_path,
+        options.mode,
+        materialization_plan.actual_materialization_mode.as_deref(),
+        materialization_plan.fallback_reason.as_deref(),
+        &snapshot,
+        excludes,
+        Some(content_manifest),
+        options.run_isolation_token.as_deref(),
+        ResourceCleanupPolicy::DeleteOnSuccess,
+    );
+    let resource_lifecycle = metadata.resource_lifecycle.clone().unwrap_or_else(|| {
+        workspace_resource_lifecycle(
+            &runner.id,
+            &remote_path,
+            None,
+            ResourceCleanupPolicy::DeleteOnSuccess,
+        )
+    });
+    let prepared_workspace_lease = metadata.workspace_lease.clone();
+    let validation_dependencies = match write_metadata_and_sync_validation_dependencies(
+        runner,
+        metadata,
+        local_path,
+        &remote_path,
+        excludes,
+    ) {
+        Ok(dependencies) => dependencies,
+        Err(error) => {
+            rollback_materialized_workspace(runner, workspace_root, &remote_path);
+            return Err(error);
+        }
+    };
+    let current_workspace = current_workspace_summary(
+        local_path,
+        &remote_path,
+        RunnerWorkspaceSyncMode::Snapshot,
+        true,
+        None,
+    );
+    let workspace_lease = workspace_lease(&runner.id, &current_workspace);
+    Ok((
+        RunnerWorkspaceSyncOutput {
+            variant: "workspace_sync",
+            command: "runner.workspace.sync",
+            runner_id: runner.id.clone(),
+            local_path: local_path.display().to_string(),
+            remote_path,
+            materialization_plan,
+            current_workspace,
+            workspace_lease,
+            resource_lifecycle,
+            sync_mode: RunnerWorkspaceSyncMode::Snapshot,
+            snapshot_identity: snapshot,
+            prepared_workspace_lease,
+            counts: stats,
+            excludes: excludes.to_vec(),
+            includes: includes.to_vec(),
+            workspace_cleanliness: workspace_cleanliness.to_string(),
+            validation_dependencies,
+        },
+        0,
+    ))
+}
+
+fn controller_object_closure_unavailable(error: &Error) -> bool {
+    error.details["reason"].as_str() == Some("controller_git_object_closure_unavailable")
 }
 
 /// Advance a prepared snapshot selected by its snapshot lease. The lease is a

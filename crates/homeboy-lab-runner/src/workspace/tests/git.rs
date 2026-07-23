@@ -7,12 +7,12 @@ use super::git;
 use crate::workspace::git::{
     git_bundle_install_command, git_snapshot, materialize_git_command, ref_has_missing_objects,
 };
-use crate::workspace::sync::sync_workspace;
+use crate::workspace::sync::{list_workspaces, sync_workspace};
 use crate::workspace::types::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
 use crate::workspace::util::git_output;
 
 #[test]
-fn changed_since_retry_route_materializes_private_unavailable_origin_from_bundle() {
+fn changed_since_private_origin_without_controller_closure_falls_back_to_snapshot() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let origin = tempfile::tempdir().expect("origin tempdir");
         let author = tempfile::tempdir().expect("author tempdir");
@@ -138,85 +138,60 @@ fn changed_since_retry_route_materializes_private_unavailable_origin_from_bundle
             "the fixture must leave unrelated promisor objects absent locally"
         );
 
-        let sync_result = sync_workspace(
-            "lab-local-git-bundle",
-            RunnerWorkspaceSyncOptions {
-                path: source.path().display().to_string(),
-                mode: RunnerWorkspaceSyncMode::Git,
-                // The runner first attempts its normal clone. The inaccessible
-                // origin then exercises the controller bundle fallback.
-                controller_routed_git: false,
-                changed_since_base: changed_since.resolved_base,
-                git_fetch_refs: Vec::new(),
-                snapshot_includes: Vec::new(),
-                allow_dirty_lab_workspace: false,
-                run_isolation_token: None,
-            },
-        );
+        let sync_options = RunnerWorkspaceSyncOptions {
+            path: source.path().display().to_string(),
+            mode: RunnerWorkspaceSyncMode::Git,
+            // The runner first attempts its normal clone. The inaccessible
+            // origin then exposes the unavailable controller object closure.
+            controller_routed_git: false,
+            changed_since_base: changed_since.resolved_base,
+            git_fetch_refs: Vec::new(),
+            snapshot_includes: Vec::new(),
+            allow_dirty_lab_workspace: false,
+            run_isolation_token: None,
+        };
+        let sync_result = sync_workspace("lab-local-git-bundle", sync_options.clone());
 
         let (output, exit_code) = sync_result.expect("sync workspace");
 
         assert_eq!(exit_code, 0);
-        assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::Git);
+        assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::Snapshot);
         assert_eq!(output.current_workspace.local_path, output.local_path);
         assert_eq!(output.current_workspace.remote_path, output.remote_path);
         assert_eq!(
             output.current_workspace.sync_mode,
-            RunnerWorkspaceSyncMode::Git
+            RunnerWorkspaceSyncMode::Snapshot
         );
         assert!(output.current_workspace.materialized);
         assert_eq!(
-            output.current_workspace.source_commit,
-            Some(output.snapshot_identity.clone())
+            output
+                .materialization_plan
+                .actual_materialization_mode
+                .as_deref(),
+            Some("filesystem_snapshot")
         );
-        assert_eq!(output.current_workspace.source_dirty, Some(false));
-        let provenance = output
+        assert_eq!(
+            output.materialization_plan.fallback_reason.as_deref(),
+            Some("controller_git_object_closure_unavailable")
+        );
+        assert_eq!(
+            output
+                .materialization_plan
+                .declared_inputs
+                .requested_changed_since_base
+                .as_deref(),
+            Some(base.as_str())
+        );
+        assert!(output
             .materialization_plan
-            .controller_git_bundle
-            .as_ref()
-            .expect("inaccessible origin falls back to a controller bundle");
-        assert_eq!(provenance.provenance, "controller_git_bundle");
-        assert_eq!(provenance.source_sha, head);
-        assert_eq!(provenance.cleanup_owner, "controller");
-        assert_eq!(provenance.cleanup_ttl, "PT0S");
-        assert_eq!(provenance.sha256.len(), 64);
+            .declared_inputs
+            .changed_since_base
+            .is_none());
         let remote = Path::new(&output.remote_path);
-        assert_eq!(
-            git_output(remote, &["rev-parse", "--is-inside-work-tree"]).unwrap(),
-            "true"
-        );
-        // The controller-bundle path repoints origin without fetching it. The
-        // source URL is deliberately unavailable from the runner, so this
-        // proves materialization did not fall back to a network clone.
-        assert_eq!(
-            git_output(remote, &["config", "--get", "remote.origin.url"]).unwrap(),
-            "https://127.0.0.1:1/example-org/private-source.git"
-        );
+        assert!(!remote.join(".git").exists());
         assert_eq!(
             fs::read_to_string(remote.join("file.txt")).expect("read synced file"),
             "head\n"
-        );
-        assert_eq!(git_output(remote, &["rev-parse", &base]).unwrap(), base);
-        assert_eq!(
-            git_output(remote, &["cat-file", "-e", &base_blob]).unwrap(),
-            ""
-        );
-        assert_eq!(
-            git_output(remote, &["merge-base", &base, "HEAD"]).unwrap(),
-            base
-        );
-        assert_eq!(git_output(remote, &["rev-parse", "HEAD"]).unwrap(), head);
-        assert!(git_output(remote, &["status", "--porcelain=v1"])
-            .expect("read final checkout status")
-            .is_empty());
-        assert!(
-            !git_output(
-                source.path(),
-                &["rev-list", "--objects", "--missing=print", &base]
-            )
-            .expect("list hydrated objects")
-            .contains(&format!("?{base_blob}")),
-            "the controller must hydrate the promised object before bundling"
         );
         assert!(
             git_without_lazy_fetch(
@@ -226,24 +201,20 @@ fn changed_since_retry_route_materializes_private_unavailable_origin_from_bundle
             .is_err(),
             "the controller must not hydrate unrelated refs"
         );
-        assert!(
-            git_without_lazy_fetch(
-                remote,
-                &["cat-file", "-e", &format!("{unrelated}^{{commit}}")]
-            )
-            .is_err(),
-            "the runner bundle must not include unrelated refs"
-        );
-        fs::write(remote.join("file.txt"), "patched\n").expect("write tracked patch");
-        assert_eq!(
-            git_output(remote, &["status", "--porcelain=v1"]).unwrap(),
-            "M file.txt"
-        );
+        fs::create_dir_all(source.path().join(".homeboy")).expect("reserved source dir");
+        fs::write(source.path().join(".homeboy/runner-workspace.json"), "{}")
+            .expect("reserved source metadata");
+        let (before, _) = list_workspaces("lab-local-git-bundle", 10).expect("list workspaces");
+        let error = sync_workspace("lab-local-git-bundle", sync_options)
+            .expect_err("fallback must reject reserved runner metadata");
+        assert!(error.message.contains("reserved runner path"));
+        let (after, _) = list_workspaces("lab-local-git-bundle", 10).expect("list workspaces");
+        assert_eq!(after.workspaces.len(), before.workspaces.len());
     });
 }
 
 #[test]
-fn changed_since_bundle_includes_a_local_only_head_over_a_promisor_base() {
+fn changed_since_promisor_base_without_controller_closure_falls_back_to_snapshot() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let origin = tempfile::tempdir().expect("origin tempdir");
         let author = tempfile::tempdir().expect("author tempdir");
@@ -320,9 +291,8 @@ fn changed_since_bundle_includes_a_local_only_head_over_a_promisor_base() {
         )
         .expect("create runner");
 
-        // Evict the promisor packs so the base blob is genuinely absent locally;
-        // the controller must hydrate it through the promisor transport while
-        // leaving the local-only head untouched.
+        // Evict the promisor packs so the base blob is genuinely absent locally.
+        // The unavailable closure must fall back to the authoritative working tree.
         remove_local_packs(source.path());
         assert!(
             git_without_lazy_fetch(source.path(), &["cat-file", "-e", &base_blob]).is_err(),
@@ -352,29 +322,38 @@ fn changed_since_bundle_includes_a_local_only_head_over_a_promisor_base() {
         );
 
         let (output, exit_code) = sync_result
-            .expect("a local-only head over a promisor base must materialize from a bundle");
+            .expect("a local-only head over an unavailable promisor base must materialize");
         assert_eq!(exit_code, 0);
 
         let remote = Path::new(&output.remote_path);
-        // The bundle is self-contained: both the local-only head and the
-        // hydrated base (with ancestry) are present on the runner.
-        assert_eq!(git_output(remote, &["rev-parse", "HEAD"]).unwrap(), head);
-        assert_eq!(git_output(remote, &["rev-parse", &base]).unwrap(), base);
+        assert_eq!(output.sync_mode, RunnerWorkspaceSyncMode::Snapshot);
         assert_eq!(
-            git_output(remote, &["merge-base", &base, "HEAD"]).unwrap(),
-            base
+            output.materialization_plan.fallback_reason.as_deref(),
+            Some("controller_git_object_closure_unavailable")
         );
         assert_eq!(
-            git_output(remote, &["cat-file", "-e", &base_blob]).unwrap(),
-            ""
+            output
+                .materialization_plan
+                .declared_inputs
+                .requested_changed_since_base
+                .as_deref(),
+            Some(base.as_str())
         );
+        assert!(output
+            .materialization_plan
+            .declared_inputs
+            .changed_since_base
+            .is_none());
+        assert!(output
+            .materialization_plan
+            .declared_inputs
+            .git_fetch_refs
+            .is_empty());
+        assert!(!remote.join(".git").exists());
         assert_eq!(
             fs::read_to_string(remote.join("file.txt")).expect("read synced file"),
             "head\n"
         );
-        assert!(git_output(remote, &["status", "--porcelain=v1"])
-            .expect("read final checkout status")
-            .is_empty());
     });
 }
 
@@ -418,6 +397,35 @@ fn ref_missing_object_probe_skips_a_fully_local_commit_but_flags_an_evicted_base
         ref_has_missing_objects(source.path(), &base).expect("probe evicted base"),
         "a ref whose objects were evicted must report missing objects"
     );
+}
+
+#[test]
+fn missing_object_probe_fails_closed_for_generic_rev_list_errors() {
+    let source = tempfile::tempdir().expect("source tempdir");
+    git(source.path(), &["init"]);
+    git(source.path(), &["config", "user.email", "test@example.com"]);
+    git(source.path(), &["config", "user.name", "Test User"]);
+    fs::write(source.path().join("file.txt"), "content\n").expect("write source file");
+    git(source.path(), &["add", "."]);
+    git(source.path(), &["commit", "-m", "initial"]);
+    git(
+        source.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/source.git",
+        ],
+    );
+    git(source.path(), &["config", "remote.origin.promisor", "true"]);
+
+    let error = ref_has_missing_objects(source.path(), "not-a-valid-ref")
+        .expect_err("an invalid rev-list ref is not missing-object evidence");
+
+    assert!(error
+        .message
+        .contains("probe controller bundle ref objects failed"));
+    assert!(error.details["reason"].is_null());
 }
 
 fn remove_local_packs(path: &Path) {

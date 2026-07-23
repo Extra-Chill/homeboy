@@ -394,9 +394,12 @@ fn hydrate_controller_bundle_objects(local_path: &Path, refs: &[String]) -> Resu
         Error::internal_io(err.to_string(), Some("list git bundle objects".to_string()))
     })?;
     if !object_list_status.success() {
-        return Err(Error::internal_unexpected(
-            "list git bundle objects failed while resolving the controller object closure",
-        ));
+        return controller_bundle_failure(
+            local_path,
+            refs,
+            "list git bundle objects",
+            object_list_status.code(),
+        );
     }
     let hydrate_status = hydrate.wait().map_err(|err| {
         Error::internal_io(
@@ -405,9 +408,12 @@ fn hydrate_controller_bundle_objects(local_path: &Path, refs: &[String]) -> Resu
         )
     })?;
     if !hydrate_status.success() {
-        return Err(Error::internal_unexpected(
-            "hydrate git bundle objects failed while resolving the controller object closure",
-        ));
+        return controller_bundle_failure(
+            local_path,
+            refs,
+            "hydrate git bundle objects",
+            hydrate_status.code(),
+        );
     }
 
     Ok(())
@@ -472,10 +478,47 @@ fn refetch_controller_bundle_commits(
         return Ok(());
     }
 
-    Err(Error::internal_unexpected(format!(
-        "refetch controller git bundle commits failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    )))
+    // `incomplete_refs` was derived from explicit missing-object probe output
+    // in a promisor-configured checkout. The transport result itself stays out
+    // of provenance: it may contain credentials or remote implementation data.
+    Err(controller_object_closure_error(
+        "refetch controller git bundle commits failed while required promisor objects remained unavailable",
+        output.status.code(),
+    ))
+}
+
+fn controller_bundle_failure(
+    local_path: &Path,
+    refs: &[String],
+    action: &str,
+    exit_status: Option<i32>,
+) -> Result<()> {
+    match has_reported_missing_promisor_objects(local_path, refs) {
+        Ok(true) => Err(controller_object_closure_error(
+            format!("{action} failed while required promisor objects remained unavailable"),
+            exit_status,
+        )),
+        // Preserve the operation that actually failed. A probe failure is not
+        // evidence that this checkout has a missing promisor-object closure.
+        Ok(false) | Err(_) => Err(git_command_failure(action, exit_status)),
+    }
+}
+
+fn controller_object_closure_error(message: impl Into<String>, exit_status: Option<i32>) -> Error {
+    let mut error = Error::internal_unexpected(message);
+    error.details = serde_json::json!({
+        "reason": "controller_git_object_closure_unavailable",
+        "git_exit_status": exit_status,
+    });
+    error
+}
+
+fn git_command_failure(action: &str, exit_status: Option<i32>) -> Error {
+    let mut error = Error::internal_unexpected(format!(
+        "{action} failed while resolving the controller object closure"
+    ));
+    error.details = serde_json::json!({ "git_exit_status": exit_status });
+    error
 }
 
 /// Report whether `git_ref`'s local object closure is missing any objects.
@@ -488,35 +531,54 @@ fn refetch_controller_bundle_commits(
 /// tip commit is itself absent) is treated as incomplete so the promisor fetch
 /// can attempt to hydrate it.
 pub(super) fn ref_has_missing_objects(local_path: &Path, git_ref: &str) -> Result<bool> {
-    let output = Command::new("git")
-        .args([
-            "-c",
-            "core.commitGraph=false",
-            "rev-list",
-            "--objects",
-            "--no-object-names",
-            "--missing=print",
-        ])
-        .arg(git_ref)
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .current_dir(local_path)
-        .output()
-        .map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some("probe controller bundle ref objects".to_string()),
-            )
-        })?;
+    has_reported_missing_promisor_objects(local_path, &[git_ref.to_string()])
+}
 
-    // The tip commit itself is absent locally: rev-list cannot walk the ref, so
-    // treat it as incomplete and let the promisor fetch hydrate it.
-    if !output.status.success() {
-        return Ok(true);
+/// Return true only when a promisor-configured checkout explicitly reports a
+/// missing object. A non-zero Git exit is not proof of an incomplete object
+/// closure: it can be caused by invalid refs, permissions, or corruption.
+fn has_reported_missing_promisor_objects(local_path: &Path, refs: &[String]) -> Result<bool> {
+    if promisor_remote(local_path)?.is_none() {
+        return Ok(false);
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .any(|line| line.starts_with('?')))
+    for git_ref in refs {
+        let output = Command::new("git")
+            .args([
+                "-c",
+                "core.commitGraph=false",
+                "rev-list",
+                "--objects",
+                "--no-object-names",
+                "--missing=print",
+            ])
+            .arg(git_ref)
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .current_dir(local_path)
+            .output()
+            .map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some("probe controller bundle ref objects".to_string()),
+                )
+            })?;
+
+        if !output.status.success() {
+            return Err(git_command_failure(
+                "probe controller bundle ref objects",
+                output.status.code(),
+            ));
+        }
+
+        if String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line.starts_with('?'))
+        {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 fn promisor_remote(local_path: &Path) -> Result<Option<String>> {

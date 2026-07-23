@@ -630,6 +630,7 @@ fn reports_no_changes_without_commit_push_or_pr() {
     assert_eq!(backend.changed_files_calls, 0);
     assert_eq!(backend.commit_calls, 0);
     assert_eq!(backend.push_calls, 0);
+    assert!(report.publication_proof.git_tracking.is_none());
 }
 
 #[test]

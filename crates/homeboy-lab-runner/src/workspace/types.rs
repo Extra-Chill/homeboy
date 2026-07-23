@@ -138,6 +138,10 @@ pub struct RunnerWorkspaceDeclaredInputs {
     pub controller_routed_git: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changed_since_base: Option<String>,
+    /// Original requested base when execution degrades to a mode that cannot
+    /// truthfully honor changed-since scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_changed_since_base: Option<String>,
     pub git_fetch_refs: Vec<String>,
     pub snapshot_includes: Vec<String>,
 }
@@ -213,6 +217,7 @@ impl RunnerWorkspaceMaterializationContract {
                 mode: options.mode,
                 controller_routed_git: options.controller_routed_git,
                 changed_since_base: options.changed_since_base.clone(),
+                requested_changed_since_base: None,
                 git_fetch_refs: options.git_fetch_refs.clone(),
                 snapshot_includes: snapshot_includes.to_vec(),
             },
