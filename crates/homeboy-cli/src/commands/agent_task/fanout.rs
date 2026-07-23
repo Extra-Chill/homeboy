@@ -804,10 +804,10 @@ impl BatchCookSpec {
                     self.selector.as_deref(),
                     self.model.as_deref(),
                 ),
-                ai_model: self
-                    .model
-                    .clone()
-                    .or_else(|| agent_task_service::ai_model_from_tool(&self.ai_tool)),
+                // Explicit/config/rotation model selection only. Disclosure text
+                // is presentation, not provenance, so it is never reverse-parsed
+                // into a model — omitted stays omitted (#9789).
+                ai_model: self.model.clone(),
                 ai_used_for: self.ai_used_for.clone(),
                 attempt_dispatcher: None,
                 harvest_context:
@@ -1649,6 +1649,76 @@ mod tests {
             assert_eq!(
                 invocation.dispatch.workspace.as_deref(),
                 Some("homeboy@fix-issue-6453-homeboy")
+            );
+        });
+    }
+
+    #[test]
+    fn cook_invocation_omits_model_when_only_disclosure_names_one() {
+        // #9789: an ai_tool disclosure like `OpenCode (gpt-5.5)` must not be
+        // reverse-parsed into a model. With no explicit/config/rotation model,
+        // the execution request's ai_model stays None.
+        with_isolated_home(|_| {
+            let plan = BatchCookFanoutPlan::from_value(
+                json!({
+                    "schema": AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA,
+                    "fanout_id": "disclosure-only",
+                    "cooks": [{
+                        "cook_id": "no-model",
+                        "prompt": "do the thing",
+                        "cwd": env!("CARGO_MANIFEST_DIR"),
+                        "to_worktree": "homeboy@no-model",
+                        "verify": ["true"],
+                        "ai_tool": "OpenCode (gpt-5.5)"
+                    }]
+                }),
+                &args(),
+            )
+            .expect("plan");
+            // Guard the premise: no model selection anywhere, only a disclosure.
+            assert_eq!(plan.cooks[0].model, None);
+            assert!(plan.cooks[0].ai_tool.contains("gpt-5.5"));
+
+            let invocation = plan.cooks[0]
+                .to_cook_invocation(&plan)
+                .expect("cook invocation");
+            assert_eq!(
+                invocation.options.ai_model, None,
+                "disclosure text must not populate ai_model"
+            );
+        });
+    }
+
+    #[test]
+    fn cook_invocation_preserves_explicit_model_selection() {
+        // Explicit/config/rotation model selection must still populate the
+        // execution request even when a disclosure is present.
+        with_isolated_home(|_| {
+            let plan = BatchCookFanoutPlan::from_value(
+                json!({
+                    "schema": AGENT_TASK_BATCH_COOK_FANOUT_PLAN_SCHEMA,
+                    "fanout_id": "explicit-model",
+                    "cooks": [{
+                        "cook_id": "with-model",
+                        "prompt": "do the thing",
+                        "cwd": env!("CARGO_MANIFEST_DIR"),
+                        "to_worktree": "homeboy@with-model",
+                        "verify": ["true"],
+                        "model": "openai/gpt-5.6-terra",
+                        "ai_tool": "OpenCode (stale-disclosure-model)"
+                    }]
+                }),
+                &args(),
+            )
+            .expect("plan");
+
+            let invocation = plan.cooks[0]
+                .to_cook_invocation(&plan)
+                .expect("cook invocation");
+            assert_eq!(
+                invocation.options.ai_model.as_deref(),
+                Some("openai/gpt-5.6-terra"),
+                "explicit model selection must reach the execution request"
             );
         });
     }
