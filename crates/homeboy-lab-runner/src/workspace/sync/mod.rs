@@ -1814,15 +1814,7 @@ fn has_pending_apply_back_local(path: &Path) -> bool {
     })
 }
 
-pub(crate) fn shell_arg(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
-    {
-        return value.to_string();
-    }
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
+pub(crate) use crate::shell_quote::shell_arg;
 
 fn workspace_lease(
     runner_id: &str,

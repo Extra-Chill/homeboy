@@ -79,6 +79,7 @@ mod runtime_materialization_status;
 pub mod runtime_materializer;
 mod runtime_overlay_freshness;
 mod session;
+mod shell_quote;
 mod source_materialization;
 mod tool_registry;
 mod transport;
