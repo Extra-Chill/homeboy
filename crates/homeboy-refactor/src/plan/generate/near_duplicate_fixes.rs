@@ -274,8 +274,14 @@ fn find_function_range(content: &str, fn_name: &str) -> Option<(usize, usize)> {
     None
 }
 
-/// Convert a file path like "src/core/code_audit/baseline.rs" to a Rust module path
-/// like "homeboy_code_audit::baseline".
+/// Convert a file path like "src/core/code_audit/baseline.rs" to a Rust module
+/// path like "homeboy_code_audit::baseline".
+///
+/// The `code_audit` subsystem was extracted into its own `homeboy-code-audit`
+/// crate, so paths under `core/code_audit/` resolve through the external crate
+/// name (`homeboy_code_audit::`) rather than the in-tree `crate::core::` path —
+/// generating `use crate::core::code_audit::…` would not compile. Everything
+/// else keeps the in-tree `crate::` prefix.
 fn file_to_module_path(file: &str) -> String {
     let mut path = file.strip_prefix("src/").unwrap_or(file);
     // "foo/mod.rs" → "foo"
@@ -285,6 +291,21 @@ fn file_to_module_path(file: &str) -> String {
         // "foo/bar.rs" → "foo/bar"
         path = stripped;
     }
+
+    // Paths inside the extracted code_audit crate resolve through its external
+    // crate name. `core/code_audit` and `core/code_audit/baseline` both map onto
+    // `homeboy_code_audit[::baseline]`.
+    if let Some(rest) = path
+        .strip_prefix("core/code_audit")
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+    {
+        let suffix = rest.trim_start_matches('/');
+        if suffix.is_empty() {
+            return "homeboy_code_audit".to_string();
+        }
+        return format!("homeboy_code_audit::{}", suffix.replace('/', "::"));
+    }
+
     format!("crate::{}", path.replace('/', "::"))
 }
 
