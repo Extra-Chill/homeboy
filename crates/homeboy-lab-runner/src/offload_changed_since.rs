@@ -11,6 +11,9 @@ pub struct LabOffloadChangedSincePreflight {
     pub requested_ref: Option<String>,
     pub resolved_base: Option<String>,
     pub git_fetch_refs: Vec<String>,
+    /// The runner executes the full component scope when a filesystem snapshot
+    /// cannot carry the Git baseline needed for changed-since.
+    pub scope_degradation: Option<String>,
 }
 
 pub fn preflight_lab_offload_changed_since(
@@ -23,6 +26,7 @@ pub fn preflight_lab_offload_changed_since(
             requested_ref: None,
             resolved_base: None,
             git_fetch_refs: Vec::new(),
+            scope_degradation: None,
         });
     };
 
@@ -32,6 +36,7 @@ pub fn preflight_lab_offload_changed_since(
             requested_ref: Some(git_ref.clone()),
             resolved_base: Some(git_ref),
             git_fetch_refs: Vec::new(),
+            scope_degradation: None,
         });
     }
 
@@ -58,6 +63,7 @@ pub fn prepare_git_lab_offload_changed_since(
             requested_ref: None,
             resolved_base: None,
             git_fetch_refs: Vec::new(),
+            scope_degradation: None,
         });
     };
 
@@ -71,7 +77,49 @@ pub fn prepare_git_lab_offload_changed_since(
         // probe origin here: controller bundles carry it when Lab cannot read
         // a private remote.
         git_fetch_refs: Vec::new(),
+        scope_degradation: None,
     })
+}
+
+/// Remove the controller-only changed-since baseline before dispatching into a
+/// filesystem snapshot, which intentionally has no `.git` metadata.
+pub fn degrade_changed_since_to_full_scope(preflight: &mut LabOffloadChangedSincePreflight) {
+    if preflight.resolved_base.is_none() {
+        return;
+    }
+
+    preflight.args = remove_controller_changed_since_args(&preflight.args);
+    preflight.resolved_base = None;
+    preflight.git_fetch_refs.clear();
+    preflight.scope_degradation = Some("full_scope_filesystem_snapshot".to_string());
+}
+
+/// Remove controller-level scope flags while preserving provider passthrough
+/// arguments after `--` verbatim.
+pub fn remove_controller_changed_since_args(args: &[String]) -> Vec<String> {
+    let mut stripped = Vec::with_capacity(args.len());
+    let mut iter = args.iter().peekable();
+    let mut passthrough = false;
+    while let Some(arg) = iter.next() {
+        if passthrough {
+            stripped.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            passthrough = true;
+            stripped.push(arg.clone());
+            continue;
+        }
+        if arg == "--changed-since" {
+            let _ = iter.next();
+            continue;
+        }
+        if arg.starts_with("--changed-since=") {
+            continue;
+        }
+        stripped.push(arg.clone());
+    }
+    stripped
 }
 
 pub fn lab_offload_changed_since_ref(args: &[String]) -> Option<String> {
@@ -197,6 +245,46 @@ fn git_output(path: &Path, args: &[&str]) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filesystem_snapshot_degradation_removes_changed_since_before_dispatch() {
+        let mut preflight = LabOffloadChangedSincePreflight {
+            args: vec![
+                "homeboy".to_string(),
+                "review".to_string(),
+                "test".to_string(),
+                "component".to_string(),
+                "--changed-since=base".to_string(),
+                "--".to_string(),
+                "--changed-since".to_string(),
+            ],
+            requested_ref: Some("origin/main".to_string()),
+            resolved_base: Some("base".to_string()),
+            git_fetch_refs: vec!["base".to_string()],
+            scope_degradation: None,
+        };
+
+        degrade_changed_since_to_full_scope(&mut preflight);
+
+        assert_eq!(
+            preflight.args,
+            vec![
+                "homeboy",
+                "review",
+                "test",
+                "component",
+                "--",
+                "--changed-since"
+            ]
+        );
+        assert_eq!(preflight.requested_ref.as_deref(), Some("origin/main"));
+        assert!(preflight.resolved_base.is_none());
+        assert!(preflight.git_fetch_refs.is_empty());
+        assert_eq!(
+            preflight.scope_degradation.as_deref(),
+            Some("full_scope_filesystem_snapshot")
+        );
+    }
 
     #[test]
     fn detects_changed_since_before_passthrough_args() {

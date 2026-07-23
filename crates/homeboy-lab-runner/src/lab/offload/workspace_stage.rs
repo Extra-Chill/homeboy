@@ -1,6 +1,9 @@
 //! Workspace sync / remap staging for the standard (non-resident) offload path.
 
 use super::*;
+use crate::offload_changed_since::{
+    degrade_changed_since_to_full_scope, remove_controller_changed_since_args,
+};
 use homeboy_core::runner_execution_envelope::{
     PathMaterializationEntry, PathMaterializationPlan,
     PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
@@ -101,6 +104,7 @@ pub(crate) fn durable_workspace_stage_projection(
             "requested_ref": stage.changed_since_preflight.requested_ref,
             "resolved_base": stage.changed_since_preflight.resolved_base,
             "git_fetch_refs": stage.changed_since_preflight.git_fetch_refs,
+            "scope_degradation": stage.changed_since_preflight.scope_degradation,
         },
         "workspace_mapping": stage.workspace_mapping,
         "path_materialization_plan": stage.path_materialization_plan,
@@ -183,7 +187,7 @@ fn prepare_lab_offload_workspace_stage_inner(
 ) -> Result<LabOffloadWorkspaceStage> {
     let mut sync_mode =
         lab_workspace_sync_mode(contract.workspace_mode_policy, lifecycle_args, source_path)?;
-    let changed_since_preflight = if sync_mode == RunnerWorkspaceSyncMode::Git {
+    let mut changed_since_preflight = if sync_mode == RunnerWorkspaceSyncMode::Git {
         prepare_git_lab_offload_changed_since(lifecycle_args, source_path)?
     } else {
         preflight_lab_offload_changed_since(lifecycle_args, sync_mode)?
@@ -227,7 +231,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         source_path,
         request.allow_dirty_lab_workspace,
     )?;
-    let offload_args = materialization_planner.args;
+    let mut offload_args = materialization_planner.args;
     let extra_workspaces = materialization_planner.extra_workspaces;
     // Isolate the primary workspace per cook/dispatch run. Without a per-run
     // token the git-mode remote path is keyed only on (source path, HEAD), so a
@@ -261,6 +265,20 @@ fn prepare_lab_offload_workspace_stage_inner(
     }
     .0;
     sync_mode = synced.sync_mode;
+    if sync_mode == RunnerWorkspaceSyncMode::Snapshot
+        && synced
+            .materialization_plan
+            .actual_materialization_mode
+            .as_deref()
+            == Some("filesystem_snapshot")
+    {
+        degrade_changed_since_to_full_scope(&mut changed_since_preflight);
+        // `offload_args` has already passed provider augmentation and path
+        // planning. Keep that work, but ensure the final remote command uses
+        // the same truthful full-scope decision as provenance.
+        offload_args = remove_controller_changed_since_args(&offload_args);
+        git_fetch_refs.clear();
+    }
     let lab_materialization_mode = synced
         .materialization_plan
         .actual_materialization_mode
@@ -317,6 +335,10 @@ fn prepare_lab_offload_workspace_stage_inner(
                     .json(
                         "changed_since_resolved_base",
                         &changed_since_preflight.resolved_base,
+                    )
+                    .json(
+                        "changed_since_scope_degradation",
+                        &changed_since_preflight.scope_degradation,
                     )
                     .json("git_fetch_refs", &git_fetch_refs)
                     .string("workspace_cleanliness", &synced.workspace_cleanliness),
@@ -2214,7 +2236,6 @@ mod tests {
                     "https://github.example.invalid/example-org/private-source.git",
                 ],
             );
-
             let bin = tempfile::tempdir().expect("git wrapper dir");
             let wrapper = bin.path().join("git");
             std::fs::write(
@@ -2331,6 +2352,189 @@ mod tests {
                 git_output(Path::new(&stage.remote_cwd), &["rev-parse", "HEAD"]),
                 git_output(source.path(), &["rev-parse", "HEAD"])
             );
+        });
+    }
+
+    #[test]
+    fn review_test_stage_degrades_missing_controller_closure_to_full_scope_snapshot() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let source = tempfile::tempdir().expect("nested component checkout");
+            let runner_root = tempfile::tempdir().expect("runner workspace root");
+            git(source.path(), &["init"]);
+            git(source.path(), &["config", "user.email", "test@example.com"]);
+            git(source.path(), &["config", "user.name", "Test User"]);
+            std::fs::write(source.path().join("file.txt"), "base\n").expect("write base");
+            git(source.path(), &["add", "."]);
+            git(source.path(), &["commit", "-m", "base"]);
+            let base = git_output(source.path(), &["rev-parse", "HEAD"]);
+            git(source.path(), &["branch", "base"]);
+            std::fs::write(source.path().join("file.txt"), "head\n").expect("write head");
+            git(source.path(), &["commit", "-am", "head"]);
+            git(
+                source.path(),
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.example.invalid/example-org/private-source.git",
+                ],
+            );
+            git(source.path(), &["config", "remote.origin.promisor", "true"]);
+
+            let bin = tempfile::tempdir().expect("git wrapper dir");
+            let wrapper = bin.path().join("git");
+            std::fs::write(
+                &wrapper,
+                "#!/bin/sh\ncase \" $* \" in\n  *\" rev-list \"*\" --missing=print \"*) printf '%s\\n' '?0000000000000000000000000000000000000000'; exit 0 ;;\n  *\" fetch --no-tags --filter=blob:none \"*) exit 1 ;;\nesac\nexec \"$HOMEBOY_TEST_REAL_GIT\" \"$@\"\n",
+            )
+            .expect("write git wrapper");
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+                .expect("make git wrapper executable");
+            let prior_path = std::env::var("PATH").expect("PATH");
+            let prior_real_git = std::env::var("HOMEBOY_TEST_REAL_GIT").ok();
+            std::env::set_var("HOMEBOY_TEST_REAL_GIT", "/usr/bin/git");
+            std::env::set_var("PATH", format!("{}:{prior_path}", bin.path().display()));
+
+            crate::create(
+                &format!(
+                    r#"{{"id":"lab-review-test-snapshot","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+            let args = vec![
+                "homeboy".to_string(),
+                "review".to_string(),
+                "test".to_string(),
+                "nested-component".to_string(),
+                "--path".to_string(),
+                source.path().display().to_string(),
+                "--changed-since".to_string(),
+                "base".to_string(),
+                "--".to_string(),
+                "--changed-since".to_string(),
+                "provider-value".to_string(),
+            ];
+            let request = LabOffloadRequest {
+                command: None,
+                normalized_args: &args,
+                explicit_runner: Some("lab-review-test-snapshot"),
+                placement: homeboy_cli_contract::Placement::Auto,
+                allow_local_fallback: false,
+                allow_dirty_lab_workspace: false,
+                skip_deps_hydration: false,
+                capture_patch: false,
+                mutation_flag: None,
+                detach_after_handoff: false,
+                output_file_requested: false,
+                read_only_polling: false,
+                local_output_file: None,
+                durable_agent_task_plan: None,
+                source_path: None,
+                verified_cook_baseline: None,
+                require_controller_git_bundle: true,
+                reuse_compatible_snapshot: false,
+                job_overrides: LabJobOverrides::default(),
+            };
+            let contract = LabOffloadCommand {
+                command: homeboy_core::lab_contract::LabCommandContract::portable(
+                    "review test",
+                    None,
+                    false,
+                    &[],
+                ),
+                required_extensions: Vec::new(),
+                required_capabilities: Vec::new(),
+                workload: None,
+            };
+            let runner_workspace_root = runner_root.path().display().to_string();
+            let stage = prepare_lab_offload_workspace_stage(
+                &request,
+                LabWorkspaceStageCommand::from(&contract),
+                crate::lab_plan::base_lab_plan(Some(&contract)),
+                "lab-review-test-snapshot",
+                source.path(),
+                &["homeboy".to_string()],
+                Some(&runner_workspace_root),
+                None,
+                &args,
+                None,
+            );
+            std::env::set_var("PATH", prior_path);
+            match prior_real_git {
+                Some(value) => std::env::set_var("HOMEBOY_TEST_REAL_GIT", value),
+                None => std::env::remove_var("HOMEBOY_TEST_REAL_GIT"),
+            }
+
+            let stage = stage.expect("filesystem snapshot stage");
+            assert_eq!(
+                stage.synced.materialization_plan.declared_inputs.mode,
+                RunnerWorkspaceSyncMode::Git
+            );
+            assert_eq!(
+                stage
+                    .synced
+                    .materialization_plan
+                    .declared_inputs
+                    .requested_changed_since_base
+                    .as_deref(),
+                Some(base.as_str())
+            );
+            assert!(stage
+                .synced
+                .materialization_plan
+                .declared_inputs
+                .changed_since_base
+                .is_none());
+            assert_eq!(stage.sync_mode, RunnerWorkspaceSyncMode::Snapshot);
+            assert_eq!(
+                stage
+                    .synced
+                    .materialization_plan
+                    .actual_materialization_mode
+                    .as_deref(),
+                Some("filesystem_snapshot")
+            );
+            assert_eq!(
+                stage.changed_since_preflight.requested_ref.as_deref(),
+                Some("base")
+            );
+            assert!(stage.changed_since_preflight.resolved_base.is_none());
+            assert_eq!(
+                stage.changed_since_preflight.scope_degradation.as_deref(),
+                Some("full_scope_filesystem_snapshot")
+            );
+            assert!(!stage.remapped_args[..stage
+                .remapped_args
+                .iter()
+                .position(|arg| arg == "--")
+                .expect("passthrough delimiter")]
+                .iter()
+                .any(|arg| arg == "--changed-since" || arg.starts_with("--changed-since=")));
+            assert_eq!(
+                &stage.remapped_args[stage
+                    .remapped_args
+                    .iter()
+                    .position(|arg| arg == "--")
+                    .expect("passthrough delimiter")..],
+                &["--", "--changed-since", "provider-value"]
+            );
+            assert!(stage.command.contains(&stage.remote_cwd));
+            assert!(stage.command.iter().any(|arg| arg == "--path"));
+            assert!(stage
+                .command
+                .windows(2)
+                .any(|args| { args[0] == "--path" && args[1] == stage.remote_cwd }));
+            let durable = durable_workspace_stage_projection(&stage);
+            assert_eq!(
+                durable["sync"]["materialization_plan"]["declared_inputs"]
+                    ["requested_changed_since_base"],
+                base
+            );
+            assert!(durable["sync"]["materialization_plan"]["declared_inputs"]
+                ["changed_since_base"]
+                .is_null());
         });
     }
 
