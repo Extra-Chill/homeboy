@@ -123,7 +123,22 @@ pub fn resume_promoted_patch(
         &normalized_patch.content,
     )?];
     let mut provider = ExternalPromotionWorkspaceProvider::from_options(&options);
-    let verified_base = capture_declared_base(target_path, options.base_ref.as_deref())?;
+    // A resumed checkpoint verifies the already-applied candidate. Its base is
+    // the immutable observation made before apply, not a new moving origin read.
+    let verified_base = previous
+        .get("verified_base")
+        .filter(|base| !base.is_null())
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| {
+            Error::validation_invalid_argument(
+                "promotion",
+                "promotion resume durable resolved base is invalid",
+                None,
+                None,
+            )
+        })?;
     let gates = run_promotion_gates(&options, &mut provider, target_path)?;
     let target =
         AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), Some(target_path));
@@ -158,6 +173,7 @@ pub fn resume_promoted_patch(
             "dependencies_materialized": gates.dependencies_materialized,
             "candidate": candidate,
             "resumed_post_apply_promotion": true,
+            "resume_contract": previous.pointer("/provenance/resume_contract"),
         }),
         operator_notification: promotion_notification(gates.status, &target),
     };
@@ -246,16 +262,28 @@ fn validate_resume_candidate(
         "task_base_sha": options.task_base_sha,
         "candidate_ref": options.candidate_ref,
     });
-    if previous
-        .pointer("/provenance/resume_inputs")
-        .is_some_and(|recorded| recorded != &expected_inputs)
-    {
+    let recorded_inputs = previous
+        .pointer("/provenance/resume_contract/inputs")
+        .or_else(|| previous.pointer("/provenance/resume_inputs"));
+    if recorded_inputs.is_some_and(|recorded| recorded != &expected_inputs) {
         return Err(Error::validation_invalid_argument(
             "promotion",
             "promotion resume base or candidate input does not match the durable post-apply promotion",
             None,
             None,
         ));
+    }
+    if let Some(recorded_gates) = previous.pointer("/provenance/resume_contract/gates") {
+        let actual_gates = serde_json::to_value(&options.gates)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?;
+        if recorded_gates != &actual_gates {
+            return Err(Error::validation_invalid_argument(
+                "promotion",
+                "promotion resume deterministic gate contract does not match the durable post-apply promotion",
+                None,
+                None,
+            ));
+        }
     }
     let status = std::process::Command::new("git")
         .args(["status", "--porcelain"])
@@ -304,15 +332,12 @@ fn validate_resume_candidate(
         }
     }
     if let Some(recorded_base) = previous.get("verified_base") {
-        let current_base = serde_json::to_value(capture_declared_base(
-            target_path,
-            options.base_ref.as_deref(),
-        )?)
-        .map_err(|error| Error::internal_json(error.to_string(), None))?;
-        if &current_base != recorded_base {
+        if recorded_base.is_null()
+            || recorded_base.get("base").and_then(Value::as_str) != options.base_ref.as_deref()
+        {
             return Err(Error::validation_invalid_argument(
                 "base_ref",
-                "promotion resume declared base no longer matches the durable post-apply promotion",
+                "promotion resume declared base does not match the durable post-apply promotion",
                 None,
                 None,
             ));
@@ -649,6 +674,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
             worktree_path,
             &outcome.schema,
             artifact.metadata.clone(),
+            pre_apply_verified_base.clone(),
         )?;
         checkpoint(&report)?;
         Some(report)
@@ -1088,6 +1114,7 @@ fn promote_committed_changes(
             artifact
                 .map(|artifact| artifact.metadata.clone())
                 .unwrap_or(Value::Null),
+            None,
         )?;
         checkpoint(&report)?;
         Some(report)
@@ -1481,6 +1508,7 @@ fn post_apply_report(
     worktree_path: &Path,
     source_schema: &str,
     artifact_metadata: Value,
+    verified_base: Option<AgentTaskPromotionVerifiedBase>,
 ) -> Result<AgentTaskPromotionReport> {
     let status = AgentTaskPromotionStatus::VerificationPending;
     let operator_notification = promotion_notification(status, &target);
@@ -1494,24 +1522,25 @@ fn post_apply_report(
         })),
         _ => None,
     };
-    // A base observation is recorded when the target can reach its remote. The
-    // post-apply checkpoint must still survive a transient remote failure so it
-    // can protect the already-applied candidate for recovery.
-    let verified_base = capture_declared_base(worktree_path, options.base_ref.as_deref())
-        .ok()
-        .flatten();
+    // Managed targets pass their pre-apply snapshot. Provider-owned targets do
+    // not expose a path until apply, so retain the established best-effort read.
+    let verified_base = verified_base.or_else(|| {
+        capture_declared_base(worktree_path, options.base_ref.as_deref())
+            .ok()
+            .flatten()
+    });
     Ok(AgentTaskPromotionReport {
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
         status,
         source: promotion_source(source_kind, outcome, options),
         to_worktree: options.to_worktree.clone(),
-        target,
-        patch_artifact,
+        target: target.clone(),
+        patch_artifact: patch_artifact.clone(),
         changed_files,
         command_evidence,
         deterministic_gates: Vec::new(),
         gate_results: Vec::new(),
-        verified_base,
+        verified_base: verified_base.clone(),
         provenance: json!({
             "source_schema": source_schema,
             "artifact_metadata": artifact_metadata,
@@ -1525,6 +1554,18 @@ fn post_apply_report(
                 "base_ref": options.base_ref,
                 "task_base_sha": options.task_base_sha,
                 "candidate_ref": options.candidate_ref,
+            },
+            "resume_contract": {
+                "resolved_base": verified_base,
+                "artifact": patch_artifact,
+                "destination": target,
+                "candidate": candidate,
+                "inputs": {
+                    "base_ref": options.base_ref,
+                    "task_base_sha": options.task_base_sha,
+                    "candidate_ref": options.candidate_ref,
+                },
+                "gates": options.gates,
             },
         }),
         operator_notification,

@@ -747,7 +747,7 @@ fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint
         source_run_id: Some("run-8307".to_string()),
         source_path: Some(source_path),
         source_worktree_path: None,
-        base_ref: None,
+        base_ref: Some("main".to_string()),
         task_base_sha: None,
         candidate_ref: None,
         to_worktree: "repo@fix-8307".to_string(),
@@ -771,6 +771,13 @@ fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint
         "to_worktree": "repo@fix-8307",
         "target": { "worktree": "repo@fix-8307", "path": target },
         "patch_artifact": { "id": "patch", "kind": "patch", "sha256": sha256_hex(VALID_PATCH) },
+        "verified_base": { "base": "main", "sha": "checkpointed-base" },
+        "provenance": {
+            "resume_contract": {
+                "inputs": { "base_ref": "main", "task_base_sha": null, "candidate_ref": null },
+                "gates": serde_json::to_value(&options.gates).expect("gate contract")
+            }
+        }
     });
 
     let report = resume_promoted_patch(options, &target, &previous).expect("resume proof");
@@ -786,6 +793,10 @@ fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint
         homeboy_core::gate::HomeboyGateStatus::Passed
     );
     assert_eq!(report.provenance["resumed_post_apply_promotion"], true);
+    assert_eq!(
+        report.verified_base.expect("checkpointed base").sha,
+        "checkpointed-base"
+    );
     assert!(report.provenance["candidate"].is_object());
     assert_eq!(report.deterministic_gates.len(), 2);
     assert_eq!(
