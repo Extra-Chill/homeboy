@@ -83,6 +83,8 @@ export async function buildRecipe(settings = {}, cwd = process.cwd()) {
             args: [
               'url=http://localhost/alpha/fixture-check/',
               'route-host=localhost',
+              'network-policy=block',
+              'allow-host=localhost',
               'assert=exists:#synthetic-site-alpha',
               'assert=exists:#synthetic-auth-anonymous',
               'assert=no-console-errors',
@@ -95,6 +97,9 @@ export async function buildRecipe(settings = {}, cwd = process.cwd()) {
             args: [
               'auth=wordpress-admin',
               'auth-user-id=1',
+              'route-host=localhost',
+              'network-policy=block',
+              'allow-host=localhost',
               `steps-json=${JSON.stringify([
                 { kind: 'navigate', url: '/alpha/fixture-check/', waitFor: 'load' },
                 { kind: 'expect', selector: '#synthetic-site-alpha', state: 'visible' },
@@ -350,7 +355,7 @@ async function browserScenarioSteps(value, cwd) {
       : entry;
     scenarios.push({
       command: 'wordpress.browser-scenario',
-      args: [`scenario-json=${JSON.stringify(scenario)}`, 'route-host=localhost'],
+      args: [`scenario-json=${JSON.stringify(scenario)}`, 'route-host=localhost', 'network-policy=block', 'allow-host=localhost'],
     });
   }
   return scenarios;
