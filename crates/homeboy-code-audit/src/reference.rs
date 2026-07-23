@@ -2,6 +2,7 @@
 //!
 //! Mechanically split out of `mod.rs`; behavior is preserved unchanged.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use super::{conventions, fingerprint, walker};
@@ -172,4 +173,100 @@ pub(super) fn fingerprint_component_reference_files(
     }
 
     fingerprints
+}
+
+/// Immutable dead-code inputs that can be shared by candidate and reference
+/// projections of a changed-since audit.
+#[derive(Debug, Clone, Default)]
+pub(super) struct DeadCodeReferenceAnalysis {
+    pub(super) external: Vec<fingerprint::FileFingerprint>,
+    pub(super) component: Vec<fingerprint::FileFingerprint>,
+}
+
+impl DeadCodeReferenceAnalysis {
+    pub(super) fn build(root: &Path, reference_paths: &[String]) -> Self {
+        #[cfg(test)]
+        REPOSITORY_REFERENCE_VISITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self {
+            external: fingerprint_reference_paths(reference_paths),
+            component: fingerprint_component_reference_files(root),
+        }
+    }
+
+    /// Replace only paths changed since the reference with fingerprints from the
+    /// archived reference tree. All other source and external reference facts are
+    /// immutable across the two projections and stay shared.
+    pub(super) fn project_reference(
+        &self,
+        reference_root: &Path,
+        changed_files: &[String],
+    ) -> Self {
+        let changed: std::collections::HashSet<&str> =
+            changed_files.iter().map(String::as_str).collect();
+        let mut component: HashMap<String, fingerprint::FileFingerprint> = self
+            .component
+            .iter()
+            .filter(|fingerprint| !changed.contains(fingerprint.relative_path.as_str()))
+            .map(|fingerprint| (fingerprint.relative_path.clone(), fingerprint.clone()))
+            .collect();
+
+        for path in changed_files {
+            let source = reference_root.join(path);
+            let Ok(content) = std::fs::read_to_string(&source) else {
+                continue;
+            };
+            if let Some(fingerprint) =
+                fingerprint::fingerprint_content(&source, reference_root, &content)
+            {
+                component.insert(fingerprint.relative_path.clone(), fingerprint);
+            }
+        }
+
+        let mut component: Vec<_> = component.into_values().collect();
+        component.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+        Self {
+            external: self.external.clone(),
+            component,
+        }
+    }
+}
+
+#[cfg(test)]
+static REPOSITORY_REFERENCE_VISITS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(super) fn repository_reference_visit_count() -> usize {
+    REPOSITORY_REFERENCE_VISITS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+pub(super) fn reset_repository_reference_visit_count() {
+    REPOSITORY_REFERENCE_VISITS.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reference_projection_reuses_candidate_repository_visit() {
+        let candidate = tempfile::tempdir().expect("candidate directory");
+        let reference = tempfile::tempdir().expect("reference directory");
+        std::fs::write(candidate.path().join("changed.rs"), "fn current() {}")
+            .expect("candidate source");
+        std::fs::write(reference.path().join("changed.rs"), "fn baseline() {}")
+            .expect("reference source");
+
+        reset_repository_reference_visit_count();
+        let analysis = DeadCodeReferenceAnalysis::build(candidate.path(), &[]);
+        let _reference_projection =
+            analysis.project_reference(reference.path(), &["changed.rs".to_string()]);
+
+        assert_eq!(
+            repository_reference_visit_count(),
+            1,
+            "changed-since reference projection must not repeat the repository-wide dead-code reference walk"
+        );
+    }
 }

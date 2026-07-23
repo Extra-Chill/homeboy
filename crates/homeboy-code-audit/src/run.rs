@@ -219,6 +219,7 @@ fn run_audit(args: &AuditRunWorkflowArgs) -> homeboy_error::Result<Option<AuditW
             &plan,
             &args.reference_paths,
             &args.extension_overrides,
+            None,
         )?))
     } else {
         Ok(Some(crate::audit_path_with_id_with_plan_and_analysis(
@@ -320,7 +321,7 @@ fn run_comparison_workflow(
                 .or_else(|| baseline::load_baseline_from_ref(&result.source_path, git_ref))
         };
         let reference = timing.time_phase("reference_baseline", || {
-            audit_reference_result(args, git_ref)
+            audit_reference_result(args, git_ref, analysis)
         })?;
         let baseline = baseline::baseline_with_reference_findings(persisted, &reference);
         return build_comparison_output(result, analysis, baseline, args, timing);
@@ -387,6 +388,7 @@ fn run_comparison_workflow(
 fn audit_reference_result(
     args: &AuditRunWorkflowArgs,
     git_ref: &str,
+    candidate_analysis: &crate::AuditAnalysisContext,
 ) -> homeboy_error::Result<CodeAuditResult> {
     let source = Path::new(&args.source_path);
     let archive = Command::new("git")
@@ -439,6 +441,10 @@ fn audit_reference_result(
 
     let changed = changed_files_for_scope(args, git_ref)?;
     let reference_path = reference_root.path().to_string_lossy();
+    let dead_code_references = candidate_analysis
+        .dead_code_references
+        .as_ref()
+        .map(|references| references.project_reference(reference_root.path(), &changed));
     let mut reference = crate::audit_path_scoped_with_plan_and_analysis(
         &args.component_id,
         &reference_path,
@@ -447,6 +453,7 @@ fn audit_reference_result(
         &audit_plan(args),
         &args.reference_paths,
         &args.extension_overrides,
+        dead_code_references,
     )?
     .result;
     apply_finding_filters(&mut reference, &args.only_kinds, &args.exclude_kinds);

@@ -19,7 +19,7 @@ use super::detectors::{artifact_portability, source_policy};
 use super::entry::audit_config_for;
 use super::execution_plan::AuditExecutionPlan;
 use super::findings;
-use super::reference::build_convention_method_set;
+use super::reference::{build_convention_method_set, DeadCodeReferenceAnalysis};
 use super::types::{
     time_audit_detector, AuditAnalysisContext, AuditSummary, AuditTiming, AuditWithAnalysis,
     CodeAuditResult, ConventionReport, ScopedAuditExecution,
@@ -54,6 +54,7 @@ pub(super) fn audit_internal(
     reference_paths: &[String],
     plan: &AuditExecutionPlan,
     extension_overrides: &[String],
+    dead_code_references: Option<DeadCodeReferenceAnalysis>,
 ) -> Result<AuditWithAnalysis> {
     let root = Path::new(source_path);
     let audit_config = audit_config_for(component_id, root, extension_overrides);
@@ -277,6 +278,10 @@ pub(super) fn audit_internal(
         .map(|(_, subset)| subset.as_slice())
         .unwrap_or(all_fingerprints.as_slice());
 
+    let dead_code_references = dead_code_references.or_else(|| {
+        plan.detector_enabled("dead_code")
+            .then(|| DeadCodeReferenceAnalysis::build(root, reference_paths))
+    });
     let detector_context = DetectorRunContext {
         root,
         component_id,
@@ -284,7 +289,7 @@ pub(super) fn audit_internal(
         all_fingerprints: &all_fingerprints,
         per_file_fingerprints,
         source_snapshot: Some(&source_snapshot),
-        reference_paths,
+        dead_code_references: dead_code_references.as_ref(),
     };
 
     // The duplication family stays hand-sequenced: it runs five timing spans and
@@ -576,6 +581,7 @@ pub(super) fn audit_internal(
             .into_iter()
             .flat_map(|(_, _, fingerprints)| fingerprints)
             .collect(),
+        dead_code_references,
     };
 
     Ok(AuditWithAnalysis {
@@ -644,7 +650,7 @@ fn audit_root_only(
         all_fingerprints: &[],
         per_file_fingerprints: &[],
         source_snapshot: source_snapshot.as_ref(),
-        reference_paths: &[],
+        dead_code_references: None,
     };
 
     run_descriptor_detectors(

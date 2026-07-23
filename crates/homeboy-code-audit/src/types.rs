@@ -21,6 +21,7 @@ pub use homeboy_audit_contract::{
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AuditAnalysisContext {
     pub(crate) fingerprints: Vec<fingerprint::FileFingerprint>,
+    pub(crate) dead_code_references: Option<super::reference::DeadCodeReferenceAnalysis>,
 }
 
 #[derive(Debug, Clone)]
