@@ -16,6 +16,8 @@ A secret has exactly one descriptor: an environment variable name or a file path
 
 The result is `homeboy/cloudflare-worker-deploy-result/v1`. It records source revision, redacted deterministic stage progress, prior and deployed Worker deployment/version IDs, rollback status, and remediation. Raw Wrangler output and gate bodies are omitted.
 
+Existing targets remain the default. Set `target.create_if_missing` to `true` to explicitly create a new Worker from the immutable source. Homeboy records the bootstrap deployment, provisions secrets only after the target exists, then performs the normal gated deployment. Missing targets without this declaration fail closed.
+
 Gates run once by default. To opt into bounded readiness retries, declare all retry fields on that gate:
 
 ```json

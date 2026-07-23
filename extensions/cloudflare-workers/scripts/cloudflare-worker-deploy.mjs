@@ -20,9 +20,12 @@ async function main() {
   try {
     const resolvedSecrets = await preflight(contract, root, result, redact, childEnvironment);
     secretValues.push(...resolvedSecrets.map(({ value }) => value));
-    const prior = await deployedState(contract, root, redact, childEnvironment);
+    let prior = await deployedState(contract, root, redact, childEnvironment, contract.target.create_if_missing === true);
+    const creating = !prior;
     if (contract.predeploy_commands.length) await runPredeployCommands(contract, root, result, redact, childEnvironment);
+    if (!prior) prior = await bootstrapWorker(contract, root, result, redact, childEnvironment);
     if (resolvedSecrets.length) await provisionSecrets(contract, root, resolvedSecrets, prior, result, redact, childEnvironment);
+    if (creating && resolvedSecrets.length) prior = await deployedState(contract, root, redact, childEnvironment);
     await deployAndGate(contract, root, prior, 'deploy', result, redact, childEnvironment);
     if (contract.durability?.redeploy_same_revision) {
       const durabilityPrior = await deployedState(contract, root, redact, childEnvironment);
@@ -38,6 +41,19 @@ async function main() {
   await writeResult(root, contract, result);
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   process.exitCode = result.status === 'succeeded' ? 0 : 1;
+}
+
+async function bootstrapWorker(contract, root, result, redact, env) {
+  const stage = start(result, 'bootstrap_create');
+  try {
+    await command(contract.wrangler.binary, ['deploy', '--config', resolvePath(root, contract.wrangler.config), '--name', contract.target.worker], root, redact, env, contract.timeout_ms);
+    const deployed = await deployedState(contract, root, redact, env);
+    result.deployments.push({ stage: 'bootstrap_create', source_revision: contract.repository.revision, prior_deployment: null, deployed });
+    finish(stage, 'succeeded', { deployed });
+    return deployed;
+  } catch (error) {
+    error.stage ||= 'bootstrap_create'; finish(stage, 'failed', { code: error.code || 'deployment_failed' }); throw error;
+  }
 }
 
 async function runPredeployCommands(contract, root, result, redact, env) {
@@ -123,8 +139,10 @@ async function deployAndGate(contract, root, prior, id, result, redact, env) {
   }
 }
 
-async function deployedState(contract, root, redact, env) {
-  const output = await command(contract.wrangler.binary, ['deployments', 'list', '--name', contract.target.worker, '--json'], root, redact, env, contract.timeout_ms);
+async function deployedState(contract, root, redact, env, allowMissing = false) {
+  let output;
+  try { output = await command(contract.wrangler.binary, ['deployments', 'list', '--name', contract.target.worker, '--json'], root, redact, env, contract.timeout_ms); }
+  catch (error) { if (allowMissing && /does not exist|code:\s*10007/.test(error.message)) return null; throw error; }
   const deployments = JSON.parse(output.stdout); const records = Array.isArray(deployments) ? deployments : deployments.deployments; const current = latestDeployment(records);
   if (!current?.id) throw fail('deployment_identity_missing', 'Wrangler did not return a current deployment ID.');
   const versions = current.versions || (current.version_id ? [{ version_id: current.version_id, percentage: 100 }] : []);
@@ -202,6 +220,7 @@ function remediation(code) { return ({ ambiguous_deployment_versions: ['Use a si
 function resolvePath(root, value) { if (!value) throw fail('invalid_contract', 'Required path is missing.'); return isAbsolute(value) ? value : resolve(root, value); } function requiredArgument(name) { const index = process.argv.indexOf(name); if (index < 0 || !process.argv[index + 1]) throw new Error(`${name} is required`); return process.argv[index + 1]; }
 function containedPath(root, value) { const path = resolve(root, value); const fromRoot = relative(root, path); if (fromRoot === '..' || fromRoot.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) || isAbsolute(fromRoot)) throw fail('invalid_contract', 'Pre-deploy command cwd must remain inside the repository.'); return path; }
 function validate(contract) { if (contract.schema !== 'homeboy/cloudflare-worker-deploy-contract/v1') throw new Error('Unsupported deployment contract schema.'); for (const path of ['repository.worktree', 'repository.revision', 'wrangler.binary', 'wrangler.config', 'wrangler.config_ref', 'target.worker', 'target.account_id']) if (!path.split('.').reduce((value, key) => value?.[key], contract)) throw new Error(`Missing ${path}.`); contract.expected_bindings ||= []; contract.secrets ||= []; contract.gates ||= []; contract.predeploy_commands ||= []; contract.timeout_ms ||= 120000; if (!Array.isArray(contract.predeploy_commands) || contract.predeploy_commands.length > 16) throw new Error('predeploy_commands must be an array of at most 16 commands.'); for (const declared of contract.predeploy_commands) { const shell = basename(declared.executable || '').toLowerCase().replace(/\.exe$/, ''); if (!/^[a-z0-9]+(?:[-_.][a-z0-9]+)*$/.test(declared.id || '') || typeof declared.executable !== 'string' || !declared.executable || ['sh','bash','zsh','fish','cmd','powershell','pwsh'].includes(shell) || !Array.isArray(declared.args) || declared.args.length > 64 || declared.args.some((arg) => typeof arg !== 'string' || arg.length > 4096) || (declared.cwd !== undefined && (typeof declared.cwd !== 'string' || !declared.cwd)) || (declared.timeout_ms !== undefined && (!Number.isInteger(declared.timeout_ms) || declared.timeout_ms < 1))) throw new Error('Each pre-deploy command requires a safe ID, a non-shell executable, bounded string arguments, an optional repository-relative cwd, and an optional positive timeout_ms.'); }
+if (contract.target.create_if_missing !== undefined && typeof contract.target.create_if_missing !== 'boolean') throw new Error('target.create_if_missing must be boolean when declared.');
 for (const secret of contract.secrets) if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(secret.name || '') || Boolean(secret.env) === Boolean(secret.file)) throw new Error('Each secret requires a safe environment-style name and exactly one environment or file descriptor.'); for (const gate of contract.gates) if (gate.retry && (!Number.isInteger(gate.retry.attempts) || gate.retry.attempts < 2 || !Number.isInteger(gate.retry.retry_delay_ms) || gate.retry.retry_delay_ms < 0 || !Array.isArray(gate.retry.transient_statuses) || !gate.retry.transient_statuses.length || gate.retry.transient_statuses.some((status) => !Number.isInteger(status) || status < 100 || status > 599))) throw new Error('Each gate retry policy requires attempts of at least 2, a non-negative retry_delay_ms, and declared transient_statuses.'); }
 async function writeResult(root, contract, result) { if (contract.result_file) await writeFile(resolvePath(root, contract.result_file), `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 }); }
 main().catch((error) => { process.stderr.write(`${JSON.stringify({ schema: SCHEMA, status: 'failed', code: error.code || 'invalid_contract', error: error.message })}\n`); process.exitCode = 1; });
