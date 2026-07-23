@@ -49,38 +49,20 @@ fn resolve_run_label_matches(label: &str, matches: Vec<RunRecord>) -> Result<Opt
 }
 
 /// Collapse a caller and its Lab mirrors only when their durable job lineage
-/// identifies one execution and exactly one caller record remains.
+/// identifies one execution and exactly one caller record remains. Thin wrapper
+/// over [`dedupe_runner_execution_mirrors`] that discards the hidden-mirror
+/// count (label resolution only needs the canonical set).
 fn canonicalize_lab_run_label_matches(matches: Vec<RunRecord>) -> Vec<RunRecord> {
-    let mut canonical = Vec::new();
-    for (index, run) in matches.iter().enumerate() {
-        let Some(lineage) = lab_run_lineage(run) else {
-            canonical.push(run.clone());
-            continue;
-        };
-        if matches[..index]
-            .iter()
-            .any(|candidate| lab_run_lineage(candidate).as_ref() == Some(&lineage))
-        {
-            continue;
-        }
-        let related = matches
-            .iter()
-            .filter(|candidate| lab_run_lineage(candidate).as_ref() == Some(&lineage))
-            .collect::<Vec<_>>();
-        let callers = related
-            .iter()
-            .filter(|candidate| candidate.kind != "runner-exec")
-            .collect::<Vec<_>>();
-        if callers.len() == 1 {
-            canonical.push((*callers[0]).clone());
-        } else {
-            canonical.extend(related.into_iter().cloned());
-        }
-    }
-    canonical
+    dedupe_runner_execution_mirrors(matches).canonical
 }
 
-fn lab_run_lineage(run: &RunRecord) -> Option<(String, String)> {
+/// Durable Lab job lineage `(runner_id, job_id)` identifying the single logical
+/// execution behind a run record and its mirrors. A controller caller record
+/// and its `runner-exec` / `runner_execution` mirrors all resolve to the same
+/// lineage, so this is the canonical key for collapsing mirror rows into one
+/// logical execution (`run_lookup` disambiguation; `runs list` dedup #9629).
+/// Returns `None` for local runs with no Lab lineage.
+pub fn lab_run_lineage(run: &RunRecord) -> Option<(String, String)> {
     runner_evidence::with_runner_evidence(|provider| provider.mirrored_runner_job_identity(run))
         .or_else(|| {
             let lab = run.metadata_json.get("lab")?;
@@ -94,6 +76,60 @@ fn lab_run_lineage(run: &RunRecord) -> Option<(String, String)> {
                 .and_then(Value::as_str)?;
             Some((runner_id.to_string(), job_id.to_string()))
         })
+}
+
+/// Outcome of collapsing a run list to one canonical row per logical execution.
+pub struct DedupedRunList {
+    /// One canonical row per logical execution: the caller record when a single
+    /// non-`runner-exec` caller shares the lineage, otherwise every related row
+    /// (ambiguous lineage is preserved rather than silently dropped).
+    pub canonical: Vec<RunRecord>,
+    /// Count of mirror rows hidden by collapsing. `canonical.len() +
+    /// hidden_mirrors == input.len()`.
+    pub hidden_mirrors: usize,
+}
+
+/// Collapse runner-execution mirrors into one canonical row per logical Lab
+/// execution, keyed by durable job lineage (#9629). Input order is preserved
+/// for canonical rows. Runs without Lab lineage (local runs) always pass
+/// through unchanged. When multiple non-`runner-exec` callers share one
+/// lineage the lineage is ambiguous, so all related rows are kept — matching
+/// the conservative behavior of `canonicalize_lab_run_label_matches`.
+pub fn dedupe_runner_execution_mirrors(runs: Vec<RunRecord>) -> DedupedRunList {
+    let input_len = runs.len();
+    let mut canonical: Vec<RunRecord> = Vec::new();
+    for (index, run) in runs.iter().enumerate() {
+        let Some(lineage) = lab_run_lineage(run) else {
+            canonical.push(run.clone());
+            continue;
+        };
+        // Emit each lineage group once, at its first occurrence.
+        if runs[..index]
+            .iter()
+            .any(|candidate| lab_run_lineage(candidate).as_ref() == Some(&lineage))
+        {
+            continue;
+        }
+        let related = runs
+            .iter()
+            .filter(|candidate| lab_run_lineage(candidate).as_ref() == Some(&lineage))
+            .collect::<Vec<_>>();
+        let callers = related
+            .iter()
+            .filter(|candidate| candidate.kind != "runner-exec")
+            .collect::<Vec<_>>();
+        if callers.len() == 1 {
+            canonical.push((*callers[0]).clone());
+        } else {
+            // Ambiguous or caller-less lineage: keep every related row.
+            canonical.extend(related.into_iter().cloned());
+        }
+    }
+    let hidden_mirrors = input_len.saturating_sub(canonical.len());
+    DedupedRunList {
+        canonical,
+        hidden_mirrors,
+    }
 }
 
 fn ambiguous_run_label_error(label: &str, matches: &[RunRecord]) -> Error {
@@ -154,7 +190,10 @@ pub(super) fn run_matches_label(run: &RunRecord, label: &str) -> bool {
     false
 }
 
-fn command_run_id_label(command: &str) -> Option<&str> {
+/// Extract the `--run-id <value>` (or `--run-id=<value>`) argument from a
+/// persisted command string, if present. This is the caller-supplied logical
+/// run label that ties a controller run to its runner-side mirrors.
+pub fn command_run_id_label(command: &str) -> Option<&str> {
     let mut expect_value = false;
     for token in command.split_whitespace() {
         if expect_value {
@@ -426,5 +465,115 @@ mod stale_runner_tests {
                 "child_run_running_without_active_runner_job"
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod dedup_tests {
+    use super::*;
+
+    fn run(id: &str, kind: &str, metadata: Value) -> RunRecord {
+        RunRecord {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            component_id: None,
+            started_at: "2026-07-22T00:00:00Z".to_string(),
+            finished_at: None,
+            status: "success".to_string(),
+            command: None,
+            cwd: None,
+            homeboy_version: None,
+            git_sha: None,
+            rig_id: None,
+            metadata_json: metadata,
+        }
+    }
+
+    fn lab_lineage(runner: &str, job: &str) -> Value {
+        serde_json::json!({ "lab": { "runner_id": runner, "remote_job_id": job } })
+    }
+
+    #[test]
+    fn collapses_mirrors_to_single_caller_and_counts_hidden() {
+        // #9629: one command shows as a caller row plus runner-exec mirrors that
+        // share the same durable job lineage. The default projection keeps the
+        // single caller and reports the collapsed mirrors.
+        let runs = vec![
+            run("caller-1", "bench", lab_lineage("homeboy-lab", "job-7")),
+            run(
+                "mirror-1",
+                "runner-exec",
+                lab_lineage("homeboy-lab", "job-7"),
+            ),
+            run(
+                "mirror-2",
+                "runner-exec",
+                lab_lineage("homeboy-lab", "job-7"),
+            ),
+        ];
+        let deduped = dedupe_runner_execution_mirrors(runs);
+        assert_eq!(deduped.canonical.len(), 1);
+        assert_eq!(deduped.canonical[0].id, "caller-1");
+        assert_eq!(deduped.hidden_mirrors, 2);
+    }
+
+    #[test]
+    fn distinct_lineages_are_independent_and_local_runs_pass_through() {
+        let runs = vec![
+            run("caller-a", "bench", lab_lineage("homeboy-lab", "job-1")),
+            run(
+                "mirror-a",
+                "runner-exec",
+                lab_lineage("homeboy-lab", "job-1"),
+            ),
+            run("caller-b", "bench", lab_lineage("homeboy-lab", "job-2")),
+            run("local", "trace", serde_json::json!({})),
+        ];
+        let deduped = dedupe_runner_execution_mirrors(runs);
+        let ids: Vec<&str> = deduped.canonical.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["caller-a", "caller-b", "local"]);
+        assert_eq!(deduped.hidden_mirrors, 1);
+    }
+
+    #[test]
+    fn ambiguous_lineage_preserves_all_related_rows() {
+        // Two callers sharing one lineage is ambiguous; keep both rather than
+        // silently dropping one (mirrors the label-resolution safety behavior).
+        let runs = vec![
+            run("caller-1", "bench", lab_lineage("homeboy-lab", "job-9")),
+            run("caller-2", "bench", lab_lineage("homeboy-lab", "job-9")),
+            run(
+                "mirror-1",
+                "runner-exec",
+                lab_lineage("homeboy-lab", "job-9"),
+            ),
+        ];
+        let deduped = dedupe_runner_execution_mirrors(runs);
+        assert_eq!(deduped.canonical.len(), 3);
+        assert_eq!(deduped.hidden_mirrors, 0);
+    }
+
+    #[test]
+    fn lineage_reads_runner_and_job_from_lab_metadata() {
+        let record = run("r", "bench", lab_lineage("homeboy-lab", "job-42"));
+        assert_eq!(
+            lab_run_lineage(&record),
+            Some(("homeboy-lab".to_string(), "job-42".to_string()))
+        );
+        let local = run("l", "trace", serde_json::json!({}));
+        assert_eq!(lab_run_lineage(&local), None);
+    }
+
+    #[test]
+    fn command_run_id_label_extracts_run_id_argument() {
+        assert_eq!(
+            command_run_id_label("homeboy bench sample --run-id cook-42 --head"),
+            Some("cook-42")
+        );
+        assert_eq!(
+            command_run_id_label("homeboy bench sample --run-id=cook-99"),
+            Some("cook-99")
+        );
+        assert_eq!(command_run_id_label("homeboy bench sample"), None);
     }
 }

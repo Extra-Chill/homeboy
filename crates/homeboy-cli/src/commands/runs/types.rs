@@ -180,6 +180,29 @@ pub struct RunsListArgs {
     /// runs that could otherwise become ghosts.
     #[arg(long, conflicts_with = "status")]
     pub running: bool,
+    /// Only include runs started at or after this RFC-3339 timestamp
+    /// (e.g. `2026-07-22T00:00:00Z`) or a relative age (`2d`, `6h`, `30m`).
+    #[arg(long)]
+    pub since: Option<String>,
+    /// Only include runs started at or before this RFC-3339 timestamp or a
+    /// relative age (`2d`, `6h`, `30m`).
+    #[arg(long)]
+    pub until: Option<String>,
+    /// Match runs whose persisted id or run-label contains this fragment.
+    #[arg(long)]
+    pub id: Option<String>,
+    /// Match runs whose command string contains this substring.
+    #[arg(long = "command-contains")]
+    pub command_contains: Option<String>,
+    /// Resolve controller run, runner job, and mirrored observation records that
+    /// share this correlation/lineage fragment (matches persisted id, run-label,
+    /// runner id, or job id).
+    #[arg(long)]
+    pub correlation: Option<String>,
+    /// Show every underlying observation row, including runner-execution mirrors
+    /// that are collapsed into one canonical row by default.
+    #[arg(long)]
+    pub include_mirrors: bool,
     /// Maximum runs to return
     #[arg(long, default_value_t = DEFAULT_LIMIT)]
     pub limit: i64,
@@ -259,6 +282,13 @@ pub enum RunsOutput {
 pub struct RunsListOutput {
     pub command: &'static str,
     pub runs: Vec<RunSummary>,
+    /// Number of canonical rows returned in `runs` after filtering and mirror
+    /// collapsing.
+    pub matched_runs: usize,
+    /// Number of runner-execution mirror rows collapsed into canonical rows.
+    /// Always 0 when `--include-mirrors` is set. `matched_runs + hidden_mirrors`
+    /// equals the post-filter observation row count.
+    pub hidden_mirrors: usize,
     #[serde(
         rename = "_homeboy_actionable",
         skip_serializing_if = "CommandActionableMetadata::is_empty"
