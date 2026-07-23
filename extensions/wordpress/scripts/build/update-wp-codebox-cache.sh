@@ -83,20 +83,8 @@ if [ -z "$NPM_BIN" ]; then
     exit 2
 fi
 
-RUNNER_ID="${TARGET:-local}"
-RUNNER_ARGS=(runner exec --script-file - --raw --env "SOURCE=$SOURCE" --env "REQUESTED_REF=$REF" --env "CACHE_DIR=$CACHE_DIR" --env "NPM_BIN=$NPM_BIN")
-
-if [ -n "$TARGET" ]; then
-    RUNNER_ARGS+=(--ssh)
-fi
-
-if [ "$DRY_RUN" -eq 1 ]; then
-    RUNNER_ARGS+=(--dry-run)
-fi
-
-RUNNER_ARGS+=("$RUNNER_ID")
-
-homeboy "${RUNNER_ARGS[@]}" <<'REMOTE_SCRIPT'
+cache_update_script() {
+    cat <<'REMOTE_SCRIPT'
 set -euo pipefail
 
 fail() {
@@ -149,3 +137,28 @@ echo "Building WP Codebox packages..."
 SHA="$(git -C "$CACHE_DIR" rev-parse HEAD)" || fail "failed to read resulting WP Codebox SHA"
 echo "WP Codebox cache SHA: $SHA"
 REMOTE_SCRIPT
+}
+
+if [ -z "$TARGET" ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+        cache_update_script
+        exit 0
+    fi
+
+    cache_update_script | env \
+        SOURCE="$SOURCE" \
+        REQUESTED_REF="$REF" \
+        CACHE_DIR="$CACHE_DIR" \
+        NPM_BIN="$NPM_BIN" \
+        bash -s
+    exit 0
+fi
+
+RUNNER_ARGS=(runner exec --script-file - --raw --env "SOURCE=$SOURCE" --env "REQUESTED_REF=$REF" --env "CACHE_DIR=$CACHE_DIR" --env "NPM_BIN=$NPM_BIN" --ssh)
+
+if [ "$DRY_RUN" -eq 1 ]; then
+    RUNNER_ARGS+=(--dry-run)
+fi
+
+RUNNER_ARGS+=("$TARGET")
+cache_update_script | homeboy "${RUNNER_ARGS[@]}"

@@ -95,16 +95,48 @@ esac
 cat > "${FAKE_BIN}/homeboy" <<'HOMEBOY'
 #!/usr/bin/env bash
 set -euo pipefail
+printf '%s\n' "$*" >> "$HOMEBOY_CALLS"
 printf '%s\n' "$*"
 cat
 HOMEBOY
 chmod +x "${FAKE_BIN}/homeboy"
 
-DRY_RUN_OUTPUT="$(PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --runner example-runner --source "$REMOTE_REPO" --ref fixture-ref --dry-run)"
+HOMEBOY_CALLS="${WORK_DIR}/homeboy-calls"
+LOCAL_DRY_RUN_OUTPUT="$(HOMEBOY_CALLS="$HOMEBOY_CALLS" PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --source "$REMOTE_REPO" --ref fixture-ref --dry-run)"
+if [ -e "$HOMEBOY_CALLS" ]; then
+    echo "Local dry-run unexpectedly dispatched through Homeboy" >&2
+    cat "$HOMEBOY_CALLS" >&2
+    exit 1
+fi
+case "$LOCAL_DRY_RUN_OUTPUT" in
+    *"Fetching WP Codebox ref"*) ;;
+    *)
+        echo "Local dry-run output did not include cache update script" >&2
+        echo "$LOCAL_DRY_RUN_OUTPUT" >&2
+        exit 1
+        ;;
+esac
+case "$LOCAL_DRY_RUN_OUTPUT" in
+    *"runner exec"*)
+        echo "Local dry-run emitted runner dispatch" >&2
+        echo "$LOCAL_DRY_RUN_OUTPUT" >&2
+        exit 1
+        ;;
+esac
+
+DRY_RUN_OUTPUT="$(HOMEBOY_CALLS="$HOMEBOY_CALLS" PATH="${FAKE_BIN}:$PATH" "$SCRIPT" --runner example-runner --source "$REMOTE_REPO" --ref fixture-ref --dry-run)"
 case "$DRY_RUN_OUTPUT" in
     "runner exec --script-file - --raw --env SOURCE="*) ;;
     *)
         echo "Dry-run did not pass runner exec options before runner id" >&2
+        echo "$DRY_RUN_OUTPUT" >&2
+        exit 1
+        ;;
+esac
+case "$DRY_RUN_OUTPUT" in
+    *"--env REQUESTED_REF=fixture-ref"*"--env CACHE_DIR="*"--env NPM_BIN=npm --ssh --dry-run example-runner"*) ;;
+    *)
+        echo "Dry-run did not preserve runner environment, SSH dispatch, and target" >&2
         echo "$DRY_RUN_OUTPUT" >&2
         exit 1
         ;;
