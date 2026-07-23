@@ -215,6 +215,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             false,
             false,
             Some(git_identity),
+            None,
         ));
     }
     if commit_required {
