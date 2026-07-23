@@ -275,6 +275,11 @@ struct CodeProductionMetrics {
     unknown_size_patches: usize,
     diff_bytes: u64,
     changed_files: usize,
+    /// Number of non-empty patches whose changed-file count could not be
+    /// determined (no metadata and the patch content was unavailable or
+    /// unparseable). Used to render `unknown` instead of a misleading verified
+    /// zero (#9742).
+    changed_files_unknown_patches: usize,
 }
 
 fn code_production_lines(metrics: &CodeProductionMetrics) -> Vec<String> {
@@ -289,9 +294,21 @@ fn code_production_lines(metrics: &CodeProductionMetrics) -> Vec<String> {
             metrics.non_empty_patches, metrics.empty_patches
         )
     };
+    // Distinguish an authoritative zero from an unknown count: if any non-empty
+    // patch's change set could not be parsed, mark the total unknown rather than
+    // claiming zero changed files for a substantive patch.
+    let changed_files = if metrics.changed_files_unknown_patches > 0 {
+        if metrics.changed_files > 0 {
+            format!("Changed files: {} (+unknown)", metrics.changed_files)
+        } else {
+            "Changed files: unknown".to_string()
+        }
+    } else {
+        format!("Changed files: {}", metrics.changed_files)
+    };
     vec![
         patch_candidates,
-        format!("Changed files: {}", metrics.changed_files),
+        changed_files,
         format!("Diff bytes: {}", metrics.diff_bytes),
     ]
 }
@@ -303,7 +320,10 @@ fn code_production_metrics(payload: &Value) -> CodeProductionMetrics {
             Some(size) if size > 0 => {
                 metrics.non_empty_patches += 1;
                 metrics.diff_bytes += size;
-                metrics.changed_files += patch.changed_files;
+                match patch.changed_files {
+                    Some(count) => metrics.changed_files += count,
+                    None => metrics.changed_files_unknown_patches += 1,
+                }
             }
             Some(_) => metrics.empty_patches += 1,
             None => metrics.unknown_size_patches += 1,
@@ -314,7 +334,9 @@ fn code_production_metrics(payload: &Value) -> CodeProductionMetrics {
 
 struct PatchArtifact {
     size_bytes: Option<u64>,
-    changed_files: usize,
+    /// `Some(n)` when the changed-file count is known (from metadata or by
+    /// parsing the patch content); `None` when it could not be determined.
+    changed_files: Option<usize>,
 }
 
 fn collect_patch_artifacts(payload: &Value) -> Vec<PatchArtifact> {
@@ -335,7 +357,7 @@ fn collect_patch_artifacts(payload: &Value) -> Vec<PatchArtifact> {
                 }
                 Some(PatchArtifact {
                     size_bytes: u64_value(item, &["size_bytes"]),
-                    changed_files: metadata_changed_files(item),
+                    changed_files: resolve_changed_files(item),
                 })
             })
             .collect();
@@ -353,7 +375,7 @@ fn collect_patch_artifacts(payload: &Value) -> Vec<PatchArtifact> {
                     .filter(|artifact| is_display_apply_artifact(artifact))
                     .map(|artifact| PatchArtifact {
                         size_bytes: u64_value(artifact, &["size_bytes"]),
-                        changed_files: metadata_changed_files(artifact),
+                        changed_files: resolve_changed_files(artifact),
                     })
             })
             .collect();
@@ -365,7 +387,7 @@ fn collect_patch_artifacts(payload: &Value) -> Vec<PatchArtifact> {
             .filter(|reference| is_apply_kind(reference))
             .map(|reference| PatchArtifact {
                 size_bytes: u64_value(reference, &["size_bytes"]),
-                changed_files: metadata_changed_files(reference),
+                changed_files: resolve_changed_files(reference),
             })
             .collect();
     }
@@ -418,16 +440,83 @@ fn artifact_flag(artifact: &Value, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn metadata_changed_files(artifact: &Value) -> usize {
+/// Resolve the number of files a patch artifact changes.
+///
+/// Prefers authoritative metadata (`changed_files` list or
+/// `changed_file_count`). When metadata is absent, falls back to parsing the
+/// unified-diff content at the artifact `path`. Returns `None` when the count
+/// cannot be determined so callers can render `unknown` instead of a misleading
+/// zero for a substantive patch (#9742).
+fn resolve_changed_files(artifact: &Value) -> Option<usize> {
     if let Some(files) =
         value_at(artifact, &["metadata", "changed_files"]).and_then(Value::as_array)
     {
-        return files.len();
+        return Some(files.len());
     }
-    value_at(artifact, &["metadata", "changed_file_count"])
-        .and_then(Value::as_u64)
-        .map(|count| count as usize)
-        .unwrap_or(0)
+    if let Some(count) =
+        value_at(artifact, &["metadata", "changed_file_count"]).and_then(Value::as_u64)
+    {
+        return Some(count as usize);
+    }
+    // No metadata: parse the patch file the artifact points at.
+    let path = string_value(artifact, &["path"])?;
+    let content = std::fs::read_to_string(path).ok()?;
+    Some(changed_paths_from_patch(&content).len())
+}
+
+/// Extract the set of unique file paths a unified-diff patch touches.
+///
+/// Prefers `diff --git a/<old> b/<new>` headers, which are present for standard
+/// edits, renames, deletes, and binary diffs alike; falls back to `+++`/`---`
+/// hunk headers when a git header is absent. Paths are de-duplicated and the
+/// `a/`/`b/` prefixes and `/dev/null` sentinels are stripped. A malformed or
+/// non-diff string simply yields no paths.
+fn changed_paths_from_patch(patch: &str) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    let mut push_unique = |candidate: Option<String>| {
+        if let Some(path) = candidate {
+            if !path.is_empty() && !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    };
+    for line in patch.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            // `diff --git a/old b/new` — take the destination (b/) path, falling
+            // back to the source when the destination is /dev/null (delete).
+            let mut parts = rest.split_whitespace();
+            let old = parts.next().map(strip_diff_path_prefix);
+            let new = parts.next().map(strip_diff_path_prefix);
+            match (new, old) {
+                (Some(new), _) if new != "/dev/null" => push_unique(Some(new)),
+                (_, Some(old)) => push_unique(Some(old)),
+                _ => {}
+            }
+        } else if let Some(rest) = line.strip_prefix("+++ ") {
+            let path = strip_diff_path_prefix(rest.split('\t').next().unwrap_or(rest));
+            if path != "/dev/null" {
+                push_unique(Some(path));
+            }
+        } else if let Some(rest) = line.strip_prefix("--- ") {
+            // Only used as a fallback for deletes where `+++` is /dev/null.
+            let path = strip_diff_path_prefix(rest.split('\t').next().unwrap_or(rest));
+            if path != "/dev/null" {
+                push_unique(Some(path));
+            }
+        }
+    }
+    paths
+}
+
+/// Strip a leading `a/` or `b/` diff prefix (and surrounding quotes) from a
+/// unified-diff path token.
+fn strip_diff_path_prefix(token: &str) -> String {
+    let token = token.trim().trim_matches('"');
+    token
+        .strip_prefix("a/")
+        .or_else(|| token.strip_prefix("b/"))
+        .unwrap_or(token)
+        .to_string()
 }
 
 /// A run whose lifecycle state is `succeeded` but that produced zero promotion
@@ -614,6 +703,117 @@ mod tests {
         assert!(summary.contains("Patch candidates: 1 non-empty / 0 empty\n"));
         assert!(summary.contains("Changed files: 2\n"));
         assert!(summary.contains("Diff bytes: 256\n"));
+    }
+
+    #[test]
+    fn changed_paths_from_patch_parses_standard_rename_delete_and_binary() {
+        let standard = "diff --git a/src/lib.rs b/src/lib.rs\n\
+             index 111..222 100644\n\
+             --- a/src/lib.rs\n\
+             +++ b/src/lib.rs\n\
+             @@ -1 +1 @@\n-a\n+b\n";
+        assert_eq!(changed_paths_from_patch(standard), vec!["src/lib.rs"]);
+
+        let rename = "diff --git a/old/name.rs b/new/name.rs\n\
+             similarity index 100%\n\
+             rename from old/name.rs\n\
+             rename to new/name.rs\n";
+        assert_eq!(changed_paths_from_patch(rename), vec!["new/name.rs"]);
+
+        let delete = "diff --git a/gone.rs b/gone.rs\n\
+             deleted file mode 100644\n\
+             index 333..000\n\
+             --- a/gone.rs\n\
+             +++ /dev/null\n\
+             @@ -1 +0,0 @@\n-x\n";
+        assert_eq!(changed_paths_from_patch(delete), vec!["gone.rs"]);
+
+        let binary = "diff --git a/logo.png b/logo.png\n\
+             index 444..555 100644\n\
+             Binary files a/logo.png and b/logo.png differ\n";
+        assert_eq!(changed_paths_from_patch(binary), vec!["logo.png"]);
+    }
+
+    #[test]
+    fn changed_paths_from_patch_dedupes_and_ignores_malformed() {
+        let multi =
+            "diff --git a/one.rs b/one.rs\n--- a/one.rs\n+++ b/one.rs\n@@ -1 +1 @@\n-a\n+b\n\
+             diff --git a/two.rs b/two.rs\n--- a/two.rs\n+++ b/two.rs\n@@ -1 +1 @@\n-c\n+d\n";
+        assert_eq!(changed_paths_from_patch(multi), vec!["one.rs", "two.rs"]);
+
+        // Not a diff at all — yields no paths rather than panicking or guessing.
+        assert!(changed_paths_from_patch("just some prose\nwith no diff headers").is_empty());
+        assert!(changed_paths_from_patch("").is_empty());
+    }
+
+    #[test]
+    fn cook_summary_parses_changed_files_from_patch_when_metadata_absent() {
+        // Regression for #9742: a substantive patch with no changed-file
+        // metadata must report the real count parsed from patch content, not 0.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let patch_path = dir.path().join("patch.diff");
+        let patch = "diff --git a/crates/a/src/x.rs b/crates/a/src/x.rs\n\
+             --- a/crates/a/src/x.rs\n+++ b/crates/a/src/x.rs\n@@ -1 +1 @@\n-a\n+b\n\
+             diff --git a/crates/a/src/y.rs b/crates/a/src/y.rs\n\
+             --- a/crates/a/src/y.rs\n+++ b/crates/a/src/y.rs\n@@ -1 +1 @@\n-c\n+d\n\
+             diff --git a/crates/a/src/z.rs b/crates/a/src/z.rs\n\
+             --- a/crates/a/src/z.rs\n+++ b/crates/a/src/z.rs\n@@ -1 +1 @@\n-e\n+f\n";
+        std::fs::write(&patch_path, patch).expect("write patch");
+
+        let payload = json!({
+            "run_id": "agent-task-9742",
+            "state": "succeeded",
+            "task_count": 1,
+            "aggregate": {
+                "outcomes": [{
+                    "task_id": "agent-task-9742",
+                    "artifacts": [{
+                        "id": "patch",
+                        "kind": "patch",
+                        "path": patch_path.to_str().unwrap(),
+                        "size_bytes": 17338
+                    }]
+                }]
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
+
+        assert!(summary.contains("Patch candidates: 1 non-empty / 0 empty\n"));
+        assert!(
+            summary.contains("Changed files: 3\n"),
+            "expected 3 changed files parsed from patch content, got: {summary}"
+        );
+    }
+
+    #[test]
+    fn cook_summary_reports_unknown_changed_files_when_content_unavailable() {
+        // Non-empty patch, no metadata, and an unreadable path: report unknown
+        // rather than a misleading verified zero.
+        let payload = json!({
+            "run_id": "agent-task-9742-unknown",
+            "state": "succeeded",
+            "task_count": 1,
+            "aggregate": {
+                "outcomes": [{
+                    "task_id": "agent-task-9742-unknown",
+                    "artifacts": [{
+                        "id": "patch",
+                        "kind": "patch",
+                        "path": "/nonexistent/does-not-exist.diff",
+                        "size_bytes": 512
+                    }]
+                }]
+            }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
+
+        assert!(summary.contains("Patch candidates: 1 non-empty / 0 empty\n"));
+        assert!(
+            summary.contains("Changed files: unknown\n"),
+            "expected unknown changed-file count, got: {summary}"
+        );
     }
 
     #[test]
