@@ -254,20 +254,137 @@ mod tests {
         assert!(!has_pub_use_of(content, "baz"));
     }
 
+    /// A grammar-source provider that serves a fixed grammar directory for `.rs`.
+    ///
+    /// `ModuleSurfaceIndex::build` fingerprints files via
+    /// `code_audit::load_grammar_for_ext`, which resolves the grammar dir through
+    /// the globally-registered `GrammarSourceProvider`. In a unit test no CLI has
+    /// registered one, so the default `NoopProvider` returns `None` for every
+    /// extension and no file is fingerprinted (#9782). Registering this fixture
+    /// makes the walk self-contained instead of depending on an installed
+    /// extension in the ambient environment.
+    struct FixtureRustGrammar {
+        dir: std::path::PathBuf,
+    }
+
+    impl homeboy_code_audit::grammar_source_provider::GrammarSourceProvider for FixtureRustGrammar {
+        fn grammar_dir(&self, file_extension: &str) -> Option<std::path::PathBuf> {
+            (file_extension == "rs").then(|| self.dir.clone())
+        }
+    }
+
+    /// An audit-manifest provider that declares `.rs` as a handled extension.
+    ///
+    /// The source walker (`walk_source_files_snapshot`) only includes files whose
+    /// extension appears in some installed audit manifest's
+    /// `provided_file_extensions`. With the default `NoopProvider` that set is
+    /// empty, so `producer.rs`/`consumer.rs` are never walked and the index is
+    /// empty. Registering this fixture lets the walk see `.rs` files.
+    struct FixtureRustManifest;
+
+    impl homeboy_code_audit::extension_manifests::AuditExtensionManifestProvider
+        for FixtureRustManifest
+    {
+        fn load_all(&self) -> Vec<homeboy_code_audit::extension_manifests::AuditExtensionManifest> {
+            vec![
+                homeboy_code_audit::extension_manifests::AuditExtensionManifest {
+                    id: "fixture-rust".to_string(),
+                    provided_file_extensions: vec!["rs".to_string()],
+                    ..Default::default()
+                },
+            ]
+        }
+
+        fn load(
+            &self,
+            _id: &str,
+        ) -> Option<homeboy_code_audit::extension_manifests::AuditExtensionManifest> {
+            None
+        }
+    }
+
+    /// Write a minimal Rust `grammar.toml` sufficient for module-surface
+    /// analysis: function definitions (drives `public_api`) and `use` imports
+    /// (drives cross-file caller/importer linking). Call sites are matched by
+    /// content substring in `SymbolReferenceIndex`, so no call-site grammar is
+    /// needed. Patterns mirror the shipped Rust grammar.
+    fn write_fixture_rust_grammar(dir: &Path) {
+        std::fs::write(
+            dir.join("grammar.toml"),
+            r#"
+[language]
+id = "rust"
+extensions = ["rs"]
+
+[comments]
+line = ["//"]
+
+[strings]
+quotes = ['"']
+
+[patterns.function]
+regex = '^\s*(pub(?:\([^)]+\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?fn\s+(\w+)\s*\(([^)]*)\)?'
+context = "any"
+skip_comments = true
+skip_strings = true
+
+[patterns.function.captures]
+visibility = 1
+name = 2
+params = 3
+
+[patterns.import]
+regex = '^use\s+([\w:]+(?:::\{[^}]+\})?)\s*;'
+context = "top_level"
+skip_comments = true
+skip_strings = true
+
+[patterns.import.captures]
+path = 1
+"#,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn build_uses_snapshot_content_for_module_surfaces() {
-        // `ModuleSurfaceIndex::build` only walks files whose extensions the
-        // installed extension registry provides, and that registry is read from
-        // `$HOME`. Other tests swap `HOME` (via the shared `home_lock`) while
-        // this one runs; if `.rs` is not a provided extension at the instant of
-        // the walk, `producer.rs` is skipped and `index.get(...)` returns
-        // `None`. Hold the shared home lock so no `HOME`-mutating test can run
-        // concurrently — the ambient registry (with its real `.rs` grammar)
-        // stays put for the duration of the walk.
-        let _home_guard = homeboy_core::test_support::home_env_guard();
+        // Make the walk self-contained instead of depending on an installed
+        // extension: (1) declare `.rs` as a handled extension so the walker
+        // includes the fixture files, and (2) serve a `.rs` grammar so they are
+        // fingerprinted. Both providers default to a no-op that yields nothing.
+        //
+        // The providers are process-global (`static Mutex<Option<..>>`), so
+        // register them exactly once and keep them installed for the whole test
+        // binary. A per-test re-register would race with any concurrently running
+        // test that reads the grammar/manifest registry (parallel test threads
+        // share this process). The grammar dir is leaked intentionally so the
+        // registered provider keeps pointing at a live path for the run.
+        // Serialize against other tests that mutate process-global environment
+        // state (the source-cache tests toggle `HOMEBOY_OUTPUT_DIR`), which can
+        // otherwise perturb snapshot/grammar resolution mid-walk.
+        let _env_guard = homeboy_core::test_support::env_lock();
+
+        static FIXTURE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        FIXTURE.get_or_init(|| {
+            homeboy_code_audit::extension_manifests::register_audit_extension_manifest_provider(
+                Box::new(FixtureRustManifest),
+            );
+            let grammar_dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+            write_fixture_rust_grammar(grammar_dir.path());
+            homeboy_code_audit::grammar_source_provider::register_grammar_source_provider(
+                Box::new(FixtureRustGrammar {
+                    dir: grammar_dir.path().to_path_buf(),
+                }),
+            );
+        });
 
         let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("src/core/example");
+        // The fixture lives under `src/example/` so `producer.rs` resolves to the
+        // module `example::producer`, matching the consumer's
+        // `use crate::example::producer::make_value;` import. (A `src/core/...`
+        // path would resolve to `core::example::...`, which — after the
+        // code_audit crate extraction — no longer aliases `crate::`.)
+        let src = dir.path().join("src/example");
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(
             src.join("producer.rs"),
@@ -281,15 +398,15 @@ mod tests {
         .unwrap();
 
         let index = ModuleSurfaceIndex::build(dir.path());
-        let producer = index.get("src/core/example/producer.rs").unwrap();
+        let producer = index.get("src/example/producer.rs").unwrap();
         let surface = producer.symbol_surface("make_value").unwrap();
 
         assert!(producer.owns_public_symbol("make_value"));
         assert!(surface
             .incoming_callers
-            .contains(&"src/core/example/consumer.rs".to_string()));
+            .contains(&"src/example/consumer.rs".to_string()));
         assert!(surface
             .incoming_importers
-            .contains(&"src/core/example/consumer.rs".to_string()));
+            .contains(&"src/example/consumer.rs".to_string()));
     }
 }
