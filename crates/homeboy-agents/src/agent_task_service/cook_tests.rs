@@ -3339,6 +3339,47 @@ fn restarted_cook_alias_and_exact_id_reuse_the_same_persisted_promotion() {
 }
 
 #[test]
+fn historical_applied_promotion_restores_only_its_exact_checkpoint_baseline() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let plan = AgentTaskPlan::new("cook-historical-baseline", Vec::new());
+        let run_id = "cook-historical-baseline-attempt-1";
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+        agent_task_lifecycle::record_cook_attempt("cook-historical-baseline", 1, run_id).unwrap();
+        let candidate = serde_json::json!({"kind":"git","fingerprint":{"head":"abc"}});
+        let checkpoint = serde_json::json!({
+            "schema":"homeboy/agent-task-promotion-report/v1",
+            "status":"verification_pending",
+            "source":{"kind":"aggregate","task_id":"task","run_id":run_id},
+            "to_worktree":"fixture@target",
+            "target":{"worktree":"fixture@target","path":"/fixture/target"},
+            "patch_artifact":{"id":"patch","kind":"patch","path":"/fixture/patch","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+            "provenance":{"post_apply":true,"candidate":candidate,"gate_feedback_baseline":{"schema":"homeboy/agent-task-gate-feedback-baseline/v1","current_diff":"diff --git a/a b/a\n"}},
+            "operator_notification":{"status":"blocked","message":"pending"}
+        });
+        let applied = serde_json::json!({
+            "schema":"homeboy/agent-task-promotion-report/v1",
+            "status":"applied",
+            "source":{"kind":"aggregate","task_id":"task","run_id":run_id},
+            "to_worktree":"fixture@target",
+            "target":{"worktree":"fixture@target","path":"/fixture/target"},
+            "patch_artifact":{"id":"patch","kind":"patch","path":"/fixture/patch","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+            "provenance":{"candidate":candidate},
+            "operator_notification":{"status":"completed","message":"applied"}
+        });
+        agent_task_lifecycle::record_promotion(run_id, checkpoint).unwrap();
+        agent_task_lifecycle::record_promotion(run_id, applied).unwrap();
+
+        let restored = persisted_promotion_for_attempt("cook-historical-baseline")
+            .unwrap()
+            .expect("alias resolves historical attempt");
+        assert_eq!(
+            restored.provenance["gate_feedback_baseline"]["current_diff"],
+            "diff --git a/a b/a\n"
+        );
+    });
+}
+
+#[test]
 fn persisted_promotion_from_another_attempt_is_rejected() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-persisted";
