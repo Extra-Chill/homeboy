@@ -102,6 +102,12 @@ fn run_list_filters_kind_component_rig_and_status() {
                 scenario_id: None,
                 status: Some("pass".to_string()),
                 running: false,
+                since: None,
+                until: None,
+                id: None,
+                command_contains: None,
+                correlation: None,
+                include_mirrors: false,
                 limit: 20,
                 include_active_runner_jobs: false,
             },
@@ -135,6 +141,12 @@ fn run_list_reads_durable_record_without_reconciliation() {
                 scenario_id: None,
                 status: None,
                 running: false,
+                since: None,
+                until: None,
+                id: None,
+                command_contains: None,
+                correlation: None,
+                include_mirrors: false,
                 limit: 20,
                 include_active_runner_jobs: false,
             },
@@ -160,6 +172,146 @@ fn run_list_reads_durable_record_without_reconciliation() {
             .expect("run exists");
         assert_eq!(stored.status, "running");
         assert!(stored.metadata_json["homeboy_reconciled"].is_null());
+    });
+}
+
+fn list_args() -> RunsListArgs {
+    RunsListArgs {
+        runner: None,
+        kind: None,
+        component_id: None,
+        rig: None,
+        scenario_id: None,
+        status: None,
+        running: false,
+        since: None,
+        until: None,
+        id: None,
+        command_contains: None,
+        correlation: None,
+        include_mirrors: false,
+        limit: 50,
+        include_active_runner_jobs: false,
+    }
+}
+
+fn lab_lineage_metadata(runner: &str, job: &str) -> Value {
+    serde_json::json!({ "lab": { "runner_id": runner, "remote_job_id": job } })
+}
+
+#[test]
+fn run_list_collapses_runner_execution_mirrors_by_default() {
+    // #9629: a caller run plus its runner-exec mirrors share one durable job
+    // lineage. The default projection returns one canonical row and reports the
+    // collapsed mirror count; --include-mirrors exposes every underlying row.
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let lineage = lab_lineage_metadata("homeboy-lab", "job-9629");
+        let caller = store
+            .start_run(sample_run("bench", "homeboy", "studio", lineage.clone()))
+            .expect("caller");
+        for _ in 0..2 {
+            let mirror = store
+                .start_run(
+                    NewRunRecord::builder("runner-exec")
+                        .component_id("homeboy")
+                        .metadata(lineage.clone())
+                        .build(),
+                )
+                .expect("mirror");
+            store
+                .finish_run(&mirror.id, RunStatus::Pass, None)
+                .expect("finish mirror");
+        }
+        store
+            .finish_run(&caller.id, RunStatus::Pass, None)
+            .expect("finish caller");
+
+        let (output, _) = list_runs(list_args(), "runs.list").expect("list");
+        let RunsOutput::List(output) = output else {
+            panic!("expected list output");
+        };
+        assert_eq!(
+            output.runs.len(),
+            1,
+            "mirrors should collapse to the caller"
+        );
+        assert_eq!(output.runs[0].id, caller.id);
+        assert_eq!(output.matched_runs, 1);
+        assert_eq!(output.hidden_mirrors, 2);
+
+        let (all, _) = list_runs(
+            RunsListArgs {
+                include_mirrors: true,
+                ..list_args()
+            },
+            "runs.list",
+        )
+        .expect("list all");
+        let RunsOutput::List(all) = all else {
+            panic!("expected list output");
+        };
+        assert_eq!(all.runs.len(), 3, "--include-mirrors exposes every row");
+        assert_eq!(all.hidden_mirrors, 0);
+    });
+}
+
+#[test]
+fn run_list_applies_command_and_id_filters() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let keep = store
+            .start_run(
+                NewRunRecord::builder("bench")
+                    .component_id("homeboy")
+                    .command("homeboy bench gutenberg --run-id cook-79020")
+                    .build(),
+            )
+            .expect("keep");
+        store
+            .finish_run(&keep.id, RunStatus::Pass, None)
+            .expect("finish keep");
+        let other = store
+            .start_run(
+                NewRunRecord::builder("bench")
+                    .component_id("homeboy")
+                    .command("homeboy bench unrelated --run-id cook-00001")
+                    .build(),
+            )
+            .expect("other");
+        store
+            .finish_run(&other.id, RunStatus::Pass, None)
+            .expect("finish other");
+
+        let (by_command, _) = list_runs(
+            RunsListArgs {
+                command_contains: Some("gutenberg".to_string()),
+                ..list_args()
+            },
+            "runs.list",
+        )
+        .expect("list by command");
+        let RunsOutput::List(by_command) = by_command else {
+            panic!("expected list output");
+        };
+        assert_eq!(by_command.runs.len(), 1);
+        assert_eq!(by_command.runs[0].id, keep.id);
+
+        let (by_id, _) = list_runs(
+            RunsListArgs {
+                id: Some("cook-79020".to_string()),
+                ..list_args()
+            },
+            "runs.list",
+        )
+        .expect("list by id label");
+        let RunsOutput::List(by_id) = by_id else {
+            panic!("expected list output");
+        };
+        assert_eq!(by_id.runs.len(), 1, "id fragment matches the run-id label");
+        assert_eq!(by_id.runs[0].id, keep.id);
     });
 }
 
@@ -1444,6 +1596,12 @@ fn bench_history_orders_and_filters_by_scenario() {
                 scenario_id: Some("cold".to_string()),
                 status: None,
                 running: false,
+                since: None,
+                until: None,
+                id: None,
+                command_contains: None,
+                correlation: None,
+                include_mirrors: false,
                 limit: 20,
                 include_active_runner_jobs: false,
             },

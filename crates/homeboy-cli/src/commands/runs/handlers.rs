@@ -41,16 +41,26 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
     let status = if args.running {
         Some("running".to_string())
     } else {
-        args.status
+        args.status.clone()
     };
     let status_filter = status.clone();
+
+    // Resolve time-window bounds up front so a bad `--since/--until` fails
+    // before any store read.
+    let since = args.since.as_deref().map(resolve_time_bound).transpose()?;
+    let until = args.until.as_deref().map(resolve_time_bound).transpose()?;
+
     let run_records = store.list_runs(RunListFilter {
-        kind: args.kind,
-        component_id: args.component_id,
+        kind: args.kind.clone(),
+        component_id: args.component_id.clone(),
         status,
-        rig_id: args.rig,
-        limit: Some(args.limit),
+        rig_id: args.rig.clone(),
+        // Over-fetch before post-filtering/dedup so the requested `--limit`
+        // counts canonical rows the caller actually sees, not mirrors that get
+        // collapsed away. The store already caps growth via retention.
+        limit: Some(list_prefetch_limit(&args)),
     })?;
+
     let run_records = run_records
         .into_iter()
         .filter(|run| {
@@ -58,22 +68,141 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
                 .as_deref()
                 .is_none_or(|scenario| run_contains_scenario(run, scenario))
         })
+        .filter(|run| run_matches_list_filters(run, &args, since.as_deref(), until.as_deref()))
         .collect::<Vec<_>>();
+
+    // Collapse runner-execution mirrors into one canonical row per logical
+    // execution unless the caller explicitly wants every underlying row.
+    let (run_records, hidden_mirrors) = if args.include_mirrors {
+        (run_records, 0)
+    } else {
+        let deduped = runs_service::dedupe_runner_execution_mirrors(run_records);
+        (deduped.canonical, deduped.hidden_mirrors)
+    };
+
+    // Apply the caller's limit to the canonical, post-filter set.
+    let limit = args.limit.max(0) as usize;
+    let run_records = run_records.into_iter().take(limit).collect::<Vec<_>>();
+
     let mut runs = run_summaries_with_artifact_indexes(&store, run_records)?;
 
     if args.include_active_runner_jobs {
         runs.extend(active_runner_job_summaries(status_filter.as_deref()));
     }
 
+    let matched_runs = runs.len();
     let actionable = actionable_for_run_list(&runs);
     Ok((
         RunsOutput::List(RunsListOutput {
             command,
             runs,
+            matched_runs,
+            hidden_mirrors,
             actionable,
         }),
         0,
     ))
+}
+
+/// Pre-fetch bound for `runs list`. When dedup or post-filters are active we
+/// over-fetch so the final `--limit` counts canonical rows the caller sees,
+/// not mirrors/filtered rows. Bounded to keep the scan cost predictable.
+fn list_prefetch_limit(args: &RunsListArgs) -> i64 {
+    let base = args.limit.max(0);
+    let post_processing = !args.include_mirrors
+        || args.since.is_some()
+        || args.until.is_some()
+        || args.id.is_some()
+        || args.command_contains.is_some()
+        || args.correlation.is_some();
+    if post_processing {
+        // Cap the amplification so a large `--limit` can't trigger an unbounded
+        // scan; retention keeps the store from growing without bound anyway.
+        base.saturating_mul(4)
+            .min(base.saturating_add(2000))
+            .max(base)
+    } else {
+        base
+    }
+}
+
+/// Resolve a `--since`/`--until` bound into an RFC-3339 timestamp. Accepts an
+/// absolute RFC-3339 timestamp (used verbatim) or a relative age like `2d` /
+/// `6h` / `30m` (resolved to `now - age`).
+fn resolve_time_bound(raw: &str) -> homeboy::core::Result<String> {
+    let trimmed = raw.trim();
+    if chrono::DateTime::parse_from_rfc3339(trimmed).is_ok() {
+        return Ok(trimmed.to_string());
+    }
+    super::common::since_threshold(trimmed)
+}
+
+/// Post-store filters that operate on fields not indexed by `RunListFilter`:
+/// time window, id/label fragment, command substring, and correlation lineage.
+fn run_matches_list_filters(
+    run: &RunRecord,
+    args: &RunsListArgs,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> bool {
+    // Time window: string comparison is correct for RFC-3339 timestamps in the
+    // same offset; the store persists UTC `started_at`.
+    if let Some(since) = since {
+        if run.started_at.as_str() < since {
+            return false;
+        }
+    }
+    if let Some(until) = until {
+        if run.started_at.as_str() > until {
+            return false;
+        }
+    }
+    if let Some(fragment) = args.id.as_deref() {
+        if !run_id_or_label_contains(run, fragment) {
+            return false;
+        }
+    }
+    if let Some(needle) = args.command_contains.as_deref() {
+        if !run
+            .command
+            .as_deref()
+            .is_some_and(|command| command.contains(needle))
+        {
+            return false;
+        }
+    }
+    if let Some(correlation) = args.correlation.as_deref() {
+        if !run_correlates_with(run, correlation) {
+            return false;
+        }
+    }
+    true
+}
+
+/// True when the run's persisted id or run-label contains `fragment`.
+fn run_id_or_label_contains(run: &RunRecord, fragment: &str) -> bool {
+    if run.id.contains(fragment) {
+        return true;
+    }
+    run.command
+        .as_deref()
+        .and_then(runs_service::command_run_id_label)
+        .is_some_and(|label| label.contains(fragment))
+}
+
+/// True when the run shares the `correlation` fragment across its id, run-label,
+/// or durable Lab lineage (runner id or job id) — so a controller run, its
+/// runner job, and mirrored observation rows resolve together.
+fn run_correlates_with(run: &RunRecord, correlation: &str) -> bool {
+    if run_id_or_label_contains(run, correlation) {
+        return true;
+    }
+    if let Some((runner_id, job_id)) = runs_service::lab_run_lineage(run) {
+        if runner_id.contains(correlation) || job_id.contains(correlation) {
+            return true;
+        }
+    }
+    false
 }
 
 fn active_runner_job_summaries(status: Option<&str>) -> Vec<RunSummary> {

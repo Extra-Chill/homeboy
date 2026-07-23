@@ -60,11 +60,16 @@ pub fn list_runner_runs(
         args.limit as usize,
     );
 
+    let matched_runs = runs.len();
     let actionable = actionable_for_run_list(&runs);
     Ok((
         RunsOutput::List(RunsListOutput {
             command,
             runs,
+            matched_runs,
+            // Remote listing returns the runner daemon's own rows; mirror
+            // collapsing is a controller-store concern and does not apply here.
+            hidden_mirrors: 0,
             actionable,
         }),
         0,
