@@ -7,6 +7,15 @@ use crate::{
 use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 use homeboy_core::test_support;
 
+fn fixture_commits_are_ancestral(repository: &Path, older: &str, newer: &str) -> Result<bool> {
+    let status = Command::new("git")
+        .args(["merge-base", "--is-ancestor", older, newer])
+        .current_dir(repository)
+        .status()
+        .expect("compare fixture commits");
+    Ok(status.success())
+}
+
 #[test]
 fn routine_reconnect_refuses_to_interrupt_an_admitted_lab_offload() {
     let admission = active_admission("0b77251a-b6a7-42a6-91a3-e49ff5f57c16");
@@ -410,10 +419,16 @@ fn promotion_policy_blocks_tag_downgrade_without_mutating_selection_and_records_
             .map(str::to_string),
         configured_selected: None,
     };
-    let denied = validate_refresh_promotion(&plan, &candidate, false, &authorities)
+    let denied =
+        validate_refresh_promotion(&plan, &candidate, false, &authorities, |older, newer| {
+            fixture_commits_are_ancestral(fixture.path(), older, newer)
+        })
         .expect_err("post-tag active daemon must block implicit rollback");
     assert_eq!(denied.details["field"], "allow_downgrade");
-    let rollback = validate_refresh_promotion(&plan, &candidate, true, &authorities)
+    let rollback =
+        validate_refresh_promotion(&plan, &candidate, true, &authorities, |older, newer| {
+            fixture_commits_are_ancestral(fixture.path(), older, newer)
+        })
         .expect("explicit rollback is allowed")
         .expect("rollback evidence");
     assert_eq!(rollback.requested.as_deref(), Some("v1.0.0"));
@@ -501,11 +516,15 @@ fn old_materializes_first_new_selects_first_uses_fresh_promotion_authorities() {
         active_daemon: None,
         configured_selected: None,
     };
-    assert!(
-        validate_refresh_promotion(&plan, &candidate, false, &stale_authorities)
-            .expect("stale snapshot would allow selection")
-            .is_none()
-    );
+    assert!(validate_refresh_promotion(
+        &plan,
+        &candidate,
+        false,
+        &stale_authorities,
+        |older, newer| fixture_commits_are_ancestral(fixture.path(), older, newer),
+    )
+    .expect("stale snapshot would allow selection")
+    .is_none());
 
     // Selection must use the authority reread after obtaining its lease.
     let fresh_authorities = RefreshPromotionAuthorities {
@@ -513,7 +532,14 @@ fn old_materializes_first_new_selects_first_uses_fresh_promotion_authorities() {
         active_daemon: None,
         configured_selected: Some(new),
     };
-    assert!(validate_refresh_promotion(&plan, &candidate, false, &fresh_authorities).is_err());
+    assert!(validate_refresh_promotion(
+        &plan,
+        &candidate,
+        false,
+        &fresh_authorities,
+        |older, newer| fixture_commits_are_ancestral(fixture.path(), older, newer),
+    )
+    .is_err());
 }
 
 #[test]
@@ -595,6 +621,7 @@ fn rollback_evidence_excludes_unrelated_authorities() {
             active_daemon: None,
             configured_selected: None,
         },
+        |older, newer| fixture_commits_are_ancestral(fixture.path(), older, newer),
     )
     .expect("unrelated authority is not a rollback");
     assert!(evidence.is_none());
@@ -1258,6 +1285,69 @@ fn connected_refresh_keeps_daemon_execution_options() {
 
     assert!(!options.allow_diagnostic_ssh);
     assert_eq!(options.diagnostic_ssh_timeout, None);
+}
+
+#[test]
+fn refresh_ancestry_probe_executes_in_the_runner_repository() {
+    let connected = refresh_ancestry_execution_options(
+        "/runner/homeboy",
+        "candidate-sha",
+        "authority-sha",
+        false,
+    );
+    assert_eq!(
+        connected.command,
+        vec![
+            "git",
+            "-C",
+            "/runner/homeboy",
+            "merge-base",
+            "--is-ancestor",
+            "candidate-sha",
+            "authority-sha",
+        ]
+    );
+    assert!(!connected.allow_diagnostic_ssh);
+    assert_eq!(
+        connected
+            .capability_preflight
+            .expect("connected preflight")
+            .required_commands,
+        vec!["git"]
+    );
+
+    let disconnected = refresh_ancestry_execution_options(
+        "/runner/homeboy",
+        "candidate-sha",
+        "authority-sha",
+        true,
+    );
+    assert!(disconnected.allow_diagnostic_ssh);
+    assert_eq!(
+        disconnected.diagnostic_ssh_timeout,
+        Some(DISCONNECTED_SSH_REFRESH_TIMEOUT)
+    );
+}
+
+#[test]
+fn refresh_ancestry_exit_status_requires_authoritative_git_result() {
+    let plan = HomeboyBinaryRefreshPlan {
+        runner_id: "lab".to_string(),
+        mode: "materialize".to_string(),
+        source: None,
+        git_ref: Some("candidate".to_string()),
+        target_dir: Some("/runner/homeboy".to_string()),
+        binary_path: "/runner/homeboy/target/release/homeboy".to_string(),
+        script: String::new(),
+        reconnect: false,
+        followup_commands: Vec::new(),
+    };
+
+    assert!(classify_refresh_ancestry_exit(&plan, 0).unwrap());
+    assert!(!classify_refresh_ancestry_exit(&plan, 1).unwrap());
+    let error = classify_refresh_ancestry_exit(&plan, 128)
+        .expect_err("git comparison errors are not ancestry evidence");
+    assert_eq!(error.details["field"], "allow_downgrade");
 }
 
 #[test]

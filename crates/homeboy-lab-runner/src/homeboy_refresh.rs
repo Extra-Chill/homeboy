@@ -430,6 +430,9 @@ pub fn refresh_homeboy_binary(
                     identity,
                     options.allow_downgrade,
                     &promotion_authorities,
+                    |older, newer| {
+                        runner_commits_are_ancestral(&plan, older, newer, disconnected_ssh)
+                    },
                 )?;
                 Ok((
                     promote_verified_runner_binary(&plan.runner_id, homeboy_path)?,
@@ -455,6 +458,7 @@ pub fn refresh_homeboy_binary(
                 &identity,
                 options.allow_downgrade,
                 &promotion_authorities,
+                |older, newer| runner_commits_are_ancestral(&plan, older, newer, disconnected_ssh),
             )?;
             let updated_fields =
                 promote_verified_runner_binary(&plan.runner_id, &plan.binary_path)?;
@@ -1163,12 +1167,16 @@ fn refresh_promotion_authorities(runner_id: &str) -> Result<RefreshPromotionAuth
     })
 }
 
-fn validate_refresh_promotion(
+fn validate_refresh_promotion<IsAncestor>(
     plan: &HomeboyBinaryRefreshPlan,
     candidate: &Value,
     allow_downgrade: bool,
     authorities: &RefreshPromotionAuthorities,
-) -> Result<Option<HomeboyBinaryRefreshRollback>> {
+    mut is_ancestor: IsAncestor,
+) -> Result<Option<HomeboyBinaryRefreshRollback>>
+where
+    IsAncestor: FnMut(&str, &str) -> Result<bool>,
+{
     let candidate_commit = identity_commit(candidate).ok_or_else(|| {
         Error::validation_invalid_argument(
             "identity",
@@ -1191,7 +1199,7 @@ fn validate_refresh_promotion(
         let Some(authority) = authority.filter(|authority| *authority != candidate_commit) else {
             continue;
         };
-        match commits_are_ancestral(plan, &candidate_commit, authority) {
+        match is_ancestor(&candidate_commit, authority) {
             Ok(true) => previous.push(format!("{name}:{authority}")),
             Ok(false) => {}
             Err(_) if allow_downgrade => unproven.push(format!("{name}:{authority}")),
@@ -1238,10 +1246,11 @@ fn identity_commit(identity: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn commits_are_ancestral(
+fn runner_commits_are_ancestral(
     plan: &HomeboyBinaryRefreshPlan,
     older: &str,
     newer: &str,
+    disconnected_ssh: bool,
 ) -> Result<bool> {
     let repository = plan.target_dir.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -1251,22 +1260,46 @@ fn commits_are_ancestral(
             None,
         )
     })?;
-    let status = Command::new("git")
-        .args([
-            "-C",
-            repository,
-            "merge-base",
-            "--is-ancestor",
-            older,
-            newer,
-        ])
-        .status()
-        .map_err(|error| {
-            Error::internal_io(error.to_string(), Some("run git merge-base".to_string()))
-        })?;
-    match status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
+    let (_, exit_code) = exec(
+        &plan.runner_id,
+        refresh_ancestry_execution_options(repository, older, newer, disconnected_ssh),
+    )?;
+    classify_refresh_ancestry_exit(plan, exit_code)
+}
+
+fn refresh_ancestry_execution_options(
+    repository: &str,
+    older: &str,
+    newer: &str,
+    disconnected_ssh: bool,
+) -> RunnerExecOptions {
+    let command = vec![
+        "git".to_string(),
+        "-C".to_string(),
+        repository.to_string(),
+        "merge-base".to_string(),
+        "--is-ancestor".to_string(),
+        older.to_string(),
+        newer.to_string(),
+    ];
+    let options = if disconnected_ssh {
+        RunnerExecOptions::diagnostic_raw_command(command)
+            .with_diagnostic_ssh_timeout(DISCONNECTED_SSH_REFRESH_TIMEOUT)
+    } else {
+        RunnerExecOptions::raw_command(command)
+    };
+    options.with_capability_preflight(RunnerCapabilityPreflight {
+        command: "runner.refresh-homeboy".to_string(),
+        required_commands: vec!["git".to_string()],
+        timeout: disconnected_ssh.then_some(DISCONNECTED_SSH_REFRESH_TIMEOUT),
+        ..Default::default()
+    })
+}
+
+fn classify_refresh_ancestry_exit(plan: &HomeboyBinaryRefreshPlan, exit_code: i32) -> Result<bool> {
+    match exit_code {
+        0 => Ok(true),
+        1 => Ok(false),
         _ => Err(Error::validation_invalid_argument(
             "allow_downgrade",
             "authoritative source repository cannot compare selected Homeboy commits",
