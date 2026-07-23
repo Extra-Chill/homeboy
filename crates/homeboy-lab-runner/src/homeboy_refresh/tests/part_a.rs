@@ -16,6 +16,54 @@ fn fixture_commits_are_ancestral(repository: &Path, older: &str, newer: &str) ->
     Ok(status.success())
 }
 
+fn linear_commit_fixture() -> (tempfile::TempDir, String, String) {
+    let fixture = tempfile::tempdir().expect("git fixture");
+    for args in [
+        vec!["init", "--quiet"],
+        vec!["config", "user.email", "homeboy@example.test"],
+        vec!["config", "user.name", "Homeboy Test"],
+    ] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(fixture.path())
+            .status()
+            .expect("git")
+            .success());
+    }
+    let revision = || {
+        String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(fixture.path())
+                .output()
+                .expect("revision")
+                .stdout,
+        )
+        .expect("utf8")
+        .trim()
+        .to_string()
+    };
+    std::fs::write(fixture.path().join("release"), "old\n").expect("old release");
+    for args in [vec!["add", "."], vec!["commit", "-m", "old"]] {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(fixture.path())
+            .status()
+            .expect("commit old")
+            .success());
+    }
+    let old = revision();
+    std::fs::write(fixture.path().join("release"), "new\n").expect("new release");
+    assert!(Command::new("git")
+        .args(["commit", "-am", "new"])
+        .current_dir(fixture.path())
+        .status()
+        .expect("commit new")
+        .success());
+    let new = revision();
+    (fixture, old, new)
+}
+
 #[test]
 fn routine_reconnect_refuses_to_interrupt_an_admitted_lab_offload() {
     let admission = active_admission("0b77251a-b6a7-42a6-91a3-e49ff5f57c16");
@@ -1348,6 +1396,112 @@ fn refresh_ancestry_exit_status_requires_authoritative_git_result() {
     let error = classify_refresh_ancestry_exit(&plan, 128)
         .expect_err("git comparison errors are not ancestry evidence");
     assert_eq!(error.details["field"], "allow_downgrade");
+}
+
+#[test]
+fn remote_forward_upgrade_uses_runner_owned_ancestry_evidence() {
+    let (fixture, old, new) = linear_commit_fixture();
+    let runner_repository = "/runner-only/homeboy";
+    assert!(!Path::new(runner_repository).exists());
+    let plan = HomeboyBinaryRefreshPlan {
+        runner_id: "lab".to_string(),
+        mode: "materialize".to_string(),
+        source: None,
+        git_ref: Some("main".to_string()),
+        target_dir: Some(runner_repository.to_string()),
+        binary_path: format!("{runner_repository}/target/release/homeboy"),
+        script: String::new(),
+        reconnect: true,
+        followup_commands: Vec::new(),
+    };
+    let mut probes = 0;
+
+    let accepted = validate_refresh_promotion(
+        &plan,
+        &serde_json::json!({"data":{"git_commit":new}}),
+        false,
+        &RefreshPromotionAuthorities {
+            controller: None,
+            active_daemon: Some(old),
+            configured_selected: None,
+        },
+        |older, newer| {
+            runner_commits_are_ancestral_with(
+                &plan,
+                older,
+                newer,
+                false,
+                |runner_id, mut options| {
+                    probes += 1;
+                    assert_eq!(runner_id, "lab");
+                    assert_eq!(options.command[2], runner_repository);
+                    options.command[2] = fixture.path().display().to_string();
+                    Ok(Command::new(&options.command[0])
+                        .args(&options.command[1..])
+                        .status()
+                        .expect("runner ancestry probe")
+                        .code()
+                        .expect("git exit code"))
+                },
+            )
+        },
+    )
+    .expect("forward upgrade is accepted");
+
+    assert!(accepted.is_none());
+    assert_eq!(probes, 1);
+}
+
+#[test]
+fn remote_true_downgrade_is_still_refused_from_runner_owned_evidence() {
+    let (fixture, old, new) = linear_commit_fixture();
+    let runner_repository = "/runner-only/homeboy";
+    assert!(!Path::new(runner_repository).exists());
+    let plan = HomeboyBinaryRefreshPlan {
+        runner_id: "lab".to_string(),
+        mode: "materialize".to_string(),
+        source: None,
+        git_ref: Some("old".to_string()),
+        target_dir: Some(runner_repository.to_string()),
+        binary_path: format!("{runner_repository}/target/release/homeboy"),
+        script: String::new(),
+        reconnect: true,
+        followup_commands: Vec::new(),
+    };
+
+    let denied = validate_refresh_promotion(
+        &plan,
+        &serde_json::json!({"data":{"git_commit":old}}),
+        false,
+        &RefreshPromotionAuthorities {
+            controller: None,
+            active_daemon: Some(new),
+            configured_selected: None,
+        },
+        |older, newer| {
+            runner_commits_are_ancestral_with(
+                &plan,
+                older,
+                newer,
+                false,
+                |runner_id, mut options| {
+                    assert_eq!(runner_id, "lab");
+                    assert_eq!(options.command[2], runner_repository);
+                    options.command[2] = fixture.path().display().to_string();
+                    Ok(Command::new(&options.command[0])
+                        .args(&options.command[1..])
+                        .status()
+                        .expect("runner ancestry probe")
+                        .code()
+                        .expect("git exit code"))
+                },
+            )
+        },
+    )
+    .expect_err("true downgrade remains refused");
+
+    assert_eq!(denied.details["field"], "allow_downgrade");
+    assert!(denied.message.contains("refusing Homeboy runner downgrade"));
 }
 
 #[test]

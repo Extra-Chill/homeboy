@@ -431,7 +431,13 @@ pub fn refresh_homeboy_binary(
                     options.allow_downgrade,
                     &promotion_authorities,
                     |older, newer| {
-                        runner_commits_are_ancestral(&plan, older, newer, disconnected_ssh)
+                        runner_commits_are_ancestral(
+                            &plan,
+                            older,
+                            newer,
+                            disconnected_ssh,
+                            &connection_status,
+                        )
                     },
                 )?;
                 Ok((
@@ -458,7 +464,15 @@ pub fn refresh_homeboy_binary(
                 &identity,
                 options.allow_downgrade,
                 &promotion_authorities,
-                |older, newer| runner_commits_are_ancestral(&plan, older, newer, disconnected_ssh),
+                |older, newer| {
+                    runner_commits_are_ancestral(
+                        &plan,
+                        older,
+                        newer,
+                        disconnected_ssh,
+                        &connection_status,
+                    )
+                },
             )?;
             let updated_fields =
                 promote_verified_runner_binary(&plan.runner_id, &plan.binary_path)?;
@@ -1251,6 +1265,26 @@ fn runner_commits_are_ancestral(
     older: &str,
     newer: &str,
     disconnected_ssh: bool,
+    status_snapshot: &super::RunnerStatusReport,
+) -> Result<bool> {
+    runner_commits_are_ancestral_with(
+        plan,
+        older,
+        newer,
+        disconnected_ssh,
+        |runner_id, options| {
+            exec_with_status_snapshot(runner_id, options, Some(status_snapshot.clone()))
+                .map(|(_, exit_code)| exit_code)
+        },
+    )
+}
+
+fn runner_commits_are_ancestral_with(
+    plan: &HomeboyBinaryRefreshPlan,
+    older: &str,
+    newer: &str,
+    disconnected_ssh: bool,
+    mut exec_runner: impl FnMut(&str, RunnerExecOptions) -> Result<i32>,
 ) -> Result<bool> {
     let repository = plan.target_dir.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -1260,7 +1294,7 @@ fn runner_commits_are_ancestral(
             None,
         )
     })?;
-    let (_, exit_code) = exec(
+    let exit_code = exec_runner(
         &plan.runner_id,
         refresh_ancestry_execution_options(repository, older, newer, disconnected_ssh),
     )?;
