@@ -214,6 +214,7 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
                         args.to_worktree.as_deref(),
                         args.provider_command.as_deref(),
                         &args.provider_argv,
+                        record.metadata.get("latest_promotion"),
                         aggregate,
                         review,
                     )
@@ -947,6 +948,7 @@ fn promotion_candidates(
     to_worktree: Option<&str>,
     provider_command: Option<&str>,
     provider_argv: &[String],
+    latest_promotion: Option<&Value>,
     aggregate: &AgentTaskAggregate,
     review: &AgentTaskAggregateReport,
 ) -> Vec<Value> {
@@ -1008,9 +1010,25 @@ fn promotion_candidates(
                     "--artifact-id".to_string(),
                     artifact_id.clone(),
                 ];
-                if let Some(to_worktree) = to_worktree {
+                let continuation = latest_promotion.filter(|promotion| {
+                    promotion_is_resumable(promotion, false)
+                        && promotion.pointer("/source/task_id").and_then(Value::as_str)
+                            == Some(candidate.task_id.as_str())
+                        && promotion.pointer("/patch_artifact/id").and_then(Value::as_str)
+                            == Some(artifact_id.as_str())
+                });
+                if let Some(to_worktree) = continuation
+                    .and_then(|promotion| promotion.pointer("/target/worktree"))
+                    .and_then(Value::as_str)
+                    .or(to_worktree)
+                {
                     command.push("--to-worktree".to_string());
                     command.push(to_worktree.to_string());
+                }
+                if let Some(contract) = continuation
+                    .and_then(|promotion| promotion.pointer("/provenance/resume_contract"))
+                {
+                    append_resume_contract(&mut command, contract);
                 }
                 if let Some(provider_command) = provider_command {
                     command.push("--provider-command".to_string());
@@ -1033,6 +1051,70 @@ fn promotion_candidates(
             })
         })
         .collect()
+}
+
+/// Render the durable gate contract rather than relying on evolving CLI defaults.
+fn append_resume_contract(command: &mut Vec<String>, contract: &Value) {
+    if let Some(base) = contract.pointer("/inputs/base_ref").and_then(Value::as_str) {
+        command.extend(["--base".to_string(), base.to_string()]);
+    }
+    let Some(gates) = contract.get("gates") else {
+        return;
+    };
+    for (key, flag) in [
+        ("verify", "--verify"),
+        ("private_verify", "--private-verify"),
+    ] {
+        if let Some(values) = gates.get(key).and_then(Value::as_array) {
+            for value in values.iter().filter_map(Value::as_str) {
+                command.extend([flag.to_string(), value.to_string()]);
+            }
+        }
+    }
+    for (key, flag) in [
+        ("private_gate_reveal", "--private-gate-reveal"),
+        ("gate_timeout_seconds", "--gate-timeout-seconds"),
+        (
+            "gate_heartbeat_interval_seconds",
+            "--gate-heartbeat-interval-seconds",
+        ),
+    ] {
+        if let Some(value) = gates.get(key) {
+            let value = value
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| value.as_u64().map(|value| value.to_string()));
+            if let Some(value) = value {
+                command.extend([flag.to_string(), value.replace('_', "-")]);
+            }
+        }
+    }
+    if gates.get("rerun_completed_gates").and_then(Value::as_bool) == Some(true) {
+        command.push("--rerun-completed-gates".to_string());
+    }
+    if let Some(environment) = gates.get("gate_environment") {
+        if let Some(mode) = environment.get("mode").and_then(Value::as_str) {
+            command.extend([
+                "--gate-environment-mode".to_string(),
+                mode.replace('_', "-"),
+            ]);
+        }
+        if let Some(variables) = environment.get("variables").and_then(Value::as_object) {
+            for (name, value) in variables {
+                if let Some(value) = value.as_str() {
+                    command.extend(["--gate-env".to_string(), format!("{name}={value}")]);
+                }
+            }
+        }
+        for (key, flag) in [
+            ("isolate_home", "--isolate-gate-home"),
+            ("isolate_xdg", "--isolate-gate-xdg"),
+        ] {
+            if let Some(value) = environment.get(key).and_then(Value::as_bool) {
+                command.push(format!("{flag}={value}"));
+            }
+        }
+    }
 }
 
 fn review_next_actions(
@@ -1278,6 +1360,7 @@ mod tests {
                 "promotion-provider".to_string(),
                 "--workspace=/tmp/target".to_string(),
             ],
+            None,
             &aggregate,
             &review,
         );
@@ -1304,6 +1387,57 @@ mod tests {
     }
 
     #[test]
+    fn resume_contract_emits_exact_base_and_gate_arguments() {
+        let mut command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        append_resume_contract(
+            &mut command,
+            &serde_json::json!({
+                "inputs": { "base_ref": "release" },
+                "gates": {
+                    "verify": ["cargo test --lib"],
+                    "private_verify": ["./private-check"],
+                    "private_gate_reveal": "full_evidence",
+                    "gate_timeout_seconds": 42,
+                    "gate_heartbeat_interval_seconds": 7,
+                    "rerun_completed_gates": false,
+                    "gate_environment": {
+                        "mode": "replace",
+                        "variables": { "MODE": "test" },
+                        "isolate_home": true,
+                        "isolate_xdg": false
+                    }
+                }
+            }),
+        );
+
+        assert_eq!(
+            command,
+            vec![
+                "homeboy",
+                "agent-task",
+                "--base",
+                "release",
+                "--verify",
+                "cargo test --lib",
+                "--private-verify",
+                "./private-check",
+                "--private-gate-reveal",
+                "full-evidence",
+                "--gate-timeout-seconds",
+                "42",
+                "--gate-heartbeat-interval-seconds",
+                "7",
+                "--gate-environment-mode",
+                "replace",
+                "--gate-env",
+                "MODE=test",
+                "--isolate-gate-home=true",
+                "--isolate-gate-xdg=false",
+            ]
+        );
+    }
+
+    #[test]
     fn promotion_candidates_canonicalize_aliases_and_preserve_attempt_choices() {
         let temp = tempfile::tempdir().expect("tempdir");
         let equivalent_aggregate = recoverable_review_aggregate(&temp, &[1, 1]);
@@ -1318,6 +1452,7 @@ mod tests {
             Some("fixture@target"),
             None,
             &[],
+            None,
             &equivalent_aggregate,
             &equivalent_review,
         );
@@ -1335,6 +1470,7 @@ mod tests {
             Some("fixture@target"),
             None,
             &[],
+            None,
             &distinct_aggregate,
             &distinct_review,
         );
