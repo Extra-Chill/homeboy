@@ -215,6 +215,9 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             false,
             false,
             Some(git_identity),
+            // Validation-only finalization performs no push, so there is no
+            // publication git tracking to record.
+            None,
         ));
     }
     if commit_required {
