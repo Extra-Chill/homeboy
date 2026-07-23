@@ -208,6 +208,17 @@ pub struct ControllerScratchCleanupOutput {
     pub applied_count: usize,
     pub skipped_count: usize,
     pub estimated_bytes: u64,
+    /// Bytes that would be eligible under the DEFAULT per-resource retention
+    /// policy (i.e. with no `--older-than-days` override). Equal to
+    /// `estimated_bytes` when no override is active; smaller when an override
+    /// unlocks additional released, clean scratch that is still inside its
+    /// default retention window. Lets operators see exactly how much a
+    /// pressure-reclaim override adds versus normal cleanup.
+    pub default_policy_eligible_bytes: u64,
+    /// Bytes eligible ONLY because of an explicit retention override
+    /// (`estimated_bytes - default_policy_eligible_bytes`). Zero when no
+    /// override is active.
+    pub override_unlocked_bytes: u64,
     pub reclaimed_bytes: u64,
     pub candidates: Vec<ControllerScratchCandidate>,
     pub skipped: Vec<ControllerScratchSkipped>,
@@ -483,6 +494,9 @@ fn cleanup_unlocked(
     let mut all_skips: Vec<(String, Option<String>)> = Vec::new();
     let mut applied_count = 0;
     let mut reclaimed_bytes = 0;
+    // Bytes among the eligible set that would also clear the DEFAULT retention
+    // window (no override). Used to report override-unlocked bytes separately.
+    let mut default_policy_eligible_bytes: u64 = 0;
     let now = chrono::Utc::now();
     let mut eligible = Vec::new();
     let mut reconciled = false;
@@ -515,6 +529,13 @@ fn cleanup_unlocked(
             continue;
         }
         let size_bytes = path_size(&path)?;
+        // Would this candidate also be eligible under the DEFAULT policy (no
+        // override)? The override only relaxes the retention time window, and
+        // every other guard has already passed, so default-eligibility reduces
+        // to the default retention window still being expired.
+        if resource_retention_window_expired(resource, &path, now) {
+            default_policy_eligible_bytes += size_bytes;
+        }
         eligible.push(ControllerScratchCandidate {
             path: resource.path.clone(),
             run_id: resource.run_id.clone(),
@@ -568,6 +589,8 @@ fn cleanup_unlocked(
         applied_count,
         skipped_count: all_skips.len(),
         estimated_bytes,
+        default_policy_eligible_bytes,
+        override_unlocked_bytes: estimated_bytes.saturating_sub(default_policy_eligible_bytes),
         reclaimed_bytes,
         candidates,
         retention_reasons: summarize_retention(&all_skips),
@@ -688,16 +711,8 @@ fn cleanup_block_reason(
     // applies — so an aggressive override can only converge released, clean,
     // finalized, terminal scratch, never in-use resources.
     let override_retention = retention_override_seconds.map(|seconds| format!("{seconds}s"));
-    let retention = if let Some(override_retention) = override_retention.as_deref() {
-        override_retention
-    } else if matches!(
-        resource.lifecycle_state.as_str(),
-        "interrupted" | "orphaned"
-    ) {
-        INTERRUPTED_RETENTION
-    } else {
-        &resource.retention
-    };
+    let default_retention = default_retention_window(resource);
+    let retention = override_retention.as_deref().unwrap_or(default_retention);
     if !retention_expired(resource.finalized_at.as_deref(), retention, path, now) {
         return Ok(Some("retention has not expired".to_string()));
     }
@@ -705,6 +720,37 @@ fn cleanup_block_reason(
         return Ok(Some("git checkout has dirty or unpushed state".to_string()));
     }
     Ok(None)
+}
+
+/// The retention window a resource is subject to under the DEFAULT policy (no
+/// `--older-than-days` override): the shorter orphaned/interrupted window when
+/// applicable, otherwise the resource's own configured retention.
+fn default_retention_window(resource: &ControllerScratchResource) -> &str {
+    if matches!(
+        resource.lifecycle_state.as_str(),
+        "interrupted" | "orphaned"
+    ) {
+        INTERRUPTED_RETENTION
+    } else {
+        &resource.retention
+    }
+}
+
+/// Whether an already-eligible candidate would ALSO clear its default retention
+/// window (i.e. would be a candidate even without an override). Callers must
+/// only use this for resources that have already passed the other cleanup
+/// guards; it evaluates the time window alone.
+fn resource_retention_window_expired(
+    resource: &ControllerScratchResource,
+    path: &Path,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    retention_expired(
+        resource.finalized_at.as_deref(),
+        default_retention_window(resource),
+        path,
+        now,
+    )
 }
 
 fn retention_expired(
@@ -1544,6 +1590,55 @@ mod tests {
                 .map(|reason| reason.resource_count)
                 .sum();
             assert_eq!(summarized, total);
+        });
+    }
+
+    #[test]
+    fn override_unlocked_bytes_are_reported_separately_from_default_policy() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            // A released, clean resource still inside its default P7D window:
+            // eligible only because of the override. Its bytes must be reported
+            // as override-unlocked, not default-policy-eligible.
+            let root = tempfile::tempdir().expect("root");
+            let scratch = root.path().join("scratch");
+            fs::create_dir(&scratch).expect("scratch");
+            fs::write(scratch.join("generated.txt"), "some generated bytes").expect("content");
+            let mut resource = resource(&scratch, root.path());
+            resource.lifecycle_state = "released".to_string();
+            resource.retention = "P7D".to_string();
+            write_index(&ControllerScratchIndex {
+                schema: schema(),
+                resources: vec![resource],
+            })
+            .expect("resource index");
+
+            // Default policy: retained, nothing eligible, no override-unlocked bytes.
+            let default_run = cleanup(ControllerScratchCleanupOptions {
+                apply: false,
+                limit: 10,
+                retention_override_seconds: None,
+            })
+            .expect("default cleanup");
+            assert_eq!(default_run.candidate_count, 0);
+            assert_eq!(default_run.estimated_bytes, 0);
+            assert_eq!(default_run.default_policy_eligible_bytes, 0);
+            assert_eq!(default_run.override_unlocked_bytes, 0);
+
+            // Pressure override: now eligible, and every eligible byte is
+            // attributed to the override (default policy would reclaim none).
+            let override_run = cleanup(ControllerScratchCleanupOptions {
+                apply: false,
+                limit: 10,
+                retention_override_seconds: Some(0),
+            })
+            .expect("override cleanup");
+            assert_eq!(override_run.candidate_count, 1);
+            assert!(override_run.estimated_bytes > 0);
+            assert_eq!(override_run.default_policy_eligible_bytes, 0);
+            assert_eq!(
+                override_run.override_unlocked_bytes,
+                override_run.estimated_bytes
+            );
         });
     }
 
