@@ -38,21 +38,32 @@ impl HarvestExecutionContext {
     pub fn from_current_process() -> homeboy_core::Result<Self> {
         let source = std::env::var(homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV).ok();
         let lab = std::env::var(homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV).ok();
+        Self::from_transport_values(source.as_deref(), lab.as_deref())
+    }
+
+    fn from_transport_values(
+        source: Option<&str>,
+        lab: Option<&str>,
+    ) -> homeboy_core::Result<Self> {
         match (source, lab) {
             (None, None) => Ok(Self::default()),
             (Some(source), Some(lab)) if !source.trim().is_empty() && !lab.trim().is_empty() => {
-                let lab_offload: serde_json::Value = serde_json::from_str(&lab).map_err(|error| {
-                    incomplete_transport_error(format!("invalid Lab offload metadata: {error}"))
-                })?;
+                let lab_offload = homeboy_core::observation::resolve_json_value(lab).ok_or_else(
+                    || incomplete_transport_error("invalid Lab offload metadata".to_string()),
+                )?;
                 if !lab_offload.is_object() {
                     return Err(incomplete_transport_error(
                         "Lab offload metadata must be a JSON object".to_string(),
                     ));
                 }
                 Self::from_lab_transport(
-                    serde_json::from_str(&source).map_err(|error| {
-                        incomplete_transport_error(format!("invalid source snapshot metadata: {error}"))
-                    })?,
+                    homeboy_core::observation::resolve_json_value(source)
+                        .and_then(|value| serde_json::from_value(value).ok())
+                        .ok_or_else(|| {
+                            incomplete_transport_error(
+                                "invalid source snapshot metadata".to_string(),
+                            )
+                        })?,
                     lab_offload,
                 )
             }
@@ -745,8 +756,43 @@ fn sha256_hex(contents: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
     use std::fs;
     use std::process::Command;
+
+    #[test]
+    fn harvest_context_resolves_direct_lab_transport_references() {
+        let directory = tempfile::tempdir().expect("transport directory");
+        let source = serde_json::to_vec(&homeboy_core::source_snapshot::existing_remote(
+            "runner-a",
+            "/runner/workspace",
+            None,
+        ))
+        .expect("source snapshot");
+        let lab = br#"{"schema":"fixture/lab-offload/v1","runner_id":"runner-a"}"#;
+        let reference = |name: &str, payload: &[u8]| {
+            let path = directory.path().join(name);
+            fs::write(&path, payload).expect("write transport payload");
+            serde_json::json!({
+                "schema": homeboy_core::observation::PROVENANCE_REFERENCE_SCHEMA,
+                "path": path,
+                "sha256": format!("{:x}", Sha256::digest(payload)),
+            })
+            .to_string()
+        };
+
+        let context = HarvestExecutionContext::from_transport_values(
+            Some(&reference("source.json", &source)),
+            Some(&reference("lab.json", lab)),
+        )
+        .expect("referenced transport");
+
+        assert_eq!(
+            context.source_snapshot.expect("source").runner_id,
+            "runner-a"
+        );
+        assert_eq!(context.lab_offload.expect("lab")["runner_id"], "runner-a");
+    }
 
     #[test]
     fn terminal_cleanup_reclaims_build_output_before_preserving_changed_source() {

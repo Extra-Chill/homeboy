@@ -16,7 +16,7 @@ pub(crate) fn validate_bundle_env(
     let Some(raw) = env.get(LAB_EXECUTION_BUNDLE_ENV) else {
         return false;
     };
-    let Ok(bundle) = serde_json::from_str::<serde_json::Value>(raw) else {
+    let Some(bundle) = homeboy_core::observation::resolve_json_value(raw) else {
         return false;
     };
     let non_empty = |pointer| {

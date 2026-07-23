@@ -36,7 +36,9 @@ pub use loop_inventory_run::persist_loop_inventory_run;
 
 pub use crate::notification_route::NotificationRoute;
 pub use budget_findings::finding_records_from_budget;
-pub use context::{RunContext, RunProvenance};
+pub use context::{
+    env_json, resolve_json_value, RunContext, RunProvenance, PROVENANCE_REFERENCE_SCHEMA,
+};
 pub use homeboy_lifecycle_contract::timeline::{
     ObservationEvent, ObservationPhaseMilestone, ObservationSpanDefinition, ObservationSpanResult,
     ObservationSpanStatus,

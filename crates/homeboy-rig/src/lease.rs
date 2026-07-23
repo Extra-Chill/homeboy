@@ -239,9 +239,7 @@ fn lab_metadata_string_pointer(pointer: &str) -> Option<String> {
 }
 
 fn lab_metadata_value() -> Option<serde_json::Value> {
-    std::env::var(homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV)
-        .ok()
-        .and_then(|value| serde_json::from_str(&value).ok())
+    homeboy_core::observation::env_json(homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV)
 }
 
 fn overlapping_resource(

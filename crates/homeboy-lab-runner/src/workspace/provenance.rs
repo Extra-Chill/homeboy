@@ -386,9 +386,11 @@ pub(crate) fn verify_lab_workspace_from_env(
     expected_remote_component_path: &str,
     materialized_workspace_path: &Path,
 ) -> std::result::Result<VerifiedLabWorkspaceProvenance, String> {
-    let snapshot: SourceSnapshot = env_json(SOURCE_SNAPSHOT_METADATA_ENV)
-        .ok_or_else(|| "is missing source snapshot transport metadata".to_string())?;
-    let lab: serde_json::Value = env_json(LAB_OFFLOAD_METADATA_ENV)
+    let snapshot: SourceSnapshot =
+        homeboy_core::observation::env_json(SOURCE_SNAPSHOT_METADATA_ENV)
+            .and_then(|value| serde_json::from_value(value).ok())
+            .ok_or_else(|| "is missing source snapshot transport metadata".to_string())?;
+    let lab: serde_json::Value = homeboy_core::observation::env_json(LAB_OFFLOAD_METADATA_ENV)
         .ok_or_else(|| "is missing Lab dispatch transport metadata".to_string())?;
     verify_lab_workspace(
         expected_remote_component_path,
@@ -922,12 +924,6 @@ fn nested_git_metadata(
         Ok(None)
     }
     visit(workspace, workspace, &content_excludes)
-}
-
-fn env_json<T: serde::de::DeserializeOwned>(name: &str) -> Option<T> {
-    std::env::var(name)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
 }
 
 /// Runner process preparation may enrich a staged snapshot with the original

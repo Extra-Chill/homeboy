@@ -326,13 +326,7 @@ fn materialize_follow_up_baseline_at(
             None,
         ));
     }
-    let parent_snapshot = std::env::var(homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV)
-        .ok()
-        .map(|raw| serde_json::from_str::<Value>(&raw))
-        .transpose()
-        .map_err(|error| {
-            Error::validation_invalid_argument("source_snapshot", error.to_string(), None, None)
-        })?;
+    let parent_snapshot = parent_snapshot_from_current_process()?;
     let artifact_bytes = std::fs::read(&promotion.patch_artifact.path).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -487,6 +481,51 @@ fn materialize_follow_up_baseline_at(
     baseline.capability.commit = commit;
     baseline.capability.tree = tree;
     Ok(baseline)
+}
+
+fn parent_snapshot_from_current_process() -> Result<Option<Value>> {
+    let Some(raw) = std::env::var(homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV).ok()
+    else {
+        return Ok(None);
+    };
+    parent_snapshot_from_transport(&raw).map(Some)
+}
+
+fn parent_snapshot_from_transport(raw: &str) -> Result<Value> {
+    homeboy_core::observation::resolve_json_value(raw).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "source_snapshot",
+            "invalid inline or referenced source snapshot JSON",
+            None,
+            None,
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn cook_baseline_resolves_referenced_parent_snapshot() {
+        let directory = tempfile::tempdir().expect("transport directory");
+        let path = directory.path().join("source.json");
+        let payload = br#"{"schema":"fixture/source/v1","snapshot_hash":"abc"}"#;
+        std::fs::write(&path, payload).expect("write source snapshot");
+        let reference = serde_json::json!({
+            "schema": homeboy_core::observation::PROVENANCE_REFERENCE_SCHEMA,
+            "path": path,
+            "sha256": format!("{:x}", Sha256::digest(payload)),
+        })
+        .to_string();
+
+        assert_eq!(
+            parent_snapshot_from_transport(&reference).expect("referenced parent snapshot")
+                ["snapshot_hash"],
+            "abc"
+        );
+    }
 }
 
 pub(crate) fn git_output(cwd: &std::path::Path, args: &[&str]) -> Result<String> {
