@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 /**
  * Internal dependencies
  */
-import { buildRecipe } from '../run.mjs';
+import { buildRecipe, runCodebox } from '../run.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const temporary = await mkdtemp(path.join(os.tmpdir(), 'wordpress-multisite-e2e-contract-'));
@@ -62,6 +62,13 @@ try {
       activate: true,
       metadata: { provenance: { revision: '0123456789abcdef' } },
     }],
+    wp_codebox_dependency_overlays: [{
+      kind: 'composer-package',
+      package: 'example/runtime-package',
+      source: '/tmp/runtime-package',
+      consumer: 'consumer-plugin',
+      metadata: { provenance: { revision: 'fedcba9876543210' } },
+    }],
     wordpress_runtime_prepare_steps: [prepareStep],
     wordpress_runtime_workloads: [{ id: 'consumer-workload', run: [] }],
     wp_codebox_scenario_manifests: [{ id: 'consumer-browser-journey', url: '/beta/' }],
@@ -89,8 +96,16 @@ try {
       slug: 'consumer-theme',
     },
   }]);
+  assert.deepEqual(recipe.inputs.dependency_overlays, [{
+    kind: 'composer-package',
+    package: 'example/runtime-package',
+    source: '/tmp/runtime-package',
+    consumer: 'consumer-plugin',
+    metadata: { provenance: { revision: 'fedcba9876543210' } },
+  }]);
   assert.ok(recipe.workflow.steps.some((step) => step.command === 'wordpress.bench'));
   assert.ok(recipe.workflow.steps.some((step) => step.command === 'wordpress.browser-scenario'));
+  assert.ok(recipe.workflow.steps.some((step) => step.command === 'wordpress.browser-scenario' && step.args.includes('route-host=localhost')));
   assert.ok(recipe.workflow.steps.some((step) => step.command === 'wordpress.browser-probe'));
   assert.ok(recipe.workflow.steps.some((step) => step.command === 'wordpress.browser-actions'));
   const seedIndex = recipe.workflow.steps.findIndex((step) => step.args?.some((arg) => arg.includes('network-seed.php')));
@@ -120,13 +135,65 @@ try {
   const withoutRuntimeInputs = await buildRecipe({}, root);
   assert.equal(Object.hasOwn(withoutRuntimeInputs.runtime, 'phpVersion'), false);
   assert.deepEqual(withoutRuntimeInputs.inputs.mounts, []);
+  assert.deepEqual(withoutRuntimeInputs.inputs.dependency_overlays, []);
   assert.equal(withoutRuntimeInputs.workflow.steps.some((step) => step.metadata?.kind === 'wordpress-theme-activation'), false);
+
+  const consumerTopology = await buildRecipe({
+    wordpress_multisite_synthetic_fixture: false,
+    wp_codebox_extra_plugins: [{ source: '/tmp/consumer-plugin', slug: 'consumer-plugin', activate: false }],
+    wordpress_runtime_workload_plugin_slug: 'consumer-plugin',
+    wordpress_runtime_workloads: [{ id: 'file-workload', run: [{ type: 'php', file: '/tmp/workload.php' }] }],
+    wordpress_runtime_prepare_steps: [prepareStep],
+    wp_codebox_scenario_manifests: [{ id: 'consumer-owned-topology', url: '/' }],
+  }, root);
+  assert.equal(consumerTopology.inputs.extra_plugins.some((plugin) => plugin.slug === 'synthetic-network-fixture'), false);
+  assert.equal(consumerTopology.workflow.steps.some((step) => step.args?.some((arg) => arg.includes('network-seed.php'))), false);
+  assert.equal(consumerTopology.workflow.steps.some((step) => step.args?.some((arg) => arg.includes('network-assert.php'))), false);
+  assert.equal(consumerTopology.workflow.steps.some((step) => step.command === 'wordpress.browser-probe'), false);
+  assert.equal(consumerTopology.workflow.steps.some((step) => step.command === 'wordpress.browser-actions'), false);
+  assert.equal(consumerTopology.workflow.steps.some((step) => step.command === 'wordpress.browser-scenario'), true);
+  const consumerBench = consumerTopology.workflow.steps.find((step) => step.command === 'wordpress.bench');
+  assert.ok(consumerBench.args.includes('plugin-slug=consumer-plugin'));
+  assert.equal(consumerBench.args.some((arg) => arg.includes('synthetic-network-fixture')), false);
+
+  const previousCodeboxBin = process.env.HOMEBOY_WP_CODEBOX_BIN;
+  const previousMaxBuffer = process.env.HOMEBOY_WP_CODEBOX_MAX_BUFFER_BYTES;
+  process.env.HOMEBOY_WP_CODEBOX_BIN = process.execPath;
+  try {
+    const largeOutput = runCodebox(['-e', "process.stdout.write('x'.repeat(2 * 1024 * 1024))"], true);
+    assert.equal(largeOutput.stdout.length, 2 * 1024 * 1024);
+    process.env.HOMEBOY_WP_CODEBOX_MAX_BUFFER_BYTES = '1024';
+    assert.throws(
+      () => runCodebox(['-e', "process.stderr.write('overflow diagnostic'); process.stdout.write('x'.repeat(2048))"], true),
+      (error) => error.code === 'ENOBUFS'
+        && error.maxBuffer === 1024
+        && error.stderr.includes('overflow diagnostic')
+        && error.stdout.length > 0,
+    );
+    process.env.HOMEBOY_WP_CODEBOX_MAX_BUFFER_BYTES = 'invalid';
+    assert.throws(() => runCodebox(['--version'], true), /must be a positive integer/);
+  } finally {
+    if (previousCodeboxBin === undefined) {
+      delete process.env.HOMEBOY_WP_CODEBOX_BIN;
+    } else {
+      process.env.HOMEBOY_WP_CODEBOX_BIN = previousCodeboxBin;
+    }
+    if (previousMaxBuffer === undefined) {
+      delete process.env.HOMEBOY_WP_CODEBOX_MAX_BUFFER_BYTES;
+    } else {
+      process.env.HOMEBOY_WP_CODEBOX_MAX_BUFFER_BYTES = previousMaxBuffer;
+    }
+  }
 
   await assert.rejects(buildRecipe({ wordpress_runtime_php_version: '' }, root), /must be a non-empty/);
   await assert.rejects(buildRecipe({ wordpress_runtime_php_version: '8.4.1' }, root), /Unsupported/);
   await assert.rejects(buildRecipe({ wordpress_runtime_php_version: '8.6' }, root), /Unsupported/);
   await assert.rejects(buildRecipe({ wordpress_runtime_php_version: '5.2' }, root), /Unsupported/);
   await assert.rejects(buildRecipe({ wp_codebox_extra_themes: {} }, root), /must be an array/);
+  await assert.rejects(buildRecipe({ wp_codebox_dependency_overlays: {} }, root), /wp_codebox_dependency_overlays must be an array/);
+  await assert.rejects(buildRecipe({ wordpress_multisite_synthetic_fixture: false, wordpress_runtime_workloads: [{ id: 'missing-owner', run: [] }] }, root), /workload_plugin_slug is required/);
+  await assert.rejects(buildRecipe({ wordpress_multisite_synthetic_fixture: false, wordpress_runtime_workload_plugin_slug: '../plugin', wordpress_runtime_workloads: [{ id: 'invalid-owner', run: [] }] }, root), /valid WordPress plugin directory slug/);
+  await assert.rejects(buildRecipe({ wordpress_multisite_synthetic_fixture: false, wordpress_runtime_workload_plugin_slug: 'missing-plugin', wordpress_runtime_workloads: [{ id: 'unknown-owner', run: [] }] }, root), /must match a declared/);
   await assert.rejects(buildRecipe({ wp_codebox_extra_themes: [null] }, root), /must be an object/);
   await assert.rejects(buildRecipe({ wp_codebox_extra_themes: [{ source: 'relative/theme', slug: 'theme' }] }, root), /absolute path/);
   await assert.rejects(buildRecipe({ wp_codebox_extra_themes: [{ source: path.join(temporary, 'missing'), slug: 'theme' }] }, root), /does not exist/);

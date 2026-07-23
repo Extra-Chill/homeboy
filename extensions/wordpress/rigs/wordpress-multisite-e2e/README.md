@@ -53,9 +53,18 @@ settings. Consumers do not edit the rig:
   8 KB. Standalone themes need a WordPress-supported index template; child themes
   need their standalone parent in the same mount list. At most one theme may be
   active, and supplied metadata remains in WP Codebox recipe evidence.
+- `wp_codebox_dependency_overlays` forwards existing WP Codebox Composer package
+  overlays for replacing a consumer plugin's bundled dependency from an
+  immutable checkout.
+- `wordpress_multisite_synthetic_fixture` defaults to `true` for the rig's
+  alpha/beta self-test. Set it to `false` when consumer prepare, scenario, and
+  post steps own the complete network topology and journey.
 - `wordpress_runtime_prepare_steps` adds seed/setup recipe steps.
 - `wordpress_runtime_workloads` runs consumer workloads through
   `wordpress.bench` after network setup.
+- `wordpress_runtime_workload_plugin_slug` selects the mounted plugin that owns
+  configured workloads. It defaults to the synthetic fixture only while that
+  fixture is enabled and is required for consumer-owned topology workloads.
 - `wp_codebox_scenario_manifests` adds inline or file-backed browser journeys.
 - `wordpress_runtime_post_steps` adds final assertions or evidence steps.
 - `wordpress_runtime_version` pins the disposable WordPress version.

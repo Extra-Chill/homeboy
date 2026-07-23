@@ -1224,11 +1224,32 @@
       "description": "Immutable local theme checkouts for the wordpress-multisite-e2e rig. Each entry is {source,slug,activate?,metadata?}; the rig validates the theme and maps it to a readonly WP Codebox mount. At most one theme may be active."
     },
     {
+      "id": "wp_codebox_dependency_overlays",
+      "label": "WP Codebox dependency overlays",
+      "type": "array",
+      "default": [],
+      "description": "Existing WP Codebox dependency overlay entries forwarded by the wordpress-multisite-e2e rig for immutable Composer package replacement."
+    },
+    {
+      "id": "wordpress_multisite_synthetic_fixture",
+      "label": "WordPress multisite synthetic fixture",
+      "type": "boolean",
+      "default": true,
+      "description": "Run the wordpress-multisite-e2e rig's built-in alpha/beta self-test. Set false when consumer prepare/scenario/post steps own the complete network topology and journey."
+    },
+    {
       "id": "wordpress_runtime_workloads",
       "label": "WordPress runtime workloads",
       "type": "array",
       "default": [],
       "description": "Backend-neutral WordPress workload declarations passed to the selected runtime adapter after dependency mounts and component load. Each workload declares an id, optional label, run steps ({type: 'php', code|file}, {type: 'ability', ability|name, input}, or {type: 'wp-cli', command}), and optional metrics/artifacts/metadata."
+    },
+    {
+      "id": "wordpress_runtime_workload_plugin_slug",
+      "label": "WordPress runtime workload plugin slug",
+      "type": "string",
+      "default": "",
+      "description": "Mounted plugin slug that owns wordpress-multisite-e2e workloads. Defaults to the synthetic fixture only while that fixture is enabled; consumer-owned topology workloads must name a declared wp_codebox_extra_plugins entry."
     },
     {
       "id": "wordpress_runtime_prepare_steps",

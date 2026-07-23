@@ -8,26 +8,41 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+const WP_CODEBOX_MAX_BUFFER_BYTES = 50 * 1024 * 1024;
+
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 const supportedPhpVersions = new Set(['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5']);
 
 export async function buildRecipe(settings = {}, cwd = process.cwd()) {
   const fixturePlugin = path.join(packageRoot, 'fixtures/network-fixture');
+  const syntheticFixture = settings.wordpress_multisite_synthetic_fixture !== false;
   const phpVersion = runtimePhpVersion(settings);
   const themes = await extraThemes(settings.wp_codebox_extra_themes);
   const activeTheme = themes.find((theme) => theme.activate);
+  const dependencyOverlays = recipeArray(settings.wp_codebox_dependency_overlays, 'wp_codebox_dependency_overlays');
+  const extraPlugins = [
+    ...(syntheticFixture ? [{
+      source: fixturePlugin,
+      slug: 'synthetic-network-fixture',
+      pluginFile: 'synthetic-network-fixture/network-fixture.php',
+      activate: false,
+    }] : []),
+    ...recipeArray(settings.wp_codebox_extra_plugins, 'wp_codebox_extra_plugins'),
+  ];
+  const workloads = recipeArray(settings.wordpress_runtime_workloads, 'wordpress_runtime_workloads');
+  const workloadPlugin = workloadPluginSlug(settings.wordpress_runtime_workload_plugin_slug, workloads, extraPlugins, syntheticFixture);
   const blueprint = mergeMultisiteBlueprint(settings.wordpress_runtime_blueprint, activeTheme?.slug);
   const prepareSteps = recipeSteps(settings.wordpress_runtime_prepare_steps);
   const postSteps = recipeSteps(settings.wordpress_runtime_post_steps);
   const scenarioSteps = await browserScenarioSteps(settings.wp_codebox_scenario_manifests, cwd);
-  const workloadSteps = settings.wordpress_runtime_workloads?.length ? [{
+  const workloadSteps = workloads.length ? [{
     command: 'wordpress.bench',
     args: [
       'component-id=wordpress-multisite-e2e',
-      'plugin-slug=synthetic-network-fixture',
+      `plugin-slug=${workloadPlugin}`,
       'iterations=1',
       'warmup=0',
-      `workloads-json=${JSON.stringify(settings.wordpress_runtime_workloads)}`,
+      `workloads-json=${JSON.stringify(workloads)}`,
     ],
   }] : [];
 
@@ -41,15 +56,7 @@ export async function buildRecipe(settings = {}, cwd = process.cwd()) {
       preview: { siteUrl: 'http://localhost' },
     },
     inputs: {
-      extra_plugins: [
-        {
-          source: fixturePlugin,
-          slug: 'synthetic-network-fixture',
-          pluginFile: 'synthetic-network-fixture/network-fixture.php',
-          activate: false,
-        },
-        ...(settings.wp_codebox_extra_plugins || []),
-      ],
+      extra_plugins: extraPlugins,
       mounts: themes.map((theme) => ({
         type: 'directory',
         source: theme.source,
@@ -61,42 +68,45 @@ export async function buildRecipe(settings = {}, cwd = process.cwd()) {
           slug: theme.slug,
         },
       })),
+      dependency_overlays: dependencyOverlays,
     },
     workflow: {
       steps: [
-        phpFileStep('network-seed.php'),
+        ...(syntheticFixture ? [phpFileStep('network-seed.php')] : []),
         ...(activeTheme ? [activateThemeStep(activeTheme.slug)] : []),
         ...prepareSteps,
         ...workloadSteps,
-        phpFileStep('network-assert.php'),
-        {
-          command: 'wordpress.browser-probe',
-          args: [
-            'url=http://localhost/alpha/fixture-check/',
-            'route-host=localhost',
-            'assert=exists:#synthetic-site-alpha',
-            'assert=exists:#synthetic-auth-anonymous',
-            'assert=no-console-errors',
-            'assert=no-page-errors',
-            'capture=console,errors,html,network,screenshot',
-          ],
-        },
-        {
-          command: 'wordpress.browser-actions',
-          args: [
-            'auth=wordpress-admin',
-            'auth-user-id=1',
-            `steps-json=${JSON.stringify([
-              { kind: 'navigate', url: '/alpha/fixture-check/', waitFor: 'load' },
-              { kind: 'expect', selector: '#synthetic-site-alpha', state: 'visible' },
-              { kind: 'expect', selector: '#synthetic-auth-authenticated', state: 'visible' },
-              { kind: 'navigate', url: '/beta/fixture-check/', waitFor: 'load' },
-              { kind: 'expect', selector: '#synthetic-site-beta', state: 'visible' },
-              { kind: 'expect', selector: '#synthetic-auth-authenticated', state: 'visible' },
-            ])}`,
-            'capture=steps,console,errors,html,network,screenshot,dom-snapshot',
-          ],
-        },
+        ...(syntheticFixture ? [
+          phpFileStep('network-assert.php'),
+          {
+            command: 'wordpress.browser-probe',
+            args: [
+              'url=http://localhost/alpha/fixture-check/',
+              'route-host=localhost',
+              'assert=exists:#synthetic-site-alpha',
+              'assert=exists:#synthetic-auth-anonymous',
+              'assert=no-console-errors',
+              'assert=no-page-errors',
+              'capture=console,errors,html,network,screenshot',
+            ],
+          },
+          {
+            command: 'wordpress.browser-actions',
+            args: [
+              'auth=wordpress-admin',
+              'auth-user-id=1',
+              `steps-json=${JSON.stringify([
+                { kind: 'navigate', url: '/alpha/fixture-check/', waitFor: 'load' },
+                { kind: 'expect', selector: '#synthetic-site-alpha', state: 'visible' },
+                { kind: 'expect', selector: '#synthetic-auth-authenticated', state: 'visible' },
+                { kind: 'navigate', url: '/beta/fixture-check/', waitFor: 'load' },
+                { kind: 'expect', selector: '#synthetic-site-beta', state: 'visible' },
+                { kind: 'expect', selector: '#synthetic-auth-authenticated', state: 'visible' },
+              ])}`,
+              'capture=steps,console,errors,html,network,screenshot,dom-snapshot',
+            ],
+          },
+        ] : []),
         ...scenarioSteps,
         ...postSteps,
       ],
@@ -295,13 +305,35 @@ function phpFileStep(file) {
 }
 
 function recipeSteps(value) {
+  return recipeArray(value, 'WordPress runtime recipe steps');
+}
+
+function recipeArray(value, label) {
   if (value === undefined) {
     return [];
   }
   if (!Array.isArray(value)) {
-    throw new Error('WordPress runtime recipe steps must be arrays.');
+    throw new Error(`${label} must be an array.`);
   }
   return value;
+}
+
+function workloadPluginSlug(value, workloads, extraPlugins, syntheticFixture) {
+  const configured = value === undefined || value === '' ? undefined : value;
+  if (configured !== undefined && (typeof configured !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(configured))) {
+    throw new Error('wordpress_runtime_workload_plugin_slug must be a valid WordPress plugin directory slug.');
+  }
+  if (workloads.length === 0) {
+    return undefined;
+  }
+  const slug = configured || (syntheticFixture ? 'synthetic-network-fixture' : '');
+  if (!slug) {
+    throw new Error('wordpress_runtime_workload_plugin_slug is required when workloads run without the synthetic fixture.');
+  }
+  if (!extraPlugins.some((plugin) => plugin?.slug === slug || plugin?.mountSlug === slug)) {
+    throw new Error(`wordpress_runtime_workload_plugin_slug must match a declared wp_codebox_extra_plugins entry: ${slug}.`);
+  }
+  return slug;
 }
 
 async function browserScenarioSteps(value, cwd) {
@@ -316,7 +348,10 @@ async function browserScenarioSteps(value, cwd) {
     const scenario = typeof entry === 'string'
       ? JSON.parse(await readFile(path.resolve(cwd, entry), 'utf8'))
       : entry;
-    scenarios.push({ command: 'wordpress.browser-scenario', args: [`scenario-json=${JSON.stringify(scenario)}`] });
+    scenarios.push({
+      command: 'wordpress.browser-scenario',
+      args: [`scenario-json=${JSON.stringify(scenario)}`, 'route-host=localhost'],
+    });
   }
   return scenarios;
 }
@@ -349,19 +384,43 @@ async function main() {
   }
 }
 
-function runCodebox(args, capture = false) {
+export function runCodebox(args, capture = false) {
   const executable = process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox';
-  const result = spawnSync(executable, args, { encoding: 'utf8', stdio: capture ? 'pipe' : 'inherit' });
+  const maxBuffer = codeboxMaxBuffer();
+  const result = spawnSync(executable, args, {
+    encoding: 'utf8',
+    stdio: capture ? 'pipe' : 'inherit',
+    maxBuffer,
+  });
   if (result.error) {
+    result.error.stdout = result.stdout || '';
+    result.error.stderr = result.stderr || '';
+    result.error.maxBuffer = maxBuffer;
     throw result.error;
   }
   if (capture && result.stderr) {
     process.stderr.write(result.stderr);
   }
   if (result.status !== 0) {
-    throw new Error(`WP Codebox exited with status ${result.status}.`);
+    const error = new Error(`WP Codebox exited with status ${result.status}.`);
+    error.stdout = result.stdout || '';
+    error.stderr = result.stderr || '';
+    error.status = result.status;
+    throw error;
   }
   return result;
+}
+
+function codeboxMaxBuffer() {
+  const raw = process.env.HOMEBOY_WP_CODEBOX_MAX_BUFFER_BYTES;
+  if (raw === undefined || raw === '') {
+    return WP_CODEBOX_MAX_BUFFER_BYTES;
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error('HOMEBOY_WP_CODEBOX_MAX_BUFFER_BYTES must be a positive integer.');
+  }
+  return value;
 }
 
 function parseSettings(raw) {
