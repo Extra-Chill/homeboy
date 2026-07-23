@@ -2144,6 +2144,7 @@ pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRu
     let source = store::read_record(&resolve_run_id(run_id)?)?;
     let mut plan = load_controller_plan(&source.run_id)?;
     restore_initial_cook_candidate_workspace(&mut plan)?;
+    restore_follow_up_cook_candidate_workspace(&mut plan)?;
     let mut retry = submit_plan(&plan, requested_run_id)?;
     let metadata = retry.ensure_metadata_object();
     if let Some(route) =
@@ -2180,6 +2181,117 @@ pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRu
     metadata.insert("retry_requested_at".to_string(), json!(now_timestamp()));
     store::write_record(&retry)?;
     Ok(retry)
+}
+
+/// Rebuild a gate-failed Cook candidate from its controller-owned promotion
+/// before retrying. A persisted follow-up plan names a temporary checkout, not
+/// authority to reuse whatever happens to exist at that path.
+fn restore_follow_up_cook_candidate_workspace(plan: &mut AgentTaskPlan) -> Result<()> {
+    let candidate_tasks = plan
+        .tasks
+        .iter()
+        .enumerate()
+        .filter(|(_, task)| {
+            task.inputs
+                .pointer("/cook_loop/artifact_provenance/source_run_id")
+                .and_then(Value::as_str)
+                .is_some()
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if candidate_tasks.len() > 1 {
+        return Err(Error::validation_invalid_argument(
+            "cook_loop.artifact_provenance",
+            "Cook retry plan has ambiguous prior candidates",
+            None,
+            None,
+        ));
+    }
+    let Some(&index) = candidate_tasks.first() else {
+        return Ok(());
+    };
+    let task = &mut plan.tasks[index];
+    let provenance = task
+        .inputs
+        .pointer("/cook_loop/artifact_provenance")
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_loop.artifact_provenance",
+                "Cook retry candidate has no prior artifact evidence",
+                None,
+                None,
+            )
+        })?;
+    let source_run_id = provenance
+        .get("source_run_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_loop.artifact_provenance.source_run_id",
+                "Cook retry candidate has no source run evidence",
+                None,
+                None,
+            )
+        })?;
+    let source_task_id = provenance
+        .get("source_task_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_loop.artifact_provenance.source_task_id",
+                "Cook retry candidate has no source task evidence",
+                None,
+                None,
+            )
+        })?;
+    let source_sha256 = provenance
+        .get("source_patch_artifact_sha256")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_loop.artifact_provenance.source_patch_artifact_sha256",
+                "Cook retry candidate has no patch identity evidence",
+                None,
+                None,
+            )
+        })?;
+    let promotion = crate::agent_task_service::persisted_promotion_for_attempt(source_run_id)?
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_loop.artifact_provenance",
+                "Cook retry candidate has no durable prior promotion",
+                Some(source_run_id.to_string()),
+                None,
+            )
+        })?;
+    if promotion.source.task_id != source_task_id
+        || promotion.patch_artifact.sha256.as_deref() != Some(source_sha256)
+    {
+        return Err(Error::validation_invalid_argument(
+            "cook_loop.artifact_provenance",
+            "Cook retry candidate evidence does not match its prior promotion",
+            Some(source_run_id.to_string()),
+            None,
+        ));
+    }
+    let baseline = crate::agent_task_service::materialize_follow_up_baseline(
+        &promotion,
+        source_run_id,
+        &task.task_id,
+    )?;
+    task.workspace.root = Some(baseline.path.display().to_string());
+    task.executor.remap_workspace_root(
+        task.workspace
+            .root
+            .as_deref()
+            .expect("baseline path is assigned"),
+    );
+    task.metadata["verified_cook_baseline"] = baseline.capability().verified_baseline_provenance();
+    baseline.preserve_for_retry();
+    Ok(())
 }
 
 /// Cook's first dirty-candidate baseline is process-local and removed after a
