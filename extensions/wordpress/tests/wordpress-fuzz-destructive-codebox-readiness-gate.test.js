@@ -229,6 +229,55 @@ assert.deepEqual(normalizeWpCodeboxDestructiveReadiness(completeReadiness, {
 }).missing_primitives, undefined);
 
 (async () => {
+	for (const [label, descriptor, expectedPreflight, expectedFuzzCalls] of [
+		['complete', {
+			schema: 'wp-codebox/runtime-descriptor/v1',
+			version: 1,
+			contractManifest: {
+				...runtimeContractManifest,
+				capabilities: { wordpressRuntime: { commands: ['run-fuzz-suite', 'run-wordpress-workload'], capabilities: completeReadiness.capabilities.capabilities, runner_modes: { 'runtime-backed': true } } },
+				readiness: { wordpressRuntime: completeReadiness },
+			},
+		}, true, 1],
+		['incomplete', {
+			schema: 'wp-codebox/runtime-descriptor/v1',
+			version: 1,
+			contractManifest: {
+				...runtimeContractManifest,
+				capabilities: { wordpressRuntime: { commands: ['run-fuzz-suite', 'run-wordpress-workload'], capabilities: incompleteReadiness.capabilities.capabilities, runner_modes: { 'runtime-backed': true } } },
+				readiness: { wordpressRuntime: incompleteReadiness },
+			},
+		}, false, 0],
+	]) {
+		const cliCalls = [];
+		const result = await runWordPressFuzzRunnerResult({
+			env: {
+				workloadPath: `/unused/${label}-descriptor-workload.json`,
+				workloadId: `${label}-descriptor-workload`,
+				runId: `${label}-descriptor-run`,
+				HOMEBOY_WP_CODEBOX_BIN: '/selected/wp-codebox-0.13.1',
+			},
+			workload: { id: `${label}-descriptor-workload`, plan: destructivePlan },
+			runPublicCli: ({ command, args }) => {
+				cliCalls.push({ command, args });
+				if (args.join(' ') === 'runtime descriptor --json') {
+					return { status: 0, stdout: JSON.stringify(descriptor) };
+				}
+				return { status: 0, stdout: JSON.stringify({ schema: 'wp-codebox/fuzz-suite-result/v1', request_id: `${label}-descriptor-run`, status: 'succeeded' }) };
+			},
+		});
+
+		assert.equal(cliCalls[0].command, '/selected/wp-codebox-0.13.1');
+		assert.deepEqual(cliCalls[0].args, ['runtime', 'descriptor', '--json']);
+		assert.equal(cliCalls.filter(({ args }) => args[0] === 'run-fuzz-suite').length, expectedFuzzCalls);
+		if (expectedPreflight) {
+			assert.equal(result.wp_codebox_result.failures.some((failure) => failure.code === 'wp_codebox_fuzz_missing_destructive_readiness'), false);
+		} else {
+			assert.equal(result.wp_codebox_result.metadata.preflight.ok, false);
+			assert.equal(result.wp_codebox_result.metadata.preflight.diagnostics.some((diagnostic) => diagnostic.code === 'wp_codebox_fuzz_missing_destructive_readiness'), true);
+		}
+	}
+
 	const result = await runWordPressFuzzRunnerResult({
 		env: {
 			workloadPath: '/unused/destructive-workload.json',

@@ -26,6 +26,7 @@ const {
 	requiredWpCodeboxContractsForFuzzCase,
 	requiredWpCodeboxContractsForFuzzPlan,
 } = require('./wordpress-fuzz-command-manifest');
+const { createCodeboxClient } = require('./codebox-client');
 
 const WORDPRESS_FUZZ_RUNNER_RESULT_SCHEMA = 'homeboy/wordpress-fuzz-runner-result/v1';
 const HOMEBOY_FUZZ_CAMPAIGN_SCHEMA = 'homeboy/fuzz-campaign/v1';
@@ -192,8 +193,10 @@ function buildWordPressFuzzRunnerSummary({
 
 async function resolveCodeboxResult(context, options = {}) {
 	const runner = options.runFuzzSuite || options.runRuntimeTask || options.runTask;
+	const runtimeDescriptor = typeof runner === 'function' ? {} : await readWpCodeboxFuzzRuntimeDescriptor({ ...options, env: context.env });
 	return runWpCodeboxFuzzSuite({
 		...options,
+		...runtimeDescriptor,
 		env: context.env,
 		taskId: context.runId,
 		input: context.wpCodeboxInput,
@@ -203,6 +206,78 @@ async function resolveCodeboxResult(context, options = {}) {
 		instructions: context.taskRequest.instructions,
 		...(typeof runner === 'function' ? { runFuzzSuite: runner } : {}),
 	});
+}
+
+async function readWpCodeboxFuzzRuntimeDescriptor(options = {}) {
+	if (hasExplicitWpCodeboxFuzzRuntimeContract(options)) {
+		return {};
+	}
+
+	const client = createCodeboxClient(options);
+	let result;
+	try {
+		result = await client.runPublicCliCommand(['runtime', 'descriptor', '--json'], options);
+	} catch (error) {
+		return blockedWpCodeboxFuzzRuntimeDescriptor(client, error.message);
+	}
+	if (result.status !== 0) {
+		return blockedWpCodeboxFuzzRuntimeDescriptor(client, `exited with status ${result.status}.`, result);
+	}
+
+	let descriptor;
+	try {
+		descriptor = JSON.parse(result.stdout);
+	} catch {
+		return blockedWpCodeboxFuzzRuntimeDescriptor(client, 'did not return valid JSON.', result);
+	}
+	if (!objectOrUndefined(descriptor) || descriptor.schema !== 'wp-codebox/runtime-descriptor/v1') {
+		return blockedWpCodeboxFuzzRuntimeDescriptor(client, 'did not return a wp-codebox/runtime-descriptor/v1 document.', result);
+	}
+
+	const runtimeContractManifest = objectOrUndefined(descriptor.contractManifest);
+	const publicCliReadiness = objectOrUndefined(runtimeContractManifest?.readiness?.wordpressRuntime);
+	if (!runtimeContractManifest || !publicCliReadiness) {
+		return blockedWpCodeboxFuzzRuntimeDescriptor(client, 'did not declare contractManifest.readiness.wordpressRuntime.', result, descriptor);
+	}
+
+	return { runtimeDescriptor: descriptor, runtimeContractManifest, publicCliReadiness };
+}
+
+function hasExplicitWpCodeboxFuzzRuntimeContract(options = {}) {
+	return Boolean(
+		options.runtimeContractManifest
+		|| options.runtime_contract_manifest
+		|| options.publicCliReadiness
+		|| options.public_cli_readiness
+	);
+}
+
+function blockedWpCodeboxFuzzRuntimeDescriptor(client, detail, result = {}, descriptor) {
+	return {
+		runtimeDescriptor: descriptor,
+		runtimeContractManifest: {},
+		publicCliReadiness: {
+			schema: 'wp-codebox/fuzz-runner-readiness/v1',
+			status: 'blocked',
+			mode: 'runtime-backed',
+			command_available: false,
+			diagnostics: [{
+				severity: 'error',
+				code: 'wp_codebox_runtime_descriptor_unavailable',
+				message: `WP Codebox runtime descriptor from ${wpCodeboxRuntimeDescriptorBin(client)} ${detail}`,
+				stderr: result.stderr || undefined,
+				stdout: result.stdout || undefined,
+			}],
+		},
+	};
+}
+
+function wpCodeboxRuntimeDescriptorBin(client) {
+	try {
+		return client.publicCliBin();
+	} catch {
+		return 'the configured WP Codebox binary';
+	}
 }
 
 function fuzzSuiteInstructions({ workload, workloadId, runId }) {
@@ -297,7 +372,6 @@ function wpCodeboxRuntimeRequirementsFromWorkload(workload = {}, options = {}) {
 
 function buildWpCodeboxFuzzRuntimeRequirements({ workload = {}, env = {} } = {}) {
 	const context = objectOrUndefined(workload.metadata?.homeboy_runtime_context || workload.metadata?.homeboyRuntimeContext);
-	const components = objectOrUndefined(context?.components);
 	const workloadRoot = nonEmptyString(env?.wpCodeboxFuzzWorkloadRoot || env?.WP_CODEBOX_FUZZ_WORKLOAD_ROOT);
 	const target = objectOrUndefined(workload.target) || {};
 	if (target.type === 'wordpress-core') {
@@ -311,6 +385,7 @@ function buildWpCodeboxFuzzRuntimeRequirements({ workload = {}, env = {} } = {})
 			}),
 		});
 	}
+	const components = objectOrUndefined(context?.components);
 	const componentId = workload.target?.component
 		|| workload.metadata?.fixture?.component
 		|| workload.metadata?.fixture?.plugin

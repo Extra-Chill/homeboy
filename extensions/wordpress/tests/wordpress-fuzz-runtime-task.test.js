@@ -150,6 +150,7 @@ Promise.all([
 	runWpCodeboxFuzzSuite({
 		taskId: 'unavailable-runtime',
 		input: { id: 'unavailable-runtime', cases: [{ id: 'case-1' }] },
+		runtimeContractManifest: {},
 		publicCliCapabilities: { commands: { 'run-fuzz-suite': false, 'run-wordpress-workload': false } },
 	}).then((summary) => {
 		assert.equal(summary.schema, WORDPRESS_CODEBOX_FUZZ_SUITE_CONSUMER_SCHEMA);
