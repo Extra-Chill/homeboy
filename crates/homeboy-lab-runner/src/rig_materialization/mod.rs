@@ -620,9 +620,21 @@ pub(super) fn lab_offload_rig_component_dependencies(
                         .unwrap_or_else(|| resolved_component_path.clone());
                     let declared_local_checkout_root =
                         expanded_local_path(&spec, &declared_checkout_root);
+                    // An unset env-backed root still belongs to the primary
+                    // workspace when that workspace contains the component.
+                    let local_checkout_root = if declared_local_checkout_root.trim().is_empty() {
+                        primary_component_path(primary_workspace)
+                            .filter(|primary_path| {
+                                normalize_path_for_prefix(Path::new(&resolved_component_path))
+                                    .starts_with(normalize_path_for_prefix(Path::new(primary_path)))
+                            })
+                            .unwrap_or_else(|| resolved_component_path.clone())
+                    } else {
+                        declared_local_checkout_root
+                    };
                     (
                         declared_checkout_root.to_string(),
-                        declared_local_checkout_root,
+                        local_checkout_root,
                         resolved_component_path,
                     )
                 }
@@ -1211,6 +1223,65 @@ mod tests {
                 "/runner/work/example-component"
             );
             assert_eq!(dependencies[0].required_subpath, None);
+        });
+    }
+
+    #[test]
+    fn unresolved_env_backed_checkout_root_uses_containing_primary_workspace() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let checkout_root = home.path().join("Developer/example");
+            let component_path = checkout_root.join("projects/plugins/example-component");
+            std::fs::create_dir_all(&component_path).expect("component path");
+            let rig_dir = homeboy_core::paths::rigs().expect("rig dir");
+            std::fs::create_dir_all(&rig_dir).expect("create rig dir");
+            std::fs::write(
+                rig_dir.join("example-fuzz.json"),
+                serde_json::json!({
+                    "id": "example-fuzz",
+                    "components": {
+                        "example-component": {
+                            "path": "${env.HOMEBOY_TEST_UNSET_COMPONENT_PATH}",
+                            "checkout_root": "${env.HOMEBOY_TEST_UNSET_CHECKOUT_ROOT}",
+                            "remote_url": "https://example.test/example/component.git"
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .expect("save rig");
+            std::env::remove_var("HOMEBOY_TEST_UNSET_COMPONENT_PATH");
+            std::env::remove_var("HOMEBOY_TEST_UNSET_CHECKOUT_ROOT");
+
+            let component_path = component_path.display().to_string();
+            let checkout_root = checkout_root.display().to_string();
+            let components_dir = homeboy_core::paths::components().expect("components dir");
+            std::fs::create_dir_all(&components_dir).expect("create components dir");
+            std::fs::write(
+                components_dir.join("example-component.json"),
+                serde_json::json!({ "local_path": component_path }).to_string(),
+            )
+            .expect("register component");
+            let dependencies = lab_offload_rig_component_dependencies(
+                &[
+                    "homeboy".to_string(),
+                    "fuzz".to_string(),
+                    "list".to_string(),
+                    "example-component".to_string(),
+                    "--rig".to_string(),
+                    "example-fuzz".to_string(),
+                ],
+                Some((&checkout_root, "/runner/work/example")),
+                None,
+            )
+            .expect("dependencies");
+
+            assert_eq!(dependencies.len(), 1);
+            assert_eq!(dependencies[0].local_checkout_root, checkout_root);
+            assert_eq!(dependencies[0].remote_checkout_root, "/runner/work/example");
+            assert_eq!(
+                dependencies[0].required_subpath.as_deref(),
+                Some("projects/plugins/example-component")
+            );
         });
     }
 
