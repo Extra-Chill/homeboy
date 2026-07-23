@@ -322,6 +322,11 @@ assert_equals \
   "refactor keeps path with changed-since"
 
 assert_equals \
+  "homeboy refactor data-machine --from lint --path /tmp/workspace --changed-since origin/main --format json" \
+  "$(build_run_command "refactor lint" "${COMPONENT}" "${WORKSPACE}")" \
+  "refactor lint shorthand uses the component-scoped source flag"
+
+assert_equals \
   "refactor---all" \
   "$(command_output_stem "refactor --all")" \
   "output stem sanitizes spaced refactor command"

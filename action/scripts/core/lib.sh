@@ -383,7 +383,12 @@ build_run_command() {
   global_flags="$(homeboy_global_flags "${output_file}")"
 
   if [[ "${cmd}" == refactor* ]]; then
-    full_cmd="homeboy ${global_flags}refactor ${component_id} ${cmd#refactor } --path ${workspace}"
+    local refactor_args
+    refactor_args="$(printf '%s' "${cmd#refactor}" | xargs)"
+    if [[ "${refactor_args}" == "lint" || "${refactor_args}" == "lint "* ]]; then
+      refactor_args="--from lint${refactor_args#lint}"
+    fi
+    full_cmd="homeboy ${global_flags}refactor ${component_id} ${refactor_args} --path ${workspace}"
   elif [[ "${cmd}" == bench* ]]; then
     local bench_args
     bench_args="$(printf '%s' "${cmd#bench}" | xargs)"
