@@ -120,6 +120,51 @@ pub(crate) fn promote_or_load_attempt(
     run_id: &str,
 ) -> Result<AgentTaskPromotionReport> {
     if let Some(promotion) = persisted_promotion_for_attempt(run_id)? {
+        if promotion.status == AgentTaskPromotionStatus::VerificationPending {
+            let target_path = promotion.target.path.as_deref().or_else(|| {
+                promotion.provenance.get("worktree_path").and_then(Value::as_str)
+            }).map(PathBuf::from).or_else(|| {
+                homeboy_core::worktree::resolve_if_present(&promotion.to_worktree)
+                    .ok()
+                    .flatten()
+                    .map(|record| PathBuf::from(record.worktree_path))
+            }).ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "promotion.target.path",
+                    "verification-pending promotion has no durable candidate worktree path or registered worktree handle",
+                    Some(run_id.to_string()),
+                    None,
+                )
+            })?;
+            let (source, source_path) = promotion_source(run_id)?;
+            let resumed = resume_promoted_patch(
+                AgentTaskPromotionOptions {
+                    source,
+                    source_run_id: Some(run_id.to_string()),
+                    source_path,
+                    source_worktree_path: options.source_worktree_path.clone(),
+                    base_ref: Some(options.base.clone()),
+                    task_base_sha: options.task_base_sha.clone(),
+                    candidate_ref: None,
+                    to_worktree: options.to_worktree.clone(),
+                    task_id: None,
+                    artifact_id: None,
+                    dry_run: false,
+                    gates: options.gates.clone(),
+                    provider_command: options.provider_command.clone(),
+                    provider_invocation: options.provider_invocation.clone(),
+                },
+                &target_path,
+                &serde_json::to_value(&promotion)
+                    .map_err(|error| Error::internal_json(error.to_string(), None))?,
+            )?;
+            agent_task_lifecycle::record_promotion(
+                run_id,
+                serde_json::to_value(&resumed)
+                    .map_err(|error| Error::internal_json(error.to_string(), None))?,
+            )?;
+            return Ok(resumed);
+        }
         return Ok(promotion);
     }
     let promotion = promote_attempt(options, run_id)?;
@@ -176,6 +221,20 @@ pub(crate) fn attempt_needs_execution(run_id: &str) -> bool {
             )
         })
         .unwrap_or(true)
+}
+
+pub(crate) fn retryable_provider_discovery_failure(run_id: &str) -> bool {
+    agent_task_lifecycle::status(run_id)
+        .is_ok_and(|record| record.state == agent_task_lifecycle::AgentTaskRunState::Failed)
+        && agent_task_lifecycle::read_aggregate(run_id).is_ok_and(|aggregate| {
+            !aggregate.outcomes.is_empty()
+                && aggregate.outcomes.iter().all(|outcome| {
+                    outcome
+                        .diagnostics
+                        .iter()
+                        .any(|diagnostic| diagnostic.class == "agent_task.provider_missing")
+                })
+        })
 }
 
 pub(crate) fn is_moving_base_finalization_error(error: &Error) -> bool {

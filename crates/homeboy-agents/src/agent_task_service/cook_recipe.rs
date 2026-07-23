@@ -345,7 +345,14 @@ pub fn record_recipe_attempt(
             None,
         ));
     }
-    if attempt != recipe.attempts.len() as u32 + 1 {
+    let next_attempt = recipe
+        .attempts
+        .iter()
+        .map(|attempt| attempt.attempt)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    if attempt != next_attempt {
         return Err(Error::validation_invalid_argument(
             "cook_recipe.attempts",
             "durable cook attempts must be appended in order",
@@ -364,6 +371,57 @@ pub fn record_recipe_attempt(
         .collect();
     recipe.sensitive_mappings.sort();
     recipe.sensitive_mappings.dedup();
+    validate_recipe(&recipe)?;
+    write_recipe(&recipe)?;
+    Ok(recipe)
+}
+
+pub fn record_recipe_attempt_replacement(
+    cook_id: &str,
+    replaced_run_id: &str,
+    replacement_run_id: &str,
+) -> Result<AgentTaskCookRecipe> {
+    let mut recipe = load_recipe(cook_id)?;
+    if let Some(existing) = recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == replacement_run_id)
+    {
+        if recipe
+            .attempts
+            .iter()
+            .any(|attempt| attempt.run_id == replaced_run_id && attempt.attempt == existing.attempt)
+        {
+            return Ok(recipe);
+        }
+        return Err(Error::validation_invalid_argument(
+            "cook_recipe.attempts",
+            "replacement run id is already bound to another durable cook attempt",
+            Some(replacement_run_id.to_string()),
+            None,
+        ));
+    }
+    let replaced = recipe.attempts.last().cloned().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "cook_recipe.attempts",
+            "durable cook recipe has no attempt to replace",
+            Some(cook_id.to_string()),
+            None,
+        )
+    })?;
+    if replaced.run_id != replaced_run_id {
+        return Err(Error::validation_invalid_argument(
+            "cook_recipe.attempts",
+            "only the latest durable cook attempt can receive a replacement run",
+            Some(replaced_run_id.to_string()),
+            None,
+        ));
+    }
+    recipe.attempts.push(AgentTaskCookRecipeAttempt {
+        attempt: replaced.attempt,
+        run_id: replacement_run_id.to_string(),
+        plan: replaced.plan,
+    });
     validate_recipe(&recipe)?;
     write_recipe(&recipe)?;
     Ok(recipe)

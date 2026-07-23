@@ -80,6 +80,24 @@ pub fn start_candidate_adoption_with_rerun_policy(
     active_gate: &str,
     rerun_completed_gates: bool,
 ) -> Result<AgentTaskRunRecord> {
+    start_candidate_adoption_with_policy(
+        run_id,
+        candidate_sha,
+        ai_model,
+        active_gate,
+        rerun_completed_gates,
+        false,
+    )
+}
+
+pub fn start_candidate_adoption_with_policy(
+    run_id: &str,
+    candidate_sha: &str,
+    ai_model: &str,
+    active_gate: &str,
+    rerun_completed_gates: bool,
+    replace_interrupted: bool,
+) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
     let candidate_sha = candidate_sha.to_string();
     let ai_model = ai_model.to_string();
@@ -87,6 +105,7 @@ pub fn start_candidate_adoption_with_rerun_policy(
     let mut conflict = false;
     let record = store::mutate_record(&run_id, |record| {
         let now = now_timestamp();
+        let mut replacement = None;
         if let Some(existing) = record.candidate_adoption.as_mut() {
             if existing.gate_process_group.is_some_and(|pgid| {
                 homeboy_core::process::isolated_process_group_is_running(pgid).unwrap_or(false)
@@ -104,7 +123,9 @@ pub fn start_candidate_adoption_with_rerun_policy(
                 existing.updated_at = now.clone();
                 existing.terminal_error = Some("adoption owner process is not running".to_string());
             }
-            if existing.state == "interrupted"
+            if existing.state == "interrupted" && replace_interrupted {
+                replacement = Some(existing.clone());
+            } else if existing.state == "interrupted"
                 && existing.candidate_sha == candidate_sha
                 && existing.ai_model == ai_model
             {
@@ -127,9 +148,20 @@ pub fn start_candidate_adoption_with_rerun_policy(
                 conflict = true;
                 return false;
             }
-            if existing.state == "verification_running" || existing.state == "interrupted" {
+            if replacement.is_none()
+                && (existing.state == "verification_running" || existing.state == "interrupted")
+            {
                 conflict = true;
                 return false;
+            }
+        }
+        if let Some(replacement) = replacement {
+            let metadata = record.ensure_metadata_object();
+            let replacements = metadata
+                .entry("candidate_adoption_replacements".to_string())
+                .or_insert_with(|| serde_json::json!([]));
+            if let Some(replacements) = replacements.as_array_mut() {
+                replacements.push(serde_json::to_value(replacement).expect("adoption serializes"));
             }
         }
         record.candidate_adoption = Some(AgentTaskCandidateAdoptionAttempt {

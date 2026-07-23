@@ -309,12 +309,13 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
     let attempt_dispatcher =
         reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
     options.attempt_dispatcher = attempt_dispatcher;
-    agent_task_lifecycle::start_candidate_adoption_with_rerun_policy(
+    agent_task_lifecycle::start_candidate_adoption_with_policy(
         &record.run_id,
         &candidate_sha,
         &adoption_ai_model,
         &gate_identity,
         options.gates.rerun_completed_gates,
+        adoption.replace_interrupted,
     )?;
     let gate_run_id = record.run_id.clone();
     let promotion = crate::agent_task_promotion::with_gate_supervision(
@@ -840,6 +841,37 @@ pub(crate) fn resolve_adoption_target(
     agent_task_lifecycle::AgentTaskRunRecord,
     super::AgentTaskCookRecipe,
 )> {
+    // A durable Cook id names its immutable recipe, not whichever attempt the
+    // mutable Cook index most recently observed. Resolve recipes before run
+    // records so a later failed attempt cannot steal adoption ownership from
+    // the original equivalent source attempt.
+    if super::recipe_exists(cook_or_run_id)? {
+        let recipe = super::load_recipe(cook_or_run_id)?;
+        let attempt = resolve_cook_adoption_attempt(&recipe)?;
+        if agent_task_lifecycle::run_record_exists(&attempt.run_id)? {
+            return Ok((agent_task_lifecycle::status(&attempt.run_id)?, recipe));
+        }
+        let run_id = attempt.run_id.clone();
+        return materialize_adoption_attempt(recipe, run_id);
+    }
+
+    // Runner-side lifecycle projection can omit the controller's `cook_id`
+    // metadata. Resolve an explicit attempt through durable recipe membership
+    // before falling back to record metadata, otherwise the actionable exact
+    // run ID emitted for an ambiguous Cook is misread as a recipe directory.
+    if let Some(recipe) = super::load_recipe_for_attempt(cook_or_run_id)? {
+        let attempt = recipe
+            .attempts
+            .iter()
+            .find(|attempt| attempt.run_id == cook_or_run_id)
+            .expect("attempt lookup returns a recipe that declares the run id");
+        if agent_task_lifecycle::run_record_exists(&attempt.run_id)? {
+            return Ok((agent_task_lifecycle::status(&attempt.run_id)?, recipe));
+        }
+        let run_id = attempt.run_id.clone();
+        return materialize_adoption_attempt(recipe, run_id);
+    }
+
     if agent_task_lifecycle::run_record_exists(cook_or_run_id)? {
         let record = agent_task_lifecycle::status(cook_or_run_id)?;
         let cook_id = record
@@ -851,31 +883,26 @@ pub(crate) fn resolve_adoption_target(
         return Ok((record, super::load_recipe(&cook_id)?));
     }
 
-    let recipe = if super::recipe_exists(cook_or_run_id)? {
-        super::load_recipe(cook_or_run_id)?
-    } else if let Some(recipe) = super::load_recipe_for_attempt(cook_or_run_id)? {
-        recipe
-    } else {
-        return Err(Error::validation_invalid_argument(
-            "run_or_cook_id",
-            "unknown agent-task run or durable cook id",
-            Some(cook_or_run_id.to_string()),
-            None,
-        ));
-    };
-    let attempt = if recipe.cook_id == cook_or_run_id {
-        resolve_cook_adoption_attempt(&recipe)?
-    } else {
-        recipe
-            .attempts
-            .iter()
-            .find(|attempt| attempt.run_id == cook_or_run_id)
-            .expect("attempt lookup returns a recipe that declares the run id")
-    };
-    if agent_task_lifecycle::run_record_exists(&attempt.run_id)? {
-        return Ok((agent_task_lifecycle::status(&attempt.run_id)?, recipe));
-    }
+    Err(Error::validation_invalid_argument(
+        "run_or_cook_id",
+        "unknown agent-task run or durable cook id",
+        Some(cook_or_run_id.to_string()),
+        None,
+    ))
+}
 
+fn materialize_adoption_attempt(
+    recipe: super::AgentTaskCookRecipe,
+    run_id: String,
+) -> Result<(
+    agent_task_lifecycle::AgentTaskRunRecord,
+    super::AgentTaskCookRecipe,
+)> {
+    let attempt = recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == run_id)
+        .expect("selected adoption attempt remains in its recipe");
     agent_task_lifecycle::submit_plan(&attempt.plan, Some(&attempt.run_id))?;
     agent_task_lifecycle::record_cook_attempt(&recipe.cook_id, attempt.attempt, &attempt.run_id)?;
     let recovery = Error::internal_unexpected(

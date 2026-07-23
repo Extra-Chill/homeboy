@@ -38,7 +38,7 @@ use super::cook_promotion::{
     is_moving_base_finalization_error, moving_base_recovery_for_run,
     moving_base_recovery_from_promotion, moving_base_recovery_report, next_moving_base_recovery,
     persisted_promotion_for_attempt, promote_or_load_attempt, recover_moving_base_cook_candidate,
-    refreshed_moving_base_recovery, MovingBaseCookRecovery,
+    refreshed_moving_base_recovery, retryable_provider_discovery_failure, MovingBaseCookRecovery,
 };
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
 use super::AgentTaskRunResult;
@@ -135,6 +135,7 @@ pub struct AgentTaskCookServiceOptions {
 #[derive(Debug, Clone, Default)]
 pub struct AgentTaskCandidateAdoptionOptions {
     pub ai_model: Option<String>,
+    pub replace_interrupted: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -314,6 +315,25 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     D: Fn(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
 {
+    resume_cook_batch_with_finalizer(
+        batch_id,
+        executor,
+        reconstruct_dispatcher,
+        finalize_or_load_cook_pr,
+    )
+}
+
+fn resume_cook_batch_with_finalizer<E, D, F>(
+    batch_id: &str,
+    executor: E,
+    reconstruct_dispatcher: D,
+    mut finalize: F,
+) -> Result<AgentTaskRunResult<AgentTaskCookBatchReport>>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    D: Fn(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+    F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
+{
     let batch = crate::agent_task_batch::read_batch_record(batch_id)?;
     if batch.child_runs.is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -331,7 +351,13 @@ where
         // is exactly the durable recipe key. Reconstruct from that recipe so the
         // resumed cook re-runs its own gates and finalization contract.
         let cook_id = child.run_id.clone();
-        let cell = match resume_batch_child(&cook_id, executor.clone(), &reconstruct_dispatcher) {
+        let cell = match resume_batch_child(
+            batch_id,
+            &cook_id,
+            executor.clone(),
+            &reconstruct_dispatcher,
+            &mut finalize,
+        ) {
             Ok(report) => {
                 let exit_code = cook_report_exit_code(&report);
                 AgentTaskCookBatchCellReport {
@@ -382,14 +408,17 @@ where
 /// Reconstruct one batch child's cook from its durable recipe and re-run it.
 /// A missing recipe means the child never reached cook start; surface an
 /// actionable resumability error instead of fabricating a cook.
-fn resume_batch_child<E, D>(
+fn resume_batch_child<E, D, F>(
+    batch_id: &str,
     cook_id: &str,
     executor: E,
     reconstruct_dispatcher: &D,
+    finalize: &mut F,
 ) -> Result<AgentTaskCookReport>
 where
     E: AgentTaskExecutorAdapter + Clone,
     D: Fn(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+    F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
 {
     if !super::recipe_exists(cook_id)? {
         return Err(Error::validation_invalid_argument(
@@ -403,18 +432,45 @@ where
             )]),
         ));
     }
-    agent_task_lifecycle::reconcile_terminal_artifact_projection(cook_id)?;
-    if let Some(reason) = agent_task_lifecycle::terminal_artifact_projection_readiness(cook_id)? {
-        return Err(Error::validation_invalid_argument(
-            "cook_id",
-            format!("cook `{cook_id}` cannot resume until controller-side patch projection is ready: {reason}"),
-            Some(cook_id.to_string()),
-            Some(vec![format!(
-                "Run `homeboy agent-task status {cook_id}` to reconcile the controller projection."
-            )]),
-        ));
-    }
     let recipe = super::load_recipe(cook_id)?;
+    let mut attempt_run_ids = recipe
+        .attempts
+        .iter()
+        .map(|attempt| attempt.run_id.clone())
+        .collect::<Vec<_>>();
+    if let Ok(index) = agent_task_lifecycle::cook_index(cook_id) {
+        attempt_run_ids.extend(index.attempts.into_iter().map(|attempt| attempt.run_id));
+    }
+    let checkpoint_run_id = attempt_run_ids.into_iter().find(|run_id| {
+        agent_task_lifecycle::exact_record(run_id)
+            .ok()
+            .is_some_and(|record| {
+                record
+                    .metadata
+                    .get("cook_recovery_source_checkpoint")
+                    .is_some()
+                    || record
+                        .metadata
+                        .get("latest_promotion")
+                        .and_then(|promotion| promotion.get("status"))
+                        .and_then(Value::as_str)
+                        == Some("verification_pending")
+            })
+    });
+    if checkpoint_run_id.is_none() {
+        agent_task_lifecycle::reconcile_terminal_artifact_projection(cook_id)?;
+        if let Some(reason) = agent_task_lifecycle::terminal_artifact_projection_readiness(cook_id)?
+        {
+            return Err(Error::validation_invalid_argument(
+                "cook_id",
+                format!("cook `{cook_id}` cannot resume until controller-side patch projection is ready: {reason}"),
+                Some(cook_id.to_string()),
+                Some(vec![format!(
+                    "Run `homeboy agent-task status {cook_id}` to reconcile the controller projection."
+                )]),
+            ));
+        }
+    }
     // Faithfully reconstruct the recipe's transport so re-running `run_cook`
     // matches the persisted durable inputs (a stripped dispatcher would look
     // like a conflicting new cook). A terminal child is not re-dispatched — its
@@ -423,8 +479,36 @@ where
     // (#9525).
     let attempt_dispatcher =
         reconstruct_dispatcher(&recipe.promotion_transport["attempt_dispatch"])?;
-    let options = super::reconstruct_options_with_dispatcher(&recipe, attempt_dispatcher)?;
-    Ok(run_cook(options, executor)?.value)
+    let mut options = super::reconstruct_options_with_dispatcher(&recipe, attempt_dispatcher)?;
+    if let Some(run_id) = checkpoint_run_id {
+        let attempt = recipe
+            .attempts
+            .iter()
+            .find(|attempt| attempt.run_id == run_id)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "cook_recovery_source_checkpoint",
+                    "checkpointed source attempt is absent from the durable cook recipe",
+                    Some(run_id.clone()),
+                    None,
+                )
+            })?;
+        // An earlier post-apply checkpoint remains the source of truth even if
+        // a later provider attempt failed and became the cook-index latest run.
+        options.initial_run_id = attempt.run_id.clone();
+        options.initial_plan = attempt.plan.clone();
+        agent_task_lifecycle::record_cook_recovery_checkpoint(
+            &attempt.run_id,
+            "verification_pending",
+            &format!("homeboy agent-task fanout resume {batch_id}"),
+        )?;
+    }
+    Ok(
+        run_cook_with_finalizer(options, executor, |options, run_id, promotion| {
+            finalize(options, run_id, promotion)
+        })?
+        .value,
+    )
 }
 
 fn child_finalization_value(cell: &AgentTaskCookBatchCellReport) -> Value {
@@ -502,7 +586,41 @@ pub(crate) fn dispatch_cook_follow_up<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
-    let Some(remaining_budget) = budget_remaining(budget_limit, budget_used) else {
+    let recipe = super::load_recipe(cook_id)?;
+    let related_attempts = recipe.attempts.iter().filter(|recipe_attempt| {
+        recipe_attempt.plan.tasks.len() == 1
+            && recipe_attempt.plan.tasks[0].inputs["cook_loop"]["artifact_provenance"]
+                ["source_run_id"]
+                .as_str()
+                == Some(source_run_id)
+    });
+    let replay = related_attempts
+        .clone()
+        .max_by_key(|recipe_attempt| recipe_attempt.attempt)
+        .filter(|recipe_attempt| recipe_attempt.attempt > attempt)
+        .filter(|recipe_attempt| {
+            recipe_attempt.plan.tasks[0].inputs["cook_loop"]["review_form_required"] == true
+                && retryable_provider_discovery_failure(&recipe_attempt.run_id)
+        })
+        .cloned();
+    let mut durable_budget_used = budget_used;
+    for recipe_attempt in related_attempts.clone() {
+        if let Ok(aggregate) = agent_task_lifecycle::read_aggregate(&recipe_attempt.run_id) {
+            durable_budget_used.add(execution_budget_usage(&aggregate));
+        }
+    }
+    if known_same_executor {
+        durable_budget_used.same_provider_retries =
+            durable_budget_used.same_provider_retries.saturating_add(
+                related_attempts
+                    .map(|recipe_attempt| recipe_attempt.attempt)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    .try_into()
+                    .unwrap_or(u32::MAX),
+            );
+    }
+    let Some(remaining_budget) = budget_remaining(budget_limit, durable_budget_used) else {
         return Ok(CookFollowUpDispatch::BudgetExhausted {
             reason: "max_provider_executions".to_string(),
         });
@@ -532,32 +650,66 @@ where
                 .to_string(),
         });
     };
-    let reservation = match reserve_remediation_budget(&remaining_budget, same_provider) {
-        Ok(reservation) => reservation,
-        Err(reason) => {
-            return Ok(CookFollowUpDispatch::BudgetExhausted {
-                reason: reason.to_string(),
-            })
+    let reservation = if replay.is_some() {
+        ExecutionBudgetUsage::default()
+    } else {
+        match reserve_remediation_budget(&remaining_budget, same_provider) {
+            Ok(reservation) => reservation,
+            Err(reason) => {
+                return Ok(CookFollowUpDispatch::BudgetExhausted {
+                    reason: reason.to_string(),
+                })
+            }
         }
     };
-    let next_attempt = attempt + 1;
-    let next_run_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, next_attempt);
     // This is reviewable lineage, not the process-local baseline capability.
     follow_up_request.inputs["cook_loop"]["artifact_provenance"] = serde_json::json!({
         "source_run_id": source_run_id,
         "source_task_id": promotion.source.task_id,
         "source_patch_artifact_sha256": promotion.patch_artifact.sha256,
     });
-    let mut follow_up_plan = AgentTaskPlan::new(
-        format!("{cook_id}-cook-attempt-{next_attempt}"),
-        vec![follow_up_request],
-    );
-    follow_up_plan.options = plan.options.clone();
-    follow_up_plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
-    follow_up_plan.options.retry.max_attempts = 1;
+    let (next_attempt, next_run_id, mut follow_up_plan, replaced_run_id) = match replay {
+        Some(recipe_attempt) => (
+            recipe_attempt.attempt,
+            agent_task_lifecycle::cook_attempt_run_id(cook_id, recipe_attempt.attempt),
+            recipe_attempt.plan.clone(),
+            Some(recipe_attempt.run_id.clone()),
+        ),
+        None => {
+            let next_attempt = recipe
+                .attempts
+                .iter()
+                .map(|recipe_attempt| recipe_attempt.attempt)
+                .max()
+                .unwrap_or(attempt)
+                .max(attempt)
+                .checked_add(1)
+                .ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "cook_recipe.attempts",
+                        "durable cook attempt sequence is exhausted",
+                        Some(cook_id.to_string()),
+                        None,
+                    )
+                })?;
+            let next_run_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, next_attempt);
+            let mut follow_up_plan = AgentTaskPlan::new(
+                format!("{cook_id}-cook-attempt-{next_attempt}"),
+                vec![follow_up_request],
+            );
+            follow_up_plan.options = plan.options.clone();
+            follow_up_plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
+            follow_up_plan.options.retry.max_attempts = 1;
+            (next_attempt, next_run_id, follow_up_plan, None)
+        }
+    };
     let review_form_only =
         follow_up_plan.tasks[0].inputs["cook_loop"]["review_form_required"] == true;
-    super::record_recipe_attempt(cook_id, next_attempt, &next_run_id, &follow_up_plan)?;
+    if let Some(replaced_run_id) = replaced_run_id {
+        super::record_recipe_attempt_replacement(cook_id, &replaced_run_id, &next_run_id)?;
+    } else {
+        super::record_recipe_attempt(cook_id, next_attempt, &next_run_id, &follow_up_plan)?;
+    }
     if attempt_needs_execution(&next_run_id) {
         let baseline = materialize_follow_up_baseline(
             promotion,
@@ -692,7 +844,24 @@ where
         .ok()
         .and_then(|record| record.metadata.get("cook_moving_base_recovery").cloned())
         .is_some();
+    let verification_pending_continuation = agent_task_lifecycle::status(&options.initial_run_id)
+        .ok()
+        .is_some_and(|record| {
+            record
+                .metadata
+                .get("cook_recovery_source_checkpoint")
+                .and_then(|checkpoint| checkpoint.get("phase"))
+                .and_then(Value::as_str)
+                == Some("verification_pending")
+                || record
+                    .metadata
+                    .get("latest_promotion")
+                    .and_then(|promotion| promotion.get("status"))
+                    .and_then(Value::as_str)
+                    == Some("verification_pending")
+        });
     if !moving_base_continuation
+        && !verification_pending_continuation
         && options.attempt_dispatcher.is_none()
         && options.provider_command.is_none()
         && options.provider_invocation.is_none()
@@ -743,15 +912,17 @@ where
     // Transport readiness can serialize on a reconnect/runtime-promotion
     // lease. Complete it before entering the provider-attempt loop so that
     // waiting for a shared Lab session never consumes a cook attempt.
-    if let Some(dispatcher) = &options.attempt_dispatcher {
-        if let Err(error) = dispatcher.prepare_for_cook() {
-            agent_task_lifecycle::record_pre_execution_failure(
-                &options.initial_run_id,
-                &options.initial_plan,
-                dispatcher.pre_execution_failure_phase(),
-                &error,
-            )?;
-            return Err(error);
+    if !verification_pending_continuation {
+        if let Some(dispatcher) = &options.attempt_dispatcher {
+            if let Err(error) = dispatcher.prepare_for_cook() {
+                agent_task_lifecycle::record_pre_execution_failure(
+                    &options.initial_run_id,
+                    &options.initial_plan,
+                    dispatcher.pre_execution_failure_phase(),
+                    &error,
+                )?;
+                return Err(error);
+            }
         }
     }
     // The initial attempt is the durable status/activity owner. Pin it rather
@@ -769,8 +940,9 @@ where
         .find(|attempt| attempt.run_id == options.initial_run_id)
         .map(|attempt| attempt.attempt)
         .unwrap_or(1);
-    let resumed_run_id = agent_task_lifecycle::cook_index(&options.cook_id)
-        .ok()
+    let resumed_run_id = (!verification_pending_continuation)
+        .then(|| agent_task_lifecycle::cook_index(&options.cook_id).ok())
+        .flatten()
         .map(|index| index.latest_run_id)
         .filter(|run_id| run_id != &options.initial_run_id)
         .filter(|run_id| {
