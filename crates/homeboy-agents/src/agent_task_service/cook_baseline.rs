@@ -102,6 +102,13 @@ impl CookFollowUpBaseline {
     pub(crate) fn artifact_provenance(&self) -> Value {
         self.capability.artifact_provenance()
     }
+
+    /// A lifecycle retry persists this controller-materialized checkout for a
+    /// later provider dispatch. Unlike the in-process Cook path, no owner is
+    /// available to remove it when this function returns.
+    pub(crate) fn preserve_for_retry(self) {
+        std::mem::forget(self);
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]

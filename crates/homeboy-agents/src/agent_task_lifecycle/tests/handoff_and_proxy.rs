@@ -15,6 +15,7 @@ use crate::agent_task_scheduler::{
 use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStore, RemoteRunnerJobRequest};
 use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 enum TestRunnerReconciliation {
@@ -393,6 +394,108 @@ fn retry_stamps_replacement_run_with_current_runtime_not_stale_source() {
             current_identity,
             "retry must not rewrite the source run's runtime provenance"
         );
+    });
+}
+
+#[test]
+fn retry_rebuilds_follow_up_candidate_from_durable_promotion() {
+    with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("temporary repository");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).expect("create repository");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init"]);
+        std::fs::write(repo.join("candidate.txt"), "base\n").expect("write base");
+        git(&["add", "candidate.txt"]);
+        git(&[
+            "-c",
+            "user.name=Homeboy Test",
+            "-c",
+            "user.email=homeboy-test@localhost",
+            "commit",
+            "-m",
+            "base",
+        ]);
+        let head = git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("candidate.txt"), "candidate\n").expect("write candidate");
+        let patch = format!("{}\n", git(&["diff", "--binary"]));
+        let patch_path = temp.path().join("candidate.patch");
+        std::fs::write(&patch_path, &patch).expect("write patch artifact");
+        let patch_sha = format!("{:x}", Sha256::digest(patch.as_bytes()));
+
+        let source_run = "cook-follow-up-source";
+        let mut plan = test_plan();
+        plan.tasks[0].inputs = json!({
+            "cook_loop": {
+                "artifact_provenance": {
+                    "source_run_id": source_run,
+                    "source_task_id": "task-a",
+                    "source_patch_artifact_sha256": patch_sha,
+                }
+            }
+        });
+        plan.tasks[0].workspace.root = Some("/stale/follow-up-baseline".to_string());
+        submit_plan(&plan, Some(source_run)).expect("submit source run");
+        record_promotion(
+            source_run,
+            json!({
+                "schema": "homeboy/agent-task-promotion-report/v1",
+                "status": "gate_failed",
+                "source": {"kind": "aggregate", "task_id": "task-a", "run_id": source_run},
+                "to_worktree": "homeboy@test",
+                "target": {"worktree": "homeboy@test", "path": repo, "head": head},
+                "patch_artifact": {
+                    "id": "patch",
+                    "kind": "patch",
+                    "path": patch_path,
+                    "sha256": patch_sha,
+                },
+                "provenance": {
+                    "worktree_path": repo,
+                    "gate_feedback_baseline": {"current_diff": patch},
+                },
+                "operator_notification": {"status": "completed", "message": "complete"},
+            }),
+        )
+        .expect("record durable promotion");
+
+        let replacement = retry(source_run, Some("cook-follow-up-retry")).expect("retry succeeds");
+        let restored = load_plan(&replacement.run_id).expect("load replacement plan");
+        let restored_task = &restored.tasks[0];
+        let restored_root = restored_task
+            .workspace
+            .root
+            .as_deref()
+            .expect("restored root");
+        assert_ne!(restored_root, "/stale/follow-up-baseline");
+        assert_eq!(
+            std::fs::read_to_string(std::path::Path::new(restored_root).join("candidate.txt"))
+                .expect("read restored candidate"),
+            "candidate\n"
+        );
+        assert_eq!(
+            restored_task.metadata["verified_cook_baseline"]["source_run_id"],
+            source_run
+        );
+        assert_eq!(
+            restored_task.metadata["verified_cook_baseline"]["promoted_patch_artifact_sha256"],
+            patch_sha
+        );
+
+        git(&["worktree", "remove", "--force", restored_root]);
     });
 }
 
