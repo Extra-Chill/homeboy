@@ -28,10 +28,17 @@ pub use model::*;
 
 // Re-exported at module scope so the source-provider submodules can pull the
 // shared helpers and collector through `use super::*` (#9794).
-pub(crate) use action_helpers::{action, metadata_string, ms_to_rfc3339};
+pub(crate) use action_helpers::{action, metadata_string, ms_to_rfc3339, parse_ts};
 pub(crate) use collector::ActivityCollector;
 
 pub const ACTIVITY_REPORT_SCHEMA: &str = "homeboy/activity-report/v1";
+
+/// A `Running` activity row whose last heartbeat/update is older than this many
+/// minutes is treated as an unverified stale projection rather than active
+/// running work. Old observation rows (runner executions and Cooks from hours or
+/// days earlier) whose processes are gone must not inflate the `active`/`running`
+/// totals that operators rely on for cleanup and workload decisions (#9743).
+const RUNNING_HEARTBEAT_STALE_MINUTES: i64 = 30;
 
 pub fn activity_report(scope: ActivityScope, limit: usize) -> Result<ActivityReport> {
     let mut collector = ActivityCollector::default();
@@ -111,7 +118,44 @@ fn resolve_item<'a>(items: &'a [ActivityItem], id: &str) -> Option<&'a ActivityI
     })
 }
 
-fn report_from_items(items: Vec<ActivityItem>, command: &'static str) -> ActivityReport {
+/// Downgrade `Running` rows whose heartbeat is stale to `Stale` so `active`
+/// totals reflect only fresh, verifiable work. A row is considered stale when
+/// its last heartbeat (`updated_at`) is older than
+/// [`RUNNING_HEARTBEAT_STALE_MINUTES`]. A row with a fresh heartbeat — or one
+/// with no `updated_at` heartbeat at all, whose liveness cannot be disproven
+/// from a timestamp alone — is left untouched. Each downgraded row is annotated
+/// with the exact reconcile command so operators can converge or inspect it
+/// (#9743).
+fn reclassify_stale_running(items: &mut [ActivityItem]) {
+    let now = chrono::Utc::now();
+    for item in items.iter_mut() {
+        if item.state != ActivityState::Running {
+            continue;
+        }
+        let Some(heartbeat) = item.updated_at.as_deref().and_then(parse_ts) else {
+            continue;
+        };
+        let age_minutes = (now - heartbeat).num_minutes();
+        if age_minutes < RUNNING_HEARTBEAT_STALE_MINUTES {
+            continue;
+        }
+        item.state = ActivityState::Stale;
+        let reconcile = action(
+            "reconcile stale activity",
+            "homeboy agent-task active --reconcile",
+        );
+        if !item
+            .next_actions
+            .iter()
+            .any(|existing| existing.command == reconcile.command)
+        {
+            item.next_actions.push(reconcile);
+        }
+    }
+}
+
+fn report_from_items(mut items: Vec<ActivityItem>, command: &'static str) -> ActivityReport {
+    reclassify_stale_running(&mut items);
     let counts = counts_for_items(&items);
     let next_actions = items
         .iter()
@@ -319,6 +363,39 @@ mod tests {
         assert!(resolve_item(&items, "agent-1").is_some());
         assert!(resolve_item(&items, "job-1").is_some());
         assert!(resolve_item(&items, "missing").is_none());
+    }
+
+    #[test]
+    fn stale_heartbeat_running_rows_are_reclassified_and_not_counted_active() {
+        let now = chrono::Utc::now();
+        let fresh_ts = now.to_rfc3339();
+        let stale_ts = (now - chrono::Duration::hours(6)).to_rfc3339();
+
+        let mut fresh = item("fresh-running", ActivityState::Running);
+        fresh.updated_at = Some(fresh_ts);
+        let mut stale = item("stale-running", ActivityState::Running);
+        stale.updated_at = Some(stale_ts);
+        // No heartbeat at all: liveness cannot be disproven from a timestamp, so
+        // it is left as Running (not reclassified).
+        let no_heartbeat = item("no-heartbeat-running", ActivityState::Running);
+
+        let report = report_from_items(vec![fresh, stale, no_heartbeat], "homeboy activity");
+
+        // Fresh + heartbeat-less stay running; the stale-heartbeat row moves to stale.
+        assert_eq!(report.counts.running, 2);
+        assert_eq!(report.counts.stale, 1);
+        assert_eq!(report.counts.active, 2);
+
+        let reclassified = report
+            .items
+            .iter()
+            .find(|item| item.id == "stale-running")
+            .expect("stale row present");
+        assert_eq!(reclassified.state, ActivityState::Stale);
+        assert!(reclassified
+            .next_actions
+            .iter()
+            .any(|action| action.command == "homeboy agent-task active --reconcile"));
     }
 
     #[test]
