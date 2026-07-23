@@ -8,6 +8,7 @@
 
 pub mod artifact_ref_scheme;
 pub mod baseline;
+pub mod canonical_json;
 pub mod codebase_scan;
 pub mod command;
 pub mod detail_output;

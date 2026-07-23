@@ -5,6 +5,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use homeboy_core::component::Component;
+use homeboy_core::engine::canonical_json::canonical_json;
 use homeboy_core::error::{Error, Result};
 
 use super::execution::{
@@ -112,23 +113,6 @@ impl ComponentPayloadPreparationRequest {
     #[allow(dead_code)]
     pub fn evidence_digest(&self) -> String {
         digest_json(&self.evidence())
-    }
-}
-
-fn canonical_json(value: serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Array(values) => {
-            serde_json::Value::Array(values.into_iter().map(canonical_json).collect())
-        }
-        serde_json::Value::Object(values) => serde_json::Value::Object(
-            values
-                .into_iter()
-                .map(|(key, value)| (key, canonical_json(value)))
-                .collect::<std::collections::BTreeMap<_, _>>()
-                .into_iter()
-                .collect(),
-        ),
-        value => value,
     }
 }
 
