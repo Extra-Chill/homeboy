@@ -5,7 +5,7 @@ use super::git;
 use crate::workspace::snapshot::{incremental_prepare_command_fits, snapshot_manifest_delta};
 use crate::workspace::sync::{
     reuse_compatible_snapshot_workspace, sync_workspace, workspace_snapshot_scan_command,
-    workspace_snapshots,
+    workspace_snapshot_scan_command_with_hint, workspace_snapshots,
 };
 use crate::workspace::types::{
     RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
@@ -28,8 +28,8 @@ fn workspace_snapshot_scan_skips_a_child_removed_during_atomic_promotion() {
         r#"{"schema":"homeboy/runner-workspace/v1"}"#,
     )
     .expect("temporary metadata");
-    let shim_root = tempfile::tempdir().expect("base64 shim root");
-    let shim = shim_root.path().join("base64");
+    let shim_root = tempfile::tempdir().expect("find shim root");
+    let shim = shim_root.path().join("find");
     fs::write(
         &shim,
         format!(
@@ -37,7 +37,7 @@ fn workspace_snapshot_scan_skips_a_child_removed_during_atomic_promotion() {
             shell_quote(temporary.as_path())
         ),
     )
-    .expect("base64 shim");
+    .expect("find shim");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -82,8 +82,8 @@ fn workspace_snapshot_scan_fails_when_its_root_disappears() {
     let workspace = root.path().join("workspace");
     fs::create_dir_all(workspace.join(".homeboy")).expect("workspace");
     fs::write(workspace.join(".homeboy/runner-workspace.json"), "{}").expect("workspace metadata");
-    let shim_root = tempfile::tempdir().expect("base64 shim root");
-    let shim = shim_root.path().join("base64");
+    let shim_root = tempfile::tempdir().expect("find shim root");
+    let shim = shim_root.path().join("find");
     fs::write(
         &shim,
         format!(
@@ -91,7 +91,7 @@ fn workspace_snapshot_scan_fails_when_its_root_disappears() {
             shell_quote(root.path())
         ),
     )
-    .expect("base64 shim");
+    .expect("find shim");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -114,6 +114,65 @@ fn workspace_snapshot_scan_fails_when_its_root_disappears() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr)
         .contains("runner workspace snapshot root disappeared during scan"));
+}
+
+#[test]
+fn workspace_snapshot_scan_hint_streams_only_matching_metadata() {
+    let root = tempfile::tempdir().expect("workspace root");
+    for (name, commit) in [("matching", "commit-a"), ("unrelated", "commit-b")] {
+        let metadata = root
+            .path()
+            .join(name)
+            .join(".homeboy/runner-workspace.json");
+        fs::create_dir_all(metadata.parent().expect("metadata parent")).expect("workspace");
+        fs::write(
+            metadata,
+            format!(r#"{{"schema":"homeboy/runner-workspace/v1","source_commit":"{commit}"}}"#),
+        )
+        .expect("workspace metadata");
+    }
+
+    let output = std::process::Command::new("sh")
+        .args([
+            "-c",
+            &workspace_snapshot_scan_command_with_hint(
+                &root.path().display().to_string(),
+                Some("commit-a"),
+            ),
+        ])
+        .output()
+        .expect("run hinted snapshot scan");
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 scan output");
+
+    assert!(output.status.success());
+    assert!(stdout.contains("matching"));
+    assert!(stdout.contains("commit-a"));
+    assert!(!stdout.contains("unrelated"));
+    assert!(!stdout.contains("commit-b"));
+}
+
+#[test]
+fn workspace_snapshot_scan_streams_empty_metadata_for_validation() {
+    let root = tempfile::tempdir().expect("workspace root");
+    let metadata = root
+        .path()
+        .join("empty")
+        .join(".homeboy/runner-workspace.json");
+    fs::create_dir_all(metadata.parent().expect("metadata parent")).expect("workspace");
+    fs::write(&metadata, "").expect("empty workspace metadata");
+
+    let output = std::process::Command::new("sh")
+        .args([
+            "-c",
+            &workspace_snapshot_scan_command(&root.path().display().to_string()),
+        ])
+        .output()
+        .expect("run snapshot scan");
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 scan output");
+
+    assert!(output.status.success());
+    assert!(stdout.contains("empty"));
+    assert!(stdout.contains('\u{1e}'));
 }
 
 fn shell_quote(path: &std::path::Path) -> String {
