@@ -22,7 +22,7 @@ use super::types_extra::{
 };
 use super::workloads::{
     build_target_inventory, fuzz_workloads, load_rig, resolve_component_id, resolve_fuzz_context,
-    resolve_profile_workload_id, select_workload,
+    resolve_profile_workload_id, resolve_profile_workload_ids, select_workload,
 };
 use homeboy_extension::ExtensionCapability;
 
@@ -141,6 +141,23 @@ pub(super) fn run_campaign(
             None,
             None,
         ));
+    }
+    if let Some(profile) = args.run.profile.take() {
+        if args.run.workload_id.is_some() {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "profile",
+                "--profile and --workload cannot be combined; pass one workload selector",
+                Some(profile),
+                None,
+            ));
+        }
+        let rig_context = load_rig(args.run.rig.as_deref(), &args.run.setting_args)?;
+        let workload_ids = resolve_profile_workload_ids(
+            rig_context.as_ref().map(|context| &context.spec),
+            &profile,
+        )?;
+        args.run.workload_id = workload_ids.first().cloned();
+        args.campaign_workloads.extend(workload_ids);
     }
     args.execute = args.execute || !args.dry_run;
     let plan_output = run_plan(args.clone())?;
