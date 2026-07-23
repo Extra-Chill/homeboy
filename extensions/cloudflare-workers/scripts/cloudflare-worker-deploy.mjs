@@ -50,6 +50,8 @@ async function runPredeployCommands(contract, root, result, redact, env) {
       catch { throw fail('predeploy_command_failed', `Pre-deploy command ${declared.id} failed.`, 'predeploy_commands'); }
       commands.push({ id: declared.id, status: 'succeeded', elapsed_ms: Math.round(performance.now() - startedAt) });
     }
+    const clean = await command('git', ['status', '--porcelain'], root, redact, env, contract.timeout_ms);
+    if (clean.stdout.trim()) throw fail('source_changed_by_predeploy', 'Pre-deploy commands changed the declared immutable source.', 'predeploy_commands');
     finish(stage, 'succeeded', { commands });
   } catch (error) {
     finish(stage, 'failed', { code: error.code || 'predeploy_command_failed', commands });
