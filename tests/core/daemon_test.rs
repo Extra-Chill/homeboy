@@ -2104,17 +2104,19 @@ fn lease_bound_stop_recovers_only_the_exact_daemon_after_binary_rebuild() {
 
 #[cfg(unix)]
 #[test]
-fn force_stop_matching_lease_cannot_signal_a_reused_pid() {
+fn force_stop_matching_idle_lease_retires_a_reused_pid_without_signaling() {
     let _home = HomeGuard::new();
     let mut child = spawn_force_stop_test_process(None);
     let mut state = daemon_state_for_test(child.id(), "127.0.0.1:1");
     state.binary_sha256 = Some("stale-binary-hash".to_string());
     write_daemon_state_for_test(&state);
 
-    force_stop_for_lease(&state.lease_id)
-        .expect_err("unowned matching lease cannot signal reused pid");
+    let result = force_stop_for_lease(&state.lease_id).expect("retire unowned idle lease");
 
+    assert!(!result.stopped);
+    assert!(result.already_absent);
     assert!(pid_is_running(child.id()));
+    assert!(!state_path().expect("state path").exists());
     child.kill().expect("cleanup test process");
     child.wait().expect("reap test process");
 }
@@ -2135,21 +2137,17 @@ fn force_stop_default_non_force_behavior_remains_unchanged() {
 }
 
 #[test]
-fn lease_bound_stop_does_not_report_live_stale_owner_as_already_absent() {
+fn lease_bound_stop_retires_a_live_unowned_idle_lease() {
     let _home = HomeGuard::new();
     let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
     state.binary_sha256 = Some("stale-binary-hash".to_string());
     write_daemon_state_for_test(&state);
 
-    let error = stop_for_lease(&state.lease_id).expect_err("unproven stale owner is rejected");
+    let result = stop_for_lease(&state.lease_id).expect("retire unowned stale lease");
 
-    assert!(
-        error.message.contains("refusing to signal")
-            || error
-                .message
-                .contains("exact process environment ownership checks")
-    );
-    assert!(state_path().expect("state path").exists());
+    assert!(!result.stopped);
+    assert!(result.already_absent);
+    assert!(!state_path().expect("state path").exists());
 }
 
 #[test]

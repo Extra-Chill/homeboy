@@ -88,15 +88,16 @@ fn force_stop_for_lease_unlocked(expected_lease_id: &str) -> Result<DaemonStopRe
         });
     }
     if !pid_has_ownership_token(state.pid, DAEMON_STARTUP_TOKEN_ENV, &state.startup_token)? {
-        return Err(Error::validation_invalid_argument(
-            "daemon_lease",
-            format!(
-                "process {} does not own the persisted daemon startup token; refusing to signal a potentially reused PID",
-                state.pid
-            ),
-            Some(state.pid.to_string()),
-            None,
-        ));
+        // The zero-job gate and exact lease revalidation make it safe to retire
+        // stale metadata, but the unowned PID must never receive a signal.
+        remove_lease_if_identity_matches(&path, &identity)?;
+        return Ok(DaemonStopResult {
+            stopped: false,
+            already_absent: true,
+            pid: Some(state.pid),
+            state_path: state_path_display,
+            termination_evidence: None,
+        });
     }
 
     let _ = read_lease_if_identity_matches(&path, &identity)?;
