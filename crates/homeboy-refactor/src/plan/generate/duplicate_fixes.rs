@@ -20,7 +20,15 @@ pub(crate) fn extract_function_name_from_unreferenced(description: &str) -> Opti
 }
 
 pub(crate) fn module_path_from_file(file_path: &str) -> String {
-    homeboy_core::engine::symbol_graph::module_path_from_file(file_path)
+    let module_path = homeboy_core::engine::symbol_graph::module_path_from_file(file_path);
+    // `src/core/**` is the homeboy-core crate root, so `core` is not part of the
+    // intra-crate module path — a generated `use crate::core::engine::…` would
+    // not resolve. Strip the leading `core::` (or a bare `core`) so the import
+    // the wrapper builds (`use crate::{path}::{fn};`) is `crate::engine::…`.
+    module_path
+        .strip_prefix("core::")
+        .map(str::to_string)
+        .unwrap_or(module_path)
 }
 
 /// Generate a language-appropriate import statement for a duplicate function fix.
