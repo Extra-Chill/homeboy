@@ -452,13 +452,32 @@ pub(super) fn run_lint_stage(
         (Vec::new(), Vec::new(), Vec::new())
     };
 
-    let (stage_changed_files, fix_results, stage_warnings) = merge_lint_extension_stage(
-        extension_stage,
-        stage_changed_files,
-        fix_results,
-        stage_warnings,
-    );
+    let (stage_changed_files, mut stage_warnings, fix_results) = {
+        let (changed, results, warnings) = merge_lint_extension_stage(
+            extension_stage,
+            stage_changed_files,
+            fix_results,
+            stage_warnings,
+        );
+        (changed, warnings, results)
+    };
     let edit_count = fix_results.len();
+
+    // Reconcile advertised auto-fixable findings against what the fixer pass
+    // actually applied. The lint diagnostic advertises "N findings can be fixed
+    // automatically — run homeboy refactor --from lint --write", but the fixer
+    // pass (phpcbf + custom fixers) may apply zero edits — e.g. PHPCS marks a
+    // finding `fixable` but no registered sniff actually rewrites it, or the
+    // findings are warnings the fixer's severity config suppresses. Previously
+    // this returned a nominal success with edit_count: 0 and no explanation,
+    // sending operators to a command that does nothing (#9618). Surface the
+    // discrepancy as an explicit warning so the no-op is legible instead of
+    // silent.
+    if write {
+        if let Some(warning) = unapplied_fixable_warning(&lint_findings, edit_count) {
+            stage_warnings.push(warning);
+        }
+    }
 
     Ok(PlannedStage {
         source: "lint".to_string(),
@@ -475,6 +494,33 @@ pub(super) fn run_lint_stage(
         },
         fix_results,
     })
+}
+
+/// Reconcile advertised auto-fixable findings against edits the fixer actually
+/// applied. Returns a warning when the lint diagnostic flagged findings as
+/// auto-fixable but the fixer pass applied zero edits (#9618). Returns `None`
+/// when no fixable findings were advertised or at least one edit landed, so a
+/// genuine fix run stays quiet.
+fn unapplied_fixable_warning(
+    lint_findings: &[homeboy_core::finding::HomeboyFinding],
+    edit_count: usize,
+) -> Option<String> {
+    if edit_count > 0 {
+        return None;
+    }
+    let advertised_fixable = lint_findings
+        .iter()
+        .filter(|finding| finding.fix.fixable == Some(true))
+        .count();
+    if advertised_fixable == 0 {
+        return None;
+    }
+    Some(format!(
+        "Lint advertised {advertised_fixable} auto-fixable finding(s) but the fixer pass applied 0 edits. \
+The linter's fixer (e.g. phpcbf + custom fixers) could not automatically rewrite these findings — \
+they may require manual remediation despite being flagged fixable. Re-run `homeboy lint <component>` \
+to see the remaining findings."
+    ))
 }
 
 fn merge_lint_extension_stage(
@@ -827,5 +873,46 @@ mod tests {
         assert_eq!(fix_results.len(), 1);
         assert_eq!(fix_results[0].rule, "phpcbf:WordPress.WhiteSpace");
         assert_eq!(warnings, vec!["tool-native fix warning".to_string()]);
+    }
+
+    fn fixable_finding(file: &str, fixable: bool) -> homeboy_core::finding::HomeboyFinding {
+        homeboy_core::finding::HomeboyFinding::builder("phpcs", "WhiteSpace")
+            .file(file)
+            .fixable(fixable)
+            .build()
+    }
+
+    #[test]
+    fn advertised_fixable_with_zero_edits_warns() {
+        // #9618: lint flags findings auto-fixable but the fixer applies nothing.
+        // The no-op must be surfaced instead of a silent success.
+        let findings = vec![
+            fixable_finding("src/a.php", true),
+            fixable_finding("src/b.php", true),
+        ];
+        let warning = unapplied_fixable_warning(&findings, 0)
+            .expect("advertised-fixable + zero edits must warn");
+        assert!(
+            warning.contains("2 auto-fixable finding(s) but the fixer pass applied 0 edits"),
+            "warning must report the discrepancy: {warning}"
+        );
+    }
+
+    #[test]
+    fn advertised_fixable_with_edits_is_quiet() {
+        // A genuine fix run (at least one edit) must not warn.
+        let findings = vec![fixable_finding("src/a.php", true)];
+        assert!(unapplied_fixable_warning(&findings, 3).is_none());
+    }
+
+    #[test]
+    fn no_fixable_findings_is_quiet() {
+        // Findings exist but none are auto-fixable — zero edits is expected, so
+        // no misleading "fixer applied nothing" warning.
+        let findings = vec![
+            fixable_finding("src/a.php", false),
+            homeboy_core::finding::HomeboyFinding::builder("phpstan", "type error").build(),
+        ];
+        assert!(unapplied_fixable_warning(&findings, 0).is_none());
     }
 }
