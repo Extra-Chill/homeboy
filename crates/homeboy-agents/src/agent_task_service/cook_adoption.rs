@@ -318,65 +318,71 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
         adoption.replace_interrupted,
     )?;
     let gate_run_id = record.run_id.clone();
-    let promotion = crate::agent_task_promotion::with_gate_supervision(
-        crate::agent_task_gate::GateSupervision {
-            timeout: options.gates.gate_timeout(),
-            heartbeat_interval: options.gates.gate_heartbeat_interval(),
-            on_spawn: Arc::new({
-                let run_id = gate_run_id.clone();
-                move |pid, command| {
-                    agent_task_lifecycle::start_candidate_adoption_gate(
-                        &run_id,
-                        command,
-                        pid,
-                        options.gates.gate_timeout_seconds,
-                    )
-                }
-            }),
-            on_heartbeat: Arc::new({
-                let run_id = gate_run_id.clone();
-                move |tail| agent_task_lifecycle::heartbeat_candidate_adoption_gate(&run_id, tail)
-            }),
-            is_cancelled: Arc::new(move || {
-                agent_task_lifecycle::candidate_adoption_cancel_requested(&gate_run_id)
-                    .unwrap_or(false)
-            }),
-        },
-        || {
-            promote_with_checkpoint(
-                AgentTaskPromotionOptions {
-                    source,
-                    source_run_id: Some(record.run_id.clone()),
-                    source_path,
-                    source_worktree_path: options.source_worktree_path.clone(),
-                    base_ref: Some(options.base.clone()),
-                    task_base_sha: options.task_base_sha.clone(),
-                    candidate_ref: Some(candidate_sha.clone()),
-                    to_worktree: options.to_worktree.clone(),
-                    task_id: None,
-                    artifact_id: None,
-                    dry_run: false,
-                    gates: options.gates.clone(),
-                    provider_command: options.provider_command.clone(),
-                    provider_invocation: options.provider_invocation.clone(),
-                },
-                |checkpoint| {
-                    let checkpoint = serde_json::to_value(checkpoint).map_err(|error| {
-                        Error::internal_json(
-                            error.to_string(),
-                            Some("serialize adopted candidate checkpoint".to_string()),
+    let promotion = match reusable_applied_adoption_promotion(&record, &candidate_sha) {
+        Some(promotion) => promotion,
+        None => crate::agent_task_promotion::with_gate_supervision(
+            crate::agent_task_gate::GateSupervision {
+                timeout: options.gates.gate_timeout(),
+                heartbeat_interval: options.gates.gate_heartbeat_interval(),
+                on_spawn: Arc::new({
+                    let run_id = gate_run_id.clone();
+                    move |pid, command| {
+                        agent_task_lifecycle::start_candidate_adoption_gate(
+                            &run_id,
+                            command,
+                            pid,
+                            options.gates.gate_timeout_seconds,
                         )
-                    })?;
-                    agent_task_lifecycle::checkpoint_candidate_adoption(
-                        &record.run_id,
-                        "post_apply_verification",
-                        &gate_identity,
-                    )?;
-                    agent_task_lifecycle::record_promotion(&record.run_id, checkpoint).map(|_| ())
-                },
-            )
-        },
-    );
+                    }
+                }),
+                on_heartbeat: Arc::new({
+                    let run_id = gate_run_id.clone();
+                    move |tail| {
+                        agent_task_lifecycle::heartbeat_candidate_adoption_gate(&run_id, tail)
+                    }
+                }),
+                is_cancelled: Arc::new(move || {
+                    agent_task_lifecycle::candidate_adoption_cancel_requested(&gate_run_id)
+                        .unwrap_or(false)
+                }),
+            },
+            || {
+                promote_with_checkpoint(
+                    AgentTaskPromotionOptions {
+                        source,
+                        source_run_id: Some(record.run_id.clone()),
+                        source_path,
+                        source_worktree_path: options.source_worktree_path.clone(),
+                        base_ref: Some(options.base.clone()),
+                        task_base_sha: options.task_base_sha.clone(),
+                        candidate_ref: Some(candidate_sha.clone()),
+                        to_worktree: options.to_worktree.clone(),
+                        task_id: None,
+                        artifact_id: None,
+                        dry_run: false,
+                        gates: options.gates.clone(),
+                        provider_command: options.provider_command.clone(),
+                        provider_invocation: options.provider_invocation.clone(),
+                    },
+                    |checkpoint| {
+                        let checkpoint = serde_json::to_value(checkpoint).map_err(|error| {
+                            Error::internal_json(
+                                error.to_string(),
+                                Some("serialize adopted candidate checkpoint".to_string()),
+                            )
+                        })?;
+                        agent_task_lifecycle::checkpoint_candidate_adoption(
+                            &record.run_id,
+                            "post_apply_verification",
+                            &gate_identity,
+                        )?;
+                        agent_task_lifecycle::record_promotion(&record.run_id, checkpoint)
+                            .map(|_| ())
+                    },
+                )
+            },
+        ),
+    };
     let mut promotion = match promotion {
         Ok(promotion) => promotion,
         Err(error) => {
@@ -644,6 +650,64 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
         exit_code,
         Some(record.run_id.as_str()),
     ))
+}
+
+fn reusable_applied_adoption_promotion(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    candidate_sha: &str,
+) -> Option<Result<AgentTaskPromotionReport>> {
+    let promotion = match persisted_promotion_for_attempt(&record.run_id) {
+        Ok(Some(promotion))
+            if promotion.status
+                == crate::agent_task_promotion::AgentTaskPromotionStatus::Applied =>
+        {
+            promotion
+        }
+        Ok(_) => return None,
+        Err(error) => return Some(Err(error)),
+    };
+    if record
+        .candidate_adoption
+        .as_ref()
+        .is_none_or(|adoption| adoption.candidate_sha != candidate_sha)
+    {
+        return None;
+    }
+    let Some(worktree_path) = promotion.target.path.as_deref() else {
+        return Some(Err(Error::validation_invalid_argument(
+            "latest_promotion.target.path",
+            "applied candidate adoption has no controller-recorded destination path",
+            Some(record.run_id.clone()),
+            None,
+        )));
+    };
+    let baseline = promotion.provenance.get("gate_feedback_baseline").cloned();
+    let Some(mut baseline) = baseline else {
+        return Some(Err(Error::validation_invalid_argument(
+            "latest_promotion",
+            "applied candidate adoption has no authenticated gate-feedback baseline",
+            Some(record.run_id.clone()),
+            None,
+        )));
+    };
+    // The checkpoint records the complete candidate diff; bind it to the exact
+    // promoted artifact before handing it to the shared dirty-destination check.
+    baseline["patch_artifact"] = match serde_json::to_value(&promotion.patch_artifact) {
+        Ok(artifact) => artifact,
+        Err(error) => {
+            return Some(Err(Error::internal_json(
+                error.to_string(),
+                Some("serialize persisted promotion artifact baseline".to_string()),
+            )));
+        }
+    };
+    Some(
+        crate::agent_task_candidate_baseline::validate_gate_feedback_candidate_baseline(
+            std::path::Path::new(worktree_path),
+            &baseline,
+        )
+        .map(|_| promotion),
+    )
 }
 
 /// Candidate adoption can prove that an otherwise-red broad command is

@@ -180,7 +180,7 @@ pub(crate) fn persisted_promotion_for_attempt(
     let Some(value) = record.metadata.get("latest_promotion") else {
         return Ok(None);
     };
-    let promotion: AgentTaskPromotionReport =
+    let mut promotion: AgentTaskPromotionReport =
         serde_json::from_value(value.clone()).map_err(|error| {
             Error::validation_invalid_argument(
                 "latest_promotion",
@@ -189,6 +189,9 @@ pub(crate) fn persisted_promotion_for_attempt(
                 None,
             )
         })?;
+    // `status` resolves a Cook alias to its immutable latest attempt. Validate
+    // against that concrete owner so aliases and exact durable IDs share the
+    // same persisted-promotion contract.
     if promotion.source.run_id.as_deref() != Some(record.run_id.as_str()) {
         let mut error = Error::validation_invalid_argument(
             "latest_promotion.source.run_id",
@@ -201,7 +204,97 @@ pub(crate) fn persisted_promotion_for_attempt(
         error.details["promotion_run_id"] = serde_json::json!(promotion.source.run_id);
         return Err(error);
     }
+    restore_gate_feedback_baseline(&record, &mut promotion)?;
     Ok(Some(promotion))
+}
+
+/// Older applied reports lost the post-apply baseline when the final gate
+/// report replaced its checkpoint. Recover it only from one controller-owned
+/// checkpoint for this exact promotion; any conflicting or incomplete evidence
+/// leaves the destination unavailable for dirty-worktree reuse.
+fn restore_gate_feedback_baseline(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    promotion: &mut AgentTaskPromotionReport,
+) -> Result<()> {
+    if promotion
+        .provenance
+        .pointer("/gate_feedback_baseline/current_diff")
+        .and_then(Value::as_str)
+        .is_some_and(|diff| !diff.trim().is_empty())
+    {
+        return Ok(());
+    }
+    let Some(events) = record.metadata.get("promotions").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    let mut baselines = events
+        .iter()
+        .filter(|event| promotion_checkpoint_matches(promotion, event))
+        .filter_map(|event| {
+            event
+                .pointer("/provenance/gate_feedback_baseline")
+                .filter(|baseline| {
+                    baseline.get("schema").and_then(Value::as_str)
+                        == Some("homeboy/agent-task-gate-feedback-baseline/v1")
+                        && baseline
+                            .get("current_diff")
+                            .and_then(Value::as_str)
+                            .is_some_and(|diff| !diff.trim().is_empty())
+                })
+                .cloned()
+        })
+        .collect::<Vec<_>>();
+    baselines.dedup();
+    match baselines.len() {
+        0 => Ok(()),
+        1 => {
+            promotion.provenance["gate_feedback_baseline"] = baselines.remove(0);
+            Ok(())
+        }
+        _ => Err(Error::validation_invalid_argument(
+            "latest_promotion",
+            "persisted promotion has ambiguous controller checkpoint gate-feedback baselines",
+            Some(record.run_id.clone()),
+            None,
+        )),
+    }
+}
+
+fn promotion_checkpoint_matches(promotion: &AgentTaskPromotionReport, checkpoint: &Value) -> bool {
+    checkpoint.get("status").and_then(Value::as_str) == Some("verification_pending")
+        && checkpoint.pointer("/provenance/post_apply") == Some(&Value::Bool(true))
+        && checkpoint.pointer("/source/run_id").and_then(Value::as_str)
+            == promotion.source.run_id.as_deref()
+        && checkpoint
+            .pointer("/source/task_id")
+            .and_then(Value::as_str)
+            == Some(promotion.source.task_id.as_str())
+        && checkpoint.get("to_worktree").and_then(Value::as_str)
+            == Some(promotion.to_worktree.as_str())
+        && checkpoint
+            .pointer("/target/worktree")
+            .and_then(Value::as_str)
+            == Some(promotion.target.worktree.as_str())
+        && checkpoint.pointer("/target/path")
+            == promotion
+                .target
+                .path
+                .as_ref()
+                .map(|path| Value::String(path.clone()))
+                .as_ref()
+        && checkpoint
+            .pointer("/patch_artifact/id")
+            .and_then(Value::as_str)
+            == Some(promotion.patch_artifact.id.as_str())
+        && checkpoint
+            .pointer("/patch_artifact/kind")
+            .and_then(Value::as_str)
+            == Some(promotion.patch_artifact.kind.as_str())
+        && checkpoint
+            .pointer("/patch_artifact/sha256")
+            .and_then(Value::as_str)
+            == promotion.patch_artifact.sha256.as_deref()
+        && checkpoint.pointer("/provenance/candidate") == promotion.provenance.get("candidate")
 }
 
 pub(crate) fn attempt_needs_execution(run_id: &str) -> bool {
