@@ -1926,6 +1926,8 @@ mod tests {
                 batch_id: plan.fanout_id.clone(),
                 status: "partial_failure".to_string(),
                 total: 2,
+                queued: 0,
+                running: 0,
                 succeeded: 1,
                 failed: 1,
                 cancelled: 0,
@@ -2008,6 +2010,8 @@ mod tests {
     #[test]
     fn durable_batch_status_envelope_preserves_canonical_terminal_state() {
         for state in [
+            batch::AgentTaskBatchState::Queued,
+            batch::AgentTaskBatchState::Running,
             batch::AgentTaskBatchState::Succeeded,
             batch::AgentTaskBatchState::PartialFailure,
             batch::AgentTaskBatchState::Failed,

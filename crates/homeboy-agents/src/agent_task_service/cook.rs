@@ -464,6 +464,8 @@ pub struct AgentTaskCookBatchReport {
     pub batch_id: String,
     pub status: String,
     pub total: usize,
+    pub queued: usize,
+    pub running: usize,
     pub succeeded: usize,
     pub failed: usize,
     pub cancelled: usize,
@@ -663,6 +665,8 @@ fn cook_batch_result(
     let mut totals = crate::agent_task_batch::AgentTaskBatchTotals::default();
     for cell in &cooks {
         match cell.status.as_str() {
+            "queued" => totals.queued += 1,
+            "running" | "in_flight" => totals.running += 1,
             "cancelled" => totals.cancelled += 1,
             "timed_out" => totals.timed_out += 1,
             _ if cell.exit_code == 0 => totals.succeeded += 1,
@@ -678,6 +682,8 @@ fn cook_batch_result(
             batch_id,
             status: state.outcome_status().to_string(),
             total,
+            queued: totals.queued,
+            running: totals.running,
             succeeded: totals.succeeded,
             failed: totals.failed,
             cancelled: totals.cancelled,
@@ -807,7 +813,7 @@ fn cook_report_exit_code(report: &AgentTaskCookReport) -> i32 {
     // could not carry to a green, finalized state is a non-zero resume result
     // the operator must still act on.
     match report.status.as_str() {
-        "review_ready" | "green_no_finalize" => 0,
+        "queued" | "running" | "in_flight" | "review_ready" | "green_no_finalize" => 0,
         _ => {
             if report
                 .finalization

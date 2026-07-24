@@ -737,6 +737,26 @@ mod tests {
     fn aggregate_state_matrix_is_shared_by_immediate_and_durable_batches() {
         for (name, totals, state, exit_code) in [
             (
+                "queued-with-terminal-child",
+                AgentTaskBatchTotals {
+                    queued: 1,
+                    succeeded: 1,
+                    ..Default::default()
+                },
+                AgentTaskBatchState::Queued,
+                0,
+            ),
+            (
+                "running-with-terminal-child",
+                AgentTaskBatchTotals {
+                    running: 1,
+                    failed: 1,
+                    ..Default::default()
+                },
+                AgentTaskBatchState::Running,
+                0,
+            ),
+            (
                 "all-success",
                 AgentTaskBatchTotals {
                     succeeded: 2,

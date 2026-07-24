@@ -2076,10 +2076,11 @@ fn cook_batch_preserves_order_concurrency_and_failure_isolation_process() {
     .expect("batch completes despite an individual cook failure");
 
     assert_eq!(entered.load(Ordering::SeqCst), 2);
-    assert_eq!(result.exit_code, 1);
-    assert_eq!(result.value.status, "partial_failure");
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.value.status, "running");
     assert_eq!(result.value.total, 2);
-    assert_eq!(result.value.succeeded, 1);
+    assert_eq!(result.value.succeeded, 0);
+    assert_eq!(result.value.running, 1);
     assert_eq!(result.value.failed, 1);
     assert_eq!(result.value.cooks[0].cook_id, "first");
     assert_eq!(result.value.cooks[0].exit_code, 1);
@@ -2154,6 +2155,19 @@ fn cook_batch_aggregate_outcome_matrix_distinguishes_success_partial_and_failure
             "timed_out",
             1,
         ),
+        ("in-flight", vec![cell("one", "in_flight", 0)], "running", 0),
+        (
+            "queued-with-terminal-child",
+            vec![cell("one", "queued", 0), cell("two", "review_ready", 0)],
+            "queued",
+            0,
+        ),
+        (
+            "running-with-terminal-child",
+            vec![cell("one", "running", 0), cell("two", "failed", 1)],
+            "running",
+            0,
+        ),
         (
             "infrastructure-error",
             vec![cell("one", "failed", 1)],
@@ -2168,7 +2182,9 @@ fn cook_batch_aggregate_outcome_matrix_distinguishes_success_partial_and_failure
             result.value.succeeded
                 + result.value.failed
                 + result.value.cancelled
-                + result.value.timed_out,
+                + result.value.timed_out
+                + result.value.queued
+                + result.value.running,
             result.value.total
         );
     }
