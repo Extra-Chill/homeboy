@@ -294,6 +294,11 @@ impl StatusProgress {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn is_active(&self) -> bool {
+        self.active
+    }
+
     pub(super) fn report(&self, index: usize, component_id: &str) {
         if !self.active {
             return;
@@ -364,5 +369,29 @@ impl serde::Serialize for StatusResult {
             StatusResult::Full(output) => output.serialize(serializer),
             StatusResult::Dashboard(output) => output.serialize(serializer),
         }
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::StatusProgress;
+
+    #[test]
+    fn single_component_progress_is_inactive() {
+        // A 0- or 1-component status is fast and needs no spinner, regardless of
+        // whether stderr is a TTY (#7378).
+        assert!(!StatusProgress::new(0).is_active());
+        assert!(!StatusProgress::new(1).is_active());
+    }
+
+    #[test]
+    fn inactive_progress_report_and_drop_are_no_ops() {
+        // In the (non-TTY) test environment progress is inactive; report/drop
+        // must be safe no-ops that never panic or emit control characters.
+        let progress = StatusProgress::new(10);
+        assert!(!progress.is_active(), "non-TTY stderr yields inactive progress");
+        progress.report(0, "component-a");
+        progress.report(9, "component-b");
+        drop(progress);
     }
 }
