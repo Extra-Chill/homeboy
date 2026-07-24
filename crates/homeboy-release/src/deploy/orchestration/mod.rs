@@ -11,7 +11,10 @@ use super::execution::{
     ReleaseArtifactPlan,
 };
 use super::orchestration_ref_checkout::{ExactRefCheckout, ExactRefIdentity};
-use super::orchestration_tag_checkout::{checkout_deploy_tags, restore_branches};
+use super::orchestration_tag_checkout::{
+    checkout_resolved_deploy_tags, partition_shared_root_conflicts, resolve_deploy_tags,
+    restore_branches,
+};
 use super::path_roots::{project_with_detected_path_roots, resolve_effective_remote_path};
 use super::planning::{load_project_components, plan_components};
 use super::types::{ComponentDeployResult, DeployConfig, DeployOrchestrationResult, DeploySummary};
@@ -255,12 +258,78 @@ pub(super) fn deploy_components(
         check_unreleased_commits(&local_build_components, config)?;
     }
 
-    // Checkout the deploy tag for each component (unless --head or --skip-build).
-    let tag_checkouts = if !config.has_requested_refs() && !config.head && !config.skip_build {
-        checkout_deploy_tags(&local_build_components, config.expected_version.as_deref())?
-    } else {
-        Vec::new()
-    };
+    // Resolve the deploy tag for each component (unless --head or --skip-build).
+    //
+    // Resolution happens against the pristine worktree, before any checkout, so
+    // one component's detached checkout cannot rewind HEAD and downgrade a later
+    // component's `--merged HEAD` tag lookup. Components that share a git root
+    // but resolve to different commits cannot both be checked out in place — the
+    // last checkout would otherwise silently supply the content for all of them
+    // — so those are materialized into isolated detached worktrees (#9963).
+    let mut tag_checkouts = Vec::new();
+    let mut tag_ref_checkouts: Vec<ExactRefCheckout> = Vec::new();
+    let mut materialized_tag_refs: HashMap<String, String> = HashMap::new();
+    let mut components = components;
+    let mut local_build_components = local_build_components;
+    if !config.has_requested_refs() && !config.head && !config.skip_build {
+        let resolved =
+            resolve_deploy_tags(&local_build_components, config.expected_version.as_deref())?;
+        let (in_place, shared_root) = partition_shared_root_conflicts(resolved);
+
+        for entry in &shared_root {
+            homeboy_core::log_status!(
+                "deploy",
+                "'{}' shares a git root with a component deploying a different commit — \
+                 materializing tag {} in an isolated worktree",
+                entry.component.id,
+                entry.tag
+            );
+        }
+
+        // Preserve the tag provenance label (including any stale-tag annotation)
+        // so an isolated materialization reports exactly what an in-place tag
+        // checkout would have reported.
+        for entry in &shared_root {
+            materialized_tag_refs.insert(entry.component.id.clone(), entry.provenance_ref());
+        }
+
+        let materialized = shared_root
+            .into_iter()
+            .map(|entry| {
+                let requested_ref = entry.tag.clone();
+                let resolved_sha = entry.tag_commit_sha.clone();
+                ExactRefCheckout::materialize(
+                    &entry.component,
+                    &requested_ref,
+                    resolved_sha.as_deref(),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for checkout in &materialized {
+            checkout.verify()?;
+            checkout.hydrate_dependencies(config.skip_deps_hydration)?;
+        }
+
+        tag_checkouts = match checkout_resolved_deploy_tags(in_place) {
+            Ok(checkouts) => checkouts,
+            Err(err) => return Err(err),
+        };
+
+        // Repoint every materialized component at its isolated worktree so
+        // version reads, packaging, and provenance all observe the tagged tree.
+        for checkout in &materialized {
+            let materialized_component = &checkout.component;
+            for target in components
+                .iter_mut()
+                .chain(local_build_components.iter_mut())
+                .filter(|candidate| candidate.id == materialized_component.id)
+            {
+                *target = materialized_component.clone();
+            }
+        }
+        tag_ref_checkouts = materialized;
+    }
+    let components = components;
 
     // Verify expected version if --version was specified
     if let Some(ref expected) = config.expected_version {
@@ -337,6 +406,8 @@ pub(super) fn deploy_components(
             .find(|c| c.component_id == component.id)
         {
             Some(checkout.provenance_ref())
+        } else if let Some(tag_ref) = materialized_tag_refs.get(&component.id) {
+            Some(tag_ref.clone())
         } else if config.head {
             // Deploying from HEAD — record the current branch
             homeboy_core::engine::command::run_in_optional(
@@ -376,6 +447,11 @@ pub(super) fn deploy_components(
             build_provenance.built_from_commit = Some(identity.resolved_sha.clone());
         } else if let Some(artifact) = resolved_release_artifacts.get(&component.id) {
             build_provenance.built_from_commit = artifact.commit.clone();
+        } else if let Some(checkout) = tag_ref_checkouts
+            .iter()
+            .find(|checkout| checkout.component.id == component.id)
+        {
+            build_provenance.built_from_commit = Some(checkout.identity.resolved_sha.clone());
         } else if let Some(prepared_artifact) = config.prepared_artifact.as_ref() {
             build_provenance.built_from_commit = Some(prepared_artifact.source_commit.clone());
         }
@@ -415,6 +491,10 @@ pub(super) fn deploy_components(
             }
         }
     }
+
+    // Isolated tag worktrees delete themselves on drop. Hold them until every
+    // payload has been built, transferred, and smoke-checked.
+    drop(tag_ref_checkouts);
 
     Ok(DeployOrchestrationResult {
         results,
@@ -1537,6 +1617,155 @@ mod tests {
         let err = validate_preflighted_component_identities(&[drifted], &config)
             .expect_err("real config drift must still fail closed");
         assert!(err.message.contains("changed after release-set preflight"));
+    }
+
+    /// Build a monorepo whose components each get their own bump commit and tag,
+    /// mirroring a real `homeboy release` run over a multi-component project.
+    ///
+    /// Layout matches the #9963 report: a theme plus two plugins, each with a
+    /// prior release tag and a newly created one.
+    fn init_monorepo_with_per_component_tags(path: &Path) {
+        run_git(path, &["init", "-q"]);
+        run_git(path, &["config", "user.email", "test@example.com"]);
+        run_git(path, &["config", "user.name", "Test"]);
+
+        for (dir, file, version) in [
+            ("theme", "style.css", "0.2.1"),
+            ("plugins/forms", "forms.php", "0.2.0"),
+            ("plugins/core", "core.php", "0.1.0"),
+        ] {
+            std::fs::create_dir_all(path.join(dir)).expect("component dir");
+            std::fs::write(path.join(dir).join(file), format!("Version: {version}\n"))
+                .expect("write version file");
+        }
+        run_git(path, &["add", "-A"]);
+        run_git(path, &["commit", "-qm", "initial"]);
+        // Prior release tags all point at the base commit.
+        run_git(path, &["tag", "theme-v0.2.1"]);
+        run_git(path, &["tag", "forms-v0.2.0"]);
+        run_git(path, &["tag", "core-v0.1.0"]);
+
+        // The new release: one bump commit + tag per component.
+        for (dir, file, version, tag) in [
+            ("theme", "style.css", "0.2.2", "theme-v0.2.2"),
+            ("plugins/forms", "forms.php", "0.2.1", "forms-v0.2.1"),
+            ("plugins/core", "core.php", "0.1.1", "core-v0.1.1"),
+        ] {
+            std::fs::write(path.join(dir).join(file), format!("Version: {version}\n"))
+                .expect("write bumped version");
+            run_git(path, &["commit", "-qam", &format!("bump {dir}")]);
+            run_git(path, &["tag", tag]);
+        }
+    }
+
+    fn monorepo_component(id: &str, root: &Path, relative: &str, version_file: &str) -> Component {
+        let mut component = make_component(id, &root.join(relative).to_string_lossy());
+        component.version_targets = Some(vec![homeboy_core::component::VersionTarget {
+            file: version_file.to_string(),
+            pattern: Some("Version:\\s*([0-9.]+)".to_string()),
+            artifact_path: None,
+        }]);
+        component
+    }
+
+    /// Regression for #9963: resolving tags lazily inside the checkout loop let
+    /// an earlier component's detached checkout rewind HEAD, so later components
+    /// resolved their *previous* release tag via `git tag --merged HEAD`.
+    #[test]
+    fn deploy_tags_resolve_against_pristine_head_for_every_component() {
+        let dir = TempDir::new().expect("temp dir");
+        init_monorepo_with_per_component_tags(dir.path());
+
+        let components = vec![
+            monorepo_component("theme", dir.path(), "theme", "style.css"),
+            monorepo_component("forms", dir.path(), "plugins/forms", "forms.php"),
+            monorepo_component("core", dir.path(), "plugins/core", "core.php"),
+        ];
+
+        let resolved = resolve_deploy_tags(&components, None).expect("resolve deploy tags");
+
+        let tags: Vec<&str> = resolved.iter().map(|entry| entry.tag.as_str()).collect();
+        assert_eq!(
+            tags,
+            vec!["theme-v0.2.2", "forms-v0.2.1", "core-v0.1.1"],
+            "every component must resolve the tag it was just released with, \
+             not the previous release it would see after a sibling checkout rewound HEAD"
+        );
+    }
+
+    /// Regression for #9963: components sharing one git root but deploying
+    /// different commits cannot be checked out in place — the last checkout would
+    /// supply the packaged content for all of them.
+    #[test]
+    fn shared_git_root_with_differing_commits_is_routed_to_isolated_materialization() {
+        let dir = TempDir::new().expect("temp dir");
+        init_monorepo_with_per_component_tags(dir.path());
+
+        let components = vec![
+            monorepo_component("theme", dir.path(), "theme", "style.css"),
+            monorepo_component("forms", dir.path(), "plugins/forms", "forms.php"),
+            monorepo_component("core", dir.path(), "plugins/core", "core.php"),
+        ];
+
+        let resolved = resolve_deploy_tags(&components, None).expect("resolve deploy tags");
+        let (in_place, shared_root) = partition_shared_root_conflicts(resolved);
+
+        assert!(
+            in_place.is_empty(),
+            "no component may be checked out in place when siblings need different commits"
+        );
+        let mut ids: Vec<&str> = shared_root
+            .iter()
+            .map(|entry| entry.component.id.as_str())
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec!["core", "forms", "theme"]);
+    }
+
+    /// A single-root component (the common non-monorepo case) must keep using the
+    /// cheap in-place checkout rather than paying for an isolated worktree.
+    #[test]
+    fn unshared_git_roots_still_check_out_in_place() {
+        let first = TempDir::new().expect("first temp dir");
+        let second = TempDir::new().expect("second temp dir");
+        init_repo_with_tag_gap(first.path());
+        init_repo_with_tag_gap(second.path());
+
+        let components = vec![
+            make_component("first", &first.path().to_string_lossy()),
+            make_component("second", &second.path().to_string_lossy()),
+        ];
+
+        let resolved = resolve_deploy_tags(&components, None).expect("resolve deploy tags");
+        let (in_place, shared_root) = partition_shared_root_conflicts(resolved);
+
+        assert_eq!(
+            in_place.len(),
+            2,
+            "separate repos never contend for a worktree"
+        );
+        assert!(shared_root.is_empty());
+    }
+
+    /// Components sharing a root that all resolve to the *same* commit are not in
+    /// conflict — one checkout serves them all.
+    #[test]
+    fn shared_git_root_at_one_commit_checks_out_in_place() {
+        let dir = TempDir::new().expect("temp dir");
+        init_monorepo_with_per_component_tags(dir.path());
+
+        // Both components resolve to the same tag commit, so a single in-place
+        // checkout is sufficient and correct.
+        let components = vec![
+            monorepo_component("theme", dir.path(), "theme", "style.css"),
+            monorepo_component("theme-dup", dir.path(), "theme", "style.css"),
+        ];
+
+        let resolved = resolve_deploy_tags(&components, Some("0.2.2")).expect("resolve tags");
+        let (in_place, shared_root) = partition_shared_root_conflicts(resolved);
+
+        assert_eq!(in_place.len(), 2, "one commit needs only one checkout");
+        assert!(shared_root.is_empty());
     }
 
     #[test]
