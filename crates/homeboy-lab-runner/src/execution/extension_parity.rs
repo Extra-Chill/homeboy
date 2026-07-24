@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 
 use super::super::{load, merge, remote_runner_homeboy_path};
 use super::super::{
-    materialize_runner_extension, RunnerExtensionMaterializationRequest,
-    RunnerExtensionMaterializationSource,
+    materialize_runner_extension_with_exec, RunnerExecOptions, RunnerExecOutput,
+    RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
 };
 use super::{Runner, RunnerKind};
 
@@ -117,6 +117,15 @@ pub(super) fn plan_extension_parity(
 }
 
 pub(super) fn ensure_extension_materialized(plan: &ExtensionParityPlan) -> Result<()> {
+    ensure_extension_materialized_with_exec(plan, &mut |runner_id, options| {
+        crate::exec(runner_id, options)
+    })
+}
+
+fn ensure_extension_materialized_with_exec(
+    plan: &ExtensionParityPlan,
+    exec_runner: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(RunnerExecOutput, i32)>,
+) -> Result<()> {
     if plan.steps.is_empty() {
         return Ok(());
     }
@@ -124,8 +133,13 @@ pub(super) fn ensure_extension_materialized(plan: &ExtensionParityPlan) -> Resul
     record_extension_parity_ensure_trail(plan, "running", None, None)?;
     let runner = load(&plan.runner_id)?;
     for step in &plan.steps {
-        let result =
-            materialize_runner_extension(&runner, &plan.homeboy_path, &step.materialization);
+        let result = materialize_runner_extension_with_exec(
+            &runner,
+            &plan.homeboy_path,
+            None,
+            &step.materialization,
+            exec_runner,
+        );
         match result {
             Ok(provenance) => {
                 if matches!(
@@ -1118,7 +1132,8 @@ fn extension_parity_diagnostic_tail(stderr: &str, stdout: &str) -> String {
 mod tests {
     use super::{
         controller_extension_metadata_required_error, controller_local_source_path,
-        dev_sync_extension_overlay, ensure_extension_materialized, plan_extension_parity,
+        dev_sync_extension_overlay, ensure_extension_materialized,
+        ensure_extension_materialized_with_exec, plan_extension_parity,
         record_materialized_extension_overlay, remote_extension_core_compatibility,
         remote_extension_ready_status, remote_extension_setting_ids,
         remote_extension_source_revision, requested_setting_keys_for_command,
@@ -1130,8 +1145,8 @@ mod tests {
     use homeboy_core::test_support::with_isolated_home;
 
     use crate::{
-        Runner, RunnerExtensionMaterializationRequest, RunnerExtensionMaterializationSource,
-        RunnerKind,
+        Runner, RunnerExecMode, RunnerExecOutput, RunnerExtensionMaterializationRequest,
+        RunnerExtensionMaterializationSource, RunnerKind,
     };
     use homeboy_core::error::Error;
     use std::collections::HashMap;
@@ -1160,6 +1175,38 @@ mod tests {
             secret_env: HashMap::new(),
             resources,
             policy: Default::default(),
+        }
+    }
+
+    fn successful_runner_exec_output() -> RunnerExecOutput {
+        RunnerExecOutput {
+            variant: "runner_exec",
+            command: "runner.exec",
+            runner_id: "homeboy-lab".to_string(),
+            dry_run: false,
+            mode: RunnerExecMode::Local,
+            argv: Vec::new(),
+            remote_cwd: String::new(),
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            source_snapshot: None,
+            job: None,
+            runner_job: None,
+            job_id: None,
+            job_events: None,
+            mirror_run_id: None,
+            patch: None,
+            mutation_artifacts: None,
+            artifacts: Vec::new(),
+            promoted_outputs: Vec::new(),
+            structured_summaries: Vec::new(),
+            metrics: None,
+            capture: None,
+            execution_record: None,
+            runner_result: None,
+            handoff: None,
+            diagnostics: None,
         }
     }
 
@@ -1288,7 +1335,37 @@ mod tests {
                 }],
             };
 
-            ensure_extension_materialized(&plan).expect("apply materialization");
+            let mut commands = Vec::new();
+            ensure_extension_materialized_with_exec(&plan, &mut |_runner_id, options| {
+                commands.push(options.command);
+                Ok((successful_runner_exec_output(), 0))
+            })
+            .expect("apply materialization through fixture executor");
+
+            assert_eq!(commands.len(), 2);
+            assert_eq!(
+                commands[0],
+                vec![
+                    command.display().to_string(),
+                    "extension".to_string(),
+                    "show".to_string(),
+                    "rust".to_string(),
+                ]
+            );
+            assert_eq!(
+                commands[1],
+                vec![
+                    command.display().to_string(),
+                    "extension".to_string(),
+                    "install".to_string(),
+                    "/runner/extensions/rust".to_string(),
+                    "--id".to_string(),
+                    "rust".to_string(),
+                    "--ref".to_string(),
+                    "abc123".to_string(),
+                    "--replace".to_string(),
+                ]
+            );
 
             let runner = crate::load("homeboy-lab").expect("runner trail");
             assert_eq!(runner.resources["extension_parity"]["status"], "success");
