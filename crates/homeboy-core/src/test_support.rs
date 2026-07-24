@@ -119,6 +119,10 @@ impl HermeticTestContext {
                 crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV,
                 self.invocation_runtime.path(),
             )
+            // Lab transport belongs to the runner job that launched this test,
+            // never to fixture subprocesses unless a test explicitly injects it.
+            .env_remove(crate::observation::SOURCE_SNAPSHOT_METADATA_ENV)
+            .env_remove(crate::observation::LAB_OFFLOAD_METADATA_ENV)
             .env("HOMEBOY_NO_UPDATE_CHECK", "1");
         command
     }
@@ -1214,6 +1218,80 @@ fn write_broker_response(stream: &mut TcpStream, body: serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl EnvRestore {
+        fn capture(names: &[&'static str]) -> Self {
+            Self(
+                names
+                    .iter()
+                    .map(|name| (*name, std::env::var_os(name)))
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (name, value) in &self.0 {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    fn command_env(command: &Command, name: &str) -> Option<Option<std::ffi::OsString>> {
+        command.get_envs().find_map(|(key, value)| {
+            (key == std::ffi::OsStr::new(name)).then(|| value.map(std::ffi::OsStr::to_os_string))
+        })
+    }
+
+    #[test]
+    fn hermetic_commands_clear_inherited_lab_transport_metadata() {
+        let _lock = env_lock();
+        let source = crate::observation::SOURCE_SNAPSHOT_METADATA_ENV;
+        let lab = crate::observation::LAB_OFFLOAD_METADATA_ENV;
+        let _restore = EnvRestore::capture(&[source, lab]);
+
+        for (source_value, lab_value) in [
+            (Some(r#"{"source":"only"}"#), None),
+            (None, Some(r#"{"lab":"only"}"#)),
+            (Some(r#"{"source":"paired"}"#), Some(r#"{"lab":"paired"}"#)),
+        ] {
+            match source_value {
+                Some(value) => std::env::set_var(source, value),
+                None => std::env::remove_var(source),
+            }
+            match lab_value {
+                Some(value) => std::env::set_var(lab, value),
+                None => std::env::remove_var(lab),
+            }
+
+            let command = HermeticTestContext::new().command(TestBinary::CurrentTest);
+            assert_eq!(command_env(&command, source), Some(None));
+            assert_eq!(command_env(&command, lab), Some(None));
+        }
+    }
+
+    #[test]
+    fn hermetic_commands_allow_explicit_complete_lab_transport_metadata() {
+        let context = HermeticTestContext::new();
+        let source = crate::observation::SOURCE_SNAPSHOT_METADATA_ENV;
+        let lab = crate::observation::LAB_OFFLOAD_METADATA_ENV;
+        let source_value = r#"{"source":"fixture"}"#;
+        let lab_value = r#"{"lab":"fixture"}"#;
+        let mut command = context.command(TestBinary::CurrentTest);
+        command.env(source, source_value).env(lab, lab_value);
+
+        assert_eq!(
+            command_env(&command, source),
+            Some(Some(source_value.into()))
+        );
+        assert_eq!(command_env(&command, lab), Some(Some(lab_value.into())));
+    }
 
     #[cfg(unix)]
     #[test]
