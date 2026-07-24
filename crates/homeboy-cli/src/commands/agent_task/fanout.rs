@@ -397,7 +397,10 @@ fn cook_batch_inner(
     } else {
         "ready"
     };
-    let exit_code = if blocked == 0 { 0 } else { 1 };
+    // A completed batch's aggregate result is authoritative. Worktree blocking
+    // remains a pre-execution failure, while child failures retain their durable
+    // evidence and produce the same nonzero result at every CLI boundary.
+    let exit_code = cook_batch_outer_exit_code(blocked, &run_result);
 
     Ok((
         serde_json::json!({
@@ -426,6 +429,17 @@ fn cook_batch_inner(
         }),
         exit_code,
     ))
+}
+
+fn cook_batch_outer_exit_code(blocked: usize, run_result: &Option<Value>) -> i32 {
+    if blocked > 0 {
+        1
+    } else {
+        run_result
+            .as_ref()
+            .and_then(|value| value["exit_code"].as_i64())
+            .unwrap_or(0) as i32
+    }
 }
 
 fn queue_or_reuse_worktrees(
@@ -1890,6 +1904,91 @@ mod tests {
             .as_str()
             .expect("resume command")
             .contains("fanout run-plan"));
+    }
+
+    #[test]
+    fn batch_cook_cli_envelope_preserves_partial_failure_and_nonzero_exit() {
+        let plan = test_batch_plan();
+        let result = agent_task_service::AgentTaskRunResult {
+            exit_code: 1,
+            value: agent_task_service::AgentTaskCookBatchReport {
+                schema: "homeboy/agent-task-cook-batch/v1",
+                batch_id: plan.fanout_id.clone(),
+                status: "partial_failure".to_string(),
+                total: 2,
+                succeeded: 1,
+                failed: 1,
+                cooks: vec![
+                    agent_task_service::AgentTaskCookBatchCellReport {
+                        cook_id: "first".to_string(),
+                        initial_run_id: "first-run".to_string(),
+                        exit_code: 0,
+                        result: None,
+                        error: None,
+                    },
+                    agent_task_service::AgentTaskCookBatchCellReport {
+                        cook_id: "second".to_string(),
+                        initial_run_id: "second-run".to_string(),
+                        exit_code: 1,
+                        result: None,
+                        error: Some("controller admission failed".to_string()),
+                    },
+                ],
+            },
+        };
+        let mut all_failed_report = result.value.clone();
+        all_failed_report.status = "failed".to_string();
+        all_failed_report.succeeded = 0;
+        all_failed_report.failed = 2;
+        for cell in &mut all_failed_report.cooks {
+            cell.exit_code = 1;
+        }
+        let (data, exit_code) = batch_cook_result(&plan, result);
+        let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
+            &Ok(data),
+            exit_code,
+            "agent-task fanout cook-batch",
+            None,
+        );
+
+        assert_eq!(exit_code, 1);
+        assert!(!envelope.success);
+        assert_eq!(envelope.exit_code, 1);
+        assert_eq!(envelope.status, "partial_failure");
+        assert_eq!(
+            envelope.data.expect("batch data")["status"],
+            "partial_failure"
+        );
+
+        let (data, exit_code) = batch_cook_result(
+            &plan,
+            agent_task_service::AgentTaskRunResult {
+                exit_code: 1,
+                value: all_failed_report,
+            },
+        );
+        let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
+            &Ok(data),
+            exit_code,
+            "agent-task fanout cook-batch",
+            None,
+        );
+        assert_eq!(exit_code, 1);
+        assert!(!envelope.success);
+        assert_eq!(envelope.status, "failed");
+    }
+
+    #[test]
+    fn cook_batch_outer_exit_code_uses_completed_child_outcome() {
+        assert_eq!(cook_batch_outer_exit_code(0, &None), 0);
+        assert_eq!(
+            cook_batch_outer_exit_code(0, &Some(json!({ "exit_code": 1 }))),
+            1
+        );
+        assert_eq!(
+            cook_batch_outer_exit_code(1, &Some(json!({ "exit_code": 0 }))),
+            1
+        );
     }
 
     #[test]

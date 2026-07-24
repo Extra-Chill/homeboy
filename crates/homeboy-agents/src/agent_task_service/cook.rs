@@ -548,24 +548,10 @@ where
     for (index, cell) in rx {
         cells[index] = Some(cell);
     }
-    let cooks = cells.into_iter().flatten().collect::<Vec<_>>();
-    let failed = cooks.iter().filter(|cell| cell.exit_code != 0).count();
-    Ok(AgentTaskRunResult {
-        exit_code: if failed == 0 { 0 } else { 1 },
-        value: AgentTaskCookBatchReport {
-            schema: "homeboy/agent-task-cook-batch/v1",
-            batch_id: options.batch_id,
-            status: if failed == 0 {
-                "succeeded".to_string()
-            } else {
-                "failed".to_string()
-            },
-            total,
-            succeeded: total - failed,
-            failed,
-            cooks,
-        },
-    })
+    Ok(cook_batch_result(
+        options.batch_id,
+        cells.into_iter().flatten().collect(),
+    ))
 }
 
 /// Resume a persisted cook batch after its original synchronous coordinator
@@ -659,23 +645,33 @@ where
         cells.push(cell);
     }
 
-    let failed = cells.iter().filter(|cell| cell.exit_code != 0).count();
-    Ok(AgentTaskRunResult {
+    Ok(cook_batch_result(batch.batch_id, cells))
+}
+
+fn cook_batch_result(
+    batch_id: String,
+    cooks: Vec<AgentTaskCookBatchCellReport>,
+) -> AgentTaskRunResult<AgentTaskCookBatchReport> {
+    let total = cooks.len();
+    let failed = cooks.iter().filter(|cell| cell.exit_code != 0).count();
+    let status = match failed {
+        0 => "succeeded",
+        failed if failed == total => "failed",
+        _ => "partial_failure",
+    };
+
+    AgentTaskRunResult {
         exit_code: if failed == 0 { 0 } else { 1 },
         value: AgentTaskCookBatchReport {
             schema: "homeboy/agent-task-cook-batch/v1",
-            batch_id: batch.batch_id,
-            status: if failed == 0 {
-                "succeeded".to_string()
-            } else {
-                "failed".to_string()
-            },
+            batch_id,
+            status: status.to_string(),
             total,
             succeeded: total - failed,
             failed,
-            cooks: cells,
+            cooks,
         },
-    })
+    }
 }
 
 /// Reconstruct one batch child's cook from its durable recipe and re-run it.

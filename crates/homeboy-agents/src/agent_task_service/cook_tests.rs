@@ -2077,7 +2077,7 @@ fn cook_batch_preserves_order_concurrency_and_failure_isolation_process() {
 
     assert_eq!(entered.load(Ordering::SeqCst), 2);
     assert_eq!(result.exit_code, 1);
-    assert_eq!(result.value.status, "failed");
+    assert_eq!(result.value.status, "partial_failure");
     assert_eq!(result.value.total, 2);
     assert_eq!(result.value.succeeded, 1);
     assert_eq!(result.value.failed, 1);
@@ -2101,6 +2101,47 @@ fn cook_batch_preserves_order_concurrency_and_failure_isolation_process() {
             .status,
         "in_flight"
     );
+}
+
+#[test]
+fn cook_batch_aggregate_outcome_matrix_distinguishes_success_partial_and_failure() {
+    let cell = |id: &str, exit_code| AgentTaskCookBatchCellReport {
+        cook_id: id.to_string(),
+        initial_run_id: format!("{id}-run"),
+        exit_code,
+        result: None,
+        error: (exit_code != 0).then(|| "infrastructure admission failed".to_string()),
+    };
+
+    for (name, cells, status, exit_code) in [
+        (
+            "all-success",
+            vec![cell("one", 0), cell("two", 0)],
+            "succeeded",
+            0,
+        ),
+        (
+            "mixed",
+            vec![cell("one", 0), cell("two", 1)],
+            "partial_failure",
+            1,
+        ),
+        (
+            "all-failed",
+            vec![cell("one", 1), cell("two", 1)],
+            "failed",
+            1,
+        ),
+        ("infrastructure-error", vec![cell("one", 1)], "failed", 1),
+    ] {
+        let result = cook_batch_result(name.to_string(), cells);
+        assert_eq!(result.value.status, status, "{name}");
+        assert_eq!(result.exit_code, exit_code, "{name}");
+        assert_eq!(
+            result.value.succeeded + result.value.failed,
+            result.value.total
+        );
+    }
 }
 
 #[test]
@@ -4564,6 +4605,7 @@ fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provid
             .expect("resume harvests terminal children");
 
         assert_eq!(result.exit_code, 0, "both children finalize green");
+        assert_eq!(result.value.status, "succeeded");
         assert_eq!(result.value.total, 3);
         assert_eq!(result.value.succeeded, 3);
         assert_eq!(result.value.failed, 0);
@@ -4834,6 +4876,7 @@ fn resume_cook_batch_reports_a_child_with_no_recipe_as_unresumable() {
         .expect("resume returns a report even when a child cannot resume");
 
         assert_eq!(result.exit_code, 1);
+        assert_eq!(result.value.status, "failed");
         assert_eq!(result.value.failed, 1);
         let cell = &result.value.cooks[0];
         assert_eq!(cell.exit_code, 1);

@@ -826,14 +826,19 @@ fn tail_text(value: String) -> String {
 }
 
 fn status_for_result(data: Option<&Value>, exit_code: i32) -> String {
+    let payload_status = data
+        .and_then(|value| value.get("status").and_then(Value::as_str))
+        .and_then(normalize_status);
     if exit_code != 0 {
+        // A partial result is still a command failure, but retaining its precise
+        // aggregate state lets machine consumers distinguish it from all-failed.
+        if payload_status == Some("partial_failure") {
+            return "partial_failure".to_string();
+        }
         return "failed".to_string();
     }
 
-    data.and_then(|value| value.get("status").and_then(Value::as_str))
-        .and_then(normalize_status)
-        .unwrap_or("succeeded")
-        .to_string()
+    payload_status.unwrap_or("succeeded").to_string()
 }
 
 fn normalize_status(status: &str) -> Option<&'static str> {
