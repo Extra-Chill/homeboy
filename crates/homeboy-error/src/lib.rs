@@ -45,6 +45,7 @@ pub enum ErrorCode {
     StackApplyConflict,
     RunnerControllerDisconnected,
     RuntimePromotionContended,
+    RuntimePromotionWaitTimeout,
     DependencyStepFailed,
     DependencyOutputMissing,
 
@@ -104,6 +105,7 @@ impl ErrorCode {
             ErrorCode::StackApplyConflict => "stack.apply_conflict",
             ErrorCode::RunnerControllerDisconnected => "runner.controller_disconnected",
             ErrorCode::RuntimePromotionContended => "runtime_promotion.contended",
+            ErrorCode::RuntimePromotionWaitTimeout => "runtime_promotion.wait_timeout",
             ErrorCode::DependencyStepFailed => "dependency_step_failed",
             ErrorCode::DependencyOutputMissing => "dependency_output_missing",
 
