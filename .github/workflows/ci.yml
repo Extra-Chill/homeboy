@@ -38,6 +38,25 @@ jobs:
       - name: Compile all workspace test targets
         run: cargo check --workspace --tests --locked
 
+  # Keep `main` rustfmt-clean so a feature branch's `cargo fmt` only ever touches
+  # the files it changed. Without this gate, unformatted files drift onto main
+  # and get pulled into unrelated PRs (a bare `cargo fmt` reformats them, or a
+  # `rustfmt mod.rs` cascades across the module tree), ballooning otherwise-small
+  # diffs and forcing manual `git checkout --` of noise files (#6860). This is a
+  # non-differential whole-workspace check, so it catches drift anywhere.
+  rustfmt:
+    name: homeboy / Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check workspace formatting
+        run: cargo fmt --all --check
+
   homeboy:
     name: homeboy / ${{ matrix.title }}
     runs-on: ubuntu-latest
