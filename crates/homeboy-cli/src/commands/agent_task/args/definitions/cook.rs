@@ -11,26 +11,43 @@ use super::super::super::review;
 
 #[derive(Args, Debug, Clone)]
 pub struct VerifyGateArgs {
+    /// Deterministic verification command that must pass before the cook
+    /// promotes its work (e.g. `--verify "cargo fmt --check"`). Runs in the
+    /// destination worktree. Repeat to require multiple gates; every one must
+    /// pass. Its output is included in the review evidence.
     #[arg(long = "verify", value_name = "COMMAND")]
     pub verify: Vec<String>,
+    /// Like `--verify`, but the command's output is treated as private: only a
+    /// pass/fail summary is revealed by default (see `--private-gate-reveal`).
+    /// Use for gates whose logs may contain secrets. Repeatable.
     #[arg(long = "private-verify", value_name = "COMMAND")]
     pub private_verify: Vec<String>,
+    /// How much of a `--private-verify` gate's output to reveal: `summary-only`
+    /// (default) shows just pass/fail; other policies expose more detail.
     #[arg(
         long = "private-gate-reveal",
         default_value = "summary-only",
         value_name = "POLICY"
     )]
     pub private_gate_reveal: AgentTaskGateRevealPolicy,
+    /// Wall-clock timeout, in seconds, for each verification gate command
+    /// (default 1800 = 30 min). A gate exceeding this fails.
     #[arg(long = "gate-timeout-seconds", default_value_t = 30 * 60, value_name = "SECONDS")]
     pub gate_timeout_seconds: u64,
+    /// How often, in seconds, to emit a heartbeat while a gate runs so long
+    /// gates are not mistaken for a stalled cook (default 5).
     #[arg(
         long = "gate-heartbeat-interval-seconds",
         default_value_t = 5,
         value_name = "SECONDS"
     )]
     pub gate_heartbeat_interval_seconds: u64,
+    /// Re-run gates that already recorded a passing result on a previous
+    /// attempt instead of reusing the recorded pass. Off by default.
     #[arg(long = "rerun-completed-gates")]
     pub rerun_completed_gates: bool,
+    /// Environment for gate commands: `inherit` (default) extends the current
+    /// environment; `replace` starts from an empty environment plus `--gate-env`.
     #[arg(
         long = "gate-environment-mode",
         default_value = "inherit",
@@ -38,14 +55,19 @@ pub struct VerifyGateArgs {
     )]
     #[arg(value_parser = ["inherit", "replace"])]
     pub gate_environment_mode: String,
+    /// Extra environment variable for gate commands, as `NAME=VALUE`. Repeatable.
     #[arg(long = "gate-env", value_name = "NAME=VALUE", value_parser = parse_gate_environment)]
     pub gate_environment: Vec<(String, String)>,
+    /// Run gates with an isolated `$HOME` so gate side effects do not touch the
+    /// operator's home directory (default true).
     #[arg(
         long = "isolate-gate-home",
         default_value_t = true,
         action = clap::ArgAction::Set
     )]
     pub isolate_gate_home: bool,
+    /// Run gates with isolated XDG base directories so gate side effects do not
+    /// touch the operator's config/cache/data dirs (default true).
     #[arg(
         long = "isolate-gate-xdg",
         default_value_t = true,
@@ -171,8 +193,14 @@ pub struct AgentTaskCookArgs {
     pub attempt_run_id: Option<String>,
     #[arg(long, hide = true)]
     pub attempt_plan: Option<String>,
+    /// One-line statement of what a successful cook must achieve. Recorded with
+    /// the run and used to frame the agent's task and the review.
     #[arg(long, value_name = "TEXT")]
     pub goal: Option<String>,
+    /// Workspace handle of the existing worktree the cook edits, verifies, and
+    /// finalizes into (e.g. `repo@branch-slug`). This checkout is authoritative:
+    /// the agent's changes, the `--verify` gates, and the resulting PR all
+    /// operate on it. Create it first with `workspace worktree add`.
     #[arg(long, value_name = "HANDLE")]
     pub to_worktree: String,
     #[arg(
@@ -190,23 +218,41 @@ pub struct AgentTaskCookArgs {
     pub provider_argv: Vec<String>,
     #[command(flatten)]
     pub gates: VerifyGateArgs,
+    /// Maximum cook attempts before giving up. Each attempt re-runs the agent
+    /// and gates; a later attempt can recover from a transient failure
+    /// (default 3).
     #[arg(long = "max-attempts", default_value_t = 3, value_name = "N")]
     pub max_attempts: u32,
+    /// Stop after the work is verified but before opening the pull request,
+    /// leaving the committed change on the worktree branch for manual review or
+    /// a later `agent-task review`/finalize.
     #[arg(long = "no-finalize")]
     pub no_finalize: bool,
     /// Return the complete cook report, including nested promotion and gate evidence.
     #[arg(long)]
     pub full: bool,
+    /// Base branch the finalized pull request targets and the branch changes are
+    /// diffed against (default `main`).
     #[arg(long, default_value = "main", value_name = "BRANCH")]
     pub base: String,
+    /// Head branch to push and open the PR from. Defaults to the branch the
+    /// destination worktree is already on.
     #[arg(long, value_name = "BRANCH")]
     pub head: Option<String>,
+    /// Title for the finalized pull request. Defaults to a title derived from
+    /// the goal / commit.
     #[arg(long, value_name = "TEXT")]
     pub title: Option<String>,
+    /// Commit message for the cook's committed change. Defaults to a message
+    /// derived from the goal.
     #[arg(long, value_name = "TEXT")]
     pub commit_message: Option<String>,
+    /// Branch names the cook refuses to push to or target directly, as a safety
+    /// guard. Repeatable; defaults to the standard protected set.
     #[arg(long = "protected-branch", default_values_t = review::default_protected_branches(), value_name = "BRANCH")]
     pub protected_branches: Vec<String>,
+    /// AI tool disclosure recorded in the PR's assistance attribution
+    /// (default `AI-assisted`).
     #[arg(long, default_value = "AI-assisted", value_name = "TEXT")]
     pub ai_tool: String,
     /// Legacy AI-usage disclosure. The reviewer-facing "Used for" text is now
