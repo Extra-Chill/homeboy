@@ -585,7 +585,8 @@ fn successive_fingerprints_at_stable_path_observe_current_methods() {
     let grammar = php_metadata_grammar();
     let dir = tempfile::tempdir().expect("temporary audit root");
     let path = dir.path().join("StableSource.php");
-    let initial = "<?php\nclass StableSource {\n    public function canExtract(): bool { return true; }\n}\n";
+    let initial =
+        "<?php\nclass StableSource {\n    public function canExtract(): bool { return true; }\n}\n";
     std::fs::write(&path, initial).expect("initial source");
 
     let first_content = std::fs::read_to_string(&path).expect("initial source content");
