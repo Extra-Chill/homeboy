@@ -1,9 +1,11 @@
 use crate::cli_surface::Commands;
 use crate::command_contract::{CommandRawOutputMode, CommandStdoutMode};
 
-use super::output_runtime::CommandRun;
+use super::output_runtime::{CommandPresentation, CommandRun};
 use super::utils::{response as output, tty};
-use super::{file, release, report, review, runner, runs, runtime, self_cmd, trace, GlobalArgs};
+use super::{
+    file, release, report, review, runner, runs, runtime, self_cmd, ssh, trace, GlobalArgs,
+};
 
 pub enum RawExecution {
     Handled(i32),
@@ -78,8 +80,25 @@ fn run_plain_text(command: Commands, global: &GlobalArgs) -> CommandRun {
         Commands::Runner(args) if runner::is_compact_exec_stdout(&args) => {
             runner_compact_exec(args, global)
         }
+        Commands::Ssh(args) => ssh_raw(args),
         Commands::Runtime(args) => raw_stdout_only(runtime::run_plain_text(args)),
         _ => raw_stdout_only(unsupported_output("plain text")),
+    }
+}
+
+/// Emit only the remote command's stdout to local stdout and its stderr to local
+/// stderr, exiting with the remote exit code (#9894).
+fn ssh_raw(args: ssh::SshArgs) -> CommandRun {
+    match ssh::execute_raw_command(&args) {
+        Ok((stdout, stderr, exit_code)) => {
+            CommandRun::from_raw_stdout("ssh", Ok(stdout), exit_code, None).with_presentation(
+                CommandPresentation {
+                    stdout: None,
+                    stderr: Some(stderr),
+                },
+            )
+        }
+        Err(err) => CommandRun::from_raw_stdout("ssh", Err(err), 1, None),
     }
 }
 
