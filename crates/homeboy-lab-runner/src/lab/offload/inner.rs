@@ -277,15 +277,22 @@ pub(crate) fn materialize_lab_at_files_on_runner(
                 format!("failed to create remote parent directory: {}", err.message),
             )
         })?;
-        transfer
-            .upload_file(&spec.local_path.display().to_string(), &spec.remote_path)
-            .map_err(|err| {
-                lab_at_file_materialization_error(
-                    runner_id,
-                    spec,
-                    format!("failed to upload file: {}", err.message),
-                )
-            })?;
+        let upload = if spec.private {
+            transfer.upload_private_file_atomic(
+                &spec.local_path.display().to_string(),
+                &spec.remote_path,
+                &spec.content_sha256,
+            )
+        } else {
+            transfer.upload_file(&spec.local_path.display().to_string(), &spec.remote_path)
+        };
+        upload.map_err(|err| {
+            lab_at_file_materialization_error(
+                runner_id,
+                spec,
+                format!("failed to upload file: {}", err.message),
+            )
+        })?;
     }
 
     Ok(())

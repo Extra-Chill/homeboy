@@ -909,6 +909,11 @@ impl SshClient {
         self.execute_with_stdin(&remote_command, SshStdin::File(local_path))
     }
 
+    pub fn upload_file_private(&self, local_path: &str, remote_path: &str) -> CommandOutput {
+        let remote_command = format!("umask 077; cat > {}", shell::quote_path(remote_path));
+        self.execute_with_stdin(&remote_command, SshStdin::File(local_path))
+    }
+
     pub fn download_file(&self, remote_path: &str, local_path: &str) -> CommandOutput {
         if self.is_local {
             return match std::fs::copy(remote_path, local_path) {

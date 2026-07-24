@@ -8,6 +8,7 @@
 //! - The legacy dispatch-envelope parser is retained only for pre-typed runners
 //!   that cannot surface the handoff through workload events/results.
 
+#[cfg(test)]
 use std::fs;
 
 use crate::agent_task_lifecycle_event::{
@@ -18,13 +19,12 @@ use homeboy_agents::agent_task::AgentTaskEvidenceRef;
 use homeboy_agents::agent_task_lifecycle::{
     cook_attempt_run_id, AgentTaskArtifactRef, AgentTaskRunRecord, AgentTaskRunState,
 };
-use homeboy_agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy_agents::agent_tasks::provider::{
     dependency_failure_patterns, AgentTaskProviderDependencyFailurePattern,
 };
-use homeboy_agents::agent_tasks::scheduler::{
-    AgentTaskAggregate, AgentTaskAggregateTotals, AgentTaskPlan,
-};
+use homeboy_agents::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
+#[cfg(test)]
+use homeboy_agents::agent_tasks::{lifecycle as agent_task_lifecycle, scheduler::AgentTaskPlan};
 use homeboy_core::api_jobs::JobEvent;
 #[cfg(test)]
 use homeboy_core::api_jobs::JobEventKind;
@@ -40,9 +40,10 @@ use serde_json::Value;
 
 #[cfg(test)]
 use super::super::lab_args::materialize_inline_agent_task_json_specs_in_args;
-use super::super::lab_args::AgentTaskInlineJsonSpec;
+#[cfg(test)]
 use super::super::lab_workspaces::{workspace_mapping_entry, LabWorkspaceMappingEntry};
-use super::super::{sync_workspace, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
+#[cfg(test)]
+use super::super::RunnerWorkspaceSyncMode;
 use super::args_util::{subcommand_index, ArgEditor, CommandInvocation};
 use homeboy_agents::agent_task_promotion::mirror_agent_task_run_plan_aggregate;
 
@@ -67,58 +68,10 @@ fn materialize_inline_agent_task_tasks_arg_with(
     ))
 }
 
-pub(super) fn sync_inline_agent_task_file(
-    runner_id: &str,
-    spec: AgentTaskInlineJsonSpec<'_>,
-) -> Result<Option<(String, LabWorkspaceMappingEntry)>> {
-    serde_json::from_str::<serde_json::Value>(spec.spec).map_err(|err| {
-        Error::internal_json(
-            err.to_string(),
-            Some("parse remapped agent-task plan".to_string()),
-        )
-    })?;
-
-    let temp = tempfile::tempdir().map_err(|err| {
-        Error::internal_io(
-            err.to_string(),
-            Some("create remapped agent-task plan workspace".to_string()),
-        )
-    })?;
-    let plan_file = temp.path().join(spec.filename);
-    if spec.role == "agent_task_attempt_plan_remapped" {
-        write_private_remapped_agent_task_plan(&plan_file, spec.spec)?;
-    } else {
-        fs::write(&plan_file, spec.spec).map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some("write remapped agent-task plan".to_string()),
-            )
-        })?;
-    }
-    let synced = sync_workspace(
-        runner_id,
-        RunnerWorkspaceSyncOptions {
-            path: temp.path().display().to_string(),
-            mode: RunnerWorkspaceSyncMode::Snapshot,
-            controller_routed_git: false,
-            changed_since_base: None,
-            git_fetch_refs: Vec::new(),
-            snapshot_includes: Vec::new(),
-            allow_dirty_lab_workspace: false,
-            run_isolation_token: None,
-        },
-    )?
-    .0;
-    let remote_spec = format!(
-        "@{}/{}",
-        synced.remote_path.trim_end_matches('/'),
-        spec.filename
-    );
-    let entry = workspace_mapping_entry(spec.role, &synced);
-    Ok(Some((remote_spec, entry)))
-}
-
-fn write_private_remapped_agent_task_plan(path: &std::path::Path, contents: &str) -> Result<()> {
+pub(crate) fn write_private_remapped_agent_task_plan(
+    path: &std::path::Path,
+    contents: &str,
+) -> Result<()> {
     write_file_owner_only(path, contents, "write remapped agent-task plan")
 }
 

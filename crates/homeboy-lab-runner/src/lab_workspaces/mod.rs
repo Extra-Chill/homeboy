@@ -222,6 +222,25 @@ pub(super) fn workspace_mapping_entry(
     }
 }
 
+/// Record a file that was explicitly transferred into the primary workspace.
+/// Its controller-side staging file is intentionally short-lived, while the
+/// runner-resident path remains available to a later durable dispatch.
+pub(super) fn workspace_mapping_entry_for_materialized_file(
+    role: impl Into<String>,
+    local_path: impl Into<String>,
+    remote_path: impl Into<String>,
+) -> LabWorkspaceMappingEntry {
+    LabWorkspaceMappingEntry {
+        role: role.into(),
+        local_path: local_path.into(),
+        remote_path: remote_path.into(),
+        sync_mode: "explicit_file_transfer".to_string(),
+        snapshot_identity: "runner_resident".to_string(),
+        dependency_freshness: None,
+        source_provenance: None,
+    }
+}
+
 /// Build a workspace-mapping entry for a declared dependency checkout that the
 /// primary workspace sync already materialized on the runner (as a sibling of
 /// the primary remote path). Folding these into the offload workspace mapping

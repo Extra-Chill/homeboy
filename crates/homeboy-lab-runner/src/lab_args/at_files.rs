@@ -18,6 +18,31 @@ pub(crate) struct LabAtFileSpec {
     pub(crate) local_path: PathBuf,
     pub(crate) remote_spec: String,
     pub(crate) remote_path: String,
+    pub(crate) content_sha256: String,
+    pub(crate) private: bool,
+}
+
+impl LabAtFileSpec {
+    /// Attempt plans can contain provider inputs and must remain owner-readable
+    /// while waiting in the durable reverse queue.
+    pub(crate) fn require_private(&mut self) {
+        self.private = true;
+        let filename = self
+            .local_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("input");
+        let parent = self
+            .remote_path
+            .rsplit_once('/')
+            .map_or(".", |(parent, _)| parent);
+        self.remote_path = format!(
+            "{parent}/private-sha256-{}-{}",
+            self.content_sha256,
+            sanitize_remote_filename(filename)
+        );
+        self.remote_spec = format!("@{}", self.remote_path);
+    }
 }
 
 pub(crate) fn lab_at_file_specs(
@@ -156,12 +181,22 @@ fn resolve_at_file_spec(
                 Some(format!("canonicalize Lab @file {}", candidate.display())),
             )
         })?;
-        let remote_path = remote_path_for_at_file(&local_path, raw_path, remote_cwd);
+        let content = std::fs::read(&local_path).map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some(format!("read Lab @file {}", local_path.display())),
+            )
+        })?;
+        let content_sha256 = format!("{:x}", Sha256::digest(&content));
+        let remote_path =
+            remote_path_for_at_file(&content_sha256, local_path.file_name(), remote_cwd);
         return Ok(LabAtFileSpec {
             original_spec: spec.to_string(),
             local_path,
             remote_spec: format!("@{remote_path}"),
             remote_path,
+            content_sha256,
+            private: false,
         });
     }
 
@@ -173,20 +208,16 @@ fn resolve_at_file_spec(
     ))
 }
 
-fn remote_path_for_at_file(local_path: &Path, raw_path: &str, remote_cwd: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(local_path.display().to_string().as_bytes());
-    digest.update(b"\0");
-    digest.update(raw_path.as_bytes());
-    let digest = format!("{:x}", digest.finalize());
-    let filename = local_path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("input");
+fn remote_path_for_at_file(
+    content_sha256: &str,
+    filename: Option<&std::ffi::OsStr>,
+    remote_cwd: &str,
+) -> String {
+    let filename = filename.and_then(|value| value.to_str()).unwrap_or("input");
     format!(
-        "{}/.homeboy/lab-at-files/{}-{}",
+        "{}/.homeboy/lab-at-files/sha256-{}-{}",
         remote_cwd.trim_end_matches('/'),
-        &digest[..16],
+        content_sha256,
         sanitize_remote_filename(filename)
     )
 }

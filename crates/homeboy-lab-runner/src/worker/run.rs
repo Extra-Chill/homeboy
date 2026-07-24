@@ -268,6 +268,7 @@ fn run_once_output(
     let mut execution_envelope = claim.request.execution_envelope();
     let _command_assets =
         materialize_command_assets(&claim.job.id.to_string(), &mut execution_envelope)?;
+    let _private_at_files = verify_private_at_files(&mut execution_envelope)?;
     materialize_snapshot_git_baseline(&execution_envelope)?;
     // Shared finisher so the exec-error and exec-success paths submit their
     // terminal job result through identical broker plumbing (#5091).
@@ -386,6 +387,358 @@ fn run_once_output(
             exit_code,
         ),
         exit_code,
+    ))
+}
+
+/// Private `@file` paths carry their SHA-256 in the runner-resident filename.
+/// Verify them after a durable claim and before starting the child, then remove
+/// them after execution so retries can resume before claim without retaining
+/// plaintext after consumption.
+#[derive(Debug)]
+pub(super) struct PrivateAtFileCleanup {
+    paths: Vec<std::path::PathBuf>,
+    directories: Vec<std::path::PathBuf>,
+}
+
+impl Drop for PrivateAtFileCleanup {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
+impl PrivateAtFileCleanup {
+    fn cleanup(&mut self) -> std::result::Result<(), String> {
+        let mut failures = Vec::new();
+        self.paths.retain(|path| match std::fs::remove_file(path) {
+            Ok(()) => false,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+            Err(err) => {
+                failures.push(format!("{}: {err}", path.display()));
+                true
+            }
+        });
+        self.directories
+            .retain(|path| match std::fs::remove_dir_all(path) {
+                Ok(()) => false,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+                Err(err) => {
+                    failures.push(format!("{}: {err}", path.display()));
+                    true
+                }
+            });
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join(", "))
+        }
+    }
+}
+
+pub(super) fn verify_private_at_files(
+    envelope: &mut homeboy_core::runner_execution_envelope::RunnerExecutionEnvelope,
+) -> Result<PrivateAtFileCleanup> {
+    use sha2::{Digest, Sha256};
+
+    #[cfg(not(unix))]
+    {
+        if envelope.dispatch.as_ref().is_some_and(|dispatch| {
+            dispatch
+                .command
+                .iter()
+                .any(|argument| is_private_at_file(argument))
+        }) {
+            return Err(Error::validation_invalid_argument(
+                "at_file",
+                "private detached runner @files require Unix owner-only filesystem guarantees",
+                None,
+                None,
+            ));
+        }
+    }
+
+    let Some(command) = envelope
+        .dispatch
+        .as_mut()
+        .map(|dispatch| &mut dispatch.command)
+    else {
+        return Ok(PrivateAtFileCleanup {
+            paths: Vec::new(),
+            directories: Vec::new(),
+        });
+    };
+    let mut cleanup = PrivateAtFileCleanup {
+        paths: Vec::new(),
+        directories: Vec::new(),
+    };
+    let mut snapshot_directory = None;
+    for argument in command.iter_mut() {
+        let value = at_file_path(argument);
+        let Some(path) = value else {
+            continue;
+        };
+        let Some(filename) = std::path::Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+        else {
+            continue;
+        };
+        let Some(expected) = filename
+            .strip_prefix("private-sha256-")
+            .and_then(|value| value.split_once('-').map(|(digest, _)| digest))
+        else {
+            continue;
+        };
+        // Register the controller-owned source before inspecting it so every
+        // rejected private input receives an owner-safe cleanup attempt.
+        cleanup.paths.push(std::path::PathBuf::from(path));
+        if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return private_at_file_error(
+                &mut cleanup,
+                "private runner @file has an invalid SHA-256 identity",
+                path,
+            );
+        }
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                return private_at_file_error(
+                    &mut cleanup,
+                    &format!("stat private runner @file {path}: {err}"),
+                    path,
+                );
+            }
+        };
+        if !metadata.file_type().is_file() {
+            return private_at_file_error(
+                &mut cleanup,
+                "private runner @file is not a regular file",
+                path,
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return private_at_file_error(
+                    &mut cleanup,
+                    "private runner @file is readable by group or other users",
+                    path,
+                );
+            }
+        }
+        let mut file = match open_private_at_file(path) {
+            Ok(file) => file,
+            Err(err) => {
+                return private_at_file_error(
+                    &mut cleanup,
+                    &format!("read private runner @file {path}: {err}"),
+                    path,
+                );
+            }
+        };
+        let opened_metadata = match file.metadata() {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                return private_at_file_error(
+                    &mut cleanup,
+                    &format!("stat opened private runner @file {path}: {err}"),
+                    path,
+                );
+            }
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if opened_metadata.permissions().mode() & 0o077 != 0 {
+                return private_at_file_error(
+                    &mut cleanup,
+                    "opened private runner @file is readable by group or other users",
+                    path,
+                );
+            }
+        }
+        let content = match read_private_at_file(&mut file) {
+            Ok(content) => content,
+            Err(err) => {
+                return private_at_file_error(
+                    &mut cleanup,
+                    &format!("read private runner @file {path}: {err}"),
+                    path,
+                );
+            }
+        };
+        if format!("{:x}", Sha256::digest(&content)) != expected {
+            return private_at_file_error(
+                &mut cleanup,
+                "private runner @file content does not match its SHA-256 identity",
+                path,
+            );
+        }
+        if snapshot_directory.is_none() {
+            let directory = match private_at_file_snapshot_directory() {
+                Ok(directory) => directory,
+                Err(err) => {
+                    return private_at_file_error(
+                        &mut cleanup,
+                        &format!("create private runner @file snapshot directory: {err}"),
+                        path,
+                    );
+                }
+            };
+            cleanup.directories.push(directory.clone());
+            snapshot_directory = Some(directory);
+        }
+        let directory = snapshot_directory
+            .as_deref()
+            .expect("private snapshot directory");
+        let snapshot = match write_private_at_file_snapshot(directory, &content) {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                return private_at_file_error(
+                    &mut cleanup,
+                    &format!("write verified private runner @file snapshot: {err}"),
+                    path,
+                );
+            }
+        };
+        cleanup.paths.push(snapshot.clone());
+        rewrite_at_file_argument(argument, &snapshot.display().to_string());
+    }
+    Ok(cleanup)
+}
+
+#[cfg(not(unix))]
+fn is_private_at_file(argument: &str) -> bool {
+    at_file_path(argument).is_some_and(|path| {
+        std::path::Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("private-sha256-"))
+    })
+}
+
+fn at_file_path(argument: &str) -> Option<&str> {
+    argument.strip_prefix('@').or_else(|| {
+        argument
+            .split_once('=')
+            .and_then(|(_, value)| value.strip_prefix('@'))
+    })
+}
+
+fn rewrite_at_file_argument(argument: &mut String, snapshot: &str) {
+    if argument.starts_with('@') {
+        *argument = format!("@{snapshot}");
+    } else if let Some((name, _)) = argument.split_once('=') {
+        *argument = format!("{name}=@{snapshot}");
+    }
+}
+
+fn private_at_file_error(
+    cleanup: &mut PrivateAtFileCleanup,
+    message: &str,
+    path: &str,
+) -> Result<PrivateAtFileCleanup> {
+    let cleanup_result = match cleanup.cleanup() {
+        Ok(()) => "private input cleanup succeeded".to_string(),
+        Err(err) => format!("private input cleanup failed: {err}"),
+    };
+    Err(Error::validation_invalid_argument(
+        "at_file",
+        format!("{message}; {cleanup_result}"),
+        Some(path.to_string()),
+        None,
+    ))
+}
+
+fn open_private_at_file(path: &str) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(path)
+}
+
+fn read_private_at_file(file: &mut std::fs::File) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+
+    let mut content = Vec::new();
+    file.read_to_end(&mut content)?;
+    Ok(content)
+}
+
+pub(super) fn write_private_at_file_snapshot(
+    directory: &std::path::Path,
+    content: &[u8],
+) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write;
+
+    let snapshot = directory.join(format!("verified-{}", uuid::Uuid::new_v4()));
+    let temporary = snapshot.with_extension("tmp");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(&temporary)?;
+    if let Err(err) = file.write_all(content).and_then(|_| file.sync_all()) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(err);
+    }
+    if let Err(err) = std::fs::rename(&temporary, &snapshot) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(err);
+    }
+    Ok(snapshot)
+}
+
+#[cfg(unix)]
+fn private_at_file_snapshot_directory() -> std::io::Result<std::path::PathBuf> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let root = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".local/share"))
+        })
+        .unwrap_or_else(std::env::temp_dir)
+        .join("homeboy/reverse-runner-private");
+    std::fs::create_dir_all(&root)?;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+    let root_metadata = std::fs::metadata(&root)?;
+    if root_metadata.permissions().mode() & 0o077 != 0
+        || root_metadata.uid() != unsafe { libc::geteuid() }
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "private runner snapshot root is not worker-owned 0700",
+        ));
+    }
+    let directory = root.join(format!("run-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory)?;
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+    let directory_metadata = std::fs::metadata(&directory)?;
+    if directory_metadata.permissions().mode() & 0o077 != 0
+        || directory_metadata.uid() != unsafe { libc::geteuid() }
+    {
+        let _ = std::fs::remove_dir(&directory);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "private runner snapshot directory is not worker-owned 0700",
+        ));
+    }
+    Ok(directory)
+}
+
+#[cfg(not(unix))]
+fn private_at_file_snapshot_directory() -> std::io::Result<std::path::PathBuf> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "private runner snapshots require Unix owner-only filesystem guarantees",
     ))
 }
 

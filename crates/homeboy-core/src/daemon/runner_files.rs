@@ -3,10 +3,12 @@
 //! paths safely within the runner root. Extracted from the `daemon` god file.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use serde_json::json;
+use sha2::Digest;
 
 use super::remote_runner;
 use super::runner_workspace_root;
@@ -75,9 +77,59 @@ pub(super) fn upload_runner_file(
                 None,
             )
         })?;
-    fs::write(&path, &content).map_err(|err| {
-        Error::internal_io(err.to_string(), Some(format!("write {}", path.display())))
-    })?;
+    if let Some(expected) = request.sha256.as_deref() {
+        let actual = format!("{:x}", sha2::Sha256::digest(&content));
+        if actual != expected {
+            return Err(Error::validation_invalid_argument(
+                "sha256",
+                "runner file upload content does not match its declared SHA-256",
+                Some(path.display().to_string()),
+                None,
+            ));
+        }
+    }
+    if request.private || request.atomic {
+        let temp = path.with_file_name(format!(
+            ".{}.{}.tmp",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("upload"),
+            uuid::Uuid::new_v4()
+        ));
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp).map_err(|err| {
+            Error::internal_io(err.to_string(), Some(format!("create {}", temp.display())))
+        })?;
+        let write = file.write_all(&content).and_then(|_| file.sync_all());
+        if let Err(err) = write {
+            let _ = fs::remove_file(&temp);
+            return Err(Error::internal_io(
+                err.to_string(),
+                Some(format!("write {}", temp.display())),
+            ));
+        }
+        #[cfg(unix)]
+        if request.private {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&temp, fs::Permissions::from_mode(0o600)).map_err(|err| {
+                Error::internal_io(err.to_string(), Some(format!("chmod {}", temp.display())))
+            })?;
+        }
+        fs::rename(&temp, &path).map_err(|err| {
+            let _ = fs::remove_file(&temp);
+            Error::internal_io(err.to_string(), Some(format!("publish {}", path.display())))
+        })?;
+    } else {
+        fs::write(&path, &content).map_err(|err| {
+            Error::internal_io(err.to_string(), Some(format!("write {}", path.display())))
+        })?;
+    }
     Ok(json!({
         "runner_id": request.runner_id,
         "path": path.display().to_string(),

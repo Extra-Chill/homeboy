@@ -10,8 +10,11 @@ use homeboy_core::api_jobs::{
 use homeboy_core::secret_env_plan::SecretEnvPlan;
 use homeboy_core::server::{RunnerPolicy, RunnerSecretEnvRef};
 use homeboy_core::test_support;
+use sha2::{Digest, Sha256};
 
-use super::super::run::{run_loop, run_reverse_worker};
+use super::super::run::{
+    run_loop, run_reverse_worker, verify_private_at_files, write_private_at_file_snapshot,
+};
 use super::support::{
     spawn_cancelling_after_claim_broker, spawn_cancelling_on_second_snapshot_broker,
     spawn_failing_broker, spawn_mock_broker, spawn_mock_broker_until_finish,
@@ -114,6 +117,335 @@ fn reverse_worker_executes_claimed_job_and_finishes_it() {
             assert!(result["metrics"]["sample_count"].as_u64().is_some());
         }
     });
+}
+
+#[cfg(unix)]
+#[test]
+fn reverse_worker_verifies_private_at_file_then_cleans_it_up() {
+    use std::os::unix::fs::PermissionsExt;
+
+    test_support::with_isolated_home(|_| {
+        crate::create(
+            r#"{"id":"lab","kind":"local","workspace_root":"/tmp"}"#,
+            false,
+        )
+        .expect("create runner");
+        crate::merge(
+            Some("lab"),
+            &serde_json::json!({
+                "policy": RunnerPolicy {
+                    allow_raw_exec: Some(true),
+                    workspace_roots: vec!["/tmp".to_string()],
+                    allowed_commands: vec!["sh".to_string()],
+                    ..Default::default()
+                }
+            })
+            .to_string(),
+            &[],
+        )
+        .expect("set policy");
+        let directory = tempfile::tempdir().expect("private file directory");
+        let content = b"private plan";
+        let digest = format!("{:x}", Sha256::digest(content));
+        let path = directory
+            .path()
+            .join(format!("private-sha256-{digest}-plan.json"));
+        std::fs::write(&path, content).expect("write private plan");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("lock private plan");
+        let store = JobStore::default();
+        store
+            .submit_remote_runner_job(RemoteRunnerJobRequest {
+                runner_id: "lab".to_string(),
+                project_id: None,
+                operation: "runner.exec".to_string(),
+                command: vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "test \"$(cat \"${1#@}\")\" = 'private plan'".to_string(),
+                    "--".to_string(),
+                    format!("@{}", path.display()),
+                ],
+                cwd: Some("/tmp".to_string()),
+                env: Default::default(),
+                secret_env_names: Vec::new(),
+                secret_env_plan: Default::default(),
+                env_materialization: None,
+                capture_patch: false,
+                source_snapshot: None,
+                path_materialization_plan: None,
+                require_paths: Vec::new(),
+                lab_runner_workload: None,
+                lifecycle: None,
+                metadata: None,
+            })
+            .expect("submit private file job");
+        let (broker_url, handle) = spawn_mock_broker_until_finish(store.clone(), 8);
+        write_reverse_controller_session(&broker_url);
+
+        let (_, exit_code) = run_reverse_worker(worker_options(broker_url)).expect("run worker");
+
+        assert_eq!(exit_code, 0);
+        assert!(!path.exists(), "private input is removed after consumption");
+        handle.join().expect("mock broker joins");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn reverse_worker_rejects_tampered_private_at_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    test_support::with_isolated_home(|_| {
+        crate::create(
+            r#"{"id":"lab","kind":"local","workspace_root":"/tmp"}"#,
+            false,
+        )
+        .expect("create runner");
+        let directory = tempfile::tempdir().expect("private file directory");
+        let digest = format!("{:x}", Sha256::digest(b"expected"));
+        let path = directory
+            .path()
+            .join(format!("private-sha256-{digest}-plan.json"));
+        std::fs::write(&path, b"tampered").expect("write tampered plan");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("lock private plan");
+        let store = JobStore::default();
+        store
+            .submit_remote_runner_job(RemoteRunnerJobRequest {
+                runner_id: "lab".to_string(),
+                project_id: None,
+                operation: "runner.exec".to_string(),
+                command: vec!["sh".to_string(), format!("@{}", path.display())],
+                cwd: Some("/tmp".to_string()),
+                env: Default::default(),
+                secret_env_names: Vec::new(),
+                secret_env_plan: Default::default(),
+                env_materialization: None,
+                capture_patch: false,
+                source_snapshot: None,
+                path_materialization_plan: None,
+                require_paths: Vec::new(),
+                lab_runner_workload: None,
+                lifecycle: None,
+                metadata: None,
+            })
+            .expect("submit tampered file job");
+        let (broker_url, handle) = spawn_mock_broker(store.clone(), 3);
+        write_reverse_controller_session(&broker_url);
+
+        let error =
+            run_reverse_worker(worker_options(broker_url)).expect_err("tampered file rejected");
+
+        assert!(
+            error
+                .message
+                .contains("does not match its SHA-256 identity"),
+            "unexpected error: {error:#?}"
+        );
+        assert!(!path.exists(), "tampered private input is removed");
+        handle.join().expect("mock broker joins");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn private_at_file_snapshot_survives_source_replacement_before_exec() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().expect("private file directory");
+    let verified = b"verified plan";
+    let digest = format!("{:x}", Sha256::digest(verified));
+    let source = directory
+        .path()
+        .join(format!("private-sha256-{digest}-plan.json"));
+    std::fs::write(&source, verified).expect("write private plan");
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600))
+        .expect("lock private plan");
+    let request = RemoteRunnerJobRequest {
+        runner_id: "lab".to_string(),
+        project_id: None,
+        operation: "runner.exec".to_string(),
+        command: vec!["sh".to_string(), format!("@{}", source.display())],
+        cwd: Some("/tmp".to_string()),
+        env: Default::default(),
+        secret_env_names: Vec::new(),
+        secret_env_plan: Default::default(),
+        env_materialization: None,
+        capture_patch: false,
+        source_snapshot: None,
+        path_materialization_plan: None,
+        require_paths: Vec::new(),
+        lab_runner_workload: None,
+        lifecycle: None,
+        metadata: None,
+    };
+    let mut envelope = request.execution_envelope();
+
+    let cleanup = verify_private_at_files(&mut envelope).expect("verify private input");
+    let snapshot = envelope.dispatch.as_ref().expect("dispatch").command[1]
+        .strip_prefix('@')
+        .expect("rewritten @file")
+        .to_string();
+    assert_ne!(
+        std::path::Path::new(&snapshot).parent(),
+        source.parent(),
+        "verified snapshot is outside the source-owner directory"
+    );
+    assert_eq!(
+        std::fs::metadata(
+            std::path::Path::new(&snapshot)
+                .parent()
+                .expect("snapshot parent")
+        )
+        .expect("snapshot parent metadata")
+        .permissions()
+        .mode()
+            & 0o777,
+        0o700,
+        "worker-owned snapshot directory is private"
+    );
+    std::fs::write(&source, b"replaced after validation").expect("replace source");
+
+    assert_eq!(std::fs::read(&snapshot).expect("read snapshot"), verified);
+    drop(cleanup);
+    assert!(!source.exists(), "source cleanup runs after replacement");
+    assert!(
+        !std::path::Path::new(&snapshot).exists(),
+        "snapshot cleanup runs"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn private_at_file_unsafe_permissions_are_cleaned_before_error() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().expect("private file directory");
+    let content = b"private plan";
+    let digest = format!("{:x}", Sha256::digest(content));
+    let source = directory
+        .path()
+        .join(format!("private-sha256-{digest}-plan.json"));
+    std::fs::write(&source, content).expect("write private plan");
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644))
+        .expect("make private plan unsafe");
+    let request = private_at_file_request(&source);
+    let mut envelope = request.execution_envelope();
+
+    let error = verify_private_at_files(&mut envelope).expect_err("unsafe mode rejected");
+
+    assert!(error.message.contains("private input cleanup succeeded"));
+    assert!(!source.exists(), "unsafe plaintext is cleaned");
+}
+
+#[cfg(unix)]
+#[test]
+fn private_at_file_stat_failure_reports_cleanup_result() {
+    let directory = tempfile::tempdir().expect("private file directory");
+    let digest = format!("{:x}", Sha256::digest(b"private plan"));
+    let source = directory
+        .path()
+        .join(format!("private-sha256-{digest}-plan.json"));
+    let request = private_at_file_request(&source);
+    let mut envelope = request.execution_envelope();
+
+    let error = verify_private_at_files(&mut envelope).expect_err("missing input rejected");
+
+    assert!(error.message.contains("stat private runner @file"));
+    assert!(error.message.contains("private input cleanup succeeded"));
+}
+
+#[cfg(unix)]
+#[test]
+fn private_at_file_read_failure_is_cleaned_before_error() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().expect("private file directory");
+    let content = b"private plan";
+    let digest = format!("{:x}", Sha256::digest(content));
+    let source = directory
+        .path()
+        .join(format!("private-sha256-{digest}-plan.json"));
+    std::fs::write(&source, content).expect("write private plan");
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o000))
+        .expect("make private plan unreadable");
+    let request = private_at_file_request(&source);
+    let mut envelope = request.execution_envelope();
+
+    let error = verify_private_at_files(&mut envelope).expect_err("unreadable input rejected");
+
+    assert!(error.message.contains("read private runner @file"));
+    assert!(error.message.contains("private input cleanup succeeded"));
+    assert!(!source.exists(), "unreadable plaintext is cleaned");
+}
+
+#[cfg(unix)]
+#[test]
+fn private_at_file_snapshot_is_atomically_published_with_owner_only_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().expect("private file directory");
+
+    let snapshot = write_private_at_file_snapshot(directory.path(), b"complete verified content")
+        .expect("write snapshot");
+
+    assert_eq!(
+        std::fs::read(&snapshot).expect("read snapshot"),
+        b"complete verified content"
+    );
+    assert_eq!(
+        std::fs::metadata(&snapshot)
+            .expect("snapshot metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let entries = std::fs::read_dir(directory.path())
+        .expect("list snapshot directory")
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect::<Vec<_>>();
+    assert!(entries.iter().all(|entry| !entry.ends_with(".tmp")));
+}
+
+fn private_at_file_request(path: &std::path::Path) -> RemoteRunnerJobRequest {
+    RemoteRunnerJobRequest {
+        runner_id: "lab".to_string(),
+        project_id: None,
+        operation: "runner.exec".to_string(),
+        command: vec!["sh".to_string(), format!("@{}", path.display())],
+        cwd: Some("/tmp".to_string()),
+        env: Default::default(),
+        secret_env_names: Vec::new(),
+        secret_env_plan: Default::default(),
+        env_materialization: None,
+        capture_patch: false,
+        source_snapshot: None,
+        path_materialization_plan: None,
+        require_paths: Vec::new(),
+        lab_runner_workload: None,
+        lifecycle: None,
+        metadata: None,
+    }
+}
+
+#[cfg(not(unix))]
+#[test]
+fn private_at_file_is_rejected_without_unix_filesystem_guarantees() {
+    let directory = tempfile::tempdir().expect("private file directory");
+    let source = directory.path().join(
+        "private-sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-plan.json",
+    );
+    let request = private_at_file_request(&source);
+    let mut envelope = request.execution_envelope();
+
+    let error = verify_private_at_files(&mut envelope).expect_err("private input rejected");
+
+    assert!(error
+        .message
+        .contains("require Unix owner-only filesystem guarantees"));
 }
 
 #[test]
