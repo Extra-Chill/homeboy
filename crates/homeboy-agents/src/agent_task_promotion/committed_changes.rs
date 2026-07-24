@@ -26,7 +26,7 @@ pub(crate) fn committed_changes_patch(
     if !worktree_path.is_dir() {
         return Ok(None);
     }
-    let Some(base_ref) = resolve_committed_changes_base(
+    let Some(mut base_ref) = resolve_committed_changes_base(
         worktree_path,
         options.task_base_sha.as_deref(),
         options.base_ref.as_deref(),
@@ -48,6 +48,31 @@ pub(crate) fn committed_changes_patch(
                 None,
             ));
         }
+    }
+
+    // Explicit adoption of a pre-existing immutable candidate: the cook can
+    // record the candidate commit itself as the task base, so a provider that
+    // reviews it and returns no-op leaves an empty base..candidate diff and
+    // promotion has nothing to adopt (#8895). When the caller supplied an
+    // explicit candidate_ref and the recorded base IS the candidate, resolve the
+    // effective base to the candidate's first parent so the immutable commit
+    // becomes the promotable change. Fail closed: a root commit (no parent)
+    // cannot be adopted this way. This only triggers for explicit adoption, so
+    // ordinary no-op cooks still reject a base-equal promotion.
+    if options.candidate_ref.is_some() && base_ref == candidate {
+        let parent = git_stdout(
+            worktree_path,
+            &["rev-parse", "--verify", &format!("{candidate}^{{commit}}~1")],
+        )
+        .map_err(|_| {
+            Error::validation_invalid_argument(
+                "candidate_ref",
+                "adopted candidate equals the recorded task base but has no parent commit to adopt against; supply a candidate with at least one committed change",
+                Some(candidate.clone()),
+                None,
+            )
+        })?;
+        base_ref = parent.trim().to_string();
     }
     let is_ancestor = Command::new("git")
         .args(["merge-base", "--is-ancestor", &base_ref, &candidate])
