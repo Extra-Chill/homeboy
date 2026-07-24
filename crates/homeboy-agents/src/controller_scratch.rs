@@ -34,6 +34,10 @@ pub struct ControllerScratchResource {
     #[serde(default)]
     pub lease_id: String,
     pub reconstructable: bool,
+    /// Controller-created temporary state that can be removed even when it is a
+    /// detached Git checkout with no upstream.
+    #[serde(default)]
+    pub ephemeral: bool,
     pub retention: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ref: Option<String>,
@@ -142,6 +146,7 @@ fn allocate_attempt_at_index(
             lifecycle_state: "active".to_string(),
             lease_id: lease_id.clone(),
             reconstructable: true,
+            ephemeral: false,
             retention: "P7D".to_string(),
             source_ref: None,
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -189,6 +194,47 @@ pub fn release_attempt(
             write_index_at_unlocked(&allocation.index_path, &index)?;
         }
         Ok(())
+    })
+}
+
+/// Mark a controller-owned allocation as disposable temporary state. This is
+/// intentionally separate from ordinary attempt scratch: an interrupted
+/// detached checkout has no upstream by design, so the normal unpushed-Git
+/// retention guard would otherwise retain it forever.
+pub fn mark_attempt_ephemeral(allocation: &ControllerScratchAllocation) -> Result<()> {
+    with_index_lock(&allocation.index_path, || {
+        let mut index = read_index_at_unlocked(&allocation.index_path)?;
+        let resource = index
+            .resources
+            .iter_mut()
+            .find(|resource| {
+                resource.lease_id == allocation.lease_id
+                    && Path::new(&resource.path) == allocation.path.as_path()
+            })
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "controller_scratch.lease_id",
+                    "allocated scratch lease is not registered",
+                    Some(allocation.lease_id.clone()),
+                    None,
+                )
+            })?;
+        resource.ephemeral = true;
+        write_index_at_unlocked(&allocation.index_path, &index)
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn abandon_attempt_for_test(allocation: &ControllerScratchAllocation) -> Result<()> {
+    with_index_lock(&allocation.index_path, || {
+        let mut index = read_index_at_unlocked(&allocation.index_path)?;
+        let resource = index
+            .resources
+            .iter_mut()
+            .find(|resource| resource.lease_id == allocation.lease_id)
+            .expect("test allocation is registered");
+        resource.owner_pid = u32::MAX;
+        write_index_at_unlocked(&allocation.index_path, &index)
     })
 }
 
@@ -422,6 +468,7 @@ fn register_outcome_resources_unlocked(run_id: &str, outcomes: &[AgentTaskOutcom
                     .get("reconstructable")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false),
+                ephemeral: false,
                 retention: value
                     .get("retention")
                     .and_then(serde_json::Value::as_str)
@@ -716,7 +763,7 @@ fn cleanup_block_reason(
     if !retention_expired(resource.finalized_at.as_deref(), retention, path, now) {
         return Ok(Some("retention has not expired".to_string()));
     }
-    if git_dirty_or_unpushed(path) {
+    if !resource.ephemeral && git_dirty_or_unpushed(path) {
         return Ok(Some("git checkout has dirty or unpushed state".to_string()));
     }
     Ok(None)
@@ -1130,6 +1177,7 @@ mod tests {
             lifecycle_state: "active".to_string(),
             lease_id: "test-lease".to_string(),
             reconstructable: true,
+            ephemeral: false,
             retention: "0s".to_string(),
             source_ref: None,
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -1294,6 +1342,41 @@ mod tests {
             assert_eq!(resource.owner_pid, std::process::id());
             assert!(resource.reconstructable);
             assert!(!resource.created_at.is_empty());
+        });
+    }
+
+    #[test]
+    fn interrupted_ephemeral_git_checkout_is_reclaimable() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let allocation = allocate_attempt("run-candidate", "promotion", "candidate", 1)
+                .expect("allocate candidate checkout");
+            mark_attempt_ephemeral(&allocation).expect("mark ephemeral");
+            let output = Command::new("git")
+                .args(["init"])
+                .current_dir(&allocation.path)
+                .output()
+                .expect("initialize candidate checkout");
+            assert!(output.status.success());
+            fs::write(allocation.path.join("candidate.txt"), "candidate\n")
+                .expect("write candidate state");
+            abandon_attempt_for_test(&allocation).expect("simulate interrupted owner");
+
+            let first = cleanup(ControllerScratchCleanupOptions {
+                apply: false,
+                limit: 1,
+                retention_override_seconds: Some(0),
+            })
+            .expect("reconcile interrupted checkout");
+            assert_eq!(first.candidate_count, 0);
+
+            let second = cleanup(ControllerScratchCleanupOptions {
+                apply: true,
+                limit: 1,
+                retention_override_seconds: Some(0),
+            })
+            .expect("reap interrupted checkout");
+            assert_eq!(second.applied_count, 1);
+            assert!(!allocation.path.exists());
         });
     }
 

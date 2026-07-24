@@ -1015,6 +1015,59 @@ fn promotion_runs_clean_checkout_gate_against_immutable_candidate() {
 }
 
 #[test]
+fn promotion_rejects_mutation_after_checkpoint_before_gate_materialization() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    git(&workspace, &["init", "-b", "main"]);
+    git(&workspace, &["config", "user.email", "test@example.com"]);
+    git(&workspace, &["config", "user.name", "Homeboy Test"]);
+    std::fs::create_dir_all(workspace.join("src")).expect("source directory");
+    std::fs::write(workspace.join("src/lib.rs"), "old\n").expect("base file");
+    git(&workspace, &["add", "."]);
+    git(&workspace, &["commit", "-m", "base"]);
+    let (source_path, source) = write_patch_source(&temp);
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(workspace.clone()),
+        apply_to_git: true,
+        ..Default::default()
+    };
+
+    let error = promote_with_provider_and_checkpoint(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("immutable-candidate-checkpoint".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "fixture@target".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec!["true".to_string()],
+                ..Default::default()
+            },
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+        &mut |_| {
+            std::fs::write(workspace.join("src/lib.rs"), "tampered\n")
+                .expect("mutate destination after checkpoint");
+            Ok(())
+        },
+    )
+    .expect_err("verification rejects a destination that changed after checkpointing");
+
+    assert!(error
+        .message
+        .contains("differs from the checkpointed candidate"));
+}
+
+#[test]
 fn resumed_verification_runs_clean_checkout_gate_for_exact_dirty_candidate() {
     let temp = tempfile::tempdir().expect("tempdir");
     let target = temp.path().join("target");

@@ -124,10 +124,9 @@ impl AgentTaskPromotionWorkspaceProvider for FakePromotionWorkspaceProvider {
         let status = Command::new("git")
             .args(["status", "--porcelain", "--untracked-files=all"])
             .current_dir(cwd)
-            .output()
-            .expect("inspect verification checkout");
+            .output();
         self.verify_worktrees_clean
-            .push(status.status.success() && status.stdout.is_empty());
+            .push(status.is_ok_and(|status| status.status.success() && status.stdout.is_empty()));
         if self.run_verify_command {
             return crate::agent_task_gate::run_gate_command_with_policy(
                 cwd,
