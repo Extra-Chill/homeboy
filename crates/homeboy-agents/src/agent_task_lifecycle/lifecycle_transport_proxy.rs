@@ -123,6 +123,9 @@ pub fn recover_terminal_transport_proxy_evidence(run_id: &str) -> Result<bool> {
     ) else {
         return Ok(false);
     };
+    if super::lifecycle_runner_projection::project_persisted_terminal_runner_events(&mut record)? {
+        return Ok(true);
+    }
     let snapshot = super::runner_continuation::with_runner_continuation(|p| {
         p.runner_job_log_snapshot(&runner_id, &runner_job_id)
     })?;

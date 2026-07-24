@@ -962,8 +962,13 @@ fn terminal_transport_recovery_replaces_lossy_historical_compact_aggregate() {
             })),
             "stderr": "",
         }));
+        rewrite_record_for_test(run_id, |record| {
+            record.metadata["runner_job_status"] = json!("succeeded");
+            record.metadata["runner_job_events"] = json!(&snapshot.events);
+        })
+        .expect("persist historical daemon events");
         let _provider = RunnerContinuationTestGuard::install(Box::new(TerminalSnapshotProvider {
-            snapshot: Mutex::new(Some(snapshot)),
+            snapshot: Mutex::new(None),
         }));
 
         assert!(recover_terminal_transport_proxy_evidence(run_id)
@@ -1058,8 +1063,13 @@ fn terminal_transport_recovery_accepts_a_verified_older_controller_pin() {
             }).to_string(),
             "stderr": "",
         }));
+        rewrite_record_for_test(run_id, |record| {
+            record.metadata["runner_job_status"] = json!("succeeded");
+            record.metadata["runner_job_events"] = json!(&snapshot.events);
+        })
+        .expect("persist older controller daemon events");
         let _provider = RunnerContinuationTestGuard::install(Box::new(TerminalSnapshotProvider {
-            snapshot: Mutex::new(Some(snapshot)),
+            snapshot: Mutex::new(None),
         }));
 
         assert!(recover_terminal_transport_proxy_evidence(run_id)
