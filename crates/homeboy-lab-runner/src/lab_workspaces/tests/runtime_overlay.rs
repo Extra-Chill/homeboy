@@ -14,6 +14,7 @@ fn synced(role: &str, remote: &str, env: Option<&str>) -> SyncedRuntimeOverlay {
         remote_path: remote.to_string(),
         install_workdir: None,
         install_ran: false,
+        dependency_hydration: serde_json::json!({"status": "skipped_no_provider"}),
         expose_remote_path_env: env.map(str::to_string),
         build_provenance:
             crate::runtime_overlay_freshness::RuntimeOverlayBuildProvenance::unverifiable(),
@@ -161,6 +162,10 @@ fn metadata_records_schema_count_and_overlays() {
         value["overlays"][0]["expose_remote_path_env"],
         "RUNTIME_CLI_DIR"
     );
+    assert_eq!(
+        value["overlays"][0]["dependency_hydration"]["status"],
+        "skipped_no_provider"
+    );
 }
 
 #[test]
@@ -176,9 +181,54 @@ fn empty_overlay_list_is_a_no_op_and_leaves_mapping_unchanged() {
         &dir.path().display().to_string(),
         Vec::new(),
         &mut mapping,
+        false,
     )
     .expect("no-op overlay sync");
 
     assert!(synced.is_empty());
     assert!(mapping.is_empty());
+}
+
+#[test]
+fn skips_declared_overlay_dependency_hydration_only_when_opted_out() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_workspace_root = tempfile::tempdir().expect("runner workspace root");
+        crate::create(
+            &serde_json::json!({
+                "id": "lab-overlay",
+                "kind": "local",
+                "workspace_root": runner_workspace_root.path(),
+            })
+            .to_string(),
+            false,
+        )
+        .expect("create local runner");
+        let overlay_dir = tempfile::tempdir().expect("overlay tempdir");
+        std::fs::write(
+            overlay_dir.path().join("homeboy-deps.json"),
+            r#"{"provider":"composer","commands":{"install":{"argv":["not-installed-composer","install"]}}}"#,
+        )
+        .expect("dependency contract");
+        let primary = tempfile::tempdir().expect("primary tempdir");
+        let mut mapping = Vec::new();
+        let overlays = parse_runtime_overlays(vec![RuntimeOverlaySpec {
+            path: overlay_dir.path().display().to_string(),
+            role: None,
+            snapshot_includes: Vec::new(),
+            install: None,
+            expose_remote_path_env: None,
+        }])
+        .expect("parse overlay");
+
+        let synced = sync_lab_runtime_overlays(
+            "lab-overlay",
+            &primary.path().display().to_string(),
+            overlays,
+            &mut mapping,
+            true,
+        )
+        .expect("opt-out bypasses the declared dependency command");
+        assert_eq!(synced[0].dependency_hydration["status"], "not_applied");
+        assert_eq!(synced[0].dependency_hydration["reason"], "opt_out");
+    });
 }
