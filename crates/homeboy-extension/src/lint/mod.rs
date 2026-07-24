@@ -8,9 +8,9 @@ use homeboy_core::component::Component;
 pub use baseline::{BaselineComparison, LintBaseline, LintBaselineMetadata};
 pub use report::LintCommandOutput;
 pub use run::{
-    run_main_lint_workflow, run_self_check_lint_workflow,
-    run_self_check_lint_workflow_with_progress, LintRunWorkflowArgs, LintRunWorkflowResult,
-    LintSniffFilters,
+    resolve_lint_fix_routes, run_main_lint_workflow, run_self_check_lint_workflow,
+    run_self_check_lint_workflow_with_progress, LintFixRoute, LintRunWorkflowArgs,
+    LintRunWorkflowResult, LintSniffFilters,
 };
 
 use homeboy_core::engine::run_dir::RunDir;

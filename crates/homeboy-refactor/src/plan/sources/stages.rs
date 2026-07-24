@@ -312,7 +312,7 @@ pub(super) fn run_lint_stage(
 
     // Helper: build the lint runner with the current stage options.
     // Used by both the diagnostic pass and the fix-only pass.
-    let build_lint_runner = |effective_glob: Option<&str>| {
+    let build_lint_runner = |effective_glob: Option<&str>, step: Option<&str>| {
         extension::lint::build_lint_runner(
             component,
             None,
@@ -324,7 +324,7 @@ pub(super) fn run_lint_stage(
             options.sniff_filters.sniffs.as_deref(),
             options.sniff_filters.exclude_sniffs.as_deref(),
             options.category.as_deref(),
-            None,
+            step,
             None,
             run_dir,
         )
@@ -359,7 +359,7 @@ pub(super) fn run_lint_stage(
         cached_findings
     } else {
         // No cached findings — run the diagnostic pass.
-        build_lint_runner(diagnostic_glob.as_deref())?.run()?;
+        build_lint_runner(diagnostic_glob.as_deref(), None)?.run()?;
 
         homeboy_extension::lint::baseline::parse_findings_file(&findings_file).unwrap_or_default()
     };
@@ -385,19 +385,35 @@ pub(super) fn run_lint_stage(
     } else {
         Vec::new()
     };
-    let fix_scope_files = requested_scope_files.or({
-        if finding_scope_files.is_empty() {
-            None
-        } else {
-            Some(finding_scope_files.as_slice())
-        }
-    });
-    let fix_glob = if let Some(files) = fix_scope_files {
-        lint_scope_glob(&root_str, files)
-    } else {
-        options.glob.clone()
-    };
+    let fix_scope_files = requested_scope_files
+        .or((!finding_scope_files.is_empty()).then_some(finding_scope_files.as_slice()));
     let (stage_changed_files, fix_results, stage_warnings) = if write && !lint_findings.is_empty() {
+        let fix_files = fix_scope_files.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "fix",
+                "Lint findings did not identify files for an extension-declared fixer route"
+                    .to_string(),
+                None,
+                Some(vec![
+                    "Run homeboy review lint without --fix to inspect diagnostics".to_string(),
+                ]),
+            )
+        })?;
+        let fix_routes = extension::lint::resolve_lint_fix_routes(component, fix_files);
+        if fix_routes.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "fix",
+                format!(
+                    "No extension-declared lint fixer applies to the {} file(s) with findings",
+                    fix_files.len()
+                ),
+                None,
+                Some(vec![
+                    "Run homeboy review lint without --fix to inspect unresolved diagnostics"
+                        .to_string(),
+                ]),
+            ));
+        }
         let before_dirty = git::get_dirty_files(&root_str).unwrap_or_default();
         let before_dirty_snapshot = capture_dirty_file_snapshot(root, &before_dirty);
 
@@ -418,9 +434,15 @@ pub(super) fn run_lint_stage(
         // fixers and skips its own validation pass (the engine validates
         // separately via the diagnose phase). Auto-fixing lives exclusively
         // under `homeboy refactor` — there is no other entry point.
-        let fix_output = build_lint_runner(fix_glob.as_deref())?
-            .env("HOMEBOY_FIX_ONLY", "1")
-            .run();
+        let fix_output = (|| {
+            for route in &fix_routes {
+                let route_glob = lint_scope_glob(&root_str, &route.files);
+                build_lint_runner(route_glob.as_deref(), route.step.as_deref())?
+                    .env("HOMEBOY_FIX_ONLY", "1")
+                    .run()?;
+            }
+            Ok(())
+        })();
         restore_release_owned_files(root, &release_owned)?;
         fix_output?;
 
@@ -435,12 +457,10 @@ pub(super) fn run_lint_stage(
         )?;
         reject_unsafe_lint_autofix_changes(root, &scope_outcome.changed_files)?;
 
-        if !scope_outcome.changed_files.is_empty() {
-            build_lint_runner(fix_glob.as_deref())?.run()?;
-            let remaining_findings =
-                homeboy_extension::lint::baseline::parse_findings_file(&findings_file)?;
-            reject_remaining_lint_fix_findings(&remaining_findings)?;
-        }
+        build_lint_runner(diagnostic_glob.as_deref(), None)?.run()?;
+        let remaining_findings =
+            homeboy_extension::lint::baseline::parse_findings_file(&findings_file)?;
+        reject_remaining_lint_fix_findings(&remaining_findings)?;
 
         let fix_results = fix_sidecars.consume_fix_results();
         (
