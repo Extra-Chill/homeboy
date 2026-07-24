@@ -17,7 +17,8 @@ use homeboy_core::{Error, Result};
 
 use super::envelope::ExecutionEnvelope;
 use super::path_remap::{
-    order_mappings_by_specificity, remap_paths_in_value, try_rewrite_flag_value_args, LabPathRemap,
+    is_absolute_controller_path, order_mappings_by_specificity, remap_local_path,
+    remap_paths_in_value, try_rewrite_flag_value_args, LabPathRemap,
 };
 
 pub(crate) struct AgentTaskSpecMaterialization<T> {
@@ -193,6 +194,7 @@ fn remap_agent_task_plan_spec(
         )
     })?;
     let controller_plan = value.clone();
+    reject_unmapped_controller_paths(&controller_plan, mappings)?;
     remap_paths_in_value(&mut value, mappings);
     record_controller_workspace_provenance(&mut value, &controller_plan);
     serde_json::to_string(&value).map_err(|err| {
@@ -201,6 +203,50 @@ fn remap_agent_task_plan_spec(
             Some("serialize remapped agent-task plan".to_string()),
         )
     })
+}
+
+/// A persisted plan is executed on the runner without a controller filesystem.
+/// Reject every absolute controller path that has no materialized mapping rather
+/// than passing it through to fail later in provider setup or change harvest.
+fn reject_unmapped_controller_paths(value: &Value, mappings: &[&LabPathRemap]) -> Result<()> {
+    fn visit(value: &Value, mappings: &[&LabPathRemap], pointer: &str) -> Result<()> {
+        match value {
+            Value::String(path) if is_absolute_controller_path(path) => {
+                if remap_local_path(path, mappings).is_none() {
+                    return Err(Error::validation_invalid_argument(
+                        "plan",
+                        format!(
+                            "Lab offload cannot map controller-local path at {pointer} to the selected runner workspace"
+                        ),
+                        Some(path.clone()),
+                        Some(vec![
+                            "Include the referenced checkout or runtime overlay in the Lab workspace materialization plan.".to_string(),
+                            "Retry after Homeboy can materialize every controller-local path in the follow-up plan.".to_string(),
+                        ]),
+                    ));
+                }
+            }
+            Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    visit(item, mappings, &format!("{pointer}/{index}"))?;
+                }
+            }
+            Value::Object(entries) => {
+                for (key, item) in entries {
+                    // This is an audit-only controller reference added after
+                    // remapping; it must remain stable for operator evidence.
+                    if key == "workspace_source_provenance" {
+                        continue;
+                    }
+                    visit(item, mappings, &format!("{pointer}/{key}"))?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    visit(value, mappings, "")
 }
 
 fn record_controller_workspace_provenance(remapped: &mut Value, controller: &Value) {
