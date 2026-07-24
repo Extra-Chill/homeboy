@@ -220,10 +220,7 @@ mod tests {
         let help = rendered_cook_help();
         // Each core flag renders with operator-facing help, not a blank line.
         assert!(help.contains("--goal"), "{help}");
-        assert!(
-            help.contains("Workspace handle of the existing worktree"),
-            "{help}"
-        );
+        assert!(help.contains("Workspace handle the cook edits"), "{help}");
         assert!(
             help.contains("Deterministic verification command"),
             "{help}"
@@ -244,10 +241,10 @@ pub struct AgentTaskCookArgs {
     /// the run and used to frame the agent's task and the review.
     #[arg(long, value_name = "TEXT")]
     pub goal: Option<String>,
-    /// Workspace handle of the existing worktree the cook edits, verifies, and
-    /// finalizes into (e.g. `repo@branch-slug`). This checkout is authoritative:
-    /// the agent's changes, the `--verify` gates, and the resulting PR all
-    /// operate on it. Create it first with `workspace worktree add`.
+    /// Workspace handle the cook edits, verifies, and finalizes into (e.g.
+    /// `repo@branch-slug`). Existing destinations are reused. A missing managed
+    /// destination is created through its configured provider when --repo,
+    /// --base, --head, and --task-url declare explicit intent.
     #[arg(long, value_name = "HANDLE")]
     pub to_worktree: String,
     #[arg(

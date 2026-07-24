@@ -106,6 +106,7 @@ variables.
 ### `WorktreeProviderCommands`
 
 - `list`
+- `create` — Mutating argv template for a missing destination. Homeboy expands `{handle}`, `{repo}`, `{base}`, `{head}`, and `{task_url}` only from explicit Cook inputs; creation also requires `apply_enabled: true`.
 - `cleanup_preview`
 - `cleanup_apply`
 - `artifacts_preview`

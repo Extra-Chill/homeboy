@@ -15,6 +15,10 @@ use homeboy::agents::agent_tasks::scheduler::{
 };
 use homeboy::agents::agent_tasks::service as agent_task_service;
 use homeboy::core::command_invocation::CommandInvocation;
+use homeboy::core::defaults;
+use homeboy::core::worktree_providers::{
+    provision_apply_enabled_worktree_provider_from_config, WorktreeProviderCreateIntent,
+};
 
 use super::super::CmdResult;
 use super::args::{
@@ -43,6 +47,45 @@ fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregate) -> Value
 
 pub(crate) fn run_cook(args: AgentTaskCookArgs) -> CmdResult<Value> {
     run_cook_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
+}
+
+/// Converge a Cook promotion destination before compiling a task plan. This is
+/// controller-owned so local and Lab dispatch use the same managed checkout.
+pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::core::Result<()> {
+    let destination = std::path::Path::new(&args.to_worktree);
+    if destination.is_dir()
+        || homeboy::core::worktree::resolve_workspace_ref_if_present(&args.to_worktree)?.is_some()
+    {
+        return Ok(());
+    }
+
+    let repo = args.dispatch.repo.clone().ok_or_else(|| {
+        homeboy::core::Error::validation_missing_argument(vec![
+            "--repo <repo> is required to create a missing --to-worktree destination".to_string(),
+        ])
+    })?;
+    let head = args.head.clone().ok_or_else(|| {
+        homeboy::core::Error::validation_missing_argument(vec![
+            "--head <branch> is required to create a missing --to-worktree destination".to_string(),
+        ])
+    })?;
+    let task_url = args.dispatch.task_url.clone().ok_or_else(|| {
+        homeboy::core::Error::validation_missing_argument(vec![
+            "--task-url <url> is required to create a missing --to-worktree destination"
+                .to_string(),
+        ])
+    })?;
+    provision_apply_enabled_worktree_provider_from_config(
+        &WorktreeProviderCreateIntent {
+            handle: args.to_worktree.clone(),
+            repo,
+            base: args.base.clone(),
+            head,
+            task_url,
+        },
+        &defaults::load_config(),
+    )?;
+    Ok(())
 }
 
 pub(super) fn promotion_provider(args: PromotionProviderArgs) -> CmdResult<Value> {
@@ -106,6 +149,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
+    provision_cook_destination(&args)?;
     // Deterministic gates exist to make *publication* safe: a green gate is the
     // proof a cook may commit, push, and open a PR. A `--no-finalize` cook does
     // none of those, so a gate is not meaningful there — read-only/exploratory
