@@ -20,6 +20,19 @@ pub struct CoreBoundaryLeakConfig {
     /// Path substrings treated as example-only when not otherwise allowlisted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub example_path_contains: Vec<String>,
+    /// Line prefixes whose lines are skipped by the ecosystem-term scan.
+    /// Defaults to Rust comment prefixes so a term that merely appears in a
+    /// comment/docstring (explaining behavior, not implementing it) is not a
+    /// finding — the detector measures architecture, not comment text (#6857).
+    #[serde(default = "default_comment_line_prefixes")]
+    pub ignore_line_prefixes: Vec<String>,
+}
+
+/// Rust comment prefixes: line (`//`), doc (`///`), and inner doc (`//!`).
+/// Lines starting with any of these are non-behavioral, so ecosystem terms
+/// mentioned in them are not core-boundary leaks (#6857).
+pub fn default_comment_line_prefixes() -> Vec<String> {
+    vec!["//".to_string(), "///".to_string(), "//!".to_string()]
 }
 
 impl CoreBoundaryLeakConfig {
@@ -40,6 +53,7 @@ impl CoreBoundaryLeakConfig {
             &mut self.example_path_contains,
             &other.example_path_contains,
         );
+        extend_unique(&mut self.ignore_line_prefixes, &other.ignore_line_prefixes);
     }
 
     /// Lower this config into generic source-policy rules. Core-boundary-leak
@@ -61,7 +75,15 @@ impl CoreBoundaryLeakConfig {
             include_path_contains: self.scan_path_contains.clone(),
             exclude_path_contains: self.allow_path_contains.clone(),
             allow_line_contains: self.allow_line_contains.clone(),
-            ignore_line_prefixes: Vec::new(),
+            // A term mentioned in a comment/docstring explains behavior, it does
+            // not implement it — skip comment lines so findings measure
+            // architecture, not comment text (#6857). Defaults to Rust comment
+            // prefixes; an explicit config override is honored.
+            ignore_line_prefixes: if self.ignore_line_prefixes.is_empty() {
+                default_comment_line_prefixes()
+            } else {
+                self.ignore_line_prefixes.clone()
+            },
             ignore_after_line_equals: Vec::new(),
             example_path_contains: self.example_path_contains.clone(),
             example_classification: None,

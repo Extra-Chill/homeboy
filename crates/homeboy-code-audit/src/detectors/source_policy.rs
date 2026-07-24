@@ -549,7 +549,51 @@ mod tests { const PACKAGE: &str = "widget-package.json"; }
             allow_path_contains: vec!["src/core/fixtures/allowed".to_string()],
             allow_line_contains: vec!["homeboy-audit: allow-core-boundary-example".to_string()],
             example_path_contains: vec!["/fixtures/".to_string(), "/examples/".to_string()],
+            // Empty → the comment-prefix default applies at rule-build time.
+            ignore_line_prefixes: Vec::new(),
         }
+    }
+
+    #[test]
+    fn core_boundary_skips_terms_that_appear_only_in_comments() {
+        // #6857: a term mentioned in a doc/line/inner-doc comment explains
+        // behavior, it does not implement it — it must not be a finding.
+        let fp = rust_fp(
+            "src/core/engine.rs",
+            r#"//! This module intentionally mentions florp-run in its overview.
+
+/// Dispatch work. Historically this ran florpstack directly.
+fn dispatch() {
+    // florp-run used to live here; do not reintroduce it.
+    run_tool("generic-run");
+}
+"#,
+        );
+
+        let findings = run_core_boundary(&[&fp], &core_boundary_config());
+
+        assert!(
+            findings.is_empty(),
+            "ecosystem terms in comments must not be findings: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn core_boundary_still_reports_terms_in_executable_context() {
+        // The comment skip must not mask a genuine leak on a code line, even when
+        // the same line also carries a trailing comment.
+        let fp = rust_fp(
+            "src/core/engine.rs",
+            r#"fn dispatch() {
+    run_tool("florp-run");
+}
+"#,
+        );
+
+        let findings = run_core_boundary(&[&fp], &core_boundary_config());
+
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].description.contains("florp-run"));
     }
 
     fn run_core_boundary(
