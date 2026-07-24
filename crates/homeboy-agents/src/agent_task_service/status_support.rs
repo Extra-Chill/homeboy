@@ -207,6 +207,9 @@ fn hydrate_homeboy_evidence_ref(
     plan: Option<&AgentTaskPlan>,
     aggregate: Option<&AgentTaskAggregate>,
 ) -> Result<HydratedContent> {
+    if let Some(diagnostic) = hydrate_typed_diagnostic_ref(uri, task_id, aggregate) {
+        return Ok(diagnostic);
+    }
     let parsed = parse_agent_task_homeboy_uri(uri)?;
     if parsed.run_id != run_id {
         return Err(homeboy_core::Error::validation_invalid_argument(
@@ -316,6 +319,51 @@ fn hydrate_homeboy_evidence_ref(
     };
 
     Ok(HydratedContent {
+        source: "homeboy".to_string(),
+        truncated: false,
+        bytes_read: None,
+        omitted_bytes: None,
+        content,
+    })
+}
+
+/// Provider failures emit typed `homeboy://agent-task/<diagnostic-class>` refs.
+/// Their durable content is the matching aggregate diagnostic, not a local file.
+fn hydrate_typed_diagnostic_ref(
+    uri: &str,
+    task_id: Option<&str>,
+    aggregate: Option<&AgentTaskAggregate>,
+) -> Option<HydratedContent> {
+    let diagnostic_class = uri.strip_prefix("homeboy://agent-task/")?;
+    if diagnostic_class.starts_with("run/") || diagnostic_class.contains('/') {
+        return None;
+    }
+    let diagnostic = aggregate?.outcomes.iter().find_map(|outcome| {
+        task_id
+            .map(|task_id| task_id == outcome.task_id)
+            .unwrap_or(true)
+            .then(|| {
+                outcome
+                    .diagnostics
+                    .iter()
+                    .find(|diagnostic| diagnostic.class == diagnostic_class)
+                    .map(|diagnostic| (outcome, diagnostic))
+            })
+            .flatten()
+    });
+    let content = match diagnostic {
+        Some((outcome, diagnostic)) => json!({
+            "task_id": outcome.task_id,
+            "status": outcome.status,
+            "failure_classification": outcome.failure_classification,
+            "diagnostic": diagnostic,
+        }),
+        None => json!({
+            "summary": "The typed diagnostic is not present in this durable aggregate.",
+            "diagnostic_class": diagnostic_class,
+        }),
+    };
+    Some(HydratedContent {
         source: "homeboy".to_string(),
         truncated: false,
         bytes_read: None,
@@ -642,6 +690,74 @@ mod tests {
         assert_eq!(
             error.details["context"],
             "agent_task.evidence.hydrate.read: evidence.json"
+        );
+    }
+
+    #[test]
+    fn typed_provider_diagnostic_ref_hydrates_from_the_durable_aggregate() {
+        let aggregate: AgentTaskAggregate = serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-aggregate/v1",
+            "plan_id": "provider-preflight",
+            "status": "failed",
+            "totals": { "skipped": 0, "failed": 1 },
+            "outcomes": [{
+                "schema": "homeboy/agent-task-outcome/v1",
+                "task_id": "cook",
+                "status": "provider_error",
+                "failure_classification": "provider",
+                "diagnostics": [{
+                    "class": "agent_task.provider_executable_missing",
+                    "message": "opencode is unavailable",
+                    "data": { "provider": "opencode" }
+                }]
+            }]
+        }))
+        .expect("aggregate");
+        let evidence = AgentTaskEvidenceRef {
+            kind: "diagnostic".to_string(),
+            uri: "homeboy://agent-task/agent_task.provider_executable_missing".to_string(),
+            label: None,
+        };
+
+        let hydrated = hydrate_evidence_ref(
+            "controller-run",
+            &evidence,
+            Some("cook"),
+            None,
+            Some(&aggregate),
+        );
+
+        assert_eq!(hydrated.status, "ok");
+        assert_eq!(hydrated.source, "homeboy");
+        assert_eq!(
+            hydrated.content["diagnostic"]["message"],
+            "opencode is unavailable"
+        );
+    }
+
+    #[test]
+    fn typed_diagnostic_without_a_matching_entry_remains_readable() {
+        let evidence = AgentTaskEvidenceRef {
+            kind: "diagnostic".to_string(),
+            uri: "homeboy://agent-task/agent_task.provider_executable_missing".to_string(),
+            label: None,
+        };
+        let aggregate: AgentTaskAggregate = serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-aggregate/v1",
+            "plan_id": "provider-preflight",
+            "status": "failed",
+            "totals": { "skipped": 0 },
+            "outcomes": []
+        }))
+        .expect("aggregate");
+
+        let hydrated =
+            hydrate_evidence_ref("controller-run", &evidence, None, None, Some(&aggregate));
+
+        assert_eq!(hydrated.status, "ok");
+        assert_eq!(
+            hydrated.content["diagnostic_class"],
+            "agent_task.provider_executable_missing"
         );
     }
 }

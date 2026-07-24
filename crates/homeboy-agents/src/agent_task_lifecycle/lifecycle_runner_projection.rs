@@ -273,16 +273,18 @@ fn project_terminal_runner_lifecycle_event(
     preserve_terminal_runner_identity(record, event)?;
     validate_runner_job_snapshot(record, snapshot)?;
     validate_terminal_child_identity(record, snapshot, event)?;
-    let projection_plan = aggregate_projection_plan_from_outcomes(&event.aggregate);
+    let mut aggregate = event.aggregate.clone();
+    crate::agent_task_lifecycle::project_runner_evidence_refs(record, &mut aggregate);
+    let projection_plan = aggregate_projection_plan_from_outcomes(&aggregate);
     let aggregate_path = store::aggregate_path(&record.run_id)
         .map(|path| path.display().to_string())
         .unwrap_or_else(|_| "aggregate.json".to_string());
-    apply_aggregate_to_record(record, &projection_plan, &event.aggregate, aggregate_path);
+    apply_aggregate_to_record(record, &projection_plan, &aggregate, aggregate_path);
     // The aggregate is the task result. A successful enclosing daemon job only
     // proves transport completion, not task success.
     record_runner_job_terminal_metadata(record, snapshot.job.status, &snapshot.events);
-    store::write_aggregate_and_record(record, &event.aggregate)?;
-    crate::agent_task_lifecycle::record_terminal_artifact_projection(record, &event.aggregate)
+    store::write_aggregate_and_record(record, &aggregate)?;
+    crate::agent_task_lifecycle::record_terminal_artifact_projection(record, &aggregate)
 }
 
 pub(crate) fn project_persisted_terminal_runner_events(
@@ -324,17 +326,19 @@ pub(crate) fn project_persisted_terminal_runner_events(
         return Ok(false);
     };
     validate_terminal_child_event_identity(record, &event)?;
-    let projection_plan = aggregate_projection_plan_from_outcomes(&event.aggregate);
+    let mut aggregate = event.aggregate.clone();
+    crate::agent_task_lifecycle::project_runner_evidence_refs(record, &mut aggregate);
+    let projection_plan = aggregate_projection_plan_from_outcomes(&aggregate);
     let aggregate_path = store::aggregate_path(&record.run_id)
         .map(|path| path.display().to_string())
         .unwrap_or_else(|_| "aggregate.json".to_string());
-    apply_aggregate_to_record(record, &projection_plan, &event.aggregate, aggregate_path);
+    apply_aggregate_to_record(record, &projection_plan, &aggregate, aggregate_path);
     record.ensure_metadata_object().insert(
         "terminal_transport_recovery".to_string(),
         json!("persisted_runner_job_events"),
     );
-    store::write_aggregate_and_record(record, &event.aggregate)?;
-    crate::agent_task_lifecycle::record_terminal_artifact_projection(record, &event.aggregate)?;
+    store::write_aggregate_and_record(record, &aggregate)?;
+    crate::agent_task_lifecycle::record_terminal_artifact_projection(record, &aggregate)?;
     Ok(true)
 }
 
