@@ -71,22 +71,6 @@ pub fn workspace_snapshots(
     runner_id: &str,
     filters: RunnerWorkspaceSnapshotFilters,
 ) -> Result<(RunnerWorkspaceSnapshotsOutput, i32)> {
-    workspace_snapshots_with_hint(runner_id, filters, None)
-}
-
-pub(crate) fn workspace_snapshots_matching_hint(
-    runner_id: &str,
-    filters: RunnerWorkspaceSnapshotFilters,
-    hint: &str,
-) -> Result<(RunnerWorkspaceSnapshotsOutput, i32)> {
-    workspace_snapshots_with_hint(runner_id, filters, Some(hint))
-}
-
-fn workspace_snapshots_with_hint(
-    runner_id: &str,
-    filters: RunnerWorkspaceSnapshotFilters,
-    hint: Option<&str>,
-) -> Result<(RunnerWorkspaceSnapshotsOutput, i32)> {
     let runner = load(runner_id)?;
     let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -103,7 +87,7 @@ fn workspace_snapshots_with_hint(
     let limit = filters.limit.max(1);
     let (mut snapshots, skipped_invalid_metadata) = match runner.kind {
         RunnerKind::Local => workspace_snapshots_local(Path::new(&lab_workspaces_root))?,
-        RunnerKind::Ssh => workspace_snapshots_ssh(&runner, &lab_workspaces_root, hint)?,
+        RunnerKind::Ssh => workspace_snapshots_ssh(&runner, &lab_workspaces_root)?,
     };
     snapshots.retain(|snapshot| workspace_snapshot_matches(snapshot, &filters));
     snapshots.sort_by(|a, b| {
@@ -282,14 +266,13 @@ fn workspace_snapshots_local(
 fn workspace_snapshots_ssh(
     runner: &super::super::super::Runner,
     root: &str,
-    hint: Option<&str>,
 ) -> Result<(
     Vec<RunnerWorkspaceSnapshotEntry>,
     Vec<RunnerWorkspaceSnapshotInvalidMetadata>,
 )> {
     let (_server, mut client) = ssh_client_for_runner(runner)?;
     client.env.extend(runner.env.clone());
-    let command = workspace_snapshot_scan_command_with_hint(root, hint);
+    let command = workspace_snapshot_scan_command(root);
     let output = client.execute(&command);
     if !output.success {
         return Err(Error::internal_unexpected(format!(
@@ -299,14 +282,22 @@ fn workspace_snapshots_ssh(
     }
     let mut snapshots = Vec::new();
     let mut skipped_invalid_metadata = Vec::new();
-    for record in output.stdout.split_terminator('\u{1e}') {
-        let Some((source, content)) = record.split_once('\t') else {
+    for line in output.stdout.lines() {
+        let parts = line.splitn(2, '\t').collect::<Vec<_>>();
+        if parts.len() != 2 {
+            continue;
+        }
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(parts[1])
+            .map_err(|error| invalid_workspace_metadata(parts[0], error));
+        let Ok(decoded) = decoded else {
+            skipped_invalid_metadata.push(decoded.expect_err("base64 decode failed"));
             continue;
         };
-        let metadata: RunnerWorkspaceMetadata = match serde_json::from_str(content) {
+        let metadata: RunnerWorkspaceMetadata = match serde_json::from_slice(&decoded) {
             Ok(metadata) => metadata,
             Err(error) => {
-                skipped_invalid_metadata.push(invalid_workspace_metadata(source, error));
+                skipped_invalid_metadata.push(invalid_workspace_metadata(parts[0], error));
                 continue;
             }
         };
@@ -406,24 +397,13 @@ fn invalid_workspace_metadata(
 }
 
 pub(crate) fn workspace_snapshot_scan_command(root: &str) -> String {
-    workspace_snapshot_scan_command_with_hint(root, None)
-}
-
-pub(crate) fn workspace_snapshot_scan_command_with_hint(root: &str, hint: Option<&str>) -> String {
-    // Stream metadata in batched awk processes instead of launching base64/tr
-    // for every workspace. `find` may report a child removed during promotion,
-    // so only disappearance of the snapshot root makes the scan fail.
+    // Promotion replaces a temporary child atomically. `find` reports a
+    // disappeared child as an error even though the snapshot root remains
+    // valid, so read each candidate defensively and verify the root afterwards.
     format!(
-        "root={root}; meta_rel={meta}; if [ -d \"$root\" ]; then find \"$root\" -mindepth 3 -maxdepth 3 -type f -path \"*/$meta_rel\" -exec awk -v suffix=\"/$meta_rel\" -v needle={needle} 'BEGIN {{ for (i = 1; i < ARGC; i++) {{ file = ARGV[i]; content = \"\"; while ((status = (getline line < file)) > 0) content = content line ORS; close(file); if (status < 0) continue; if (needle == \"\" || index(content, needle) > 0) {{ dir = substr(file, 1, length(file) - length(suffix)); printf \"%s\\t%s%c\", dir, content, 30 }} }} }}' {{}} + >/dev/stdout 2>/dev/null || true; [ -d \"$root\" ] || {{ printf '%s\\n' \"runner workspace snapshot root disappeared during scan: $root\" >&2; exit 1; }}; fi",
+        "root={root}; meta_rel={meta}; if [ -d \"$root\" ]; then for dir in \"$root\"/*; do [ -d \"$dir\" ] || continue; meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; encoded=$(base64 < \"$meta\" 2>/dev/null) || continue; encoded=$(printf '%s' \"$encoded\" | tr -d '\\n'); printf \"%s\\t%s\\n\" \"$dir\" \"$encoded\"; done; [ -d \"$root\" ] || {{ printf '%s\\n' \"runner workspace snapshot root disappeared during scan: $root\" >&2; exit 1; }}; fi",
         root = shell::quote_arg(root),
         meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
-        needle = shell::quote_arg(
-            &hint
-                .map(serde_json::to_string)
-                .transpose()
-                .expect("serialize workspace snapshot hint")
-                .unwrap_or_default()
-        ),
     )
 }
 

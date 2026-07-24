@@ -46,12 +46,9 @@ use homeboy_core::server::{is_transient_ssh_error, CommandOutput};
 
 mod snapshots;
 use snapshots::workspace_snapshot_for_lease;
-use snapshots::workspace_snapshots_matching_hint;
-pub use snapshots::{list_workspaces, workspace_snapshots};
 #[cfg(test)]
-pub(crate) use snapshots::{
-    workspace_snapshot_scan_command, workspace_snapshot_scan_command_with_hint,
-};
+pub(crate) use snapshots::workspace_snapshot_scan_command;
+pub use snapshots::{list_workspaces, workspace_snapshots};
 
 pub(crate) const WORKSPACE_METADATA_FILE: &str = ".homeboy/runner-workspace.json";
 const MIN_RUNNER_WORKSPACE_FREE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -773,13 +770,12 @@ pub fn hydrate_prepared_workspace_source_snapshot(
     if !remote_path.starts_with(&prepared_root) {
         return Ok(());
     }
-    let (snapshots, _) = workspace_snapshots_matching_hint(
+    let (snapshots, _) = workspace_snapshots(
         runner_id,
         RunnerWorkspaceSnapshotFilters {
             limit: usize::MAX,
             ..Default::default()
         },
-        remote_path,
     )?;
     let Some(snapshot) = snapshots
         .snapshots
@@ -822,13 +818,12 @@ pub fn reuse_compatible_snapshot_workspace(
         return Ok(None);
     }
 
-    let (snapshots, _) = workspace_snapshots_matching_hint(
+    let (snapshots, _) = workspace_snapshots(
         runner_id,
         RunnerWorkspaceSnapshotFilters {
             limit: usize::MAX,
             ..Default::default()
         },
-        &source_commit,
     )?;
     let local_path_string = local_path.display().to_string();
     let Some(snapshot) = snapshots.snapshots.into_iter().find(|snapshot| {
@@ -936,14 +931,12 @@ fn compatible_incremental_snapshot(
     excludes: &[String],
     controller_manifest: &super::snapshot::WorkspaceContentManifest,
 ) -> Result<Option<(RunnerWorkspaceSnapshotEntry, SnapshotManifestDelta)>> {
-    let repo_hint = workspace_repo_from_path(&local_path.display().to_string());
-    let (snapshots, _) = workspace_snapshots_matching_hint(
+    let (snapshots, _) = workspace_snapshots(
         &runner.id,
         RunnerWorkspaceSnapshotFilters {
             limit: usize::MAX,
             ..Default::default()
         },
-        &repo_hint,
     )?;
     let local_path = local_path.display().to_string();
     Ok(snapshots.snapshots.into_iter().find_map(|snapshot| {

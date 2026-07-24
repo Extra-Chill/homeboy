@@ -5,7 +5,6 @@
 //! artifact fetch, and filesystem persistence live here so the orchestration is
 //! testable and reusable outside the CLI.
 
-use std::fs::{self, OpenOptions};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -117,26 +116,6 @@ fn bounded_redacted(bytes: &[u8]) -> Option<String> {
         text.push_str("\n[truncated]");
     }
     Some(crate::redaction::redact_string(&text))
-}
-
-fn startup_timeout_error(
-    pid: u32,
-    state_path: &Path,
-    child: String,
-    observed_state: Option<serde_json::Value>,
-    stderr: Option<String>,
-) -> Error {
-    let mut error = Error::internal_unexpected(format!(
-        "daemon process {} did not publish matching startup token before timeout",
-        pid
-    ));
-    error.details["daemon_startup"] = serde_json::json!({
-        "child": child,
-        "state_path": state_path,
-        "observed_state": observed_state,
-        "stderr": stderr,
-    });
-    error
 }
 
 #[cfg(unix)]
@@ -1762,26 +1741,6 @@ fn spawn_and_wait_for_lease(addr: &str, startup_token: &str) -> Result<DaemonSta
             Some("resolve current executable".to_string()),
         )
     })?;
-    let state_path = crate::paths::daemon_state_file()?;
-    let startup_stderr_path = state_path.with_extension(format!("startup-{startup_token}.stderr"));
-    if let Some(parent) = startup_stderr_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("create daemon startup directory".to_string()),
-            )
-        })?;
-    }
-    let startup_stderr = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&startup_stderr_path)
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("create daemon startup stderr".to_string()),
-            )
-        })?;
     let mut command = Command::new(exe);
     command
         .args([
@@ -1795,9 +1754,9 @@ fn spawn_and_wait_for_lease(addr: &str, startup_token: &str) -> Result<DaemonSta
         .env(DAEMON_STARTUP_TOKEN_ENV, startup_token)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::from(startup_stderr));
+        .stderr(Stdio::null());
     detach_from_launcher_session(&mut command);
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|e| Error::internal_io(e.to_string(), Some("spawn daemon".to_string())))?;
     let pid = child.id();
@@ -1805,51 +1764,30 @@ fn spawn_and_wait_for_lease(addr: &str, startup_token: &str) -> Result<DaemonSta
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let status = read_status()?;
-        if let Some(state) = status.state.as_ref() {
+        if let Some(state) = status.state {
             if state.pid == pid && state.startup_token == startup_token {
-                let _ = fs::remove_file(&startup_stderr_path);
                 return Ok(DaemonStartResult {
                     pid,
-                    address: state.address.clone(),
-                    state_path: state.state_path.clone(),
-                    lease_id: state.lease_id.clone(),
+                    address: state.address,
+                    state_path: state.state_path,
+                    lease_id: state.lease_id,
                 });
             }
             if status.running {
-                let _ = fs::remove_file(&startup_stderr_path);
                 return Ok(DaemonStartResult {
                     pid: state.pid,
-                    address: state.address.clone(),
-                    state_path: state.state_path.clone(),
-                    lease_id: state.lease_id.clone(),
+                    address: state.address,
+                    state_path: state.state_path,
+                    lease_id: state.lease_id,
                 });
             }
         }
 
         if Instant::now() >= deadline {
-            let stderr = fs::read(&startup_stderr_path)
-                .ok()
-                .and_then(|bytes| bounded_redacted(&bytes));
-            let child_state = child
-                .try_wait()
-                .ok()
-                .flatten()
-                .map(|status| format!("exited: {status}"))
-                .unwrap_or_else(|| "running".to_string());
-            let observed_state = status.state.as_ref().map(|state| {
-                serde_json::json!({
-                    "pid": state.pid,
-                    "startup_token_matches": state.startup_token == startup_token,
-                    "state_path": state.state_path,
-                })
-            });
-            return Err(startup_timeout_error(
-                pid,
-                &state_path,
-                child_state,
-                observed_state,
-                stderr,
-            ));
+            return Err(Error::internal_unexpected(format!(
+                "daemon process {} did not publish matching startup token before timeout",
+                pid
+            )));
         }
 
         thread::sleep(Duration::from_millis(50));

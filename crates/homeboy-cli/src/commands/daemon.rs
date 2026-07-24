@@ -108,9 +108,6 @@ enum DaemonCommand {
         /// Local bind address. Defaults to an OS-selected loopback port.
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
-        /// Startup ownership token forwarded by the daemon supervisor.
-        #[arg(long, hide = true)]
-        startup_token: Option<String>,
     },
     /// Supervise one daemon child and persist its termination evidence.
     #[command(hide = true)]
@@ -245,20 +242,7 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
             DaemonOutput::RecoverMissingLeaseState(daemon::recover_missing_lease_state(&lease_id, recorded_pid, &recorded_endpoint, confirm_pid_dead, confirm_control_plane_lost, &addr)?),
             0,
         )),
-        DaemonCommand::Serve { addr, startup_token } => {
-            if let Some(startup_token) = startup_token {
-                let inherited = std::env::var(daemon::DAEMON_STARTUP_TOKEN_ENV).ok();
-                if inherited.as_deref() != Some(startup_token.as_str()) {
-                    return Err(Error::validation_invalid_argument(
-                        "startup_token",
-                        "daemon serve startup token does not match its inherited supervisor token",
-                        None,
-                        None,
-                    ));
-                }
-            }
-            serve(&addr)
-        }
+        DaemonCommand::Serve { addr } => serve(&addr),
         DaemonCommand::Supervise { addr, startup_token } => {
             daemon::supervise(&addr, &startup_token)?;
             Ok((DaemonOutput::Serve(DaemonStartResult { pid: std::process::id(), address: addr, state_path: String::new(), lease_id: String::new() }), 0))
