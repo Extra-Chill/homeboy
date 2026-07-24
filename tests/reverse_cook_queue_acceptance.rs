@@ -280,6 +280,22 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
         .get(queued[0].id)
         .expect("completed broker job");
     assert_eq!(completed.status, JobStatus::Succeeded);
+    let private_at_files = checkout.join(".homeboy/lab-at-files");
+    let retained_private_files = match std::fs::read_dir(&private_at_files) {
+        Ok(entries) => entries
+            .filter_map(std::result::Result::ok)
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| {
+                name.starts_with("private-sha256-") || name.starts_with(".homeboy-verified-")
+            })
+            .collect::<Vec<_>>(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("read runner @file directory: {error}"),
+    };
+    assert!(
+        retained_private_files.is_empty(),
+        "worker removes private plan source and verified snapshot: {retained_private_files:?}"
+    );
     assert_eq!(
         broker
             .store
