@@ -890,6 +890,7 @@ fn materialize_agent_task_cook_plan(
     else {
         return Ok(None);
     };
+    crate::commands::agent_task::run::validate_cook_request(cook)?;
     crate::commands::agent_task::run::provision_cook_destination(cook)?;
     let mut dispatch = cook.dispatch.clone();
     if dispatch.prompt.is_none() {

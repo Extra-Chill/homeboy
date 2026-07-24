@@ -308,10 +308,11 @@ pub struct WorktreeProviderCommands {
     /// `resolve`. Exact handle lookups prefer `resolve` when it is configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list: Option<Vec<String>>,
-    /// Create a missing managed worktree. Homeboy expands `{handle}`, `{repo}`,
-    /// `{base}`, `{head}`, and `{task_url}` from an explicit Cook destination.
+    /// Atomically return an existing managed worktree or create it. Homeboy
+    /// expands `{handle}`, `{repo}`, `{base}`, `{head}`, `{task_url}`, and a
+    /// stable `{idempotency_key}` from an explicit Cook destination.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub create: Option<Vec<String>>,
+    pub ensure: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup_preview: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

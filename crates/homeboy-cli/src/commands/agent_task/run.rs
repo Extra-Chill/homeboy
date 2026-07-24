@@ -84,7 +84,27 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
             task_url,
         },
         &defaults::load_config(),
-    )?;
+    )
+    .map(|_| ())
+}
+
+pub(crate) fn validate_cook_request(args: &AgentTaskCookArgs) -> homeboy::core::Result<()> {
+    if !args.gates.has_deterministic_gate() && !args.no_finalize {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "verify",
+            "agent-task cook requires at least one deterministic --verify or --private-verify gate before it can commit, push, and open a PR",
+            None,
+            Some(vec!["Provide a deterministic verification gate, e.g. --verify \"cargo test\".".to_string()]),
+        ));
+    }
+    if args.dispatch.core.queue_only {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "queue-only",
+            "agent-task cook cannot queue its controller-owned lifecycle",
+            None,
+            None,
+        ));
+    }
     Ok(())
 }
 
@@ -149,7 +169,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
-    provision_cook_destination(&args)?;
+    validate_cook_request(&args)?;
     // Deterministic gates exist to make *publication* safe: a green gate is the
     // proof a cook may commit, push, and open a PR. A `--no-finalize` cook does
     // none of those, so a gate is not meaningful there — read-only/exploratory
@@ -159,27 +179,7 @@ where
     // the requirement here is safe end to end (#7608). Finalizing cooks still
     // require a gate, but now say so with a copy-pasteable example instead of a
     // bare rejection.
-    if !args.gates.has_deterministic_gate() && !args.no_finalize {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "verify",
-            "agent-task cook requires at least one deterministic --verify or --private-verify gate before it can commit, push, and open a PR",
-            None,
-            Some(vec![
-                "Provide a gate, e.g. --verify \"cargo test\" (or --private-verify for a secret gate).".to_string(),
-                "For a read-only or exploratory cook with nothing to verify, pass --no-finalize (skips commit, push, and PR); a no-op gate like --verify true also works.".to_string(),
-            ]),
-        ));
-    }
-    if args.dispatch.core.queue_only {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "queue-only",
-            "agent-task cook cannot queue its controller-owned lifecycle; it must retain provider completion to ingest artifacts, promote candidates, run gates, and finalize",
-            None,
-            Some(vec![
-                "Use `homeboy agent-task run-plan --plan <materialized-plan> --record-run-id <run-id> --queue-only` only when a controller owns the corresponding continuation.".to_string(),
-            ]),
-        ));
-    }
+    provision_cook_destination(&args)?;
 
     let mut dispatch_args = args.dispatch.clone();
     if dispatch_args.prompt.is_none() {

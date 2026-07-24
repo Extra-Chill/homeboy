@@ -106,7 +106,7 @@ variables.
 ### `WorktreeProviderCommands`
 
 - `list`
-- `create` — Mutating argv template for a missing destination. Homeboy expands `{handle}`, `{repo}`, `{base}`, `{head}`, and `{task_url}` only from explicit Cook inputs; creation also requires `apply_enabled: true`.
+- `ensure` — Atomic create-or-return-existing argv template. Homeboy invokes it only after an explicit typed provider no-match, expands `{handle}`, `{repo}`, `{base}`, `{head}`, `{task_url}`, and `{idempotency_key}`, and requires `apply_enabled: true`.
 - `cleanup_preview`
 - `cleanup_apply`
 - `artifacts_preview`

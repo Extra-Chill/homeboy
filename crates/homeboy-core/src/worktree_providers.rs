@@ -102,6 +102,13 @@ pub struct WorktreeProviderCreateIntent {
     pub task_url: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeProviderProvision {
+    pub resolution: WorktreeProviderResolution,
+    pub action: &'static str,
+    pub idempotency_key: String,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct WorktreeProviderHandleSafety {
     pub dirty: bool,
@@ -177,11 +184,22 @@ pub fn resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination
 pub fn provision_apply_enabled_worktree_provider_from_config(
     intent: &WorktreeProviderCreateIntent,
     config: &HomeboyConfig,
-) -> Result<WorktreeProviderResolution> {
-    if let Ok(resolution) =
-        resolve_apply_enabled_worktree_provider_from_config(&intent.handle, config, None)
-    {
-        return Ok(resolution);
+) -> Result<WorktreeProviderProvision> {
+    match resolve_apply_enabled_worktree_provider_from_config(&intent.handle, config, None) {
+        Ok(resolution) => {
+            return Ok(WorktreeProviderProvision {
+                resolution,
+                action: "adopted",
+                idempotency_key: provision_idempotency_key(intent),
+            })
+        }
+        Err(error)
+            if error
+                .details
+                .get("worktree_provider_lookup")
+                .and_then(Value::as_str)
+                == Some("not_found") => {}
+        Err(error) => return Err(error),
     }
 
     let mut providers = config
@@ -191,7 +209,7 @@ pub fn provision_apply_enabled_worktree_provider_from_config(
             provider
                 .enabled
                 .then_some((id.as_str(), provider))
-                .filter(|(_, provider)| provider.commands.create.is_some())
+                .filter(|(_, provider)| provider.commands.ensure.is_some())
         })
         .collect::<Vec<_>>();
     providers.sort_by_key(|(id, _)| *id);
@@ -199,7 +217,7 @@ pub fn provision_apply_enabled_worktree_provider_from_config(
         return Err(Error::validation_invalid_argument(
             "to_worktree",
             format!(
-                "worktree handle `{}` is missing and multiple providers can create it: {}",
+                "worktree handle `{}` is missing and multiple providers can ensure it: {}",
                 intent.handle,
                 providers
                     .iter()
@@ -208,45 +226,64 @@ pub fn provision_apply_enabled_worktree_provider_from_config(
                     .join(", ")
             ),
             Some(intent.handle.clone()),
-            Some(vec!["Configure exactly one enabled worktree provider commands.create template for this Cook destination.".to_string()]),
+            Some(vec!["Configure exactly one enabled worktree provider commands.ensure template for this Cook destination.".to_string()]),
         ));
     }
     let Some((provider_id, provider)) = providers.first().copied() else {
         return Err(Error::validation_invalid_argument(
             "to_worktree",
             format!(
-                "worktree handle `{}` is missing and no enabled worktree provider configures commands.create",
+                "worktree handle `{}` is missing and no enabled worktree provider configures commands.ensure",
                 intent.handle
             ),
             Some(intent.handle.clone()),
-            Some(vec!["Configure an enabled generic worktree provider commands.create argv template.".to_string()]),
+            Some(vec!["Configure an enabled generic worktree provider commands.ensure argv template.".to_string()]),
         ));
     };
-    let command = expand_create_command(
+    let idempotency_key = provision_idempotency_key(intent);
+    let command = expand_ensure_command(
         provider
             .commands
-            .create
+            .ensure
             .as_ref()
-            .expect("filtered create command"),
+            .expect("filtered ensure command"),
         intent,
+        &idempotency_key,
     );
     let rendered_command = render_provider_command(&command);
     if !provider.apply_enabled {
         return Err(Error::validation_invalid_argument(
             "to_worktree",
             format!(
-                "worktree handle `{}` is missing and provider `{provider_id}` creation is disabled",
+                "worktree handle `{}` is missing and provider `{provider_id}` ensure is disabled",
                 intent.handle
             ),
             Some(intent.handle.clone()),
             Some(vec![format!("Create it with: {rendered_command}")]),
         ));
     }
-    run_provider_create_command(provider_id, &command)?;
-    resolve_apply_enabled_worktree_provider_from_config(&intent.handle, config, None)
+    run_provider_ensure_command(provider_id, &command)?;
+    let resolution =
+        resolve_apply_enabled_worktree_provider_from_config(&intent.handle, config, None)?;
+    Ok(WorktreeProviderProvision {
+        resolution,
+        action: "ensured",
+        idempotency_key,
+    })
 }
 
-fn expand_create_command(command: &[String], intent: &WorktreeProviderCreateIntent) -> Vec<String> {
+fn provision_idempotency_key(intent: &WorktreeProviderCreateIntent) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        intent.handle, intent.repo, intent.base, intent.head
+    )
+}
+
+fn expand_ensure_command(
+    command: &[String],
+    intent: &WorktreeProviderCreateIntent,
+    idempotency_key: &str,
+) -> Vec<String> {
     command
         .iter()
         .map(|argument| {
@@ -256,6 +293,7 @@ fn expand_create_command(command: &[String], intent: &WorktreeProviderCreateInte
                 .replace("{base}", &intent.base)
                 .replace("{head}", &intent.head)
                 .replace("{task_url}", &intent.task_url)
+                .replace("{idempotency_key}", idempotency_key)
         })
         .collect()
 }
@@ -268,14 +306,14 @@ fn render_provider_command(command: &[String]) -> String {
         .join(" ")
 }
 
-fn run_provider_create_command(provider_id: &str, command: &[String]) -> Result<()> {
+fn run_provider_ensure_command(provider_id: &str, command: &[String]) -> Result<()> {
     let Some((program, args)) = command
         .split_first()
         .filter(|(program, _)| !program.trim().is_empty())
     else {
         return Err(Error::validation_invalid_argument(
-            "worktree_providers.commands.create",
-            format!("worktree provider `{provider_id}` create command must include an executable"),
+            "worktree_providers.commands.ensure",
+            format!("worktree provider `{provider_id}` ensure command must include an executable"),
             Some(provider_id.to_string()),
             None,
         ));
@@ -283,7 +321,7 @@ fn run_provider_create_command(provider_id: &str, command: &[String]) -> Result<
     let output = Command::new(program).args(args).output().map_err(|error| {
         Error::validation_invalid_argument(
             "to_worktree",
-            format!("worktree provider `{provider_id}` create command could not start: {error}"),
+            format!("worktree provider `{provider_id}` ensure command could not start: {error}"),
             Some(provider_id.to_string()),
             None,
         )
@@ -294,7 +332,7 @@ fn run_provider_create_command(provider_id: &str, command: &[String]) -> Result<
     Err(Error::validation_invalid_argument_with_evidence(
         "to_worktree",
         format!(
-            "worktree provider `{provider_id}` create command failed with {}",
+            "worktree provider `{provider_id}` ensure command failed with {}",
             output
                 .status
                 .code()
@@ -389,7 +427,7 @@ fn resolve_worktree_provider_with_policy_from_config(
             },
         )
     };
-    Err(Error::validation_invalid_argument(
+    let mut error = Error::validation_invalid_argument(
         "to_worktree",
         format!(
             "worktree handle `{handle}` is not a Homeboy task worktree and was not returned by a configured worktree provider ({configured})"
@@ -403,7 +441,9 @@ fn resolve_worktree_provider_with_policy_from_config(
                 "Configure an enabled worktree provider commands.list command that returns typed worktree path, branch, and safety metadata.".to_string()
             },
         ]),
-    ))
+    );
+    error.details["worktree_provider_lookup"] = Value::String("not_found".to_string());
+    Err(error)
 }
 
 fn run_provider_resolve_command(
@@ -1297,7 +1337,7 @@ mod tests {
                         "resolve".to_string(),
                         "{handle}".to_string(),
                     ]),
-                    create: Some(vec![
+                    ensure: Some(vec![
                         script.display().to_string(),
                         "create".to_string(),
                         "{handle}".to_string(),
@@ -1332,8 +1372,9 @@ mod tests {
         )
         .expect("provider creates then resolves destination");
 
-        assert_eq!(resolution.provider_id, "fixture");
-        assert_eq!(resolution.worktree.handle, "homeboy@fix-9908");
+        assert_eq!(resolution.action, "ensured");
+        assert_eq!(resolution.resolution.provider_id, "fixture");
+        assert_eq!(resolution.resolution.worktree.handle, "homeboy@fix-9908");
         assert_eq!(
             fs::read_to_string(state).expect("creation intent"),
             "homeboy@fix-9908|homeboy|main|fix/9908|https://github.com/Extra-Chill/homeboy/issues/9908"
