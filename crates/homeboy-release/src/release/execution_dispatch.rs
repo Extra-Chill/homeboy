@@ -688,6 +688,19 @@ fn release_step_unexpected_dirty_files(
     context: &ReleaseExecutionContext,
     files: Vec<String>,
 ) -> Result<Vec<String>> {
+    if step.kind == "preflight.dependencies" {
+        // `composer install` rewrites its own bookkeeping files with differing
+        // content every run. Components that vendor their autoloader (common for
+        // WordPress plugins that must work without a build step) track those
+        // files, so this preflight would otherwise dirty the tree and block the
+        // release it is preparing (#9965). This churn is expected noise from
+        // Homeboy's own step, not an operator-introduced change.
+        return Ok(files
+            .into_iter()
+            .filter(|file| !is_composer_regenerated_bookkeeping_file(file))
+            .collect());
+    }
+
     if step.kind != "release.prepare" {
         return Ok(files);
     }
@@ -697,6 +710,23 @@ fn release_step_unexpected_dirty_files(
         .into_iter()
         .filter(|file| !allowed.iter().any(|allowed| file == allowed))
         .collect())
+}
+
+/// Whether a path is one of Composer's non-deterministically regenerated
+/// bookkeeping files under `vendor/composer/`.
+///
+/// `composer install` rewrites `installed.json` and `installed.php` with
+/// differing content (ordering/timestamps/paths) even when the lock file has not
+/// changed, so their churn is not a meaningful tracked-file modification.
+fn is_composer_regenerated_bookkeeping_file(path: &str) -> bool {
+    const COMPOSER_REGENERATED: &[&str] = &[
+        "vendor/composer/installed.json",
+        "vendor/composer/installed.php",
+    ];
+    let normalized = path.replace('\\', "/");
+    COMPOSER_REGENERATED
+        .iter()
+        .any(|suffix| normalized == *suffix || normalized.ends_with(&format!("/{suffix}")))
 }
 
 fn release_prepare_allowed_dirty_files(
@@ -1465,6 +1495,70 @@ mod tests {
         .expect("guard should classify dirty files");
 
         assert_eq!(unexpected, vec!["src/lib.rs"]);
+    }
+
+    #[test]
+    fn dependencies_preflight_ignores_composer_regenerated_bookkeeping() {
+        // #9965: `composer install` rewrites vendor/composer/installed.{json,php}
+        // every run. Components that vendor their autoloader track those files, so
+        // this preflight would otherwise block the release it is preparing.
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: "/tmp/fixture".to_string(),
+            ..Default::default()
+        };
+        let options = ReleaseOptions::default();
+        let context = ReleaseExecutionContext {
+            component: &component,
+            extensions: &[],
+            component_id: "fixture",
+            options: &options,
+            state: ReleaseState::default(),
+            publish_failed: false,
+        };
+
+        let unexpected = release_step_unexpected_dirty_files(
+            &plan_step("preflight.dependencies"),
+            &context,
+            vec![
+                "plugins/h44-forms/vendor/composer/installed.json".to_string(),
+                "plugins/h44-forms/vendor/composer/installed.php".to_string(),
+                "plugins/h44-forms/src/Plugin.php".to_string(),
+            ],
+        )
+        .expect("guard should classify dirty files");
+
+        // Composer bookkeeping churn is expected noise; a real source change is not.
+        assert_eq!(unexpected, vec!["plugins/h44-forms/src/Plugin.php"]);
+    }
+
+    #[test]
+    fn other_guarded_steps_still_report_composer_files() {
+        // The exclusion is scoped to preflight.dependencies, which is the step
+        // that runs `composer install`.
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: "/tmp/fixture".to_string(),
+            ..Default::default()
+        };
+        let options = ReleaseOptions::default();
+        let context = ReleaseExecutionContext {
+            component: &component,
+            extensions: &[],
+            component_id: "fixture",
+            options: &options,
+            state: ReleaseState::default(),
+            publish_failed: false,
+        };
+
+        let unexpected = release_step_unexpected_dirty_files(
+            &plan_step("preflight.test"),
+            &context,
+            vec!["vendor/composer/installed.json".to_string()],
+        )
+        .expect("guard should classify dirty files");
+
+        assert_eq!(unexpected, vec!["vendor/composer/installed.json"]);
     }
 
     #[test]
