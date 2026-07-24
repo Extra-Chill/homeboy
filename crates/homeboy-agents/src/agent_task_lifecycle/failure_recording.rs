@@ -687,6 +687,66 @@ pub(crate) fn record_terminal_artifact_projection(
     store::write_record(record)
 }
 
+/// Replace runner-local file references with controller-resolvable aggregate
+/// references before persisting a terminal runner result. The original location
+/// is deliberately not retained as a durable URI: it is meaningful only on the
+/// producing runner and would make a controller attempt local IO against it.
+pub(crate) fn project_runner_evidence_refs(
+    record: &AgentTaskRunRecord,
+    aggregate: &mut AgentTaskAggregate,
+) {
+    let Some(runner_id) = record
+        .runner_id()
+        .filter(|runner_id| !runner_id.trim().is_empty())
+    else {
+        return;
+    };
+    let runner_job_id = record
+        .runner_job_id()
+        .filter(|job_id| !job_id.trim().is_empty());
+    let encoded_run_id = homeboy_core::execution_contract::encode_uri_component(&record.run_id);
+
+    for outcome in &mut aggregate.outcomes {
+        let mut projected = Vec::new();
+        for evidence in &mut outcome.evidence_refs {
+            if !evidence.uri.starts_with("file://") {
+                continue;
+            }
+            let reference_digest = format!("{:x}", sha2::Sha256::digest(evidence.uri.as_bytes()));
+            let encoded_task_id =
+                homeboy_core::execution_contract::encode_uri_component(&outcome.task_id);
+            evidence.uri = format!(
+                "homeboy://agent-task/run/{encoded_run_id}/aggregate#outcome={encoded_task_id}&evidence={reference_digest}"
+            );
+            projected.push((reference_digest, evidence.kind.clone()));
+        }
+        if projected.is_empty() {
+            continue;
+        }
+        if !outcome.metadata.is_object() {
+            outcome.metadata = json!({});
+        }
+        if !outcome.metadata["runner_evidence_projection"].is_object() {
+            outcome.metadata["runner_evidence_projection"] = json!({});
+        }
+        let projections = outcome.metadata["runner_evidence_projection"]
+            .as_object_mut()
+            .expect("runner evidence projection is an object");
+        for (reference_digest, kind) in projected {
+            projections.insert(
+                reference_digest,
+                json!({
+                    "kind": kind,
+                    "source_runner_id": runner_id,
+                    "source_runner_job_id": runner_job_id,
+                    "retention": "controller_aggregate",
+                    "redaction": "producer_redacted",
+                }),
+            );
+        }
+    }
+}
+
 /// The authoritative model recorded on an aggregate outcome, if any.
 ///
 /// Locates the outcome for `task_id` and reads its concrete model through the
