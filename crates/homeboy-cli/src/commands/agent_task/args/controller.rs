@@ -44,9 +44,11 @@ pub enum AgentTaskControllerCommand {
     Proof(AgentTaskControllerProofArgs),
 }
 
-/// Shared dispatch overrides for controller subcommands that can spawn dispatch
-/// actions. Flattened into each controller args struct so the CLI surface is
-/// identical to declaring these fields inline.
+/// Dispatch overrides applied to actions a controller subcommand spawns, for
+/// when those actions do not specify their own backend, provider, or model.
+//
+// Implementation note (not shown in `--help`): flattened into each controller
+// args struct so the CLI surface is identical to declaring these fields inline.
 #[derive(Args, Debug, Clone)]
 pub struct AgentTaskControllerDispatchArgs {
     /// Executor backend to use for controller-spawned dispatch actions when the action omits one.
