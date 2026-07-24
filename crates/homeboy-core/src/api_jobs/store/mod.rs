@@ -1896,6 +1896,11 @@ impl JobStore {
             let now = timestamp_ms();
             stored.job.status = next_status;
             stored.job.updated_at_ms = now;
+            if next_status == JobStatus::Cancelled {
+                // Preserve the cancellation cause in the job projection as well
+                // as the status event, so a drained generation remains diagnosable.
+                stored.job.stale_reason = Some(message.clone());
+            }
             if next_status == JobStatus::Running {
                 stored.job.started_at_ms = Some(now);
             }

@@ -6,6 +6,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use uuid::Uuid;
@@ -54,6 +55,71 @@ use patch_capture::{capture_baseline, capture_patch_report};
 use runner_files::{create_runner_file_directory, download_runner_file, upload_runner_file};
 
 pub const DEFAULT_ADDR: &str = "127.0.0.1:0";
+
+const HEARTBEAT_ONLY_STALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const HEARTBEAT_ONLY_STALL_POLL: Duration = Duration::from_secs(1);
+
+/// Separates transport liveness from child work. A wrapper heartbeat is useful
+/// evidence that the supervisor is alive, but it cannot extend a child's lease.
+#[derive(Debug)]
+struct ExecLiveness {
+    last_semantic_progress: Instant,
+    last_cpu_ms: Option<u64>,
+    stalled: bool,
+}
+
+impl ExecLiveness {
+    fn new(now: Instant) -> Self {
+        Self {
+            last_semantic_progress: now,
+            last_cpu_ms: None,
+            stalled: false,
+        }
+    }
+
+    fn observe(&mut self, data: &serde_json::Value, now: Instant) -> bool {
+        if self.stalled {
+            return false;
+        }
+        let phase = data.get("phase").and_then(serde_json::Value::as_str);
+        // Child protocols may legitimately use a heartbeat phase. The resource
+        // wrapper is identified by the process snapshot it emits.
+        let wrapper_heartbeat =
+            phase == Some("heartbeat") && data.pointer("/process/root_pid").is_some();
+        let cpu_ms = data
+            .pointer("/process/resources/cpu_user_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default()
+            .saturating_add(
+                data.pointer("/process/resources/cpu_system_ms")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default(),
+            );
+        let cpu_advanced = self.last_cpu_ms.is_some_and(|previous| cpu_ms > previous);
+        if !wrapper_heartbeat || cpu_advanced {
+            self.last_semantic_progress = now;
+        }
+        if wrapper_heartbeat {
+            self.last_cpu_ms = Some(cpu_ms);
+        }
+        true
+    }
+
+    fn select_stall(&mut self, now: Instant, timeout: Duration) -> bool {
+        if self.stalled || now.duration_since(self.last_semantic_progress) < timeout {
+            return false;
+        }
+        self.stalled = true;
+        true
+    }
+}
+
+fn heartbeat_only_stall_reason(timeout: Duration) -> String {
+    format!(
+        "heartbeat_only_stall: no child output, semantic progress, or advancing CPU for {}s; cancellation requested so daemon generation draining can converge",
+        timeout.as_secs()
+    )
+}
 
 /// Generic client for controller-local daemon jobs. Domain crates use this
 /// rather than carrying daemon HTTP or controller-job semantics themselves.
@@ -1645,6 +1711,7 @@ fn enqueue_exec_job(
     let capacity = is_agent_task
         .then_some(plan.concurrency_limit.unwrap_or(usize::MAX).max(1))
         .unwrap_or(usize::MAX);
+    let stall_watchdog_store = job_store.clone();
     let runner = job_store
         .run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
             operation,
@@ -1671,8 +1738,24 @@ fn enqueue_exec_job(
                 };
                 plan.env
                     .insert("HOMEBOY_RUNNER_CHILD_RESERVATION".to_string(), reservation_id);
+                let liveness = Arc::new(Mutex::new(ExecLiveness::new(Instant::now())));
+                let cancellation_requested = Arc::new(AtomicBool::new(false));
                 let progress_job = job.clone();
-                let progress_sink = Arc::new(move |data| progress_job.progress(data).map(|_| ()));
+                let progress_liveness = Arc::clone(&liveness);
+                let progress_sink = Arc::new(move |data| {
+                    // Select a stall before accepting progress so a late wrapper
+                    // heartbeat cannot race a selected cancellation back to life.
+                    if !progress_liveness
+                        .lock()
+                        .expect("runner exec liveness lock")
+                        .observe(&data, Instant::now())
+                    {
+                        return Err(Error::internal_unexpected(
+                            "runner exec progress arrived after heartbeat-only stall cancellation",
+                        ));
+                    }
+                    progress_job.progress(data).map(|_| ())
+                });
                 let started_job = job.clone();
                 let child_started = Arc::new(move |pid| {
                     let process_group_id = crate::process::isolated_process_group_id(pid)
@@ -1686,15 +1769,47 @@ fn enqueue_exec_job(
                     Ok(())
                 });
                 let cancel_job = job.clone();
+                let watchdog_store = stall_watchdog_store.clone();
+                let watchdog_liveness = Arc::clone(&liveness);
+                let watchdog_cancellation = Arc::clone(&cancellation_requested);
+                let watchdog_job = job.clone();
+                let (watchdog_stop, watchdog_stopped) = mpsc::channel();
+                let watchdog = std::thread::spawn(move || {
+                    while watchdog_stopped
+                        .recv_timeout(HEARTBEAT_ONLY_STALL_POLL)
+                        .is_err()
+                    {
+                        let stalled = watchdog_liveness
+                            .lock()
+                            .expect("runner exec liveness lock")
+                            .select_stall(Instant::now(), HEARTBEAT_ONLY_STALL_TIMEOUT);
+                        if stalled {
+                            // Latch before writing the terminal state. If durable
+                            // persistence races a normal completion, the child is
+                            // still asked to stop and no later heartbeat can revive it.
+                            watchdog_cancellation.store(true, Ordering::SeqCst);
+                            let _ = watchdog_store.cancel(
+                                watchdog_job.job_id(),
+                                heartbeat_only_stall_reason(HEARTBEAT_ONLY_STALL_TIMEOUT),
+                            );
+                            return;
+                        }
+                    }
+                });
                 job.progress(json!({ "phase": "local_child_driver_execution_started" }))?;
                 job.progress(json!({ "phase": "local_child_command_spawn_attempted" }))?;
                 let process_output = runner_exec_driver::execute_exec(
                     &plan,
-                    Box::new(move || cancel_job.is_cancelled()),
+                    Box::new(move || {
+                        cancellation_requested.load(Ordering::SeqCst) || cancel_job.is_cancelled()
+                    }),
                     Some(progress_sink),
                     true,
                     Some(child_started),
-                )?;
+                );
+                let _ = watchdog_stop.send(());
+                let _ = watchdog.join();
+                let process_output = process_output?;
                 let stdout = process_output.stdout.clone();
                 let stderr = process_output.stderr.clone();
                 let exit_code = process_output.exit_code;
@@ -2321,6 +2436,78 @@ mod tests {
     use crate::daemon::runner_exec_driver::{
         self, DaemonExecOutput, PreparedDaemonExec, RunnerExecDriver, RunnerExecPrepareRequest,
     };
+
+    #[test]
+    fn heartbeat_only_liveness_stalls_after_the_bounded_window() {
+        let start = Instant::now();
+        let mut liveness = ExecLiveness::new(start);
+        let heartbeat = json!({
+            "phase": "heartbeat",
+            "process": { "root_pid": 1, "resources": { "cpu_user_ms": 10, "cpu_system_ms": 2 } }
+        });
+
+        assert!(liveness.observe(&heartbeat, start + Duration::from_secs(1)));
+        assert!(liveness.observe(&heartbeat, start + Duration::from_secs(9)));
+        assert!(liveness.select_stall(start + Duration::from_secs(10), Duration::from_secs(10)));
+        assert!(!liveness.observe(&heartbeat, start + Duration::from_secs(11)));
+        assert!(
+            heartbeat_only_stall_reason(Duration::from_secs(10)).contains("heartbeat_only_stall")
+        );
+    }
+
+    #[test]
+    fn semantic_output_and_advancing_cpu_protect_long_running_work() {
+        let start = Instant::now();
+        let mut liveness = ExecLiveness::new(start);
+        let heartbeat = |cpu| {
+            json!({
+                "phase": "heartbeat",
+                "process": { "root_pid": 1, "resources": { "cpu_user_ms": cpu, "cpu_system_ms": 0 } }
+            })
+        };
+
+        assert!(liveness.observe(&heartbeat(10), start + Duration::from_secs(9)));
+        assert!(liveness.observe(&heartbeat(11), start + Duration::from_secs(18)));
+        assert!(!liveness.select_stall(start + Duration::from_secs(20), Duration::from_secs(10)));
+        assert!(liveness.observe(
+            &json!({ "phase": "child_output", "message": "working" }),
+            start + Duration::from_secs(29)
+        ));
+        assert!(!liveness.select_stall(start + Duration::from_secs(30), Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn selected_stall_wins_the_progress_cancellation_race() {
+        let start = Instant::now();
+        let mut liveness = ExecLiveness::new(start);
+        assert!(liveness.select_stall(start + Duration::from_secs(10), Duration::from_secs(10)));
+        assert!(liveness.stalled);
+        assert!(!liveness.observe(
+            &json!({ "phase": "child_output" }),
+            start + Duration::from_secs(10)
+        ));
+        assert!(!liveness.select_stall(start + Duration::from_secs(11), Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn stalled_cancellation_converges_active_job_accounting() {
+        let store = JobStore::default();
+        let job = store.create("runner.exec");
+        store.start(job.id).expect("start job");
+        let cancelled = store
+            .cancel(job.id, heartbeat_only_stall_reason(Duration::from_secs(10)))
+            .expect("cancel stalled job");
+
+        assert_eq!(cancelled.status, JobStatus::Cancelled);
+        assert!(cancelled
+            .stale_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("heartbeat_only_stall")));
+        assert!(
+            store.active_runner_jobs().is_empty(),
+            "cancelled jobs cannot pin a draining generation"
+        );
+    }
 
     #[test]
     fn resolve_exec_idempotency_key_prefers_the_explicit_controller_key() {
