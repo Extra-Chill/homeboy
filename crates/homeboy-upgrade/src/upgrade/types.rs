@@ -42,6 +42,23 @@ impl<'de> Deserialize<'de> for InstallMethod {
     }
 }
 
+/// Disposition of runner convergence for an upgrade, so structured output
+/// records intent and outcome rather than leaving consumers to infer it from
+/// empty runner arrays (#9842).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerConvergenceDisposition {
+    /// Runner convergence was explicitly skipped (e.g. `--skip-runners`); no
+    /// runner state was collected or claimed.
+    Skipped,
+    /// No runners are configured, so there was nothing to converge.
+    NoRunnersConfigured,
+    /// Every selected configured runner converged to the controller build.
+    Converged,
+    /// One or more selected runners did not converge.
+    Partial,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 
 pub struct VersionCheck {
@@ -73,6 +90,11 @@ pub struct UpgradeResult {
     /// their current payload shape; accepted when reading persisted responses.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub partial: bool,
+    /// Explicit runner-convergence disposition (skipped / none configured /
+    /// converged / partial), so consumers never infer convergence from empty
+    /// runner arrays. Omitted for older persisted responses (#9842).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_convergence: Option<RunnerConvergenceDisposition>,
     pub message: String,
     pub restart_required: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
