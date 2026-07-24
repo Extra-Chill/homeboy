@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.21] - 2026-07-24
+
+### Fixed
+- bound baseline command liveness and cleanup
+
 ## [2.8.20] - 2026-07-23
 
 ### Fixed
