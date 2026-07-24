@@ -1360,7 +1360,13 @@ pub fn run_status(run_id: &str, since_cursor: Option<u64>) -> Result<AgentTaskRu
             let refs = artifact_refs_for_outcomes(&aggregate.outcomes);
             (aggregate.events, refs)
         }
-        Err(_) => (queued_events(&record.tasks), record.artifact_refs.clone()),
+        Err(_) => {
+            // Surface a local cook's durable running provider execution so the
+            // live bridge status advances past "task submitted" too (#8396).
+            let mut events = queued_events(&record.tasks);
+            events.extend(local_provider_execution_events(&record));
+            (events, record.artifact_refs.clone())
+        }
     };
     let normalized_events = normalize_progress_events(&record.run_id, &events, &artifact_refs);
     let latest_event_cursor = normalized_events
@@ -2390,11 +2396,16 @@ pub fn logs_with_raw(run_id: &str, include_raw: bool) -> Result<AgentTaskRunLog>
         }
         Err(_) => {
             let raw_events = runner_job_raw_events(&record);
-            (
-                runner_job_progress_events(&record).unwrap_or_else(|| queued_events(&record.tasks)),
-                record.artifact_refs.clone(),
-                raw_events,
-            )
+            // Before any aggregate exists, a local (in-process) cook that is
+            // actively running the provider otherwise shows only "task submitted".
+            // Surface the durable running provider execution so `agent-task logs`
+            // distinguishes active provider execution from a hung preflight (#8396).
+            let progress = runner_job_progress_events(&record).unwrap_or_else(|| {
+                let mut events = queued_events(&record.tasks);
+                events.extend(local_provider_execution_events(&record));
+                events
+            });
+            (progress, record.artifact_refs.clone(), raw_events)
         }
     };
     let events = if raw_events.is_empty() {
@@ -2408,6 +2419,56 @@ pub fn logs_with_raw(run_id: &str, include_raw: bool) -> Result<AgentTaskRunLog>
         events,
         raw_events: include_raw.then_some(raw_events).unwrap_or_default(),
     })
+}
+
+/// Synthesize progress events from the durable running provider executions of a
+/// local (in-process) cook. `reserve_provider_execution` records each attempt
+/// (backend, model, started_at, `state:"running"`) before the scheduler blocks
+/// on the backend, but until an aggregate exists `agent-task logs` shows only
+/// "task submitted". Surface the running executions so logs reflect active
+/// provider work rather than a stalled preflight (#8396).
+fn local_provider_execution_events(record: &AgentTaskRunRecord) -> Vec<AgentTaskProgressEvent> {
+    let Some(executions) = record
+        .metadata
+        .get("provider_executions")
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    executions
+        .iter()
+        .filter(|execution| execution.get("state").and_then(Value::as_str) == Some("running"))
+        .map(|execution| {
+            let task_id = execution
+                .get("task_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| record.tasks.first().map(|task| task.task_id.clone()))
+                .unwrap_or_else(|| record.run_id.clone());
+            let backend = execution
+                .get("backend")
+                .and_then(Value::as_str)
+                .unwrap_or("provider");
+            let mut message = format!("provider execution running: {backend}");
+            if let Some(model) = execution.get("model").and_then(Value::as_str) {
+                if !model.is_empty() {
+                    message.push_str(&format!(" ({model})"));
+                }
+            }
+            if let Some(started_at) = execution.get("started_at").and_then(Value::as_str) {
+                message.push_str(&format!("; started {started_at}"));
+            }
+            AgentTaskProgressEvent {
+                task_id,
+                state: AgentTaskState::Running,
+                attempt: execution
+                    .get("attempt")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1) as u32,
+                message: Some(message),
+            }
+        })
+        .collect()
 }
 
 fn runner_job_progress_events(record: &AgentTaskRunRecord) -> Option<Vec<AgentTaskProgressEvent>> {

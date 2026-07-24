@@ -119,6 +119,44 @@ fn legacy_v1_pin_migration_failures_leave_durable_record_unchanged() {
     });
 }
 
+#[test]
+fn local_cook_logs_surface_running_provider_execution_before_aggregate() {
+    // #8396: while a local cook runs the provider (no aggregate yet), logs must
+    // advance past "task submitted" to reflect the durable running provider
+    // execution, so operators can tell active execution from a hung preflight.
+    with_isolated_home(|_| {
+        let run_id = "local-cook-running";
+        submit_plan(&test_plan(), Some(run_id)).expect("submitted");
+        rewrite_record_for_test(run_id, |record| {
+            record.metadata["provider_executions"] = serde_json::json!([{
+                "key": "task:1",
+                "task_id": "task",
+                "attempt": 1,
+                "backend": "opencode",
+                "model": "openai/gpt-5.6-sol",
+                "state": "running",
+                "started_at": "2026-07-24T00:00:00Z"
+            }]);
+        })
+        .expect("running provider execution recorded");
+
+        let log = logs(run_id).expect("logs resolve for a running local cook");
+        let messages: Vec<&str> = log
+            .events
+            .iter()
+            .filter_map(|event| event.message.as_deref())
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("provider execution running")
+                    && message.contains("opencode")
+                    && message.contains("openai/gpt-5.6-sol")),
+            "logs must surface the running provider execution, got: {messages:?}"
+        );
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn submit_plan_persists_owner_only_plan_file_before_observation() {
