@@ -10,7 +10,8 @@ use crate::agent_task::{
     AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_OUTCOME_SCHEMA,
 };
 use crate::agent_task_gate::{
-    AgentTaskGateRevealPolicy, AgentTaskGateStatus, AgentTaskGateVisibility,
+    AgentTaskGateCandidateCheckout, AgentTaskGateRevealPolicy, AgentTaskGateStatus,
+    AgentTaskGateVisibility,
 };
 use crate::agent_task_scheduler::{AgentTaskAggregate, AGENT_TASK_AGGREGATE_SCHEMA};
 use crate::agent_task_timeout_artifacts::{
@@ -139,7 +140,26 @@ pub fn resume_promoted_patch(
                 None,
             )
         })?;
-    let gates = run_promotion_gates(&options, &mut provider, target_path)?;
+    let expected_candidate = previous
+        .pointer("/provenance/candidate")
+        .filter(|candidate| !candidate.is_null())
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| {
+            Error::validation_invalid_argument(
+                "promotion.provenance.candidate",
+                "promotion resume durable candidate fingerprint is invalid",
+                None,
+                None,
+            )
+        })?;
+    let gates = run_promotion_gates(
+        &options,
+        &mut provider,
+        target_path,
+        expected_candidate.as_ref(),
+    )?;
     let target =
         AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), Some(target_path));
     let candidate = if gates.status.patch_promoted() {
@@ -171,6 +191,7 @@ pub fn resume_promoted_patch(
             "artifact_metadata": artifact.metadata,
             "worktree_path": target_path,
             "dependencies_materialized": gates.dependencies_materialized,
+            "candidate_checkout": gates.candidate_checkout,
             "candidate": candidate,
             "resumed_post_apply_promotion": true,
             "resume_contract": previous.pointer("/provenance/resume_contract"),
@@ -554,7 +575,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
         let target =
             AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), worktree_path);
         let gates = if let Some(worktree_path) = worktree_path {
-            run_promotion_gates(&options, provider, worktree_path)?
+            run_promotion_gates(&options, provider, worktree_path, None)?
         } else {
             PromotionGateRun::without_gates(options.dry_run)
         };
@@ -594,6 +615,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
                 "worktree_path": worktree_path,
                 "verified_revision": verified_revision,
                 "dependencies_materialized": gates.dependencies_materialized,
+                "candidate_checkout": gates.candidate_checkout,
                 "candidate": candidate,
             }),
             operator_notification,
@@ -690,7 +712,27 @@ pub(super) fn promote_with_provider_and_checkpoint(
             capture_declared_base(worktree_path, options.base_ref.as_deref())?
         };
         (
-            run_promotion_gates(&options, provider, worktree_path)?,
+            run_promotion_gates(
+                &options,
+                provider,
+                worktree_path,
+                post_apply
+                    .as_ref()
+                    .and_then(|report| report.provenance.get("candidate"))
+                    .filter(|candidate| !candidate.is_null())
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|_| {
+                        Error::validation_invalid_argument(
+                            "promotion.provenance.candidate",
+                            "post-apply promotion candidate fingerprint is invalid",
+                            None,
+                            None,
+                        )
+                    })?
+                    .as_ref(),
+            )?,
             verified_base,
         )
     } else {
@@ -730,6 +772,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
             "artifact_metadata": artifact.metadata,
             "worktree_path": applied_worktree_path,
             "dependencies_materialized": gates.dependencies_materialized,
+            "candidate_checkout": gates.candidate_checkout,
             "candidate": candidate,
             "destination_baseline": candidate,
             "prior_baseline": promotion_chain_baseline,
@@ -1123,7 +1166,30 @@ fn promote_committed_changes(
     };
     let verified_base = if let Some(path) = applied_worktree_path.as_deref() {
         let verified_base = capture_declared_base(path, options.base_ref.as_deref())?;
-        (run_promotion_gates(options, provider, path)?, verified_base)
+        (
+            run_promotion_gates(
+                options,
+                provider,
+                path,
+                post_apply
+                    .as_ref()
+                    .and_then(|report| report.provenance.get("candidate"))
+                    .filter(|candidate| !candidate.is_null())
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|_| {
+                        Error::validation_invalid_argument(
+                            "promotion.provenance.candidate",
+                            "post-apply promotion candidate fingerprint is invalid",
+                            None,
+                            None,
+                        )
+                    })?
+                    .as_ref(),
+            )?,
+            verified_base,
+        )
     } else {
         (PromotionGateRun::without_gates(options.dry_run), None)
     };
@@ -1159,6 +1225,7 @@ fn promote_committed_changes(
             "artifact_metadata": artifact.map(|artifact| artifact.metadata.clone()).unwrap_or(Value::Null),
             "worktree_path": applied_worktree_path,
             "dependencies_materialized": gates.dependencies_materialized,
+            "candidate_checkout": gates.candidate_checkout,
             "change_source": "local_commits",
             "base_ref": committed_patch.base_ref,
             "commit_range": committed_patch.commit_range,
@@ -1175,6 +1242,7 @@ fn run_promotion_gates(
     options: &AgentTaskPromotionOptions,
     provider: &mut impl AgentTaskPromotionWorkspaceProvider,
     worktree_path: &Path,
+    expected_candidate: Option<&crate::agent_task_promotion::AgentTaskPromotionCandidate>,
 ) -> Result<PromotionGateRun> {
     if options.dry_run
         || (options.gates.verify.is_empty() && options.gates.private_verify.is_empty())
@@ -1182,15 +1250,28 @@ fn run_promotion_gates(
         return Ok(PromotionGateRun::without_gates(options.dry_run));
     }
 
-    // Materialize dependencies via the component's resolved dependency providers
-    // before running verify gates so dependency misses do not mask gate signal.
-    homeboy_core::hygiene::materialize_worktree_dependencies(worktree_path)?;
+    let candidate_checkout = ImmutableCandidateCheckout::materialize(
+        worktree_path,
+        options
+            .source_run_id
+            .as_deref()
+            .unwrap_or("unrecorded-promotion"),
+        expected_candidate,
+    )?;
+    let gate_path = candidate_checkout
+        .as_ref()
+        .map(ImmutableCandidateCheckout::path)
+        .unwrap_or(worktree_path);
+    // Materialize dependencies in the immutable checkout so repository-owned
+    // verification sees the candidate as committed content, never the dirty
+    // promotion target that finalization still owns.
+    homeboy_core::hygiene::materialize_worktree_dependencies(gate_path)?;
     let mut deterministic_gates = Vec::new();
     for (index, command) in options.gates.verify.iter().enumerate() {
         deterministic_gates.push(run_promotion_gate(
             options,
             provider,
-            worktree_path,
+            gate_path,
             index + 1,
             command,
             AgentTaskGateVisibility::Visible,
@@ -1202,7 +1283,7 @@ fn run_promotion_gates(
         deterministic_gates.push(run_promotion_gate(
             options,
             provider,
-            worktree_path,
+            gate_path,
             private_offset + index + 1,
             command,
             AgentTaskGateVisibility::Private,
@@ -1218,12 +1299,167 @@ fn run_promotion_gates(
         .map(HomeboyGateResult::from)
         .collect();
 
+    let candidate_checkout = candidate_checkout.map(|checkout| checkout.identity());
+    if let Some(candidate_checkout) = &candidate_checkout {
+        for gate in &mut deterministic_gates {
+            gate.candidate_checkout = Some(candidate_checkout.clone());
+        }
+    }
     Ok(PromotionGateRun {
         status: status_for_report(options.dry_run, has_gate_failure),
         deterministic_gates,
         gate_results,
         dependencies_materialized: true,
+        candidate_checkout,
     })
+}
+
+/// A run-scoped detached worktree whose commit tree is exactly the promoted
+/// candidate. The source destination stays dirty for final commit/push/PR.
+struct ImmutableCandidateCheckout {
+    source_root: PathBuf,
+    path: PathBuf,
+    allocation: crate::controller_scratch::ControllerScratchAllocation,
+    identity: AgentTaskGateCandidateCheckout,
+}
+
+impl ImmutableCandidateCheckout {
+    fn materialize(
+        source_root: &Path,
+        run_id: &str,
+        expected_candidate: Option<&crate::agent_task_promotion::AgentTaskPromotionCandidate>,
+    ) -> Result<Option<Self>> {
+        if !source_root.is_dir() {
+            // An external provider can report an opaque or not-yet-mounted
+            // destination. Preserve its existing direct verification path.
+            return Ok(None);
+        }
+        let head = Command::new("git")
+            .args(["rev-parse", "--verify", "HEAD^{commit}"])
+            .current_dir(source_root)
+            .output()
+            .map_err(|error| Error::git_command_failed(error.to_string()))?;
+        if !head.status.success() {
+            // Provider-owned and bootstrap destinations can still be verified,
+            // but have no committed Git candidate to materialize.
+            return Ok(None);
+        }
+        let candidate =
+            crate::agent_task_promotion::candidate_fingerprint(&source_root.display().to_string())?;
+        if let Some(expected_candidate) = expected_candidate {
+            if &candidate != expected_candidate {
+                return Err(Error::validation_invalid_argument(
+                    "promotion.provenance.candidate",
+                    "promotion destination differs from the checkpointed candidate before deterministic verification",
+                    Some(source_root.display().to_string()),
+                    None,
+                ));
+            }
+        }
+        let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } =
+            candidate
+        else {
+            return Ok(None);
+        };
+        let commit = git_output(
+            source_root,
+            &[
+                "-c",
+                "user.name=Homeboy",
+                "-c",
+                "user.email=homeboy@localhost",
+                "commit-tree",
+                &fingerprint.tree,
+                "-p",
+                &fingerprint.head,
+                "-m",
+                "homeboy: immutable promotion candidate",
+            ],
+        )?;
+        let allocation = crate::controller_scratch::allocate_attempt(
+            run_id,
+            "promotion-candidate-checkout",
+            "candidate",
+            1,
+        )?;
+        crate::controller_scratch::mark_attempt_ephemeral(&allocation)?;
+        let path = allocation.path.clone();
+        git_output(
+            source_root,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                &path.display().to_string(),
+                &commit,
+            ],
+        )?;
+        let checkout = Self {
+            source_root: source_root.to_path_buf(),
+            path,
+            allocation,
+            identity: AgentTaskGateCandidateCheckout {
+                schema: "homeboy/agent-task-gate-candidate-checkout/v1".to_string(),
+                commit,
+                tree: fingerprint.tree,
+                candidate_sha256: fingerprint.sha256,
+            },
+        };
+        let status = git_output(
+            &checkout.path,
+            &["status", "--porcelain", "--untracked-files=all"],
+        )?;
+        if !status.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "promotion",
+                "immutable candidate checkout is unexpectedly dirty",
+                Some(checkout.path.display().to_string()),
+                None,
+            ));
+        }
+        Ok(Some(checkout))
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn identity(&self) -> AgentTaskGateCandidateCheckout {
+        self.identity.clone()
+    }
+}
+
+impl Drop for ImmutableCandidateCheckout {
+    fn drop(&mut self) {
+        let _ = Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(&self.path)
+            .current_dir(&self.source_root)
+            .status();
+        let _ = crate::controller_scratch::release_attempt(
+            &self.allocation,
+            "candidate_checkout_removed",
+            serde_json::json!({ "commit": self.identity.commit, "tree": self.identity.tree }),
+        );
+        let _ = Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(&self.source_root)
+            .status();
+    }
+}
+
+fn git_output(path: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    if !output.status.success() {
+        return Err(Error::git_command_failed(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn run_promotion_gate(

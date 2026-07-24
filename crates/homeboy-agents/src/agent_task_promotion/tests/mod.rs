@@ -55,6 +55,8 @@ pub(super) struct FakePromotionWorkspaceProvider {
     )>,
     verify_exit_code: i32,
     verify_transport_error: bool,
+    run_verify_command: bool,
+    verify_worktrees_clean: Vec<bool>,
     force_add_ignored_file: bool,
     apply_to_git: bool,
 }
@@ -118,6 +120,21 @@ impl AgentTaskPromotionWorkspaceProvider for FakePromotionWorkspaceProvider {
                 "simulated verification transport interruption",
                 Some("promotion gate transport".to_string()),
             ));
+        }
+        let status = Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=all"])
+            .current_dir(cwd)
+            .output();
+        self.verify_worktrees_clean
+            .push(status.is_ok_and(|status| status.status.success() && status.stdout.is_empty()));
+        if self.run_verify_command {
+            return crate::agent_task_gate::run_gate_command_with_policy(
+                cwd,
+                index,
+                command,
+                visibility,
+                reveal_policy,
+            );
         }
         Ok(AgentTaskGateReport::new(
             format!("gate-{index}"),

@@ -419,7 +419,7 @@ fn empty_patch_failing_gate_is_reported_against_pinned_candidate() {
         homeboy_core::gate::HomeboyGateStatus::Failed
     );
     assert_eq!(provider.apply_calls.len(), 0);
-    assert_eq!(provider.verify_calls[0].0, repo);
+    assert_ne!(provider.verify_calls[0].0, repo);
 }
 
 #[test]
