@@ -1699,6 +1699,12 @@ impl JobStore {
                     let _ = worker_store.complete(job_id, serde_json::to_value(output).ok());
                 }
                 Err(error) => {
+                    // A child whose process tree could not be reaped remains
+                    // active. Terminalizing it would let a draining generation
+                    // retire while unconfirmed work still exists.
+                    if error.details["retain_active"].as_bool() == Some(true) {
+                        return;
+                    }
                     let error_message = error.to_string();
                     let failure_data = serde_json::json!({
                         "phase": "local_child_worker_failed_before_child_identity",
@@ -1788,6 +1794,9 @@ impl JobStore {
                     let _ = worker_store.complete(job_id, serde_json::to_value(output).ok());
                 }
                 Err(error) => {
+                    if error.details["retain_active"].as_bool() == Some(true) {
+                        return;
+                    }
                     let error_message = error.to_string();
                     let failure_data = serde_json::json!({
                         "phase": "local_child_worker_failed_before_child_identity",

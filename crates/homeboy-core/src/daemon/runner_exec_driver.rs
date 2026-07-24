@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use crate::error::{Error, Result};
+use crate::server::HeartbeatOnlyStallPolicy;
 use crate::source_snapshot::SourceSnapshot;
 
 /// Everything the driver needs to build a runner process plan. Mirrors the
@@ -59,6 +60,7 @@ pub struct PreparedDaemonExec {
     /// The runner's declared process capacity. The daemon uses this to admit a
     /// local child before creating its bounded pre-spawn reservation.
     pub concurrency_limit: Option<usize>,
+    pub heartbeat_only_stall: HeartbeatOnlyStallPolicy,
     /// Opaque driver-owned plan handle carried back into `execute`. The daemon
     /// never inspects it; it exists so the driver can reconstruct the full
     /// runner process without re-preparing.
@@ -77,6 +79,7 @@ impl PreparedDaemonExec {
         source_snapshot: SourceSnapshot,
         require_paths: Vec<String>,
         concurrency_limit: Option<usize>,
+        heartbeat_only_stall: HeartbeatOnlyStallPolicy,
         plan_token: Arc<dyn std::any::Any + Send + Sync>,
     ) -> Self {
         Self {
@@ -88,6 +91,7 @@ impl PreparedDaemonExec {
             source_snapshot,
             require_paths,
             concurrency_limit,
+            heartbeat_only_stall,
             plan_token,
         }
     }
