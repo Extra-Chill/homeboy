@@ -212,7 +212,11 @@ fn get_unexpected_uncommitted_files(
     all_uncommitted
         .into_iter()
         .filter(|f| !is_homeboy_managed_path(f))
-        .filter(|f| !allowed.iter().any(|a| f.ends_with(a) || a.ends_with(*f)))
+        .filter(|f| {
+            !allowed
+                .iter()
+                .any(|a| uncommitted_entry_matches_allowed(f, a))
+        })
         .filter(|f| {
             !declared_artifacts
                 .iter()
@@ -220,6 +224,26 @@ fn get_unexpected_uncommitted_files(
         })
         .cloned()
         .collect()
+}
+
+/// Whether an uncommitted git entry corresponds to a release-allowed path.
+///
+/// Git collapses a wholly-untracked directory into a single entry with a
+/// trailing slash (e.g. `plugins/foo/docs/`) instead of listing the files under
+/// it. When the release bootstraps a changelog into a brand-new directory, the
+/// allowed path is the file (`.../docs/CHANGELOG.md`) but the uncommitted entry
+/// is the directory — the old `ends_with` match missed that and aborted every
+/// component's first release (#9964). Treat a directory entry as matching when
+/// an allowed path lives under it.
+fn uncommitted_entry_matches_allowed(entry: &str, allowed: &str) -> bool {
+    if entry.ends_with(allowed) || allowed.ends_with(entry) {
+        return true;
+    }
+    // A wholly-untracked directory entry (trailing slash) matches when an allowed
+    // path lives under it. Both are repo-root-relative, so `starts_with` is the
+    // primary check; `/{entry}` also matches when `allowed` is rooted deeper than
+    // the reported entry (the directory appears as an interior path component).
+    entry.ends_with('/') && (allowed.starts_with(entry) || allowed.contains(&format!("/{entry}")))
 }
 
 fn paths_match(file: &str, allowed: &str) -> bool {
@@ -365,6 +389,39 @@ mod tests {
             untracked: untracked.iter().map(|s| s.to_string()).collect(),
             hint: None,
         }
+    }
+
+    #[test]
+    fn bootstrapped_changelog_in_new_untracked_directory_is_allowed() {
+        // #9964: bootstrapping docs/CHANGELOG.md into a brand-new directory makes
+        // git report the untracked *directory* (`plugins/foo/docs/`), not the
+        // file. The allowed changelog path must still cover it, so the first
+        // release does not abort on the file it just wrote.
+        let allowed = vec!["plugins/foo/docs/CHANGELOG.md".to_string()];
+        let changes = uncommitted(&[], &[], &["plugins/foo/docs/"]);
+        let unexpected = get_unexpected_uncommitted_files(&changes, &allowed, &[]);
+        assert!(
+            unexpected.is_empty(),
+            "the untracked changelog directory should be allowed: {unexpected:?}"
+        );
+    }
+
+    #[test]
+    fn unrelated_untracked_directory_is_still_unexpected() {
+        // A directory that does not contain an allowed path stays flagged.
+        let allowed = vec!["plugins/foo/docs/CHANGELOG.md".to_string()];
+        let changes = uncommitted(&[], &[], &["plugins/foo/src/"]);
+        let unexpected = get_unexpected_uncommitted_files(&changes, &allowed, &[]);
+        assert_eq!(unexpected, vec!["plugins/foo/src/".to_string()]);
+    }
+
+    #[test]
+    fn allowed_changelog_file_path_is_matched() {
+        // The direct file entry (existing changelog updated in place) still matches.
+        let allowed = vec!["plugins/foo/docs/CHANGELOG.md".to_string()];
+        let changes = uncommitted(&[], &["plugins/foo/docs/CHANGELOG.md"], &[]);
+        let unexpected = get_unexpected_uncommitted_files(&changes, &allowed, &[]);
+        assert!(unexpected.is_empty());
     }
 
     #[test]
