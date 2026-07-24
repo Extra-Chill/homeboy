@@ -501,6 +501,11 @@ promotes the selected patch into the target worktree, runs deterministic gates,
 retries red gates within the configured budget, then commits, pushes, and opens or
 updates a PR.
 
+`--goal` is one-line Cook framing metadata, recorded on the durable plan and each
+provider cell. When work is supplied with `--prompt`, repeated `--task`, or
+`--tasks`, those inputs alone determine the cell count; `--goal` never creates an
+additional cell. A goal without explicit work supplies one provider task.
+
 ```bash
 homeboy agent-task cook \
   --repo sample-plugin \
