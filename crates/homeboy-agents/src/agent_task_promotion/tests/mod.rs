@@ -59,6 +59,7 @@ pub(super) struct FakePromotionWorkspaceProvider {
     verify_worktrees_clean: Vec<bool>,
     force_add_ignored_file: bool,
     apply_to_git: bool,
+    replace_source_on_apply: Option<(PathBuf, String)>,
 }
 
 impl AgentTaskPromotionWorkspaceProvider for FakePromotionWorkspaceProvider {
@@ -66,6 +67,9 @@ impl AgentTaskPromotionWorkspaceProvider for FakePromotionWorkspaceProvider {
         &mut self,
         request: AgentTaskPromotionApplyRequest,
     ) -> Result<AgentTaskPromotionWorkspace> {
+        if let Some((path, contents)) = self.replace_source_on_apply.take() {
+            std::fs::write(path, contents).expect("replace source during provider handoff");
+        }
         self.applied_patch_contents
             .push(std::fs::read_to_string(&request.patch_path).unwrap_or_else(|_| String::new()));
         self.apply_calls.push(request.clone());

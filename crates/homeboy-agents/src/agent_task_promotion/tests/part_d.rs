@@ -98,6 +98,44 @@ fn promotion_uses_verified_controller_projection_for_recovered_runner_aggregate_
 }
 
 #[test]
+fn promotion_applies_verified_snapshot_when_source_artifact_is_replaced() {
+    let temp = tempfile::tempdir().expect("promotion tempdir");
+    let (source_path, source) = write_patch_source(&temp);
+    let artifact_path = temp.path().join("changes.patch");
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(temp.path().join("target")),
+        replace_source_on_apply: Some((artifact_path, VALID_PATCH.replace("+new", "+replaced"))),
+        ..Default::default()
+    };
+
+    promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: None,
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "homeboy@verified-snapshot".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect("promotion uses the verified snapshot");
+
+    assert_eq!(
+        provider.applied_patch_contents,
+        vec![VALID_PATCH.to_string()]
+    );
+}
+
+#[test]
 fn promote_recoverable_candidate_applies_exactly_one_actionable_patch() {
     let (result, apply_calls) = promote_recoverable_patch_count(1);
     assert_eq!(
@@ -294,7 +332,7 @@ fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
             source_run_id: Some("run-committed".to_string()),
             source_path: Some(source_path),
             source_worktree_path: Some(repo.clone()),
-            base_ref: Some("main".to_string()),
+            base_ref: None,
             task_base_sha: Some(git_head(&repo, "main")),
             candidate_ref: None,
             to_worktree: "repo@fix-committed".to_string(),
@@ -331,7 +369,80 @@ fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
     );
     assert_eq!(provider.apply_calls.len(), 1);
     assert_eq!(provider.verify_calls.len(), 1);
-    assert_eq!(provider.verify_calls[0].0, repo);
+    assert_ne!(provider.verify_calls[0].0, repo);
+}
+
+#[test]
+fn committed_changes_bind_cleanup_safe_gate_feedback_baselines() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).expect("create repo");
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.email", "homeboy@example.test"]);
+        git(&repo, &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(repo.join("lib.rs"), "old\n").expect("base");
+        git(&repo, &["add", "lib.rs"]);
+        git(&repo, &["commit", "-m", "base"]);
+        let base = git_head(&repo, "HEAD");
+        std::fs::write(repo.join("lib.rs"), "new\n").expect("candidate");
+        git(&repo, &["commit", "-am", "candidate"]);
+        let (source_path, source) = write_empty_patch_source(&temp);
+        let baseline_patch = VALID_PATCH;
+        let baseline_sha256 = sha256_hex(baseline_patch);
+        record_controller_projection("baseline-run", "baseline-task", "baseline", baseline_patch);
+        let mut source: Value = serde_json::from_str(&source).expect("source json");
+        source["artifacts"][0]["metadata"] = serde_json::json!({
+            "gate_feedback_baseline": {
+                "source_run_id": "baseline-run",
+                "source_task_id": "baseline-task",
+                "current_diff": baseline_patch,
+                "patch_artifact": {
+                    "id": "baseline",
+                    "kind": "patch",
+                    "path": "/lab/cleaned/baseline.patch",
+                    "sha256": baseline_sha256
+                }
+            }
+        });
+        let source = source.to_string();
+        std::fs::write(&source_path, &source).expect("write source");
+        let mut provider = FakePromotionWorkspaceProvider {
+            workspace_path: Some(repo.clone()),
+            ..Default::default()
+        };
+
+        promote_with_provider(
+            AgentTaskPromotionOptions {
+                source,
+                source_run_id: Some("committed-follow-up".to_string()),
+                source_path: Some(source_path),
+                source_worktree_path: Some(repo),
+                base_ref: None,
+                task_base_sha: Some(base),
+                candidate_ref: None,
+                to_worktree: "repo@committed-follow-up".to_string(),
+                task_id: None,
+                artifact_id: None,
+                dry_run: false,
+                gates: VerifyGateOptions::default(),
+                provider_command: None,
+                provider_invocation: None,
+            },
+            &mut provider,
+        )
+        .expect("committed follow-up promotes after Lab cleanup");
+
+        let baseline = provider.apply_calls[0]
+            .gate_feedback_baseline
+            .as_ref()
+            .expect("baseline forwarded");
+        assert!(baseline["patch_artifact"].get("path").is_none());
+        assert_eq!(
+            baseline["patch_artifact"]["controller_artifact"]["run_id"],
+            "baseline-run"
+        );
+    });
 }
 
 #[test]

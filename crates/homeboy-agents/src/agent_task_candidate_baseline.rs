@@ -87,7 +87,7 @@ pub(crate) fn validate_gate_feedback_candidate_baseline(
             ));
         }
         let record_id = reference.get("record_id").and_then(Value::as_str);
-        let (_, path) = crate::agent_task_lifecycle::verified_controller_artifact_projection(
+        let (_, bytes) = crate::agent_task_lifecycle::verified_controller_artifact_projection(
             run_id,
             task_id,
             artifact_id,
@@ -96,11 +96,7 @@ pub(crate) fn validate_gate_feedback_candidate_baseline(
             record_id,
         )?
         .ok_or_else(|| invalid("controller artifact mirror is missing"))?;
-        std::fs::read(path).map_err(|error| {
-            invalid(&format!(
-                "controller artifact mirror is unreadable: {error}"
-            ))
-        })?
+        bytes
     } else {
         let path = path.ok_or_else(|| invalid("recorded patch artifact has no path"))?;
         std::fs::read(path)

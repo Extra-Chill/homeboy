@@ -655,13 +655,11 @@ pub(super) fn promote_with_provider_and_checkpoint(
     let mut command_evidence = Vec::new();
     let mut applied_worktree_path = None;
     {
-        let normalized_patch_file;
-        let provider_patch_path = if normalized_patch.content == patch {
-            patch_path.display().to_string()
-        } else {
-            normalized_patch_file = write_normalized_patch(&normalized_patch.content)?;
-            normalized_patch_file.path().display().to_string()
-        };
+        // The provider reads an owned snapshot of the verified bytes. Never
+        // hand it the producer/controller path after validation: that path can
+        // be replaced before the provider opens it.
+        let normalized_patch_file = write_normalized_patch(&normalized_patch.content)?;
+        let provider_patch_path = normalized_patch_file.path().display().to_string();
         let target = provider.apply_patch(AgentTaskPromotionApplyRequest {
             schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
             to_workspace: options.to_worktree.clone(),
@@ -1205,28 +1203,42 @@ fn promote_committed_changes(
     artifact: Option<&AgentTaskArtifact>,
     committed_patch: CommittedChangesPatch,
 ) -> Result<AgentTaskPromotionReport> {
-    let normalized_patch = normalize_promotion_patch(
-        &std::fs::read_to_string(&committed_patch.patch_path).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!(
-                    "read committed changes promotion patch {}",
-                    committed_patch.patch_path.display()
-                )),
-            )
-        })?,
-        &options.to_worktree,
+    let patch = std::fs::read_to_string(&committed_patch.patch_path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "read committed changes promotion patch {}",
+                committed_patch.patch_path.display()
+            )),
+        )
+    })?;
+    let actual_sha256 = format!("{:x}", Sha256::digest(patch.as_bytes()));
+    if actual_sha256 != committed_patch.sha256 {
+        return Err(Error::validation_invalid_argument(
+            "committed_changes.sha256",
+            format!(
+                "committed changes patch sha256 mismatch: expected {}, read {actual_sha256}",
+                committed_patch.sha256
+            ),
+            Some(committed_patch.patch_path.display().to_string()),
+            None,
+        ));
+    }
+    let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
+    let provider_patch = write_normalized_patch(&normalized_patch.content)?;
+    let gate_feedback_baseline = bind_gate_feedback_baseline(
+        artifact
+            .and_then(|artifact| artifact.metadata.get("gate_feedback_baseline"))
+            .cloned(),
     )?;
     let mut command_evidence = Vec::new();
     let target = provider.apply_patch(AgentTaskPromotionApplyRequest {
         schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
         to_workspace: options.to_worktree.clone(),
         patch: Some(normalized_patch.content.clone()),
-        patch_path: committed_patch.patch_path.display().to_string(),
+        patch_path: provider_patch.path().display().to_string(),
         changed_files: normalized_patch.changed_files.clone(),
-        gate_feedback_baseline: artifact
-            .and_then(|artifact| artifact.metadata.get("gate_feedback_baseline"))
-            .cloned(),
+        gate_feedback_baseline,
         dry_run: options.dry_run,
         trusted_unpushed_candidate_destination: options.candidate_ref.as_ref().map(|_| {
             TrustedUnpushedCandidateDestination {

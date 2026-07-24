@@ -1534,7 +1534,7 @@ pub fn verified_controller_artifact_projection(
     kind: &str,
     expected_sha256: &str,
     expected_record_id: Option<&str>,
-) -> Result<Option<(String, PathBuf)>> {
+) -> Result<Option<(String, Vec<u8>)>> {
     let store = homeboy_core::observation::ObservationStore::open_initialized()?;
     let candidates: Vec<_> = store
         .list_artifacts(run_id)?
@@ -1580,18 +1580,22 @@ pub fn verified_controller_artifact_projection(
         ));
     }
     let path = PathBuf::from(&candidate.path);
-    let actual_sha256 = homeboy_core::artifact_metadata::sha256_file(&path).map_err(|error| {
+    let bytes = std::fs::read(&path).map_err(|error| {
         Error::validation_invalid_argument(
             "gate_feedback_candidate_baseline",
             format!(
                 "controller artifact mirror is unavailable for run '{run_id}', task '{task_id}', and artifact '{logical_artifact_id}': {}",
-                error.message
+                error
             ),
             Some(logical_artifact_id.to_string()),
             None,
         )
     })?;
-    if candidate.sha256.as_deref() != Some(expected_sha256) || actual_sha256 != expected_sha256 {
+    let actual_sha256 = format!("{:x}", sha2::Sha256::digest(&bytes));
+    if candidate.sha256.as_deref() != Some(expected_sha256)
+        || candidate.size_bytes != Some(bytes.len() as i64)
+        || actual_sha256 != expected_sha256
+    {
         return Err(Error::validation_invalid_argument(
             "gate_feedback_candidate_baseline",
             format!(
@@ -1602,7 +1606,7 @@ pub fn verified_controller_artifact_projection(
             None,
         ));
     }
-    Ok(Some((candidate.id.clone(), path)))
+    Ok(Some((candidate.id.clone(), bytes)))
 }
 
 fn unique_logical_artifact_id(
