@@ -315,6 +315,7 @@ mod tests {
             source_revision: None,
             upgraded: true,
             partial: false,
+            runner_convergence: None,
             message: "Upgraded to 0.228.7".to_string(),
             restart_required: false,
             extensions_updated: Vec::new(),

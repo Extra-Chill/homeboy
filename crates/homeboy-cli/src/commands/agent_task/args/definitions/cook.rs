@@ -183,6 +183,53 @@ mod tests {
         assert!(!options.gate_environment.isolate_home);
         assert!(!options.gate_environment.isolate_xdg);
     }
+
+    #[derive(Parser)]
+    struct CookHelpCli {
+        #[command(flatten)]
+        cook: AgentTaskCookArgs,
+    }
+
+    fn rendered_cook_help() -> String {
+        use clap::CommandFactory;
+        CookHelpCli::command().render_long_help().to_string()
+    }
+
+    #[test]
+    fn cook_help_does_not_leak_internal_refactoring_prose() {
+        // #9898/#9907: help must describe the operator contract, never the Rust
+        // refactor behind the flags.
+        let help = rendered_cook_help();
+        for leaked in [
+            "Flattened into",
+            "#[arg] attributes",
+            "DispatchArgs",
+            "field group is declared once",
+            "reproduce the original flag",
+            "CLI surface for the dispatch inputs",
+        ] {
+            assert!(
+                !help.contains(leaked),
+                "cook help leaked internal prose {leaked:?}:\n{help}"
+            );
+        }
+    }
+
+    #[test]
+    fn cook_help_documents_core_workflow_flags() {
+        let help = rendered_cook_help();
+        // Each core flag renders with operator-facing help, not a blank line.
+        assert!(help.contains("--goal"), "{help}");
+        assert!(
+            help.contains("Workspace handle of the existing worktree"),
+            "{help}"
+        );
+        assert!(
+            help.contains("Deterministic verification command"),
+            "{help}"
+        );
+        assert!(help.contains("before opening the pull request"), "{help}");
+    }
 }
 
 #[derive(Args, Debug, Clone)]
