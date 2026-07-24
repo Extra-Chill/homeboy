@@ -8,7 +8,7 @@ export default [
     ignores: [
       'node_extensions/',
       'vendor/',
-      'build/',
+      '**/build/**',
       'dist/',
       '*.min.js',
       'tests/',
