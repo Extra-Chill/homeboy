@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.310.5] - 2026-07-24
+
+### Changed
+- Reject unsupported rig component-field interpolation
+
+### Fixed
+- make changed-file mismatch error self-diagnosing
+- fix(agent-task): replay retained runner events
+- fix(agent-task): replay evidence across runtime pins
+
 ## [0.310.4] - 2026-07-24
 
 ### Changed
