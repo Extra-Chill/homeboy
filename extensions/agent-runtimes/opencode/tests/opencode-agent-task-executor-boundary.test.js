@@ -1029,6 +1029,74 @@ process.stdout.write(JSON.stringify({ type: 'result', result: { summary: 'Review
 	assert.equal(reviewConfig.permission.read['..'], 'deny');
 	assert.equal(reviewConfig.permission.read['../*'], 'deny');
 	assert.equal(reviewConfig.permission.read['*.env'], 'deny');
+
+	const structuredReviewForm = {
+		summary: 'Preserve the reviewed cleanup scope in the apply command.',
+		what_changed: ['Added the scoped apply command to cleanup output.'],
+		compatibility: 'The output change is additive.',
+		used_for: 'Inspected the candidate and summarized its verified behavior.',
+	};
+	const structuredReviewCliPath = path.join(root, 'mock-opencode-structured-review.cjs');
+	fs.writeFileSync(structuredReviewCliPath, `#!/usr/bin/env node
+const mode = process.env.REVIEW_FORM_MODE;
+const text = mode === 'valid'
+	? ${JSON.stringify(`\`\`\`json\n${JSON.stringify({ review_form: {
+		summary: 'Preserve the reviewed cleanup scope in the apply command.',
+		what_changed: ['Added the scoped apply command to cleanup output.'],
+		compatibility: 'The output change is additive.',
+		used_for: 'Inspected the candidate and summarized its verified behavior.',
+	} }, null, 2)}\n\`\`\``)}
+	: mode === 'invalid'
+		? ${JSON.stringify('```json\n{"review_form":{"summary":[]}}\n```')}
+		: 'Review completed without structured output.';
+process.stdout.write(JSON.stringify({
+	type: 'text',
+	part: { type: 'text', text, metadata: { openai: { phase: 'final_answer' } } },
+}) + '\\n');
+`);
+	const structuredReviewRequest = {
+		...request,
+		task_id: 'opencode-structured-review',
+		inputs: { cook_loop: { review_form_required: true } },
+		workspace: { root: reviewWorkspace },
+		executor: {
+			...request.executor,
+			config: {
+				...request.executor.config,
+				command_args: [structuredReviewCliPath],
+				cwd: reviewWorkspace,
+				runtime_env: { REVIEW_FORM_MODE: 'valid' },
+			},
+		},
+	};
+	const structuredReviewResult = await executeOpenCodeAgentTask(structuredReviewRequest, { env: fixtureEnv });
+	assert.equal(structuredReviewResult.status, 'no_op');
+	assert.deepEqual(structuredReviewResult.outputs.review_form, structuredReviewForm);
+	assert.equal(structuredReviewResult.metadata.review_form_status, 'harvested');
+	const structuredAgentResult = structuredReviewResult.artifacts.find((artifact) => artifact.name === 'agent_result');
+	const structuredAgentResultPayload = JSON.parse(fs.readFileSync(structuredAgentResult.path, 'utf8'));
+	assert.equal(structuredAgentResultPayload.status, 'no_op');
+	assert.deepEqual(structuredAgentResultPayload.outputs.review_form, structuredReviewForm);
+
+	for (const [mode, diagnosticClass] of [
+		['missing', 'opencode.review_form_missing'],
+		['invalid', 'opencode.review_form_invalid'],
+	]) {
+		const incompleteReviewResult = await executeOpenCodeAgentTask({
+			...structuredReviewRequest,
+			task_id: `opencode-structured-review-${mode}`,
+			executor: {
+				...structuredReviewRequest.executor,
+				config: {
+					...structuredReviewRequest.executor.config,
+					runtime_env: { REVIEW_FORM_MODE: mode },
+				},
+			},
+		}, { env: fixtureEnv });
+		assert.equal(incompleteReviewResult.status, 'succeeded');
+		assert.deepEqual(incompleteReviewResult.outputs, {});
+		assert.equal(incompleteReviewResult.diagnostics.some((diagnostic) => diagnostic.class === diagnosticClass), true);
+	}
 } finally {
 	fs.rmSync(root, { recursive: true, force: true });
 }

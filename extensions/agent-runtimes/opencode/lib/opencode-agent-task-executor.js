@@ -476,17 +476,107 @@ function findArtifact(artifacts, declaration) {
 }
 
 function opencodeSuccessOutcome(context) {
+	const structured = structuredOpenCodeReviewOutput(context);
+	const evidence = collectOpenCodeArtifacts(context, structured);
+	const emptyPatch = evidence.artifacts?.some((artifact) => artifact.name === 'patch' && artifact.bytes === 0);
 	return withPolicyDeniedOutcome(context, {
-		status: 'succeeded',
-		summary: 'OpenCode completed successfully.',
-		diagnostics: [{ classification: 'provider', message: 'OpenCode CLI exited with status 0.' }],
+		status: structured.outputs && emptyPatch ? 'no_op' : 'succeeded',
+		summary: structured.outputs && emptyPatch
+			? 'OpenCode completed the requested review form without workspace changes.'
+			: 'OpenCode completed successfully.',
+		diagnostics: [
+			{ classification: 'provider', message: 'OpenCode CLI exited with status 0.' },
+			...(structured.diagnostics || []),
+		],
 		metadata: {
 			exit_code: 0,
 			opencode_session: sessionMetadata(context),
 			opencode_progress: progressMetadata(context),
+			...(structured.review_form_status ? { review_form_status: structured.review_form_status } : {}),
 		},
-		...collectOpenCodeArtifacts(context),
+		...(structured.outputs ? { outputs: structured.outputs } : {}),
+		...evidence,
 	});
+}
+
+function structuredOpenCodeReviewOutput(context = {}) {
+	if (context.request?.inputs?.cook_loop?.review_form_required !== true) {
+		return {};
+	}
+	const textEvents = parseJsonObjectsFromText(context.spawnResult?.stdout)
+		.flatMap(openCodeTextParts);
+	const finalAnswers = textEvents.filter((event) => event.final_answer);
+	const candidates = finalAnswers.length > 0 ? finalAnswers : textEvents.slice(-1);
+	for (const event of candidates.reverse()) {
+		const envelope = parseStructuredAnswer(event.text);
+		if (!envelope || !Object.hasOwn(envelope, 'review_form')) {
+			continue;
+		}
+		if (validReviewForm(envelope.review_form)) {
+			return {
+				outputs: { review_form: envelope.review_form },
+				review_form_status: 'harvested',
+			};
+		}
+		return reviewFormOutputDiagnostic(
+			'invalid',
+			'OpenCode emitted a review_form with an invalid schema.'
+		);
+	}
+	return reviewFormOutputDiagnostic(
+		'missing',
+		'OpenCode completed without a structured review_form in its final answer.'
+	);
+}
+
+function openCodeTextParts(frame = {}) {
+	const parts = Array.isArray(frame.parts) ? frame.parts : [frame.part || frame];
+	return parts
+		.filter((part) => part && typeof part === 'object' && (part.type === 'text' || frame.type === 'text'))
+		.map((part) => ({
+			text: stringValue(part.text),
+			final_answer: part.metadata?.openai?.phase === 'final_answer'
+				|| frame.metadata?.openai?.phase === 'final_answer',
+		}))
+		.filter((event) => event.text);
+}
+
+function parseStructuredAnswer(text = '') {
+	const candidates = [String(text).trim()];
+	for (const match of String(text).matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) {
+		candidates.unshift(match[1].trim());
+	}
+	for (const candidate of candidates) {
+		try {
+			const parsed = JSON.parse(candidate);
+			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+				return parsed;
+			}
+		} catch {
+			// Continue through the bounded final-answer candidates.
+		}
+	}
+	return null;
+}
+
+function validReviewForm(form) {
+	return form && typeof form === 'object' && !Array.isArray(form)
+		&& typeof form.summary === 'string'
+		&& Array.isArray(form.what_changed)
+		&& form.what_changed.every((item) => typeof item === 'string')
+		&& typeof form.compatibility === 'string'
+		&& typeof form.used_for === 'string';
+}
+
+function reviewFormOutputDiagnostic(status, message) {
+	return {
+		review_form_status: status,
+		diagnostics: [{
+			class: `opencode.review_form_${status}`,
+			classification: 'provider',
+			message,
+		}],
+	};
 }
 
 function opencodeFailureOutcome(context) {
@@ -630,7 +720,7 @@ function stringValue(value) {
 	return typeof value === 'string' ? value : '';
 }
 
-function collectOpenCodeArtifacts(context = {}) {
+function collectOpenCodeArtifacts(context = {}, structured = {}) {
 	const request = context.request || {};
 	const artifactDir = resolveArtifactDir(context);
 	if (!artifactDir) {
@@ -676,7 +766,9 @@ function collectOpenCodeArtifacts(context = {}) {
 	}
 	const patch = patchCapture.content;
 	const policyDenial = spawnResult.status === 0 ? null : detectOpenCodePolicyDenial(context);
-	const resultStatus = policyDenial ? 'failed' : (spawnResult.status === 0 ? 'succeeded' : 'failed');
+	const resultStatus = policyDenial
+		? 'failed'
+		: (spawnResult.status === 0 ? (structured.outputs && patch === '' ? 'no_op' : 'succeeded') : 'failed');
 	const resultEnvelope = JSON.stringify({
 		schema: 'homeboy/opencode-agent-result/v1',
 		task_id: request.task_id,
@@ -693,6 +785,7 @@ function collectOpenCodeArtifacts(context = {}) {
 			patch: patch !== '',
 			transcript: transcript !== '',
 		},
+		...(structured.outputs ? { outputs: structured.outputs } : {}),
 		opencode_session: sessionMetadata(context),
 		opencode_progress: progressMetadata(context),
 	}, null, 2);
