@@ -35,7 +35,7 @@ const options = clean({
   pluginSlug: slug,
   extra_plugins: [
     { source: root, sourceSubpath: subpath, slug, activate: false },
-    ...dependencies.map(({ source, slug: dependencySlug }) => ({ source, slug: dependencySlug, activate: true })),
+    ...dependencies.map(({ source, slug: dependencySlug }) => ({ source, slug: dependencySlug, activate: false })),
   ],
   dependencyMounts: [...new Set([sandboxPluginDirectory(slug), ...dependencies.map(({ sandboxDirectory }) => sandboxDirectory)])],
   testRoot: settings.wp_codebox_phpunit_test_root,

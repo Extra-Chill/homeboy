@@ -68,8 +68,8 @@ try {
     { source: '/workspace/monorepo', sourceSubpath: 'plugins/canonical-plugin', slug: 'canonical-plugin', activate: false },
   ]);
   assert.deepEqual(options[1].extra_plugins.slice(1), [
-    { source: component, slug: 'canonical-plugin', activate: true },
-    { source: dependency, slug: 'db-touching-dependency', activate: true },
+    { source: component, slug: 'canonical-plugin', activate: false },
+    { source: dependency, slug: 'db-touching-dependency', activate: false },
   ]);
   assert.deepEqual(options[1].dependencyMounts, [
     '/wordpress/wp-content/plugins/canonical-plugin',

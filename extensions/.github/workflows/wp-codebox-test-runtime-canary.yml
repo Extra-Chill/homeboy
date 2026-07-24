@@ -8,6 +8,8 @@ on:
       - wordpress/scripts/test/**
       - wordpress/tests/fixtures/test-db-activation-host/**
       - wordpress/tests/fixtures/bench-db-activation-dep/**
+      - wordpress/tests/fixtures/test-managed-dependency-order-host/**
+      - wordpress/tests/fixtures/managed-dependency-order-dep/**
 
 permissions:
   contents: read
@@ -61,6 +63,13 @@ jobs:
           HOMEBOY_WP_CODEBOX_CORE_MODULE: ${{ github.workspace }}/.ci/wp-codebox/packages/runtime-core/dist/index.js
           HOMEBOY_CORE_DIR: ${{ github.workspace }}/.ci/homeboy
         run: bash wordpress/scripts/test/playground-db-activation-smoke.sh
+
+      - name: Run managed dependency ordering canary
+        env:
+          HOMEBOY_WP_CODEBOX_BIN: ${{ github.workspace }}/.ci/wp-codebox/packages/cli/dist/index.js
+          HOMEBOY_WP_CODEBOX_CORE_MODULE: ${{ github.workspace }}/.ci/wp-codebox/packages/runtime-core/dist/index.js
+          HOMEBOY_CORE_DIR: ${{ github.workspace }}/.ci/homeboy
+        run: bash wordpress/scripts/test/playground-managed-dependency-order-smoke.sh
 
       - name: Run raw extra_plugins Composer autoload canary
         env:
