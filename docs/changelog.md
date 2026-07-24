@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.310.4] - 2026-07-24
+
+### Changed
+- Revert "fix(daemon): diagnose replacement startup publication"
+- Revert "fix(lab): bound workspace snapshot scans"
+- Resume legacy candidate adoption budget failures
+
+### Fixed
+- preserve artifact follow-up scope
+- fix(agent-task): recover terminal Lab aggregates
+- bound workspace snapshot scans
+- diagnose replacement startup publication
+- retire idle unowned stale leases
+- prove ownership on non-Linux
+- refresh stale controller before staging
+
 ## [0.310.3] - 2026-07-23
 
 ### Fixed
