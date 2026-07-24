@@ -441,13 +441,21 @@ fn runner_exec_run_id_creates_generic_run_on_demand() {
             &command,
         )
         .expect("new ad hoc run id creates a generic runner-exec run");
-        assert_eq!(created.metadata["kind"], RUNNER_EXEC_RUN_KIND);
-        assert_eq!(created.metadata["runner_id"], "homeboy-lab");
-        assert_eq!(created.metadata["runner_job_id"], "job-1");
+        assert_eq!(created.kind, "runner_execution");
+        assert_eq!(created.metadata_json["kind"], RUNNER_EXEC_RUN_KIND);
+        assert_eq!(created.metadata_json["runner_id"], "homeboy-lab");
+        assert_eq!(created.metadata_json["runner_job_id"], "job-1");
+        assert!(created.metadata_json.get("agent_task_run").is_none());
 
-        // The generic run is a real durable record readable through status.
-        let loaded = status("recovery-8447-lab-build-r3").expect("generic run persisted");
-        assert_eq!(loaded.metadata["kind"], RUNNER_EXEC_RUN_KIND);
+        // The generic run is a real durable record without agent-task metadata.
+        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+        let loaded = store
+            .get_run("recovery-8447-lab-build-r3")
+            .expect("read run")
+            .expect("generic run persisted");
+        assert_eq!(loaded.kind, "runner_execution");
+        assert_eq!(loaded.metadata_json["kind"], RUNNER_EXEC_RUN_KIND);
+        assert!(loaded.metadata_json.get("agent_task_run").is_none());
 
         // (2) Reusing the same generic ID re-attaches without error.
         let reused = record_runner_exec_job_identity(
@@ -458,7 +466,7 @@ fn runner_exec_run_id_creates_generic_run_on_demand() {
             &command,
         )
         .expect("existing generic run id re-binds");
-        assert_eq!(reused.metadata["runner_job_id"], "job-2");
+        assert_eq!(reused.metadata_json["runner_job_id"], "job-2");
 
         // (3) An ID already owned by an agent-task lifecycle run is a different
         //     owner: reusing it as a generic runner-exec run fails closed before
@@ -501,16 +509,23 @@ fn diagnostic_ssh_run_id_creates_generic_run_without_a_runner_job() {
             &command,
         )
         .expect("new ad hoc ssh run id creates a generic runner-exec run");
-        assert_eq!(created.metadata["kind"], RUNNER_EXEC_RUN_KIND);
-        assert_eq!(created.metadata["runner_id"], "homeboy-lab");
+        assert_eq!(created.kind, "runner_execution");
+        assert_eq!(created.metadata_json["kind"], RUNNER_EXEC_RUN_KIND);
+        assert_eq!(created.metadata_json["runner_id"], "homeboy-lab");
         assert!(
-            created.metadata.get("runner_job_id").is_none(),
+            created.metadata_json.get("runner_job_id").is_none(),
             "diagnostic-SSH run has no accepted runner job"
         );
+        assert!(created.metadata_json.get("agent_task_run").is_none());
 
         // The run is a real durable record — declared artifacts can attach.
-        let loaded = status("fisiostetic-image-specificity-v4").expect("generic run persisted");
-        assert_eq!(loaded.metadata["kind"], RUNNER_EXEC_RUN_KIND);
+        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+        let loaded = store
+            .get_run("fisiostetic-image-specificity-v4")
+            .expect("read run")
+            .expect("generic run persisted");
+        assert_eq!(loaded.metadata_json["kind"], RUNNER_EXEC_RUN_KIND);
+        assert!(loaded.metadata_json.get("agent_task_run").is_none());
 
         // (2) Re-running the same ad hoc ID is idempotent (reuses the run).
         let reused = ensure_generic_runner_exec_run(
@@ -520,7 +535,7 @@ fn diagnostic_ssh_run_id_creates_generic_run_without_a_runner_job() {
             &command,
         )
         .expect("existing generic ssh run id is reused");
-        assert_eq!(reused.metadata["kind"], RUNNER_EXEC_RUN_KIND);
+        assert_eq!(reused.metadata_json["kind"], RUNNER_EXEC_RUN_KIND);
 
         // (3) An ID owned by an agent-task run fails closed with a typed
         //     ownership diagnostic before any runner mutation.
