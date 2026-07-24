@@ -10,7 +10,8 @@ use super::delegated::{DELEGATED_RUN_POLL_MS_ENV, DELEGATED_RUN_STATUS_FILE_ENV}
 use super::host::{get_local_ips, is_local_host};
 use super::local_exec::{
     execute_local_command_in_dir, execute_local_command_interactive,
-    execute_local_command_passthrough, execute_local_command_stderr_passthrough, StdinSource,
+    execute_local_command_passthrough, execute_local_command_stderr_passthrough,
+    windows_pipe_error_is_eof, StdinSource,
 };
 use super::ssh_client::{
     build_secret_env_stdin_block, execute_command_with_stdin_timeout,
@@ -312,6 +313,34 @@ fn local_producer_failure_cannot_report_success() {
     assert!(output.stderr.contains("stdin delivery failed"));
 }
 
+#[test]
+fn windows_closed_pipe_errors_are_eof_only_when_empty() {
+    assert!(windows_pipe_error_is_eof(Some(109), 0));
+    assert!(windows_pipe_error_is_eof(Some(233), 0));
+    assert!(!windows_pipe_error_is_eof(Some(109), 1));
+    assert!(!windows_pipe_error_is_eof(Some(5), 0));
+    assert!(!windows_pipe_error_is_eof(None, 0));
+}
+
+#[cfg(windows)]
+fn closed_windows_pipe(bytes: &[u8]) -> std::fs::File {
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::Pipes::CreatePipe;
+
+    let mut reader: HANDLE = std::ptr::null_mut();
+    let mut writer: HANDLE = std::ptr::null_mut();
+    assert_ne!(
+        unsafe { CreatePipe(&mut reader, &mut writer, std::ptr::null(), 0) },
+        0
+    );
+    let reader = unsafe { std::fs::File::from_raw_handle(reader) };
+    let mut writer = unsafe { std::fs::File::from_raw_handle(writer) };
+    std::io::Write::write_all(&mut writer, bytes).expect("write pipe bytes");
+    drop(writer);
+    reader
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_empty_redirected_stdin_preserves_no_input_execution() {
@@ -320,6 +349,36 @@ fn windows_empty_redirected_stdin_preserves_no_input_execution() {
 
     assert!(output.success, "{}", output.stderr);
     assert_eq!(output.exit_code, 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_closed_empty_pipe_is_eof() {
+    let output = run_command_with_stdin_source(
+        piped_command("exit 0"),
+        StdinSource::Piped(closed_windows_pipe(b"")),
+    );
+
+    assert!(output.success, "{}", output.stderr);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_closed_pipe_delivers_buffered_bytes_before_eof() {
+    let target = tempfile::NamedTempFile::new().expect("payload target");
+    let output = run_command_with_stdin_source(
+        piped_command(&format!(
+            "cat > {}",
+            crate::engine::shell::quote_path(&target.path().to_string_lossy())
+        )),
+        StdinSource::Piped(closed_windows_pipe(b"payload")),
+    );
+
+    assert!(output.success, "{}", output.stderr);
+    assert_eq!(
+        std::fs::read(target.path()).expect("read payload"),
+        b"payload"
+    );
 }
 
 #[test]

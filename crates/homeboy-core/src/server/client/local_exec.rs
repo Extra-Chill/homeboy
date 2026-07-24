@@ -371,7 +371,11 @@ fn copy_piped_stdin_to_child(
             )
         };
         if result == 0 {
-            return Err(std::io::Error::last_os_error());
+            let error = std::io::Error::last_os_error();
+            if windows_pipe_error_is_eof(error.raw_os_error(), available) {
+                return Ok(());
+            }
+            return Err(error);
         }
         if available == 0 {
             thread::sleep(Duration::from_millis(20));
@@ -384,6 +388,13 @@ fn copy_piped_stdin_to_child(
         }
     }
     Ok(())
+}
+
+/// Windows reports a closed anonymous pipe through `PeekNamedPipe` as an
+/// error rather than a zero-byte read. Treat only the no-bytes-remaining form
+/// as EOF so an empty pipeline keeps normal no-input command semantics.
+pub(super) fn windows_pipe_error_is_eof(error_code: Option<i32>, available: u32) -> bool {
+    available == 0 && matches!(error_code, Some(109 | 233))
 }
 
 #[cfg(all(not(unix), not(windows)))]
