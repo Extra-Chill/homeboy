@@ -129,7 +129,7 @@ fn list_prefetch_limit(args: &RunsListArgs) -> i64 {
 /// Resolve a `--since`/`--until` bound into an RFC-3339 timestamp. Accepts an
 /// absolute RFC-3339 timestamp (used verbatim) or a relative age like `2d` /
 /// `6h` / `30m` (resolved to `now - age`).
-fn resolve_time_bound(raw: &str) -> homeboy::core::Result<String> {
+pub(super) fn resolve_time_bound(raw: &str) -> homeboy::core::Result<String> {
     let trimmed = raw.trim();
     if chrono::DateTime::parse_from_rfc3339(trimmed).is_ok() {
         return Ok(trimmed.to_string());

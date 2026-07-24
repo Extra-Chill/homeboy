@@ -20,23 +20,26 @@ pub fn list_runner_runs(
 ) -> CmdResult<RunsOutput> {
     let mut query = Vec::new();
     let kind_filter = args.kind.clone();
-    if let Some(kind) = args.kind {
+    if let Some(kind) = args.kind.clone() {
         query.push(("kind", kind));
     }
-    if let Some(component_id) = args.component_id {
+    if let Some(component_id) = args.component_id.clone() {
         query.push(("component", component_id));
     }
     let status = if args.running {
         Some("running".to_string())
     } else {
-        args.status
+        args.status.clone()
     };
     let status_filter = status.clone();
     if let Some(status) = status {
         query.push(("status", status));
     }
-    if let Some(rig) = args.rig {
+    if let Some(rig) = args.rig.clone() {
         query.push(("rig", rig));
+    }
+    if let Some(scenario) = args.scenario_id.clone() {
+        query.push(("scenario", scenario));
     }
     query.push(("limit", args.limit.to_string()));
     let query = query
@@ -60,6 +63,12 @@ pub fn list_runner_runs(
         args.limit as usize,
     );
 
+    // Apply the query filters the daemon does not index (id/label fragment,
+    // command substring, time window, correlation) client-side, so remote
+    // listing honors the same filters as the controller store instead of
+    // silently returning unfiltered history (#9903).
+    apply_remote_list_filters(&mut runs, &args)?;
+
     let matched_runs = runs.len();
     let actionable = actionable_for_run_list(&runs);
     Ok((
@@ -74,6 +83,83 @@ pub fn list_runner_runs(
         }),
         0,
     ))
+}
+
+/// Apply the list filters the runner daemon does not index to the fetched rows,
+/// so `runs list --runner` matches the controller store's filtering behavior.
+///
+/// The daemon query already scopes `kind`, `component`, `status`, `rig`, and
+/// `scenario`; this covers the remaining `--id`/`--command-contains`/`--since`/
+/// `--until`/`--correlation` filters client-side against the returned summaries.
+fn apply_remote_list_filters(
+    runs: &mut Vec<RunSummary>,
+    args: &RunsListArgs,
+) -> homeboy::core::Result<()> {
+    let since = args
+        .since
+        .as_deref()
+        .map(super::handlers::resolve_time_bound)
+        .transpose()?;
+    let until = args
+        .until
+        .as_deref()
+        .map(super::handlers::resolve_time_bound)
+        .transpose()?;
+    runs.retain(|run| remote_run_matches_filters(run, args, since.as_deref(), until.as_deref()));
+    Ok(())
+}
+
+fn remote_run_matches_filters(
+    run: &RunSummary,
+    args: &RunsListArgs,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> bool {
+    // RFC-3339 UTC timestamps compare correctly as strings.
+    if let Some(since) = since {
+        if run.started_at.as_str() < since {
+            return false;
+        }
+    }
+    if let Some(until) = until {
+        if run.started_at.as_str() > until {
+            return false;
+        }
+    }
+    if let Some(fragment) = args.id.as_deref() {
+        if !remote_run_id_or_label_contains(run, fragment) {
+            return false;
+        }
+    }
+    if let Some(needle) = args.command_contains.as_deref() {
+        if !run
+            .command
+            .as_deref()
+            .is_some_and(|command| command.contains(needle))
+        {
+            return false;
+        }
+    }
+    if let Some(correlation) = args.correlation.as_deref() {
+        // Remote summaries carry id + command; match the correlation fragment
+        // against both (the runner-id/job-id lineage is controller-store only).
+        if !remote_run_id_or_label_contains(run, correlation) {
+            return false;
+        }
+    }
+    true
+}
+
+/// True when a remote run's id or its command-embedded run-label contains
+/// `fragment`.
+fn remote_run_id_or_label_contains(run: &RunSummary, fragment: &str) -> bool {
+    if run.id.contains(fragment) {
+        return true;
+    }
+    run.command
+        .as_deref()
+        .and_then(homeboy::core::observation::runs_service::command_run_id_label)
+        .is_some_and(|label| label.contains(fragment))
 }
 
 fn merge_active_runner_jobs(
@@ -437,5 +523,94 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("durable_run=bench-run-123"));
+    }
+
+    fn summary(id: &str, command: &str, started_at: &str) -> RunSummary {
+        RunSummary {
+            id: id.to_string(),
+            kind: "agent-task".to_string(),
+            status: "succeeded".to_string(),
+            started_at: started_at.to_string(),
+            finished_at: None,
+            component_id: None,
+            rig_id: None,
+            git_sha: None,
+            command: Some(command.to_string()),
+            cwd: None,
+            status_note: None,
+            artifact_index: None,
+        }
+    }
+
+    fn list_args() -> RunsListArgs {
+        #[derive(clap::Parser)]
+        struct Wrapper {
+            #[command(flatten)]
+            args: RunsListArgs,
+        }
+        <Wrapper as clap::Parser>::parse_from(["homeboy"]).args
+    }
+
+    #[test]
+    fn remote_id_filter_excludes_non_matching_runs() {
+        // #9903: `--id` must filter remote runs, not be silently dropped.
+        let mut runs = vec![
+            summary("run-alpha", "homeboy run alpha", "2026-07-22T00:00:00Z"),
+            summary("run-beta", "homeboy run beta", "2026-07-22T00:00:00Z"),
+        ];
+        let mut args = list_args();
+        args.id = Some("beta".to_string());
+        apply_remote_list_filters(&mut runs, &args).expect("filter");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, "run-beta");
+    }
+
+    #[test]
+    fn remote_id_filter_removes_all_when_no_match() {
+        let mut runs = vec![summary(
+            "run-alpha",
+            "homeboy run alpha",
+            "2026-07-22T00:00:00Z",
+        )];
+        let mut args = list_args();
+        args.id = Some("definitely-no-such-run-9899".to_string());
+        apply_remote_list_filters(&mut runs, &args).expect("filter");
+        assert!(runs.is_empty());
+    }
+
+    #[test]
+    fn remote_command_and_time_filters_apply() {
+        let mut runs = vec![
+            summary("r1", "homeboy bench alpha", "2026-07-20T00:00:00Z"),
+            summary("r2", "homeboy trace beta", "2026-07-23T00:00:00Z"),
+        ];
+        let mut args = list_args();
+        args.command_contains = Some("trace".to_string());
+        apply_remote_list_filters(&mut runs, &args).expect("command filter");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, "r2");
+
+        let mut runs = vec![
+            summary("r1", "homeboy bench alpha", "2026-07-20T00:00:00Z"),
+            summary("r2", "homeboy trace beta", "2026-07-23T00:00:00Z"),
+        ];
+        let mut args = list_args();
+        args.since = Some("2026-07-22T00:00:00Z".to_string());
+        apply_remote_list_filters(&mut runs, &args).expect("since filter");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, "r2");
+    }
+
+    #[test]
+    fn remote_id_filter_matches_command_embedded_run_label() {
+        let mut runs = vec![summary(
+            "opaque-daemon-id",
+            "homeboy agent-task run --record-run-id homeboy-9899-fixture",
+            "2026-07-22T00:00:00Z",
+        )];
+        let mut args = list_args();
+        args.id = Some("homeboy-9899".to_string());
+        apply_remote_list_filters(&mut runs, &args).expect("label filter");
+        assert_eq!(runs.len(), 1);
     }
 }
