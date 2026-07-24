@@ -257,7 +257,7 @@ fn empty_patch_runs_public_and_private_gates_against_pinned_candidate() {
     assert_eq!(report.provenance["verified_revision"], revision);
     assert_eq!(provider.apply_calls.len(), 0);
     assert_eq!(provider.verify_calls.len(), 2);
-    assert_eq!(provider.verify_calls[0].0, repo);
+    assert_ne!(provider.verify_calls[0].0, repo);
     assert_eq!(provider.verify_calls[1].2, AgentTaskGateVisibility::Private);
     assert_eq!(
         provider.verify_calls[1].3,

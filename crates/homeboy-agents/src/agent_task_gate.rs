@@ -161,8 +161,20 @@ pub struct AgentTaskGateReport {
     /// adoption needs to distinguish inherited failures from regressions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_comparison: Option<AgentTaskGateBaselineComparison>,
+    /// Immutable checkout identity used for this gate when verification runs
+    /// against a materialized candidate rather than the promotion destination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_checkout: Option<AgentTaskGateCandidateCheckout>,
     #[serde(default, skip_serializing_if = "AgentTaskGateEnvironment::is_empty")]
     pub environment: AgentTaskGateEnvironment,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateCandidateCheckout {
+    pub schema: String,
+    pub commit: String,
+    pub tree: String,
+    pub candidate_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -308,6 +320,7 @@ impl AgentTaskGateReport {
             stderr: stderr.into(),
             failure_evidence,
             baseline_comparison: None,
+            candidate_checkout: None,
             environment,
         }
     }

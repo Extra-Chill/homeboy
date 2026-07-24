@@ -944,6 +944,146 @@ fn explicit_candidate_gate_failure_is_recorded_after_normal_promotion_handoff() 
 }
 
 #[test]
+fn promotion_runs_clean_checkout_gate_against_immutable_candidate() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    git(&workspace, &["init", "-b", "main"]);
+    git(&workspace, &["config", "user.email", "test@example.com"]);
+    git(&workspace, &["config", "user.name", "Homeboy Test"]);
+    std::fs::create_dir_all(workspace.join("src")).expect("source directory");
+    std::fs::write(workspace.join("src/lib.rs"), "old\n").expect("base file");
+    git(&workspace, &["add", "."]);
+    git(&workspace, &["commit", "-m", "base"]);
+    let (source_path, source) = write_patch_source(&temp);
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(workspace.clone()),
+        apply_to_git: true,
+        run_verify_command: true,
+        ..Default::default()
+    };
+
+    let report = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("immutable-candidate-first-attempt".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "fixture@target".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec![
+                    "test -z \"$(git status --porcelain)\" && test \"$(cat src/lib.rs)\" = new"
+                        .to_string(),
+                ],
+                ..Default::default()
+            },
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect("clean-checkout gate accepts the dirty promoted candidate");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+    assert_eq!(provider.verify_worktrees_clean, vec![true]);
+    assert_ne!(provider.verify_calls[0].0, workspace);
+    assert!(Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&workspace)
+        .output()
+        .expect("inspect promotion destination")
+        .stdout
+        .starts_with(b" M src/lib.rs"));
+    let checkout = report.deterministic_gates[0]
+        .candidate_checkout
+        .as_ref()
+        .expect("gate candidate checkout identity");
+    assert_eq!(
+        checkout.tree,
+        report.provenance["candidate_checkout"]["tree"]
+    );
+    assert_eq!(
+        checkout.candidate_sha256,
+        report.provenance["candidate_checkout"]["candidate_sha256"]
+    );
+}
+
+#[test]
+fn resumed_verification_runs_clean_checkout_gate_for_exact_dirty_candidate() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let target = temp.path().join("target");
+    std::fs::create_dir(&target).expect("target");
+    git(&target, &["init", "-b", "main"]);
+    git(&target, &["config", "user.email", "test@example.com"]);
+    git(&target, &["config", "user.name", "Test"]);
+    std::fs::create_dir_all(target.join("src")).expect("src");
+    std::fs::write(target.join("src/lib.rs"), "old\n").expect("base");
+    git(&target, &["add", "."]);
+    git(&target, &["commit", "-m", "base"]);
+    std::fs::write(target.join("src/lib.rs"), "new\n").expect("apply candidate");
+    let candidate =
+        crate::agent_task_promotion::candidate_fingerprint(target.to_string_lossy().as_ref())
+            .expect("candidate fingerprint");
+    let (source_path, source) = write_patch_source(&temp);
+    let options = AgentTaskPromotionOptions {
+        source,
+        source_run_id: Some("immutable-candidate-follow-up".to_string()),
+        source_path: Some(source_path),
+        source_worktree_path: None,
+        base_ref: None,
+        task_base_sha: None,
+        candidate_ref: None,
+        to_worktree: "fixture@target".to_string(),
+        task_id: None,
+        artifact_id: None,
+        dry_run: false,
+        gates: VerifyGateOptions {
+            verify: vec![
+                "test -z \"$(git status --porcelain)\" && test \"$(cat src/lib.rs)\" = new"
+                    .to_string(),
+            ],
+            rerun_completed_gates: true,
+            ..Default::default()
+        },
+        provider_command: None,
+        provider_invocation: None,
+    };
+    let previous = serde_json::json!({
+        "schema": "homeboy/agent-task-promotion-report/v1",
+        "status": "applied",
+        "source_run_id": "immutable-candidate-follow-up",
+        "source": { "task_id": "task-1" },
+        "to_worktree": "fixture@target",
+        "target": { "worktree": "fixture@target", "path": target },
+        "patch_artifact": { "id": "patch", "kind": "patch", "sha256": sha256_hex(VALID_PATCH) },
+        "provenance": { "candidate": candidate },
+    });
+
+    let report = resume_promoted_patch(options.clone(), &target, &previous)
+        .expect("follow-up verification accepts the exact dirty candidate");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+    assert_eq!(report.deterministic_gates.len(), 1);
+    assert!(report.deterministic_gates[0].candidate_checkout.is_some());
+    assert!(Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&target)
+        .output()
+        .expect("inspect promotion destination")
+        .stdout
+        .starts_with(b" M src/lib.rs"));
+    std::fs::write(target.join("unrelated.txt"), "drift\n").expect("diverge target");
+    let error = resume_promoted_patch(options, &target, &previous);
+    assert!(error.is_err(), "divergent destination fails closed");
+}
+
+#[test]
 fn gate_failure_preserves_the_pre_gate_candidate_baseline_for_feedback_retry() {
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
