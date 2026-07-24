@@ -557,6 +557,8 @@ runs:
         BASELINE_COMMANDS: ${{ inputs.baseline-commands }}
         HOMEBOY_DIFFERENTIAL_GATING: ${{ inputs.differential-gating }}
         RUN_GROUP_PREFIX: homeboy baseline
+        HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}
+        HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS: ${{ inputs.cleanup-timeout-seconds }}
       run: bash ${{ github.action_path }}/scripts/core/run-baseline-commands.sh
 
     # ── Phase 6: Results and reporting ──

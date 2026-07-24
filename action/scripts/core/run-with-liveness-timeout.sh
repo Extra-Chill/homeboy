@@ -22,6 +22,9 @@ for value_name in timeout_seconds cleanup_timeout_seconds; do
 done
 
 start_seconds="$(date +%s)"
+timeout_marker="$(mktemp)"
+rm -f "${timeout_marker}"
+trap 'rm -f "${timeout_marker}"' EXIT
 
 # Job control gives the child command its own process group. Capturing its output
 # directly in a file prevents a descendant-held stdout pipe from wedging `tee`
@@ -42,7 +45,16 @@ set +m
       elapsed="$(( $(date +%s) - start_seconds ))"
       if [ "${elapsed}" -ge "${timeout_seconds}" ]; then
         echo "::error::${label} exceeded its ${timeout_seconds}s execution timeout; terminating its process group."
+        touch "${timeout_marker}"
         kill -TERM -- "-${command_pid}" 2>/dev/null || true
+        cleanup_deadline="$(( $(date +%s) + cleanup_timeout_seconds ))"
+        while kill -0 -- "-${command_pid}" 2>/dev/null && [ "$(date +%s)" -lt "${cleanup_deadline}" ]; do
+          sleep 1
+        done
+        if kill -0 -- "-${command_pid}" 2>/dev/null; then
+          echo "::warning::${label} ignored SIGTERM for ${cleanup_timeout_seconds}s; sending SIGKILL to process group ${command_pid}."
+          kill -KILL -- "-${command_pid}" 2>/dev/null || true
+        fi
         exit 0
       fi
       if [ "$(( elapsed % 60 ))" -eq 0 ]; then
@@ -59,6 +71,11 @@ command_exit=$?
 set -e
 kill "${liveness_pid}" 2>/dev/null || true
 wait "${liveness_pid}" 2>/dev/null || true
+
+if [ -f "${timeout_marker}" ]; then
+  echo "::error::${label} exceeded its ${timeout_seconds}s execution timeout and was terminated. Inspect this step's logs and rerun after resolving the blocked command; the caller can continue when this action is advisory."
+  exit 124
+fi
 
 if kill -0 -- "-${command_pid}" 2>/dev/null; then
   echo "::warning::${label} finalization found a live process group after the command parent exited; terminating it within ${cleanup_timeout_seconds}s."
@@ -83,11 +100,6 @@ if kill -0 -- "-${command_pid}" 2>/dev/null; then
   fi
 
   echo "::notice::${label} finalization terminated surviving process group ${command_pid}; retained command output: ${log_file:-standard output}."
-fi
-
-if [ "$(( $(date +%s) - start_seconds ))" -ge "${timeout_seconds}" ]; then
-  echo "::error::${label} exceeded its ${timeout_seconds}s execution timeout and was terminated. Inspect this step's logs and rerun after resolving the blocked command; the caller can continue when this action is advisory."
-  exit 124
 fi
 
 exit "${command_exit}"

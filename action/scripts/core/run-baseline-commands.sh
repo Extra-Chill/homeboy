@@ -71,8 +71,11 @@ for CMD in "${BASELINE_RUN_COMMANDS[@]}"; do
 
   echo "::group::${GROUP_PREFIX} ${CMD}"
   set +e
-  eval "${FULL_CMD}" 2>&1 | tee "${BASE_OUTPUT_DIR}/${OUTPUT_STEM}.log"
-  CMD_EXIT=${PIPESTATUS[0]}
+  bash "${GITHUB_ACTION_PATH}/scripts/core/run-with-liveness-timeout.sh" \
+    --log-file "${BASE_OUTPUT_DIR}/${OUTPUT_STEM}.log" \
+    "baseline homeboy ${CMD}" bash -c "${FULL_CMD}"
+  CMD_EXIT=$?
+  cat "${BASE_OUTPUT_DIR}/${OUTPUT_STEM}.log"
   set -e
   echo "::endgroup::"
 
