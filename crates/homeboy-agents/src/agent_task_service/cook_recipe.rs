@@ -45,6 +45,17 @@ pub struct AgentTaskCookRecipeAttempt {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+struct AgentTaskCookRecipeSupersession {
+    schema: String,
+    previous: AgentTaskCookRecipe,
+    replacement: AgentTaskCookRecipe,
+    changed_fields: Vec<String>,
+}
+
+const SUPERSESSION_SCHEMA: &str = "homeboy/agent-task-cook-recipe-supersession/v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct AgentTaskCookContinuation {
     pub schema: String,
     pub key: String,
@@ -105,6 +116,7 @@ pub trait AgentTaskCookContinuationScheduler {
 pub fn persist_initial_recipe(
     options: &AgentTaskCookServiceOptions,
 ) -> Result<AgentTaskCookRecipe> {
+    recover_pending_supersession(&options.cook_id)?;
     let mut recipe = initial_recipe(options)?;
     validate_recipe(&recipe)?;
     if let Some(existing) = compatible_existing_recipe(&recipe)? {
@@ -138,7 +150,18 @@ pub fn persist_initial_recipe(
         recipe.sensitive_mappings.sort();
         recipe.sensitive_mappings.dedup();
         validate_recipe(&recipe)?;
-        archive_recipe_revision(&existing, &recipe, &mismatches)?;
+        let supersession = AgentTaskCookRecipeSupersession {
+            schema: SUPERSESSION_SCHEMA.to_string(),
+            previous: existing,
+            replacement: recipe.clone(),
+            changed_fields: mismatches
+                .iter()
+                .map(|field| (*field).to_string())
+                .collect(),
+        };
+        write_supersession(&supersession)?;
+        complete_supersession(&supersession)?;
+        return Ok(recipe);
     }
     write_recipe(&recipe)?;
     Ok(recipe)
@@ -308,17 +331,23 @@ fn reached_freeze_boundary(recipe: &AgentTaskCookRecipe) -> Result<Option<Recipe
             // correctable until an applied promotion exists.
             reached = Some(RecipeFreezeBoundary::Candidate);
         }
-        let promotion = &record.metadata["latest_promotion"];
-        if !promotion.is_null() {
+        let promotion = serde_json::from_value::<
+            crate::agent_task_promotion::AgentTaskPromotionReport,
+        >(record.metadata["latest_promotion"].clone())
+        .ok();
+        if promotion
+            .as_ref()
+            .is_some_and(|promotion| promotion.status.patch_promoted())
+        {
             reached = Some(RecipeFreezeBoundary::Promotion);
-            if promotion.get("gate_results").is_some()
-                || promotion.get("deterministic_gates").is_some()
-            {
+            if promotion.is_some_and(|promotion| {
+                !promotion.gate_results.is_empty() || !promotion.deterministic_gates.is_empty()
+            }) {
                 reached = Some(RecipeFreezeBoundary::Gate);
             }
-        }
-        if !record.metadata["cook_finalization"].is_null() {
-            reached = Some(RecipeFreezeBoundary::Finalization);
+            if !record.metadata["cook_finalization"].is_null() {
+                reached = Some(RecipeFreezeBoundary::Finalization);
+            }
         }
     }
     Ok(reached)
@@ -355,36 +384,94 @@ fn ensure_correction_is_safe(
     ))
 }
 
-fn archive_recipe_revision(
-    existing: &AgentTaskCookRecipe,
-    replacement: &AgentTaskCookRecipe,
-    mismatches: &[&str],
-) -> Result<()> {
-    let root = recipe_path(&existing.cook_id)?
+fn recover_pending_supersession(cook_id: &str) -> Result<()> {
+    let path = supersession_path(cook_id)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let supersession: AgentTaskCookRecipeSupersession =
+        serde_json::from_slice(&fs::read(&path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        })?)
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "cook_recipe",
+                format!("malformed durable cook recipe supersession: {error}"),
+                Some(cook_id.to_string()),
+                None,
+            )
+        })?;
+    if supersession.schema != SUPERSESSION_SCHEMA || supersession.previous.cook_id != cook_id {
+        return Err(Error::validation_invalid_argument(
+            "cook_recipe",
+            "durable cook recipe supersession does not match its Cook",
+            Some(cook_id.to_string()),
+            None,
+        ));
+    }
+    complete_supersession(&supersession)
+}
+
+fn write_supersession(supersession: &AgentTaskCookRecipeSupersession) -> Result<()> {
+    let path = supersession_path(&supersession.previous.cook_id)?;
+    homeboy_core::engine::local_files::write_json_file_owner_only(&path, supersession)
+}
+
+fn complete_supersession(supersession: &AgentTaskCookRecipeSupersession) -> Result<()> {
+    // The intent is durable before either result. Replaying always replaces the
+    // active recipe first, then records immutable history, so either crash point
+    // converges on the same state without blocking the corrected retry.
+    write_recipe(&supersession.replacement)?;
+    archive_recipe_revision(supersession)?;
+    let path = supersession_path(&supersession.previous.cook_id)?;
+    fs::remove_file(&path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
+}
+
+fn archive_recipe_revision(supersession: &AgentTaskCookRecipeSupersession) -> Result<()> {
+    let root = recipe_path(&supersession.previous.cook_id)?
         .parent()
         .expect("recipe path has parent")
         .join("recipe-history");
     fs::create_dir_all(&root)
         .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?;
-    let revision = format!("{:04}", existing.attempts.len());
+    let revision = format!("{:04}", supersession.previous.attempts.len());
     let recipe_path = root.join(format!("{revision}.recipe.json"));
     if recipe_path.exists() {
-        return Err(Error::validation_invalid_argument(
-            "cook_recipe",
-            "durable recipe revision already exists; resume the current recipe before correcting it again",
-            Some(existing.cook_id.clone()),
-            None,
-        ));
+        let archived: AgentTaskCookRecipe =
+            serde_json::from_slice(&fs::read(&recipe_path).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(recipe_path.display().to_string()))
+            })?)
+            .map_err(|error| {
+                Error::validation_invalid_argument(
+                    "cook_recipe",
+                    format!("malformed archived cook recipe: {error}"),
+                    Some(supersession.previous.cook_id.clone()),
+                    None,
+                )
+            })?;
+        if archived != supersession.previous {
+            return Err(Error::validation_invalid_argument(
+                "cook_recipe",
+                "durable recipe revision conflicts with a different immutable history entry",
+                Some(supersession.previous.cook_id.clone()),
+                None,
+            ));
+        }
+    } else {
+        homeboy_core::engine::local_files::write_json_file_owner_only(
+            &recipe_path,
+            &supersession.previous,
+        )?;
     }
-    homeboy_core::engine::local_files::write_json_file_owner_only(&recipe_path, existing)?;
     homeboy_core::engine::local_files::write_json_file_owner_only(
         &root.join(format!("{revision}.supersession.json")),
         &serde_json::json!({
-            "schema": "homeboy/agent-task-cook-recipe-supersession/v1",
-            "cook_id": existing.cook_id,
-            "replaced_attempt_run_id": existing.attempts.last().map(|attempt| &attempt.run_id),
-            "replacement_attempt_run_id": replacement.attempts.last().map(|attempt| &attempt.run_id),
-            "changed_fields": mismatches,
+            "schema": SUPERSESSION_SCHEMA,
+            "cook_id": supersession.previous.cook_id,
+            "replaced_attempt_run_id": supersession.previous.attempts.last().map(|attempt| &attempt.run_id),
+            "replacement_attempt_run_id": supersession.replacement.attempts.last().map(|attempt| &attempt.run_id),
+            "changed_fields": supersession.changed_fields,
         }),
     )?;
     Ok(())
@@ -1162,6 +1249,9 @@ fn recipe_path(cook_id: &str) -> Result<PathBuf> {
         .join(paths::sanitize_path_segment(cook_id))
         .join("recipe.json"))
 }
+fn supersession_path(cook_id: &str) -> Result<PathBuf> {
+    Ok(recipe_path(cook_id)?.with_file_name("supersession.json"))
+}
 fn queue_root() -> Result<PathBuf> {
     Ok(paths::homeboy_data()?.join("agent-task-cook-continuations"))
 }
@@ -1301,6 +1391,19 @@ mod tests {
             sensitive_mappings: vec!["TEST_TOKEN".to_string()],
             harvest_context: Default::default(),
         }
+    }
+
+    fn promotion_value(status: &str, gate_results: Value) -> Value {
+        serde_json::json!({
+            "schema": "homeboy/agent-task-promotion-report/v1",
+            "status": status,
+            "source": { "kind": "aggregate", "task_id": "task", "run_id": "run-2" },
+            "to_worktree": "corrected-target",
+            "target": { "worktree": "corrected-target" },
+            "patch_artifact": { "id": "patch", "kind": "patch", "path": "/tmp/patch" },
+            "gate_results": gate_results,
+            "operator_notification": { "status": "completed", "message": "fixture" }
+        })
     }
 
     fn persist_recipe_run() -> (AgentTaskCookRecipe, AgentTaskPlan) {
@@ -1711,7 +1814,8 @@ mod tests {
             assert!(error.message.contains("source_refs"));
 
             crate::agent_task_lifecycle::rewrite_record_for_test("run-2", |record| {
-                record.metadata["latest_promotion"] = serde_json::json!({ "status": "applied" });
+                record.metadata["latest_promotion"] =
+                    promotion_value("applied", serde_json::json!([]));
             })
             .expect("record applied promotion");
             let mut destination_corrected = existing.clone();
@@ -1728,15 +1832,27 @@ mod tests {
             crate::agent_task_lifecycle::rewrite_record_for_test("run-2", |record| {
                 record.metadata["latest_promotion"]["gate_results"] = serde_json::json!([]);
             })
-            .expect("record completed gates");
+            .expect("record empty gate projection");
             let mut gate_corrected = existing.clone();
             gate_corrected.gate_policy["verify"] = serde_json::json!(["corrected gate"]);
+            ensure_correction_is_safe(
+                &existing,
+                &gate_corrected,
+                &recipe_mismatch_fields(&existing, &gate_corrected),
+            )
+            .expect("empty gate arrays do not freeze gate policy");
+            crate::agent_task_lifecycle::rewrite_record_for_test("run-2", |record| {
+                record.metadata["latest_promotion"]["deterministic_gates"] = serde_json::json!([
+                    { "id": "gate", "status": "succeeded", "command": [], "exit_code": 0 }
+                ]);
+            })
+            .expect("record gate execution");
             let error = ensure_correction_is_safe(
                 &existing,
                 &gate_corrected,
                 &recipe_mismatch_fields(&existing, &gate_corrected),
             )
-            .expect_err("completed gates freeze gate policy");
+            .expect_err("executed gates freeze gate policy");
             assert!(error.message.contains("gate execution"));
             assert!(error.message.contains("gate_policy"));
 
@@ -1758,6 +1874,78 @@ mod tests {
             .expect_err("finalization freezes finalization policy");
             assert!(error.message.contains("finalization execution"));
             assert!(error.message.contains("finalization"));
+        });
+    }
+
+    #[test]
+    fn supersession_intent_recovers_before_and_after_active_recipe_replacement() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let previous = recipe();
+            let mut replacement = previous.clone();
+            replacement.finalization["title"] = serde_json::json!("corrected");
+            replacement.attempts.push(AgentTaskCookRecipeAttempt {
+                attempt: 2,
+                run_id: "run-2".to_string(),
+                plan: previous.attempts[0].plan.clone(),
+            });
+            let supersession = AgentTaskCookRecipeSupersession {
+                schema: SUPERSESSION_SCHEMA.to_string(),
+                previous: previous.clone(),
+                replacement: replacement.clone(),
+                changed_fields: vec!["finalization".to_string()],
+            };
+
+            write_recipe(&previous).expect("persist previous recipe");
+            write_supersession(&supersession).expect("persist intent before active replacement");
+            recover_pending_supersession("cook").expect("recover interrupted replacement");
+            assert_eq!(load_recipe("cook").unwrap(), replacement);
+            assert!(!supersession_path("cook").unwrap().exists());
+
+            write_recipe(&previous).expect("reset active recipe");
+            write_supersession(&supersession).expect("persist retry intent");
+            write_recipe(&replacement).expect("simulate interruption after active replacement");
+            recover_pending_supersession("cook").expect("idempotently finish archived history");
+            assert_eq!(load_recipe("cook").unwrap(), replacement);
+            assert!(!supersession_path("cook").unwrap().exists());
+            assert_eq!(
+                serde_json::from_slice::<AgentTaskCookRecipe>(
+                    &fs::read(
+                        recipe_path("cook")
+                            .unwrap()
+                            .parent()
+                            .unwrap()
+                            .join("recipe-history/0001.recipe.json"),
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+                previous
+            );
+        });
+    }
+
+    #[test]
+    fn non_applied_promotion_reports_do_not_freeze_destination_inputs() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let recipe = recipe();
+            write_recipe(&recipe).expect("persist recipe");
+            crate::agent_task_lifecycle::submit_plan(&recipe.attempts[0].plan, Some("run"))
+                .expect("materialize attempt");
+            let mut corrected = recipe.clone();
+            corrected.finalization["to_worktree"] = serde_json::json!("other-target");
+            for status in ["dry_run", "no_changes", "no_changes_gate_failed"] {
+                crate::agent_task_lifecycle::rewrite_record_for_test("run", |record| {
+                    record.metadata["latest_promotion"] =
+                        promotion_value(status, serde_json::json!([]));
+                })
+                .expect("record non-applied promotion");
+                ensure_correction_is_safe(
+                    &recipe,
+                    &corrected,
+                    &recipe_mismatch_fields(&recipe, &corrected),
+                )
+                .expect("non-applied promotion leaves destination correctable");
+            }
         });
     }
 
