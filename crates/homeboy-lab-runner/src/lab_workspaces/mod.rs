@@ -140,7 +140,7 @@ pub(super) struct RuntimeOverlay {
 /// its opaque install step executed. Records the resolved remote path and the
 /// env var surfacing it, so callers can fold the overlay into the command env
 /// and offload metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub(super) struct SyncedRuntimeOverlay {
     pub(super) role: String,
     pub(super) local_path: String,
@@ -148,6 +148,11 @@ pub(super) struct SyncedRuntimeOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) install_workdir: Option<String>,
     pub(super) install_ran: bool,
+    /// The typed dependency-hydration record derived from the overlay's
+    /// materialized dependency contract. This is separate from `install_ran`:
+    /// an opaque install is an explicit overlay contract, while this record
+    /// captures providers discovered from the snapshot's package metadata.
+    pub(super) dependency_hydration: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) expose_remote_path_env: Option<String>,
     /// Build-freshness provenance for the synced artifact: the source SHA the
@@ -426,6 +431,7 @@ pub(super) fn sync_lab_runtime_overlays(
     primary_local_path: &str,
     overlays: Vec<RuntimeOverlay>,
     workspace_mapping: &mut Vec<LabWorkspaceMappingEntry>,
+    skip_deps_hydration: bool,
 ) -> Result<Vec<SyncedRuntimeOverlay>> {
     if overlays.is_empty() {
         return Ok(Vec::new());
@@ -495,12 +501,38 @@ pub(super) fn sync_lab_runtime_overlays(
             install_ran = true;
         }
 
+        // Snapshots intentionally omit installed dependency trees. Reuse the
+        // generic provider resolver against the overlay's own package metadata
+        // and execute its resulting plan on the runner before provider preflight.
+        // This keeps package-manager policy out of Lab and prevents a missing
+        // runtime dependency from being charged to an agent provider attempt.
+        let dependency_hydration = if skip_deps_hydration {
+            serde_json::json!({
+                "schema": "homeboy/lab-workspace-dependency-hydration/v1",
+                "status": "not_applied",
+                "reason": "opt_out",
+            })
+        } else {
+            serde_json::to_value(super::lab::offload::hydrate_lab_workspace_dependencies(
+                runner_id,
+                &synced.local_path,
+                &synced.remote_path,
+            )?)
+            .map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("serialize runtime-overlay dependency hydration".to_string()),
+                )
+            })?
+        };
+
         synced_overlays.push(SyncedRuntimeOverlay {
             role: overlay.workspace.role.clone(),
             local_path: synced.local_path.clone(),
             remote_path: synced.remote_path.clone(),
             install_workdir,
             install_ran,
+            dependency_hydration,
             expose_remote_path_env: overlay.expose_remote_path_env.clone(),
             build_provenance,
         });
@@ -542,7 +574,7 @@ fn run_runtime_overlay_install_step(
         return Ok(());
     }
 
-    Err(Error::validation_invalid_argument(
+    let mut error = Error::validation_invalid_argument(
         "runtime_overlay.install",
         format!(
             "Lab offload runtime-overlay install step failed (exit {exit_code}) in remote workdir `{remote_workdir}`"
@@ -552,7 +584,13 @@ fn run_runtime_overlay_install_step(
             format!("install stderr: {}", output.stderr.trim()),
             "Verify the overlay install command succeeds on the runner, or package the runtime as a self-contained artifact so no install step is required.".to_string(),
         ]),
-    ))
+    );
+    // Runtime-overlay setup happens before the provider command is dispatched.
+    // Preserve that distinction for durable Cook accounting and retries.
+    error.details["classification"] = serde_json::json!("workspace_setup");
+    error.details["workspace"] = serde_json::json!(remote_workdir);
+    error.details["exit_code"] = serde_json::json!(exit_code);
+    Err(error)
 }
 
 /// Build the env-var deltas that surface synced runtime-overlay remote paths to
