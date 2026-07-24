@@ -212,6 +212,10 @@ pub fn validate_dependency_materialization_steps(rig: &RigSpec) -> Vec<String> {
             errors.push(format!("{context} must declare safety classification"));
         }
 
+        if let Some(cwd) = &step.spec.cwd {
+            validate_component_interpolations_in_string(cwd, &context, &mut errors);
+        }
+
         for output in &step.spec.expected_outputs {
             if output.path.trim().is_empty() {
                 errors.push(format!("{context} expected output path must not be empty"));
@@ -232,6 +236,22 @@ pub fn validate_dependency_materialization_steps(rig: &RigSpec) -> Vec<String> {
     }
 
     errors
+}
+
+fn validate_component_interpolations_in_string(
+    input: &str,
+    context: &str,
+    errors: &mut Vec<String>,
+) {
+    errors.extend(
+        crate::expand::unsupported_component_interpolations(input)
+            .into_iter()
+            .map(|token| {
+                format!(
+                    "{context} has unsupported component interpolation `{token}`; supported shape is `${{components.<id>.path}}`"
+                )
+            }),
+    );
 }
 
 fn normalized_step_spec(
@@ -418,5 +438,25 @@ mod tests {
         assert!(errors
             .iter()
             .any(|error| error.contains("bad-component") && error.contains("component ref")));
+    }
+
+    #[test]
+    fn accepts_component_path_and_environment_interpolations() {
+        let rig: RigSpec = serde_json::from_str(
+            r#"{
+                "components": { "app": { "path": "/workspace/app" } },
+                "requirements": {
+                    "dependency_materialization": [{
+                        "id": "prepare",
+                        "command": "npm install",
+                        "cwd": "${env.WORKSPACE_ROOT}/${components.app.path}",
+                        "safety": "writes_working_tree"
+                    }]
+                }
+            }"#,
+        )
+        .expect("parse valid dependency materialization contract");
+
+        assert!(validate_dependency_materialization_steps(&rig).is_empty());
     }
 }

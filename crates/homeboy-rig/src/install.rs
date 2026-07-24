@@ -14,7 +14,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use super::spec::{validate_dependency_materialization_steps, RigSpec};
+use super::spec::RigSpec;
 
 const EXTENDS_FIELD: &str = "extends";
 const SHARED_TEMPLATES_FIELD: &str = "shared_templates";
@@ -218,20 +218,7 @@ fn validate_rig_spec_file(path: &Path, source_root: &Path, rig_id: &str) -> Resu
         spec.id = rig_id.to_string();
     }
 
-    let errors = validate_dependency_materialization_steps(&spec);
-    if errors.is_empty() {
-        return Ok(());
-    }
-
-    Err(Error::validation_invalid_argument(
-        "rig",
-        format!(
-            "Rig `{}` has invalid dependency materialization configuration",
-            spec.id
-        ),
-        Some(spec.id),
-        Some(errors),
-    ))
+    super::validate_rig_spec(&spec)
 }
 
 pub(crate) fn write_rig_config_from_source(
