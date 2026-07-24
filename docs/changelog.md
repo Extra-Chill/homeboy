@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.314.1] - 2026-07-24
+
+### Changed
+- cover no-op adoption when base equals candidate
+- cover no-code-change disclosure guard
+
+### Fixed
+- bind promotion artifacts to verified bytes
+- share Lab plan compilation
+- adopt pre-existing immutable candidate after no-op review
+- reject 'no code changed' disclosure when candidate changed files
+- keep goals out of explicit task cells
+- resolve gate baselines through controller artifacts
+
 ## [0.314.0] - 2026-07-24
 
 ### Added
