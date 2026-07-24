@@ -17,8 +17,8 @@ use homeboy_core::{Error, Result};
 
 use super::envelope::ExecutionEnvelope;
 use super::path_remap::{
-    is_absolute_controller_path, order_mappings_by_specificity, remap_local_path,
-    remap_paths_in_value, try_rewrite_flag_value_args, LabPathRemap,
+    is_absolute_controller_path, order_mappings_by_specificity, path_escapes_mapping,
+    remap_local_path, remap_paths_in_value, try_rewrite_flag_value_args, LabPathRemap,
 };
 
 pub(crate) struct AgentTaskSpecMaterialization<T> {
@@ -194,6 +194,7 @@ fn remap_agent_task_plan_spec(
         )
     })?;
     let controller_plan = value.clone();
+    reject_paths_escaping_mappings(&controller_plan, mappings)?;
     reject_unmapped_controller_paths(&controller_plan, mappings)?;
     remap_paths_in_value(&mut value, mappings);
     record_controller_workspace_provenance(&mut value, &controller_plan);
@@ -205,48 +206,136 @@ fn remap_agent_task_plan_spec(
     })
 }
 
-/// A persisted plan is executed on the runner without a controller filesystem.
-/// Reject every absolute controller path that has no materialized mapping rather
-/// than passing it through to fail later in provider setup or change harvest.
-fn reject_unmapped_controller_paths(value: &Value, mappings: &[&LabPathRemap]) -> Result<()> {
+/// Reject any path that starts below a controller mapping but crosses back out.
+/// This applies to every plan value because the mapping itself proves its
+/// controller origin, unlike an arbitrary absolute provider config string.
+fn reject_paths_escaping_mappings(value: &Value, mappings: &[&LabPathRemap]) -> Result<()> {
     fn visit(value: &Value, mappings: &[&LabPathRemap], pointer: &str) -> Result<()> {
         match value {
-            Value::String(path) if is_absolute_controller_path(path) => {
-                if remap_local_path(path, mappings).is_none() {
-                    return Err(Error::validation_invalid_argument(
-                        "plan",
-                        format!(
-                            "Lab offload cannot map controller-local path at {pointer} to the selected runner workspace"
-                        ),
-                        Some(path.clone()),
-                        Some(vec![
-                            "Include the referenced checkout or runtime overlay in the Lab workspace materialization plan.".to_string(),
-                            "Retry after Homeboy can materialize every controller-local path in the follow-up plan.".to_string(),
-                        ]),
-                    ));
-                }
+            Value::String(path)
+                if mappings
+                    .iter()
+                    .any(|mapping| path_escapes_mapping(path, mapping)) =>
+            {
+                Err(Error::validation_invalid_argument(
+                    "plan",
+                    format!(
+                        "Lab offload rejects controller-local path at {pointer} because it escapes the selected runner workspace"
+                    ),
+                    Some(path.clone()),
+                    Some(vec![
+                        "Use a path below the materialized controller workspace without `..` traversal.".to_string(),
+                    ]),
+                ))
             }
             Value::Array(items) => {
                 for (index, item) in items.iter().enumerate() {
                     visit(item, mappings, &format!("{pointer}/{index}"))?;
                 }
+                Ok(())
             }
             Value::Object(entries) => {
                 for (key, item) in entries {
-                    // This is an audit-only controller reference added after
-                    // remapping; it must remain stable for operator evidence.
-                    if key == "workspace_source_provenance" {
-                        continue;
-                    }
                     visit(item, mappings, &format!("{pointer}/{key}"))?;
                 }
+                Ok(())
             }
-            _ => {}
+            _ => Ok(()),
+        }
+    }
+
+    visit(value, mappings, "")
+}
+
+/// A persisted plan is executed on the runner without a controller filesystem.
+/// Validate only schema-declared controller path fields; opaque provider config
+/// may intentionally name a runner-native binary or service path.
+fn reject_unmapped_controller_paths(value: &Value, mappings: &[&LabPathRemap]) -> Result<()> {
+    fn validate(path: &str, mappings: &[&LabPathRemap], pointer: &str) -> Result<()> {
+        if !is_absolute_controller_path(path) {
+            return Ok(());
+        }
+        if remap_local_path(path, mappings).is_none() {
+            return Err(Error::validation_invalid_argument(
+                "plan",
+                format!(
+                    "Lab offload cannot map controller-local path at {pointer} to the selected runner workspace"
+                ),
+                Some(path.to_string()),
+                Some(vec![
+                    "Include the referenced checkout or runtime overlay in the Lab workspace materialization plan.".to_string(),
+                    "Retry after Homeboy can materialize every controller-local path in the follow-up plan.".to_string(),
+                ]),
+            ));
         }
         Ok(())
     }
 
-    visit(value, mappings, "")
+    let validate_value = |value: Option<&Value>, pointer: String| -> Result<()> {
+        if let Some(path) = value.and_then(Value::as_str) {
+            validate(path, mappings, &pointer)?;
+        }
+        Ok(())
+    };
+
+    for (index, contract) in value
+        .get("component_contracts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        validate_value(
+            contract.get("path"),
+            format!("/component_contracts/{index}/path"),
+        )?;
+    }
+    for (index, task) in value
+        .get("tasks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let base = format!("/tasks/{index}");
+        validate_value(
+            task.pointer("/workspace/root"),
+            format!("{base}/workspace/root"),
+        )?;
+        validate_value(
+            task.pointer("/executor/config/workspace_root"),
+            format!("{base}/executor/config/workspace_root"),
+        )?;
+        validate_value(
+            task.pointer("/executor/config/workspace/root"),
+            format!("{base}/executor/config/workspace/root"),
+        )?;
+        validate_value(
+            task.pointer("/metadata/workspace/root"),
+            format!("{base}/metadata/workspace/root"),
+        )?;
+        validate_value(
+            task.pointer("/metadata/cook_continuation_workspace/candidate_source_root"),
+            format!("{base}/metadata/cook_continuation_workspace/candidate_source_root"),
+        )?;
+        validate_value(
+            task.pointer("/metadata/cook_continuation_workspace/task_workspace/root"),
+            format!("{base}/metadata/cook_continuation_workspace/task_workspace/root"),
+        )?;
+        for (contract_index, contract) in task
+            .get("component_contracts")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            validate_value(
+                contract.get("path"),
+                format!("{base}/component_contracts/{contract_index}/path"),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn record_controller_workspace_provenance(remapped: &mut Value, controller: &Value) {

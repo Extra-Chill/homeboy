@@ -235,7 +235,42 @@ fn path_suffix<'a>(path: &'a str, prefix: &str) -> Option<String> {
     } else {
         path.strip_prefix(&prefix_with_separator)
     }?;
-    Some(rest.to_string())
+    normalize_relative_suffix(rest)
+}
+
+/// Whether a path starts beneath a mapped controller root but uses `..` to
+/// escape it. The caller must reject this rather than treating it as an
+/// unmapped path, since accepting it would make the remote join unsafe.
+pub(super) fn path_escapes_mapping(path: &str, mapping: &LabPathRemap) -> bool {
+    let path = normalize_path_separators(path);
+    let prefix = normalize_path_separators(&mapping.local)
+        .trim_end_matches('/')
+        .to_string();
+    let prefix_with_separator = format!("{prefix}/");
+    let rest = if is_windows_drive_path(&path) || is_windows_drive_path(&prefix) {
+        path.get(..prefix_with_separator.len())
+            .filter(|candidate| candidate.eq_ignore_ascii_case(&prefix_with_separator))
+            .and_then(|_| path.get(prefix_with_separator.len()..))
+    } else {
+        path.strip_prefix(&prefix_with_separator)
+    };
+    rest.is_some_and(|rest| normalize_relative_suffix(rest).is_none())
+}
+
+/// Normalize a relative suffix while retaining it below the mapped workspace.
+/// Returning `None` means a `..` would cross the mapping boundary.
+fn normalize_relative_suffix(suffix: &str) -> Option<String> {
+    let mut segments = Vec::new();
+    for segment in suffix.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop()?;
+            }
+            segment => segments.push(segment),
+        }
+    }
+    Some(segments.join("/"))
 }
 
 fn normalize_path_separators(path: &str) -> String {
