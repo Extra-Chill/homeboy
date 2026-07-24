@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.313.0] - 2026-07-24
+
+### Added
+- add --raw for pipeable remote stdout
+
+### Changed
+- add rustfmt --all --check gate and clean the last drifted file
+
 ## [0.312.2] - 2026-07-24
 
 ### Changed
