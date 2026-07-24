@@ -250,6 +250,65 @@ fn review_form_gap(field: &str, problem: &str) -> Error {
     )
 }
 
+/// Phrases that assert no AI-authored code change. A review-form-only adoption
+/// follow-up (which changes no code) can supply such a `used_for`, but when the
+/// finalized candidate lineage has AI-authored changed files, that disclosure
+/// materially understates the work and misleads reviewers (#9897).
+const NO_CODE_CHANGE_CLAIMS: &[&str] = &[
+    "without changing code",
+    "without changing any code",
+    "did not change code",
+    "did not change any code",
+    "no code changed",
+    "no code was changed",
+    "changed no code",
+    "made no code changes",
+    "no changes to code",
+    "without modifying code",
+    "without writing code",
+];
+
+/// Whether a `used_for` narrative asserts that no code was changed.
+fn used_for_claims_no_code_change(used_for: &str) -> bool {
+    let normalized = used_for.to_ascii_lowercase();
+    NO_CODE_CHANGE_CLAIMS
+        .iter()
+        .any(|claim| normalized.contains(claim))
+}
+
+/// Reject a reviewer disclosure whose `used_for` claims no code was changed when
+/// the finalized candidate actually has changed files. This catches a
+/// review-form-only adoption follow-up erasing the substantive implementation
+/// the original provider attempt authored, keeping the PR's AI attribution
+/// honest against the patch lineage (#9897).
+pub fn validate_used_for_against_changed_files(
+    dossier: &AgentTaskReviewDossier,
+    changed_files: &[String],
+) -> Result<()> {
+    if changed_files.is_empty() {
+        return Ok(());
+    }
+    if !dossier.ai_assistance.used {
+        return Ok(());
+    }
+    if used_for_claims_no_code_change(&dossier.ai_assistance.used_for) {
+        return Err(review_form_gap(
+            "review_form.used_for",
+            &format!(
+                "used_for claims no code was changed, but the finalized candidate changes {} file(s) (e.g. {}). Attribute the AI-authored implementation across the candidate lineage instead of the review-form-only follow-up",
+                changed_files.len(),
+                changed_files
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Canned/placeholder `used_for` values that must not pass as a genuine
 /// reflection — including the legacy CLI default this refactor retires.
 fn used_for_is_placeholder(value: &str) -> bool {
@@ -1009,6 +1068,52 @@ mod tests {
     #[test]
     fn valid_review_form_passes_validation() {
         assert!(valid_form().validate().is_ok());
+    }
+
+    #[test]
+    fn used_for_no_code_change_claim_is_detected() {
+        assert!(used_for_claims_no_code_change(
+            "I supplied the missing reviewer metadata without changing code, preserving the candidate."
+        ));
+        assert!(used_for_claims_no_code_change(
+            "Reviewed the state; no code was changed."
+        ));
+        // A genuine implementation narrative is not flagged.
+        assert!(!used_for_claims_no_code_change(
+            "Traced the bug, implemented the guard, and verified with the gate."
+        ));
+    }
+
+    #[test]
+    fn finalization_rejects_no_code_claim_when_candidate_changed_files() {
+        // #9897: a review-form-only follow-up claiming no code changed must not
+        // finalize when the candidate lineage actually changed files.
+        let mut d = dossier();
+        d.ai_assistance.used_for =
+            "Supplied the missing reviewer metadata without changing code, preserving the candidate."
+                .into();
+
+        let changed = vec!["src/lib.rs".to_string(), "src/tests.rs".to_string()];
+        let error = validate_used_for_against_changed_files(&d, &changed)
+            .expect_err("no-code claim with changed files must fail");
+        assert!(error.message.contains("changes 2 file(s)"));
+        assert!(error.message.contains("src/lib.rs"));
+    }
+
+    #[test]
+    fn finalization_allows_no_code_claim_when_no_files_changed() {
+        // A genuinely no-op review (no changed files) may honestly say so.
+        let mut d = dossier();
+        d.ai_assistance.used_for = "Reviewed the candidate; no code was changed.".into();
+        assert!(validate_used_for_against_changed_files(&d, &[]).is_ok());
+    }
+
+    #[test]
+    fn finalization_allows_substantive_narrative_with_changed_files() {
+        // The normal case: an implementation narrative + changed files passes.
+        let d = dossier();
+        let changed = vec!["src/lib.rs".to_string()];
+        assert!(validate_used_for_against_changed_files(&d, &changed).is_ok());
     }
 
     #[test]
