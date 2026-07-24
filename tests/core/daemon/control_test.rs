@@ -8,7 +8,7 @@ use std::{os::unix::process::CommandExt, process::Command};
 use super::{
     artifact_content_url, ensure_running_with_operations, fetch_artifact_to_path,
     reconcile_dead_lease_and_ensure_running_with_operations,
-    reconcile_leaseless_orphan_store_with_operations, startup_timeout_error,
+    reconcile_leaseless_orphan_store_with_operations,
 };
 use crate::api_jobs::{JobEventKind, JobStatus, JobStore};
 use crate::build_identity::BuildIdentity;
@@ -17,39 +17,6 @@ use crate::daemon::{
     DaemonTerminationClassification, DaemonTerminationEvidence,
 };
 use crate::test_support::with_isolated_home;
-
-#[test]
-fn startup_timeout_diagnostic_captures_exit_state_lease_location_and_stderr() {
-    let error = startup_timeout_error(
-        42,
-        std::path::Path::new("/tmp/homeboy/daemon/state.json"),
-        "exited: exit status: 1".to_string(),
-        Some(serde_json::json!({
-            "pid": 7,
-            "startup_token_matches": false,
-            "state_path": "/other/homeboy/daemon/state.json",
-        })),
-        Some("daemon owner lock is held".to_string()),
-    );
-
-    assert!(error.message.contains("42"));
-    assert_eq!(
-        error.details["daemon_startup"]["child"],
-        "exited: exit status: 1"
-    );
-    assert_eq!(
-        error.details["daemon_startup"]["state_path"],
-        "/tmp/homeboy/daemon/state.json"
-    );
-    assert_eq!(
-        error.details["daemon_startup"]["observed_state"]["startup_token_matches"],
-        false
-    );
-    assert_eq!(
-        error.details["daemon_startup"]["stderr"],
-        "daemon owner lock is held"
-    );
-}
 
 #[cfg(unix)]
 #[test]

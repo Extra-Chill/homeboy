@@ -150,7 +150,7 @@ pub(crate) fn controller_job_runtime_count() -> usize {
 }
 
 pub(crate) const DAEMON_LEASE_SCHEMA: &str = "homeboy.daemon.session_lease.v1";
-pub const DAEMON_STARTUP_TOKEN_ENV: &str = "HOMEBOY_DAEMON_STARTUP_TOKEN";
+pub(super) const DAEMON_STARTUP_TOKEN_ENV: &str = "HOMEBOY_DAEMON_STARTUP_TOKEN";
 const RUNTIME_PATH_FILE_LIMIT: usize = 2_000;
 const RUNTIME_PATH_SUFFIXES: &[&str] = &["_COMPONENT_PATH", "_PROVIDER_PATH", "_RUNTIME_PATH"];
 pub(super) const FORCE_STOP_WAIT: Duration = Duration::from_secs(5);
