@@ -526,6 +526,14 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
     let run_id = match &cli.command {
         Commands::AgentTask(agent_task) => match &agent_task.command {
             crate::commands::agent_task::AgentTaskCommand::Run(args) => Some(&args.run_id),
+            crate::commands::agent_task::AgentTaskCommand::Resume(args)
+                if args.bridge
+                    && crate::agents::agent_tasks::service::terminal_transport_recovery_required(
+                        &args.run_id,
+                    ) =>
+            {
+                None
+            }
             crate::commands::agent_task::AgentTaskCommand::Resume(args) => Some(&args.run_id),
             _ => None,
         },

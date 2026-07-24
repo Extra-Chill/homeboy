@@ -962,8 +962,13 @@ fn terminal_transport_recovery_replaces_lossy_historical_compact_aggregate() {
             })),
             "stderr": "",
         }));
+        rewrite_record_for_test(run_id, |record| {
+            record.metadata["runner_job_status"] = json!("succeeded");
+            record.metadata["runner_job_events"] = json!(&snapshot.events);
+        })
+        .expect("persist historical daemon events");
         let _provider = RunnerContinuationTestGuard::install(Box::new(TerminalSnapshotProvider {
-            snapshot: Mutex::new(Some(snapshot)),
+            snapshot: Mutex::new(None),
         }));
 
         assert!(recover_terminal_transport_proxy_evidence(run_id)
@@ -982,6 +987,99 @@ fn terminal_transport_recovery_replaces_lossy_historical_compact_aggregate() {
         assert_eq!(
             report.artifacts[0].sha256.as_deref(),
             Some("b86157f2c3735b453880c486455b263dfdbd8e77541cb5846b89754065fc9d9a")
+        );
+    });
+}
+
+#[test]
+fn terminal_transport_recovery_accepts_a_verified_older_controller_pin() {
+    with_isolated_home(|_| {
+        let run_id = "terminal-recovery-older-controller";
+        let runner_job_id = "00000000-0000-0000-0000-000000000123";
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--record-run-id".to_string(),
+            run_id.to_string(),
+        ];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id,
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("accepted Lab handoff");
+        apply_runner_job_terminal_state(
+            &mut record,
+            homeboy_core::api_jobs::JobStatus::Succeeded,
+            &[],
+        );
+        let temporary = tempfile::tempdir().expect("temporary controller directory");
+        let pinned = temporary.path().join("older-homeboy");
+        let identity = "homeboy verified-older-controller";
+        let digest = fake_controller_artifact(&pinned, identity, "older controller");
+        record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+            ["originating"]["build_identity"] = json!(identity);
+        record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+            ["current"] = json!(identity);
+        record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+            ["executed"] = json!(identity);
+        record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+            ["requested"] = json!(identity);
+        record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+            ["originating"]["executable"] = json!(&pinned);
+        record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+            ["originating"]["pinned_executable"] = json!(&pinned);
+        record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
+            ["originating"]["sha256"] = json!(digest);
+        store::write_record(&record).expect("older controller projection");
+
+        let mut lossy = succeeded_aggregate(&test_plan());
+        lossy.outcomes.clear();
+        store::write_aggregate(run_id, &lossy).expect("lossy aggregate");
+        let compact = json!({
+            "schema": "homeboy/agent-task-aggregate/v1",
+            "view": "summary",
+            "plan_id": "plan-a",
+            "status": "succeeded",
+            "totals": { "skipped": 0, "succeeded": 1, "failed": 0 },
+            "tasks": [{ "task_id": "task-a", "status": "succeeded" }],
+            "tasks_omitted": 0,
+            "run_id": run_id,
+        });
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        snapshot.events[0].kind = JobEventKind::Result;
+        snapshot.events[0].data = Some(json!({
+            "exit_code": 0,
+            "command": command,
+            "stdout": json!({
+                "schema": "homeboy/command-result/v3",
+                "command": "agent-task",
+                "success": true,
+                "exit_code": 0,
+                "data": compact,
+            }).to_string(),
+            "stderr": "",
+        }));
+        rewrite_record_for_test(run_id, |record| {
+            record.metadata["runner_job_status"] = json!("succeeded");
+            record.metadata["runner_job_events"] = json!(&snapshot.events);
+        })
+        .expect("persist older controller daemon events");
+        let _provider = RunnerContinuationTestGuard::install(Box::new(TerminalSnapshotProvider {
+            snapshot: Mutex::new(None),
+        }));
+
+        assert!(recover_terminal_transport_proxy_evidence(run_id)
+            .expect("current controller replays verified historical evidence"));
+        assert_eq!(
+            store::read_aggregate(run_id)
+                .expect("recovered aggregate")
+                .outcomes
+                .len(),
+            1
         );
     });
 }

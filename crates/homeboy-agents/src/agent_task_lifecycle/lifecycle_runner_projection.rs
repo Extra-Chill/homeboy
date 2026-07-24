@@ -285,6 +285,59 @@ fn project_terminal_runner_lifecycle_event(
     crate::agent_task_lifecycle::record_terminal_artifact_projection(record, &event.aggregate)
 }
 
+pub(crate) fn project_persisted_terminal_runner_events(
+    record: &mut AgentTaskRunRecord,
+) -> Result<bool> {
+    let terminal_status = record
+        .metadata
+        .get("runner_job_status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| matches!(status, "succeeded" | "failed" | "cancelled"));
+    if !terminal_status {
+        return Ok(false);
+    }
+    let Some(runner_job_id) = record.runner_job_id() else {
+        return Ok(false);
+    };
+    let Some(events) = record
+        .metadata
+        .get("runner_job_events")
+        .cloned()
+        .and_then(|events| {
+            serde_json::from_value::<Vec<homeboy_core::api_jobs::JobEvent>>(events).ok()
+        })
+        .filter(|events| {
+            !events.is_empty()
+                && events
+                    .iter()
+                    .all(|event| event.job_id.to_string() == runner_job_id)
+        })
+    else {
+        return Ok(false);
+    };
+    let Some(event) = crate::agent_task_lifecycle::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_persisted_job_events(
+        &events,
+        record.runner_id().unwrap_or_default(),
+        runner_job_id,
+        &record.run_id,
+    )? else {
+        return Ok(false);
+    };
+    validate_terminal_child_event_identity(record, &event)?;
+    let projection_plan = aggregate_projection_plan_from_outcomes(&event.aggregate);
+    let aggregate_path = store::aggregate_path(&record.run_id)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "aggregate.json".to_string());
+    apply_aggregate_to_record(record, &projection_plan, &event.aggregate, aggregate_path);
+    record.ensure_metadata_object().insert(
+        "terminal_transport_recovery".to_string(),
+        json!("persisted_runner_job_events"),
+    );
+    store::write_aggregate_and_record(record, &event.aggregate)?;
+    crate::agent_task_lifecycle::record_terminal_artifact_projection(record, &event.aggregate)?;
+    Ok(true)
+}
+
 fn preserve_terminal_runner_identity(
     record: &mut AgentTaskRunRecord,
     event: &crate::agent_task_lifecycle::agent_task_lifecycle_event::AgentTaskRunPlanLifecycleEvent,
@@ -418,6 +471,22 @@ fn validate_terminal_child_identity(
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
     event: &crate::agent_task_lifecycle::agent_task_lifecycle_event::AgentTaskRunPlanLifecycleEvent,
 ) -> Result<()> {
+    validate_terminal_child_event_identity(record, event)?;
+    if snapshot.job.id.to_string() == record.runner_job_id().unwrap_or_default() {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "runner_lifecycle_identity",
+        "terminal runner child lifecycle event does not match its controller run, persisted run, runner, and job identity",
+        Some(record.run_id.clone()),
+        None,
+    ))
+}
+
+fn validate_terminal_child_event_identity(
+    record: &AgentTaskRunRecord,
+    event: &crate::agent_task_lifecycle::agent_task_lifecycle_event::AgentTaskRunPlanLifecycleEvent,
+) -> Result<()> {
     // Canonical run/runner/job identity the controller expects, and the identity
     // the terminal event carries (built from its *persisted* run id). Comparing
     // via the shared `RunnerJobIdentity` keeps the runner/job/run tuple check in
@@ -433,11 +502,9 @@ fn validate_terminal_child_identity(
         event.identity.runner_job_id.clone(),
     );
     // Beyond the run/runner/job tuple, the terminal event must also agree on the
-    // raw transport run id (not just the persisted run id) and the snapshot's
-    // own job id, so the whole child projection provably belongs to this run.
+    // raw transport run id (not just the persisted run id).
     if expected.matches(&event_identity)
         && event.identity.run_id.as_deref() == Some(record.run_id.as_str())
-        && snapshot.job.id.to_string() == expected.runner_job_id
     {
         return Ok(());
     }
