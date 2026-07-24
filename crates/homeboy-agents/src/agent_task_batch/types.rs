@@ -37,6 +37,7 @@ pub enum AgentTaskBatchState {
     PartialFailure,
     Failed,
     Cancelled,
+    TimedOut,
 }
 
 impl AgentTaskBatchState {
@@ -50,6 +51,7 @@ impl AgentTaskBatchState {
             Self::PartialFailure => "partial_failure",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
         }
     }
 
@@ -58,13 +60,15 @@ impl AgentTaskBatchState {
     pub fn exit_code(self) -> i32 {
         match self {
             Self::Queued | Self::Running | Self::Succeeded => 0,
-            Self::PartialFailure | Self::Failed | Self::Cancelled => 1,
+            Self::PartialFailure | Self::Failed | Self::Cancelled | Self::TimedOut => 1,
         }
     }
 }
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct AgentTaskBatchStatusReport {
     pub schema: &'static str,
+    /// Additive top-level projection of `batch.state` for command envelopes.
+    pub status: String,
     pub batch: AgentTaskBatchRecord,
     pub totals: AgentTaskBatchTotals,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -111,6 +115,7 @@ pub struct AgentTaskBatchTotals {
     pub partial_failure: usize,
     pub failed: usize,
     pub cancelled: usize,
+    pub timed_out: usize,
     pub unavailable: usize,
 }
 
@@ -125,7 +130,7 @@ pub fn aggregate_state(totals: &AgentTaskBatchTotals) -> AgentTaskBatchState {
     } else if totals.unavailable > 0 {
         AgentTaskBatchState::PartialFailure
     } else if totals.failed > 0 || totals.partial_failure > 0 {
-        if totals.succeeded == 0 && totals.cancelled == 0 {
+        if totals.succeeded == 0 && totals.cancelled == 0 && totals.timed_out == 0 {
             AgentTaskBatchState::Failed
         } else {
             AgentTaskBatchState::PartialFailure
@@ -133,6 +138,12 @@ pub fn aggregate_state(totals: &AgentTaskBatchTotals) -> AgentTaskBatchState {
     } else if totals.cancelled > 0 {
         if totals.succeeded == 0 {
             AgentTaskBatchState::Cancelled
+        } else {
+            AgentTaskBatchState::PartialFailure
+        }
+    } else if totals.timed_out > 0 {
+        if totals.succeeded == 0 {
+            AgentTaskBatchState::TimedOut
         } else {
             AgentTaskBatchState::PartialFailure
         }

@@ -143,6 +143,8 @@ fn batch_resume(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
                 "total": report.total,
                 "succeeded": report.succeeded,
                 "failed": report.failed,
+                "cancelled": report.cancelled,
+                "timed_out": report.timed_out,
             },
             "cooks": report.cooks,
             "commands": {
@@ -314,7 +316,13 @@ fn batch_cook_result(
             "schema": AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA,
             "fanout_id": plan.fanout_id,
             "status": report.status,
-            "summary": { "total": report.total, "succeeded": report.succeeded, "failed": report.failed },
+            "summary": {
+                "total": report.total,
+                "succeeded": report.succeeded,
+                "failed": report.failed,
+                "cancelled": report.cancelled,
+                "timed_out": report.timed_out,
+            },
             "cooks": cooks,
             "commands": {
                 "status": format!("homeboy agent-task fanout status {}", plan.fanout_id),
@@ -1920,10 +1928,13 @@ mod tests {
                 total: 2,
                 succeeded: 1,
                 failed: 1,
+                cancelled: 0,
+                timed_out: 0,
                 cooks: vec![
                     agent_task_service::AgentTaskCookBatchCellReport {
                         cook_id: "first".to_string(),
                         initial_run_id: "first-run".to_string(),
+                        status: "review_ready".to_string(),
                         exit_code: 0,
                         result: None,
                         error: None,
@@ -1931,6 +1942,7 @@ mod tests {
                     agent_task_service::AgentTaskCookBatchCellReport {
                         cook_id: "second".to_string(),
                         initial_run_id: "second-run".to_string(),
+                        status: "failed".to_string(),
                         exit_code: 1,
                         result: None,
                         error: Some("controller admission failed".to_string()),
@@ -1994,24 +2006,35 @@ mod tests {
     }
 
     #[test]
-    fn durable_failed_batch_status_envelope_is_unsuccessful() {
-        let state = batch::AgentTaskBatchState::Failed;
-        let exit_code = state.exit_code();
-        let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
-            &Ok(json!({ "batch": { "state": state.outcome_status() } })),
-            exit_code,
-            "agent-task fanout status",
-            None,
-        );
+    fn durable_batch_status_envelope_preserves_canonical_terminal_state() {
+        for state in [
+            batch::AgentTaskBatchState::Succeeded,
+            batch::AgentTaskBatchState::PartialFailure,
+            batch::AgentTaskBatchState::Failed,
+            batch::AgentTaskBatchState::Cancelled,
+            batch::AgentTaskBatchState::TimedOut,
+        ] {
+            let exit_code = state.exit_code();
+            let envelope =
+                crate::commands::utils::response::cli_response_for_json_result_for_command(
+                    &Ok(json!({
+                        "status": state.outcome_status(),
+                        "batch": { "state": state.outcome_status() }
+                    })),
+                    exit_code,
+                    "agent-task fanout status",
+                    None,
+                );
 
-        assert_eq!(exit_code, 1);
-        assert!(!envelope.success);
-        assert_eq!(envelope.exit_code, 1);
-        assert_eq!(envelope.status, "failed");
-        assert_eq!(
-            envelope.data.expect("durable status")["batch"]["state"],
-            "failed"
-        );
+            assert_eq!(envelope.success, exit_code == 0, "{state:?}");
+            assert_eq!(envelope.exit_code, exit_code, "{state:?}");
+            assert_eq!(envelope.status, state.outcome_status(), "{state:?}");
+            assert_eq!(
+                envelope.data.expect("durable status")["batch"]["state"],
+                state.outcome_status(),
+                "{state:?}"
+            );
+        }
     }
 
     #[test]

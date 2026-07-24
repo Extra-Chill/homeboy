@@ -450,6 +450,7 @@ pub struct AgentTaskCookBatchOptions {
 pub struct AgentTaskCookBatchCellReport {
     pub cook_id: String,
     pub initial_run_id: String,
+    pub status: String,
     pub exit_code: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<AgentTaskCookReport>,
@@ -465,6 +466,8 @@ pub struct AgentTaskCookBatchReport {
     pub total: usize,
     pub succeeded: usize,
     pub failed: usize,
+    pub cancelled: usize,
+    pub timed_out: usize,
     pub cooks: Vec<AgentTaskCookBatchCellReport>,
 }
 
@@ -526,6 +529,7 @@ where
                     Ok(result) => AgentTaskCookBatchCellReport {
                         cook_id: cook.cook_id,
                         initial_run_id: cook.initial_run_id,
+                        status: result.value.status.clone(),
                         exit_code: result.exit_code,
                         result: Some(result.value),
                         error: None,
@@ -533,6 +537,7 @@ where
                     Err(error) => AgentTaskCookBatchCellReport {
                         cook_id: cook.cook_id,
                         initial_run_id: cook.initial_run_id,
+                        status: "failed".to_string(),
                         exit_code: 1,
                         result: None,
                         error: Some(error.to_string()),
@@ -622,6 +627,7 @@ where
                 AgentTaskCookBatchCellReport {
                     cook_id: report.cook_id.clone(),
                     initial_run_id: cook_id,
+                    status: report.status.clone(),
                     exit_code,
                     result: Some(report),
                     error: None,
@@ -630,6 +636,7 @@ where
             Err(error) => AgentTaskCookBatchCellReport {
                 cook_id: child.task_id.clone(),
                 initial_run_id: cook_id,
+                status: "failed".to_string(),
                 exit_code: 1,
                 result: None,
                 error: Some(error.to_string()),
@@ -653,13 +660,16 @@ fn cook_batch_result(
     cooks: Vec<AgentTaskCookBatchCellReport>,
 ) -> AgentTaskRunResult<AgentTaskCookBatchReport> {
     let total = cooks.len();
-    let failed = cooks.iter().filter(|cell| cell.exit_code != 0).count();
-    let state =
-        crate::agent_task_batch::aggregate_state(&crate::agent_task_batch::AgentTaskBatchTotals {
-            succeeded: total - failed,
-            failed,
-            ..Default::default()
-        });
+    let mut totals = crate::agent_task_batch::AgentTaskBatchTotals::default();
+    for cell in &cooks {
+        match cell.status.as_str() {
+            "cancelled" => totals.cancelled += 1,
+            "timed_out" => totals.timed_out += 1,
+            _ if cell.exit_code == 0 => totals.succeeded += 1,
+            _ => totals.failed += 1,
+        }
+    }
+    let state = crate::agent_task_batch::aggregate_state(&totals);
 
     AgentTaskRunResult {
         exit_code: state.exit_code(),
@@ -668,8 +678,10 @@ fn cook_batch_result(
             batch_id,
             status: state.outcome_status().to_string(),
             total,
-            succeeded: total - failed,
-            failed,
+            succeeded: totals.succeeded,
+            failed: totals.failed,
+            cancelled: totals.cancelled,
+            timed_out: totals.timed_out,
             cooks,
         },
     }
@@ -785,11 +797,7 @@ fn child_finalization_value(cell: &AgentTaskCookBatchCellReport) -> Value {
     serde_json::json!({
         "resumed_at": chrono::Utc::now().to_rfc3339(),
         "exit_code": cell.exit_code,
-        "status": cell
-            .result
-            .as_ref()
-            .map(|report| report.status.clone())
-            .unwrap_or_else(|| "error".to_string()),
+        "status": cell.status,
         "error": cell.error,
     })
 }

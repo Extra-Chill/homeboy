@@ -2105,9 +2105,10 @@ fn cook_batch_preserves_order_concurrency_and_failure_isolation_process() {
 
 #[test]
 fn cook_batch_aggregate_outcome_matrix_distinguishes_success_partial_and_failure() {
-    let cell = |id: &str, exit_code| AgentTaskCookBatchCellReport {
+    let cell = |id: &str, status: &str, exit_code| AgentTaskCookBatchCellReport {
         cook_id: id.to_string(),
         initial_run_id: format!("{id}-run"),
+        status: status.to_string(),
         exit_code,
         result: None,
         error: (exit_code != 0).then(|| "infrastructure admission failed".to_string()),
@@ -2116,29 +2117,58 @@ fn cook_batch_aggregate_outcome_matrix_distinguishes_success_partial_and_failure
     for (name, cells, status, exit_code) in [
         (
             "all-success",
-            vec![cell("one", 0), cell("two", 0)],
+            vec![
+                cell("one", "review_ready", 0),
+                cell("two", "green_no_finalize", 0),
+            ],
             "succeeded",
             0,
         ),
         (
             "mixed",
-            vec![cell("one", 0), cell("two", 1)],
+            vec![cell("one", "review_ready", 0), cell("two", "failed", 1)],
             "partial_failure",
             1,
         ),
         (
             "all-failed",
-            vec![cell("one", 1), cell("two", 1)],
+            vec![cell("one", "failed", 1), cell("two", "failed", 1)],
             "failed",
             1,
         ),
-        ("infrastructure-error", vec![cell("one", 1)], "failed", 1),
+        (
+            "all-cancelled",
+            vec![cell("one", "cancelled", 1), cell("two", "cancelled", 1)],
+            "cancelled",
+            1,
+        ),
+        (
+            "cancelled-and-success",
+            vec![cell("one", "cancelled", 1), cell("two", "review_ready", 0)],
+            "partial_failure",
+            1,
+        ),
+        (
+            "timed-out",
+            vec![cell("one", "timed_out", 1)],
+            "timed_out",
+            1,
+        ),
+        (
+            "infrastructure-error",
+            vec![cell("one", "failed", 1)],
+            "failed",
+            1,
+        ),
     ] {
         let result = cook_batch_result(name.to_string(), cells);
         assert_eq!(result.value.status, status, "{name}");
         assert_eq!(result.exit_code, exit_code, "{name}");
         assert_eq!(
-            result.value.succeeded + result.value.failed,
+            result.value.succeeded
+                + result.value.failed
+                + result.value.cancelled
+                + result.value.timed_out,
             result.value.total
         );
     }

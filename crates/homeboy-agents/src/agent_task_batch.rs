@@ -200,12 +200,20 @@ pub fn status(batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
     let mut unavailable_child_runs = Vec::new();
     let mut projection_pending_child_runs = Vec::new();
     let mut resumable_child_runs = Vec::new();
+    let mut timed_out_child_runs = HashSet::new();
     for child in &mut batch.child_runs {
         match agent_task_lifecycle::status(&child.run_id) {
             Ok(record) => {
                 if child.state != record.state {
                     child.state = record.state;
                     changed = true;
+                }
+                if record
+                    .totals
+                    .as_ref()
+                    .is_some_and(|totals| totals.timed_out > 0)
+                {
+                    timed_out_child_runs.insert(child.run_id.clone());
                 }
                 if let Some(pending) = projection_pending_child(child, &record)? {
                     projection_pending_child_runs.push(pending);
@@ -227,6 +235,13 @@ pub fn status(batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
         }
     }
     let mut totals = totals_for_children(&batch.child_runs);
+    for child in &batch.child_runs {
+        if timed_out_child_runs.contains(&child.run_id) && child.state == AgentTaskRunState::Failed
+        {
+            totals.failed = totals.failed.saturating_sub(1);
+            totals.timed_out += 1;
+        }
+    }
     totals.unavailable = unavailable_child_runs.len();
     let state = aggregate_state(&totals);
     if batch.state != state {
@@ -242,6 +257,7 @@ pub fn status(batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
     let commands = commands(&batch.batch_id);
     Ok(AgentTaskBatchStatusReport {
         schema: AGENT_TASK_BATCH_STATUS_SCHEMA,
+        status: state.outcome_status().to_string(),
         next_actions: batch_next_actions(
             &unavailable_child_runs,
             &projection_pending_child_runs,
@@ -775,6 +791,15 @@ mod tests {
                 AgentTaskBatchState::Cancelled,
                 1,
             ),
+            (
+                "timed-out",
+                AgentTaskBatchTotals {
+                    timed_out: 1,
+                    ..Default::default()
+                },
+                AgentTaskBatchState::TimedOut,
+                1,
+            ),
         ] {
             let actual = aggregate_state(&totals);
             assert_eq!(actual, state, "{name}");
@@ -797,6 +822,7 @@ mod tests {
         let report = status("batch/failed").expect("durable failed status");
 
         assert_eq!(report.batch.state, AgentTaskBatchState::Failed);
+        assert_eq!(report.status, "failed");
         assert_eq!(report.batch.state.outcome_status(), "failed");
         assert_eq!(report.batch.state.exit_code(), 1);
         assert_eq!(report.totals.failed, 2);
