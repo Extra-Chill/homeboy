@@ -695,15 +695,46 @@ fn release_step_unexpected_dirty_files(
     context: &ReleaseExecutionContext,
     files: Vec<String>,
 ) -> Result<Vec<String>> {
-    if step.kind != "release.prepare" {
-        return Ok(files);
+    match step.kind.as_str() {
+        "release.prepare" => {
+            let allowed = release_prepare_allowed_dirty_files(context.component)?;
+            Ok(files
+                .into_iter()
+                .filter(|file| !allowed.iter().any(|allowed| file == allowed))
+                .collect())
+        }
+        // Hydration regenerates package-manager bookkeeping as a side effect of
+        // running at all. That churn is homeboy's own doing, not operator drift.
+        "preflight.dependencies" => Ok(files
+            .into_iter()
+            .filter(|file| !is_dependency_hydration_metadata(file))
+            .collect()),
+        _ => Ok(files),
     }
+}
 
-    let allowed = release_prepare_allowed_dirty_files(context.component)?;
-    Ok(files
-        .into_iter()
-        .filter(|file| !allowed.iter().any(|allowed| file == allowed))
-        .collect())
+/// Generated package-manager metadata that a dependency install rewrites even
+/// when it resolves no changes.
+///
+/// Composer regenerates `vendor/composer/installed.json` and `installed.php`
+/// during autoload generation on every `composer install`, including a no-op
+/// "Nothing to install" run. WordPress plugins commonly commit `vendor/` so the
+/// plugin works without a build step on the host, which made the release's own
+/// hydration step fail the working-tree gate it was preparing for (#9965).
+///
+/// Deliberately narrow: only the two files composer rewrites unconditionally.
+/// Real dependency changes still surface through `composer.lock` and the
+/// installed package sources, which remain guarded.
+fn is_dependency_hydration_metadata(file: &str) -> bool {
+    const GENERATED_METADATA: &[&str] = &[
+        "vendor/composer/installed.json",
+        "vendor/composer/installed.php",
+    ];
+
+    let normalized = file.trim_start_matches("./").replace('\\', "/");
+    GENERATED_METADATA
+        .iter()
+        .any(|generated| normalized == *generated || normalized.ends_with(&format!("/{generated}")))
 }
 
 fn release_prepare_allowed_dirty_files(
@@ -1432,6 +1463,52 @@ mod tests {
             .hints
             .iter()
             .any(|hint| hint.message.contains("Fix the build/test/package step")));
+    }
+
+    /// Regression for #9965: `composer install` rewrites
+    /// `vendor/composer/installed.{json,php}` on every run, including a no-op
+    /// "Nothing to install" run. WordPress plugins commonly commit `vendor/`, so
+    /// homeboy's own hydration step failed the working-tree gate it was
+    /// preparing for. That churn is expected noise; real source changes are not.
+    #[test]
+    fn dependency_preflight_dirty_guard_allows_generated_composer_metadata() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: temp.path().to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let options = ReleaseOptions::default();
+        let context = ReleaseExecutionContext {
+            component: &component,
+            extensions: &[],
+            component_id: "fixture",
+            options: &options,
+            state: ReleaseState::default(),
+            publish_failed: false,
+        };
+
+        let unexpected = release_step_unexpected_dirty_files(
+            &plan_step("preflight.dependencies"),
+            &context,
+            vec![
+                "vendor/composer/installed.json".to_string(),
+                "vendor/composer/installed.php".to_string(),
+                // Monorepo form: the component sits under a subdirectory.
+                "plugins/h44-forms/vendor/composer/installed.json".to_string(),
+                "plugins/h44-forms/vendor/composer/installed.php".to_string(),
+                // Real dependency and source changes must still be reported.
+                "composer.lock".to_string(),
+                "src/Plugin.php".to_string(),
+            ],
+        )
+        .expect("guard should classify dirty files");
+
+        assert_eq!(
+            unexpected,
+            vec!["composer.lock", "src/Plugin.php"],
+            "only composer's unconditionally regenerated metadata may be excused"
+        );
     }
 
     #[test]
