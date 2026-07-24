@@ -50,7 +50,7 @@ pub fn run_command_output(
                                 .with_output_file_already_written();
                         }
                     };
-                    let progress = |phase: &str, cook_id: &str, run_id: &str| {
+                    let progress = |phase: &str, cook_id: Option<&str>, run_id: Option<&str>| {
                         lease.progress(phase, cook_id, run_id)
                     };
                     let (result, exit_code) = map(

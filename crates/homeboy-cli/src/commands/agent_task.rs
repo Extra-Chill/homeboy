@@ -48,7 +48,7 @@ pub fn run(args: AgentTaskArgs, _global: &GlobalArgs) -> CmdResult<Value> {
 
 pub(crate) fn run_with_cook_progress(
     args: AgentTaskArgs,
-    progress: Option<&dyn Fn(&str, &str, &str) -> homeboy::core::Result<()>>,
+    progress: Option<&dyn Fn(&str, Option<&str>, Option<&str>) -> homeboy::core::Result<()>>,
 ) -> CmdResult<Value> {
     match args.command {
         AgentTaskCommand::Doctor(doctor_args) => doctor::doctor(doctor_args),

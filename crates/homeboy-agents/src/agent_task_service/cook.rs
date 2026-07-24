@@ -1158,6 +1158,21 @@ where
     run_cook_with_finalizer(options, executor, finalize_or_load_cook_pr)
 }
 
+/// Run Cook while reporting the authoritative attempt only after its durable
+/// recipe has been persisted. Callers must treat pre-observer work as
+/// invocation-local because no run recovery identity exists yet.
+pub fn run_cook_with_durable_observer<E>(
+    options: AgentTaskCookServiceOptions,
+    executor: E,
+    observer: &dyn Fn(&str, &str) -> Result<()>,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    let side_effects = DefaultCookSideEffects::new(finalize_or_load_cook_pr);
+    run_cook_with_boundaries_observed(options, executor, side_effects, Some(observer))
+}
+
 pub(crate) fn run_cook_with_finalizer<E, F>(
     options: AgentTaskCookServiceOptions,
     executor: E,
@@ -1174,7 +1189,20 @@ where
 fn run_cook_with_boundaries<E, S>(
     options: AgentTaskCookServiceOptions,
     executor: E,
+    side_effects: S,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    S: CookSideEffectService,
+{
+    run_cook_with_boundaries_observed(options, executor, side_effects, None)
+}
+
+fn run_cook_with_boundaries_observed<E, S>(
+    options: AgentTaskCookServiceOptions,
+    executor: E,
     mut side_effects: S,
+    durable_observer: Option<&dyn Fn(&str, &str) -> Result<()>>,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
 where
     E: AgentTaskExecutorAdapter + Clone,
@@ -1252,6 +1280,9 @@ where
     // same candidate/model pair, including after a detached continuation.
     if let Some(model) = adopted_model {
         options.ai_model = Some(model);
+    }
+    if let Some(observer) = durable_observer {
+        observer(&options.cook_id, &options.initial_run_id)?;
     }
     materialize_initial_cook_attempt(&options)?;
     // Transport readiness can serialize on a reconnect/runtime-promotion

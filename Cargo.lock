@@ -784,6 +784,7 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "fs4",
  "glob",
  "homeboy-agents",
  "homeboy-cli-contract",

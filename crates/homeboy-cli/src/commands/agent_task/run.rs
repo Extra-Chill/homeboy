@@ -198,7 +198,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress<E>(
     attempt_dispatcher: Option<
         Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>,
     >,
-    progress: Option<&dyn Fn(&str, &str, &str) -> homeboy::core::Result<()>>,
+    progress: Option<&dyn Fn(&str, Option<&str>, Option<&str>) -> homeboy::core::Result<()>>,
 ) -> CmdResult<Value>
 where
     E: AgentTaskExecutorAdapter + Clone,
@@ -235,7 +235,7 @@ where
     dispatch_args.run_id = Some(run_id.clone());
     let cook_id = requested_cook_id.clone().unwrap_or_else(|| run_id.clone());
     if let Some(progress) = progress {
-        progress("preflight", &cook_id, &run_id)?;
+        progress("preparing", None, None)?;
     }
     let provision = provision_cook_destination(&args)?;
     let (run_id, mut initial_plan) = if let Some(attempt_plan) = args.attempt_plan.as_deref() {
@@ -283,10 +283,12 @@ where
         .commit_message
         .clone()
         .unwrap_or_else(|| default_loop_commit_message(&args));
-    if let Some(progress) = progress {
-        progress("dispatching", &cook_id, &run_id)?;
-    }
-    let result = agent_task_service::run_cook(
+    let durable_observer = |cook_id: &str, run_id: &str| {
+        progress
+            .map(|progress| progress("in_flight", Some(cook_id), Some(run_id)))
+            .unwrap_or(Ok(()))
+    };
+    let result = agent_task_service::run_cook_with_durable_observer(
         agent_task_service::AgentTaskCookServiceOptions {
             cook_id,
             initial_run_id: run_id,
@@ -327,6 +329,7 @@ where
                 )?,
         },
         executor,
+        &durable_observer,
     )?;
     Ok((
         super::status::compact_cook_report(
