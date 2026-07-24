@@ -6,6 +6,7 @@ use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::json;
 use serde_json::Value;
+use sha2::Digest;
 
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, ErrorCode, Result};
@@ -250,6 +251,82 @@ impl RunnerFileTransfer {
         Ok(())
     }
 
+    /// Publish a private file only after its content hash and owner-only mode
+    /// are established. The temporary file is never visible at the final path.
+    pub(crate) fn upload_private_file_atomic(
+        &self,
+        local_path: &str,
+        remote_path: &str,
+        expected_sha256: &str,
+    ) -> Result<()> {
+        let content = fs::read(local_path).map_err(|err| {
+            Error::internal_io(err.to_string(), Some(format!("read {local_path}")))
+        })?;
+        let actual_sha256 = format!("{:x}", sha2::Sha256::digest(&content));
+        if actual_sha256 != expected_sha256 {
+            return Err(Error::validation_invalid_argument(
+                "at_file",
+                "private runner file content does not match its declared SHA-256",
+                Some(remote_path.to_string()),
+                None,
+            ));
+        }
+        let temp_path = format!("{remote_path}.{}.tmp", uuid::Uuid::new_v4());
+        let result = match &self.channel {
+            RunnerFileChannel::DirectSsh(client) => {
+                let upload = client.upload_file_private(local_path, &temp_path);
+                if !upload.success {
+                    Err(file_transfer_operation_error(
+                        &self.runner_id,
+                        "private upload",
+                        remote_path,
+                        upload.stderr,
+                        "direct_ssh",
+                    ))
+                } else {
+                    let publish = client.execute(&format!(
+                        "test \"$(shasum -a 256 {} | awk '{{print $1}}')\" = {} && chmod 600 {} && mv -f {} {}",
+                        shell::quote_arg(&temp_path),
+                        shell::quote_arg(expected_sha256),
+                        shell::quote_arg(&temp_path),
+                        shell::quote_arg(&temp_path),
+                        shell::quote_arg(remote_path),
+                    ));
+                    if publish.success {
+                        Ok(())
+                    } else {
+                        Err(file_transfer_operation_error(
+                            &self.runner_id,
+                            "private publish",
+                            remote_path,
+                            publish.stderr,
+                            "direct_ssh",
+                        ))
+                    }
+                }
+            }
+            RunnerFileChannel::DaemonHttp { .. } | RunnerFileChannel::BrokerHttp { .. } => {
+                self.http_post_json(
+                    "/files/upload",
+                    self.private_file_upload_body(
+                        remote_path,
+                        base64::engine::general_purpose::STANDARD.encode(content),
+                        expected_sha256,
+                    ),
+                    "private upload",
+                    remote_path,
+                )?;
+                Ok(())
+            }
+        };
+        if result.is_err() {
+            if let RunnerFileChannel::DirectSsh(client) = &self.channel {
+                let _ = client.execute(&format!("rm -f {}", shell::quote_arg(&temp_path)));
+            }
+        }
+        result
+    }
+
     pub(crate) fn download_file(&self, remote_path: &str, local_path: &str) -> Result<()> {
         match &self.channel {
             RunnerFileChannel::DirectSsh(client) => {
@@ -354,6 +431,18 @@ impl RunnerFileTransfer {
             "path": path,
             "workspace_root": &self.workspace_root,
             "content_base64": content_base64,
+        })
+    }
+
+    fn private_file_upload_body(&self, path: &str, content_base64: String, sha256: &str) -> Value {
+        json!({
+            "runner_id": &self.runner_id,
+            "path": path,
+            "workspace_root": &self.workspace_root,
+            "content_base64": content_base64,
+            "sha256": sha256,
+            "private": true,
+            "atomic": true,
         })
     }
 }

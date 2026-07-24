@@ -10,6 +10,7 @@ use homeboy_core::api_jobs::{
 use homeboy_core::secret_env_plan::SecretEnvPlan;
 use homeboy_core::server::{RunnerPolicy, RunnerSecretEnvRef};
 use homeboy_core::test_support;
+use sha2::{Digest, Sha256};
 
 use super::super::run::{run_loop, run_reverse_worker};
 use super::support::{
@@ -113,6 +114,135 @@ fn reverse_worker_executes_claimed_job_and_finishes_it() {
             );
             assert!(result["metrics"]["sample_count"].as_u64().is_some());
         }
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn reverse_worker_verifies_private_at_file_then_cleans_it_up() {
+    use std::os::unix::fs::PermissionsExt;
+
+    test_support::with_isolated_home(|_| {
+        crate::create(
+            r#"{"id":"lab","kind":"local","workspace_root":"/tmp"}"#,
+            false,
+        )
+        .expect("create runner");
+        crate::merge(
+            Some("lab"),
+            &serde_json::json!({
+                "policy": RunnerPolicy {
+                    allow_raw_exec: Some(true),
+                    workspace_roots: vec!["/tmp".to_string()],
+                    allowed_commands: vec!["sh".to_string()],
+                    ..Default::default()
+                }
+            })
+            .to_string(),
+            &[],
+        )
+        .expect("set policy");
+        let directory = tempfile::tempdir().expect("private file directory");
+        let content = b"private plan";
+        let digest = format!("{:x}", Sha256::digest(content));
+        let path = directory
+            .path()
+            .join(format!("private-sha256-{digest}-plan.json"));
+        std::fs::write(&path, content).expect("write private plan");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("lock private plan");
+        let store = JobStore::default();
+        store
+            .submit_remote_runner_job(RemoteRunnerJobRequest {
+                runner_id: "lab".to_string(),
+                project_id: None,
+                operation: "runner.exec".to_string(),
+                command: vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "test \"$(cat \"${1#@}\")\" = 'private plan'".to_string(),
+                    "--".to_string(),
+                    format!("@{}", path.display()),
+                ],
+                cwd: Some("/tmp".to_string()),
+                env: Default::default(),
+                secret_env_names: Vec::new(),
+                secret_env_plan: Default::default(),
+                env_materialization: None,
+                capture_patch: false,
+                source_snapshot: None,
+                path_materialization_plan: None,
+                require_paths: Vec::new(),
+                lab_runner_workload: None,
+                lifecycle: None,
+                metadata: None,
+            })
+            .expect("submit private file job");
+        let (broker_url, handle) = spawn_mock_broker_until_finish(store.clone(), 8);
+        write_reverse_controller_session(&broker_url);
+
+        let (_, exit_code) = run_reverse_worker(worker_options(broker_url)).expect("run worker");
+
+        assert_eq!(exit_code, 0);
+        assert!(!path.exists(), "private input is removed after consumption");
+        handle.join().expect("mock broker joins");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn reverse_worker_rejects_tampered_private_at_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    test_support::with_isolated_home(|_| {
+        crate::create(
+            r#"{"id":"lab","kind":"local","workspace_root":"/tmp"}"#,
+            false,
+        )
+        .expect("create runner");
+        let directory = tempfile::tempdir().expect("private file directory");
+        let digest = format!("{:x}", Sha256::digest(b"expected"));
+        let path = directory
+            .path()
+            .join(format!("private-sha256-{digest}-plan.json"));
+        std::fs::write(&path, b"tampered").expect("write tampered plan");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("lock private plan");
+        let store = JobStore::default();
+        store
+            .submit_remote_runner_job(RemoteRunnerJobRequest {
+                runner_id: "lab".to_string(),
+                project_id: None,
+                operation: "runner.exec".to_string(),
+                command: vec!["sh".to_string(), format!("@{}", path.display())],
+                cwd: Some("/tmp".to_string()),
+                env: Default::default(),
+                secret_env_names: Vec::new(),
+                secret_env_plan: Default::default(),
+                env_materialization: None,
+                capture_patch: false,
+                source_snapshot: None,
+                path_materialization_plan: None,
+                require_paths: Vec::new(),
+                lab_runner_workload: None,
+                lifecycle: None,
+                metadata: None,
+            })
+            .expect("submit tampered file job");
+        let (broker_url, handle) = spawn_mock_broker(store.clone(), 3);
+        write_reverse_controller_session(&broker_url);
+
+        let error =
+            run_reverse_worker(worker_options(broker_url)).expect_err("tampered file rejected");
+
+        assert!(
+            error
+                .message
+                .contains("does not match its SHA-256 identity"),
+            "unexpected error: {error:#?}"
+        );
+        assert!(!path.exists(), "tampered private input is removed");
+        handle.join().expect("mock broker joins");
     });
 }
 

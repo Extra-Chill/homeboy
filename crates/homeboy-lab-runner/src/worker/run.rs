@@ -268,6 +268,7 @@ fn run_once_output(
     let mut execution_envelope = claim.request.execution_envelope();
     let _command_assets =
         materialize_command_assets(&claim.job.id.to_string(), &mut execution_envelope)?;
+    let _private_at_files = verify_private_at_files(&execution_envelope)?;
     materialize_snapshot_git_baseline(&execution_envelope)?;
     // Shared finisher so the exec-error and exec-success paths submit their
     // terminal job result through identical broker plumbing (#5091).
@@ -387,6 +388,100 @@ fn run_once_output(
         ),
         exit_code,
     ))
+}
+
+/// Private `@file` paths carry their SHA-256 in the runner-resident filename.
+/// Verify them after a durable claim and before starting the child, then remove
+/// them after execution so retries can resume before claim without retaining
+/// plaintext after consumption.
+struct PrivateAtFileCleanup(Vec<std::path::PathBuf>);
+
+impl Drop for PrivateAtFileCleanup {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn verify_private_at_files(
+    envelope: &homeboy_core::runner_execution_envelope::RunnerExecutionEnvelope,
+) -> Result<PrivateAtFileCleanup> {
+    use sha2::{Digest, Sha256};
+
+    let command = envelope
+        .dispatch
+        .as_ref()
+        .map(|dispatch| &dispatch.command)
+        .into_iter()
+        .flatten();
+    let mut cleanup = Vec::new();
+    for argument in command {
+        let value = argument.strip_prefix('@').or_else(|| {
+            argument
+                .split_once('=')
+                .and_then(|(_, value)| value.strip_prefix('@'))
+        });
+        let Some(path) = value else {
+            continue;
+        };
+        let Some(filename) = std::path::Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+        else {
+            continue;
+        };
+        let Some(expected) = filename
+            .strip_prefix("private-sha256-")
+            .and_then(|value| value.split_once('-').map(|(digest, _)| digest))
+        else {
+            continue;
+        };
+        if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            let _ = std::fs::remove_file(path);
+            return Err(Error::validation_invalid_argument(
+                "at_file",
+                "private runner @file has an invalid SHA-256 identity",
+                Some(path.to_string()),
+                None,
+            ));
+        }
+        let metadata = std::fs::metadata(path).map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some(format!("stat private runner @file {path}")),
+            )
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err(Error::validation_invalid_argument(
+                    "at_file",
+                    "private runner @file is readable by group or other users",
+                    Some(path.to_string()),
+                    None,
+                ));
+            }
+        }
+        let content = std::fs::read(path).map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some(format!("read private runner @file {path}")),
+            )
+        })?;
+        if format!("{:x}", Sha256::digest(&content)) != expected {
+            let _ = std::fs::remove_file(path);
+            return Err(Error::validation_invalid_argument(
+                "at_file",
+                "private runner @file content does not match its SHA-256 identity",
+                Some(path.to_string()),
+                None,
+            ));
+        }
+        cleanup.push(std::path::PathBuf::from(path));
+    }
+    Ok(PrivateAtFileCleanup(cleanup))
 }
 
 /// Snapshot transport intentionally excludes `.git`. Reconstruct the verified,

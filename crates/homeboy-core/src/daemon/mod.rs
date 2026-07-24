@@ -540,6 +540,12 @@ pub(super) struct FileUploadRequest {
     #[serde(default)]
     workspace_root: Option<String>,
     content_base64: String,
+    #[serde(default)]
+    sha256: Option<String>,
+    #[serde(default)]
+    private: bool,
+    #[serde(default)]
+    atomic: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -531,11 +531,14 @@ fn prepare_lab_offload_workspace_stage_inner(
                     )
                 })?;
             }
-            let specs = lab_at_file_specs(
+            let mut specs = lab_at_file_specs(
                 &[format!("@{}", plan_file.display())],
                 Path::new(&synced.local_path),
                 &remote_cwd,
             )?;
+            for file in &mut specs {
+                file.require_private();
+            }
             materialize_lab_at_files_on_runner(runner_id, &specs)?;
             let file = specs
                 .into_iter()
