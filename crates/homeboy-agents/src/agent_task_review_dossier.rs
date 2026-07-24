@@ -1071,6 +1071,52 @@ mod tests {
     }
 
     #[test]
+    fn used_for_no_code_change_claim_is_detected() {
+        assert!(used_for_claims_no_code_change(
+            "I supplied the missing reviewer metadata without changing code, preserving the candidate."
+        ));
+        assert!(used_for_claims_no_code_change(
+            "Reviewed the state; no code was changed."
+        ));
+        // A genuine implementation narrative is not flagged.
+        assert!(!used_for_claims_no_code_change(
+            "Traced the bug, implemented the guard, and verified with the gate."
+        ));
+    }
+
+    #[test]
+    fn finalization_rejects_no_code_claim_when_candidate_changed_files() {
+        // #9897: a review-form-only follow-up claiming no code changed must not
+        // finalize when the candidate lineage actually changed files.
+        let mut d = dossier();
+        d.ai_assistance.used_for =
+            "Supplied the missing reviewer metadata without changing code, preserving the candidate."
+                .into();
+
+        let changed = vec!["src/lib.rs".to_string(), "src/tests.rs".to_string()];
+        let error = validate_used_for_against_changed_files(&d, &changed)
+            .expect_err("no-code claim with changed files must fail");
+        assert!(error.message.contains("changes 2 file(s)"));
+        assert!(error.message.contains("src/lib.rs"));
+    }
+
+    #[test]
+    fn finalization_allows_no_code_claim_when_no_files_changed() {
+        // A genuinely no-op review (no changed files) may honestly say so.
+        let mut d = dossier();
+        d.ai_assistance.used_for = "Reviewed the candidate; no code was changed.".into();
+        assert!(validate_used_for_against_changed_files(&d, &[]).is_ok());
+    }
+
+    #[test]
+    fn finalization_allows_substantive_narrative_with_changed_files() {
+        // The normal case: an implementation narrative + changed files passes.
+        let d = dossier();
+        let changed = vec!["src/lib.rs".to_string()];
+        assert!(validate_used_for_against_changed_files(&d, &changed).is_ok());
+    }
+
+    #[test]
     fn review_form_rejects_empty_required_fields() {
         for mutate in [
             (|f: &mut AiFilledReviewForm| f.summary.clear()) as fn(&mut AiFilledReviewForm),
