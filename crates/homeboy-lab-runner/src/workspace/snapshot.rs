@@ -75,11 +75,16 @@ pub(crate) fn snapshot_identity(
 ) -> Result<String> {
     let head =
         git_output(local_path, &["rev-parse", "HEAD"]).unwrap_or_else(|_| "nogit".to_string());
-    let status = git_output(local_path, &["status", "--porcelain=v1"])
+    let status = snapshot_git_output(local_path, &["status", "--porcelain=v1"], excludes)
         .unwrap_or_else(|_| "nogit".to_string());
-    let diff = git_output(local_path, &["diff", "--binary", "HEAD"]).unwrap_or_default();
-    let staged =
-        git_output(local_path, &["diff", "--cached", "--binary", "HEAD"]).unwrap_or_default();
+    let diff = snapshot_git_output(local_path, &["diff", "--binary", "HEAD"], excludes)
+        .unwrap_or_default();
+    let staged = snapshot_git_output(
+        local_path,
+        &["diff", "--cached", "--binary", "HEAD"],
+        excludes,
+    )
+    .unwrap_or_default();
     let mut hasher = Sha256::new();
     hasher.update(local_path.display().to_string().as_bytes());
     hasher.update(head.as_bytes());
@@ -88,6 +93,58 @@ pub(crate) fn snapshot_identity(
     hasher.update(staged.as_bytes());
     hash_snapshot_tree(local_path, local_path, excludes, includes, &mut hasher)?;
     Ok(format!("snapshot:{}", hex_prefix(&hasher.finalize(), 16)))
+}
+
+/// Return Git exclusion pathspecs with the same root and glob semantics as the
+/// snapshot traversal. A malformed Git pathspec is deliberately left to Git to
+/// reject so callers that validate provenance fail closed.
+pub(crate) fn snapshot_git_exclude_pathspecs(excludes: &[String]) -> Vec<String> {
+    let mut pathspecs = Vec::new();
+    for exclude in excludes {
+        let root_anchored = exclude.starts_with("./");
+        let pattern = exclude
+            .trim_start_matches("./")
+            .trim_end_matches('/')
+            .trim();
+        if pattern.is_empty() {
+            continue;
+        }
+        let pattern = if root_anchored || pattern.contains('/') {
+            pattern.to_string()
+        } else {
+            format!("**/{pattern}")
+        };
+        let pathspec = format!(":(exclude,top,glob){pattern}");
+        if !pathspecs.contains(&pathspec) {
+            pathspecs.push(pathspec);
+        }
+        // Snapshot traversal skips an excluded directory before visiting its
+        // children. Add its descendants explicitly because Git status reports
+        // files rather than the excluded directory entry itself.
+        if !pattern.contains('*') {
+            let descendants = format!(":(exclude,top,glob){pattern}/**");
+            if !pathspecs.contains(&descendants) {
+                pathspecs.push(descendants);
+            }
+        }
+    }
+    pathspecs
+}
+
+pub(crate) fn snapshot_git_output(
+    path: &Path,
+    command: &[&str],
+    excludes: &[String],
+) -> Result<String> {
+    let mut args = command
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect::<Vec<_>>();
+    args.push("--".to_string());
+    args.push(".".to_string());
+    args.extend(snapshot_git_exclude_pathspecs(excludes));
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    git_output(path, &args)
 }
 
 /// Stable v2 digest of the files a snapshot materializes. Unlike
@@ -635,6 +692,62 @@ pub(super) fn is_excluded(
             || glob_match(pattern, rel)
             || (!root_anchored && (pattern == name || glob_match(pattern, name)))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn snapshot_identity_ignores_declared_context_excludes() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
+        std::fs::write(workspace.path().join("AGENTS.md"), "context\n").expect("context file");
+        git(workspace.path(), &["init", "--quiet", "-b", "main"]);
+        git(workspace.path(), &["add", "--all"]);
+        git(
+            workspace.path(),
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=test@homeboy.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "baseline",
+            ],
+        );
+        let excludes = vec!["AGENTS.md".to_string()];
+        let baseline =
+            snapshot_identity(workspace.path(), &excludes, &[]).expect("baseline identity");
+
+        std::fs::write(workspace.path().join("AGENTS.md"), "changed context\n")
+            .expect("change context");
+        assert_eq!(
+            snapshot_identity(workspace.path(), &excludes, &[]).expect("excluded identity"),
+            baseline,
+            "excluded context must not alter the snapshot identity"
+        );
+
+        std::fs::write(workspace.path().join("file.txt"), "changed source\n")
+            .expect("change source");
+        assert_ne!(
+            snapshot_identity(workspace.path(), &excludes, &[]).expect("changed identity"),
+            baseline,
+            "non-excluded source drift must alter the snapshot identity"
+        );
+    }
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "git {args:?} failed");
+    }
 }
 
 pub(crate) fn materialize_snapshot(
