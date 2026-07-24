@@ -199,15 +199,96 @@ pub(super) fn remap_local_path(text: &str, mappings: &[&LabPathRemap]) -> Option
         if mapping.local.is_empty() {
             continue;
         }
-        if text == mapping.local {
+        if paths_match(text, &mapping.local) {
             return Some(mapping.remote.clone());
         }
-        let prefix = format!("{}/", mapping.local.trim_end_matches('/'));
-        if let Some(rest) = text.strip_prefix(&prefix) {
+        if let Some(rest) = path_suffix(text, &mapping.local) {
             return Some(format!("{}/{}", mapping.remote.trim_end_matches('/'), rest));
         }
     }
     None
+}
+
+/// Compare controller paths without assuming the controller uses the runner's
+/// separator. Lab commonly materializes a Windows controller workspace on a
+/// Linux runner, so a `C:\\work\\repo` plan path must match its recorded mapping.
+fn paths_match(path: &str, prefix: &str) -> bool {
+    let path = normalize_path_separators(path);
+    let prefix = normalize_path_separators(prefix);
+    if is_windows_drive_path(&path) || is_windows_drive_path(&prefix) {
+        path.eq_ignore_ascii_case(&prefix)
+    } else {
+        path == prefix
+    }
+}
+
+fn path_suffix<'a>(path: &'a str, prefix: &str) -> Option<String> {
+    let path = normalize_path_separators(path);
+    let prefix = normalize_path_separators(prefix)
+        .trim_end_matches('/')
+        .to_string();
+    let prefix_with_separator = format!("{prefix}/");
+    let rest = if is_windows_drive_path(&path) || is_windows_drive_path(&prefix) {
+        path.get(..prefix_with_separator.len())
+            .filter(|candidate| candidate.eq_ignore_ascii_case(&prefix_with_separator))
+            .and_then(|_| path.get(prefix_with_separator.len()..))
+    } else {
+        path.strip_prefix(&prefix_with_separator)
+    }?;
+    normalize_relative_suffix(rest)
+}
+
+/// Whether a path starts beneath a mapped controller root but uses `..` to
+/// escape it. The caller must reject this rather than treating it as an
+/// unmapped path, since accepting it would make the remote join unsafe.
+pub(super) fn path_escapes_mapping(path: &str, mapping: &LabPathRemap) -> bool {
+    let path = normalize_path_separators(path);
+    let prefix = normalize_path_separators(&mapping.local)
+        .trim_end_matches('/')
+        .to_string();
+    let prefix_with_separator = format!("{prefix}/");
+    let rest = if is_windows_drive_path(&path) || is_windows_drive_path(&prefix) {
+        path.get(..prefix_with_separator.len())
+            .filter(|candidate| candidate.eq_ignore_ascii_case(&prefix_with_separator))
+            .and_then(|_| path.get(prefix_with_separator.len()..))
+    } else {
+        path.strip_prefix(&prefix_with_separator)
+    };
+    rest.is_some_and(|rest| normalize_relative_suffix(rest).is_none())
+}
+
+/// Normalize a relative suffix while retaining it below the mapped workspace.
+/// Returning `None` means a `..` would cross the mapping boundary.
+fn normalize_relative_suffix(suffix: &str) -> Option<String> {
+    let mut segments = Vec::new();
+    for segment in suffix.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop()?;
+            }
+            segment => segments.push(segment),
+        }
+    }
+    Some(segments.join("/"))
+}
+
+fn normalize_path_separators(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
+pub(super) fn is_absolute_controller_path(path: &str) -> bool {
+    let path = normalize_path_separators(path);
+    path.starts_with('/')
+        || path.starts_with("~/")
+        || (path.len() >= 3
+            && path.as_bytes()[0].is_ascii_alphabetic()
+            && path.as_bytes()[1] == b':'
+            && path.as_bytes()[2] == b'/')
+}
+
+fn is_windows_drive_path(path: &str) -> bool {
+    path.len() >= 2 && path.as_bytes()[0].is_ascii_alphabetic() && path.as_bytes()[1] == b':'
 }
 
 fn remap_existing_canonical_path(text: &str, mappings: &[&LabPathRemap]) -> Option<String> {
@@ -230,5 +311,5 @@ fn remap_existing_canonical_path(text: &str, mappings: &[&LabPathRemap]) -> Opti
 }
 
 fn is_controller_path_like(value: &str) -> bool {
-    value.starts_with('/') || value.starts_with("~/")
+    is_absolute_controller_path(value)
 }

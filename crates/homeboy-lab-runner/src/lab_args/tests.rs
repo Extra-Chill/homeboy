@@ -1993,6 +1993,188 @@ mod materialize_specs_tests {
     }
 
     #[test]
+    fn materialize_agent_task_specs_maps_windows_follow_up_paths_to_linux_workspace() {
+        let controller_workspace = r"C:\Users\chris\Developer\homeboy@follow-up";
+        let runner_workspace = "/home/chris/lab/homeboy-follow-up";
+        let mappings = vec![LabPathRemap {
+            local: controller_workspace.to_string(),
+            remote: runner_workspace.to_string(),
+        }];
+        let plan = serde_json::json!({
+            "schema": "homeboy/agent-task-plan/v1",
+            "plan_id": "gate-feedback-follow-up",
+            "tasks": [{
+                "task_id": "follow-up",
+                "workspace": { "root": format!(r"{controller_workspace}\candidate") },
+                "executor": { "backend": "fixture", "config": {
+                    "workspace_root": format!(r"{controller_workspace}\candidate"),
+                    "runtime_overlay": format!(r"{controller_workspace}\.homeboy\runtime")
+                }},
+                "metadata": {
+                    "cook_continuation_workspace": { "candidate_source_root": controller_workspace }
+                }
+            }]
+        })
+        .to_string();
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            plan,
+        ];
+        let mut staged = None;
+
+        materialize_agent_task_specs_in_args(&args, &mappings, Path::new("/tmp"), |spec| {
+            staged = Some(spec.spec.to_string());
+            Ok(None::<(String, ())>)
+        })
+        .expect("map follow-up plan");
+        let staged: serde_json::Value =
+            serde_json::from_str(&staged.expect("staged plan")).expect("plan JSON");
+
+        assert_eq!(
+            staged["tasks"][0]["workspace"]["root"],
+            format!("{runner_workspace}/candidate")
+        );
+        assert_eq!(
+            staged["tasks"][0]["executor"]["config"]["workspace_root"],
+            format!("{runner_workspace}/candidate")
+        );
+        assert_eq!(
+            staged["tasks"][0]["executor"]["config"]["runtime_overlay"],
+            format!("{runner_workspace}/.homeboy/runtime")
+        );
+        assert_eq!(
+            staged["tasks"][0]["metadata"]["cook_continuation_workspace"]["candidate_source_root"],
+            runner_workspace
+        );
+    }
+
+    #[test]
+    fn materialize_agent_task_specs_rejects_unmapped_windows_follow_up_path() {
+        let mappings = vec![LabPathRemap {
+            local: r"C:\Users\chris\Developer\homeboy@follow-up".to_string(),
+            remote: "/home/chris/lab/homeboy-follow-up".to_string(),
+        }];
+        let args = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            serde_json::json!({
+                "schema": "homeboy/agent-task-plan/v1",
+                "tasks": [{
+                    "task_id": "follow-up",
+                    "workspace": { "root": r"D:\unmapped\candidate" },
+                    "executor": { "backend": "fixture" }
+                }]
+            })
+            .to_string(),
+        ];
+
+        let error =
+            match materialize_agent_task_specs_in_args(&args, &mappings, Path::new("/tmp"), |_| {
+                Ok(None::<(String, ())>)
+            }) {
+                Ok(_) => panic!("unmapped controller path must fail before Lab dispatch"),
+                Err(error) => error,
+            };
+
+        assert_eq!(error.details["field"], "plan");
+        assert!(error.message.contains("selected runner workspace"));
+    }
+
+    #[test]
+    fn materialize_agent_task_specs_rejects_posix_workspace_traversal() {
+        let mappings = vec![LabPathRemap {
+            local: "/controller/workspace".to_string(),
+            remote: "/runner/workspace".to_string(),
+        }];
+        let args = follow_up_plan_args("/controller/workspace/../../outside", None);
+
+        let error =
+            materialize_agent_task_specs_in_args(&args, &mappings, Path::new("/tmp"), |_| {
+                Ok(None::<(String, ())>)
+            })
+            .err()
+            .expect("POSIX traversal must fail before Lab dispatch");
+
+        assert!(error
+            .message
+            .contains("escapes the selected runner workspace"));
+    }
+
+    #[test]
+    fn materialize_agent_task_specs_rejects_windows_workspace_traversal() {
+        let mappings = vec![LabPathRemap {
+            local: r"C:\controller\workspace".to_string(),
+            remote: "/runner/workspace".to_string(),
+        }];
+        let args = follow_up_plan_args(r"C:\controller\workspace\..\..\outside", None);
+
+        let error =
+            materialize_agent_task_specs_in_args(&args, &mappings, Path::new("/tmp"), |_| {
+                Ok(None::<(String, ())>)
+            })
+            .err()
+            .expect("Windows traversal must fail before Lab dispatch");
+
+        assert!(error
+            .message
+            .contains("escapes the selected runner workspace"));
+    }
+
+    #[test]
+    fn materialize_agent_task_specs_preserves_runner_native_binary_path() {
+        let mappings = vec![LabPathRemap {
+            local: "/controller/workspace".to_string(),
+            remote: "/runner/workspace".to_string(),
+        }];
+        let args = follow_up_plan_args("/controller/workspace/candidate", Some("/usr/bin/tool"));
+        let mut staged = None;
+
+        materialize_agent_task_specs_in_args(&args, &mappings, Path::new("/tmp"), |spec| {
+            staged = Some(spec.spec.to_string());
+            Ok(None::<(String, ())>)
+        })
+        .expect("runner-native binary path is not a controller workspace path");
+        let staged: serde_json::Value =
+            serde_json::from_str(&staged.expect("staged plan")).expect("plan JSON");
+
+        assert_eq!(
+            staged["tasks"][0]["workspace"]["root"],
+            "/runner/workspace/candidate"
+        );
+        assert_eq!(
+            staged["tasks"][0]["executor"]["config"]["binary_path"],
+            "/usr/bin/tool"
+        );
+    }
+
+    fn follow_up_plan_args(workspace_root: &str, binary_path: Option<&str>) -> Vec<String> {
+        let mut config = serde_json::json!({ "workspace_root": workspace_root });
+        if let Some(binary_path) = binary_path {
+            config["binary_path"] = serde_json::json!(binary_path);
+        }
+        vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+            "--plan".to_string(),
+            serde_json::json!({
+                "schema": "homeboy/agent-task-plan/v1",
+                "tasks": [{
+                    "task_id": "follow-up",
+                    "workspace": { "root": workspace_root },
+                    "executor": { "backend": "fixture", "config": config }
+                }]
+            })
+            .to_string(),
+        ]
+    }
+
+    #[test]
     fn materialize_agent_task_specs_rewrites_fanout_child_cwd_to_runner_path() {
         let temp = tempfile::tempdir().expect("tempdir");
         let controller = temp.path().join("homeboy@cook-one");
