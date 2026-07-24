@@ -48,6 +48,7 @@ mod operation_claims;
 mod private_attachment;
 mod records;
 pub mod runner_continuation;
+mod runner_exec;
 
 pub use artifact_materialization::*;
 pub use cancellation::*;
@@ -70,6 +71,7 @@ pub use runner_continuation::{
 pub use runner_continuation::{
     register_runner_continuation_provider, RunnerContinuationProvider, RunnerJobReconciliation,
 };
+pub use runner_exec::*;
 
 pub(crate) use conversion::*;
 pub(crate) use lifecycle_record_ops::*;
