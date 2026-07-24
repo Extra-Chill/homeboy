@@ -45,6 +45,17 @@ pub struct AgentTaskCookRecipeAttempt {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+struct AgentTaskCookRecipeSupersession {
+    schema: String,
+    previous: AgentTaskCookRecipe,
+    replacement: AgentTaskCookRecipe,
+    changed_fields: Vec<String>,
+}
+
+const SUPERSESSION_SCHEMA: &str = "homeboy/agent-task-cook-recipe-supersession/v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct AgentTaskCookContinuation {
     pub schema: String,
     pub key: String,
@@ -105,10 +116,52 @@ pub trait AgentTaskCookContinuationScheduler {
 pub fn persist_initial_recipe(
     options: &AgentTaskCookServiceOptions,
 ) -> Result<AgentTaskCookRecipe> {
-    let recipe = initial_recipe(options)?;
+    recover_pending_supersession(&options.cook_id)?;
+    let mut recipe = initial_recipe(options)?;
     validate_recipe(&recipe)?;
     if let Some(existing) = compatible_existing_recipe(&recipe)? {
         return Ok(existing);
+    }
+    if recipe_exists(&recipe.cook_id)? {
+        let existing = load_recipe(&recipe.cook_id)?;
+        let mismatches = recipe_mismatch_fields(&existing, &recipe);
+        ensure_correction_is_safe(&existing, &recipe, &mismatches)?;
+        let requested_attempt = recipe.attempts.pop().expect("validated recipe has attempt");
+        let next_attempt = existing
+            .attempts
+            .iter()
+            .map(|attempt| attempt.attempt)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        recipe.attempts = existing.attempts.clone();
+        recipe.attempts.push(AgentTaskCookRecipeAttempt {
+            attempt: next_attempt,
+            ..requested_attempt
+        });
+        recipe.sensitive_mappings = recipe
+            .attempts
+            .iter()
+            .map(|attempt| sensitive_mappings(&attempt.plan))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        recipe.sensitive_mappings.sort();
+        recipe.sensitive_mappings.dedup();
+        validate_recipe(&recipe)?;
+        let supersession = AgentTaskCookRecipeSupersession {
+            schema: SUPERSESSION_SCHEMA.to_string(),
+            previous: existing,
+            replacement: recipe.clone(),
+            changed_fields: mismatches
+                .iter()
+                .map(|field| (*field).to_string())
+                .collect(),
+        };
+        write_supersession(&supersession)?;
+        complete_supersession(&supersession)?;
+        return Ok(recipe);
     }
     write_recipe(&recipe)?;
     Ok(recipe)
@@ -126,9 +179,10 @@ pub fn validate_initial_recipe_compatibility(options: &AgentTaskCookServiceOptio
     // The attempt plan is compiled only after the target worktree exists. Use
     // the durable plan here so preflight compares every input already known
     // without weakening persistence-time plan validation.
-    recipe.attempts = existing.attempts;
+    recipe.attempts = existing.attempts.clone();
     recipe.retry_budget["execution_budget"] = existing.retry_budget["execution_budget"].clone();
-    compatible_existing_recipe(&recipe)?;
+    let mismatches = recipe_mismatch_fields(&existing, &recipe);
+    ensure_correction_is_safe(&existing, &recipe, &mismatches)?;
     Ok(())
 }
 
@@ -201,7 +255,8 @@ fn compatible_existing_recipe(recipe: &AgentTaskCookRecipe) -> Result<Option<Age
         let inputs_match = recorded_attempt
             .map(|attempt| {
                 attempt.plan == requested_attempt.plan
-                    && (attempt.attempt > 1 || recipes_match(&existing, &expected))
+                    && ((existing.attempts.len() > 1 && attempt.attempt == 1)
+                        || recipes_match(&existing, &expected))
             })
             .unwrap_or_else(|| {
                 recipes_match(&existing, &expected)
@@ -214,25 +269,212 @@ fn compatible_existing_recipe(recipe: &AgentTaskCookRecipe) -> Result<Option<Age
                     )
             });
         if !inputs_match {
-            let mismatches = recipe_mismatch_fields(&existing, &expected);
-            let problem = if mismatches.is_empty() {
-                "durable cook recipe already exists with different execution inputs".to_string()
-            } else {
-                format!(
-                    "durable cook recipe already exists with different execution inputs: {}",
-                    mismatches.join(", ")
-                )
-            };
-            return Err(Error::validation_invalid_argument(
-                "cook_recipe",
-                problem,
-                Some(recipe.cook_id.clone()),
-                None,
-            ));
+            return Ok(None);
         }
         return Ok(Some(existing));
     }
     Ok(None)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RecipeFreezeBoundary {
+    Provider,
+    Candidate,
+    Promotion,
+    Gate,
+    Finalization,
+}
+
+impl RecipeFreezeBoundary {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Provider => "provider",
+            Self::Candidate => "candidate",
+            Self::Promotion => "promotion",
+            Self::Gate => "gate",
+            Self::Finalization => "finalization",
+        }
+    }
+}
+
+fn mismatch_freeze_boundary(field: &str) -> RecipeFreezeBoundary {
+    match field {
+        "promotion_transport" | "retry_budget" | "runtime_generation" | "harvest_context" => {
+            RecipeFreezeBoundary::Provider
+        }
+        "source_refs" | "sensitive_mappings" | "attempts" => RecipeFreezeBoundary::Candidate,
+        "finalization.to_worktree"
+        | "finalization.source_worktree_path"
+        | "finalization.task_base_sha" => RecipeFreezeBoundary::Promotion,
+        "gate_policy" => RecipeFreezeBoundary::Gate,
+        "finalization" => RecipeFreezeBoundary::Finalization,
+        _ => RecipeFreezeBoundary::Provider,
+    }
+}
+
+fn reached_freeze_boundary(recipe: &AgentTaskCookRecipe) -> Result<Option<RecipeFreezeBoundary>> {
+    let mut reached = None;
+    for attempt in &recipe.attempts {
+        let Ok(record) = crate::agent_task_lifecycle::status(&attempt.run_id) else {
+            continue;
+        };
+        if record.metadata["provider_executions_consumed"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0
+            || record.metadata["provider_executions"]
+                .as_array()
+                .is_some_and(|executions| !executions.is_empty())
+        {
+            // Provider output authenticates the source candidate. This locks
+            // dispatch and candidate inputs, while destination inputs remain
+            // correctable until an applied promotion exists.
+            reached = Some(RecipeFreezeBoundary::Candidate);
+        }
+        let promotion = serde_json::from_value::<
+            crate::agent_task_promotion::AgentTaskPromotionReport,
+        >(record.metadata["latest_promotion"].clone())
+        .ok();
+        if promotion
+            .as_ref()
+            .is_some_and(|promotion| promotion.status.patch_promoted())
+        {
+            reached = Some(RecipeFreezeBoundary::Promotion);
+            if promotion.is_some_and(|promotion| {
+                !promotion.gate_results.is_empty() || !promotion.deterministic_gates.is_empty()
+            }) {
+                reached = Some(RecipeFreezeBoundary::Gate);
+            }
+            if !record.metadata["cook_finalization"].is_null() {
+                reached = Some(RecipeFreezeBoundary::Finalization);
+            }
+        }
+    }
+    Ok(reached)
+}
+
+fn ensure_correction_is_safe(
+    existing: &AgentTaskCookRecipe,
+    requested: &AgentTaskCookRecipe,
+    mismatches: &[&str],
+) -> Result<()> {
+    let reached = reached_freeze_boundary(existing)?;
+    let frozen = mismatches
+        .iter()
+        .copied()
+        .filter(|field| reached.is_some_and(|boundary| mismatch_freeze_boundary(field) <= boundary))
+        .collect::<Vec<_>>();
+    if frozen.is_empty() {
+        return Ok(());
+    }
+    let boundary = reached.expect("frozen fields require a reached boundary");
+    Err(Error::validation_invalid_argument(
+        "cook_recipe",
+        format!(
+            "durable cook recipe correction is unsafe after {} execution: {}. Resume the existing recipe; corrected inputs require a new Cook ID.",
+            boundary.name(),
+            frozen.join(", ")
+        ),
+        Some(requested.cook_id.clone()),
+        Some(vec![format!(
+            "Resume `{}` with its immutable {}-boundary inputs.",
+            existing.cook_id,
+            boundary.name()
+        )]),
+    ))
+}
+
+fn recover_pending_supersession(cook_id: &str) -> Result<()> {
+    let path = supersession_path(cook_id)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let supersession: AgentTaskCookRecipeSupersession =
+        serde_json::from_slice(&fs::read(&path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        })?)
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "cook_recipe",
+                format!("malformed durable cook recipe supersession: {error}"),
+                Some(cook_id.to_string()),
+                None,
+            )
+        })?;
+    if supersession.schema != SUPERSESSION_SCHEMA || supersession.previous.cook_id != cook_id {
+        return Err(Error::validation_invalid_argument(
+            "cook_recipe",
+            "durable cook recipe supersession does not match its Cook",
+            Some(cook_id.to_string()),
+            None,
+        ));
+    }
+    complete_supersession(&supersession)
+}
+
+fn write_supersession(supersession: &AgentTaskCookRecipeSupersession) -> Result<()> {
+    let path = supersession_path(&supersession.previous.cook_id)?;
+    homeboy_core::engine::local_files::write_json_file_owner_only(&path, supersession)
+}
+
+fn complete_supersession(supersession: &AgentTaskCookRecipeSupersession) -> Result<()> {
+    // The intent is durable before either result. Replaying always replaces the
+    // active recipe first, then records immutable history, so either crash point
+    // converges on the same state without blocking the corrected retry.
+    write_recipe(&supersession.replacement)?;
+    archive_recipe_revision(supersession)?;
+    let path = supersession_path(&supersession.previous.cook_id)?;
+    fs::remove_file(&path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
+}
+
+fn archive_recipe_revision(supersession: &AgentTaskCookRecipeSupersession) -> Result<()> {
+    let root = recipe_path(&supersession.previous.cook_id)?
+        .parent()
+        .expect("recipe path has parent")
+        .join("recipe-history");
+    fs::create_dir_all(&root)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?;
+    let revision = format!("{:04}", supersession.previous.attempts.len());
+    let recipe_path = root.join(format!("{revision}.recipe.json"));
+    if recipe_path.exists() {
+        let archived: AgentTaskCookRecipe =
+            serde_json::from_slice(&fs::read(&recipe_path).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(recipe_path.display().to_string()))
+            })?)
+            .map_err(|error| {
+                Error::validation_invalid_argument(
+                    "cook_recipe",
+                    format!("malformed archived cook recipe: {error}"),
+                    Some(supersession.previous.cook_id.clone()),
+                    None,
+                )
+            })?;
+        if archived != supersession.previous {
+            return Err(Error::validation_invalid_argument(
+                "cook_recipe",
+                "durable recipe revision conflicts with a different immutable history entry",
+                Some(supersession.previous.cook_id.clone()),
+                None,
+            ));
+        }
+    } else {
+        homeboy_core::engine::local_files::write_json_file_owner_only(
+            &recipe_path,
+            &supersession.previous,
+        )?;
+    }
+    homeboy_core::engine::local_files::write_json_file_owner_only(
+        &root.join(format!("{revision}.supersession.json")),
+        &serde_json::json!({
+            "schema": SUPERSESSION_SCHEMA,
+            "cook_id": supersession.previous.cook_id,
+            "replaced_attempt_run_id": supersession.previous.attempts.last().map(|attempt| &attempt.run_id),
+            "replacement_attempt_run_id": supersession.replacement.attempts.last().map(|attempt| &attempt.run_id),
+            "changed_fields": supersession.changed_fields,
+        }),
+    )?;
+    Ok(())
 }
 
 /// `homeboy_plan` is a derived execution projection rebuilt by each controller
@@ -263,7 +505,32 @@ fn recipe_mismatch_fields(
         fields.push("retry_budget");
     }
     if left.finalization != right.finalization {
-        fields.push("finalization");
+        for field in ["to_worktree", "source_worktree_path", "task_base_sha"] {
+            if left.finalization.get(field) != right.finalization.get(field) {
+                fields.push(match field {
+                    "to_worktree" => "finalization.to_worktree",
+                    "source_worktree_path" => "finalization.source_worktree_path",
+                    "task_base_sha" => "finalization.task_base_sha",
+                    _ => unreachable!(),
+                });
+            }
+        }
+        if [
+            "no_finalize",
+            "base",
+            "head",
+            "title",
+            "commit_message",
+            "protected_branches",
+            "ai_tool",
+            "ai_model",
+            "ai_used_for",
+        ]
+        .iter()
+        .any(|field| left.finalization.get(field) != right.finalization.get(field))
+        {
+            fields.push("finalization");
+        }
     }
     if left.source_refs != right.source_refs {
         fields.push("source_refs");
@@ -982,6 +1249,9 @@ fn recipe_path(cook_id: &str) -> Result<PathBuf> {
         .join(paths::sanitize_path_segment(cook_id))
         .join("recipe.json"))
 }
+fn supersession_path(cook_id: &str) -> Result<PathBuf> {
+    Ok(recipe_path(cook_id)?.with_file_name("supersession.json"))
+}
 fn queue_root() -> Result<PathBuf> {
     Ok(paths::homeboy_data()?.join("agent-task-cook-continuations"))
 }
@@ -1121,6 +1391,19 @@ mod tests {
             sensitive_mappings: vec!["TEST_TOKEN".to_string()],
             harvest_context: Default::default(),
         }
+    }
+
+    fn promotion_value(status: &str, gate_results: Value) -> Value {
+        serde_json::json!({
+            "schema": "homeboy/agent-task-promotion-report/v1",
+            "status": status,
+            "source": { "kind": "aggregate", "task_id": "task", "run_id": "run-2" },
+            "to_worktree": "corrected-target",
+            "target": { "worktree": "corrected-target" },
+            "patch_artifact": { "id": "patch", "kind": "patch", "path": "/tmp/patch" },
+            "gate_results": gate_results,
+            "operator_notification": { "status": "completed", "message": "fixture" }
+        })
     }
 
     fn persist_recipe_run() -> (AgentTaskCookRecipe, AgentTaskPlan) {
@@ -1445,7 +1728,7 @@ mod tests {
     }
 
     #[test]
-    fn recipe_compatibility_preflight_is_read_only_and_rejects_changed_inputs() {
+    fn recipe_compatibility_preflight_is_read_only_and_allows_pre_provider_corrections() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let options = reconstruct_options(&recipe()).expect("canonical options");
 
@@ -1457,9 +1740,212 @@ mod tests {
 
             let mut changed = options;
             changed.title = "different title".to_string();
-            let error = validate_initial_recipe_compatibility(&changed)
-                .expect_err("changed execution inputs conflict");
-            assert!(error.message.contains("different execution inputs"));
+            validate_initial_recipe_compatibility(&changed)
+                .expect("pre-provider correction is compatible");
+            assert_eq!(
+                load_recipe(&changed.cook_id).unwrap().finalization["title"],
+                "title"
+            );
+        });
+    }
+
+    #[test]
+    fn recipe_correction_transitions_from_pre_provider_supersede_to_frozen_boundaries() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut original = reconstruct_options(&recipe()).expect("canonical options");
+            original.initial_run_id = "run-1".to_string();
+            persist_initial_recipe(&original).expect("persist original recipe");
+            crate::agent_task_lifecycle::submit_plan(&original.initial_plan, Some("run-1"))
+                .expect("materialize pre-provider attempt");
+            crate::agent_task_lifecycle::record_pre_execution_failure(
+                "run-1",
+                &original.initial_plan,
+                "provider_missing",
+                &Error::internal_unexpected("provider executable is unavailable"),
+            )
+            .expect("record pre-provider failure");
+
+            let mut corrected = original.clone();
+            corrected.initial_run_id = "run-2".to_string();
+            corrected.to_worktree = "corrected-target".to_string();
+            corrected.title = "Corrected Cook".to_string();
+            let superseded =
+                persist_initial_recipe(&corrected).expect("supersede pre-provider recipe");
+            assert_eq!(superseded.attempts.len(), 2);
+            assert_eq!(superseded.attempts[0].run_id, "run-1");
+            assert_eq!(superseded.attempts[1].run_id, "run-2");
+            let history = recipe_path("cook")
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("recipe-history");
+            let archived: AgentTaskCookRecipe = serde_json::from_slice(
+                &fs::read(history.join("0001.recipe.json")).expect("immutable recipe history"),
+            )
+            .expect("parse archived recipe");
+            assert_eq!(archived.attempts[0].run_id, "run-1");
+            let diff: Value = serde_json::from_slice(
+                &fs::read(history.join("0001.supersession.json")).expect("supersession diff"),
+            )
+            .expect("parse supersession diff");
+            assert_eq!(diff["replacement_attempt_run_id"], "run-2");
+            assert!(diff["changed_fields"]
+                .as_array()
+                .expect("changed fields")
+                .iter()
+                .any(|field| field == "finalization.to_worktree"));
+
+            crate::agent_task_lifecycle::submit_plan(&corrected.initial_plan, Some("run-2"))
+                .expect("materialize provider attempt");
+            crate::agent_task_lifecycle::rewrite_record_for_test("run-2", |record| {
+                record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+            })
+            .expect("record provider execution");
+            let existing = load_recipe("cook").expect("load corrected recipe");
+            let mut source_corrected = existing.clone();
+            source_corrected.source_refs = vec!["corrected-source".to_string()];
+            let error = ensure_correction_is_safe(
+                &existing,
+                &source_corrected,
+                &recipe_mismatch_fields(&existing, &source_corrected),
+            )
+            .expect_err("authenticated candidate freezes source inputs");
+            assert!(error.message.contains("candidate execution"));
+            assert!(error.message.contains("source_refs"));
+
+            crate::agent_task_lifecycle::rewrite_record_for_test("run-2", |record| {
+                record.metadata["latest_promotion"] =
+                    promotion_value("applied", serde_json::json!([]));
+            })
+            .expect("record applied promotion");
+            let mut destination_corrected = existing.clone();
+            destination_corrected.finalization["to_worktree"] = serde_json::json!("other-target");
+            let error = ensure_correction_is_safe(
+                &existing,
+                &destination_corrected,
+                &recipe_mismatch_fields(&existing, &destination_corrected),
+            )
+            .expect_err("applied promotion freezes destination inputs");
+            assert!(error.message.contains("promotion execution"));
+            assert!(error.message.contains("finalization.to_worktree"));
+
+            crate::agent_task_lifecycle::rewrite_record_for_test("run-2", |record| {
+                record.metadata["latest_promotion"]["gate_results"] = serde_json::json!([]);
+            })
+            .expect("record empty gate projection");
+            let mut gate_corrected = existing.clone();
+            gate_corrected.gate_policy["verify"] = serde_json::json!(["corrected gate"]);
+            ensure_correction_is_safe(
+                &existing,
+                &gate_corrected,
+                &recipe_mismatch_fields(&existing, &gate_corrected),
+            )
+            .expect("empty gate arrays do not freeze gate policy");
+            crate::agent_task_lifecycle::rewrite_record_for_test("run-2", |record| {
+                record.metadata["latest_promotion"]["deterministic_gates"] = serde_json::json!([
+                    { "id": "gate", "status": "succeeded", "command": [], "exit_code": 0 }
+                ]);
+            })
+            .expect("record gate execution");
+            let error = ensure_correction_is_safe(
+                &existing,
+                &gate_corrected,
+                &recipe_mismatch_fields(&existing, &gate_corrected),
+            )
+            .expect_err("executed gates freeze gate policy");
+            assert!(error.message.contains("gate execution"));
+            assert!(error.message.contains("gate_policy"));
+
+            crate::agent_task_lifecycle::rewrite_record_for_test("run-2", |record| {
+                record.metadata["cook_finalization"] =
+                    serde_json::json!({ "status": "review_ready" });
+            })
+            .expect("record finalization");
+            let mut finalization_corrected = existing;
+            finalization_corrected.finalization["title"] = serde_json::json!("Different title");
+            let error = ensure_correction_is_safe(
+                &load_recipe("cook").expect("load finalized recipe"),
+                &finalization_corrected,
+                &recipe_mismatch_fields(
+                    &load_recipe("cook").expect("load finalized recipe"),
+                    &finalization_corrected,
+                ),
+            )
+            .expect_err("finalization freezes finalization policy");
+            assert!(error.message.contains("finalization execution"));
+            assert!(error.message.contains("finalization"));
+        });
+    }
+
+    #[test]
+    fn supersession_intent_recovers_before_and_after_active_recipe_replacement() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let previous = recipe();
+            let mut replacement = previous.clone();
+            replacement.finalization["title"] = serde_json::json!("corrected");
+            replacement.attempts.push(AgentTaskCookRecipeAttempt {
+                attempt: 2,
+                run_id: "run-2".to_string(),
+                plan: previous.attempts[0].plan.clone(),
+            });
+            let supersession = AgentTaskCookRecipeSupersession {
+                schema: SUPERSESSION_SCHEMA.to_string(),
+                previous: previous.clone(),
+                replacement: replacement.clone(),
+                changed_fields: vec!["finalization".to_string()],
+            };
+
+            write_recipe(&previous).expect("persist previous recipe");
+            write_supersession(&supersession).expect("persist intent before active replacement");
+            recover_pending_supersession("cook").expect("recover interrupted replacement");
+            assert_eq!(load_recipe("cook").unwrap(), replacement);
+            assert!(!supersession_path("cook").unwrap().exists());
+
+            write_recipe(&previous).expect("reset active recipe");
+            write_supersession(&supersession).expect("persist retry intent");
+            write_recipe(&replacement).expect("simulate interruption after active replacement");
+            recover_pending_supersession("cook").expect("idempotently finish archived history");
+            assert_eq!(load_recipe("cook").unwrap(), replacement);
+            assert!(!supersession_path("cook").unwrap().exists());
+            assert_eq!(
+                serde_json::from_slice::<AgentTaskCookRecipe>(
+                    &fs::read(
+                        recipe_path("cook")
+                            .unwrap()
+                            .parent()
+                            .unwrap()
+                            .join("recipe-history/0001.recipe.json"),
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+                previous
+            );
+        });
+    }
+
+    #[test]
+    fn non_applied_promotion_reports_do_not_freeze_destination_inputs() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let recipe = recipe();
+            write_recipe(&recipe).expect("persist recipe");
+            crate::agent_task_lifecycle::submit_plan(&recipe.attempts[0].plan, Some("run"))
+                .expect("materialize attempt");
+            let mut corrected = recipe.clone();
+            corrected.finalization["to_worktree"] = serde_json::json!("other-target");
+            for status in ["dry_run", "no_changes", "no_changes_gate_failed"] {
+                crate::agent_task_lifecycle::rewrite_record_for_test("run", |record| {
+                    record.metadata["latest_promotion"] =
+                        promotion_value(status, serde_json::json!([]));
+                })
+                .expect("record non-applied promotion");
+                ensure_correction_is_safe(
+                    &recipe,
+                    &corrected,
+                    &recipe_mismatch_fields(&recipe, &corrected),
+                )
+                .expect("non-applied promotion leaves destination correctable");
+            }
         });
     }
 
