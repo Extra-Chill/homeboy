@@ -163,6 +163,59 @@ fn cook_service_retry_uses_the_same_passed_context_after_ambient_mutation() {
 }
 
 #[test]
+fn fresh_cook_review_form_has_bounded_budget_independent_of_code_execution() {
+    let mut follow_up_request = batch_cook_options(
+        "fresh-review-budget",
+        Arc::new(AcceptedDetachedAttemptDispatcher),
+    )
+    .initial_plan
+    .tasks
+    .remove(0);
+    follow_up_request.inputs["cook_loop"]["review_form_required"] = serde_json::json!(true);
+    let mut source_request = follow_up_request.clone();
+    source_request.inputs = Value::Null;
+    let scope = follow_up_budget_scope(&source_request, &follow_up_request);
+    assert_eq!(scope, CookFollowUpBudgetScope::FreshCookReview);
+
+    let code_budget = crate::agent_task_scheduler::AgentTaskExecutionBudget::new(1, 0, 0);
+    let consumed_code_budget = ExecutionBudgetUsage {
+        executions: 1,
+        ..Default::default()
+    };
+    assert!(budget_remaining(&code_budget, consumed_code_budget).is_none());
+
+    let (review_budget, review_usage) =
+        scoped_follow_up_budget(scope, &code_budget, consumed_code_budget);
+    assert_eq!(
+        review_budget,
+        crate::agent_task_scheduler::AgentTaskExecutionBudget::new(2, 1, 0)
+    );
+    assert_eq!(review_usage.executions, 0);
+    assert_eq!(
+        budget_remaining(&review_budget, review_usage),
+        Some(crate::agent_task_scheduler::AgentTaskExecutionBudget::new(
+            2, 1, 0
+        ))
+    );
+
+    source_request.inputs["cook_loop"]["execution_budget_authority"] = serde_json::json!({
+        "kind": "fresh_cook_review",
+        "max_provider_executions": 2,
+    });
+    assert_eq!(
+        follow_up_budget_scope(&source_request, &follow_up_request),
+        CookFollowUpBudgetScope::Cook,
+        "a review-only retry cannot mint another review allowance"
+    );
+
+    follow_up_request.inputs["cook_loop"]["review_form_required"] = serde_json::json!(false);
+    assert_eq!(
+        follow_up_budget_scope(&source_request, &follow_up_request),
+        CookFollowUpBudgetScope::Cook
+    );
+}
+
+#[test]
 fn moving_base_recovery_report_retains_typed_evidence_and_exact_continuation() {
     let recovery = MovingBaseCookRecovery {
         schema: "homeboy/agent-task-cook-moving-base-recovery/v1".to_string(),

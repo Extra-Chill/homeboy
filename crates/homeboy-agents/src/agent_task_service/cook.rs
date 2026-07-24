@@ -841,7 +841,39 @@ pub(crate) enum CookFollowUpDispatch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CookFollowUpBudgetScope {
     Cook,
+    FreshCookReview,
     CandidateAdoptionReview,
+}
+
+fn follow_up_budget_scope(
+    source_request: &crate::agent_task::AgentTaskRequest,
+    follow_up_request: &crate::agent_task::AgentTaskRequest,
+) -> CookFollowUpBudgetScope {
+    if follow_up_request.inputs["cook_loop"]["review_form_required"] == true
+        && source_request.inputs["cook_loop"]["execution_budget_authority"]["kind"]
+            != "fresh_cook_review"
+    {
+        CookFollowUpBudgetScope::FreshCookReview
+    } else {
+        CookFollowUpBudgetScope::Cook
+    }
+}
+
+fn scoped_follow_up_budget(
+    scope: CookFollowUpBudgetScope,
+    cook_budget: &AgentTaskExecutionBudget,
+    cook_usage: ExecutionBudgetUsage,
+) -> (AgentTaskExecutionBudget, ExecutionBudgetUsage) {
+    match scope {
+        CookFollowUpBudgetScope::Cook => (cook_budget.clone(), cook_usage),
+        CookFollowUpBudgetScope::FreshCookReview
+        | CookFollowUpBudgetScope::CandidateAdoptionReview => (
+            // One review execution plus one bounded replay when provider
+            // discovery fails before the review provider starts.
+            AgentTaskExecutionBudget::new(2, 1, 0),
+            ExecutionBudgetUsage::default(),
+        ),
+    }
 }
 
 /// Append and dispatch one remediation attempt from an authenticated promoted
@@ -883,16 +915,8 @@ where
                 && retryable_provider_discovery_failure(&recipe_attempt.run_id)
         })
         .cloned();
-    // The review plan itself permits one execution. The owning dispatch budget
-    // also permits one replay when executor startup cannot discover a provider.
-    let candidate_adoption_review_budget = AgentTaskExecutionBudget::new(2, 1, 0);
-    let (budget_limit, mut durable_budget_used) = match budget_scope {
-        CookFollowUpBudgetScope::Cook => (budget_limit, budget_used),
-        CookFollowUpBudgetScope::CandidateAdoptionReview => (
-            &candidate_adoption_review_budget,
-            ExecutionBudgetUsage::default(),
-        ),
-    };
+    let (budget_limit, mut durable_budget_used) =
+        scoped_follow_up_budget(budget_scope, budget_limit, budget_used);
     for recipe_attempt in related_attempts.clone() {
         if let Ok(aggregate) = agent_task_lifecycle::read_aggregate(&recipe_attempt.run_id) {
             durable_budget_used.add(execution_budget_usage(&aggregate));
@@ -909,7 +933,7 @@ where
                     .unwrap_or(u32::MAX),
             );
     }
-    let Some(remaining_budget) = budget_remaining(budget_limit, durable_budget_used) else {
+    let Some(remaining_budget) = budget_remaining(&budget_limit, durable_budget_used) else {
         return Ok(CookFollowUpDispatch::BudgetExhausted {
             reason: "max_provider_executions".to_string(),
         });
@@ -957,9 +981,14 @@ where
         "source_task_id": promotion.source.task_id,
         "source_patch_artifact_sha256": promotion.patch_artifact.sha256,
     });
-    if budget_scope == CookFollowUpBudgetScope::CandidateAdoptionReview {
+    if budget_scope != CookFollowUpBudgetScope::Cook {
+        let kind = match budget_scope {
+            CookFollowUpBudgetScope::FreshCookReview => "fresh_cook_review",
+            CookFollowUpBudgetScope::CandidateAdoptionReview => "candidate_adoption_review",
+            CookFollowUpBudgetScope::Cook => unreachable!(),
+        };
         follow_up_request.inputs["cook_loop"]["execution_budget_authority"] = serde_json::json!({
-            "kind": "candidate_adoption_review",
+            "kind": kind,
             "max_provider_executions": 2,
             "max_same_provider_retries": 1,
             "max_provider_rotations": 0,
@@ -1622,7 +1651,7 @@ where
 
         let review_form = review_form_from_aggregate(&aggregate)?;
         let feedback = evaluate_cook_loop(AgentTaskCookLoopOptions {
-            source_request,
+            source_request: source_request.clone(),
             promotion_report: promotion.clone(),
             attempt,
             max_attempts,
@@ -1818,6 +1847,7 @@ where
                 let budget_limit = budget_limit
                     .as_ref()
                     .expect("budget is initialized from the loaded attempt plan");
+                let budget_scope = follow_up_budget_scope(&source_request, &follow_up_request);
                 match dispatch_cook_follow_up(
                     &options,
                     executor.clone(),
@@ -1829,7 +1859,7 @@ where
                     &promotion,
                     follow_up_request,
                     false,
-                    CookFollowUpBudgetScope::Cook,
+                    budget_scope,
                     budget_limit,
                     budget_used,
                     &mut remediation_category_usage,
