@@ -20,6 +20,7 @@ use homeboy::core::worktree_providers::{
     provision_apply_enabled_worktree_provider_from_config, WorktreeProviderCreateIntent,
 };
 
+use super::super::agent_task_dispatch::DispatchArgs;
 use super::super::CmdResult;
 use super::args::{
     AgentTaskCookArgs, PromotionProviderArgs, RetryArgs, RunArgs, RunPlanArgs, StatusArgs,
@@ -201,10 +202,7 @@ where
     // bare rejection.
     let provision = provision_cook_destination(&args)?;
 
-    let mut dispatch_args = args.dispatch.clone();
-    if dispatch_args.prompt.is_none() {
-        dispatch_args.prompt = args.goal.clone();
-    }
+    let mut dispatch_args = dispatch_args_for_cook(&args);
     if dispatch_args.cwd.is_none() && dispatch_args.workspace.is_none() {
         dispatch_args.workspace = Some(args.to_worktree.clone());
     }
@@ -248,6 +246,7 @@ where
         (run_id, plan)
     };
     record_cook_provision(&mut initial_plan, provision);
+    record_cook_goal(&mut initial_plan, args.goal.as_deref());
     let cook_id = requested_cook_id.unwrap_or_else(|| run_id.clone());
     // Capture the resolved task workspace before dispatch. The provider may
     // commit and leave a clean tree, so resolving this after it runs would
@@ -315,6 +314,33 @@ where
         ),
         result.exit_code,
     ))
+}
+
+pub(super) fn dispatch_args_for_cook(args: &AgentTaskCookArgs) -> DispatchArgs {
+    let mut dispatch_args = args.dispatch.clone();
+    let has_explicit_work = dispatch_args.prompt.is_some()
+        || !dispatch_args.tasks.is_empty()
+        || dispatch_args.core.tasks_json.is_some();
+    if !has_explicit_work {
+        dispatch_args.prompt = args.goal.clone();
+    }
+    dispatch_args
+}
+
+fn record_cook_goal(plan: &mut AgentTaskPlan, goal: Option<&str>) {
+    let Some(goal) = goal else {
+        return;
+    };
+    if !plan.metadata.is_object() {
+        plan.metadata = serde_json::json!({});
+    }
+    plan.metadata["cook_goal"] = serde_json::json!(goal);
+    for task in &mut plan.tasks {
+        if !task.metadata.is_object() {
+            task.metadata = serde_json::json!({});
+        }
+        task.metadata["cook_goal"] = serde_json::json!(goal);
+    }
 }
 
 fn git_head_sha(path: &Path) -> Option<String> {
