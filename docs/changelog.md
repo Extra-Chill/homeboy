@@ -4,6 +4,25 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.311.0] - 2026-07-24
+
+### Added
+- feat(agent-task): add durable exactly-once cook operation claims
+- feat(agent-task): surface in-flight provider execution for local cooks
+
+### Changed
+- test(agent-task): drive moving-base cook test through the side-effect boundary
+- refactor(agent-task): route cook side effects through one boundary
+- test(agent-task): cover backend-scoped providers output
+- cover summary-mode passthrough gating
+
+### Fixed
+- fix(agent-task): label JSON-spec flags correctly and hint @FILE on bare paths
+- Fix rig path override checkout root fallback
+- fix(agent-task): scope providers output to the requested backend
+- capture child output in summary mode instead of streaming
+- report skipped runner convergence instead of false success
+
 ## [0.310.5] - 2026-07-24
 
 ### Changed
