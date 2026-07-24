@@ -116,6 +116,10 @@ fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_command
             status_value["metadata"]["pre_execution_failure"]["retryable"],
             true
         );
+        assert_eq!(
+            status_value["metadata"]["worktree_provision"]["action"], "existing",
+            "status projects the persisted Cook worktree evidence"
+        );
 
         dispatcher.unavailable.store(false, Ordering::SeqCst);
         let (resumed, exit_code) = run_cook_with_executor_and_dispatcher(
@@ -126,6 +130,18 @@ fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_command
         .expect("same immutable cook resumes after runner repair");
         assert_eq!(exit_code, 0);
         assert_eq!(resumed["status"], "in_flight");
+        assert_eq!(
+            status(StatusArgs {
+                run_id: "cook-cli-preflight-recovery".to_string(),
+                bridge: false,
+                since_cursor: None,
+                full: true,
+            })
+            .expect("resumed Cook status")
+            .0["metadata"]["worktree_provision"]["action"],
+            "existing",
+            "resuming preserves Cook worktree evidence"
+        );
 
         let error = run_cook_with_executor_and_dispatcher(
             recoverable_runner_cook_args(source.path(), Some("changed immutable title")),

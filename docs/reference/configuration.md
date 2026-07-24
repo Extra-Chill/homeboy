@@ -106,6 +106,7 @@ variables.
 ### `WorktreeProviderCommands`
 
 - `list`
+- `ensure` — Atomic create-or-return-existing argv template. Homeboy invokes it only after an explicit typed provider no-match, expands `{handle}`, `{repo}`, `{base}`, `{head}`, `{task_url}`, and `{idempotency_key}`, and requires `apply_enabled: true`.
 - `cleanup_preview`
 - `cleanup_apply`
 - `artifacts_preview`

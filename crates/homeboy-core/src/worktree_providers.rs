@@ -91,6 +91,24 @@ pub struct WorktreeProviderResolution {
     pub worktree: WorktreeProviderHandle,
 }
 
+/// Explicit destination inputs required to create a managed worktree without
+/// inferring repository or branch policy from a product-specific provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeProviderCreateIntent {
+    pub handle: String,
+    pub repo: String,
+    pub base: String,
+    pub head: String,
+    pub task_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeProviderProvision {
+    pub resolution: WorktreeProviderResolution,
+    pub action: &'static str,
+    pub idempotency_key: String,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct WorktreeProviderHandleSafety {
     pub dirty: bool,
@@ -159,6 +177,172 @@ pub fn resolve_apply_enabled_worktree_provider_with_trusted_unpushed_destination
         gate_feedback_baseline,
         trusted_unpushed_destination,
     )
+}
+
+/// Resolve a managed destination, creating it through an apply-enabled command
+/// provider only when all branch and task intent is explicit.
+pub fn provision_apply_enabled_worktree_provider_from_config(
+    intent: &WorktreeProviderCreateIntent,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderProvision> {
+    match resolve_apply_enabled_worktree_provider_from_config(&intent.handle, config, None) {
+        Ok(resolution) => {
+            return Ok(WorktreeProviderProvision {
+                resolution,
+                action: "adopted",
+                idempotency_key: provision_idempotency_key(intent),
+            })
+        }
+        Err(error)
+            if error
+                .details
+                .get("worktree_provider_lookup")
+                .and_then(Value::as_str)
+                == Some("not_found") => {}
+        Err(error) => return Err(error),
+    }
+
+    let mut providers = config
+        .worktree_providers
+        .iter()
+        .filter_map(|(id, provider)| {
+            provider
+                .enabled
+                .then_some((id.as_str(), provider))
+                .filter(|(_, provider)| provider.commands.ensure.is_some())
+        })
+        .collect::<Vec<_>>();
+    providers.sort_by_key(|(id, _)| *id);
+    if providers.len() > 1 {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            format!(
+                "worktree handle `{}` is missing and multiple providers can ensure it: {}",
+                intent.handle,
+                providers
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Some(intent.handle.clone()),
+            Some(vec!["Configure exactly one enabled worktree provider commands.ensure template for this Cook destination.".to_string()]),
+        ));
+    }
+    let Some((provider_id, provider)) = providers.first().copied() else {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            format!(
+                "worktree handle `{}` is missing and no enabled worktree provider configures commands.ensure",
+                intent.handle
+            ),
+            Some(intent.handle.clone()),
+            Some(vec!["Configure an enabled generic worktree provider commands.ensure argv template.".to_string()]),
+        ));
+    };
+    let idempotency_key = provision_idempotency_key(intent);
+    let command = expand_ensure_command(
+        provider
+            .commands
+            .ensure
+            .as_ref()
+            .expect("filtered ensure command"),
+        intent,
+        &idempotency_key,
+    );
+    let rendered_command = render_provider_command(&command);
+    if !provider.apply_enabled {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            format!(
+                "worktree handle `{}` is missing and provider `{provider_id}` ensure is disabled",
+                intent.handle
+            ),
+            Some(intent.handle.clone()),
+            Some(vec![format!("Create it with: {rendered_command}")]),
+        ));
+    }
+    run_provider_ensure_command(provider_id, &command)?;
+    let resolution =
+        resolve_apply_enabled_worktree_provider_from_config(&intent.handle, config, None)?;
+    Ok(WorktreeProviderProvision {
+        resolution,
+        action: "ensured",
+        idempotency_key,
+    })
+}
+
+fn provision_idempotency_key(intent: &WorktreeProviderCreateIntent) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        intent.handle, intent.repo, intent.base, intent.head
+    )
+}
+
+fn expand_ensure_command(
+    command: &[String],
+    intent: &WorktreeProviderCreateIntent,
+    idempotency_key: &str,
+) -> Vec<String> {
+    command
+        .iter()
+        .map(|argument| {
+            argument
+                .replace("{handle}", &intent.handle)
+                .replace("{repo}", &intent.repo)
+                .replace("{base}", &intent.base)
+                .replace("{head}", &intent.head)
+                .replace("{task_url}", &intent.task_url)
+                .replace("{idempotency_key}", idempotency_key)
+        })
+        .collect()
+}
+
+fn render_provider_command(command: &[String]) -> String {
+    command
+        .iter()
+        .map(|argument| format!("'{}'", argument.replace('\'', "'\\\"'\\\"'")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn run_provider_ensure_command(provider_id: &str, command: &[String]) -> Result<()> {
+    let Some((program, args)) = command
+        .split_first()
+        .filter(|(program, _)| !program.trim().is_empty())
+    else {
+        return Err(Error::validation_invalid_argument(
+            "worktree_providers.commands.ensure",
+            format!("worktree provider `{provider_id}` ensure command must include an executable"),
+            Some(provider_id.to_string()),
+            None,
+        ));
+    };
+    let output = Command::new(program).args(args).output().map_err(|error| {
+        Error::validation_invalid_argument(
+            "to_worktree",
+            format!("worktree provider `{provider_id}` ensure command could not start: {error}"),
+            Some(provider_id.to_string()),
+            None,
+        )
+    })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument_with_evidence(
+        "to_worktree",
+        format!(
+            "worktree provider `{provider_id}` ensure command failed with {}",
+            output
+                .status
+                .code()
+                .map(|code| format!("exit code {code}"))
+                .unwrap_or_else(|| "a signal".to_string())
+        ),
+        Some(provider_id.to_string()),
+        None,
+        Some(provider_command_evidence(command, &output)),
+    ))
 }
 
 fn resolve_worktree_provider_with_policy_from_config(
@@ -243,7 +427,7 @@ fn resolve_worktree_provider_with_policy_from_config(
             },
         )
     };
-    Err(Error::validation_invalid_argument(
+    let mut error = Error::validation_invalid_argument(
         "to_worktree",
         format!(
             "worktree handle `{handle}` is not a Homeboy task worktree and was not returned by a configured worktree provider ({configured})"
@@ -257,7 +441,9 @@ fn resolve_worktree_provider_with_policy_from_config(
                 "Configure an enabled worktree provider commands.list command that returns typed worktree path, branch, and safety metadata.".to_string()
             },
         ]),
-    ))
+    );
+    error.details["worktree_provider_lookup"] = Value::String("not_found".to_string());
+    Err(error)
 }
 
 fn run_provider_resolve_command(
@@ -1112,6 +1298,246 @@ mod tests {
                 .expect("list result mapping")
                 .items,
             "$.result.items"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provision_creates_missing_destination_from_explicit_generic_intent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("destination");
+        let state = temp.path().join("state");
+        let script = temp.path().join("provider");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -f '{}' ]; then\n    printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-9908\",\"path\":\"{}\",\"branch\":\"fix/9908\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n  else\n    printf '%s\\n' '{{\"worktrees\":[]}}'\n  fi\nelse\n  git init -b fix/9908 '{}' >/dev/null\n  printf '%s|%s|%s|%s|%s' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" > '{}'\nfi\n",
+                state.display(),
+                workspace.display(),
+                workspace.display(),
+                state.display(),
+            ),
+        )
+        .expect("write provider");
+        let mut permissions = fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).expect("executable");
+        let mut config = HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: true,
+                commands: WorktreeProviderCommands {
+                    resolve: Some(vec![
+                        script.display().to_string(),
+                        "resolve".to_string(),
+                        "{handle}".to_string(),
+                    ]),
+                    ensure: Some(vec![
+                        script.display().to_string(),
+                        "create".to_string(),
+                        "{handle}".to_string(),
+                        "{repo}".to_string(),
+                        "{base}".to_string(),
+                        "{head}".to_string(),
+                        "{task_url}".to_string(),
+                        "{idempotency_key}".to_string(),
+                    ]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(WorktreeProviderListResultMapping {
+                    items: "$.worktrees".to_string(),
+                    handle: "$.handle".to_string(),
+                    path: "$.path".to_string(),
+                    branch: "$.branch".to_string(),
+                    dirty: "$.safety.dirty".to_string(),
+                    unpushed: "$.safety.unpushed".to_string(),
+                    primary: "$.safety.primary".to_string(),
+                }),
+            },
+        );
+
+        let resolution = provision_apply_enabled_worktree_provider_from_config(
+            &WorktreeProviderCreateIntent {
+                handle: "homeboy@fix-9908".to_string(),
+                repo: "homeboy".to_string(),
+                base: "main".to_string(),
+                head: "fix/9908".to_string(),
+                task_url: "https://github.com/Extra-Chill/homeboy/issues/9908".to_string(),
+            },
+            &config,
+        )
+        .expect("provider creates then resolves destination");
+
+        assert_eq!(resolution.action, "ensured");
+        assert_eq!(resolution.resolution.provider_id, "fixture");
+        assert_eq!(resolution.resolution.worktree.handle, "homeboy@fix-9908");
+        assert_eq!(
+            fs::read_to_string(state).expect("creation intent"),
+            "homeboy@fix-9908|homeboy|main|fix/9908|https://github.com/Extra-Chill/homeboy/issues/9908|homeboy@fix-9908:homeboy:main:fix/9908"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_identical_provisioning_reuses_one_destination_and_idempotency_key() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Barrier};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("destination");
+        let lock = temp.path().join("ensure-lock");
+        let keys = temp.path().join("keys");
+        let script = temp.path().join("provider");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -d '{}' ]; then\n    printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-9908\",\"path\":\"{}\",\"branch\":\"fix/9908\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n  else\n    printf '%s\\n' '{{\"worktrees\":[]}}'\n  fi\nelse\n  printf '%s\\n' \"$7\" >> '{}'\n  if mkdir '{}' 2>/dev/null; then\n    git init -b fix/9908 '{}' >/dev/null\n    rmdir '{}'\n  else\n    while [ -d '{}' ]; do sleep 0.01; done\n  fi\nfi\n",
+                workspace.display(),
+                workspace.display(),
+                keys.display(),
+                lock.display(),
+                workspace.display(),
+                lock.display(),
+                lock.display(),
+            ),
+        )
+        .expect("write provider");
+        let mut permissions = fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).expect("executable");
+
+        let mut config = HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: true,
+                commands: WorktreeProviderCommands {
+                    resolve: Some(vec![
+                        script.display().to_string(),
+                        "resolve".to_string(),
+                        "{handle}".to_string(),
+                    ]),
+                    ensure: Some(vec![
+                        script.display().to_string(),
+                        "ensure".to_string(),
+                        "{handle}".to_string(),
+                        "{repo}".to_string(),
+                        "{base}".to_string(),
+                        "{head}".to_string(),
+                        "{task_url}".to_string(),
+                        "{idempotency_key}".to_string(),
+                    ]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(WorktreeProviderListResultMapping {
+                    items: "$.worktrees".to_string(),
+                    handle: "$.handle".to_string(),
+                    path: "$.path".to_string(),
+                    branch: "$.branch".to_string(),
+                    dirty: "$.safety.dirty".to_string(),
+                    unpushed: "$.safety.unpushed".to_string(),
+                    primary: "$.safety.primary".to_string(),
+                }),
+            },
+        );
+        let intent = WorktreeProviderCreateIntent {
+            handle: "homeboy@fix-9908".to_string(),
+            repo: "homeboy".to_string(),
+            base: "main".to_string(),
+            head: "fix/9908".to_string(),
+            task_url: "https://github.com/Extra-Chill/homeboy/issues/9908".to_string(),
+        };
+        let barrier = Arc::new(Barrier::new(2));
+        let mut joins = Vec::new();
+        for _ in 0..2 {
+            let config = config.clone();
+            let intent = intent.clone();
+            let barrier = barrier.clone();
+            joins.push(std::thread::spawn(move || {
+                barrier.wait();
+                provision_apply_enabled_worktree_provider_from_config(&intent, &config)
+                    .expect("concurrent ensure converges")
+            }));
+        }
+        let provisions = joins
+            .into_iter()
+            .map(|join| join.join().expect("thread"))
+            .collect::<Vec<_>>();
+
+        assert!(workspace.is_dir());
+        assert!(
+            provisions
+                .iter()
+                .all(|provision| provision.resolution.worktree.path
+                    == workspace.display().to_string())
+        );
+        assert!(
+            provisions
+                .iter()
+                .all(|provision| provision.idempotency_key
+                    == "homeboy@fix-9908:homeboy:main:fix/9908")
+        );
+        let keys = fs::read_to_string(keys).expect("ensure keys");
+        assert!(keys
+            .lines()
+            .all(|key| key == "homeboy@fix-9908:homeboy:main:fix/9908"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lookup_auth_and_malformed_failures_do_not_run_ensure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ensured = temp.path().join("ensured");
+        let script = temp.path().join("provider");
+        fs::write(&script, format!("#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  case \"$2\" in auth) exit 77 ;; malformed) printf '{{' ;; esac\n  exit 0\nfi\ntouch '{}'\n", ensured.display())).expect("write provider");
+        let mut permissions = fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).expect("executable");
+        let mut config = HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: true,
+                commands: WorktreeProviderCommands {
+                    resolve: Some(vec![
+                        script.display().to_string(),
+                        "resolve".to_string(),
+                        "{handle}".to_string(),
+                    ]),
+                    ensure: Some(vec![script.display().to_string(), "ensure".to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(worktrees_mapping()),
+            },
+        );
+        for handle in ["auth", "malformed"] {
+            let error = provision_apply_enabled_worktree_provider_from_config(
+                &WorktreeProviderCreateIntent {
+                    handle: handle.to_string(),
+                    repo: "homeboy".to_string(),
+                    base: "main".to_string(),
+                    head: "fix/9908".to_string(),
+                    task_url: "https://example.test/9908".to_string(),
+                },
+                &config,
+            )
+            .expect_err("lookup failure is not absence");
+            assert!(error.message.contains("provider `fixture` resolve command"));
+        }
+        assert!(
+            !ensured.exists(),
+            "ensure must never follow an auth or malformed lookup failure"
         );
     }
 

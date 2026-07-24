@@ -15,6 +15,10 @@ use homeboy::agents::agent_tasks::scheduler::{
 };
 use homeboy::agents::agent_tasks::service as agent_task_service;
 use homeboy::core::command_invocation::CommandInvocation;
+use homeboy::core::defaults;
+use homeboy::core::worktree_providers::{
+    provision_apply_enabled_worktree_provider_from_config, WorktreeProviderCreateIntent,
+};
 
 use super::super::CmdResult;
 use super::args::{
@@ -43,6 +47,85 @@ fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregate) -> Value
 
 pub(crate) fn run_cook(args: AgentTaskCookArgs) -> CmdResult<Value> {
     run_cook_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
+}
+
+/// Converge a Cook promotion destination before compiling a task plan. This is
+/// controller-owned so local and Lab dispatch use the same managed checkout.
+pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::core::Result<Value> {
+    let destination = std::path::Path::new(&args.to_worktree);
+    if destination.is_dir()
+        || homeboy::core::worktree::resolve_workspace_ref_if_present(&args.to_worktree)?.is_some()
+    {
+        return Ok(
+            serde_json::json!({ "action": "existing", "kind": "path_or_homeboy", "handle": args.to_worktree }),
+        );
+    }
+
+    let repo = args.dispatch.repo.clone().ok_or_else(|| {
+        homeboy::core::Error::validation_missing_argument(vec![
+            "--repo <repo> is required to create a missing --to-worktree destination".to_string(),
+        ])
+    })?;
+    let head = args.head.clone().ok_or_else(|| {
+        homeboy::core::Error::validation_missing_argument(vec![
+            "--head <branch> is required to create a missing --to-worktree destination".to_string(),
+        ])
+    })?;
+    let task_url = args.dispatch.task_url.clone().ok_or_else(|| {
+        homeboy::core::Error::validation_missing_argument(vec![
+            "--task-url <url> is required to create a missing --to-worktree destination"
+                .to_string(),
+        ])
+    })?;
+    provision_apply_enabled_worktree_provider_from_config(
+        &WorktreeProviderCreateIntent {
+            handle: args.to_worktree.clone(),
+            repo,
+            base: args.base.clone(),
+            head,
+            task_url,
+        },
+        &defaults::load_config(),
+    )
+    .map(|provision| {
+        serde_json::json!({
+            "action": provision.action,
+            "provider": provision.resolution.provider_id,
+            "idempotency_key": provision.idempotency_key,
+            "handle": provision.resolution.worktree.handle,
+            "path": provision.resolution.worktree.path,
+            "branch": provision.resolution.worktree.branch,
+        })
+    })
+}
+
+pub(crate) fn record_cook_provision(plan: &mut AgentTaskPlan, provision: Value) {
+    if let Some(task) = plan.tasks.first_mut() {
+        if !task.metadata.is_object() {
+            task.metadata = serde_json::json!({});
+        }
+        task.metadata["worktree_provision"] = provision;
+    }
+}
+
+pub(crate) fn validate_cook_request(args: &AgentTaskCookArgs) -> homeboy::core::Result<()> {
+    if !args.gates.has_deterministic_gate() && !args.no_finalize {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "verify",
+            "agent-task cook requires at least one deterministic --verify or --private-verify gate before it can commit, push, and open a PR",
+            None,
+            Some(vec!["Provide a deterministic verification gate, e.g. --verify \"cargo test\".".to_string()]),
+        ));
+    }
+    if args.dispatch.core.queue_only {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "queue-only",
+            "agent-task cook cannot queue its controller-owned lifecycle",
+            None,
+            None,
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn promotion_provider(args: PromotionProviderArgs) -> CmdResult<Value> {
@@ -106,6 +189,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
+    validate_cook_request(&args)?;
     // Deterministic gates exist to make *publication* safe: a green gate is the
     // proof a cook may commit, push, and open a PR. A `--no-finalize` cook does
     // none of those, so a gate is not meaningful there — read-only/exploratory
@@ -115,27 +199,7 @@ where
     // the requirement here is safe end to end (#7608). Finalizing cooks still
     // require a gate, but now say so with a copy-pasteable example instead of a
     // bare rejection.
-    if !args.gates.has_deterministic_gate() && !args.no_finalize {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "verify",
-            "agent-task cook requires at least one deterministic --verify or --private-verify gate before it can commit, push, and open a PR",
-            None,
-            Some(vec![
-                "Provide a gate, e.g. --verify \"cargo test\" (or --private-verify for a secret gate).".to_string(),
-                "For a read-only or exploratory cook with nothing to verify, pass --no-finalize (skips commit, push, and PR); a no-op gate like --verify true also works.".to_string(),
-            ]),
-        ));
-    }
-    if args.dispatch.core.queue_only {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "queue-only",
-            "agent-task cook cannot queue its controller-owned lifecycle; it must retain provider completion to ingest artifacts, promote candidates, run gates, and finalize",
-            None,
-            Some(vec![
-                "Use `homeboy agent-task run-plan --plan <materialized-plan> --record-run-id <run-id> --queue-only` only when a controller owns the corresponding continuation.".to_string(),
-            ]),
-        ));
-    }
+    let provision = provision_cook_destination(&args)?;
 
     let mut dispatch_args = args.dispatch.clone();
     if dispatch_args.prompt.is_none() {
@@ -152,7 +216,7 @@ where
                 .unwrap_or_else(|| agent_task_lifecycle::cook_attempt_run_id(cook_id, 1)),
         );
     }
-    let (run_id, initial_plan) = if let Some(attempt_plan) = args.attempt_plan.as_deref() {
+    let (run_id, mut initial_plan) = if let Some(attempt_plan) = args.attempt_plan.as_deref() {
         let run_id = dispatch_args.run_id.clone().ok_or_else(|| {
             homeboy::core::Error::internal_unexpected(
                 "agent-task cook attempt plan requires an attempt run id".to_string(),
@@ -183,6 +247,7 @@ where
         };
         (run_id, plan)
     };
+    record_cook_provision(&mut initial_plan, provision);
     let cook_id = requested_cook_id.unwrap_or_else(|| run_id.clone());
     // Capture the resolved task workspace before dispatch. The provider may
     // commit and leave a clean tree, so resolving this after it runs would
