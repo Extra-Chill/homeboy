@@ -189,6 +189,20 @@ pub(crate) fn run_cook_with_executor_and_dispatcher<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
+    run_cook_with_executor_and_dispatcher_with_progress(args, executor, attempt_dispatcher, None)
+}
+
+pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress<E>(
+    args: AgentTaskCookArgs,
+    executor: E,
+    attempt_dispatcher: Option<
+        Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>,
+    >,
+    progress: Option<&dyn Fn(&str, &str, &str) -> homeboy::core::Result<()>>,
+) -> CmdResult<Value>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
     validate_cook_request(&args)?;
     // Deterministic gates exist to make *publication* safe: a green gate is the
     // proof a cook may commit, push, and open a PR. A `--no-finalize` cook does
@@ -199,8 +213,6 @@ where
     // the requirement here is safe end to end (#7608). Finalizing cooks still
     // require a gate, but now say so with a copy-pasteable example instead of a
     // bare rejection.
-    let provision = provision_cook_destination(&args)?;
-
     let mut dispatch_args = args.dispatch.clone();
     if dispatch_args.prompt.is_none() {
         dispatch_args.prompt = args.goal.clone();
@@ -216,6 +228,16 @@ where
                 .unwrap_or_else(|| agent_task_lifecycle::cook_attempt_run_id(cook_id, 1)),
         );
     }
+    let run_id = dispatch_args
+        .run_id
+        .clone()
+        .unwrap_or_else(|| format!("agent-task-{}", uuid::Uuid::new_v4()));
+    dispatch_args.run_id = Some(run_id.clone());
+    let cook_id = requested_cook_id.clone().unwrap_or_else(|| run_id.clone());
+    if let Some(progress) = progress {
+        progress("preflight", &cook_id, &run_id)?;
+    }
+    let provision = provision_cook_destination(&args)?;
     let (run_id, mut initial_plan) = if let Some(attempt_plan) = args.attempt_plan.as_deref() {
         let run_id = dispatch_args.run_id.clone().ok_or_else(|| {
             homeboy::core::Error::internal_unexpected(
@@ -224,10 +246,6 @@ where
         })?;
         (run_id, agent_task_service::read_plan(attempt_plan)?)
     } else {
-        let run_id = dispatch_args
-            .run_id
-            .clone()
-            .unwrap_or_else(|| format!("agent-task-{}", uuid::Uuid::new_v4()));
         let mut request = dispatch_service::resolve_dispatch_request(dispatch_args.into())?;
         let plan = match dispatch_service::build_controller_dispatch_plan(&mut request) {
             Ok(plan) => plan,
@@ -248,7 +266,6 @@ where
         (run_id, plan)
     };
     record_cook_provision(&mut initial_plan, provision);
-    let cook_id = requested_cook_id.unwrap_or_else(|| run_id.clone());
     // Capture the resolved task workspace before dispatch. The provider may
     // commit and leave a clean tree, so resolving this after it runs would
     // silently widen the promotion range.
@@ -266,6 +283,9 @@ where
         .commit_message
         .clone()
         .unwrap_or_else(|| default_loop_commit_message(&args));
+    if let Some(progress) = progress {
+        progress("dispatching", &cook_id, &run_id)?;
+    }
     let result = agent_task_service::run_cook(
         agent_task_service::AgentTaskCookServiceOptions {
             cook_id,

@@ -36,6 +36,33 @@ pub fn run_command_output(
             let run_from_spec_output_ref =
                 agent_task_controller_run_from_spec_output_ref_eligible(&args, output_file);
             let summary_kind = agent_task_summary_kind_for_output(&args);
+            if matches!(
+                &args.command,
+                crate::commands::agent_task::AgentTaskCommand::Cook(_)
+            ) {
+                if let Some(path) = output_file {
+                    let lease = match super::output_runtime::CookOutputLease::claim(path) {
+                        Ok(lease) => lease,
+                        Err(error) => {
+                            return CommandRun::from_stdout_result(Err(error), 2)
+                                .with_command(spec.name)
+                        }
+                    };
+                    let progress = |phase: &str, cook_id: &str, run_id: &str| {
+                        lease.progress(phase, cook_id, run_id)
+                    };
+                    let (result, exit_code) = map(
+                        crate::commands::agent_task::run_with_cook_progress(args, Some(&progress)),
+                    );
+                    if let Err(error) = lease.finish(&result, exit_code, "agent-task", None) {
+                        return CommandRun::from_stdout_result(Err(error), 2)
+                            .with_command(spec.name);
+                    }
+                    return CommandRun::from_stdout_result(result, exit_code)
+                        .with_command(spec.name)
+                        .with_output_file_already_written();
+                }
+            }
             command_run_with_summary(
                 dispatch(Commands::AgentTask(args), spec, global),
                 |payload, exit_code| {

@@ -1,10 +1,175 @@
 use serde_json::Value;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 
 use crate::cli_surface::Commands;
 use crate::command_contract::CommandOutputFileMode;
 
 use crate::commands::utils::response as output;
 use crate::commands::{review, trace, GlobalArgs};
+
+#[derive(Debug)]
+pub(crate) struct CookOutputLease {
+    path: PathBuf,
+    lock_path: PathBuf,
+    invocation_id: String,
+}
+
+impl CookOutputLease {
+    pub(crate) fn claim(path: &str) -> homeboy::core::Result<Self> {
+        let path = PathBuf::from(path);
+        let lease = Self {
+            lock_path: output_lock_path(&path),
+            path,
+            invocation_id: uuid::Uuid::new_v4().to_string(),
+        };
+        lease.acquire_lock()?;
+        lease.write_in_flight("claimed", None, None)?;
+        Ok(lease)
+    }
+
+    pub(crate) fn progress(
+        &self,
+        phase: &str,
+        cook_id: &str,
+        run_id: &str,
+    ) -> homeboy::core::Result<()> {
+        self.write_in_flight(phase, Some(cook_id), Some(run_id))
+    }
+
+    pub(crate) fn finish(
+        &self,
+        result: &homeboy::core::Result<Value>,
+        exit_code: i32,
+        command: &str,
+        presentation: Option<output::CommandPresentationEnvelope>,
+    ) -> homeboy::core::Result<()> {
+        let response = output::cli_response_for_json_result_for_command(
+            result,
+            exit_code,
+            command,
+            presentation,
+        );
+        let contents = serde_json::to_string_pretty(&response).map_err(|error| {
+            homeboy::core::Error::internal_json(
+                error.to_string(),
+                Some("serialize Cook output".to_string()),
+            )
+        })?;
+        self.write(&contents)
+    }
+
+    fn acquire_lock(&self) -> homeboy::core::Result<()> {
+        for _ in 0..2 {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&self.lock_path)
+            {
+                Ok(mut lock) => {
+                    use std::io::Write;
+                    writeln!(lock, "{}", std::process::id())
+                        .map_err(|error| output_io_error(&self.lock_path, error))?;
+                    return Ok(());
+                }
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                    if !stale_lock(&self.lock_path)? {
+                        return Err(homeboy::core::Error::validation_invalid_argument(
+                            "output",
+                            format!(
+                                "Cook output `{}` is owned by another active invocation; choose a different --output path or wait for it to finish",
+                                self.path.display()
+                            ),
+                            None,
+                            None,
+                        ));
+                    }
+                    std::fs::remove_file(&self.lock_path)
+                        .map_err(|error| output_io_error(&self.lock_path, error))?;
+                }
+                Err(error) => return Err(output_io_error(&self.lock_path, error)),
+            }
+        }
+        Err(homeboy::core::Error::internal_unexpected(
+            "could not claim Cook output ownership after reclaiming a stale lock",
+        ))
+    }
+
+    fn write_in_flight(
+        &self,
+        phase: &str,
+        cook_id: Option<&str>,
+        run_id: Option<&str>,
+    ) -> homeboy::core::Result<()> {
+        let value = serde_json::json!({
+            "schema": "homeboy/agent-task-cook-output/v1",
+            "command": "agent-task cook",
+            "success": false,
+            "exit_code": null,
+            "status": "in_flight",
+            "invocation_id": self.invocation_id,
+            "updated_at": chrono::Utc::now().to_rfc3339(),
+            "phase": phase,
+            "cook_id": cook_id,
+            "run": run_id.map(|id| serde_json::json!({ "id": id, "kind": "agent-task" })),
+            "recovery": {
+                "status": run_id.map(|id| format!("homeboy agent-task status {id}")),
+                "logs": run_id.map(|id| format!("homeboy agent-task logs {id}")),
+                "resume": cook_id.map(|id| format!("homeboy agent-task resume {id}")),
+            }
+        });
+        let contents = serde_json::to_string_pretty(&value).map_err(|error| {
+            homeboy::core::Error::internal_json(
+                error.to_string(),
+                Some("serialize Cook in-flight output".to_string()),
+            )
+        })?;
+        self.write(&contents)
+    }
+
+    fn write(&self, contents: &str) -> homeboy::core::Result<()> {
+        homeboy::core::io::write_output_file_atomically(
+            &self.path,
+            contents,
+            homeboy::core::io::OutputWriteOptions::json_output(),
+        )
+        .map_err(|error| output_io_error(&self.path, error))
+    }
+}
+
+impl Drop for CookOutputLease {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.lock_path);
+    }
+}
+
+fn output_lock_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("output");
+    path.with_file_name(format!(".{name}.homeboy-cook-output.lock"))
+}
+
+fn stale_lock(path: &Path) -> homeboy::core::Result<bool> {
+    let pid = std::fs::read_to_string(path)
+        .map_err(|error| output_io_error(path, error))?
+        .trim()
+        .parse::<u32>()
+        .unwrap_or(0);
+    if pid == 0 {
+        return Ok(true);
+    }
+    let result = unsafe { libc::kill(pid as i32, 0) };
+    Ok(result != 0 && std::io::Error::last_os_error().kind() == ErrorKind::NotFound)
+}
+
+fn output_io_error(path: &Path, error: std::io::Error) -> homeboy::core::Error {
+    homeboy::core::Error::internal_io(
+        error.to_string(),
+        Some(format!("write Cook output {}", path.display())),
+    )
+}
 
 pub struct CommandRun {
     pub command: String,
@@ -13,6 +178,7 @@ pub struct CommandRun {
     pub output_file_result: Option<homeboy::core::Result<Value>>,
     pub presentation: CommandPresentation,
     pub raw_stdout: Option<homeboy::core::Result<String>>,
+    output_file_already_written: bool,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -38,6 +204,7 @@ impl CommandRun {
             output_file_result: None,
             presentation: CommandPresentation::default(),
             raw_stdout: None,
+            output_file_already_written: false,
         }
     }
 
@@ -48,6 +215,11 @@ impl CommandRun {
 
     pub fn with_command(mut self, command: impl Into<String>) -> Self {
         self.command = command.into();
+        self
+    }
+
+    pub fn with_output_file_already_written(mut self) -> Self {
+        self.output_file_already_written = true;
         self
     }
 
@@ -72,6 +244,7 @@ impl CommandRun {
             output_file_result,
             presentation: CommandPresentation::default(),
             raw_stdout: Some(raw_stdout),
+            output_file_already_written: false,
         }
     }
 
@@ -139,7 +312,9 @@ impl<'a> OutputService<'a> {
     }
 
     pub fn write_output_file(&self, run: &CommandRun, mode: CommandOutputFileMode) {
-        write_output_file(run, mode, self.output_file);
+        if !run.output_file_already_written {
+            write_output_file(run, mode, self.output_file);
+        }
     }
 }
 
@@ -229,6 +404,7 @@ pub fn run_json(
                 output_file_result,
                 presentation: CommandPresentation::default(),
                 raw_stdout: None,
+                output_file_already_written: false,
             }
         }
         (_, command) => {
@@ -290,6 +466,7 @@ mod tests {
             output_file_result,
             presentation: CommandPresentation::default(),
             raw_stdout: None,
+            output_file_already_written: false,
         }
     }
 
@@ -448,6 +625,76 @@ mod tests {
         assert_eq!(json["success"], false);
         assert_eq!(json["exit_code"], 1);
         assert_eq!(json["data"]["test_counts"]["failed"], 15);
+    }
+
+    #[test]
+    fn cook_output_replaces_stale_terminal_result_with_current_run_then_terminal_result() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cook.json");
+        std::fs::write(&path, r#"{"status":"failed","run":{"id":"old-run"}}"#)
+            .expect("seed stale terminal result");
+
+        let lease =
+            CookOutputLease::claim(path.to_str().expect("utf8 path")).expect("claim output");
+        lease
+            .progress("dispatching", "cook-current", "run-current")
+            .expect("record current durable run");
+        let in_flight: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(in_flight["status"], "in_flight");
+        assert_eq!(in_flight["phase"], "dispatching");
+        assert_eq!(in_flight["cook_id"], "cook-current");
+        assert_eq!(in_flight["run"]["id"], "run-current");
+        assert!(in_flight["recovery"]["status"]
+            .as_str()
+            .unwrap()
+            .contains("run-current"));
+
+        lease
+            .finish(
+                &Ok(json!({ "status": "green_no_finalize", "latest_run_id": "run-current" })),
+                0,
+                "agent-task",
+                None,
+            )
+            .expect("write terminal envelope");
+        let terminal: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(terminal["schema"], "homeboy/command-result/v3");
+        assert_eq!(terminal["success"], true);
+        assert_eq!(terminal["data"]["latest_run_id"], "run-current");
+    }
+
+    #[test]
+    fn cook_output_concurrent_writer_fails_closed_until_owner_releases_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cook.json");
+        let first = CookOutputLease::claim(path.to_str().expect("utf8 path")).expect("first claim");
+
+        let error = CookOutputLease::claim(path.to_str().expect("utf8 path"))
+            .expect_err("second writer must not replace active output");
+        assert!(error.message.contains("owned by another active invocation"));
+        drop(first);
+
+        CookOutputLease::claim(path.to_str().expect("utf8 path"))
+            .expect("released output can be claimed by a later invocation");
+    }
+
+    #[test]
+    fn cook_output_reclaims_stale_lock_after_interruption() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cook.json");
+        let lock = output_lock_path(&path);
+        // An interrupted lock write has no trustworthy live owner and must not
+        // permanently strand a reusable output path.
+        std::fs::write(&lock, "\n").expect("seed interrupted lock");
+
+        let lease = CookOutputLease::claim(path.to_str().expect("utf8 path"))
+            .expect("reclaim dead owner lock");
+        let output: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(output["status"], "in_flight");
+        drop(lease);
+        assert!(!lock.exists());
     }
 
     #[test]
