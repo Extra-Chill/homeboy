@@ -369,26 +369,29 @@ fn moving_base_continuation_finalizes_without_a_second_provider_dispatch() {
         let second = run_cook_with_boundaries(
             options.clone(),
             UnusedExecutor,
-            move |_, _, promotion| {
-                finalization_count_for_finalize.fetch_add(1, Ordering::SeqCst);
-                assert_eq!(
-                    promotion.verified_base.as_ref().unwrap().sha,
-                    "pinned-refreshed-base"
-                );
-                Ok(serde_json::json!({"status":"review_ready", "run_id": run_id}))
-            },
-            move |options, recovery| {
-                rebase_count_for_recover.fetch_add(1, Ordering::SeqCst);
-                assert_eq!(
-                    options.gates.private_gate_reveal,
-                    crate::agent_task_gate::AgentTaskGateRevealPolicy::FullEvidence
-                );
-                let mut refreshed = recovery.promotion.clone();
-                refreshed.verified_base.as_mut().unwrap().sha = "pinned-refreshed-base".to_string();
-                refreshed.provenance["candidate"] =
-                    serde_json::json!({"kind":"git","fingerprint":{"tree":"rebased"}});
-                Ok(refreshed)
-            },
+            TestCookSideEffects::new(
+                move |_: &_, _: &_, promotion: &AgentTaskPromotionReport| {
+                    finalization_count_for_finalize.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(
+                        promotion.verified_base.as_ref().unwrap().sha,
+                        "pinned-refreshed-base"
+                    );
+                    Ok(serde_json::json!({"status":"review_ready", "run_id": run_id}))
+                },
+                move |options: &AgentTaskCookServiceOptions, recovery: &MovingBaseCookRecovery| {
+                    rebase_count_for_recover.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(
+                        options.gates.private_gate_reveal,
+                        crate::agent_task_gate::AgentTaskGateRevealPolicy::FullEvidence
+                    );
+                    let mut refreshed = recovery.promotion.clone();
+                    refreshed.verified_base.as_mut().unwrap().sha =
+                        "pinned-refreshed-base".to_string();
+                    refreshed.provenance["candidate"] =
+                        serde_json::json!({"kind":"git","fingerprint":{"tree":"rebased"}});
+                    Ok(refreshed)
+                },
+            ),
         )
         .unwrap();
         claim.complete().unwrap();
@@ -419,12 +422,14 @@ fn moving_base_continuation_finalizes_without_a_second_provider_dispatch() {
         let third = run_cook_with_boundaries(
             options,
             UnusedExecutor,
-            |_, _, _| panic!("failed rebased gates must not finalize"),
-            |_, recovery| {
-                let mut failed = recovery.promotion.clone();
-                failed.status = AgentTaskPromotionStatus::GateFailed;
-                Ok(failed)
-            },
+            TestCookSideEffects::new(
+                |_: &_, _: &_, _: &_| panic!("failed rebased gates must not finalize"),
+                |_: &AgentTaskCookServiceOptions, recovery: &MovingBaseCookRecovery| {
+                    let mut failed = recovery.promotion.clone();
+                    failed.status = AgentTaskPromotionStatus::GateFailed;
+                    Ok(failed)
+                },
+            ),
         )
         .unwrap();
         assert_eq!(third.value.status, "candidate_recoverable");
