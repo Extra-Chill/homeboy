@@ -3474,6 +3474,81 @@ fn restarted_cook_alias_and_exact_id_reuse_the_same_persisted_promotion() {
     });
 }
 
+fn promotion_claim_options(cook_id: &str, run_id: &str) -> AgentTaskCookServiceOptions {
+    AgentTaskCookServiceOptions {
+        cook_id: cook_id.to_string(),
+        initial_run_id: run_id.to_string(),
+        initial_plan: AgentTaskPlan::new(cook_id, Vec::new()),
+        to_worktree: "homeboy@8058".to_string(),
+        source_worktree_path: None,
+        provider_command: None,
+        provider_invocation: None,
+        gates: VerifyGateOptions::default(),
+        max_attempts: 1,
+        no_finalize: true,
+        base: "main".to_string(),
+        task_base_sha: None,
+        head: None,
+        title: "Cook".to_string(),
+        commit_message: "test".to_string(),
+        source_refs: Vec::new(),
+        protected_branches: Vec::new(),
+        ai_tool: "test".to_string(),
+        ai_model: None,
+        ai_used_for: "test".to_string(),
+        attempt_dispatcher: None,
+        harvest_context: Default::default(),
+    }
+}
+
+#[test]
+fn promotion_operation_claim_completes_once_and_replays_persisted_result() {
+    // #8357: promoting a cook attempt reserves a durable operation claim before
+    // the effect and completes it with the result. An already-persisted
+    // promotion (the resume path) loads without repeating the effect, and the
+    // claim is marked completed so a subsequent pass replays the same result.
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-promote-claim";
+        let run_id = "run-promote-claim";
+        let plan = AgentTaskPlan::new(cook_id, Vec::new());
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).unwrap();
+        // Seed an already-applied promotion so the promote path loads it rather
+        // than performing a real git/worktree promotion.
+        agent_task_lifecycle::record_promotion(
+            run_id,
+            serde_json::to_value(promotion(run_id)).unwrap(),
+        )
+        .unwrap();
+
+        let options = promotion_claim_options(cook_id, run_id);
+        let operation_key = format!("promote:{run_id}");
+
+        // No claim exists until the first promote pass.
+        assert!(
+            agent_task_lifecycle::operation_claim(run_id, &operation_key)
+                .unwrap()
+                .is_none()
+        );
+
+        let first = promote_with_operation_claim(&options, run_id).unwrap();
+        assert_eq!(first.source.run_id.as_deref(), Some(run_id));
+
+        // The claim is now completed with the promotion result.
+        let claim = agent_task_lifecycle::operation_claim(run_id, &operation_key)
+            .unwrap()
+            .expect("promotion claim recorded");
+        assert_eq!(claim.state, agent_task_lifecycle::ClaimState::Completed);
+        assert!(!agent_task_lifecycle::operation_lease_is_active(run_id, &operation_key).unwrap());
+
+        // A resumed pass replays the same promotion via AlreadyCompleted without
+        // re-running the effect.
+        let replayed = promote_with_operation_claim(&options, run_id).unwrap();
+        assert_eq!(replayed.source.run_id, first.source.run_id);
+        assert_eq!(replayed.patch_artifact.id, first.patch_artifact.id);
+    });
+}
+
 #[test]
 fn historical_applied_promotion_restores_only_its_exact_checkpoint_baseline() {
     homeboy_core::test_support::with_isolated_home(|_| {

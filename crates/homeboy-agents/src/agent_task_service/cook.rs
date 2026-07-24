@@ -43,16 +43,66 @@ use super::cook_promotion::{
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
 use super::AgentTaskRunResult;
 
+/// Lease window for a cook promotion operation claim. Long enough that a healthy
+/// controller finishes promoting and records the result within it; a crashed
+/// controller's lease elapses so a resumed pass can reconcile and continue.
+const PROMOTION_CLAIM_LEASE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Durable operation key for the promotion of one cook attempt. Promotion is
+/// one-per-`run_id`, so the run id is the stable operation identity (#8357).
+fn promotion_operation_key(run_id: &str) -> String {
+    format!("promote:{run_id}")
+}
+
+/// Promote a cook attempt under a durable exactly-once operation claim.
+///
+/// `promote_or_load_attempt` already loads an already-persisted promotion, but
+/// the fresh-promote path performs its external effect (`promote_attempt`) and
+/// only then records the result. A controller crash in that window re-runs the
+/// effect on restart. The claim closes it: reserve `promote:<run_id>` before the
+/// effect, complete it after the result is durable, and on a resumed pass return
+/// the persisted promotion instead of repeating the effect (#8357).
+fn promote_with_operation_claim(
+    options: &AgentTaskCookServiceOptions,
+    run_id: &str,
+) -> Result<AgentTaskPromotionReport> {
+    let operation_key = promotion_operation_key(run_id);
+    match agent_task_lifecycle::claim_cook_operation(run_id, &operation_key, PROMOTION_CLAIM_LEASE)?
+    {
+        // A prior pass already promoted and recorded the result. Load the durable
+        // promotion rather than repeating the external effect.
+        agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_) => {
+            promote_or_load_attempt(options, run_id)
+        }
+        // Another pass holds a still-fresh lease. The persisted-promotion read in
+        // `promote_or_load_attempt` still resolves an already-produced promotion;
+        // if none exists yet, promotion proceeds (content-addressed and idempotent
+        // on disk). Do not mark the claim completed from here — its owner does.
+        agent_task_lifecycle::ClaimOutcome::LeaseHeld => promote_or_load_attempt(options, run_id),
+        // This pass owns the operation. Promote, then record the result as the
+        // claim's immutable completion.
+        agent_task_lifecycle::ClaimOutcome::Acquired => {
+            let promotion = promote_or_load_attempt(options, run_id)?;
+            agent_task_lifecycle::complete_cook_operation(
+                run_id,
+                &operation_key,
+                serde_json::to_value(&promotion)
+                    .map_err(|error| Error::internal_json(error.to_string(), None))?,
+            )?;
+            Ok(promotion)
+        }
+    }
+}
+
 /// The generic cook side-effect boundary the attempt loop drives its external
 /// effects through: promotion, moving-base recovery, and PR finalization.
 ///
 /// Routing every external effect through one injectable object (rather than a
 /// mix of free-function calls and ad-hoc closures) gives durable exactly-once
 /// operation claims a single wiring point, and lets deterministic tests inject
-/// side effects without real Git/GitHub mutations (#8357). This slice is a pure
-/// structural boundary: [`DefaultCookSideEffects`] preserves the exact prior
-/// behavior by delegating to the existing free functions. Claim wiring for
-/// promotion, retry dispatch, and finalization follows as separate changes.
+/// side effects without real Git/GitHub mutations (#8357). Promotion is wired
+/// through the claim primitive here (`promote_with_operation_claim`); retry
+/// dispatch and finalization follow as separate slices.
 pub(crate) trait CookSideEffectService {
     /// Promote the successful candidate for `run_id`, or load the already-persisted
     /// promotion when this attempt was interrupted after promoting.
@@ -105,7 +155,7 @@ where
         options: &AgentTaskCookServiceOptions,
         run_id: &str,
     ) -> Result<AgentTaskPromotionReport> {
-        promote_or_load_attempt(options, run_id)
+        promote_with_operation_claim(options, run_id)
     }
 
     fn recover_moving_base(
