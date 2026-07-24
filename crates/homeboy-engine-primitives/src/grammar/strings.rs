@@ -53,36 +53,45 @@ pub fn find_unclosed_raw_string_on_line(line: &str) -> Option<String> {
     None
 }
 
-pub(crate) fn line_has_unclosed_regular_string(line: &str) -> bool {
+pub(crate) fn unclosed_regular_string_quote(
+    line: &str,
+    quote_chars: &[char],
+    escape: char,
+) -> Option<char> {
     let bytes = line.as_bytes();
     let mut pos = 0;
-    let mut in_string = false;
+    let mut active_quote = None;
 
     while pos < bytes.len() {
         let byte = bytes[pos];
+        let ch = byte as char;
 
-        if byte == b'"' && !is_escaped(bytes, pos) {
+        if quote_chars.contains(&ch) && !is_escaped_with(bytes, pos, escape as u8) {
             // Raw string openers are handled separately. Treat the opening
             // delimiter as non-regular so `r#"..."#` does not toggle us.
-            if !in_string && pos > 0 && bytes[pos - 1] == b'r' {
+            if active_quote.is_none() && ch == '"' && pos > 0 && bytes[pos - 1] == b'r' {
                 pos += 1;
                 continue;
             }
-            in_string = !in_string;
+            match active_quote {
+                Some(open) if open == ch => active_quote = None,
+                None => active_quote = Some(ch),
+                Some(_) => {}
+            }
         }
 
         pos += 1;
     }
 
-    in_string
+    active_quote
 }
 
-pub(crate) fn line_closes_regular_string(line: &str) -> bool {
+pub(crate) fn line_closes_regular_string(line: &str, quote: char, escape: char) -> bool {
     let bytes = line.as_bytes();
     let mut pos = 0;
 
     while pos < bytes.len() {
-        if bytes[pos] == b'"' && !is_escaped(bytes, pos) {
+        if bytes[pos] == quote as u8 && !is_escaped_with(bytes, pos, escape as u8) {
             return true;
         }
         pos += 1;
@@ -91,14 +100,14 @@ pub(crate) fn line_closes_regular_string(line: &str) -> bool {
     false
 }
 
-fn is_escaped(bytes: &[u8], pos: usize) -> bool {
+fn is_escaped_with(bytes: &[u8], pos: usize, escape: u8) -> bool {
     if pos == 0 {
         return false;
     }
 
     let mut backslashes = 0;
     let mut i = pos;
-    while i > 0 && bytes[i - 1] == b'\\' {
+    while i > 0 && bytes[i - 1] == escape {
         backslashes += 1;
         i -= 1;
     }

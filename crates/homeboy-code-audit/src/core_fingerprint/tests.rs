@@ -581,6 +581,31 @@ fn php_metadata_grammar() -> Grammar {
 }
 
 #[test]
+fn successive_fingerprints_at_stable_path_observe_current_methods() {
+    let grammar = php_metadata_grammar();
+    let dir = tempfile::tempdir().expect("temporary audit root");
+    let path = dir.path().join("StableSource.php");
+    let initial =
+        "<?php\nclass StableSource {\n    public function canExtract(): bool { return true; }\n}\n";
+    std::fs::write(&path, initial).expect("initial source");
+
+    let first_content = std::fs::read_to_string(&path).expect("initial source content");
+    let first = fingerprint_from_grammar(&first_content, &grammar, "StableSource.php")
+        .expect("initial fingerprint");
+    assert_eq!(first.methods, vec!["canExtract"]);
+
+    // The double quote is data inside a single-quoted string. It must not leave
+    // the parser in multiline-string state and hide declarations below it.
+    let updated = "<?php\nclass StableSource {\n    public function canExtract(): bool { return strpos( 'marker=\"value', 'marker' ) !== false; }\n    public function extract(): array { return array(); }\n    public function getMethod(): string { return 'stable'; }\n}\n";
+    std::fs::write(&path, updated).expect("updated source");
+
+    let second_content = std::fs::read_to_string(&path).expect("updated source content");
+    let second = fingerprint_from_grammar(&second_content, &grammar, "StableSource.php")
+        .expect("updated fingerprint");
+    assert_eq!(second.methods, vec!["canExtract", "extract", "getMethod"]);
+}
+
+#[test]
 fn grammar_contract_metadata_suppresses_framework_unused_params() {
     let grammar = php_metadata_grammar();
     let content = "<?php\nclass Sample {\n    public function contractExecute( string $input ): bool {\n        return true;\n    }\n    public function route( FrameworkRequest $request ): bool {\n        return true;\n    }\n    public function helper( int $left, int $right ): int {\n        return $left * 2;\n    }\n}\n";

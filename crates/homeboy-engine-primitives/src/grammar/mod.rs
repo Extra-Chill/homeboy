@@ -30,7 +30,7 @@ mod strings;
 mod types;
 
 pub use strings::find_unclosed_raw_string_on_line;
-use strings::{line_closes_regular_string, line_has_unclosed_regular_string};
+use strings::{line_closes_regular_string, unclosed_regular_string_quote};
 
 pub use extract::cached_regex;
 pub use extract::{extract, namespace, Symbol};
@@ -336,6 +336,20 @@ mod tests {
 
         assert_eq!(lines[1].region, Region::LineComment);
         assert_eq!(lines[2].region, Region::Code);
+    }
+
+    #[test]
+    fn php_single_quoted_string_can_contain_unpaired_double_quote() {
+        let content = "<?php\n$value = 'marker=\"value';\nfunction current_method() {}\n";
+        let grammar = php_grammar();
+        let lines = walk_lines(content, &grammar);
+
+        assert_eq!(lines[1].region, Region::Code);
+        assert_eq!(lines[2].region, Region::Code);
+        assert_eq!(
+            method_names(&extract(content, &grammar)),
+            vec!["current_method"]
+        );
     }
 
     // ---- Extraction tests ----
