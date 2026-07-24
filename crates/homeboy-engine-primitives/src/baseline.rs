@@ -39,7 +39,7 @@
 //! }
 //! ```
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -312,6 +312,103 @@ pub fn load<M: for<'de> Deserialize<'de> + Serialize>(
     Ok(Some(baseline))
 }
 
+/// Outcome of a baseline prune: which requested fingerprints were removed and
+/// which were not present (so callers can report a safe, exact result).
+#[derive(Debug, Clone, Serialize)]
+pub struct PruneResult {
+    pub removed: Vec<String>,
+    pub not_found: Vec<String>,
+    pub remaining_count: usize,
+}
+
+/// Remove specific fingerprints from a baseline, in place, without re-running an
+/// audit or hand-editing the JSON array (#6861). Only fingerprints that are
+/// actually present are removed; the rest are reported as `not_found` so a
+/// caller never silently drops the wrong row. The surviving fingerprints are
+/// kept sorted and `item_count` is updated, and the output stays valid canonical
+/// JSON — eliminating the fat-finger / broken-comma risk of a manual `sed` edit.
+///
+/// This mutates only `known_fingerprints`/`item_count`; baseline metadata and
+/// every other key in `homeboy.json` are preserved untouched.
+pub fn prune(config: &BaselineConfig, fingerprints: &[String]) -> Result<PruneResult> {
+    let requested: BTreeSet<&String> = fingerprints.iter().collect();
+    let path = config.json_path();
+    let mut root = read_json_or_empty(&path)?;
+
+    let baseline_value = root
+        .get_mut(BASELINES_KEY)
+        .and_then(|baselines| baselines.get_mut(config.key()));
+    let Some(baseline_value) = baseline_value else {
+        return Ok(PruneResult {
+            removed: Vec::new(),
+            not_found: fingerprints.to_vec(),
+            remaining_count: 0,
+        });
+    };
+
+    let known = baseline_value
+        .get_mut("known_fingerprints")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| {
+            Error::internal_io(
+                format!(
+                    "baseline '{}' has no known_fingerprints array",
+                    config.key()
+                ),
+                Some("baseline.prune".to_string()),
+            )
+        })?;
+
+    let present: BTreeSet<String> = known
+        .iter()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .collect();
+    let removed: Vec<String> = requested
+        .iter()
+        .filter(|fingerprint| present.contains(**fingerprint))
+        .map(|fingerprint| (*fingerprint).clone())
+        .collect();
+    let not_found: Vec<String> = requested
+        .iter()
+        .filter(|fingerprint| !present.contains(**fingerprint))
+        .map(|fingerprint| (*fingerprint).clone())
+        .collect();
+
+    if removed.is_empty() {
+        return Ok(PruneResult {
+            removed,
+            not_found,
+            remaining_count: known.len(),
+        });
+    }
+
+    let removed_set: BTreeSet<&String> = removed.iter().collect();
+    known.retain(|value| {
+        value
+            .as_str()
+            .is_none_or(|fingerprint| !removed_set.contains(&fingerprint.to_string()))
+    });
+    // Keep the surviving rows sorted so the diff is exactly the removed lines.
+    known.sort_by(|left, right| {
+        left.as_str()
+            .unwrap_or_default()
+            .cmp(right.as_str().unwrap_or_default())
+    });
+    let remaining_count = known.len();
+
+    if let Some(count) = baseline_value.get_mut("item_count") {
+        *count = Value::from(remaining_count);
+    }
+
+    write_json(&path, &root)?;
+
+    Ok(PruneResult {
+        removed,
+        not_found,
+        remaining_count,
+    })
+}
+
 pub fn compare<T: Fingerprintable, M: Serialize>(
     current_items: &[T],
     baseline: &Baseline<M>,
@@ -474,4 +571,109 @@ fn days_to_date(mut days: u64) -> (u64, u64, u64) {
 
 fn is_leap_year(year: u64) -> bool {
     (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
+}
+
+#[cfg(test)]
+mod prune_tests {
+    use super::*;
+
+    struct Finding(String);
+
+    impl Fingerprintable for Finding {
+        fn fingerprint(&self) -> String {
+            self.0.clone()
+        }
+        fn description(&self) -> String {
+            self.0.clone()
+        }
+        fn context_label(&self) -> String {
+            "test".to_string()
+        }
+    }
+
+    fn seed(dir: &std::path::Path, fingerprints: &[&str]) -> BaselineConfig {
+        let config = BaselineConfig::new(dir, "audit");
+        let items: Vec<Finding> = fingerprints
+            .iter()
+            .map(|f| Finding(f.to_string()))
+            .collect();
+        save(
+            &config,
+            "test-component",
+            &items,
+            serde_json::json!({"note": "keep"}),
+        )
+        .unwrap();
+        config
+    }
+
+    #[test]
+    fn prune_removes_only_present_fingerprints_and_reports_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = seed(dir.path(), &["a", "b", "c"]);
+
+        let result = prune(&config, &["b".to_string(), "zzz".to_string()]).unwrap();
+
+        assert_eq!(result.removed, vec!["b".to_string()]);
+        assert_eq!(result.not_found, vec!["zzz".to_string()]);
+        assert_eq!(result.remaining_count, 2);
+
+        let loaded = load::<serde_json::Value>(&config).unwrap().unwrap();
+        assert_eq!(
+            loaded.known_fingerprints,
+            vec!["a".to_string(), "c".to_string()]
+        );
+        assert_eq!(loaded.item_count, 2);
+    }
+
+    #[test]
+    fn prune_preserves_metadata_and_other_json_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = seed(dir.path(), &["a", "b"]);
+        // Add an unrelated top-level key to prove prune leaves it untouched.
+        let path = config.json_path();
+        let mut root: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        root.as_object_mut()
+            .unwrap()
+            .insert("unrelated".to_string(), serde_json::json!({"x": 1}));
+        std::fs::write(&path, serde_json::to_string_pretty(&root).unwrap()).unwrap();
+
+        prune(&config, &["a".to_string()]).unwrap();
+
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(after["unrelated"], serde_json::json!({"x": 1}));
+        assert_eq!(after["baselines"]["audit"]["metadata"]["note"], "keep");
+    }
+
+    #[test]
+    fn prune_removes_exactly_the_requested_rows_and_keeps_valid_sorted_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = seed(dir.path(), &["a", "b", "c", "d"]);
+        let path = config.json_path();
+
+        // Prune the LAST fingerprint row — the case that is most error-prone to
+        // hand-edit (removing it forces a trailing-comma change on the new-last
+        // row). The command does this safely and leaves valid, sorted JSON.
+        prune(&config, &["d".to_string()]).unwrap();
+
+        // JSON stays valid and parseable (no broken commas from a bad hand-edit).
+        let reloaded = load::<serde_json::Value>(&config).unwrap().unwrap();
+        assert_eq!(
+            reloaded.known_fingerprints,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            "exactly the pruned row is gone and survivors stay sorted"
+        );
+        assert_eq!(reloaded.item_count, 3);
+        assert!(!reloaded.known_fingerprints.contains(&"d".to_string()));
+    }
+
+    #[test]
+    fn prune_missing_baseline_reports_all_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = BaselineConfig::new(dir.path(), "audit");
+        let result = prune(&config, &["x".to_string()]).unwrap();
+        assert!(result.removed.is_empty());
+        assert_eq!(result.not_found, vec!["x".to_string()]);
+    }
 }

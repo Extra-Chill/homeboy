@@ -25,6 +25,21 @@ enum AuditBaselineCommand {
     Refresh(AuditBaselineRefreshArgs),
     /// Auto-merge a baseline-only `homeboy.json` merge/rebase conflict
     Merge(AuditBaselineMergeArgs),
+    /// Safely remove specific fingerprints from the baseline (no hand-editing)
+    Prune(AuditBaselinePruneArgs),
+}
+
+#[derive(Args)]
+pub struct AuditBaselinePruneArgs {
+    #[command(flatten)]
+    pub comp: PositionalComponentArgs,
+
+    #[command(flatten)]
+    pub extension_override: ExtensionOverrideArgs,
+
+    /// Fingerprint string(s) to remove from the baseline. Repeat for multiple.
+    #[arg(long = "fingerprint", value_name = "FINGERPRINT", required = true)]
+    pub fingerprints: Vec<String>,
 }
 
 #[derive(Args)]
@@ -69,7 +84,69 @@ pub fn run(args: AuditBaselineArgs, global: &GlobalArgs) -> CmdResult<AuditBasel
     match args.command {
         AuditBaselineCommand::Refresh(args) => refresh(args, global),
         AuditBaselineCommand::Merge(args) => merge(args, global),
+        AuditBaselineCommand::Prune(args) => prune(args, global),
     }
+}
+
+fn prune(
+    args: AuditBaselinePruneArgs,
+    _global: &GlobalArgs,
+) -> CmdResult<AuditBaselineRefreshOutput> {
+    let source_ctx = resolve_source_context(
+        &args.comp,
+        &SettingArgs::default(),
+        &args.extension_override,
+        None,
+    )?;
+    let source_path = source_ctx.source_path.to_string_lossy().to_string();
+    let source = Path::new(&source_path);
+    let baseline_path = source.join("homeboy.json").to_string_lossy().to_string();
+
+    fail_if_homeboy_json_has_conflict_markers(source)?;
+
+    let previous_count = baseline::load_baseline(source)
+        .map(|baseline| baseline.known_fingerprints.len())
+        .unwrap_or(0);
+
+    let result = baseline::prune_baseline(source, &args.fingerprints).map_err(|message| {
+        homeboy::core::Error::internal_io(message, Some("audit-baseline.prune".to_string()))
+    })?;
+
+    if !result.not_found.is_empty() {
+        eprintln!(
+            "[audit-baseline] {} requested fingerprint(s) were not in the baseline and were skipped:",
+            result.not_found.len()
+        );
+        for fingerprint in &result.not_found {
+            eprintln!("  - {fingerprint}");
+        }
+    }
+
+    eprintln!(
+        "[audit-baseline] pruned {}: -{} fingerprint(s), {} remaining",
+        baseline_path,
+        result.removed.len(),
+        result.remaining_count
+    );
+
+    let output = AuditBaselineRefreshOutput {
+        command: "audit-baseline.prune".to_string(),
+        component_id: source_ctx.component_id,
+        source_path,
+        baseline_path,
+        changed_since: "prune".to_string(),
+        previous_source: "current baseline".to_string(),
+        previous_count,
+        current_count: result.remaining_count,
+        added_count: 0,
+        resolved_count: result.removed.len(),
+        added_fingerprints: Vec::new(),
+        resolved_fingerprints: result.removed,
+    };
+
+    // A prune that matched nothing is a no-op the caller should notice.
+    let exit_code = if output.resolved_count == 0 { 1 } else { 0 };
+    Ok((output, exit_code))
 }
 
 fn refresh(
