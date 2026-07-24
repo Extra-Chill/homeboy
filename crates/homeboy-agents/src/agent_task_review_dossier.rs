@@ -250,6 +250,65 @@ fn review_form_gap(field: &str, problem: &str) -> Error {
     )
 }
 
+/// Phrases that assert no AI-authored code change. A review-form-only adoption
+/// follow-up (which changes no code) can supply such a `used_for`, but when the
+/// finalized candidate lineage has AI-authored changed files, that disclosure
+/// materially understates the work and misleads reviewers (#9897).
+const NO_CODE_CHANGE_CLAIMS: &[&str] = &[
+    "without changing code",
+    "without changing any code",
+    "did not change code",
+    "did not change any code",
+    "no code changed",
+    "no code was changed",
+    "changed no code",
+    "made no code changes",
+    "no changes to code",
+    "without modifying code",
+    "without writing code",
+];
+
+/// Whether a `used_for` narrative asserts that no code was changed.
+fn used_for_claims_no_code_change(used_for: &str) -> bool {
+    let normalized = used_for.to_ascii_lowercase();
+    NO_CODE_CHANGE_CLAIMS
+        .iter()
+        .any(|claim| normalized.contains(claim))
+}
+
+/// Reject a reviewer disclosure whose `used_for` claims no code was changed when
+/// the finalized candidate actually has changed files. This catches a
+/// review-form-only adoption follow-up erasing the substantive implementation
+/// the original provider attempt authored, keeping the PR's AI attribution
+/// honest against the patch lineage (#9897).
+pub fn validate_used_for_against_changed_files(
+    dossier: &AgentTaskReviewDossier,
+    changed_files: &[String],
+) -> Result<()> {
+    if changed_files.is_empty() {
+        return Ok(());
+    }
+    if !dossier.ai_assistance.used {
+        return Ok(());
+    }
+    if used_for_claims_no_code_change(&dossier.ai_assistance.used_for) {
+        return Err(review_form_gap(
+            "review_form.used_for",
+            &format!(
+                "used_for claims no code was changed, but the finalized candidate changes {} file(s) (e.g. {}). Attribute the AI-authored implementation across the candidate lineage instead of the review-form-only follow-up",
+                changed_files.len(),
+                changed_files
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Canned/placeholder `used_for` values that must not pass as a genuine
 /// reflection — including the legacy CLI default this refactor retires.
 fn used_for_is_placeholder(value: &str) -> bool {
