@@ -312,17 +312,25 @@ pub fn validation_dependency_ids(local_path: &Path) -> Result<Vec<String>> {
     })?;
 
     let mut ids = Vec::new();
-    let Some(extensions) = manifest
+
+    // A top-level `validation_dependencies` key is the component-scoped
+    // declaration (as reported by `component show`); it must be forwarded into
+    // the recipe just like the `--setting-json` override, otherwise a `--path`
+    // review that changes only the checkout location silently drops the
+    // dependency (#9926). `collect_validation_dependency_ids` looks up the key
+    // on the object it is given, so pass the manifest root.
+    collect_validation_dependency_ids(&manifest, &mut ids);
+
+    // Per-extension declarations, at the extension level or under its settings.
+    if let Some(extensions) = manifest
         .get("extensions")
         .and_then(|value| value.as_object())
-    else {
-        return Ok(ids);
-    };
-
-    for extension in extensions.values() {
-        collect_validation_dependency_ids(extension, &mut ids);
-        if let Some(settings) = extension.get("settings") {
-            collect_validation_dependency_ids(settings, &mut ids);
+    {
+        for extension in extensions.values() {
+            collect_validation_dependency_ids(extension, &mut ids);
+            if let Some(settings) = extension.get("settings") {
+                collect_validation_dependency_ids(settings, &mut ids);
+            }
         }
     }
 
@@ -1136,5 +1144,63 @@ mod tests {
             ".homeboy/dependency-lifecycle/dependency-output-generated-report-json.json"
         ));
         assert!(Path::new(artifact).exists());
+    }
+
+    fn write_manifest(dir: &Path, contents: &str) {
+        fs::write(dir.join(PORTABLE_CONFIG_FILE), contents).expect("write manifest");
+    }
+
+    #[test]
+    fn validation_dependency_ids_reads_top_level_declaration() {
+        // #9926: a component-scoped top-level `validation_dependencies` must be
+        // collected (previously only extension-nested keys were read, so a
+        // `--path` review dropped the dependency).
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(
+            dir.path(),
+            r#"{"validation_dependencies": ["data-machine-events"]}"#,
+        );
+        let ids = validation_dependency_ids(dir.path()).expect("ids");
+        assert_eq!(ids, vec!["data-machine-events".to_string()]);
+    }
+
+    #[test]
+    fn validation_dependency_ids_reads_extension_nested_declaration() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(
+            dir.path(),
+            r#"{"extensions": {"wp": {"settings": {"validation_dependencies": ["shared-runtime"]}}}}"#,
+        );
+        let ids = validation_dependency_ids(dir.path()).expect("ids");
+        assert_eq!(ids, vec!["shared-runtime".to_string()]);
+    }
+
+    #[test]
+    fn validation_dependency_ids_merges_and_dedupes_top_level_and_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(
+            dir.path(),
+            r#"{
+                "validation_dependencies": ["data-machine-events", "shared-runtime"],
+                "extensions": {"wp": {"validation_dependencies": ["shared-runtime"]}}
+            }"#,
+        );
+        let ids = validation_dependency_ids(dir.path()).expect("ids");
+        assert_eq!(
+            ids,
+            vec![
+                "data-machine-events".to_string(),
+                "shared-runtime".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn validation_dependency_ids_empty_without_declarations() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(dir.path(), r#"{"id": "some-component"}"#);
+        assert!(validation_dependency_ids(dir.path())
+            .expect("ids")
+            .is_empty());
     }
 }
