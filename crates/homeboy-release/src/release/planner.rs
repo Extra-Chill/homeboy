@@ -547,6 +547,8 @@ mod tests {
             requested_bump: requested_bump.to_string(),
             is_underbump: false,
             reasons: Vec::new(),
+            non_conventional_commit_count: 0,
+            considered_commit_count: 0,
             bump_policy: None,
         }
     }
