@@ -166,6 +166,21 @@ fn failed_deployment(projects: &[String], error: String) -> ReleaseDeploymentRes
     }
 }
 
+/// Resolve the component-scoped release tag for a version (e.g.
+/// `wp-native-auth-v0.2.0`), matching the tag the release's `git.tag` step
+/// created. Falls back to the unscoped `v{version}` form when the component has
+/// no release scope or cannot be resolved, preserving prior behavior for
+/// single-component repos (#9888).
+fn scoped_release_tag(component_id: &str, local_path: &str, version: &str) -> String {
+    let unscoped = format!("v{}", version.trim_start_matches('v'));
+    match homeboy_core::component::resolve_effective(Some(component_id), Some(local_path), None) {
+        Ok(component) => {
+            crate::release::component_tag_name(&component, version).unwrap_or(unscoped)
+        }
+        Err(_) => unscoped,
+    }
+}
+
 fn prepared_release_artifact(
     component_id: &str,
     local_path: &str,
@@ -202,7 +217,11 @@ fn prepared_release_artifact(
             Some(durable_path.clone()),
         )
     })?;
-    let tag = format!("v{}", version);
+    // Use the component-scoped tag the release actually created (e.g.
+    // `wp-native-auth-v0.2.0`), not a reconstructed unscoped `v{version}`.
+    // Monorepo components namespace their tags; deploying the unscoped form
+    // fails to resolve to a source commit (#9888).
+    let tag = scoped_release_tag(component_id, local_path, version);
     let source_commit = homeboy_core::engine::command::run_in_optional(
         local_path,
         "git",
@@ -311,6 +330,29 @@ mod tests {
 
         assert!(deployment.projects.is_empty());
         assert_eq!(deployment.summary.total_projects, 0);
+    }
+
+    #[test]
+    fn scoped_release_tag_falls_back_to_unscoped_when_component_unresolvable() {
+        // An id/path that resolves to no scoped component yields the plain
+        // `v{version}` tag, preserving single-component-repo behavior. The
+        // scoped path (e.g. `blocks-engine-v0.2.3`) is produced by
+        // release::component_tag_name and covered by the ReleaseScope tag_name
+        // tests in scope.rs.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tag = super::scoped_release_tag(
+            "definitely-no-such-component-9888",
+            temp.path().to_str().unwrap(),
+            "0.2.0",
+        );
+        assert_eq!(tag, "v0.2.0");
+        // A `v`-prefixed version is normalized, not doubled.
+        let tag = super::scoped_release_tag(
+            "definitely-no-such-component-9888",
+            temp.path().to_str().unwrap(),
+            "v0.2.0",
+        );
+        assert_eq!(tag, "v0.2.0");
     }
 
     #[test]
