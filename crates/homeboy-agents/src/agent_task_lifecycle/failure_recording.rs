@@ -1524,6 +1524,87 @@ pub fn verified_controller_artifact_projection_path(
     Ok(Some(path))
 }
 
+/// Resolve a controller-retained artifact by its durable logical identity. This
+/// is intentionally independent of the runner-reported path: Lab workspaces
+/// are disposable after their aggregate has been mirrored.
+pub fn verified_controller_artifact_projection(
+    run_id: &str,
+    task_id: &str,
+    logical_artifact_id: &str,
+    kind: &str,
+    expected_sha256: &str,
+    expected_record_id: Option<&str>,
+) -> Result<Option<(String, PathBuf)>> {
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let candidates: Vec<_> = store
+        .list_artifacts(run_id)?
+        .into_iter()
+        .filter(|candidate| {
+            candidate.artifact_type == "file"
+                && candidate.kind == kind
+                && candidate
+                    .metadata_json
+                    .pointer("/agent_task/task_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(task_id)
+                && candidate
+                    .metadata_json
+                    .pointer("/agent_task/logical_artifact_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(logical_artifact_id)
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    if candidates.len() != 1 {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            format!(
+                "multiple controller-side artifact projections match run '{run_id}', task '{task_id}', and artifact '{logical_artifact_id}'"
+            ),
+            Some(logical_artifact_id.to_string()),
+            None,
+        ));
+    }
+    let candidate = &candidates[0];
+    if expected_record_id.is_some_and(|id| id != candidate.id) {
+        return Err(Error::validation_invalid_argument(
+            "gate_feedback_candidate_baseline",
+            format!(
+                "controller artifact identity mismatch for run '{run_id}', task '{task_id}', and artifact '{logical_artifact_id}': expected record '{}', found '{}'",
+                expected_record_id.unwrap_or_default(), candidate.id
+            ),
+            Some(logical_artifact_id.to_string()),
+            None,
+        ));
+    }
+    let path = PathBuf::from(&candidate.path);
+    let actual_sha256 = homeboy_core::artifact_metadata::sha256_file(&path).map_err(|error| {
+        Error::validation_invalid_argument(
+            "gate_feedback_candidate_baseline",
+            format!(
+                "controller artifact mirror is unavailable for run '{run_id}', task '{task_id}', and artifact '{logical_artifact_id}': {}",
+                error.message
+            ),
+            Some(logical_artifact_id.to_string()),
+            None,
+        )
+    })?;
+    if candidate.sha256.as_deref() != Some(expected_sha256) || actual_sha256 != expected_sha256 {
+        return Err(Error::validation_invalid_argument(
+            "gate_feedback_candidate_baseline",
+            format!(
+                "controller artifact mirror hash mismatch for run '{run_id}', task '{task_id}', and artifact '{logical_artifact_id}': expected '{expected_sha256}', record '{:?}', bytes '{actual_sha256}'",
+                candidate.sha256
+            ),
+            Some(logical_artifact_id.to_string()),
+            None,
+        ));
+    }
+    Ok(Some((candidate.id.clone(), path)))
+}
+
 fn unique_logical_artifact_id(
     used_ids: &mut std::collections::BTreeSet<String>,
     base_id: &str,
