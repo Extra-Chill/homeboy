@@ -378,7 +378,7 @@ fn read_spec_from_path(
     Ok(spec)
 }
 
-fn validate_rig_spec(spec: &RigSpec) -> Result<()> {
+pub(crate) fn validate_rig_spec(spec: &RigSpec) -> Result<()> {
     let errors = validate_dependency_materialization_steps(spec);
     if errors.is_empty() {
         return Ok(());
@@ -387,8 +387,9 @@ fn validate_rig_spec(spec: &RigSpec) -> Result<()> {
     Err(Error::validation_invalid_argument(
         "rig",
         format!(
-            "Rig `{}` has invalid dependency materialization configuration",
-            spec.id
+            "Rig `{}` has invalid dependency materialization configuration: {}",
+            spec.id,
+            errors.join("; ")
         ),
         Some(spec.id.clone()),
         Some(errors),

@@ -1073,6 +1073,41 @@ mod tests {
     }
 
     #[test]
+    fn package_lint_rejects_unsupported_component_interpolation_in_materialization_cwd() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("bad");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "bad",
+                "components": { "jetpack": { "path": "/tmp/jetpack" } },
+                "requirements": {
+                    "dependency_materialization": [{
+                        "id": "install",
+                        "command": "npm install",
+                        "cwd": "${components.jetpack.checkout_root}",
+                        "safety": "writes_working_tree"
+                    }]
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let contract_step = outcome
+            .steps
+            .iter()
+            .find(|step| step.label.contains("Homeboy rig contract"))
+            .expect("contract step");
+
+        assert_eq!(contract_step.status, "fail");
+        let error = contract_step.error.as_ref().expect("contract error");
+        assert!(error.contains("${components.jetpack.checkout_root}"));
+        assert!(error.contains("${components.<id>.path}"));
+    }
+
+    #[test]
     fn package_lint_reports_unknown_top_level_rig_fields() {
         let temp = tempfile::TempDir::new().expect("temp package");
         let rig_dir = temp.path().join("rigs").join("bad");

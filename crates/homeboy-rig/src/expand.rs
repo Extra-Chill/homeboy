@@ -125,12 +125,7 @@ fn resolve_token(rig: &RigSpec, token: &str, env: &BTreeMap<String, String>) -> 
         }
         return super::install::read_source_metadata(&rig.id).map(|metadata| metadata.package_path);
     }
-    if let Some(rest) = token.strip_prefix("components.") {
-        // Expect "<id>.path" — future fields can add here.
-        let (id, field) = rest.split_once('.')?;
-        if field != "path" {
-            return None;
-        }
+    if let Some(id) = component_path_interpolation_id(token) {
         if let Ok(path) = super::component_resolution::resolve_component_path(rig, id) {
             return Some(path);
         }
@@ -159,6 +154,31 @@ fn resolve_token(rig: &RigSpec, token: &str, env: &BTreeMap<String, String>) -> 
         return Some(std::env::var(name).unwrap_or_default());
     }
     None
+}
+
+pub(crate) fn component_path_interpolation_id(token: &str) -> Option<&str> {
+    let rest = token.strip_prefix("components.")?;
+    let (id, field) = rest.split_once('.')?;
+    (!id.is_empty() && field == "path").then_some(id)
+}
+
+pub(crate) fn unsupported_component_interpolations(input: &str) -> Vec<String> {
+    let mut unsupported = Vec::new();
+    let mut remaining = input;
+
+    while let Some(start) = remaining.find("${") {
+        let after_start = &remaining[start + 2..];
+        let Some(end) = after_start.find('}') else {
+            break;
+        };
+        let token = &after_start[..end];
+        if token.starts_with("components.") && component_path_interpolation_id(token).is_none() {
+            unsupported.push(format!("${{{token}}}"));
+        }
+        remaining = &after_start[end + 1..];
+    }
+
+    unsupported
 }
 
 /// Materialize rig settings as environment variables.
