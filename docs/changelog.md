@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.312.1] - 2026-07-24
+
+### Fixed
+- strip conventional prefix with hyphenated/punctuated scopes
+
 ## [0.312.0] - 2026-07-24
 
 ### Added
