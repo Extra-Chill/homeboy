@@ -10,11 +10,11 @@ use super::delegated::{DELEGATED_RUN_POLL_MS_ENV, DELEGATED_RUN_STATUS_FILE_ENV}
 use super::host::{get_local_ips, is_local_host};
 use super::local_exec::{
     execute_local_command_in_dir, execute_local_command_interactive,
-    execute_local_command_passthrough, execute_local_command_stderr_passthrough,
+    execute_local_command_passthrough, execute_local_command_stderr_passthrough, StdinSource,
 };
 use super::ssh_client::{
     build_secret_env_stdin_block, execute_command_with_stdin_timeout,
-    execute_command_with_writer_factory, run_command_with_stdin_reader,
+    execute_command_with_writer_factory, run_command_with_stdin_source,
     wrap_command_with_secret_env_read_loop, SECRET_ENV_STDIN_SENTINEL,
 };
 use super::{CommandOutput, SshClient};
@@ -195,7 +195,8 @@ fn piped_stdin_preserves_binary_bytes_exactly() {
         crate::engine::shell::quote_path(&path.path().to_string_lossy())
     ));
 
-    let output = run_command_with_stdin_reader(command, Cursor::new(payload));
+    let output =
+        run_command_with_stdin_source(command, StdinSource::Reader(Box::new(Cursor::new(payload))));
 
     assert!(output.success, "{}", output.stderr);
     assert_eq!(
@@ -207,9 +208,9 @@ fn piped_stdin_preserves_binary_bytes_exactly() {
 #[test]
 fn piped_stdin_handles_large_payload_with_backpressure() {
     let payload = vec![0xA5; 8 * 1024 * 1024];
-    let output = run_command_with_stdin_reader(
+    let output = run_command_with_stdin_source(
         piped_command("cat >/dev/null; printf complete"),
-        Cursor::new(payload),
+        StdinSource::Reader(Box::new(Cursor::new(payload))),
     );
 
     assert!(output.success, "{}", output.stderr);
@@ -218,9 +219,9 @@ fn piped_stdin_handles_large_payload_with_backpressure() {
 
 #[test]
 fn closed_remote_stdin_cannot_report_success() {
-    let output = run_command_with_stdin_reader(
+    let output = run_command_with_stdin_source(
         piped_command("exec 0<&-; exit 0"),
-        Cursor::new(vec![0x5A; 1024 * 1024]),
+        StdinSource::Reader(Box::new(Cursor::new(vec![0x5A; 1024 * 1024]))),
     );
 
     assert!(!output.success);
@@ -230,17 +231,61 @@ fn closed_remote_stdin_cannot_report_success() {
 
 #[test]
 fn empty_piped_stdin_allows_a_zero_exit_no_op() {
-    let output = run_command_with_stdin_reader(piped_command("true"), Cursor::new(Vec::new()));
+    let output = run_command_with_stdin_source(
+        piped_command("true"),
+        StdinSource::Reader(Box::new(Cursor::new(Vec::new()))),
+    );
 
     assert!(output.success, "{}", output.stderr);
     assert_eq!(output.exit_code, 0);
 }
 
+#[cfg(unix)]
+fn idle_pipe() -> (std::fs::File, std::fs::File) {
+    use std::os::fd::FromRawFd;
+
+    let mut descriptors = [0; 2];
+    assert_eq!(unsafe { libc::pipe(descriptors.as_mut_ptr()) }, 0);
+    unsafe {
+        (
+            std::fs::File::from_raw_fd(descriptors[0]),
+            std::fs::File::from_raw_fd(descriptors[1]),
+        )
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn idle_piped_stdin_is_cancelled_after_zero_exit() {
+    let (reader, _producer) = idle_pipe();
+    let started = Instant::now();
+
+    let output = run_command_with_stdin_source(piped_command("exit 0"), StdinSource::Piped(reader));
+
+    assert!(output.success, "{}", output.stderr);
+    assert_eq!(output.exit_code, 0);
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[cfg(unix)]
+#[test]
+fn idle_piped_stdin_is_cancelled_after_nonzero_exit() {
+    let (reader, _producer) = idle_pipe();
+    let started = Instant::now();
+
+    let output =
+        run_command_with_stdin_source(piped_command("exit 42"), StdinSource::Piped(reader));
+
+    assert!(!output.success);
+    assert_eq!(output.exit_code, 42);
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
 #[test]
 fn transport_failure_preserves_its_nonzero_exit_code() {
-    let output = run_command_with_stdin_reader(
+    let output = run_command_with_stdin_source(
         piped_command("cat >/dev/null; exit 255"),
-        Cursor::new(b"payload".to_vec()),
+        StdinSource::Reader(Box::new(Cursor::new(b"payload".to_vec()))),
     );
 
     assert!(!output.success);
@@ -257,7 +302,10 @@ impl Read for FailingReader {
 
 #[test]
 fn local_producer_failure_cannot_report_success() {
-    let output = run_command_with_stdin_reader(piped_command("cat >/dev/null"), FailingReader);
+    let output = run_command_with_stdin_source(
+        piped_command("cat >/dev/null"),
+        StdinSource::Reader(Box::new(FailingReader)),
+    );
 
     assert!(!output.success);
     assert_ne!(output.exit_code, 0);

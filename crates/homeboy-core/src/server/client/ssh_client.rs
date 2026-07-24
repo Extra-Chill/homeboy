@@ -18,8 +18,9 @@ use super::super::{
 use super::host::{is_local_host, is_transient_ssh_error};
 use super::local_exec::{
     execute_local_command, execute_local_command_in_dir_with_timeout,
-    execute_local_command_interactive, execute_local_command_with_stdin,
-    execute_local_command_with_stdin_and_timeout, execute_local_command_with_stdin_reader,
+    execute_local_command_interactive, execute_local_command_with_piped_stdin,
+    execute_local_command_with_stdin, execute_local_command_with_stdin_and_timeout,
+    piped_stdin_file, spawn_stdin_pump, StdinSource,
 };
 use super::{CommandOutput, SshClient};
 
@@ -385,8 +386,13 @@ impl SshClient {
     pub fn execute_with_piped_stdin(&self, command: &str) -> CommandOutput {
         let effective = self.prepend_env(command);
         if self.is_local {
-            return execute_local_command_with_stdin_reader(&effective, std::io::stdin());
+            return execute_local_command_with_piped_stdin(&effective);
         }
+
+        let stdin = match piped_stdin_file() {
+            Ok(stdin) => stdin,
+            Err(error) => return ssh_process_error(error),
+        };
 
         let args = self.build_ssh_args(Some(&effective), false);
         let mut cmd = Command::new("ssh");
@@ -394,7 +400,7 @@ impl SshClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        run_command_with_stdin_reader(cmd, std::io::stdin())
+        run_command_with_stdin_source(cmd, StdinSource::Piped(stdin))
     }
 
     /// Execute a short, read-only probe with a hard wall-clock deadline.
@@ -482,31 +488,23 @@ impl SshClient {
     }
 }
 
-pub(super) fn run_command_with_stdin_reader(
+pub(super) fn run_command_with_stdin_source(
     mut cmd: Command,
-    mut reader: impl Read + Send + 'static,
+    source: StdinSource,
 ) -> CommandOutput {
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(error) => return ssh_process_error(error),
     };
-    let writer = child.stdin.take().map(|mut pipe| {
-        thread::spawn(move || {
-            let mut buffer = [0u8; 64 * 1024];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => return Ok(()),
-                    Ok(count) => pipe.write_all(&buffer[..count])?,
-                    Err(error) => return Err(error),
-                }
-            }
-        })
-    });
+    let writer = child
+        .stdin
+        .take()
+        .map(|pipe| spawn_stdin_pump(pipe, source));
     let stdout = child.stdout.take().map(read_stream);
     let stderr = child.stderr.take().map(read_stream);
     let status = child.wait();
     let stdin_failed = writer
-        .and_then(|writer| writer.join().ok())
+        .and_then(|writer| writer.finish_after_child())
         .is_some_and(|result: std::io::Result<()>| result.is_err());
     let stdout = stdout
         .and_then(|reader| reader.join().ok())
