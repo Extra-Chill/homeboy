@@ -27,6 +27,12 @@ pub(super) fn build_semver_recommendation(
         return Ok(None);
     }
 
+    let non_conventional_commit_count = commits
+        .iter()
+        .filter(|c| c.category == git::CommitCategory::Other)
+        .count();
+    let considered_commit_count = commits.len();
+
     if is_explicit_version {
         return Ok(Some(ReleaseSemverRecommendation {
             latest_tag: latest_tag.clone(),
@@ -36,6 +42,8 @@ pub(super) fn build_semver_recommendation(
             requested_bump: requested_bump.to_string(),
             is_underbump: false,
             reasons: Vec::new(),
+            non_conventional_commit_count,
+            considered_commit_count,
             bump_policy: None,
         }));
     }
@@ -78,6 +86,17 @@ pub(super) fn build_semver_recommendation(
         (requested, is_underbump)
     };
 
+    let mut reasons = recommendation_reasons(&commits, recommended);
+    if let Some(warning) = low_confidence_bump_warning(
+        recommended,
+        non_conventional_commit_count,
+        considered_commit_count,
+    ) {
+        // Lead with the low-confidence signal so it is not buried under the
+        // per-commit reason lines when the output is truncated.
+        reasons.insert(0, warning);
+    }
+
     Ok(Some(ReleaseSemverRecommendation {
         latest_tag: latest_tag.clone(),
         range: commit_range(latest_tag.as_deref()),
@@ -85,9 +104,43 @@ pub(super) fn build_semver_recommendation(
         recommended_bump: recommended.map(|r| r.as_str().to_string()),
         requested_bump: requested.as_str().to_string(),
         is_underbump,
-        reasons: recommendation_reasons(&commits, recommended),
+        reasons,
+        non_conventional_commit_count,
+        considered_commit_count,
         bump_policy: None,
     }))
+}
+
+/// Fraction of non-conventional commits above which a low (patch/none)
+/// auto-detected bump is flagged as low-confidence. On repos that don't use
+/// conventional-commit prefixes, most commits classify `other` and can only ever
+/// drive a `patch`, so a majority-non-conventional history recommending patch is
+/// exactly the silent under-bump the operator should see before tagging (#6851).
+const LOW_CONFIDENCE_NON_CONVENTIONAL_FRACTION: f64 = 0.5;
+
+/// A warning when the auto-detected bump is likely too low because the history
+/// lacks conventional-commit prefixes. Only fires for a low recommendation
+/// (patch or none) — a `feat:`/breaking-driven minor/major is already confident.
+fn low_confidence_bump_warning(
+    recommended: Option<git::SemverBump>,
+    non_conventional_commit_count: usize,
+    considered_commit_count: usize,
+) -> Option<String> {
+    if considered_commit_count == 0 {
+        return None;
+    }
+    let is_low = matches!(recommended, None | Some(git::SemverBump::Patch));
+    if !is_low {
+        return None;
+    }
+    let fraction = non_conventional_commit_count as f64 / considered_commit_count as f64;
+    if fraction < LOW_CONFIDENCE_NON_CONVENTIONAL_FRACTION {
+        return None;
+    }
+    let recommended_label = recommended.map(|r| r.as_str()).unwrap_or("none");
+    Some(format!(
+        "low-confidence bump: {non_conventional_commit_count} of {considered_commit_count} commits have no conventional-commit prefix and were treated as `other` (patch-level). Auto-detected `{recommended_label}` may under-bump — pass an explicit --bump (e.g. minor) if this range adds features."
+    ))
 }
 
 pub(super) fn validate_release_version_floor(

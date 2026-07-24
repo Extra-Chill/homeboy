@@ -136,6 +136,15 @@ pub struct ReleaseSemverRecommendation {
     pub requested_bump: String,
     pub is_underbump: bool,
     pub reasons: Vec<String>,
+    /// How many commits in range carried no recognizable conventional-commit
+    /// prefix (`feat:`/`fix:`/etc.). On repos that don't use conventional commits
+    /// these are classified `other` and only ever drive a `patch` bump, so a
+    /// high count next to a low bump is a silent under-bump signal (#6851).
+    #[serde(default)]
+    pub non_conventional_commit_count: usize,
+    /// Total commits considered for the bump (excludes merge/release noise).
+    #[serde(default)]
+    pub considered_commit_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bump_policy: Option<ReleaseBumpPolicy>,
 }
@@ -617,6 +626,8 @@ mod tests {
             requested_bump: "minor".to_string(),
             is_underbump: false,
             reasons: Vec::new(),
+            non_conventional_commit_count: 0,
+            considered_commit_count: 0,
             bump_policy: None,
         };
         let plan = ReleasePlan::new(

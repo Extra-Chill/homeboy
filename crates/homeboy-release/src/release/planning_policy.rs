@@ -331,6 +331,8 @@ mod tests {
             requested_bump: requested.to_string(),
             is_underbump: false,
             reasons: vec![],
+            non_conventional_commit_count: 0,
+            considered_commit_count: 0,
             bump_policy: None,
         }
     }
