@@ -11,10 +11,14 @@ fn providers_output_includes_core_capability_contract() {
             secret_env: Vec::new(),
             validate_readiness: false,
             refresh: false,
+            catalog: false,
         })
         .expect("providers output");
 
         assert_eq!(status, 0);
+        // An absent `--backend` leaves the presentation unscoped (#9654).
+        assert_eq!(value["scope"]["filtered"], false);
+        assert!(value["scope"]["backend"].is_null());
         assert_eq!(
             value["capability_contract"]["schema"],
             AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA

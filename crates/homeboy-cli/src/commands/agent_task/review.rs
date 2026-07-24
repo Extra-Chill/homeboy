@@ -787,6 +787,33 @@ pub(crate) fn gate_feedback(args: GateFeedbackArgs) -> CmdResult<Value> {
     Ok((serde_json::to_value(report).unwrap_or(Value::Null), 0))
 }
 
+/// The backend the providers presentation is scoped to, if any. `--catalog`
+/// (full multi-backend view) and an absent `--backend` both leave the output
+/// unscoped (#9654).
+fn scoped_provider_backend(backend: Option<&str>, catalog: bool) -> Option<&str> {
+    if catalog {
+        return None;
+    }
+    backend
+}
+
+/// Filter the catalog to the scoped backend's providers, or return the full set
+/// when unscoped. All derived catalog sections are built from the result, so a
+/// single-backend query no longer emits every other backend's data (#9654).
+fn scope_providers(
+    all_providers: &[AgentTaskExecutorProvider],
+    scoped_backend: Option<&str>,
+) -> Vec<AgentTaskExecutorProvider> {
+    match scoped_backend {
+        Some(backend) => all_providers
+            .iter()
+            .filter(|provider| provider.backend == backend)
+            .cloned()
+            .collect(),
+        None => all_providers.to_vec(),
+    }
+}
+
 pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     let catalog = if args.refresh {
         AgentTaskProviderCatalog::refresh()
@@ -795,9 +822,7 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     };
     let catalog_version = catalog.version.clone();
     let executor = ExtensionProviderAgentTaskExecutor::from_catalog(catalog);
-    let providers = executor.providers();
-    let fallback_sources =
-        homeboy::agents::agent_tasks::provider::provider_secret_sources_for_providers(providers);
+    let all_providers = executor.providers();
     if args.validate_readiness {
         let backend = args.backend.as_deref().ok_or_else(|| {
             homeboy::core::Error::validation_invalid_argument(
@@ -815,12 +840,31 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
             args.selector.as_deref(),
         )?;
     }
+
+    // Default to the requested backend's slice. Dumping the whole multi-backend
+    // catalog (every backend's providers, identity catalog, dispatch layers, and
+    // diagnostics) for a single-backend readiness query overflowed the caller
+    // display limit and buried the answer (#9654). `--catalog`/`--all` opts back
+    // into the full catalog; an absent `--backend` still shows everything.
+    let scoped_backend = scoped_provider_backend(args.backend.as_deref(), args.catalog);
+    let scoped_providers = scope_providers(all_providers, scoped_backend);
+    let providers: &[AgentTaskExecutorProvider] = &scoped_providers;
+    let fallback_sources =
+        homeboy::agents::agent_tasks::provider::provider_secret_sources_for_providers(providers);
+
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-providers/v1",
             "catalog": {
                 "refreshed": args.refresh,
                 "version": catalog_version,
+            },
+            "scope": {
+                "backend": scoped_backend,
+                "filtered": scoped_backend.is_some(),
+                "shown": providers.len(),
+                "total": all_providers.len(),
+                "catalog_command": "homeboy agent-task providers --catalog",
             },
             "dispatch_config_layers": dispatch_config_layers(providers),
             "provider_identity_catalog": provider_identity_catalog(providers),
@@ -1698,5 +1742,56 @@ mod tests {
             handoff["pr_url"],
             "https://github.com/Extra-Chill/homeboy/pull/9999"
         );
+    }
+
+    fn provider_fixture(id: &str, backend: &str) -> AgentTaskExecutorProvider {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "backend": backend,
+            "extension_id": format!("{backend}.extension"),
+            "runtime_id": format!("{backend}-runtime"),
+        }))
+        .expect("provider fixture")
+    }
+
+    #[test]
+    fn providers_scope_filters_to_requested_backend_by_default() {
+        let all = vec![
+            provider_fixture("opencode.executor", "opencode"),
+            provider_fixture("codex.executor", "codex"),
+            provider_fixture("opencode.executor-2", "opencode"),
+        ];
+
+        // `--backend opencode` (no `--catalog`) scopes to opencode only.
+        let backend = scoped_provider_backend(Some("opencode"), false);
+        assert_eq!(backend, Some("opencode"));
+        let scoped = scope_providers(&all, backend);
+        assert_eq!(scoped.len(), 2);
+        assert!(scoped.iter().all(|provider| provider.backend == "opencode"));
+    }
+
+    #[test]
+    fn providers_scope_catalog_flag_returns_full_multi_backend_set() {
+        let all = vec![
+            provider_fixture("opencode.executor", "opencode"),
+            provider_fixture("codex.executor", "codex"),
+        ];
+
+        // `--catalog` overrides `--backend` and returns everything.
+        let backend = scoped_provider_backend(Some("opencode"), true);
+        assert_eq!(backend, None);
+        assert_eq!(scope_providers(&all, backend).len(), 2);
+
+        // An absent `--backend` also returns the full set.
+        let unscoped = scoped_provider_backend(None, false);
+        assert_eq!(unscoped, None);
+        assert_eq!(scope_providers(&all, unscoped).len(), 2);
+    }
+
+    #[test]
+    fn providers_scope_unknown_backend_yields_empty_slice() {
+        let all = vec![provider_fixture("opencode.executor", "opencode")];
+        let scoped = scope_providers(&all, scoped_provider_backend(Some("nope"), false));
+        assert!(scoped.is_empty());
     }
 }

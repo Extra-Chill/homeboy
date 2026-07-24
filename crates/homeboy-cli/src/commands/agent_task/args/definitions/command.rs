@@ -141,6 +141,11 @@ pub struct ProvidersArgs {
     pub validate_readiness: bool,
     #[arg(long = "refresh")]
     pub refresh: bool,
+    /// Return the full multi-backend catalog even when `--backend` is set.
+    /// Without this, `--backend X` filters the presentation to X so the output
+    /// stays within caller display limits (#9654).
+    #[arg(long = "catalog", visible_alias = "all")]
+    pub catalog: bool,
 }
 #[derive(Args, Debug)]
 pub struct AgentTaskDoctorArgs {
