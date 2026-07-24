@@ -1,4 +1,5 @@
 use clap::{Args, Subcommand};
+use std::io::IsTerminal;
 use homeboy::core::engine::shell;
 use homeboy::core::server::{self, Server};
 use homeboy::core::server::{resolve_context, SshClient, SshResolveArgs};
@@ -141,7 +142,11 @@ pub fn run(args: SshArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Ss
                         "No command resolved for non-interactive SSH execution".to_string(),
                     )
                 })?;
-                let output = client.execute(cmd);
+                let output = if std::io::stdin().is_terminal() {
+                    client.execute(cmd)
+                } else {
+                    client.execute_with_piped_stdin(cmd)
+                };
 
                 Ok((
                     SshOutput::Connect(connect_output_from_execution(
@@ -240,7 +245,11 @@ pub(super) fn execute_raw_command(
             "No command resolved for non-interactive SSH execution".to_string(),
         )
     })?;
-    let output = client.execute(cmd);
+    let output = if std::io::stdin().is_terminal() {
+        client.execute(cmd)
+    } else {
+        client.execute_with_piped_stdin(cmd)
+    };
     Ok((output.stdout, output.stderr, output.exit_code))
 }
 

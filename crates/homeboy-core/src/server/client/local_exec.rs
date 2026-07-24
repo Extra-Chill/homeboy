@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{Cursor, Read, Write};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -26,7 +26,25 @@ pub fn execute_local_command(command: &str) -> CommandOutput {
 /// `sh -c` argv (where they would be visible in `ps`). The bytes are written on
 /// a dedicated thread and stdin is closed (EOF) once they are flushed.
 pub(crate) fn execute_local_command_with_stdin(command: &str, stdin: &[u8]) -> CommandOutput {
-    execute_local_command_in_dir_impl(command, None, None, None, Some(stdin.to_vec()))
+    execute_local_command_in_dir_impl(
+        command,
+        None,
+        None,
+        None,
+        Some(Box::new(Cursor::new(stdin.to_vec()))),
+    )
+}
+
+/// Run a local command while streaming bytes from a reader into its stdin.
+///
+/// This is the localhost implementation of the non-interactive SSH stdin
+/// contract. Keeping the reader streaming avoids buffering piped artifacts in
+/// the controller process.
+pub(crate) fn execute_local_command_with_stdin_reader(
+    command: &str,
+    stdin: impl Read + Send + 'static,
+) -> CommandOutput {
+    execute_local_command_in_dir_impl(command, None, None, None, Some(Box::new(stdin)))
 }
 
 pub(crate) fn execute_local_command_with_stdin_and_timeout(
@@ -34,7 +52,13 @@ pub(crate) fn execute_local_command_with_stdin_and_timeout(
     stdin: &[u8],
     timeout: Duration,
 ) -> CommandOutput {
-    execute_local_command_in_dir_impl(command, None, None, Some(timeout), Some(stdin.to_vec()))
+    execute_local_command_in_dir_impl(
+        command,
+        None,
+        None,
+        Some(timeout),
+        Some(Box::new(Cursor::new(stdin.to_vec()))),
+    )
 }
 
 /// Run a local command, capturing stdout/stderr.
@@ -71,7 +95,7 @@ fn execute_local_command_in_dir_impl(
     current_dir: Option<&str>,
     env: Option<&[(&str, &str)]>,
     timeout: Option<Duration>,
-    stdin: Option<Vec<u8>>,
+    stdin: Option<Box<dyn Read + Send>>,
 ) -> CommandOutput {
     run_local_command(
         command,
@@ -88,7 +112,7 @@ fn run_local_command(
     current_dir: Option<&str>,
     env: Option<&[(&str, &str)]>,
     timeout: Option<Duration>,
-    stdin: Option<Vec<u8>>,
+    stdin: Option<Box<dyn Read + Send>>,
     stream_mode: StreamMode,
 ) -> CommandOutput {
     #[cfg(windows)]
@@ -142,13 +166,19 @@ fn run_local_command(
     );
     let monitor = ChildResourceMonitor::start(child.id(), command.to_string());
 
-    // Stream the provided stdin bytes on a dedicated thread, then close the pipe
-    // (EOF). The command's own stdin is empty for this path, so the buffer is
-    // small and never deadlocks against the captured stdout/stderr pipes.
-    let stdin_handle = stdin.and_then(|bytes| {
+    // Stream stdin independently while stdout/stderr are drained, so a large
+    // producer cannot deadlock against a verbose child command.
+    let stdin_handle = stdin.and_then(|mut reader| {
         child.stdin.take().map(|mut pipe| {
             thread::spawn(move || {
-                let _ = pipe.write_all(&bytes);
+                let mut buffer = [0u8; 64 * 1024];
+                loop {
+                    match reader.read(&mut buffer) {
+                        Ok(0) => return Ok(()),
+                        Ok(count) => pipe.write_all(&buffer[..count])?,
+                        Err(error) => return Err(error),
+                    }
+                }
             })
         })
     });
@@ -172,9 +202,9 @@ fn run_local_command(
         wait_for_child_or_delegated_failure(&mut child, env, &mut cleanup_guard, timeout);
     let interrupted_signal = active_cleanup_signal();
 
-    if let Some(handle) = stdin_handle {
-        let _ = handle.join();
-    }
+    let stdin_failed = stdin_handle
+        .and_then(|handle| handle.join().ok())
+        .is_some_and(|result: std::io::Result<()>| result.is_err());
     let stdout = stdout_handle
         .and_then(|h| h.join().ok())
         .unwrap_or_default();
@@ -185,21 +215,28 @@ fn run_local_command(
     let output = match status {
         Ok(status) => CommandOutput {
             stdout,
-            stderr: stderr_with_delegated_failure(
-                stderr_with_timeout(
-                    stderr_with_interruption(stderr, interrupted_signal),
-                    timed_out,
-                    timeout,
+            stderr: stdin_failure_message(
+                stderr_with_delegated_failure(
+                    stderr_with_timeout(
+                        stderr_with_interruption(stderr, interrupted_signal),
+                        timed_out,
+                        timeout,
+                    ),
+                    delegated_failure.as_ref(),
                 ),
-                delegated_failure.as_ref(),
+                stdin_failed,
             ),
             success: status.success()
                 && interrupted_signal.is_none()
                 && delegated_failure.is_none()
-                && !timed_out,
+                && !timed_out
+                && !stdin_failed,
             exit_code: timed_out_exit_code(
                 timed_out,
-                interrupted_exit_code(interrupted_signal, status.code().unwrap_or(-1)),
+                stdin_failure_exit_code(
+                    stdin_failed,
+                    interrupted_exit_code(interrupted_signal, status.code().unwrap_or(-1)),
+                ),
             ),
             timed_out,
             child_resource: Some(monitor.finish()),
@@ -230,6 +267,24 @@ fn run_local_command(
         cleanup_guard.cleanup();
     }
     output
+}
+
+fn stdin_failure_message(mut stderr: String, stdin_failed: bool) -> String {
+    if stdin_failed {
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        stderr.push_str("Homeboy stdin delivery failed before command completion.");
+    }
+    stderr
+}
+
+fn stdin_failure_exit_code(stdin_failed: bool, exit_code: i32) -> i32 {
+    if stdin_failed && exit_code == 0 {
+        1
+    } else {
+        exit_code
+    }
 }
 
 fn read_all<R: Read>(mut src: R) -> String {

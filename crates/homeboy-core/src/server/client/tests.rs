@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::io::{Cursor, Read};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use super::super::{
@@ -12,8 +14,8 @@ use super::local_exec::{
 };
 use super::ssh_client::{
     build_secret_env_stdin_block, execute_command_with_stdin_timeout,
-    execute_command_with_writer_factory, wrap_command_with_secret_env_read_loop,
-    SECRET_ENV_STDIN_SENTINEL,
+    execute_command_with_writer_factory, run_command_with_stdin_reader,
+    wrap_command_with_secret_env_read_loop, SECRET_ENV_STDIN_SENTINEL,
 };
 use super::{CommandOutput, SshClient};
 
@@ -172,6 +174,94 @@ fn injected_stdin_write_failure_kills_a_term_ignoring_child_without_leaking_secr
     assert!(output.stderr.contains("stdin delivery failed"));
     assert!(!output.stdout.contains("stdin-failure-secret"));
     assert!(!output.stderr.contains("stdin-failure-secret"));
+}
+
+fn piped_command(script: &str) -> Command {
+    let mut command = Command::new("sh");
+    command
+        .args(["-c", script])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
+#[test]
+fn piped_stdin_preserves_binary_bytes_exactly() {
+    let path = tempfile::NamedTempFile::new().expect("temporary payload target");
+    let payload = [0, 255, 1, b'\n', 0, 42, 128];
+    let command = piped_command(&format!(
+        "cat > {}",
+        crate::engine::shell::quote_path(&path.path().to_string_lossy())
+    ));
+
+    let output = run_command_with_stdin_reader(command, Cursor::new(payload));
+
+    assert!(output.success, "{}", output.stderr);
+    assert_eq!(
+        std::fs::read(path.path()).expect("read received payload"),
+        payload
+    );
+}
+
+#[test]
+fn piped_stdin_handles_large_payload_with_backpressure() {
+    let payload = vec![0xA5; 8 * 1024 * 1024];
+    let output = run_command_with_stdin_reader(
+        piped_command("cat >/dev/null; printf complete"),
+        Cursor::new(payload),
+    );
+
+    assert!(output.success, "{}", output.stderr);
+    assert_eq!(output.stdout, "complete");
+}
+
+#[test]
+fn closed_remote_stdin_cannot_report_success() {
+    let output = run_command_with_stdin_reader(
+        piped_command("exec 0<&-; exit 0"),
+        Cursor::new(vec![0x5A; 1024 * 1024]),
+    );
+
+    assert!(!output.success);
+    assert_ne!(output.exit_code, 0);
+    assert!(output.stderr.contains("stdin delivery failed"));
+}
+
+#[test]
+fn empty_piped_stdin_allows_a_zero_exit_no_op() {
+    let output = run_command_with_stdin_reader(piped_command("true"), Cursor::new(Vec::new()));
+
+    assert!(output.success, "{}", output.stderr);
+    assert_eq!(output.exit_code, 0);
+}
+
+#[test]
+fn transport_failure_preserves_its_nonzero_exit_code() {
+    let output = run_command_with_stdin_reader(
+        piped_command("cat >/dev/null; exit 255"),
+        Cursor::new(b"payload".to_vec()),
+    );
+
+    assert!(!output.success);
+    assert_eq!(output.exit_code, 255);
+}
+
+struct FailingReader;
+
+impl Read for FailingReader {
+    fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("producer failed"))
+    }
+}
+
+#[test]
+fn local_producer_failure_cannot_report_success() {
+    let output = run_command_with_stdin_reader(piped_command("cat >/dev/null"), FailingReader);
+
+    assert!(!output.success);
+    assert_ne!(output.exit_code, 0);
+    assert!(output.stderr.contains("stdin delivery failed"));
 }
 
 #[test]
