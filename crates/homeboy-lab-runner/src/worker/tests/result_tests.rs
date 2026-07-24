@@ -211,6 +211,9 @@ fn reverse_worker_result_surfaces_resource_guard_violation() {
                 resource_guard: Some(RunnerResourceGuardLimits {
                     rss_limit_bytes: 23 * 1024 * 1024 * 1024,
                     process_count_limit: 128,
+                    process_count_limit_source: Some("default".to_string()),
+                    requested_process_count_limit: None,
+                    process_count_limit_ceiling: Some(256),
                     concurrency: 4,
                     memory_capacity_bytes: Some(96 * 1024 * 1024 * 1024),
                     host_headroom_bytes: Some((96 * 1024 * 1024 * 1024) / 10),
@@ -289,6 +292,13 @@ fn reverse_worker_result_surfaces_resource_guard_violation() {
     assert_eq!(guard.active_rss_bytes, Some(64 * 1024 * 1024 * 1024));
     assert_eq!(guard.aggregate_rss_bytes, Some(87 * 1024 * 1024 * 1024));
     assert_eq!(guard.rss_limit_bytes, 23 * 1024 * 1024 * 1024);
+    assert_eq!(guard.process_count_limit_source.as_deref(), Some("default"));
+    assert_eq!(guard.requested_process_count_limit, None);
+    assert_eq!(guard.process_count_limit_ceiling, Some(256));
+    let guard_json = serde_json::to_value(guard).expect("serialize resource guard evidence");
+    assert_eq!(guard_json["process_count_limit_source"], "default");
+    assert!(guard_json.get("requested_process_count_limit").is_none());
+    assert_eq!(guard_json["process_count_limit_ceiling"], 256);
 }
 
 #[test]

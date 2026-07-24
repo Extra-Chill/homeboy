@@ -702,6 +702,9 @@ pub(crate) struct PreparedRunnerProcess {
     pub cwd: String,
     pub command: Vec<String>,
     pub env: HashMap<String, String>,
+    /// Public environment supplied by the authenticated execution request,
+    /// before runner-owned environment and secrets are merged.
+    pub resource_guard_env: HashMap<String, String>,
     pub secret_env_names: Vec<String>,
     pub source_snapshot: SourceSnapshot,
     pub require_paths: Vec<String>,

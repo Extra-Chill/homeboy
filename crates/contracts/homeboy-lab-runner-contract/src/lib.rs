@@ -300,6 +300,12 @@ pub struct RunnerResourceMetrics {
 pub struct RunnerResourceGuardLimits {
     pub rss_limit_bytes: u64,
     pub process_count_limit: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_count_limit_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_process_count_limit: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_count_limit_ceiling: Option<u64>,
     pub concurrency: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_capacity_bytes: Option<u64>,

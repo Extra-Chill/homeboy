@@ -65,7 +65,7 @@ pub fn runner_exec_failure_error(output: &RunnerExecOutput) -> Option<Error> {
     }
     if let Some(message) = runner_resource_guard_message(output) {
         error = error.with_hint(format!(
-            "Runner resource guard stopped the job before it could destabilize the runner daemon: {message}. Override only for trusted workloads with HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES or HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT."
+            "Runner resource guard stopped the job before it could destabilize the runner daemon: {message}. Trusted jobs may request a bounded process budget with HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT; the runner-owned HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT ceiling still applies. RSS policy remains runner-owned through HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES."
         ));
     }
 
