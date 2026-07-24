@@ -860,18 +860,39 @@ pub fn recommended_bump_from_commits(commits: &[CommitInfo]) -> Option<SemverBum
 /// "feat: Add new feature" -> "Add new feature"
 /// "fix(scope): Fix bug" -> "Fix bug"
 pub fn strip_conventional_prefix(subject: &str) -> &str {
-    // Pattern: type(scope)?: message or type!: message
+    // Pattern: type(scope)?!?: message
+    // The type is a short alphanumeric word (feat, fix, test, chore, ...).
+    // The optional scope lives inside parentheses and may contain arbitrary
+    // punctuation (e.g. `agent-task`, `feat/scope`, `#741`, `a.b`), so it must
+    // not be validated against the same narrow character set as the type.
     if let Some(pos) = subject.find(": ") {
-        let prefix = &subject[..pos];
-        // Check if it looks like a conventional commit prefix
-        if prefix
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '(' || c == ')' || c == '!' || c == '#')
-        {
+        if is_conventional_prefix(&subject[..pos]) {
             return &subject[pos + 2..];
         }
     }
     subject
+}
+
+/// Returns true when `prefix` (the text before the first `": "`) is a
+/// conventional-commit prefix of the form `type`, `type!`, `type(scope)`, or
+/// `type(scope)!`. The scope is accepted verbatim so hyphenated, slashed, or
+/// issue-number scopes survive.
+fn is_conventional_prefix(prefix: &str) -> bool {
+    // Strip a trailing breaking-change `!`.
+    let prefix = prefix.strip_suffix('!').unwrap_or(prefix);
+
+    // Split off an optional `(scope)` suffix; the scope itself is not validated.
+    let type_part = match prefix.strip_suffix(')') {
+        Some(head) => match head.split_once('(') {
+            // Reject an empty scope like `feat():`.
+            Some((type_part, scope)) if !scope.is_empty() => type_part,
+            _ => return false,
+        },
+        None => prefix,
+    };
+
+    // The type must be a non-empty alphabetic word (feat, fix, test, chore, ...).
+    !type_part.is_empty() && type_part.chars().all(|c| c.is_ascii_alphabetic())
 }
 
 #[cfg(test)]
@@ -1058,6 +1079,59 @@ mod tests {
         assert_eq!(
             strip_conventional_prefix("feat(#123): add new feature"),
             "add new feature"
+        );
+    }
+
+    #[test]
+    fn strip_conventional_prefix_handles_hyphenated_scope() {
+        assert_eq!(
+            strip_conventional_prefix(
+                "feat(agent-task): surface local cook provider execution in logs"
+            ),
+            "surface local cook provider execution in logs"
+        );
+        assert_eq!(
+            strip_conventional_prefix(
+                "test(agent-task): cover local cook logs surfacing running provider execution"
+            ),
+            "cover local cook logs surfacing running provider execution"
+        );
+    }
+
+    #[test]
+    fn strip_conventional_prefix_handles_punctuated_scopes() {
+        assert_eq!(
+            strip_conventional_prefix("fix(lab/runner): converge stale daemon"),
+            "converge stale daemon"
+        );
+        assert_eq!(strip_conventional_prefix("chore(a.b): tidy"), "tidy");
+    }
+
+    #[test]
+    fn strip_conventional_prefix_handles_breaking_change_marker() {
+        assert_eq!(
+            strip_conventional_prefix("feat!: drop legacy API"),
+            "drop legacy API"
+        );
+        assert_eq!(
+            strip_conventional_prefix("feat(agent-task)!: drop legacy API"),
+            "drop legacy API"
+        );
+    }
+
+    #[test]
+    fn strip_conventional_prefix_leaves_non_conventional_subjects() {
+        // Empty scope is not a valid conventional prefix.
+        assert_eq!(strip_conventional_prefix("feat(): weird"), "feat(): weird");
+        // A multi-word phrase before the colon is not a single type token.
+        assert_eq!(
+            strip_conventional_prefix("Reverted the change: because reasons"),
+            "Reverted the change: because reasons"
+        );
+        // A subject with no ": " separator is returned unchanged.
+        assert_eq!(
+            strip_conventional_prefix("Regular commit message"),
+            "Regular commit message"
         );
     }
 
