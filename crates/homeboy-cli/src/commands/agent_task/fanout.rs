@@ -133,14 +133,23 @@ fn batch_resume(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
         crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
     )?;
     let exit_code = result.exit_code;
-    let report = result.value;
-    Ok((
+    Ok(batch_resume_result(result.value, exit_code, &args.batch_id))
+}
+
+fn batch_resume_result(
+    report: agent_task_service::AgentTaskCookBatchReport,
+    exit_code: i32,
+    batch_id: &str,
+) -> (Value, i32) {
+    (
         serde_json::json!({
             "schema": "homeboy/agent-task-cook-batch-resume/v1",
             "batch_id": report.batch_id,
             "status": report.status,
             "summary": {
                 "total": report.total,
+                "queued": report.queued,
+                "running": report.running,
                 "succeeded": report.succeeded,
                 "failed": report.failed,
                 "cancelled": report.cancelled,
@@ -148,13 +157,13 @@ fn batch_resume(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
             },
             "cooks": report.cooks,
             "commands": {
-                "status": format!("homeboy agent-task fanout status {}", args.batch_id),
-                "artifacts": format!("homeboy agent-task fanout artifacts {}", args.batch_id),
-                "resume": format!("homeboy agent-task fanout resume {}", args.batch_id),
+                "status": format!("homeboy agent-task fanout status {batch_id}"),
+                "artifacts": format!("homeboy agent-task fanout artifacts {batch_id}"),
+                "resume": format!("homeboy agent-task fanout resume {batch_id}"),
             },
         }),
         exit_code,
-    ))
+    )
 }
 
 fn batch_artifacts(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
@@ -318,6 +327,8 @@ fn batch_cook_result(
             "status": report.status,
             "summary": {
                 "total": report.total,
+                "queued": report.queued,
+                "running": report.running,
                 "succeeded": report.succeeded,
                 "failed": report.failed,
                 "cancelled": report.cancelled,
@@ -1959,6 +1970,13 @@ mod tests {
         for cell in &mut all_failed_report.cooks {
             cell.exit_code = 1;
         }
+        let mut active_failed_report = result.value.clone();
+        active_failed_report.status = "running".to_string();
+        active_failed_report.queued = 0;
+        active_failed_report.running = 1;
+        active_failed_report.succeeded = 0;
+        active_failed_report.failed = 1;
+        active_failed_report.cooks[0].status = "in_flight".to_string();
         let (data, exit_code) = batch_cook_result(&plan, result);
         let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
             &Ok(data),
@@ -1992,6 +2010,34 @@ mod tests {
         assert_eq!(exit_code, 1);
         assert!(!envelope.success);
         assert_eq!(envelope.status, "failed");
+
+        let (immediate, exit_code) = batch_cook_result(
+            &plan,
+            agent_task_service::AgentTaskRunResult {
+                exit_code: 0,
+                value: active_failed_report.clone(),
+            },
+        );
+        let (resumed, resume_exit_code) =
+            batch_resume_result(active_failed_report, 0, "test-batch");
+        for (name, value, code) in [
+            ("immediate", immediate, exit_code),
+            ("resume", resumed, resume_exit_code),
+        ] {
+            assert_eq!(value["status"], "running", "{name}");
+            assert_eq!(code, 0, "{name}");
+            let summary = &value["summary"];
+            assert_eq!(
+                summary["queued"].as_u64().unwrap_or_default()
+                    + summary["running"].as_u64().unwrap_or_default()
+                    + summary["succeeded"].as_u64().unwrap_or_default()
+                    + summary["failed"].as_u64().unwrap_or_default()
+                    + summary["cancelled"].as_u64().unwrap_or_default()
+                    + summary["timed_out"].as_u64().unwrap_or_default(),
+                summary["total"].as_u64().unwrap_or_default(),
+                "{name}"
+            );
+        }
     }
 
     #[test]
