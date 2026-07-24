@@ -334,11 +334,13 @@ fn commit_range(latest_tag: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_semver_recommendation, release_version_floor_base, resolve_tag_and_commits,
-        validate_current_version_tag_reachable, validate_release_version_floor,
+        build_semver_recommendation, low_confidence_bump_warning, release_version_floor_base,
+        resolve_tag_and_commits, validate_current_version_tag_reachable,
+        validate_release_version_floor,
     };
     use crate::release::scope::ReleaseScope;
     use homeboy_core::component::{CommandScopeConfig, Component, ScopeConfig, VersionTarget};
+    use homeboy_core::git::SemverBump;
 
     fn run_git(dir: &std::path::Path, args: &[&str]) {
         let output = std::process::Command::new("git")
@@ -856,5 +858,61 @@ mod tests {
         assert_eq!(latest_tag.as_deref(), Some("v0.1.0"));
         assert_eq!(commits.len(), 2);
         assert_eq!(commits[0].subject, "fix: second work");
+    }
+
+    #[test]
+    fn low_confidence_warning_fires_on_majority_non_conventional_low_bump() {
+        // Majority non-conventional + a patch recommendation → warn.
+        let warning = low_confidence_bump_warning(Some(SemverBump::Patch), 6, 10)
+            .expect("majority non-conventional patch bump warns");
+        assert!(warning.contains("6 of 10"));
+        assert!(warning.contains("under-bump"));
+
+        // No recommendation at all with non-conventional commits also warns.
+        assert!(low_confidence_bump_warning(None, 3, 4).is_some());
+    }
+
+    #[test]
+    fn low_confidence_warning_silent_when_confident_or_conventional() {
+        // A minor/major recommendation is feat-/breaking-driven → confident.
+        assert!(low_confidence_bump_warning(Some(SemverBump::Minor), 9, 10).is_none());
+        // Mostly-conventional history recommending patch → not low-confidence.
+        assert!(low_confidence_bump_warning(Some(SemverBump::Patch), 2, 10).is_none());
+        // Empty range → nothing to warn about.
+        assert!(low_confidence_bump_warning(Some(SemverBump::Patch), 0, 0).is_none());
+    }
+
+    #[test]
+    fn non_conventional_commits_surface_low_confidence_warning_end_to_end() {
+        // A range of plain (non-conventional) feature subjects auto-detects a
+        // patch and must surface the low-confidence warning + the counts (#6851).
+        let temp = git_repo();
+        let dir = temp.path();
+        commit_file(dir, "seed.txt", "seed", "seed");
+        run_git(dir, &["tag", "v0.1.0"]);
+        commit_file(dir, "a.rs", "a", "Add public runtime descriptor API");
+        commit_file(dir, "b.rs", "b", "Add browser connector SDK primitives");
+        commit_file(dir, "c.rs", "c", "Complete browser SDK v1 contract");
+
+        let component = Component {
+            local_path: dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let scope = ReleaseScope::resolve(&component, "fixture").expect("scope");
+        let recommendation = build_semver_recommendation(&component, "none", &scope)
+            .expect("recommendation builds")
+            .expect("some recommendation");
+
+        assert_eq!(recommendation.recommended_bump.as_deref(), Some("patch"));
+        assert_eq!(recommendation.non_conventional_commit_count, 3);
+        assert_eq!(recommendation.considered_commit_count, 3);
+        assert!(
+            recommendation
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("low-confidence bump") && reason.contains("3 of 3")),
+            "expected a low-confidence warning, got: {:?}",
+            recommendation.reasons
+        );
     }
 }
