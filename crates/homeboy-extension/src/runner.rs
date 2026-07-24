@@ -198,6 +198,14 @@ impl ExtensionRunner {
         self
     }
 
+    /// Whether this runner streams child output to the terminal. Summary-mode
+    /// callers disable passthrough so large child streams are captured to
+    /// evidence rather than flooding the terminal (#9845).
+    #[cfg(test)]
+    pub(crate) fn is_passthrough(&self) -> bool {
+        self.passthrough
+    }
+
     /// Stream stderr without streaming stdout. Useful for commands that emit
     /// live human progress while the parent process owns stdout JSON.
     pub(crate) fn stderr_passthrough(mut self, stderr_passthrough: bool) -> Self {
@@ -683,6 +691,24 @@ mod tests {
         let runner = ExtensionRunner::for_context(context()).stderr_passthrough(true);
 
         assert!(runner.stderr_passthrough);
+    }
+
+    #[test]
+    fn passthrough_defaults_on_and_summary_mode_disables_it() {
+        // The runner streams child output to the terminal by default, but
+        // summary-mode callers pass `passthrough(false)` so large child streams
+        // are captured to evidence instead of flooding the terminal (#9845).
+        let default_runner = ExtensionRunner::for_context(context());
+        assert!(
+            default_runner.is_passthrough(),
+            "passthrough is on by default so non-summary runs still stream live output"
+        );
+
+        let summary_runner = ExtensionRunner::for_context(context()).passthrough(false);
+        assert!(
+            !summary_runner.is_passthrough(),
+            "summary mode must disable passthrough so the child stream is captured, not streamed"
+        );
     }
 
     #[test]
