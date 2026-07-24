@@ -254,7 +254,8 @@ pub type BaselinePruneResult = generic::PruneResult;
 /// Safely remove specific fingerprints from the audit baseline in `homeboy.json`
 /// without hand-editing the JSON array. Only fingerprints actually present are
 /// removed; the rest are reported as not-found. The surviving rows stay sorted
-/// so the diff is exactly the removed lines — no trailing-comma churn (#6861).
+/// and the output is valid canonical JSON, so a prune can't fat-finger the wrong
+/// row or break commas the way a manual `sed` edit can (#6861).
 pub fn prune_baseline(
     source_path: &Path,
     fingerprints: &[String],
