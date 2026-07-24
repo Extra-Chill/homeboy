@@ -653,6 +653,47 @@ fn explicit_source_upgrade_runs_build_phase_without_upstream_on_local_branch_or_
 }
 
 #[test]
+fn explicit_source_upgrade_skips_git_switch_main_and_reaches_build_phase() {
+    // #6987: an upgrade command that runs `git switch main` must not switch the
+    // explicitly selected source checkout — otherwise it collides with another
+    // worktree that owns main. The guard skips switch/checkout and the build
+    // phase still runs; the source stays on its original branch.
+    let checkout = source_workspace_with_package_name("homeboy");
+    git(
+        checkout.path(),
+        &["init", "--initial-branch", "task-branch"],
+    );
+    git(
+        checkout.path(),
+        &["config", "user.email", "test@example.com"],
+    );
+    git(checkout.path(), &["config", "user.name", "Homeboy Test"]);
+    git(checkout.path(), &["add", "."]);
+    git(checkout.path(), &["commit", "-m", "initial"]);
+
+    let build_marker = checkout.path().join("build-phase");
+    // A command that would move the checkout to main (and, without the guard,
+    // `set -e` would abort before the build). `git checkout -b` is also skipped.
+    let upgrade_command = format!(
+        "set -e\ngit switch main\ngit checkout main\nprintf built > {}",
+        shell_quote_path(&build_marker)
+    );
+    let command =
+        source_upgrade_command_for_prepared_workspace(&upgrade_command, checkout.path(), true)
+            .expect("explicit source command");
+
+    run_source_upgrade_command(&command, checkout.path(), Duration::from_secs(5))
+        .expect("guarded upgrade command reaches build phase despite git switch main");
+
+    assert_eq!(std::fs::read_to_string(build_marker).unwrap(), "built");
+    // The source checkout is untouched: still on its original task branch.
+    assert_eq!(
+        git_stdout(checkout.path(), &["branch", "--show-current"]),
+        "task-branch"
+    );
+}
+
+#[test]
 fn source_upgrade_command_preserves_snapshot_command() {
     let checkout = source_workspace_with_package_name("homeboy");
 
