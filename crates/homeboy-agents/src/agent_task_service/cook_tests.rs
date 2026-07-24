@@ -3590,6 +3590,55 @@ fn retry_dispatch_operation_key_claim_dispatches_once() {
 }
 
 #[test]
+fn finalization_operation_claim_finalizes_once_and_replays_recorded_result() {
+    // #8357: finalization runs its external effects (commit/push/PR) then records
+    // the result. The claim brackets it: the first pass finalizes exactly once and
+    // completes the claim, and a resumed pass replays the recorded finalization
+    // via AlreadyCompleted without opening a second PR. Uses an injected finalize
+    // closure so no real Git/GitHub mutation occurs.
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-finalize-claim";
+        let run_id = "run-finalize-claim";
+        let plan = AgentTaskPlan::new(cook_id, Vec::new());
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).unwrap();
+
+        let options = promotion_claim_options(cook_id, run_id);
+        let promotion = promotion(run_id);
+        let finalize_calls = Arc::new(AtomicUsize::new(0));
+
+        let calls = Arc::clone(&finalize_calls);
+        let mut finalize =
+            move |_: &AgentTaskCookServiceOptions, rid: &str, _: &AgentTaskPromotionReport| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(serde_json::json!({"status": "review_ready", "run_id": rid}))
+            };
+
+        let first =
+            finalize_with_operation_claim(&options, run_id, &promotion, &mut finalize).unwrap();
+        assert_eq!(first["status"], "review_ready");
+        assert_eq!(finalize_calls.load(Ordering::SeqCst), 1);
+
+        // A resumed pass replays the recorded finalization; the effect closure is
+        // NOT invoked a second time.
+        let replayed =
+            finalize_with_operation_claim(&options, run_id, &promotion, &mut finalize).unwrap();
+        assert_eq!(replayed["status"], "review_ready");
+        assert_eq!(
+            finalize_calls.load(Ordering::SeqCst),
+            1,
+            "a resumed finalization must not re-run the external PR effect"
+        );
+
+        let operation_key = finalization_operation_key(run_id, &promotion);
+        let claim = agent_task_lifecycle::operation_claim(run_id, &operation_key)
+            .unwrap()
+            .expect("finalization claim recorded");
+        assert_eq!(claim.state, agent_task_lifecycle::ClaimState::Completed);
+    });
+}
+
+#[test]
 fn historical_applied_promotion_restores_only_its_exact_checkpoint_baseline() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let plan = AgentTaskPlan::new("cook-historical-baseline", Vec::new());

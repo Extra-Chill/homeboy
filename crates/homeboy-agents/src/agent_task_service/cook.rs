@@ -65,6 +65,75 @@ fn retry_dispatch_operation_key(next_run_id: &str) -> String {
     format!("dispatch:{next_run_id}")
 }
 
+/// Lease window for a finalization operation claim. PR finalization (commit,
+/// push, `gh pr create`) can take a while; the lease is generous so a healthy
+/// controller completes it, while a crashed controller's lease still elapses.
+const FINALIZATION_CLAIM_LEASE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Durable operation key for finalizing one cook candidate. Keyed by the run id
+/// plus the promoted candidate fingerprint (patch SHA), so re-finalizing the
+/// same candidate is idempotent while a genuinely different candidate finalizes
+/// on its own claim (#8357).
+fn finalization_operation_key(run_id: &str, promotion: &AgentTaskPromotionReport) -> String {
+    match promotion.patch_artifact.sha256.as_deref() {
+        Some(sha) => format!("finalize:{run_id}:{sha}"),
+        None => format!("finalize:{run_id}"),
+    }
+}
+
+/// Finalize a cook candidate under a durable exactly-once operation claim.
+///
+/// PR finalization performs its external effects (commit, push, `gh pr create`)
+/// and only then records the result. A controller crash after the PR is created
+/// but before the result is durable would open a second PR on restart. The claim
+/// closes it: reserve `finalize:<run_id>:<sha>` before the effect and complete it
+/// with the finalization result after it is durable. A resumed pass replays the
+/// recorded finalization via `AlreadyCompleted` instead of finalizing again
+/// (#8357).
+fn finalize_with_operation_claim(
+    options: &AgentTaskCookServiceOptions,
+    run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+    finalize: &mut dyn FnMut(
+        &AgentTaskCookServiceOptions,
+        &str,
+        &AgentTaskPromotionReport,
+    ) -> Result<Value>,
+) -> Result<Value> {
+    let operation_key = finalization_operation_key(run_id, promotion);
+    match agent_task_lifecycle::claim_cook_operation(
+        run_id,
+        &operation_key,
+        FINALIZATION_CLAIM_LEASE,
+    )? {
+        // The candidate was already finalized. Replay the recorded finalization
+        // (`finalize_or_load_cook_pr` also loads the persisted result) rather
+        // than opening a second PR.
+        agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(result) => {
+            if result.is_null() {
+                finalize(options, run_id, promotion)
+            } else {
+                Ok(result)
+            }
+        }
+        // A concurrent pass owns a fresh lease. The load-or-finalize path still
+        // returns an already-recorded finalization when present; do not mark the
+        // claim completed from here — its owner does.
+        agent_task_lifecycle::ClaimOutcome::LeaseHeld => finalize(options, run_id, promotion),
+        // This pass owns the operation. Finalize, then record the result as the
+        // claim's immutable completion.
+        agent_task_lifecycle::ClaimOutcome::Acquired => {
+            let finalization = finalize(options, run_id, promotion)?;
+            agent_task_lifecycle::complete_cook_operation(
+                run_id,
+                &operation_key,
+                finalization.clone(),
+            )?;
+            Ok(finalization)
+        }
+    }
+}
+
 /// Promote a cook attempt under a durable exactly-once operation claim.
 ///
 /// `promote_or_load_attempt` already loads an already-persisted promotion, but
@@ -183,7 +252,7 @@ where
         run_id: &str,
         promotion: &AgentTaskPromotionReport,
     ) -> Result<Value> {
-        (self.finalize)(options, run_id, promotion)
+        finalize_with_operation_claim(options, run_id, promotion, &mut self.finalize)
     }
 }
 
