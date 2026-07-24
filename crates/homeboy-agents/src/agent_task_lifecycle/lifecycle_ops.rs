@@ -725,8 +725,9 @@ pub fn reserve_provider_execution(
     let execution_key = format!("{}:{attempt}", task.task_id);
     let mut reservation = ProviderExecutionReservation::AlreadyReserved;
     store::mutate_record(&run_id, |record| {
-        let metadata = record.ensure_metadata_object();
+        let started_at = now_timestamp();
         let consumed = {
+            let metadata = record.ensure_metadata_object();
             let executions = metadata
                 .entry("provider_executions".to_string())
                 .or_insert_with(|| json!([]))
@@ -745,11 +746,23 @@ pub fn reserve_provider_execution(
                 "backend": task.executor.backend,
                 "model": task.executor.model(),
                 "state": "running",
-                "started_at": now_timestamp(),
+                "started_at": started_at.clone(),
             }));
-            executions.len()
+            let consumed = executions.len();
+            metadata.insert("provider_executions_consumed".to_string(), json!(consumed));
+            consumed
         };
-        metadata.insert("provider_executions_consumed".to_string(), json!(consumed));
+        let _ = consumed;
+        // Advance the heartbeat to provider-execution start for a local
+        // (in-process) cook. Before this, a local cook left the heartbeat frozen
+        // at submission time for the entire provider run, so operators could not
+        // distinguish active execution from a hung preflight (#8396). Restrict
+        // this to non-runner-backed runs: a runner-backed run's owner PID and
+        // heartbeat are owned by the runner, not the controller reserving here.
+        if !record.is_runner_backed() {
+            record.updated_at = Some(started_at);
+            update_lifecycle_heartbeat(record);
+        }
         reservation = ProviderExecutionReservation::Acquired;
         true
     })?;

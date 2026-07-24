@@ -1465,15 +1465,28 @@ fn liveness_summary(record: &Value, run_id: &str) -> Value {
         .and_then(Value::as_str)
         == Some("waiting_for_capacity");
 
+    // A local cook runs the provider in an in-process thread, so it has neither
+    // provider handles nor a runner job id. `reserve_provider_execution` still
+    // durably records the running attempt (backend, model, started_at) before
+    // the scheduler blocks on the backend, so surface that as authoritative
+    // in-flight provider evidence instead of reporting the boundary absent
+    // while the provider is actively working (#8396).
+    let active_provider_executions = running_provider_executions(metadata);
+    let has_active_provider_execution = !active_provider_executions.is_empty();
+    let provider_boundary_recorded =
+        provider_handle_count > 0 || runner_job_id.is_some() || has_active_provider_execution;
+
     json!({
         "status": if terminal { "terminal" } else if stale { "stale" } else if waiting_for_capacity { "waiting_for_capacity" } else { "active" },
         "heartbeat_last_seen_at": record.pointer("/lifecycle/heartbeat/last_seen_at"),
         "runner_job_status": metadata.get("runner_job_status"),
         "runner_job_last_seen_at": metadata.get("runner_job_last_seen_at"),
         "provider_boundary": {
-            "status": if provider_handle_count > 0 || runner_job_id.is_some() { "recorded" } else { "absent" },
+            "status": if provider_boundary_recorded { "recorded" } else { "absent" },
             "provider_handle_count": provider_handle_count,
             "runner_job_id": runner_job_id,
+            "active_execution_count": active_provider_executions.len(),
+            "active_executions": active_provider_executions,
         },
         "stale_reason": metadata.get("stale_running_reason"),
         "runner_queue": metadata.get("runner_queue"),
@@ -1487,6 +1500,36 @@ fn liveness_summary(record: &Value, run_id: &str) -> Value {
             "homeboy agent-task status <run-id> --full".to_string()
         },
     })
+}
+
+/// Project the durable `provider_executions` metadata into a compact list of the
+/// attempts that are still `running`. These are written by
+/// `reserve_provider_execution` before the scheduler blocks on the backend and
+/// cleared to a terminal state by `record_provider_execution_terminal`, so a
+/// running entry is authoritative evidence that a provider is executing right
+/// now — the only in-flight signal a local (in-process) cook has (#8396).
+fn running_provider_executions(metadata: &Value) -> Vec<Value> {
+    metadata
+        .get("provider_executions")
+        .and_then(Value::as_array)
+        .map(|executions| {
+            executions
+                .iter()
+                .filter(|execution| {
+                    execution.get("state").and_then(Value::as_str) == Some("running")
+                })
+                .map(|execution| {
+                    json!({
+                        "task_id": execution.get("task_id"),
+                        "attempt": execution.get("attempt"),
+                        "backend": execution.get("backend"),
+                        "model": execution.get("model"),
+                        "started_at": execution.get("started_at"),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn execution_location(record: &Value) -> Value {
@@ -2110,6 +2153,85 @@ mod tests {
             accepted_handoff["liveness"]["provider_boundary"]["runner_job_id"],
             "accepted-daemon-job"
         );
+    }
+
+    #[test]
+    fn local_cook_surfaces_in_flight_provider_execution() {
+        // A local cook has no provider handles and no runner job id, but
+        // `reserve_provider_execution` durably records the running attempt
+        // before the backend blocks. The liveness projection must report the
+        // provider boundary as recorded (not absent) and expose the running
+        // execution's backend, model, and start time so operators can tell an
+        // active provider from a hung preflight (#8396).
+        let local_running = compact_status_summary(
+            &json!({
+                "run_id": "agent-task-local-1",
+                "state": "running",
+                "tasks": [],
+                "provider_handles": [],
+                "lifecycle": { "heartbeat": { "last_seen_at": "2026-07-16T00:00:00Z" } },
+                "metadata": {
+                    "provider_executions_consumed": 1,
+                    "provider_executions": [{
+                        "key": "cook:1",
+                        "task_id": "cook",
+                        "attempt": 1,
+                        "backend": "opencode",
+                        "model": "openai/gpt-5.6-sol",
+                        "state": "running",
+                        "started_at": "2026-07-16T00:00:00Z"
+                    }]
+                }
+            }),
+            "agent-task-local-1",
+        );
+        let boundary = &local_running["liveness"]["provider_boundary"];
+        assert_eq!(boundary["status"], "recorded");
+        assert_eq!(boundary["provider_handle_count"], 0);
+        assert!(boundary["runner_job_id"].is_null());
+        assert_eq!(boundary["active_execution_count"], 1);
+        assert_eq!(boundary["active_executions"][0]["backend"], "opencode");
+        assert_eq!(
+            boundary["active_executions"][0]["model"],
+            "openai/gpt-5.6-sol"
+        );
+        assert_eq!(boundary["active_executions"][0]["task_id"], "cook");
+        assert_eq!(
+            boundary["active_executions"][0]["started_at"],
+            "2026-07-16T00:00:00Z"
+        );
+        assert_eq!(local_running["execution_location"], "local");
+    }
+
+    #[test]
+    fn terminal_provider_execution_is_not_surfaced_as_active() {
+        // Once the provider execution reaches a terminal state, it must no
+        // longer count as in-flight. A local run with only completed executions
+        // and no other liveness evidence reports the boundary as absent (#8396).
+        let completed = compact_status_summary(
+            &json!({
+                "run_id": "agent-task-local-2",
+                "state": "running",
+                "tasks": [],
+                "provider_handles": [],
+                "metadata": {
+                    "provider_executions": [{
+                        "key": "cook:1",
+                        "task_id": "cook",
+                        "attempt": 1,
+                        "backend": "opencode",
+                        "state": "succeeded",
+                        "started_at": "2026-07-16T00:00:00Z",
+                        "finished_at": "2026-07-16T00:03:00Z"
+                    }]
+                }
+            }),
+            "agent-task-local-2",
+        );
+        let boundary = &completed["liveness"]["provider_boundary"];
+        assert_eq!(boundary["status"], "absent");
+        assert_eq!(boundary["active_execution_count"], 0);
+        assert!(boundary["active_executions"].as_array().unwrap().is_empty());
     }
 
     #[test]
