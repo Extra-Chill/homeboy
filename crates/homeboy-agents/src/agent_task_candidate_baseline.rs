@@ -49,14 +49,59 @@ pub(crate) fn validate_gate_feedback_candidate_baseline(
         .get("path")
         .and_then(Value::as_str)
         .filter(|path| !path.is_empty())
-        .ok_or_else(|| invalid("recorded patch artifact has no path"))?;
+        .map(str::to_string);
     let expected_sha256 = artifact
         .get("sha256")
         .and_then(Value::as_str)
         .filter(|sha256| !sha256.is_empty())
         .ok_or_else(|| invalid("recorded patch artifact has no sha256"))?;
-    let patch = std::fs::read(path)
-        .map_err(|error| invalid(&format!("recorded patch artifact is unreadable: {error}")))?;
+    let patch = if let Some(reference) = artifact.get("controller_artifact") {
+        let run_id = reference
+            .get("run_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| invalid("controller artifact reference has no run id"))?;
+        let task_id = reference
+            .get("task_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| invalid("controller artifact reference has no task id"))?;
+        let artifact_id = reference
+            .get("logical_artifact_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| invalid("controller artifact reference has no logical artifact id"))?;
+        let kind = reference
+            .get("kind")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| invalid("controller artifact reference has no kind"))?;
+        let reference_sha256 = reference
+            .get("sha256")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| invalid("controller artifact reference has no sha256"))?;
+        if reference_sha256 != expected_sha256 {
+            return Err(invalid(
+                "controller artifact reference sha256 conflicts with the baseline patch artifact",
+            ));
+        }
+        let record_id = reference.get("record_id").and_then(Value::as_str);
+        let (_, bytes) = crate::agent_task_lifecycle::verified_controller_artifact_projection(
+            run_id,
+            task_id,
+            artifact_id,
+            kind,
+            expected_sha256,
+            record_id,
+        )?
+        .ok_or_else(|| invalid("controller artifact mirror is missing"))?;
+        bytes
+    } else {
+        let path = path.ok_or_else(|| invalid("recorded patch artifact has no path"))?;
+        std::fs::read(path)
+            .map_err(|error| invalid(&format!("recorded patch artifact is unreadable: {error}")))?
+    };
     if format!("{:x}", Sha256::digest(&patch)) != expected_sha256 {
         return Err(invalid(
             "recorded patch artifact sha256 does not match its content",
@@ -263,6 +308,98 @@ mod tests {
         assert!(error
             .message
             .contains("differs from the follow-up source snapshot"));
+    }
+
+    #[test]
+    fn controller_mirror_survives_runner_cleanup_and_rejects_hash_mismatch() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let workspace = temp.path().join("workspace");
+            std::fs::create_dir(&workspace).expect("workspace");
+            git(&workspace, &["init", "-b", "main"]);
+            git(&workspace, &["config", "user.name", "Homeboy Test"]);
+            git(
+                &workspace,
+                &["config", "user.email", "homeboy@example.test"],
+            );
+            std::fs::write(workspace.join("tracked.txt"), "old\n").expect("base file");
+            git(&workspace, &["add", "tracked.txt"]);
+            git(&workspace, &["commit", "-m", "base"]);
+            std::fs::write(workspace.join("tracked.txt"), "new\n").expect("candidate file");
+            let patch = git(&workspace, &["diff", "--binary"]);
+            let sha256 = format!("{:x}", Sha256::digest(patch.as_bytes()));
+            let runner = temp.path().join("lab-workspace.patch");
+            std::fs::write(&runner, &patch).expect("runner patch");
+
+            let store = homeboy_core::observation::ObservationStore::open_initialized()
+                .expect("observation store");
+            store
+                .upsert_imported_run(&homeboy_core::observation::RunRecord {
+                    id: "lab-run".to_string(),
+                    kind: "agent-task".to_string(),
+                    component_id: None,
+                    started_at: "2026-07-24T00:00:00Z".to_string(),
+                    finished_at: Some("2026-07-24T00:00:01Z".to_string()),
+                    status: "pass".to_string(),
+                    command: None,
+                    cwd: None,
+                    homeboy_version: None,
+                    git_sha: None,
+                    rig_id: None,
+                    metadata_json: serde_json::json!({}),
+                })
+                .expect("record run");
+            let projection = store
+                .record_artifact_with_id(
+                    "lab-run",
+                    "patch",
+                    &runner,
+                    "controller-mirror",
+                    serde_json::json!({
+                        "agent_task": {
+                            "task_id": "follow-up",
+                            "logical_artifact_id": "patch"
+                        }
+                    }),
+                )
+                .expect("mirror patch");
+            std::fs::remove_file(&runner).expect("Lab cleanup");
+            let baseline = serde_json::json!({
+                "current_diff": patch,
+                "patch_artifact": {
+                    "id": "patch",
+                    "kind": "patch",
+                    "sha256": sha256,
+                    "controller_artifact": {
+                        "schema": "homeboy/controller-artifact-reference/v1",
+                        "run_id": "lab-run",
+                        "task_id": "follow-up",
+                        "logical_artifact_id": "patch",
+                        "kind": "patch",
+                        "sha256": sha256,
+                        "record_id": "controller-mirror"
+                    }
+                }
+            });
+
+            let mut missing = baseline.clone();
+            missing["patch_artifact"]["controller_artifact"]["run_id"] =
+                serde_json::json!("missing-lab-run");
+            let error = validate_gate_feedback_candidate_baseline(&workspace, &missing)
+                .expect_err("missing controller mirror fails closed");
+            assert!(error
+                .message
+                .contains("controller artifact mirror is missing"));
+            validate_gate_feedback_candidate_baseline(&workspace, &baseline)
+                .expect("controller mirror resolves after Lab cleanup");
+            validate_gate_feedback_candidate_baseline(&workspace, &baseline)
+                .expect("retry/resume resolves the same mirror identity");
+
+            std::fs::write(&projection.path, "different bytes").expect("alter mirror");
+            let error = validate_gate_feedback_candidate_baseline(&workspace, &baseline)
+                .expect_err("altered mirror fails closed");
+            assert!(error.message.contains("hash mismatch"));
+        });
     }
 
     fn git(root: &Path, args: &[&str]) -> String {

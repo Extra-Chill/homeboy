@@ -267,19 +267,33 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
 
 #[test]
 fn aggregate_promotion_forwards_canonical_gate_feedback_baseline() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let patch_path = temp.path().join("remediation.patch");
-    std::fs::write(&patch_path, VALID_PATCH).expect("write remediation patch");
-    let baseline = serde_json::json!({
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let patch_path = temp.path().join("remediation.patch");
+        std::fs::write(&patch_path, VALID_PATCH).expect("write remediation patch");
+        let baseline_patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
+        let baseline_sha256 = sha256_hex(baseline_patch);
+        record_controller_projection(
+            "source-run",
+            "source-task",
+            "baseline-patch",
+            baseline_patch,
+        );
+        let baseline = serde_json::json!({
         "source_run_id": "source-run",
         "source_task_id": "source-task",
         "source_patch_task_id": "source-task",
         "to_worktree": "fixture@target",
         "current_diff": "diff --git a/a b/a",
         "failed_gates": [],
-        "patch_artifact": { "path": "/candidate.patch", "sha256": "a".repeat(64) }
-    });
-    let source = serde_json::json!({
+        "patch_artifact": {
+            "id": "baseline-patch",
+            "kind": "patch",
+            "path": "/home/lab/ephemeral/candidate.patch",
+            "sha256": baseline_sha256
+        }
+        });
+        let source = serde_json::json!({
         "schema": "homeboy/agent-task-aggregate/v1",
         "plan_id": "follow-up-plan",
         "status": "succeeded",
@@ -314,37 +328,46 @@ fn aggregate_promotion_forwards_canonical_gate_feedback_baseline() {
                 "metadata": { "normalized_from": "artifact" }
             }]
         }]
-    })
-    .to_string();
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().to_path_buf()),
-        ..Default::default()
-    };
-    promote_with_provider(
-        AgentTaskPromotionOptions {
-            source,
-            source_run_id: Some("follow-up-run".to_string()),
-            source_path: None,
-            source_worktree_path: None,
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: "fixture@target".to_string(),
-            task_id: Some("follow-up".to_string()),
-            artifact_id: Some("patch".to_string()),
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_command: None,
-            provider_invocation: None,
-        },
-        &mut provider,
-    )
-    .expect("aggregate promotion");
-    assert_eq!(
-        provider.apply_calls[0].gate_feedback_baseline,
-        Some(baseline),
-        "only canonical artifact metadata authorizes the dirty target"
-    );
+        })
+        .to_string();
+        let mut provider = FakePromotionWorkspaceProvider {
+            workspace_path: Some(temp.path().to_path_buf()),
+            ..Default::default()
+        };
+        promote_with_provider(
+            AgentTaskPromotionOptions {
+                source,
+                source_run_id: Some("follow-up-run".to_string()),
+                source_path: None,
+                source_worktree_path: None,
+                base_ref: None,
+                task_base_sha: None,
+                candidate_ref: None,
+                to_worktree: "fixture@target".to_string(),
+                task_id: Some("follow-up".to_string()),
+                artifact_id: Some("patch".to_string()),
+                dry_run: false,
+                gates: VerifyGateOptions::default(),
+                provider_command: None,
+                provider_invocation: None,
+            },
+            &mut provider,
+        )
+        .expect("aggregate promotion");
+        let forwarded = provider.apply_calls[0]
+            .gate_feedback_baseline
+            .as_ref()
+            .expect("baseline forwarded");
+        assert!(forwarded["patch_artifact"].get("path").is_none());
+        assert_eq!(
+            forwarded["patch_artifact"]["controller_artifact"]["run_id"],
+            "source-run"
+        );
+        assert_eq!(
+            forwarded["patch_artifact"]["controller_artifact"]["sha256"],
+            baseline_sha256
+        );
+    });
 }
 
 #[test]
