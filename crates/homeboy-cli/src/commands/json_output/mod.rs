@@ -46,6 +46,8 @@ pub fn run_command_output(
                         Err(error) => {
                             return CommandRun::from_stdout_result(Err(error), 2)
                                 .with_command(spec.name)
+                                // The rejected invocation never owns this path.
+                                .with_output_file_already_written();
                         }
                     };
                     let progress = |phase: &str, cook_id: &str, run_id: &str| {

@@ -12,18 +12,22 @@ use crate::commands::{review, trace, GlobalArgs};
 pub(crate) struct CookOutputLease {
     path: PathBuf,
     lock_path: PathBuf,
-    invocation_id: String,
+    token: String,
+    lock: std::fs::File,
 }
 
 impl CookOutputLease {
     pub(crate) fn claim(path: &str) -> homeboy::core::Result<Self> {
         let path = PathBuf::from(path);
+        let lock_path = output_lock_path(&path);
+        let token = uuid::Uuid::new_v4().to_string();
+        let lock = claim_lock(&lock_path, &path, &token)?;
         let lease = Self {
-            lock_path: output_lock_path(&path),
             path,
-            invocation_id: uuid::Uuid::new_v4().to_string(),
+            lock_path,
+            token,
+            lock,
         };
-        lease.acquire_lock()?;
         lease.write_in_flight("claimed", None, None)?;
         Ok(lease)
     }
@@ -59,42 +63,6 @@ impl CookOutputLease {
         self.write(&contents)
     }
 
-    fn acquire_lock(&self) -> homeboy::core::Result<()> {
-        for _ in 0..2 {
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&self.lock_path)
-            {
-                Ok(mut lock) => {
-                    use std::io::Write;
-                    writeln!(lock, "{}", std::process::id())
-                        .map_err(|error| output_io_error(&self.lock_path, error))?;
-                    return Ok(());
-                }
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                    if !stale_lock(&self.lock_path)? {
-                        return Err(homeboy::core::Error::validation_invalid_argument(
-                            "output",
-                            format!(
-                                "Cook output `{}` is owned by another active invocation; choose a different --output path or wait for it to finish",
-                                self.path.display()
-                            ),
-                            None,
-                            None,
-                        ));
-                    }
-                    std::fs::remove_file(&self.lock_path)
-                        .map_err(|error| output_io_error(&self.lock_path, error))?;
-                }
-                Err(error) => return Err(output_io_error(&self.lock_path, error)),
-            }
-        }
-        Err(homeboy::core::Error::internal_unexpected(
-            "could not claim Cook output ownership after reclaiming a stale lock",
-        ))
-    }
-
     fn write_in_flight(
         &self,
         phase: &str,
@@ -107,7 +75,7 @@ impl CookOutputLease {
             "success": false,
             "exit_code": null,
             "status": "in_flight",
-            "invocation_id": self.invocation_id,
+            "invocation_id": self.token,
             "updated_at": chrono::Utc::now().to_rfc3339(),
             "phase": phase,
             "cook_id": cook_id,
@@ -139,7 +107,13 @@ impl CookOutputLease {
 
 impl Drop for CookOutputLease {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.lock_path);
+        // The advisory lock makes the read/compare/unlink sequence exclusive.
+        // A waiter that opened this inode rechecks the pathname after locking, so
+        // it cannot resurrect an unlinked stale lease beside a new owner.
+        if lock_matches(&self.lock, &self.token) && path_matches_file(&self.lock_path, &self.lock) {
+            let _ = std::fs::remove_file(&self.lock_path);
+        }
+        let _ = unlock_file(&self.lock);
     }
 }
 
@@ -151,17 +125,125 @@ fn output_lock_path(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{name}.homeboy-cook-output.lock"))
 }
 
-fn stale_lock(path: &Path) -> homeboy::core::Result<bool> {
-    let pid = std::fs::read_to_string(path)
-        .map_err(|error| output_io_error(path, error))?
-        .trim()
-        .parse::<u32>()
-        .unwrap_or(0);
-    if pid == 0 {
-        return Ok(true);
+fn claim_lock(
+    lock_path: &Path,
+    output_path: &Path,
+    token: &str,
+) -> homeboy::core::Result<std::fs::File> {
+    for _ in 0..3 {
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(lock_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(lock_path)
+                .map_err(|error| output_io_error(lock_path, error))?,
+            Err(error) => return Err(output_io_error(lock_path, error)),
+        };
+        match lock_file(&file) {
+            Ok(()) => {
+                // An owner may unlink while this waiter blocks. Never take an
+                // unlinked inode; retry against the current path instead.
+                if !path_matches_file(lock_path, &file) {
+                    let _ = unlock_file(&file);
+                    continue;
+                }
+                write_lock_record(&file, token)?;
+                return Ok(file);
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                return Err(homeboy::core::Error::validation_invalid_argument(
+                    "output",
+                    format!(
+                        "Cook output `{}` is owned by another active invocation; choose a different --output path or wait for it to finish",
+                        output_path.display()
+                    ),
+                    None,
+                    None,
+                ));
+            }
+            Err(error) => return Err(output_io_error(lock_path, error)),
+        }
     }
-    let result = unsafe { libc::kill(pid as i32, 0) };
-    Ok(result != 0 && std::io::Error::last_os_error().kind() == ErrorKind::NotFound)
+    Err(homeboy::core::Error::internal_unexpected(
+        "Cook output ownership changed while reclaiming its stale lock",
+    ))
+}
+
+fn write_lock_record(file: &std::fs::File, token: &str) -> homeboy::core::Result<()> {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut file = file;
+    file.set_len(0)
+        .map_err(|error| output_io_error(Path::new("Cook output lock"), error))?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| output_io_error(Path::new("Cook output lock"), error))?;
+    let record = serde_json::json!({
+        "pid": std::process::id(),
+        "process_start": process_start_identity(std::process::id()),
+        "token": token,
+    });
+    file.write_all(record.to_string().as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|error| output_io_error(Path::new("Cook output lock"), error))
+}
+
+fn lock_matches(file: &std::fs::File, token: &str) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = file;
+    let mut contents = String::new();
+    file.seek(SeekFrom::Start(0)).is_ok()
+        && file.read_to_string(&mut contents).is_ok()
+        && serde_json::from_str::<Value>(&contents)
+            .ok()
+            .and_then(|value| value["token"].as_str().map(str::to_string))
+            == Some(token.to_string())
+}
+
+fn process_start_identity(pid: u32) -> Option<String> {
+    std::process::Command::new("ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn path_matches_file(path: &Path, file: &std::fs::File) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(path) = std::fs::metadata(path) else {
+        return false;
+    };
+    let Ok(file) = file.metadata() else {
+        return false;
+    };
+    path.dev() == file.dev() && path.ino() == file.ino()
+}
+
+fn lock_file(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+fn unlock_file(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 fn output_io_error(path: &Path, error: std::io::Error) -> homeboy::core::Error {
@@ -678,6 +760,77 @@ mod tests {
 
         CookOutputLease::claim(path.to_str().expect("utf8 path"))
             .expect("released output can be claimed by a later invocation");
+    }
+
+    #[test]
+    fn rejected_writer_leaves_active_in_flight_output_byte_identical() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cook.json");
+        let lease = CookOutputLease::claim(path.to_str().expect("utf8 path")).expect("claim");
+        lease.progress("dispatching", "cook-a", "run-a").unwrap();
+        let before = std::fs::read(&path).expect("read active output");
+
+        assert!(CookOutputLease::claim(path.to_str().expect("utf8 path")).is_err());
+        let rejected = CommandRun::from_stdout_result(
+            Err(homeboy::core::Error::validation_invalid_argument(
+                "output",
+                "contended",
+                None,
+                None,
+            )),
+            2,
+        )
+        .with_output_file_already_written();
+        OutputService::new(Some(path.to_str().unwrap()))
+            .write_output_file(&rejected, CommandOutputFileMode::GenericEnvelope);
+
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn reclaimed_lock_replaces_reused_pid_record_with_a_new_nonce() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cook.json");
+        let lock = output_lock_path(&path);
+        std::fs::write(
+            &lock,
+            serde_json::json!({
+                "pid": std::process::id(),
+                "process_start": "reused-pid-start",
+                "token": "old-owner"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let lease = CookOutputLease::claim(path.to_str().unwrap()).expect("reclaim stale record");
+        let record: Value = serde_json::from_str(&std::fs::read_to_string(&lock).unwrap()).unwrap();
+        assert_eq!(record["pid"], std::process::id());
+        assert_ne!(record["token"], "old-owner");
+        assert_ne!(record["process_start"], "reused-pid-start");
+        drop(lease);
+    }
+
+    #[test]
+    fn concurrent_reclaimers_admit_only_one_owner() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cook.json");
+        let lock = output_lock_path(&path);
+        std::fs::write(&lock, "interrupted").unwrap();
+        let (claimed_tx, claimed_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let path_for_owner = path.clone();
+        let owner = std::thread::spawn(move || {
+            let lease =
+                CookOutputLease::claim(path_for_owner.to_str().unwrap()).expect("first reclaimer");
+            claimed_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(lease);
+        });
+        claimed_rx.recv().unwrap();
+        assert!(CookOutputLease::claim(path.to_str().unwrap()).is_err());
+        release_tx.send(()).unwrap();
+        owner.join().unwrap();
     }
 
     #[test]
