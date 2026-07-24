@@ -4,6 +4,29 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.312.0] - 2026-07-24
+
+### Added
+- feat(agent-task): surface local cook provider execution in logs
+- feat(agent-task): wire cook finalization through the operation claim
+- feat(agent-task): wire cook retry dispatch through the operation claim
+- feat(agent-task): wire cook promotion through the operation claim
+
+### Changed
+- test(agent-task): cover local cook logs surfacing running provider execution
+- test(agent-task): acceptance — concurrent passes admit one retry dispatcher
+- test(agent-task): acceptance — duplicate passes produce one side effect each
+- test(agent-task): cover finalization operation-claim exactly-once wiring
+- test(agent-task): cover retry-dispatch operation-claim exactly-once contract
+- test(agent-task): cover promotion operation-claim exactly-once wiring
+
+### Fixed
+- read top-level validation_dependencies from the manifest
+- apply list query filters to remote runner listing
+- skip un-inspectable worktrees instead of aborting the batch
+- deploy the component-scoped release tag, not an unscoped one
+- fall back to --no-hardlinks for cross-filesystem exact-ref clone
+
 ## [0.311.0] - 2026-07-24
 
 ### Added
