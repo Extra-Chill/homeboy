@@ -3639,6 +3639,80 @@ fn finalization_operation_claim_finalizes_once_and_replays_recorded_result() {
 }
 
 #[test]
+fn duplicate_controller_passes_produce_one_promotion_and_one_finalization() {
+    // #8357 acceptance (AC5 + AC7): duplicate/concurrent controller passes over
+    // the same candidate must produce exactly one promotion checkpoint and one
+    // finalization side effect. Drive the PRODUCTION `DefaultCookSideEffects`
+    // boundary (which routes promote/finalize through the durable operation
+    // claims) with an injected finalize effect, so no real Git/GitHub mutation
+    // occurs. Promotion is seeded as already-applied so `promote` takes its load
+    // path rather than performing a real git promotion.
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-acceptance-once";
+        let run_id = "run-acceptance-once";
+        let plan = AgentTaskPlan::new(cook_id, Vec::new());
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).unwrap();
+        agent_task_lifecycle::record_promotion(
+            run_id,
+            serde_json::to_value(promotion(run_id)).unwrap(),
+        )
+        .unwrap();
+
+        let options = promotion_claim_options(cook_id, run_id);
+        let finalize_calls = Arc::new(AtomicUsize::new(0));
+
+        // Run three independent controller passes, each with its own production
+        // side-effect boundary, exactly as three restarted/concurrent controllers
+        // would. The injected finalize effect increments a shared counter.
+        let mut finalizations = Vec::new();
+        for _ in 0..3 {
+            let calls = Arc::clone(&finalize_calls);
+            let mut side_effects = DefaultCookSideEffects::new(
+                move |_: &AgentTaskCookServiceOptions, rid: &str, _: &AgentTaskPromotionReport| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(serde_json::json!({"status": "review_ready", "run_id": rid}))
+                },
+            );
+            let promotion = side_effects.promote(&options, run_id).unwrap();
+            let finalization = side_effects.finalize(&options, run_id, &promotion).unwrap();
+            finalizations.push(finalization);
+        }
+
+        // Exactly one finalization side effect across all passes.
+        assert_eq!(
+            finalize_calls.load(Ordering::SeqCst),
+            1,
+            "duplicate controller passes must produce exactly one finalization side effect"
+        );
+        // Every pass observes the same review-ready finalization.
+        for finalization in &finalizations {
+            assert_eq!(finalization["status"], "review_ready");
+        }
+
+        // Exactly one durable promotion checkpoint and one completed finalization
+        // claim survive.
+        let promote_key = format!("promote:{run_id}");
+        let promote_claim = agent_task_lifecycle::operation_claim(run_id, &promote_key)
+            .unwrap()
+            .expect("promotion claim recorded");
+        assert_eq!(
+            promote_claim.state,
+            agent_task_lifecycle::ClaimState::Completed
+        );
+
+        let finalize_key = finalization_operation_key(run_id, &promotion(run_id));
+        let finalize_claim = agent_task_lifecycle::operation_claim(run_id, &finalize_key)
+            .unwrap()
+            .expect("finalization claim recorded");
+        assert_eq!(
+            finalize_claim.state,
+            agent_task_lifecycle::ClaimState::Completed
+        );
+    });
+}
+
+#[test]
 fn historical_applied_promotion_restores_only_its_exact_checkpoint_baseline() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let plan = AgentTaskPlan::new("cook-historical-baseline", Vec::new());
