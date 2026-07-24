@@ -421,6 +421,126 @@ fn handoff_refresh_options(
     }
 }
 
+enum HandoffConvergenceAction {
+    Ready,
+    Refresh(crate::HomeboyBinaryRefreshMode),
+    Refuse,
+}
+
+fn handoff_convergence_action(
+    runner: &crate::Runner,
+    status: &crate::RunnerStatusReport,
+    requested: &str,
+    configured: Option<&str>,
+    daemon: Option<&str>,
+    command: &str,
+) -> HandoffConvergenceAction {
+    if handoff_identities_match(requested, configured, daemon) {
+        return HandoffConvergenceAction::Ready;
+    }
+    if automatic_handoff_convergence_allowed(runner)
+        && status.active_jobs.is_empty()
+        && status.active_job_state == crate::RunnerActiveJobState::Available
+        && status
+            .session
+            .as_ref()
+            .is_some_and(|session| session.mode == crate::RunnerTunnelMode::DirectSsh)
+    {
+        return HandoffConvergenceAction::Refresh(
+            if configured.is_some_and(|identity| {
+                canonical_homeboy_identity(identity) == canonical_homeboy_identity(requested)
+            }) {
+                crate::HomeboyBinaryRefreshMode::Select {
+                    binary_path: command.to_string(),
+                }
+            } else {
+                crate::HomeboyBinaryRefreshMode::Materialize
+            },
+        );
+    }
+    HandoffConvergenceAction::Refuse
+}
+
+/// Converge the runner control plane before provider or workspace work. Refresh
+/// output is insufficient evidence, so the next loop iteration re-reads both
+/// the daemon and configured job-binary identities.
+pub(crate) fn converge_lab_handoff_runtime(
+    runner_id: &str,
+    tunnel_mode: crate::RunnerTunnelMode,
+    requested: &str,
+) -> Result<()> {
+    for _ in 0..2 {
+        let runner = crate::load(runner_id)?;
+        let command = crate::remote_runner_homeboy_path(&runner, "Lab handoff convergence")?;
+        let status = crate::status_for_admission(runner_id)?;
+        let session = status
+            .session
+            .as_ref()
+            .ok_or_else(|| handoff_identity_error(runner_id, requested, None, None))?;
+        if session.mode != tunnel_mode {
+            return Err(Error::validation_invalid_argument(
+                "runner",
+                format!(
+                    "Lab handoff requires `{}` transport, but runner `{runner_id}` is connected through `{}`",
+                    tunnel_mode.metadata_value(),
+                    session.mode.metadata_value(),
+                ),
+                Some(runner_id.to_string()),
+                None,
+            ));
+        }
+        let configured = crate::configured_runner_homeboy_build_identity(&runner, command)?;
+        let daemon = session.homeboy_build_identity.clone();
+        match handoff_convergence_action(
+            &runner,
+            &status,
+            requested,
+            configured.as_deref(),
+            daemon.as_deref(),
+            command,
+        ) {
+            HandoffConvergenceAction::Ready => return Ok(()),
+            HandoffConvergenceAction::Refuse => {
+                return Err(handoff_identity_error(
+                    runner_id,
+                    requested,
+                    configured.as_deref(),
+                    daemon.as_deref(),
+                ));
+            }
+            HandoffConvergenceAction::Refresh(mode) => {
+                let (report, exit_code) = crate::refresh_homeboy_binary(handoff_refresh_options(
+                    runner_id.to_string(),
+                    mode,
+                    requested,
+                ))?;
+                if exit_code != 0 || !report.daemon_refreshed {
+                    return Err(handoff_identity_error(
+                        runner_id,
+                        requested,
+                        configured.as_deref(),
+                        daemon.as_deref(),
+                    ));
+                }
+            }
+        }
+    }
+    let runner = crate::load(runner_id)?;
+    let command = crate::remote_runner_homeboy_path(&runner, "Lab handoff convergence")?;
+    let status = crate::status_for_admission(runner_id)?;
+    let configured = crate::configured_runner_homeboy_build_identity(&runner, command)?;
+    let daemon = status
+        .session
+        .as_ref()
+        .and_then(|session| session.homeboy_build_identity.clone());
+    Err(handoff_identity_error(
+        runner_id,
+        requested,
+        configured.as_deref(),
+        daemon.as_deref(),
+    ))
+}
+
 fn default_lab_staging_tunnel_mode() -> crate::RunnerTunnelMode {
     crate::RunnerTunnelMode::DirectSsh
 }
@@ -486,30 +606,37 @@ fn persist_lab_staging_recipe_for_transport(
 }
 
 fn ensure_current_controller_daemon() -> Result<homeboy_core::daemon::DaemonStartResult> {
-    let daemon = homeboy_core::daemon::ensure_running(homeboy_core::daemon::DEFAULT_ADDR)?;
-    let status = homeboy_core::daemon::read_status()?;
-    let Some(state) = status.state else {
-        return Err(Error::internal_unexpected(
-            "controller daemon did not publish a lease after startup",
-        ));
-    };
     let expected = homeboy_core::build_identity::current().display;
-    if state.build_identity.display == expected {
-        return Ok(daemon);
-    }
-    if !status.active_job_recovery_evidence.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "controller_daemon",
-            "controller daemon build does not match the submitting Homeboy binary while durable jobs are active",
-            Some(state.build_identity.display),
-            Some(vec!["Wait for the listed controller jobs to finish before retrying the Lab handoff.".to_string()]),
-        ));
-    }
+    for _ in 0..2 {
+        let daemon = homeboy_core::daemon::ensure_running(homeboy_core::daemon::DEFAULT_ADDR)?;
+        let status = homeboy_core::daemon::read_status()?;
+        let Some(state) = status.state else {
+            return Err(Error::internal_unexpected(
+                "controller daemon did not publish a lease after startup",
+            ));
+        };
+        if state.build_identity.display == expected {
+            return Ok(daemon);
+        }
+        if !status.active_job_recovery_evidence.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "controller_daemon",
+                "controller daemon build does not match the submitting Homeboy binary while durable jobs are active",
+                Some(state.build_identity.display),
+                Some(vec!["Wait for the listed controller jobs to finish before retrying the Lab handoff.".to_string()]),
+            ));
+        }
 
-    // A private staging recipe is a typed protocol payload. Replace an idle
-    // stale daemon before it can read a newer attachment with an older schema.
-    homeboy_core::daemon::stop_for_lease(&state.lease_id)?;
-    homeboy_core::daemon::ensure_running(homeboy_core::daemon::DEFAULT_ADDR)
+        // A private staging recipe is a typed protocol payload. Replace an idle
+        // stale daemon before it can read a newer attachment with an older schema.
+        homeboy_core::daemon::stop_for_lease(&state.lease_id)?;
+    }
+    Err(Error::validation_invalid_argument(
+        "controller_daemon",
+        "controller daemon did not converge to the submitting Homeboy build before Lab staging admission",
+        Some(expected),
+        None,
+    ))
 }
 
 /// Controller-owned admission for a detached agent-task attempt.
@@ -1621,50 +1748,19 @@ impl ProductionLabStagingOperations {
             // Mixed-version recovery: old recipes had no immutable binding.
             return Ok(None);
         };
-        let mut runner = crate::load(&request.recipe.runner_id)?;
-        let mut command =
-            crate::remote_runner_homeboy_path(&runner, "durable Lab handoff")?.to_string();
-        let mut status = Self::status_for_recipe_transport(request)?;
-        let configured = crate::configured_runner_homeboy_build_identity(&runner, &command)?;
+        converge_lab_handoff_runtime(
+            &request.recipe.runner_id,
+            request.recipe.tunnel_mode.clone(),
+            requested,
+        )?;
+        let runner = crate::load(&request.recipe.runner_id)?;
+        let command = crate::remote_runner_homeboy_path(&runner, "durable Lab handoff")?;
+        let status = Self::status_for_recipe_transport(request)?;
         let daemon = status
             .session
             .as_ref()
             .and_then(|session| session.homeboy_build_identity.clone());
-        if !handoff_identities_match(requested, configured.as_deref(), daemon.as_deref())
-            && automatic_handoff_convergence_allowed(&runner)
-            && status.active_jobs.is_empty()
-            && status.active_job_state == crate::RunnerActiveJobState::Available
-            && status
-                .session
-                .as_ref()
-                .is_some_and(|session| session.mode == crate::RunnerTunnelMode::DirectSsh)
-        {
-            let mode = if configured.as_deref().is_some_and(|identity| {
-                canonical_homeboy_identity(identity) == canonical_homeboy_identity(requested)
-            }) {
-                crate::HomeboyBinaryRefreshMode::Select {
-                    binary_path: command.to_string(),
-                }
-            } else {
-                crate::HomeboyBinaryRefreshMode::Materialize
-            };
-            let (report, exit_code) = crate::refresh_homeboy_binary(handoff_refresh_options(
-                request.recipe.runner_id.clone(),
-                mode,
-                requested,
-            ))?;
-            if exit_code == 0 && report.daemon_refreshed {
-                status = Self::status_for_recipe_transport(request)?;
-                runner = crate::load(&request.recipe.runner_id)?;
-                command =
-                    crate::remote_runner_homeboy_path(&runner, "durable Lab handoff")?.to_string();
-            }
-        }
-        let daemon = status
-            .session
-            .as_ref()
-            .and_then(|session| session.homeboy_build_identity.clone());
-        let configured = crate::configured_runner_homeboy_build_identity(&runner, &command)?;
+        let configured = crate::configured_runner_homeboy_build_identity(&runner, command)?;
         if !handoff_identities_match(requested, configured.as_deref(), daemon.as_deref()) {
             return Err(handoff_identity_error(
                 &request.recipe.runner_id,
@@ -3905,6 +4001,157 @@ mod tests {
 
         assert!(!options.allow_downgrade);
         assert_eq!(options.git_ref.as_deref(), Some("required"));
+    }
+
+    fn convergence_runner(allowed: bool) -> crate::Runner {
+        serde_json::from_value(json!({
+            "kind": "ssh",
+            "policy": { "allow_homeboy_convergence": allowed },
+        }))
+        .expect("runner")
+    }
+
+    fn convergence_status(daemon_identity: &str) -> crate::RunnerStatusReport {
+        crate::RunnerStatusReport {
+            runner_id: "lab-identity".to_string(),
+            connected: true,
+            state: crate::RunnerSessionState::Connected,
+            session: Some(crate::RunnerSession {
+                runner_id: "lab-identity".to_string(),
+                mode: crate::RunnerTunnelMode::DirectSsh,
+                role: crate::RunnerSessionRole::Controller,
+                server_id: None,
+                controller_id: None,
+                broker_url: None,
+                remote_daemon_address: None,
+                local_port: None,
+                local_url: None,
+                tunnel_pid: None,
+                remote_daemon_pid: None,
+                remote_daemon_lease_id: None,
+                homeboy_version: "test".to_string(),
+                homeboy_build_identity: Some(daemon_identity.to_string()),
+                connected_at: "now".to_string(),
+                worker_identity: None,
+                worker_pid: None,
+                last_seen_at: None,
+                leaseless_recovery_evidence: None,
+            }),
+            stale_daemon: None,
+            daemon_freshness: None,
+            active_jobs: Vec::new(),
+            active_runner_jobs: Vec::new(),
+            stale_runner_jobs: Vec::new(),
+            active_job_count: 0,
+            stale_runner_job_count: 0,
+            active_job_state: crate::RunnerActiveJobState::Available,
+            active_job_source: None,
+            active_job_error: None,
+            active_job_recovery_evidence: None,
+            session_path: "/tmp/lab-identity.json".to_string(),
+        }
+    }
+
+    #[test]
+    fn stale_daemon_converges_before_provider_work() {
+        let runner = convergence_runner(true);
+        let status = convergence_status("homeboy 1.2.2+stale");
+
+        assert!(matches!(
+            handoff_convergence_action(
+                &runner,
+                &status,
+                "homeboy 1.2.3+required",
+                Some("homeboy 1.2.3+required"),
+                Some("homeboy 1.2.2+stale"),
+                "/runner/homeboy",
+            ),
+            HandoffConvergenceAction::Refresh(crate::HomeboyBinaryRefreshMode::Select { .. })
+        ));
+    }
+
+    #[test]
+    fn stale_job_binary_converges_before_provider_work() {
+        let runner = convergence_runner(true);
+        let status = convergence_status("homeboy 1.2.3+required");
+
+        assert!(matches!(
+            handoff_convergence_action(
+                &runner,
+                &status,
+                "homeboy 1.2.3+required",
+                Some("homeboy 1.2.2+stale"),
+                Some("homeboy 1.2.3+required"),
+                "/runner/homeboy",
+            ),
+            HandoffConvergenceAction::Refresh(crate::HomeboyBinaryRefreshMode::Materialize)
+        ));
+    }
+
+    #[test]
+    fn exact_runtime_skips_convergence() {
+        let runner = convergence_runner(true);
+        let status = convergence_status("homeboy 1.2.3+required");
+
+        assert!(matches!(
+            handoff_convergence_action(
+                &runner,
+                &status,
+                "homeboy 1.2.3+required",
+                Some("homeboy 1.2.3+required"),
+                Some("homeboy 1.2.3+required"),
+                "/runner/homeboy",
+            ),
+            HandoffConvergenceAction::Ready
+        ));
+    }
+
+    #[test]
+    fn failed_convergence_refuses_before_provider_work() {
+        let runner = convergence_runner(false);
+        let status = convergence_status("homeboy 1.2.2+stale");
+
+        assert!(matches!(
+            handoff_convergence_action(
+                &runner,
+                &status,
+                "homeboy 1.2.3+required",
+                Some("homeboy 1.2.2+stale"),
+                Some("homeboy 1.2.2+stale"),
+                "/runner/homeboy",
+            ),
+            HandoffConvergenceAction::Refuse
+        ));
+    }
+
+    #[test]
+    fn concurrent_dispatch_rechecks_the_runtime_after_one_converges() {
+        let runner = convergence_runner(true);
+        let stale = convergence_status("homeboy 1.2.2+stale");
+        let converged = convergence_status("homeboy 1.2.3+required");
+
+        assert!(matches!(
+            handoff_convergence_action(
+                &runner,
+                &stale,
+                "homeboy 1.2.3+required",
+                Some("homeboy 1.2.3+required"),
+                Some("homeboy 1.2.2+stale"),
+                "/runner/homeboy",
+            ),
+            HandoffConvergenceAction::Refresh(_)
+        ));
+        assert!(matches!(
+            handoff_convergence_action(
+                &runner,
+                &converged,
+                "homeboy 1.2.3+required",
+                Some("homeboy 1.2.3+required"),
+                Some("homeboy 1.2.3+required"),
+                "/runner/homeboy",
+            ),
+            HandoffConvergenceAction::Ready
+        ));
     }
 
     #[test]

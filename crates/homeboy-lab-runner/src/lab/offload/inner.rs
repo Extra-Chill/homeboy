@@ -1311,7 +1311,17 @@ pub(crate) fn run_lab_offload_inner(
                 shell::quote_arg(runner_id)
             ))
     );
-    if lab_runner_homeboy_has_blocking_drift_against_configured_identity(
+    // A detached Cook must converge its exact controller build before provider
+    // readiness work. Otherwise a stale daemon can account for a provider run
+    // that will later execute an older lifecycle contract.
+    if request.detach_after_handoff && request.durable_agent_task_plan.is_some() {
+        crate::lab_staging_controller::converge_lab_handoff_runtime(
+            runner_id,
+            selection.mode.clone(),
+            &homeboy_product_identity::build_identity().display,
+        )?;
+        runner_status = crate::status_for_admission(runner_id)?;
+    } else if lab_runner_homeboy_has_blocking_drift_against_configured_identity(
         &runner_status,
         configured_build_identity.as_deref(),
         require_exact_runner_version,
