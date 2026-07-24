@@ -37,6 +37,31 @@ fn cook_rejects_invalid_controller_transport_before_worktree_resolution() {
 }
 
 #[test]
+fn cook_rejects_local_detach_before_worktree_resolution() {
+    let output = homeboy()
+        .args([
+            "--placement",
+            "local",
+            "--detach-after-handoff",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "implement the fix",
+            "--to-worktree",
+            "missing@worktree",
+            "--verify",
+            "true",
+        ])
+        .output()
+        .expect("run homeboy");
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("cannot detach after handoff with --placement local"));
+    assert!(!stdout.contains("worktree provider"));
+}
+
+#[test]
 fn cook_rejects_queue_only_before_worktree_resolution() {
     let output = homeboy()
         .args([
