@@ -23,7 +23,10 @@ pub mod resolution;
 pub mod scope;
 pub mod versioning;
 
-pub use artifacts::{cleanup_artifact_report, CleanupArtifactCandidate, CleanupArtifactReport};
+pub use artifacts::{
+    cleanup_artifact_report, declared_cleanup_artifact_paths, CleanupArtifactCandidate,
+    CleanupArtifactReport,
+};
 pub use audit::{
     ArtifactPortabilityConfig, AuditConfig, CommandStatusContractConfig,
     CommandStatusContractScenario, ConfigKeyUsageConfig, ConfigKeyUsagePattern, ConfigKeyUsageRule,

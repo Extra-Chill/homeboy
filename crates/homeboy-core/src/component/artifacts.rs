@@ -39,6 +39,22 @@ struct ResolvedDeclaration {
     relative_path: String,
 }
 
+/// Component-relative paths the component declares as generated/reconstructable
+/// artifacts (`cleanup_artifacts`, by explicit path or glob, plus manifest
+/// declarations).
+///
+/// Callers that must distinguish operator-authored source changes from expected
+/// generated-file churn use this instead of hardcoding ecosystem-specific paths:
+/// the component (or its extension) owns the declaration, and core only honors
+/// it. Keeps toolchain knowledge out of core.
+pub fn declared_cleanup_artifact_paths(component: &Component) -> Result<Vec<String>> {
+    let component_path = PathBuf::from(&component.local_path);
+    Ok(cleanup_artifact_declarations(component, &component_path)?
+        .into_iter()
+        .map(|declaration| declaration.relative_path)
+        .collect())
+}
+
 pub fn cleanup_artifact_report(
     component: &Component,
     apply: bool,

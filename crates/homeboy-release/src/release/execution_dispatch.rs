@@ -705,36 +705,34 @@ fn release_step_unexpected_dirty_files(
         }
         // Hydration regenerates package-manager bookkeeping as a side effect of
         // running at all. That churn is homeboy's own doing, not operator drift.
-        "preflight.dependencies" => Ok(files
-            .into_iter()
-            .filter(|file| !is_dependency_hydration_metadata(file))
-            .collect()),
+        // The component (or its extension) declares which generated paths are
+        // reconstructable, so this stays free of any toolchain's specific paths.
+        "preflight.dependencies" => {
+            let declared =
+                homeboy_core::component::declared_cleanup_artifact_paths(context.component)?;
+            Ok(files
+                .into_iter()
+                .filter(|file| {
+                    !declared
+                        .iter()
+                        .any(|artifact| declared_artifact_matches(file, artifact))
+                })
+                .collect())
+        }
         _ => Ok(files),
     }
 }
 
-/// Generated package-manager metadata that a dependency install rewrites even
-/// when it resolves no changes.
+/// Whether a dirty-file entry corresponds to a declared artifact path.
 ///
-/// Composer regenerates `vendor/composer/installed.json` and `installed.php`
-/// during autoload generation on every `composer install`, including a no-op
-/// "Nothing to install" run. WordPress plugins commonly commit `vendor/` so the
-/// plugin works without a build step on the host, which made the release's own
-/// hydration step fail the working-tree gate it was preparing for (#9965).
-///
-/// Deliberately narrow: only the two files composer rewrites unconditionally.
-/// Real dependency changes still surface through `composer.lock` and the
-/// installed package sources, which remain guarded.
-fn is_dependency_hydration_metadata(file: &str) -> bool {
-    const GENERATED_METADATA: &[&str] = &[
-        "vendor/composer/installed.json",
-        "vendor/composer/installed.php",
-    ];
-
-    let normalized = file.trim_start_matches("./").replace('\\', "/");
-    GENERATED_METADATA
-        .iter()
-        .any(|generated| normalized == *generated || normalized.ends_with(&format!("/{generated}")))
+/// Git reports entries relative to the repository root while declarations are
+/// component-relative, so match on either direction's path-boundary suffix.
+fn declared_artifact_matches(file: &str, declared: &str) -> bool {
+    let file = file.replace('\\', "/");
+    let declared = declared.replace('\\', "/");
+    file == declared
+        || file.ends_with(&format!("/{declared}"))
+        || declared.ends_with(&format!("/{file}"))
 }
 
 fn release_prepare_allowed_dirty_files(
@@ -1465,13 +1463,70 @@ mod tests {
             .any(|hint| hint.message.contains("Fix the build/test/package step")));
     }
 
-    /// Regression for #9965: `composer install` rewrites
-    /// `vendor/composer/installed.{json,php}` on every run, including a no-op
-    /// "Nothing to install" run. WordPress plugins commonly commit `vendor/`, so
-    /// homeboy's own hydration step failed the working-tree gate it was
-    /// preparing for. That churn is expected noise; real source changes are not.
+    /// Regression for #9965: a dependency install rewrites generated bookkeeping
+    /// on every run, including a no-op one. Components that commit those
+    /// generated files made homeboy's own hydration step fail the working-tree
+    /// gate it was preparing for. The component declares which paths are
+    /// reconstructable, so that churn is excused while real changes are not —
+    /// and core stays free of any toolchain's specific paths.
     #[test]
-    fn dependency_preflight_dirty_guard_allows_generated_composer_metadata() {
+    fn dependency_preflight_dirty_guard_allows_declared_generated_artifacts() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: temp.path().to_string_lossy().to_string(),
+            cleanup_artifacts: vec![
+                homeboy_core::component::CleanupArtifactDeclaration {
+                    label: "generated dependency bookkeeping".to_string(),
+                    path: Some("deps/generated/state.json".to_string()),
+                    glob: None,
+                },
+                homeboy_core::component::CleanupArtifactDeclaration {
+                    label: "generated dependency map".to_string(),
+                    path: Some("deps/generated/map.bin".to_string()),
+                    glob: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let options = ReleaseOptions::default();
+        let context = ReleaseExecutionContext {
+            component: &component,
+            extensions: &[],
+            component_id: "fixture",
+            options: &options,
+            state: ReleaseState::default(),
+            publish_failed: false,
+        };
+
+        let unexpected = release_step_unexpected_dirty_files(
+            &plan_step("preflight.dependencies"),
+            &context,
+            vec![
+                "deps/generated/state.json".to_string(),
+                "deps/generated/map.bin".to_string(),
+                // Monorepo form: the component sits under a subdirectory, so git
+                // reports repo-root-relative paths.
+                "plugins/fixture/deps/generated/state.json".to_string(),
+                "plugins/fixture/deps/generated/map.bin".to_string(),
+                // The dependency lock and real source changes must still report.
+                "deps/lock.txt".to_string(),
+                "src/lib.rs".to_string(),
+            ],
+        )
+        .expect("guard should classify dirty files");
+
+        assert_eq!(
+            unexpected,
+            vec!["deps/lock.txt", "src/lib.rs"],
+            "only the component's declared generated artifacts may be excused"
+        );
+    }
+
+    /// Without a declaration nothing is excused: the component owns the list of
+    /// reconstructable paths, so an undeclared generated file still reports.
+    #[test]
+    fn dependency_preflight_dirty_guard_reports_undeclared_files() {
         let temp = tempfile::tempdir().expect("tempdir");
         let component = Component {
             id: "fixture".to_string(),
@@ -1491,24 +1546,11 @@ mod tests {
         let unexpected = release_step_unexpected_dirty_files(
             &plan_step("preflight.dependencies"),
             &context,
-            vec![
-                "vendor/composer/installed.json".to_string(),
-                "vendor/composer/installed.php".to_string(),
-                // Monorepo form: the component sits under a subdirectory.
-                "plugins/h44-forms/vendor/composer/installed.json".to_string(),
-                "plugins/h44-forms/vendor/composer/installed.php".to_string(),
-                // Real dependency and source changes must still be reported.
-                "composer.lock".to_string(),
-                "src/Plugin.php".to_string(),
-            ],
+            vec!["deps/generated/state.json".to_string()],
         )
         .expect("guard should classify dirty files");
 
-        assert_eq!(
-            unexpected,
-            vec!["composer.lock", "src/Plugin.php"],
-            "only composer's unconditionally regenerated metadata may be excused"
-        );
+        assert_eq!(unexpected, vec!["deps/generated/state.json"]);
     }
 
     #[test]
