@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.31.10] - 2026-07-24
+
+### Fixed
+- restore explicit PHPUnit runtime preparation
+
 ## [3.31.9] - 2026-07-24
 
 ### Fixed
