@@ -368,6 +368,30 @@ fn cook_dispatch_provider_id_alias_maps_to_selector() {
 }
 
 #[test]
+fn adopt_attempt_selector_parses_as_an_explicit_cook_attempt() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "adopt",
+        "cook-with-colliding-first-run-id",
+        "--attempt",
+        "1",
+        "--candidate-ref",
+        "deadbeef",
+    ])
+    .expect("attempt selector parses");
+
+    let Commands::AgentTask(agent_task) = cli.command else {
+        panic!("expected agent-task command");
+    };
+    let AgentTaskCommand::Adopt(args) = agent_task.command else {
+        panic!("expected adopt command");
+    };
+    assert_eq!(args.run_or_cook_id, "cook-with-colliding-first-run-id");
+    assert_eq!(args.attempt, Some(1));
+}
+
+#[test]
 fn cook_execution_budget_flags_parse_and_reject_legacy_attempts_mix() {
     let cli = Cli::try_parse_from([
         "homeboy",
