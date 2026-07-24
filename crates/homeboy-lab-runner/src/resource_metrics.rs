@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::process::{Command, Output, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
@@ -24,12 +25,16 @@ const FALLBACK_RSS_LIMIT_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const PREFERRED_HOST_HEADROOM_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 #[cfg(any(target_os = "linux", test))]
 const HOST_HEADROOM_DIVISOR: u64 = 10;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 const DEFAULT_PROCESS_COUNT_LIMIT: u64 = 128;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 const RSS_LIMIT_ENV: &str = "HOMEBOY_RUNNER_RESOURCE_GUARD_RSS_BYTES";
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 const PROCESS_COUNT_LIMIT_ENV: &str = "HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT";
+#[cfg(any(target_os = "linux", test))]
+const DEFAULT_PROCESS_COUNT_LIMIT_CEILING: u64 = 256;
+#[cfg(any(target_os = "linux", test))]
+const PROCESS_COUNT_LIMIT_CEILING_ENV: &str = "HOMEBOY_RUNNER_RESOURCE_GUARD_MAX_PROCESS_COUNT";
 
 fn require_process_tree_isolation() -> Result<()> {
     if supports_process_tree_isolation() {
@@ -75,6 +80,7 @@ struct MetricsState {
 
 pub(crate) fn measured_command_output(
     command: &mut Command,
+    resource_guard_env: &HashMap<String, String>,
     concurrency_limit: Option<usize>,
 ) -> Result<MeasuredOutput> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -83,7 +89,14 @@ pub(crate) fn measured_command_output(
         .spawn()
         .map_err(|error| runner_command_spawn_error(command, &error))?;
     let pid = child.id();
-    let collector = ResourceMetricsCollector::start(pid, started, None, None, concurrency_limit);
+    let collector = ResourceMetricsCollector::start(
+        pid,
+        started,
+        None,
+        None,
+        resource_guard_env,
+        concurrency_limit,
+    );
     let bounded_output =
         wait_with_bounded_output(child, DEFAULT_CAPTURE_LIMIT_BYTES).map_err(|err| {
             Error::internal_io(err.to_string(), Some("wait for runner command".to_string()))
@@ -105,6 +118,7 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
     require_child_identity_acknowledgement: bool,
     stdout_line_observer: Option<StdoutLineObserver>,
     child_started: Option<Arc<dyn Fn(u32) -> Result<()> + Send + Sync + 'static>>,
+    resource_guard_env: &HashMap<String, String>,
     concurrency_limit: Option<usize>,
 ) -> Result<MeasuredOutput> {
     if require_child_identity_acknowledgement {
@@ -167,6 +181,7 @@ pub(crate) fn measured_command_output_until_cancelled_with_progress(
         started,
         progress_sink,
         Some(Arc::clone(&guard_violation)),
+        resource_guard_env,
         concurrency_limit,
     );
     let bounded_output = wait_with_bounded_output_until_cancelled_with_stdout_observer(
@@ -301,10 +316,11 @@ impl ResourceMetricsCollector {
         started: Instant,
         progress_sink: Option<RunnerCommandProgressSink>,
         guard_violation: Option<Arc<Mutex<Option<RunnerResourceGuardViolation>>>>,
+        resource_guard_env: &HashMap<String, String>,
         concurrency_limit: Option<usize>,
     ) -> Self {
         let supported = cfg!(target_os = "linux") && std::path::Path::new("/proc").exists();
-        let guard_limits = resolved_resource_guard_limits(concurrency_limit);
+        let guard_limits = resolved_resource_guard_limits(resource_guard_env, concurrency_limit);
         let state = Arc::new(Mutex::new(MetricsState::default()));
         if !supported && progress_sink.is_none() {
             return Self {
@@ -558,6 +574,7 @@ fn resource_guard_violation(
 
 #[cfg(target_os = "linux")]
 fn resolved_resource_guard_limits(
+    resource_guard_env: &HashMap<String, String>,
     concurrency_limit: Option<usize>,
 ) -> Option<RunnerResourceGuardLimits> {
     let concurrency = u64::try_from(concurrency_limit.unwrap_or(1).max(1)).unwrap_or(u64::MAX);
@@ -567,12 +584,13 @@ fn resolved_resource_guard_limits(
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok());
     let rss_limit = resolved_rss_limit(memory_capacity_bytes, explicit_rss_limit);
+    let process_count = resolved_process_count_limit(resource_guard_env);
     Some(RunnerResourceGuardLimits {
         rss_limit_bytes: rss_limit.rss_limit_bytes,
-        process_count_limit: resource_guard_limit(
-            PROCESS_COUNT_LIMIT_ENV,
-            DEFAULT_PROCESS_COUNT_LIMIT,
-        ),
+        process_count_limit: process_count.limit,
+        process_count_limit_source: Some(process_count.source),
+        requested_process_count_limit: process_count.requested,
+        process_count_limit_ceiling: Some(process_count.ceiling),
         concurrency,
         memory_capacity_bytes,
         host_headroom_bytes: rss_limit.host_headroom_bytes,
@@ -681,9 +699,65 @@ fn update_active_runner_rss(root_pid: u32, rss_bytes: u64) -> ActiveRunnerRss {
 
 #[cfg(not(target_os = "linux"))]
 fn resolved_resource_guard_limits(
+    _resource_guard_env: &HashMap<String, String>,
     _concurrency_limit: Option<usize>,
 ) -> Option<RunnerResourceGuardLimits> {
     None
+}
+
+#[cfg(any(target_os = "linux", test))]
+struct ResolvedProcessCountLimit {
+    limit: u64,
+    requested: Option<u64>,
+    ceiling: u64,
+    source: String,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn resolved_process_count_limit(
+    resource_guard_env: &HashMap<String, String>,
+) -> ResolvedProcessCountLimit {
+    let runner_default_override = std::env::var(PROCESS_COUNT_LIMIT_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    let runner_default = runner_default_override.unwrap_or(DEFAULT_PROCESS_COUNT_LIMIT);
+    let ceiling = resource_guard_limit(
+        PROCESS_COUNT_LIMIT_CEILING_ENV,
+        DEFAULT_PROCESS_COUNT_LIMIT_CEILING,
+    );
+    let requested = resource_guard_env
+        .get(PROCESS_COUNT_LIMIT_ENV)
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    resolve_process_count_limit(
+        runner_default,
+        ceiling,
+        requested,
+        runner_default_override.is_some(),
+    )
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn resolve_process_count_limit(
+    runner_default: u64,
+    ceiling: u64,
+    requested: Option<u64>,
+    runner_default_is_override: bool,
+) -> ResolvedProcessCountLimit {
+    let (limit, source) = match requested {
+        Some(0) if runner_default_is_override => (runner_default, "runner_override"),
+        Some(0) => (runner_default, "job_override_rejected"),
+        Some(_) if ceiling == 0 => (runner_default, "job_override_rejected"),
+        Some(requested) if requested > ceiling => (ceiling, "job_override_capped"),
+        Some(requested) => (requested, "job_override"),
+        None if runner_default_is_override => (runner_default, "runner_override"),
+        None => (runner_default, "default"),
+    };
+    ResolvedProcessCountLimit {
+        limit,
+        requested,
+        ceiling,
+        source: source.to_string(),
+    }
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -712,7 +786,7 @@ fn classify_resource_guard_violation(
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn resource_guard_limit(env_name: &str, default_value: u64) -> u64 {
     std::env::var(env_name)
         .ok()
@@ -860,6 +934,7 @@ mod tests {
                 callback_pid.store(child_pid, Ordering::SeqCst);
                 Err(Error::internal_unexpected("persist child identity"))
             })),
+            &HashMap::new(),
             None,
         )
         .expect_err("callback failure returns");
@@ -907,6 +982,7 @@ mod tests {
             true,
             None,
             None,
+            &HashMap::new(),
             None,
         )
         .expect("command completes");
@@ -931,6 +1007,7 @@ mod tests {
             true,
             None,
             None,
+            &HashMap::new(),
             None,
         )
         .expect_err("unsupported platforms must fail before spawning a child");
@@ -972,6 +1049,7 @@ mod tests {
             true,
             None,
             None,
+            &HashMap::new(),
             None,
         )
         .expect_err("initial identity persistence failure must fail execution");
@@ -1013,7 +1091,7 @@ mod tests {
         let mut command = Command::new("sh");
         command.args(["-c", "exit 0"]);
 
-        let output = measured_command_output(&mut command, None)
+        let output = measured_command_output(&mut command, &HashMap::new(), None)
             .expect("ordinary measured command execution remains available");
 
         assert!(output.output.status.success());
@@ -1068,6 +1146,9 @@ mod tests {
         let limits = RunnerResourceGuardLimits {
             rss_limit_bytes: resolved.rss_limit_bytes,
             process_count_limit: 128,
+            process_count_limit_source: Some("default".to_string()),
+            requested_process_count_limit: None,
+            process_count_limit_ceiling: Some(256),
             concurrency: 8,
             memory_capacity_bytes: Some(96 * 1024 * 1024 * 1024),
             host_headroom_bytes: resolved.host_headroom_bytes,
@@ -1116,6 +1197,46 @@ mod tests {
         assert_eq!(limits.rss_limit_bytes, 7 * 1024 * 1024 * 1024);
         assert_eq!(limits.source, "explicit_override");
         assert_eq!(limits.aggregate_rss_budget_bytes, None);
+    }
+
+    #[test]
+    fn trusted_job_process_count_override_is_bounded_by_runner_ceiling() {
+        let accepted = resolve_process_count_limit(128, 256, Some(200), false);
+        assert_eq!(accepted.limit, 200);
+        assert_eq!(accepted.requested, Some(200));
+        assert_eq!(accepted.ceiling, 256);
+        assert_eq!(accepted.source, "job_override");
+
+        let capped = resolve_process_count_limit(128, 256, Some(512), false);
+        assert_eq!(capped.limit, 256);
+        assert_eq!(capped.requested, Some(512));
+        assert_eq!(capped.source, "job_override_capped");
+    }
+
+    #[test]
+    fn job_cannot_disable_runner_process_guard() {
+        let resolved = resolve_process_count_limit(128, 256, Some(0), false);
+        assert_eq!(resolved.limit, 128);
+        assert_eq!(resolved.source, "job_override_rejected");
+
+        let runner_disabled = resolve_process_count_limit(0, 256, Some(0), true);
+        assert_eq!(runner_disabled.limit, 0);
+        assert_eq!(runner_disabled.source, "runner_override");
+
+        let disabled_ceiling = resolve_process_count_limit(128, 0, Some(200), false);
+        assert_eq!(disabled_ceiling.limit, 128);
+        assert_eq!(disabled_ceiling.source, "job_override_rejected");
+    }
+
+    #[test]
+    fn job_ceiling_does_not_inherit_a_larger_runner_default() {
+        let runner_default = resolve_process_count_limit(512, 256, None, true);
+        assert_eq!(runner_default.limit, 512);
+        assert_eq!(runner_default.source, "runner_override");
+
+        let requested = resolve_process_count_limit(512, 256, Some(512), true);
+        assert_eq!(requested.limit, 256);
+        assert_eq!(requested.source, "job_override_capped");
     }
 }
 

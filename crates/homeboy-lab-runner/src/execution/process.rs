@@ -300,6 +300,7 @@ pub(crate) fn prepare_runner_process(
         cwd,
         command: request.command,
         env,
+        resource_guard_env: request_env,
         secret_env_names: secret_env_plan.secret_env_names(),
         source_snapshot,
         require_paths: request.require_paths,
@@ -418,6 +419,7 @@ pub(crate) fn prepare_daemon_local_process(
         cwd,
         command: request.command,
         env,
+        resource_guard_env: request_env,
         secret_env_names: secret_env_plan.secret_env_names(),
         source_snapshot,
         require_paths: request.require_paths,
@@ -429,7 +431,11 @@ pub(crate) fn execute_runner_process(plan: &PreparedRunnerProcess) -> Result<Pro
     command.args(&plan.command[1..]).current_dir(&plan.cwd);
     apply_runner_process_env(&mut command, plan)?;
 
-    command_output(&mut command, plan.runner.settings.concurrency_limit)
+    command_output(
+        &mut command,
+        &plan.resource_guard_env,
+        plan.runner.settings.concurrency_limit,
+    )
 }
 
 pub(crate) fn execute_runner_process_until_cancelled_with_progress(
@@ -450,6 +456,7 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
         require_child_identity_acknowledgement,
         child_started,
         &plan.env,
+        &plan.resource_guard_env,
         &plan.secret_env_names,
         plan.runner.settings.concurrency_limit,
     )
@@ -1024,9 +1031,10 @@ pub(super) fn inherited_runner_process_env_keys() -> &'static [&'static str] {
 
 pub(super) fn command_output(
     command: &mut std::process::Command,
+    env: &HashMap<String, String>,
     concurrency_limit: Option<usize>,
 ) -> Result<ProcessOutput> {
-    let measured = measured_command_output(command, concurrency_limit)?;
+    let measured = measured_command_output(command, env, concurrency_limit)?;
     let output = measured.output;
     Ok(ProcessOutput {
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
@@ -1044,6 +1052,7 @@ pub(super) fn command_output_until_cancelled_with_progress(
     require_child_identity_acknowledgement: bool,
     child_started: Option<Arc<dyn Fn(u32) -> Result<()> + Send + Sync + 'static>>,
     env: &HashMap<String, String>,
+    resource_guard_env: &HashMap<String, String>,
     secret_env_names: &[String],
     concurrency_limit: Option<usize>,
 ) -> Result<ProcessOutput> {
@@ -1066,6 +1075,7 @@ pub(super) fn command_output_until_cancelled_with_progress(
         require_child_identity_acknowledgement,
         stdout_line_observer,
         child_started,
+        resource_guard_env,
         concurrency_limit,
     )?;
     let output = measured.output;

@@ -312,6 +312,58 @@ fn daemon_worker_marks_nested_cook_as_runner_hosted() {
 }
 
 #[test]
+fn daemon_prep_keeps_resource_guard_request_separate_from_runner_env() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let mut runner = local_runner(workspace.display().to_string());
+        runner.env.insert(
+            "HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT".to_string(),
+            "160".to_string(),
+        );
+        runner
+            .env
+            .insert("RUNNER_ONLY".to_string(), "1".to_string());
+
+        let plan = prepare_daemon_local_process(RunnerProcessRequest {
+            runner_id: "homeboy-lab".to_string(),
+            runner: Some(runner),
+            cwd: Some(workspace.display().to_string()),
+            project_id: None,
+            command: vec!["true".to_string()],
+            env: HashMap::from([(
+                "HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT".to_string(),
+                "200".to_string(),
+            )]),
+            secret_env_names: Vec::new(),
+            secret_env_plan: None,
+            capture_patch: false,
+            raw_exec: false,
+            source_snapshot: None,
+            require_paths: Vec::new(),
+            validate_require_paths_on_host: true,
+        })
+        .expect("prepare daemon worker process");
+
+        assert_eq!(
+            plan.env
+                .get("HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT")
+                .map(String::as_str),
+            Some("200")
+        );
+        assert_eq!(
+            plan.resource_guard_env
+                .get("HOMEBOY_RUNNER_RESOURCE_GUARD_PROCESS_COUNT")
+                .map(String::as_str),
+            Some("200")
+        );
+        assert_eq!(plan.resource_guard_env.len(), 1);
+        assert!(!plan.resource_guard_env.contains_key("RUNNER_ONLY"));
+    });
+}
+
+#[test]
 fn runner_prep_drops_undeclared_sensitive_env() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
