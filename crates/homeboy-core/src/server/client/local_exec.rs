@@ -342,7 +342,51 @@ fn copy_piped_stdin_to_child(
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn copy_piped_stdin_to_child(
+    mut reader: std::fs::File,
+    mut pipe: ChildStdin,
+    cancelled: Arc<AtomicBool>,
+) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_PIPE};
+    use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+
+    let handle = reader.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+    if unsafe { GetFileType(handle) } != FILE_TYPE_PIPE {
+        return copy_stdin_to_child(&mut reader, pipe);
+    }
+
+    let mut buffer = [0u8; 64 * 1024];
+    while !cancelled.load(Ordering::Acquire) {
+        let mut available = 0;
+        let result = unsafe {
+            PeekNamedPipe(
+                handle,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut available,
+                std::ptr::null_mut(),
+            )
+        };
+        if result == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if available == 0 {
+            thread::sleep(Duration::from_millis(20));
+            continue;
+        }
+        match reader.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(count) => pipe.write_all(&buffer[..count])?,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn copy_piped_stdin_to_child(
     mut reader: std::fs::File,
     pipe: ChildStdin,
@@ -363,7 +407,33 @@ pub(crate) fn piped_stdin_file() -> std::io::Result<std::fs::File> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(crate) fn piped_stdin_file() -> std::io::Result<std::fs::File> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows_sys::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    let process = unsafe { GetCurrentProcess() };
+    let mut duplicate: HANDLE = std::ptr::null_mut();
+    let result = unsafe {
+        DuplicateHandle(
+            process,
+            std::io::stdin().as_raw_handle() as HANDLE,
+            process,
+            &mut duplicate,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(unsafe { std::fs::File::from_raw_handle(duplicate) })
+    }
+}
+
+#[cfg(all(not(unix), not(windows)))]
 pub(crate) fn piped_stdin_file() -> std::io::Result<std::fs::File> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,

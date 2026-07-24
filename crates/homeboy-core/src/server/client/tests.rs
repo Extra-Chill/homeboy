@@ -312,6 +312,16 @@ fn local_producer_failure_cannot_report_success() {
     assert!(output.stderr.contains("stdin delivery failed"));
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_empty_redirected_stdin_preserves_no_input_execution() {
+    let file = tempfile::tempfile().expect("empty redirected stdin file");
+    let output = run_command_with_stdin_source(piped_command("exit 0"), StdinSource::Piped(file));
+
+    assert!(output.success, "{}", output.stderr);
+    assert_eq!(output.exit_code, 0);
+}
+
 #[test]
 fn test_non_local_hosts() {
     assert!(!is_local_host("example.com"));
