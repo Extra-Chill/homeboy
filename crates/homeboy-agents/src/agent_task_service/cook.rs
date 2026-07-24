@@ -43,6 +43,89 @@ use super::cook_promotion::{
 use super::execution::run_loaded_plan_with_derived_cook_baseline;
 use super::AgentTaskRunResult;
 
+/// The generic cook side-effect boundary the attempt loop drives its external
+/// effects through: promotion, moving-base recovery, and PR finalization.
+///
+/// Routing every external effect through one injectable object (rather than a
+/// mix of free-function calls and ad-hoc closures) gives durable exactly-once
+/// operation claims a single wiring point, and lets deterministic tests inject
+/// side effects without real Git/GitHub mutations (#8357). This slice is a pure
+/// structural boundary: [`DefaultCookSideEffects`] preserves the exact prior
+/// behavior by delegating to the existing free functions. Claim wiring for
+/// promotion, retry dispatch, and finalization follows as separate changes.
+pub(crate) trait CookSideEffectService {
+    /// Promote the successful candidate for `run_id`, or load the already-persisted
+    /// promotion when this attempt was interrupted after promoting.
+    fn promote(
+        &mut self,
+        options: &AgentTaskCookServiceOptions,
+        run_id: &str,
+    ) -> Result<AgentTaskPromotionReport>;
+
+    /// Rebase and re-verify a candidate whose base moved under it.
+    fn recover_moving_base(
+        &mut self,
+        options: &AgentTaskCookServiceOptions,
+        recovery: &MovingBaseCookRecovery,
+    ) -> Result<AgentTaskPromotionReport>;
+
+    /// Commit, push, and open/update the PR for a green promoted candidate, or
+    /// load the already-finalized PR when this attempt was interrupted after
+    /// finalizing.
+    fn finalize(
+        &mut self,
+        options: &AgentTaskCookServiceOptions,
+        run_id: &str,
+        promotion: &AgentTaskPromotionReport,
+    ) -> Result<Value>;
+}
+
+/// Production cook side-effect boundary. Each method delegates to the existing
+/// promotion/finalization free functions, so behavior is identical to the prior
+/// direct calls; the trait only relocates the call sites behind one seam.
+pub(crate) struct DefaultCookSideEffects<F> {
+    finalize: F,
+}
+
+impl<F> DefaultCookSideEffects<F>
+where
+    F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
+{
+    pub(crate) fn new(finalize: F) -> Self {
+        Self { finalize }
+    }
+}
+
+impl<F> CookSideEffectService for DefaultCookSideEffects<F>
+where
+    F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
+{
+    fn promote(
+        &mut self,
+        options: &AgentTaskCookServiceOptions,
+        run_id: &str,
+    ) -> Result<AgentTaskPromotionReport> {
+        promote_or_load_attempt(options, run_id)
+    }
+
+    fn recover_moving_base(
+        &mut self,
+        options: &AgentTaskCookServiceOptions,
+        recovery: &MovingBaseCookRecovery,
+    ) -> Result<AgentTaskPromotionReport> {
+        recover_moving_base_cook_candidate(options, recovery)
+    }
+
+    fn finalize(
+        &mut self,
+        options: &AgentTaskCookServiceOptions,
+        run_id: &str,
+        promotion: &AgentTaskPromotionReport,
+    ) -> Result<Value> {
+        (self.finalize)(options, run_id, promotion)
+    }
+}
+
 /// The promotion checkpoint captures this before gates run, when it is the only
 /// complete authorization for reusing the dirty managed destination.
 pub(crate) fn gate_feedback_current_diff(promotion: &AgentTaskPromotionReport) -> String {
@@ -838,27 +921,18 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
 {
-    run_cook_with_boundaries(
-        options,
-        executor,
-        finalize,
-        recover_moving_base_cook_candidate,
-    )
+    let side_effects = DefaultCookSideEffects::new(finalize);
+    run_cook_with_boundaries(options, executor, side_effects)
 }
 
-fn run_cook_with_boundaries<E, F, R>(
+fn run_cook_with_boundaries<E, S>(
     options: AgentTaskCookServiceOptions,
     executor: E,
-    mut finalize: F,
-    mut recover: R,
+    mut side_effects: S,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
 where
     E: AgentTaskExecutorAdapter + Clone,
-    F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
-    R: FnMut(
-        &AgentTaskCookServiceOptions,
-        &MovingBaseCookRecovery,
-    ) -> Result<AgentTaskPromotionReport>,
+    S: CookSideEffectService,
 {
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are
@@ -1303,7 +1377,7 @@ where
             ));
         }
 
-        let promotion = match promote_or_load_attempt(&options, &run_id) {
+        let promotion = match side_effects.promote(&options, &run_id) {
             Ok(report) => report,
             Err(error) => {
                 attempts.push(AgentTaskCookAttemptReport {
@@ -1370,7 +1444,7 @@ where
                 }
                 let mut active_moving_base_recovery = None;
                 let promotion = match moving_base_recovery_for_run(&run_id)? {
-                    Some(recovery) => match recover(&options, &recovery) {
+                    Some(recovery) => match side_effects.recover_moving_base(&options, &recovery) {
                         Ok(promotion) => {
                             agent_task_lifecycle::record_promotion(
                                 &run_id,
@@ -1431,7 +1505,7 @@ where
                     },
                     None => promotion,
                 };
-                let finalization = match finalize(&options, &run_id, &promotion) {
+                let finalization = match side_effects.finalize(&options, &run_id, &promotion) {
                     Ok(finalization) => {
                         if active_moving_base_recovery.is_some() {
                             agent_task_lifecycle::clear_cook_moving_base_recovery(&run_id)?;
