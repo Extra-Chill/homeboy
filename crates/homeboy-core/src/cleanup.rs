@@ -196,6 +196,97 @@ pub fn cleanup_worktree_artifacts(worktree: &Path) -> Result<ArtifactCleanupOutp
     )
 }
 
+/// Candidates and skips discovered for a single worktree.
+struct WorktreeCandidateScan {
+    candidates: Vec<ArtifactCleanupCandidate>,
+    skipped: Vec<ArtifactCleanupSkipped>,
+}
+
+/// Scan one worktree for artifact-cleanup candidates. Fallible git/inventory
+/// operations are contained here so the caller can skip a single bad worktree
+/// (stale, non-Git, or vanished) without aborting the whole batch (#9925).
+fn collect_worktree_candidates(
+    worktree: &WorktreeInfo,
+    options: &ArtifactCleanupOptions,
+) -> Result<WorktreeCandidateScan> {
+    let mut candidates = Vec::new();
+    let mut skipped = Vec::new();
+
+    let safety = git_safety(&worktree.path)?;
+    if options.merged_only && !branch_is_merged(&worktree.path) {
+        for declaration in artifact_declarations(&worktree.path)? {
+            let artifact_path = worktree.path.join(&declaration.relative_path);
+            if !artifact_path.exists() {
+                continue;
+            }
+            skipped.push(skip_row(
+                worktree,
+                &declaration,
+                artifact_path.to_string_lossy().to_string(),
+                "worktree branch is not merged into its upstream",
+            ));
+        }
+        return Ok(WorktreeCandidateScan {
+            candidates,
+            skipped,
+        });
+    }
+    for declaration in artifact_declarations(&worktree.path)? {
+        let artifact_path = worktree.path.join(&declaration.relative_path);
+        let display_path = artifact_path.to_string_lossy().to_string();
+        if !artifact_path.exists() {
+            continue;
+        }
+        if !is_safe_artifact_path(&declaration.relative_path) {
+            skipped.push(skip_row(
+                worktree,
+                &declaration,
+                display_path,
+                "declared artifact path is not a safe repo-relative path",
+            ));
+            continue;
+        }
+        if has_tracked_changes_under(&safety.dirty_paths, &declaration.relative_path) {
+            skipped.push(skip_row(
+                worktree,
+                &declaration,
+                display_path,
+                "artifact path contains tracked or staged source changes",
+            ));
+            continue;
+        }
+
+        let size_bytes = path_size(&artifact_path)?;
+        candidates.push(ArtifactCleanupCandidate {
+            worktree: worktree.path.to_string_lossy().to_string(),
+            path: display_path.clone(),
+            relative_path: declaration.relative_path.clone(),
+            kind: declaration.kind.clone(),
+            declared_by: declaration.declared_by.clone(),
+            size_bytes,
+            source_dirty: safety.source_dirty,
+            unpushed_commits: safety.unpushed_commits,
+        });
+    }
+
+    Ok(WorktreeCandidateScan {
+        candidates,
+        skipped,
+    })
+}
+
+/// A worktree-level skip row (no specific artifact declaration), used when an
+/// entire worktree cannot be inspected.
+fn worktree_skip_row(worktree: &WorktreeInfo, reason: String) -> ArtifactCleanupSkipped {
+    ArtifactCleanupSkipped {
+        worktree: worktree.path.to_string_lossy().to_string(),
+        path: worktree.path.to_string_lossy().to_string(),
+        relative_path: String::new(),
+        kind: String::new(),
+        reason,
+    }
+}
+
 fn cleanup_artifacts_in_worktrees(
     root: PathBuf,
     worktrees: Vec<WorktreeInfo>,
@@ -206,60 +297,23 @@ fn cleanup_artifacts_in_worktrees(
     let mut skipped = Vec::new();
 
     for worktree in &worktrees {
-        let safety = git_safety(&worktree.path)?;
-        if options.merged_only && !branch_is_merged(&worktree.path) {
-            for declaration in artifact_declarations(&worktree.path)? {
-                let artifact_path = worktree.path.join(&declaration.relative_path);
-                if !artifact_path.exists() {
-                    continue;
-                }
-                skipped.push(skip_row(
+        // A single stale/non-Git/vanished worktree candidate must not abort the
+        // whole batch: classify it, record a bounded diagnostic, and continue so
+        // independent valid worktrees are still cleaned (#9925).
+        match collect_worktree_candidates(worktree, options) {
+            Ok(WorktreeCandidateScan {
+                candidates: worktree_candidates,
+                skipped: worktree_skipped,
+            }) => {
+                candidates.extend(worktree_candidates);
+                skipped.extend(worktree_skipped);
+            }
+            Err(error) => {
+                skipped.push(worktree_skip_row(
                     worktree,
-                    &declaration,
-                    artifact_path.to_string_lossy().to_string(),
-                    "worktree branch is not merged into its upstream",
+                    format!("worktree could not be inspected and was skipped: {error}"),
                 ));
             }
-            continue;
-        }
-        for declaration in artifact_declarations(&worktree.path)? {
-            let artifact_path = worktree.path.join(&declaration.relative_path);
-            let display_path = artifact_path.to_string_lossy().to_string();
-            if !artifact_path.exists() {
-                continue;
-            }
-            if !is_safe_artifact_path(&declaration.relative_path) {
-                skipped.push(skip_row(
-                    worktree,
-                    &declaration,
-                    display_path,
-                    "declared artifact path is not a safe repo-relative path",
-                ));
-                continue;
-            }
-            if has_tracked_changes_under(&safety.dirty_paths, &declaration.relative_path) {
-                skipped.push(skip_row(
-                    worktree,
-                    &declaration,
-                    display_path,
-                    "artifact path contains tracked or staged source changes",
-                ));
-                continue;
-            }
-
-            let size_bytes = path_size(&artifact_path)?;
-            let candidate = ArtifactCleanupCandidate {
-                worktree: worktree.path.to_string_lossy().to_string(),
-                path: display_path.clone(),
-                relative_path: declaration.relative_path.clone(),
-                kind: declaration.kind.clone(),
-                declared_by: declaration.declared_by.clone(),
-                size_bytes,
-                source_dirty: safety.source_dirty,
-                unpushed_commits: safety.unpushed_commits,
-            };
-
-            candidates.push(candidate);
         }
     }
 
@@ -2152,6 +2206,67 @@ mod tests {
             "git {} failed: {}",
             args.join(" "),
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn non_git_worktree_scan_errors_without_aborting_batch() {
+        // A stale/non-Git worktree path makes the per-worktree scan fail, but
+        // the batch loop turns that into a skip rather than aborting (#9925).
+        let not_a_repo = TempDir::new().expect("non-git dir");
+        let scan = collect_worktree_candidates(
+            &WorktreeInfo {
+                path: not_a_repo.path().to_path_buf(),
+            },
+            &ArtifactCleanupOptions::default(),
+        );
+        assert!(
+            scan.is_err(),
+            "a non-Git worktree scan should fail so the caller can skip it"
+        );
+    }
+
+    #[test]
+    fn one_invalid_worktree_does_not_block_cleanup_of_valid_worktrees() {
+        // Batch with a valid git worktree (declaring a target/ artifact) plus a
+        // stale non-Git worktree. The valid worktree must still yield a
+        // candidate, and the invalid one must be reported as skipped -- not
+        // abort the whole batch.
+        let valid = git_repo();
+        write_file(&valid.path().join("target/debug/build.o"), "artifact bytes");
+        let invalid = TempDir::new().expect("non-git dir");
+
+        let output = cleanup_artifacts_in_worktrees(
+            valid.path().to_path_buf(),
+            vec![
+                WorktreeInfo {
+                    path: valid.path().to_path_buf(),
+                },
+                WorktreeInfo {
+                    path: invalid.path().to_path_buf(),
+                },
+            ],
+            &ArtifactCleanupOptions::default(),
+            false,
+        )
+        .expect("batch must not abort on one bad worktree");
+
+        assert!(
+            output
+                .candidates
+                .iter()
+                .any(|candidate| candidate.relative_path == "target"),
+            "valid worktree's target/ artifact should be a candidate: {:?}",
+            output.candidates
+        );
+        assert!(
+            output
+                .skipped
+                .iter()
+                .any(|skip| skip.worktree == invalid.path().to_string_lossy()
+                    && skip.reason.contains("could not be inspected")),
+            "invalid worktree should be reported as skipped: {:?}",
+            output.skipped
         );
     }
 }
