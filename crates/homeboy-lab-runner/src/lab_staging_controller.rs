@@ -2945,6 +2945,15 @@ impl StageExecutionAdapter {
     where
         F: FnMut(&LabStagingCheckpoint) -> Result<()>,
     {
+        // The controller process owns materialization after the initiating Cook
+        // returns. Keep the generic runtime-generation admission barrier until
+        // the runner job is durably bound, so a concurrent refresh cannot swap
+        // the selected binary between exact identity validation and dispatch.
+        let mut runtime_generation_pin = checkpoint
+            .final_runner_job_id
+            .is_none()
+            .then(|| homeboy_core::runtime_promotion::pin_cook_generation(&request.recipe.run_id))
+            .transpose()?;
         self.operations
             .validate_recorded_identities(request, &checkpoint)?;
         loop {
@@ -3022,6 +3031,12 @@ impl StageExecutionAdapter {
                     LabStagingPhase::Completed => return Ok(checkpoint),
                 },
             };
+            // `dispatch_runner` binds the accepted job before returning. Once
+            // that binding exists, generation ownership moves to the durable
+            // runner record and this temporary admission pin can be released.
+            if matches!(effect, LabStagingStageEffect::Dispatch(_)) {
+                runtime_generation_pin.take();
+            }
             checkpoint = match effect {
                 LabStagingStageEffect::Workspace(source_snapshot_id, workspace_id) => {
                     LabStagingCheckpoint {
