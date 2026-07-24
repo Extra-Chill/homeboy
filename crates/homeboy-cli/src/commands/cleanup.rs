@@ -1410,10 +1410,16 @@ pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String>
     let next = if mode == "apply" {
         format!("homeboy cleanup artifacts --path {}", quote_arg(root))
     } else {
-        format!(
-            "homeboy cleanup artifacts --path {} --apply",
-            quote_arg(root)
-        )
+        payload
+            .get("next_command")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| {
+                format!(
+                    "homeboy cleanup artifacts --path {} --apply",
+                    quote_arg(root)
+                )
+            })
     };
     lines.push(format!("Next safe command: {next}"));
     lines.push(String::new());
@@ -2032,6 +2038,7 @@ mod tests {
             "applied_count": 0,
             "estimated_bytes": 1572864,
             "reclaimed_bytes": 0,
+            "next_command": "homeboy cleanup artifacts --path '/tmp/homeboy repo' --temp-root /tmp/review --sort size --limit 7 --merged-only --apply",
             "candidates": [],
             "skipped": [
                 { "reason": "artifact path contains tracked or staged source changes" },
@@ -2052,7 +2059,7 @@ mod tests {
             summary.contains("  - artifact path contains tracked or staged source changes: 2\n")
         );
         assert!(summary.contains(
-            "Next safe command: homeboy cleanup artifacts --path '/tmp/homeboy repo' --apply\n"
+            "Next safe command: homeboy cleanup artifacts --path '/tmp/homeboy repo' --temp-root /tmp/review --sort size --limit 7 --merged-only --apply\n"
         ));
     }
 
