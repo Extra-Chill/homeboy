@@ -70,6 +70,10 @@ pub struct RunnerSettings {
     pub daemon: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concurrency_limit: Option<usize>,
+    /// Bounds a child which emits only runner-wrapper heartbeats. Zero disables
+    /// this safeguard for workloads whose semantic progress cannot be observed.
+    #[serde(default, skip_serializing_if = "HeartbeatOnlyStallPolicy::is_default")]
+    pub heartbeat_only_stall: HeartbeatOnlyStallPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_policy: Option<String>,
     /// When `true`, the Lab offload controller↔runner version gate requires a
@@ -80,6 +84,34 @@ pub struct RunnerSettings {
     /// single run regardless of this setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_exact_homeboy_version: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HeartbeatOnlyStallPolicy {
+    #[serde(default = "default_heartbeat_only_stall_timeout_seconds")]
+    pub timeout_seconds: u64,
+}
+
+fn default_heartbeat_only_stall_timeout_seconds() -> u64 {
+    15 * 60
+}
+
+impl Default for HeartbeatOnlyStallPolicy {
+    fn default() -> Self {
+        Self {
+            timeout_seconds: default_heartbeat_only_stall_timeout_seconds(),
+        }
+    }
+}
+
+impl HeartbeatOnlyStallPolicy {
+    pub fn timeout(&self) -> Option<std::time::Duration> {
+        (self.timeout_seconds > 0).then(|| std::time::Duration::from_secs(self.timeout_seconds))
+    }
+
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
