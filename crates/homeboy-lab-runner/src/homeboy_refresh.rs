@@ -408,7 +408,10 @@ pub fn refresh_homeboy_binary(
         ));
     }
 
-    let promotion_lease = homeboy_core::runtime_promotion::acquire_for_generation_rotation(
+    // A Cook pin reserves its exact runtime from provider preflight through
+    // durable runner-job binding. A refresh must drain that reservation rather
+    // than rotating the configured binary underneath an admitted handoff.
+    let promotion_lease = homeboy_core::runtime_promotion::acquire(
         "runner binary promotion",
         options.runner_id.clone(),
     )?;

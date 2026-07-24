@@ -997,6 +997,61 @@ mod tests {
     }
 
     #[test]
+    fn pinned_handoff_blocks_a_concurrent_runner_binary_promotion() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut handoff = pinned_handoff_owner();
+            let pins = paths::runtime_promotion_dir()
+                .expect("runtime promotion directory")
+                .join(PIN_DIR);
+            for _ in 0..50 {
+                if pins.exists() && fs::read_dir(&pins).expect("list pins").count() == 1 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(pins.exists(), "handoff pin was published");
+
+            let (promoted, promoted_result) = std::sync::mpsc::channel();
+            let promotion = std::thread::spawn(move || {
+                let _lease = acquire("runner binary promotion", "runner-a")
+                    .expect("promotion acquires after handoff drains");
+                promoted.send(()).expect("report promotion");
+            });
+            assert!(
+                promoted_result
+                    .recv_timeout(Duration::from_millis(100))
+                    .is_err(),
+                "runner promotion must not replace a generation while the handoff is pinned"
+            );
+
+            handoff.wait().expect("handoff exits and releases its pin");
+            promoted_result
+                .recv_timeout(Duration::from_secs(5))
+                .expect("promotion proceeds after pin release");
+            promotion.join().expect("promotion exits");
+        });
+    }
+
+    fn pinned_handoff_owner() -> std::process::Child {
+        let executable = std::env::current_exe().expect("resolve test executable");
+        Command::new(executable)
+            .args([
+                "--ignored",
+                "--exact",
+                "runtime_promotion::tests::pinned_handoff_owner_child",
+            ])
+            .spawn()
+            .expect("start pinned handoff owner")
+    }
+
+    #[test]
+    #[ignore = "invoked by pinned_handoff_blocks_a_concurrent_runner_binary_promotion"]
+    fn pinned_handoff_owner_child() {
+        let _pin = pin_cook_generation("handoff-attempt").expect("pin handoff generation");
+        std::thread::sleep(Duration::from_millis(350));
+    }
+
+    #[test]
     fn authorized_child_reenters_only_its_parent_transaction() {
         crate::test_support::with_isolated_home(|_| {
             let lease = acquire("parent", "lab").expect("parent acquires lease");
