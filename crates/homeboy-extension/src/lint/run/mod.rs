@@ -15,6 +15,7 @@ mod workflow;
 #[cfg(test)]
 mod tests;
 
+pub use scoping::{resolve_lint_fix_routes, LintFixRoute};
 pub use types::{
     FormattingFindings, LintRunWorkflowArgs, LintRunWorkflowResult, LintSniffFilters,
     LintSummaryOutput,

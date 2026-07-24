@@ -312,7 +312,7 @@ pub(super) fn run_lint_stage(
 
     // Helper: build the lint runner with the current stage options.
     // Used by both the diagnostic pass and the fix-only pass.
-    let build_lint_runner = |effective_glob: Option<&str>| {
+    let build_lint_runner = |effective_glob: Option<&str>, step: Option<&str>| {
         extension::lint::build_lint_runner(
             component,
             None,
@@ -324,7 +324,7 @@ pub(super) fn run_lint_stage(
             options.sniff_filters.sniffs.as_deref(),
             options.sniff_filters.exclude_sniffs.as_deref(),
             options.category.as_deref(),
-            None,
+            step,
             None,
             run_dir,
         )
@@ -359,7 +359,7 @@ pub(super) fn run_lint_stage(
         cached_findings
     } else {
         // No cached findings — run the diagnostic pass.
-        build_lint_runner(diagnostic_glob.as_deref())?.run()?;
+        build_lint_runner(diagnostic_glob.as_deref(), None)?.run()?;
 
         homeboy_extension::lint::baseline::parse_findings_file(&findings_file).unwrap_or_default()
     };
@@ -380,24 +380,39 @@ pub(super) fn run_lint_stage(
     // The engine controls fix application. The extension's fix-mode
     // invocation runs ONLY the fixers, not the diagnostic pass. The engine
     // tracks what changed via undo snapshots and git diff.
-    let finding_scope_files = if requested_scope_files.is_none() && options.glob.is_none() {
-        lint_finding_scope_files(&lint_findings)
-    } else {
-        Vec::new()
-    };
-    let fix_scope_files = requested_scope_files.or({
-        if finding_scope_files.is_empty() {
-            None
-        } else {
-            Some(finding_scope_files.as_slice())
-        }
-    });
-    let fix_glob = if let Some(files) = fix_scope_files {
-        lint_scope_glob(&root_str, files)
-    } else {
-        options.glob.clone()
-    };
+    // Diagnostics are the authoritative fallback scope for every invocation
+    // shape. A glob identifies the diagnostic pass; its reported files select
+    // the extension-declared fixer route. Explicit selected files still win.
+    let finding_scope_files = lint_finding_scope_files(&lint_findings);
+    let fix_scope_files = requested_scope_files
+        .or((!finding_scope_files.is_empty()).then_some(finding_scope_files.as_slice()));
     let (stage_changed_files, fix_results, stage_warnings) = if write && !lint_findings.is_empty() {
+        let fix_files = fix_scope_files.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "fix",
+                "Lint findings did not identify files for an extension-declared fixer route"
+                    .to_string(),
+                None,
+                Some(vec![
+                    "Run homeboy review lint without --fix to inspect diagnostics".to_string(),
+                ]),
+            )
+        })?;
+        let fix_routes = extension::lint::resolve_lint_fix_routes(component, fix_files);
+        if fix_routes.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "fix",
+                format!(
+                    "No extension-declared lint fixer applies to the {} file(s) with findings",
+                    fix_files.len()
+                ),
+                None,
+                Some(vec![
+                    "Run homeboy review lint without --fix to inspect unresolved diagnostics"
+                        .to_string(),
+                ]),
+            ));
+        }
         let before_dirty = git::get_dirty_files(&root_str).unwrap_or_default();
         let before_dirty_snapshot = capture_dirty_file_snapshot(root, &before_dirty);
 
@@ -418,9 +433,15 @@ pub(super) fn run_lint_stage(
         // fixers and skips its own validation pass (the engine validates
         // separately via the diagnose phase). Auto-fixing lives exclusively
         // under `homeboy refactor` — there is no other entry point.
-        let fix_output = build_lint_runner(fix_glob.as_deref())?
-            .env("HOMEBOY_FIX_ONLY", "1")
-            .run();
+        let fix_output = (|| {
+            for route in &fix_routes {
+                let route_glob = lint_scope_glob(&root_str, &route.files);
+                build_lint_runner(route_glob.as_deref(), route.step.as_deref())?
+                    .env("HOMEBOY_FIX_ONLY", "1")
+                    .run()?;
+            }
+            Ok(())
+        })();
         restore_release_owned_files(root, &release_owned)?;
         fix_output?;
 
@@ -435,12 +456,10 @@ pub(super) fn run_lint_stage(
         )?;
         reject_unsafe_lint_autofix_changes(root, &scope_outcome.changed_files)?;
 
-        if !scope_outcome.changed_files.is_empty() {
-            build_lint_runner(fix_glob.as_deref())?.run()?;
-            let remaining_findings =
-                homeboy_extension::lint::baseline::parse_findings_file(&findings_file)?;
-            reject_remaining_lint_fix_findings(&remaining_findings)?;
-        }
+        build_lint_runner(diagnostic_glob.as_deref(), None)?.run()?;
+        let remaining_findings =
+            homeboy_extension::lint::baseline::parse_findings_file(&findings_file)?;
+        reject_remaining_lint_fix_findings(&remaining_findings)?;
 
         let fix_results = fix_sidecars.consume_fix_results();
         (
@@ -795,6 +814,95 @@ pub(super) fn summarize_audit_fix_result_entries(fix_result: &fixer::FixResult) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy_core::component::ScopedExtensionConfig;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn tmp_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("homeboy-lint-stage-{name}-{nanos}"))
+    }
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn routed_component(root: &Path, extension_id: &str) -> Component {
+        let mut component = Component::new(
+            "fixture".to_string(),
+            root.to_string_lossy().to_string(),
+            String::new(),
+            None,
+        );
+        component.extensions = Some(HashMap::from([(
+            extension_id.to_string(),
+            ScopedExtensionConfig::default(),
+        )]));
+        component
+    }
+
+    fn write_routed_lint_extension(home: &Path, id: &str, mutates: bool) {
+        let extension = home.join(".config/homeboy/extensions").join(id);
+        fs::create_dir_all(&extension).unwrap();
+        fs::write(
+            extension.join(format!("{id}.json")),
+            serde_json::json!({
+                "name": "Routed lint fixture",
+                "version": "0.0.0",
+                "lint": {
+                    "extension_script": "lint.sh",
+                    "changed_file_routes": [{
+                        "extensions": ["fixture"],
+                        "step": "fixture-fixer"
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            extension.join("lint.sh"),
+            format!(
+                "#!/bin/sh\nset -eu\nfile=\"$HOMEBOY_COMPONENT_PATH/src/example.fixture\"\necho \"${{HOMEBOY_FIX_ONLY:-diagnose}}:${{HOMEBOY_STEP:-all}}\" >> \"$HOMEBOY_COMPONENT_PATH/runner.log\"\nif [ \"${{HOMEBOY_FIX_ONLY:-}}\" = 1 ]; then\n  [ \"${{HOMEBOY_STEP:-}}\" = fixture-fixer ] || exit 91\n  {}\n  exit 0\nfi\nif grep -q unresolved \"$file\"; then\n  printf '%s\\n' '[{{\"tool\":\"fixture\",\"file\":\"src/example.fixture\",\"message\":\"unresolved fixture finding\",\"rule\":\"fixture.rule\",\"fixable\":true}}]' > \"$HOMEBOY_LINT_FINDINGS_FILE\"\nelse\n  printf '%s\\n' '[]' > \"$HOMEBOY_LINT_FINDINGS_FILE\"\nfi\n",
+                if mutates { "printf 'resolved\\n' > \"$file\"" } else { ":" }
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = extension.join("lint.sh");
+            let mut permissions = fs::metadata(&script).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(script, permissions).unwrap();
+        }
+    }
+
+    fn init_routed_lint_repo(root: &Path) {
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/example.fixture"), "unresolved\n").unwrap();
+        run_git(root, &["init", "-q"]);
+        run_git(root, &["config", "user.email", "test@example.com"]);
+        run_git(root, &["config", "user.name", "test"]);
+        run_git(root, &["add", "."]);
+        run_git(root, &["commit", "-q", "-m", "fixture"]);
+    }
 
     fn fix(file: &str, rule: &str) -> FixApplied {
         FixApplied {
@@ -803,6 +911,78 @@ mod tests {
             action: None,
             primitive: None,
         }
+    }
+
+    #[test]
+    fn glob_fix_routes_diagnostics_to_extension_fixer_and_reruns_lint() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let root = tmp_dir("glob-routed-fix");
+            init_routed_lint_repo(&root);
+            write_routed_lint_extension(home.path(), "routed-fixture", true);
+            let run_dir = RunDir::create().unwrap();
+
+            let stage = run_lint_stage(
+                &routed_component(&root, "routed-fixture"),
+                &root,
+                &[],
+                &LintSourceOptions {
+                    glob: Some("src/*.{fixture,other}".to_string()),
+                    ..Default::default()
+                },
+                None,
+                true,
+                &run_dir,
+            )
+            .expect("routed fixer should resolve glob-scoped finding");
+
+            assert_eq!(
+                fs::read_to_string(root.join("src/example.fixture")).unwrap(),
+                "resolved\n"
+            );
+            assert_eq!(stage.summary.changed_files, vec!["src/example.fixture"]);
+            assert_eq!(
+                fs::read_to_string(root.join("runner.log")).unwrap(),
+                "diagnose:all\n1:fixture-fixer\ndiagnose:all\n"
+            );
+            let _ = fs::remove_dir_all(root);
+        });
+    }
+
+    #[test]
+    fn glob_fix_reports_unresolved_diagnostics_after_routed_fixer_runs() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let root = tmp_dir("glob-unresolved-fix");
+            init_routed_lint_repo(&root);
+            write_routed_lint_extension(home.path(), "unresolved-fixture", false);
+            let run_dir = RunDir::create().unwrap();
+
+            let result = run_lint_stage(
+                &routed_component(&root, "unresolved-fixture"),
+                &root,
+                &[],
+                &LintSourceOptions {
+                    glob: Some("src/*.{fixture,other}".to_string()),
+                    ..Default::default()
+                },
+                None,
+                true,
+                &run_dir,
+            );
+            let error = match result {
+                Ok(_) => {
+                    panic!("unresolved diagnostic must fail instead of reporting autofix success")
+                }
+                Err(error) => error,
+            };
+
+            assert!(error.message.contains("Lint fix left 1 finding(s)"));
+            assert!(error.message.contains("unresolved fixture finding"));
+            assert_eq!(
+                fs::read_to_string(root.join("runner.log")).unwrap(),
+                "diagnose:all\n1:fixture-fixer\ndiagnose:all\n"
+            );
+            let _ = fs::remove_dir_all(root);
+        });
     }
 
     fn extension_stage() -> PlannedStage {

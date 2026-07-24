@@ -1,4 +1,7 @@
-use super::super::scoping::{build_changed_lint_runs, build_changed_lint_runs_with_routes};
+use super::super::scoping::{
+    build_changed_lint_runs, build_changed_lint_runs_with_routes,
+    resolve_lint_fix_routes_with_routes,
+};
 use super::super::types::ScopedLintRun;
 use super::{component, split_lint_routes};
 use crate::LintChangedFileRoute;
@@ -114,4 +117,32 @@ fn non_wordpress_changed_files_keep_existing_single_runner_scope() {
             changed_files: vec!["src/main.rs".to_string(), "README.md".to_string()],
         }]
     );
+}
+
+#[test]
+fn fixer_routes_dispatch_only_extension_declared_matching_steps() {
+    let routes = split_lint_routes();
+    assert_eq!(
+        resolve_lint_fix_routes_with_routes(
+            &["assets/app.ts".to_string(), "inc/Foo.php".to_string()],
+            &routes,
+        ),
+        vec![
+            super::super::scoping::LintFixRoute {
+                step: Some("phpcs,phpstan".to_string()),
+                files: vec!["inc/Foo.php".to_string()],
+            },
+            super::super::scoping::LintFixRoute {
+                step: Some("eslint".to_string()),
+                files: vec!["assets/app.ts".to_string()],
+            },
+        ]
+    );
+}
+
+#[test]
+fn fixer_routes_do_not_fall_back_to_an_unrelated_declared_step() {
+    let routes = split_lint_routes();
+
+    assert!(resolve_lint_fix_routes_with_routes(&["README.md".to_string()], &routes).is_empty());
 }

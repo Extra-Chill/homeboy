@@ -8,6 +8,16 @@ use homeboy_core::component::Component;
 use homeboy_core::git;
 use std::path::Path;
 
+/// An extension-declared lint fixer route selected for a concrete file scope.
+///
+/// The step name is opaque to Homeboy. Extensions define both the file matcher
+/// and the runner step in their manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LintFixRoute {
+    pub step: Option<String>,
+    pub files: Vec<String>,
+}
+
 /// Resolve runner-compatible scopes from --changed-only or --changed-since flags.
 ///
 /// Returns `Some(Vec::new())` when changed-file mode is active but no compatible
@@ -63,6 +73,43 @@ pub(super) fn build_changed_lint_runs(
 ) -> Vec<ScopedLintRun> {
     let routes = changed_file_routes_for_component(component);
     build_changed_lint_runs_with_routes(component, changed_files, &routes)
+}
+
+/// Resolve the extension-owned fixer steps applicable to known lint files.
+///
+/// Components without routes retain their single-runner behavior. When routes
+/// are declared, only matching steps are returned: falling back to every step
+/// would let an unrelated fixer claim a scoped diagnostic.
+pub fn resolve_lint_fix_routes(component: &Component, files: &[String]) -> Vec<LintFixRoute> {
+    let routes = changed_file_routes_for_component(component);
+    resolve_lint_fix_routes_with_routes(files, &routes)
+}
+
+pub(crate) fn resolve_lint_fix_routes_with_routes(
+    files: &[String],
+    routes: &[LintChangedFileRoute],
+) -> Vec<LintFixRoute> {
+    if routes.is_empty() {
+        return vec![LintFixRoute {
+            step: None,
+            files: files.to_vec(),
+        }];
+    }
+
+    routes
+        .iter()
+        .filter_map(|route| {
+            let files = files
+                .iter()
+                .filter(|file| route_matches_file(route, file))
+                .cloned()
+                .collect::<Vec<_>>();
+            (!files.is_empty()).then(|| LintFixRoute {
+                step: Some(route.step.clone()),
+                files,
+            })
+        })
+        .collect()
 }
 
 pub(super) fn build_changed_lint_runs_with_routes(
