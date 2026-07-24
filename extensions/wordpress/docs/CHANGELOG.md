@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.31.8] - 2026-07-24
+
+### Fixed
+- ignore nested WordPress build bundles
+
 ## [3.31.7] - 2026-07-24
 
 ### Fixed
