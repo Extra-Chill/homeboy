@@ -30,8 +30,21 @@ pub struct SshArgs {
     #[arg(long)]
     pub user: Option<String>,
 
+    /// Write only the remote command's stdout to local stdout (and its stderr to
+    /// local stderr), exiting with the remote exit code. Ideal for piping a
+    /// remote export straight into a file. Combine with `--output <path>` to also
+    /// persist the structured envelope. Requires a non-interactive command.
+    #[arg(long)]
+    pub raw: bool,
+
     #[command(subcommand)]
     pub subcommand: Option<SshSubcommand>,
+}
+
+/// Whether this invocation requested raw stdout mode for a non-interactive
+/// remote command.
+pub(super) fn is_raw_command(args: &SshArgs) -> bool {
+    args.raw && args.subcommand.is_none() && !args.command.is_empty()
 }
 
 #[derive(Subcommand)]
@@ -131,23 +144,13 @@ pub fn run(args: SshArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Ss
                 let output = client.execute(cmd);
 
                 Ok((
-                    SshOutput::Connect(SshConnectOutput {
-                        resolved_type: result.resolved_type,
-                        project_id: result.project_id,
-                        server_id: result.server_id,
-                        // Prefer the quoted/normalized command string for JSON output so
-                        // multi-arg invocations remain unambiguous (e.g. args containing spaces).
-                        command: command_string.clone(),
-                        stdout: Some(output.stdout),
-                        stderr: Some(output.stderr),
-                        success: output.success,
-                        exit_code: output.exit_code,
-                        result_classification: ssh_result_classification(
-                            output.success,
-                            output.exit_code,
-                        ),
-                        failure_reason: ssh_failure_reason(output.success, output.exit_code),
-                    }),
+                    SshOutput::Connect(connect_output_from_execution(
+                        &result.resolved_type,
+                        result.project_id.clone(),
+                        &result.server_id,
+                        command_string.clone(),
+                        &output,
+                    )),
                     output.exit_code,
                 ))
             } else {
@@ -172,6 +175,73 @@ pub fn run(args: SshArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<Ss
             }
         }
     }
+}
+
+fn connect_output_from_execution(
+    resolved_type: &str,
+    project_id: Option<String>,
+    server_id: &str,
+    // Prefer the quoted/normalized command string for JSON output so multi-arg
+    // invocations remain unambiguous (e.g. args containing spaces).
+    command: Option<String>,
+    output: &homeboy::core::server::CommandOutput,
+) -> SshConnectOutput {
+    SshConnectOutput {
+        resolved_type: resolved_type.to_string(),
+        project_id,
+        server_id: server_id.to_string(),
+        command,
+        stdout: Some(output.stdout.clone()),
+        stderr: Some(output.stderr.clone()),
+        success: output.success,
+        exit_code: output.exit_code,
+        result_classification: ssh_result_classification(output.success, output.exit_code),
+        failure_reason: ssh_failure_reason(output.success, output.exit_code),
+    }
+}
+
+/// Execute a non-interactive remote command and return its raw stdout/stderr and
+/// exit code, for `--raw` mode. Resolution mirrors [`run`], but the caller emits
+/// the remote streams directly instead of a JSON envelope.
+pub(super) fn execute_raw_command(
+    args: &SshArgs,
+) -> homeboy::core::Result<(String, String, i32)> {
+    let resolve_args = if args.as_server {
+        SshResolveArgs {
+            id: None,
+            project: None,
+            server: args.target.clone(),
+        }
+    } else {
+        SshResolveArgs {
+            id: args.target.clone(),
+            project: None,
+            server: None,
+        }
+    };
+    let result = resolve_context(&resolve_args)?;
+
+    let command_string: Option<String> = if args.command.len() == 1 {
+        Some(args.command[0].clone())
+    } else {
+        Some(shell::quote_args(&args.command))
+    };
+    let effective_command = match (&result.project_id, &result.base_path, &command_string) {
+        (Some(_), Some(bp), Some(cmd)) => Some(format!("cd {} && {}", shell::quote_path(bp), cmd)),
+        _ => command_string.clone(),
+    };
+
+    let mut client = SshClient::from_server(&result.server, &result.server_id)?;
+    if let Some(ref user_override) = args.user {
+        client.user = user_override.clone();
+    }
+    let cmd = effective_command.as_deref().ok_or_else(|| {
+        homeboy::core::Error::internal_unexpected(
+            "No command resolved for non-interactive SSH execution".to_string(),
+        )
+    })?;
+    let output = client.execute(cmd);
+    Ok((output.stdout, output.stderr, output.exit_code))
 }
 
 fn ssh_result_classification(success: bool, exit_code: i32) -> String {
@@ -236,5 +306,26 @@ mod tests {
             ssh_failure_reason(false, 255).as_deref(),
             Some("SSH transport failed with exit code 255")
         );
+    }
+
+    fn raw_args(command: Vec<&str>, raw: bool) -> SshArgs {
+        SshArgs {
+            target: Some("wp-build-runtime".to_string()),
+            command: command.into_iter().map(str::to_string).collect(),
+            as_server: false,
+            user: None,
+            raw,
+            subcommand: None,
+        }
+    }
+
+    #[test]
+    fn is_raw_command_requires_raw_flag_and_a_command() {
+        // Raw mode applies only to a non-interactive command with --raw.
+        assert!(is_raw_command(&raw_args(vec!["printf", "hi"], true)));
+        // Without --raw it is the normal JSON-envelope path.
+        assert!(!is_raw_command(&raw_args(vec!["printf", "hi"], false)));
+        // --raw with no command (interactive) is not a raw stdout invocation.
+        assert!(!is_raw_command(&raw_args(vec![], true)));
     }
 }
