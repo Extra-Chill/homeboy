@@ -575,7 +575,7 @@ pub(super) fn lab_offload_rig_component_checkout_root(args: &[String]) -> Result
         return Ok(None);
     };
     let declared_required_subpath =
-        declared_required_component_subpath(&spec, component_id, component)?;
+        declared_required_component_subpath(&spec, component_id, component, Some(&path_override))?;
     Ok(Some(PathBuf::from(
         checkout_root_for_component_path_override(
             &expanded_local_path(&spec, &path_override),
@@ -597,8 +597,12 @@ pub(super) fn lab_offload_rig_component_dependencies(
         for (component_id, component) in &spec.components {
             let (checkout_root, local_checkout_root, local_component_path) = if single_component {
                 if let Some(path_override) = component_path_override.as_deref() {
-                    let declared_required_subpath =
-                        declared_required_component_subpath(&spec, component_id, component)?;
+                    let declared_required_subpath = declared_required_component_subpath(
+                        &spec,
+                        component_id,
+                        component,
+                        Some(path_override),
+                    )?;
                     let local_component_path = expanded_local_path(&spec, path_override);
                     let local_checkout_root = checkout_root_for_component_path_override(
                         &local_component_path,
@@ -685,16 +689,32 @@ fn declared_required_component_subpath(
     spec: &homeboy_rig::RigSpec,
     component_id: &str,
     component: &homeboy_rig::ComponentSpec,
+    component_path_override: Option<&str>,
 ) -> Result<Option<String>> {
     let Some(declared_checkout_root) = component.checkout_root.as_deref() else {
         return Ok(None);
     };
+    let declared_checkout_root = expanded_local_path(spec, declared_checkout_root);
+    if declared_checkout_root.trim().is_empty() {
+        if let Some(component_path_override) = component_path_override {
+            let component_path = PathBuf::from(expanded_local_path(spec, component_path_override));
+            let component_path = component_path.canonicalize().unwrap_or(component_path);
+            if let Some(checkout_root) = homeboy_core::git::repo_root(&component_path) {
+                return required_component_subpath(
+                    &checkout_root,
+                    &component_path,
+                    &spec.id,
+                    component_id,
+                );
+            }
+        }
+    }
     let Ok(resolved_component_path) = homeboy_rig::resolve_component_path(spec, component_id)
     else {
         return Ok(None);
     };
     required_component_subpath(
-        Path::new(&expanded_local_path(spec, declared_checkout_root)),
+        Path::new(&declared_checkout_root),
         Path::new(&resolved_component_path),
         &spec.id,
         component_id,
@@ -921,7 +941,37 @@ fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::*;
+
+    fn initialize_git_checkout(checkout_root: &Path) {
+        let status = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(checkout_root)
+            .status()
+            .expect("run git init");
+        assert!(status.success(), "initialize git checkout");
+    }
+
+    fn write_checkout_root_rig(rig_id: &str, component_path: &Path, checkout_root: &str) {
+        let rig_dir = homeboy_core::paths::rigs().expect("rig dir");
+        std::fs::create_dir_all(&rig_dir).expect("create rig dir");
+        std::fs::write(
+            rig_dir.join(format!("{rig_id}.json")),
+            serde_json::json!({
+                "id": rig_id,
+                "components": {
+                    "example-component": {
+                        "path": component_path.display().to_string(),
+                        "checkout_root": checkout_root
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("save rig");
+    }
 
     #[test]
     fn extracts_unique_bench_rig_ids_for_lab_materialization() {
@@ -1322,6 +1372,106 @@ mod tests {
             .expect("rig source path");
 
             assert_eq!(source_path, override_checkout);
+        });
+    }
+
+    #[test]
+    fn unavailable_checkout_root_with_nested_path_override_derives_lab_source_root() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let checkout_root = home.path().join("Developer/example-monorepo");
+            let component_path = checkout_root.join("packages/example-component");
+            std::fs::create_dir_all(&component_path).expect("component path");
+            initialize_git_checkout(&checkout_root);
+            write_checkout_root_rig(
+                "example-monorepo",
+                &component_path,
+                "${env.HOMEBOY_TEST_UNSET_CHECKOUT_ROOT}",
+            );
+            std::env::remove_var("HOMEBOY_TEST_UNSET_CHECKOUT_ROOT");
+
+            let source_path = lab_offload_rig_component_checkout_root(&[
+                "homeboy".to_string(),
+                "bench".to_string(),
+                "--rig".to_string(),
+                "example-monorepo".to_string(),
+                "--path".to_string(),
+                component_path.display().to_string(),
+            ])
+            .expect("source path")
+            .expect("rig source path");
+
+            assert_eq!(source_path, checkout_root);
+        });
+    }
+
+    #[test]
+    fn unavailable_checkout_root_with_nested_path_override_derives_dependency_root() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let checkout_root = home.path().join("Developer/example-monorepo");
+            let component_path = checkout_root.join("packages/example-component");
+            std::fs::create_dir_all(&component_path).expect("component path");
+            initialize_git_checkout(&checkout_root);
+            write_checkout_root_rig(
+                "example-monorepo",
+                &component_path,
+                "${env.HOMEBOY_TEST_UNSET_CHECKOUT_ROOT}",
+            );
+            std::env::remove_var("HOMEBOY_TEST_UNSET_CHECKOUT_ROOT");
+
+            let dependencies = lab_offload_rig_component_dependencies(
+                &[
+                    "homeboy".to_string(),
+                    "bench".to_string(),
+                    "--rig".to_string(),
+                    "example-monorepo".to_string(),
+                    "--path".to_string(),
+                    component_path.display().to_string(),
+                ],
+                None,
+                None,
+            )
+            .expect("dependencies");
+
+            assert_eq!(dependencies.len(), 1);
+            assert_eq!(
+                dependencies[0].local_checkout_root,
+                checkout_root.display().to_string()
+            );
+            assert_eq!(
+                dependencies[0].required_subpath.as_deref(),
+                Some("packages/example-component")
+            );
+        });
+    }
+
+    #[test]
+    fn nested_path_override_rejects_unrelated_concrete_checkout_root() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let checkout_root = home.path().join("Developer/example-monorepo");
+            let component_path = checkout_root.join("packages/example-component");
+            std::fs::create_dir_all(&component_path).expect("component path");
+            initialize_git_checkout(&checkout_root);
+            write_checkout_root_rig(
+                "example-monorepo",
+                &component_path,
+                &home
+                    .path()
+                    .join("Developer/unrelated")
+                    .display()
+                    .to_string(),
+            );
+
+            let error = lab_offload_rig_component_checkout_root(&[
+                "homeboy".to_string(),
+                "bench".to_string(),
+                "--rig".to_string(),
+                "example-monorepo".to_string(),
+                "--path".to_string(),
+                component_path.display().to_string(),
+            ])
+            .expect_err("unrelated concrete checkout root must be rejected");
+
+            assert_eq!(error.details["field"], "checkout_root");
         });
     }
 
