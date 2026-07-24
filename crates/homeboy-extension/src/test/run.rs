@@ -259,6 +259,12 @@ fn run_main_test_workflow_inner(
         .ci_env
         .iter()
         .fold(runner, |runner, (key, value)| runner.env(key, value));
+    // In summary mode, capture the child's stdout/stderr into run evidence
+    // instead of tee-ing the full compiler/test stream to the terminal. The
+    // output is still persisted to artifacts below and a bounded failure tail
+    // is surfaced by the summary, so `--summary` stays actionable on large
+    // repositories instead of overflowing the caller's display limit (#9845).
+    let runner = runner.passthrough(!args.json_summary);
     let passthrough_args = normalize_test_passthrough_args(component, &args.passthrough_args)?;
     let mut progress = ValidationProgressRecorder::new(
         run_dir,
