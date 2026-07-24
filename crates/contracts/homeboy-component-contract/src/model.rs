@@ -350,8 +350,7 @@ impl Component {
     /// Return a stable serialization suitable for comparing resolved component
     /// configuration across independently loaded snapshots.
     pub fn canonical_identity(&self) -> serde_json::Result<String> {
-        serde_json::to_value(self)
-            .and_then(|value| serde_json::to_string(&canonical_json(value)))
+        serde_json::to_value(self).and_then(|value| serde_json::to_string(&canonical_json(value)))
     }
 
     /// Return a stable identity for comparing a component's *configured*
