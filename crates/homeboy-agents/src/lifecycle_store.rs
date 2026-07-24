@@ -222,21 +222,56 @@ pub(super) fn write_cook_index_attempt(
 ) -> Result<AgentTaskCookIndex> {
     let cook_id = sanitize_run_id(cook_id);
     let run_id = sanitize_run_id(run_id);
-    let mut index = read_cook_index(&cook_id).unwrap_or_else(|_| AgentTaskCookIndex {
-        schema: super::records::schemas::COOK_INDEX.to_string(),
-        cook_id: cook_id.clone(),
-        latest_run_id: run_id.clone(),
-        attempts: Vec::new(),
-    });
+    let path = cook_index_path(&cook_id)?;
+    let mut index = if path.exists() {
+        read_json(&path)?
+    } else {
+        AgentTaskCookIndex {
+            schema: super::records::schemas::COOK_INDEX.to_string(),
+            cook_id: cook_id.clone(),
+            latest_run_id: run_id.clone(),
+            attempts: Vec::new(),
+        }
+    };
+    if index
+        .attempts
+        .iter()
+        .any(|entry| entry.attempt == attempt && entry.run_id != run_id)
+    {
+        return Err(Error::validation_invalid_argument(
+            "cook_attempt",
+            "durable Cook index maps this attempt to a different run",
+            Some(cook_id),
+            None,
+        ));
+    }
+    if index
+        .attempts
+        .iter()
+        .any(|entry| entry.run_id == run_id && entry.attempt != attempt)
+    {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "durable Cook index maps this run to a different attempt",
+            Some(run_id),
+            None,
+        ));
+    }
     index.cook_id = cook_id;
-    index.latest_run_id = run_id.clone();
     index.attempts.retain(|entry| entry.run_id != run_id);
     index.attempts.push(AgentTaskCookIndexAttempt {
         attempt,
         run_id,
         recorded_at,
     });
-    write_json(&cook_index_path(&index.cook_id)?, &index)?;
+    index.latest_run_id = index
+        .attempts
+        .iter()
+        .max_by_key(|entry| entry.attempt)
+        .expect("Cook index has the recorded attempt")
+        .run_id
+        .clone();
+    write_json(&path, &index)?;
     Ok(index)
 }
 

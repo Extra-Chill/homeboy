@@ -1508,6 +1508,60 @@ fn cook_persists_controller_admission_timeout_before_provider_execution() {
 }
 
 #[test]
+fn cook_repairs_initial_alias_after_submit_before_index_interruption() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-repair-initial-alias";
+        let run_id = "cook-repair-initial-alias-run";
+        let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        super::super::persist_initial_recipe(&options).expect("persist durable recipe");
+
+        // Simulate a controller crash after plan submission and before the
+        // subsequent Cook attempt index write.
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id))
+            .expect("persist initial run");
+        assert!(agent_task_lifecycle::cook_index(cook_id).is_err());
+
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observer_records = observed.clone();
+        let result = run_cook_with_durable_observer(options, UnusedExecutor, &move |cook, run| {
+            let status =
+                agent_task_lifecycle::status(cook).expect("Cook alias resolves in observer");
+            let logs =
+                agent_task_lifecycle::logs(cook).expect("Cook alias logs resolve in observer");
+            assert_eq!(status.run_id, run);
+            assert!(!logs.events.is_empty());
+            observer_records
+                .lock()
+                .expect("observer records lock")
+                .push((cook.to_string(), run.to_string()));
+            Ok(())
+        })
+        .expect("restart repairs the Cook alias");
+
+        assert_eq!(result.value.latest_run_id.as_deref(), Some(run_id));
+        assert_eq!(
+            observed.lock().expect("observer records lock").as_slice(),
+            &[(cook_id.to_string(), run_id.to_string())]
+        );
+        let index = agent_task_lifecycle::cook_index(cook_id).expect("repaired Cook index");
+        assert_eq!(index.latest_run_id, run_id);
+        assert_eq!(index.attempts.len(), 1);
+        assert_eq!(index.attempts[0].attempt, 1);
+        assert_eq!(index.attempts[0].run_id, run_id);
+        assert_eq!(
+            agent_task_lifecycle::status(cook_id)
+                .expect("Cook alias status after restart")
+                .run_id,
+            run_id
+        );
+        assert!(agent_task_lifecycle::logs(cook_id).is_ok());
+        assert!(
+            agent_task_lifecycle::retry(cook_id, Some("cook-repair-initial-alias-retry")).is_ok()
+        );
+    });
+}
+
+#[test]
 fn retry_after_admission_failure_restores_managed_workspace_after_baseline_cleanup() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("temp source root");
