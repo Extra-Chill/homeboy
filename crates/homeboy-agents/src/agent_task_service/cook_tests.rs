@@ -3713,6 +3713,63 @@ fn duplicate_controller_passes_produce_one_promotion_and_one_finalization() {
 }
 
 #[test]
+fn concurrent_retry_dispatch_claims_admit_exactly_one_dispatcher() {
+    // #8357 acceptance (AC5): concurrent continuation attempts racing to dispatch
+    // the same retry run must admit exactly one dispatcher; the rest observe a
+    // held lease (or a completed claim) and do not send a second handoff. This
+    // exercises the claim's atomic converge-on-one-owner contract for the
+    // retry-dispatch key across real threads.
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-concurrent-dispatch";
+        let next_run_id = "run-concurrent-dispatch-attempt-2";
+        let plan = AgentTaskPlan::new(cook_id, Vec::new());
+        agent_task_lifecycle::submit_plan(&plan, Some(next_run_id)).unwrap();
+
+        let operation_key = retry_dispatch_operation_key(next_run_id);
+        let lease = std::time::Duration::from_secs(300);
+        let acquired = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(4));
+
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let key = operation_key.clone();
+                let run = next_run_id.to_string();
+                let acquired = Arc::clone(&acquired);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    if let agent_task_lifecycle::ClaimOutcome::Acquired =
+                        agent_task_lifecycle::claim_cook_operation(&run, &key, lease).unwrap()
+                    {
+                        acquired.fetch_add(1, Ordering::SeqCst);
+                        // The winning dispatcher records completion after its handoff.
+                        agent_task_lifecycle::complete_cook_operation(
+                            &run,
+                            &key,
+                            serde_json::json!({ "dispatched_run_id": run }),
+                        )
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        assert_eq!(
+            acquired.load(Ordering::SeqCst),
+            1,
+            "exactly one concurrent pass may dispatch the retry"
+        );
+        let claim = agent_task_lifecycle::operation_claim(next_run_id, &operation_key)
+            .unwrap()
+            .expect("dispatch claim recorded");
+        assert_eq!(claim.state, agent_task_lifecycle::ClaimState::Completed);
+    });
+}
+
+#[test]
 fn historical_applied_promotion_restores_only_its_exact_checkpoint_baseline() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let plan = AgentTaskPlan::new("cook-historical-baseline", Vec::new());
