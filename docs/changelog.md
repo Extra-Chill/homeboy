@@ -4,6 +4,47 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.314.0] - 2026-07-24
+
+### Added
+- persist worktree provision evidence
+- surface low-confidence bump on non-conventional histories
+- add safe audit-baseline prune command
+
+### Changed
+- drive the dependencies dirty guard from declarations
+- cover progress indicator activation and no-op safety
+- prove provider provisioning boundaries
+- cover git switch/checkout guard for explicit source path
+- format fingerprint regression
+- cover low-confidence bump warning
+- Bound fresh cook review form retries
+- hermetic extension parity materialization
+- cover baseline prune; correct comma-churn framing
+
+### Fixed
+- excuse composer's regenerated metadata in dependency preflight
+- stage bootstrapped changelog so first release does not block itself
+- resolve deploy tags against pristine HEAD and isolate shared roots
+- allow bootstrapped changelog in a new untracked directory
+- bound git fetch and show progress so status can't hang silently
+- advertise review test, not the nonexistent top-level test command
+- don't switch/checkout an explicitly selected source checkout
+- bind gates to checkpointed candidate
+- preserve grammar quote delimiters
+- recover supersession intents
+- constrain follow-up path remapping
+- make provider provisioning atomic
+- accept command-result envelope in gate-feedback inputs
+- describe adoption attempt policies
+- route glob diagnostics to fixers
+- fail closed on unmapped follow-up paths
+- provision missing provider destinations
+- allow pre-provider recipe corrections
+- verify immutable candidate checkout
+- route autofix through extension steps
+- select Cook adoption attempts explicitly
+
 ## [0.313.0] - 2026-07-24
 
 ### Added
