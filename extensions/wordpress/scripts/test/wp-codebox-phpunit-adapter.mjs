@@ -2,11 +2,13 @@
 /**
  * External dependencies
  */
-import { access, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createWriteStream } from 'node:fs';
+import { access, copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 const settings = json(process.env.HOMEBOY_SETTINGS_JSON, {});
 const componentPath = required(process.env.HOMEBOY_COMPONENT_PATH, 'HOMEBOY_COMPONENT_PATH');
@@ -55,11 +57,94 @@ try {
   await writeFile(optionsPath, `${JSON.stringify(options)}\n`);
   run(['recipe', 'build', 'phpunit', '--options', optionsPath, '--output', recipePath]);
   await mkdir(runArtifacts, { recursive: true });
-  run(['recipe-run', '--recipe', recipePath, '--artifacts', runArtifacts, '--json']);
-  await handoffArtifacts(runArtifacts);
-  process.stdout.write('WP Codebox test run complete.\n');
+  const execution = await runCaptured(['recipe-run', '--recipe', recipePath, '--artifacts', runArtifacts, '--json']);
+  await handoffArtifacts(runArtifacts, execution);
+  if (execution.status !== 0) {
+    process.exitCode = execution.status;
+  } else {
+    process.stdout.write('WP Codebox test run complete.\n');
+  }
 } finally {
   await rm(directory, { recursive: true, force: true });
+}
+async function runCaptured(args) {
+  const logsDirectory = path.join(runArtifacts, 'logs');
+  const stdoutPath = path.join(logsDirectory, 'recipe-run.stdout.log');
+  const stderrPath = path.join(logsDirectory, 'recipe-run.stderr.log');
+  await mkdir(logsDirectory, { recursive: true });
+  const secretValues = configuredSecretValues();
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox', args, { cwd: componentPath, stdio: ['ignore', 'pipe', 'pipe'] });
+    const stdoutFile = createWriteStream(stdoutPath);
+    const stderrFile = createWriteStream(stderrPath);
+    const stdoutRedactor = createLineRedactor(secretValues);
+    const stderrRedactor = createLineRedactor(secretValues);
+    let childError;
+
+    child.stdout.on('data', (chunk) => {
+      chunk = stdoutRedactor.write(chunk);
+      stdoutFile.write(chunk);
+      process.stdout.write(chunk);
+    });
+    child.stderr.on('data', (chunk) => {
+      chunk = stderrRedactor.write(chunk);
+      stderrFile.write(chunk);
+      process.stderr.write(chunk);
+    });
+    child.on('error', (error) => { childError = error; });
+    child.on('close', (status) => {
+      const stdoutTail = stdoutRedactor.end();
+      const stderrTail = stderrRedactor.end();
+      stdoutFile.write(stdoutTail);
+      stderrFile.write(stderrTail);
+      process.stdout.write(stdoutTail);
+      process.stderr.write(stderrTail);
+      stdoutFile.end();
+      stderrFile.end();
+      Promise.all([
+        new Promise((done) => stdoutFile.on('finish', done)),
+        new Promise((done) => stderrFile.on('finish', done)),
+      ]).then(() => {
+        if (childError) {
+          reject(childError);
+          return;
+        }
+        resolve({ status: status ?? 1, stdoutPath, stderrPath });
+      }, reject);
+    });
+  });
+}
+function configuredSecretValues() {
+  const configured = settings.bench_env && typeof settings.bench_env === 'object' ? settings.bench_env : {};
+  return Object.entries({ ...process.env, ...configured })
+    .filter(([name, value]) => /(?:auth|cookie|credential|key|nonce|passw|secret|session|token)/i.test(name) && typeof value === 'string' && value.length >= 8)
+    .map(([, value]) => value)
+    .sort((left, right) => right.length - left.length);
+}
+function createLineRedactor(secretValues) {
+  const decoder = new StringDecoder('utf8');
+  let pending = '';
+  const redact = (text) => {
+    for (const secret of secretValues) {
+      text = text.replaceAll(secret, '[REDACTED]');
+    }
+    return text;
+  };
+  return {
+    write(chunk) {
+      pending += decoder.write(chunk);
+      const boundary = pending.lastIndexOf('\n') + 1;
+      if (boundary === 0) { return ''; }
+      const completeLines = pending.slice(0, boundary);
+      pending = pending.slice(boundary);
+      return redact(completeLines);
+    },
+    end() {
+      pending += decoder.end();
+      return redact(pending);
+    },
+  };
 }
 
 function run(args) {
@@ -139,7 +224,7 @@ async function requireHarness(source) {
     throw new Error(`WP Codebox PHPUnit harness is required at ${source}. Run composer install in ${extensionRoot}.`);
   }
 }
-async function handoffArtifacts(artifactRoot) {
+async function handoffArtifacts(artifactRoot, execution) {
   let pointer;
   try { pointer = await readFile(path.join(artifactRoot, 'latest-runtime.json'), 'utf8'); } catch { return; }
   const runtime = json(pointer, {}).paths?.runtimeDirectory;
@@ -147,12 +232,62 @@ async function handoffArtifacts(artifactRoot) {
     return;
   }
   const artifactDirectory = path.join(artifactRoot, runtime);
+  await preservePhpunitOutput(artifactDirectory, execution);
   if (process.env.HOMEBOY_TEST_RESULTS_FILE) {
     runScript('parse-test-results.sh', [artifactDirectory]);
   }
   if (process.env.HOMEBOY_TEST_FAILURES_FILE) {
     runScript('parse-test-failures.sh', [artifactDirectory, componentPath]);
   }
+}
+async function preservePhpunitOutput(artifactDirectory, execution) {
+  const filesDirectory = path.join(artifactDirectory, 'files');
+  const logsDirectory = path.join(artifactDirectory, 'logs');
+  const testResultsPath = path.join(filesDirectory, 'test-results.json');
+  const phpunitOutputPath = path.join(filesDirectory, 'phpunit-output.log');
+  await mkdir(filesDirectory, { recursive: true });
+  await mkdir(logsDirectory, { recursive: true });
+  await copyFile(execution.stdoutPath, path.join(logsDirectory, 'recipe-run.stdout.log'));
+  await copyFile(execution.stderrPath, path.join(logsDirectory, 'recipe-run.stderr.log'));
+
+  const stdout = await readFile(execution.stdoutPath, 'utf8');
+  const stderr = await readFile(execution.stderrPath, 'utf8');
+  const output = extractPhpunitOutput(stdout, stderr);
+  await writeFile(phpunitOutputPath, output);
+
+  let results;
+  try { results = json(await readFile(testResultsPath, 'utf8'), null); } catch { results = null; }
+  if (results && typeof results === 'object') {
+    const references = Array.isArray(results.rawLogReferences) ? results.rawLogReferences : [];
+    results.rawLogReferences = [
+      ...references.filter((reference) => reference?.path !== 'files/phpunit-output.log'),
+      { path: 'files/phpunit-output.log', kind: 'phpunit-output' },
+      { path: 'logs/recipe-run.stdout.log', kind: 'recipe-run-stdout' },
+      { path: 'logs/recipe-run.stderr.log', kind: 'recipe-run-stderr' },
+    ];
+    results.evidenceReferences = [
+      { kind: 'structured-test-results', uri: 'artifact://files/test-results.json' },
+      { kind: 'raw-phpunit-output', uri: 'artifact://files/phpunit-output.log' },
+    ];
+    await writeFile(testResultsPath, `${JSON.stringify(results, null, 2)}\n`);
+  }
+
+  process.stdout.write('Structured PHPUnit evidence: artifact://files/test-results.json\n');
+  process.stdout.write('Full PHPUnit output: artifact://files/phpunit-output.log\n');
+}
+function extractPhpunitOutput(stdout, stderr) {
+  const payload = json(stdout.trim(), null);
+  if (payload && Array.isArray(payload.executions)) {
+    const chunks = [];
+    for (const execution of payload.executions) {
+      if (typeof execution?.stdout === 'string') { chunks.push(execution.stdout); }
+      if (typeof execution?.stderr === 'string') { chunks.push(execution.stderr); }
+    }
+    if (chunks.length > 0) {
+      return chunks.join('');
+    }
+  }
+  return stdout + stderr;
 }
 function runScript(script, args) {
   const result = spawnSync('bash', [path.join(scriptDirectory, script), ...args], { cwd: componentPath, encoding: 'utf8', stdio: 'inherit' });

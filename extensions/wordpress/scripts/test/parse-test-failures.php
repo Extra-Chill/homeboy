@@ -197,6 +197,8 @@ foreach ( $blocks as $block ) {
 		'fingerprint'    => $fingerprint,
 		'stdout_excerpt' => $stdout_excerpt,
 		'stderr_excerpt' => '',
+		'status'         => $block['status'] ?? 'failure',
+		'stack_trace'    => implode( "\n", $trace_lines ),
 	];
 }
 
@@ -324,6 +326,7 @@ $output = [
 	'failures' => $failures,
 	'total'    => $total,
 	'passed'   => $passed,
+	'metadata' => phpunit_failure_metadata( $failures, $raw ),
 ];
 
 echo json_encode( $output, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES ) . "\n";
@@ -356,12 +359,115 @@ function parse_wp_codebox_test_results( array $payload, string $test_results_pat
 		}
 	}
 
+	$raw_output = wp_codebox_raw_phpunit_output( $payload, $artifact_root );
+	if ( $raw_output !== '' && count( $failures ) < (int) ( $summary['failed'] ?? 0 ) ) {
+		$existing_test_ids = array_column( $failures, 'test_id' );
+		foreach ( parse_wp_codebox_phpunit_text( $raw_output, $component_path ) as $text_failure ) {
+			if ( ! in_array( $text_failure['test_id'], $existing_test_ids, true ) ) {
+				$failures[]         = $text_failure;
+				$existing_test_ids[] = $text_failure['test_id'];
+			}
+		}
+	}
 	$failures = array_merge( $failures, wp_codebox_diagnostic_failures( $artifact_root, $component_path, $raw_excerpt ) );
 
 	return [
 		'failures' => $failures,
 		'total'    => $total,
 		'passed'   => $passed,
+		'metadata' => phpunit_failure_metadata( $failures, $raw_output ),
+	];
+}
+
+/**
+ * Parse PHPUnit 9's numbered textual failure and error sections.
+ */
+function parse_wp_codebox_phpunit_text( string $raw, string $component_path ): array {
+	$records = [];
+	foreach ( parse_standard_blocks( explode( "\n", $raw ) ) as $block ) {
+		$test_name    = preg_replace( '/ with data set.*$/', '', $block['header'] );
+		$message_lines = [];
+		$trace_lines   = [];
+		$in_trace      = false;
+		foreach ( $block['body_lines'] as $line ) {
+			$trimmed = trim( $line );
+			if ( $trimmed === '' ) {
+				continue;
+			}
+			if ( preg_match( '#^(/[^\s:]+\.php):\d+$#', $trimmed ) || preg_match( '#^\s*at\s+(/[^\s:]+\.php):\d+#', $line ) ) {
+				$in_trace      = true;
+				$trace_lines[] = preg_replace( '/^at\s+/', '', $trimmed );
+				continue;
+			}
+			if ( ! $in_trace ) {
+				$message_lines[] = $trimmed;
+			}
+		}
+		$message     = implode( "\n", $message_lines );
+		$error_type = classify_error_type( $message );
+		$source      = extract_source_from_trace( $trace_lines, $component_path );
+		$test_file   = $source['test_file'] ?: guess_test_file_from_name( $test_name );
+		$file        = $source['source_file'] ?: $test_file;
+		$line        = $source['source_line'];
+		$records[]   = [
+			'test_name'      => $test_name,
+			'test_file'      => $test_file,
+			'error_type'     => $error_type,
+			'message'        => $message,
+			'source_file'    => $source['source_file'],
+			'source_line'    => $line,
+			'test_id'        => $test_name,
+			'suite'          => 'phpunit',
+			'file'           => $file,
+			'line'           => $line,
+			'failure_type'   => $error_type,
+			'fingerprint'    => make_failure_fingerprint( $test_name, $file, $line, $error_type, $message ),
+			'stdout_excerpt' => make_output_excerpt( array_merge( [ $block['header'] ], $block['body_lines'] ) ),
+			'stderr_excerpt' => '',
+			'status'         => $block['status'] ?? 'failure',
+			'stack_trace'    => implode( "\n", $trace_lines ),
+		];
+	}
+	return $records;
+}
+
+/**
+ * Load the complete PHPUnit stream referenced by WP Codebox.
+ */
+function wp_codebox_raw_phpunit_output( array $payload, string $artifact_root ): string {
+	foreach ( (array) ( $payload['rawLogReferences'] ?? [] ) as $reference ) {
+		if ( ! is_array( $reference ) || ( $reference['kind'] ?? '' ) !== 'phpunit-output' || empty( $reference['path'] ) ) {
+			continue;
+		}
+		$path = substr( $reference['path'], 0, 1 ) === '/' ? $reference['path'] : $artifact_root . '/' . $reference['path'];
+		if ( is_file( $path ) ) {
+			return (string) file_get_contents( $path );
+		}
+	}
+	return '';
+}
+
+/**
+ * Keep aggregate failure/error/assertion metadata aligned with parsed records.
+ */
+function phpunit_failure_metadata( array $failures, string $raw ): array {
+	$phpunit_failures = array_filter( $failures, static fn( $failure ) => strtolower( (string) ( $failure['suite'] ?? 'phpunit' ) ) === 'phpunit' );
+	$errors = count( array_filter( $phpunit_failures, static fn( $failure ) => ( $failure['status'] ?? '' ) === 'error' ) );
+	$assertion_failures = count( array_filter( $phpunit_failures, static fn( $failure ) => ( $failure['status'] ?? 'failure' ) === 'failure' ) );
+	$assertions = 0;
+	$skipped = 0;
+	if ( preg_match_all( '/^Tests:\s*\d+.*$/m', $raw, $summary_lines ) && ! empty( $summary_lines[0] ) ) {
+		$summary = end( $summary_lines[0] );
+		preg_match( '/Assertions:\s*(\d+)/', $summary, $assertion_match );
+		preg_match( '/Skipped:\s*(\d+)/', $summary, $skipped_match );
+		$assertions = (int) ( $assertion_match[1] ?? 0 );
+		$skipped = (int) ( $skipped_match[1] ?? 0 );
+	}
+	return [
+		'assertions' => $assertions,
+		'failures'   => $assertion_failures,
+		'errors'     => $errors,
+		'skipped'    => $skipped,
 	];
 }
 
@@ -424,9 +530,14 @@ function wp_codebox_diagnostic_failures( string $artifact_root, string $componen
 function wp_codebox_failure_entries( array $suite ): array {
 	$entries = [];
 
-	foreach ( [ 'failures', 'errors' ] as $key ) {
+	foreach ( [ 'failures' => 'failure', 'errors' => 'error' ] as $key => $status ) {
 		if ( is_array( $suite[ $key ] ?? null ) ) {
-			$entries = array_merge( $entries, $suite[ $key ] );
+			foreach ( $suite[ $key ] as $entry ) {
+				if ( is_array( $entry ) && empty( $entry['status'] ) ) {
+					$entry['status'] = $status;
+				}
+				$entries[] = $entry;
+			}
 		}
 	}
 
@@ -440,6 +551,9 @@ function wp_codebox_failure_entries( array $suite ): array {
 
 	foreach ( $test_entries as $test ) {
 		if ( is_array( $test ) && in_array( $test['status'] ?? '', [ 'failed', 'error' ], true ) ) {
+			if ( $test['status'] === 'failed' ) {
+				$test['status'] = 'failure';
+			}
 			$entries[] = $test;
 		}
 	}
@@ -484,6 +598,7 @@ function normalize_wp_codebox_failure_entry( array $entry, string $suite_name, s
 	$line           = $source_line;
 	$stdout_excerpt = (string) ( $entry['stdout_excerpt'] ?? $entry['stdout'] ?? $entry['output'] ?? '' );
 	$stderr_excerpt = (string) ( $entry['stderr_excerpt'] ?? $entry['stderr'] ?? '' );
+	$stack_trace    = (string) ( $entry['stack_trace'] ?? $entry['stackTrace'] ?? $entry['trace'] ?? '' );
 
 	if ( $stdout_excerpt === '' ) {
 		$stdout_excerpt = $raw_excerpt;
@@ -509,6 +624,8 @@ function normalize_wp_codebox_failure_entry( array $entry, string $suite_name, s
 		'fingerprint'    => $fingerprint,
 		'stdout_excerpt' => make_output_excerpt( explode( "\n", $stdout_excerpt ) ),
 		'stderr_excerpt' => make_output_excerpt( explode( "\n", $stderr_excerpt ) ),
+		'status'         => in_array( $entry['status'] ?? '', [ 'error', 'failure' ], true ) ? $entry['status'] : 'failure',
+		'stack_trace'    => $stack_trace,
 	];
 }
 

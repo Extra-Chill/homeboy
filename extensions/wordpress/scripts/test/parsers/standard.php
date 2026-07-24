@@ -29,6 +29,7 @@ require_once __DIR__ . '/classify-error.php';
  */
 function parse_standard_blocks( array $lines ): array {
 	$in_failure_section = false;
+	$section_type       = 'failure';
 	$current_block      = null;
 	$blocks             = [];
 
@@ -36,8 +37,9 @@ function parse_standard_blocks( array $lines ): array {
 		$line = $lines[ $i ];
 
 		// Detect start of failure/error listing sections
-		if ( preg_match( '/^There (?:was|were) \d+ (?:error|failure)/i', $line ) ) {
+		if ( preg_match( '/^There (?:was|were) \d+ (error|failure)/i', $line, $section_match ) ) {
 			$in_failure_section = true;
+			$section_type       = strtolower( $section_match[1] );
 			continue;
 		}
 
@@ -73,6 +75,7 @@ function parse_standard_blocks( array $lines ): array {
 			$current_block = [
 				'header'     => trim( $m[1] ),
 				'body_lines' => [],
+				'status'     => $section_type,
 			];
 			continue;
 		}
