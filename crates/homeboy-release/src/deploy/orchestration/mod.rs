@@ -310,10 +310,7 @@ pub(super) fn deploy_components(
             checkout.hydrate_dependencies(config.skip_deps_hydration)?;
         }
 
-        tag_checkouts = match checkout_resolved_deploy_tags(in_place) {
-            Ok(checkouts) => checkouts,
-            Err(err) => return Err(err),
-        };
+        tag_checkouts = checkout_resolved_deploy_tags(in_place)?;
 
         // Repoint every materialized component at its isolated worktree so
         // version reads, packaging, and provenance all observe the tagged tree.
