@@ -654,18 +654,19 @@ fn cook_batch_result(
 ) -> AgentTaskRunResult<AgentTaskCookBatchReport> {
     let total = cooks.len();
     let failed = cooks.iter().filter(|cell| cell.exit_code != 0).count();
-    let status = match failed {
-        0 => "succeeded",
-        failed if failed == total => "failed",
-        _ => "partial_failure",
-    };
+    let state =
+        crate::agent_task_batch::aggregate_state(&crate::agent_task_batch::AgentTaskBatchTotals {
+            succeeded: total - failed,
+            failed,
+            ..Default::default()
+        });
 
     AgentTaskRunResult {
-        exit_code: if failed == 0 { 0 } else { 1 },
+        exit_code: state.exit_code(),
         value: AgentTaskCookBatchReport {
             schema: "homeboy/agent-task-cook-batch/v1",
             batch_id,
-            status: status.to_string(),
+            status: state.outcome_status().to_string(),
             total,
             succeeded: total - failed,
             failed,

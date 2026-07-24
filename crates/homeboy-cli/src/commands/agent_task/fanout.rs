@@ -116,7 +116,9 @@ fn submit_fanout_batch(args: AgentTaskFanoutSubmitBatchArgs) -> CmdResult<Value>
 }
 
 fn batch_status(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
-    Ok((command_json_value(batch::status(&args.batch_id)?)?, 0))
+    let report = batch::status(&args.batch_id)?;
+    let exit_code = report.batch.state.exit_code();
+    Ok((command_json_value(report)?, exit_code))
 }
 
 /// Resume a durable fanout batch after its synchronous coordinator exited.
@@ -1988,6 +1990,27 @@ mod tests {
         assert_eq!(
             cook_batch_outer_exit_code(1, &Some(json!({ "exit_code": 0 }))),
             1
+        );
+    }
+
+    #[test]
+    fn durable_failed_batch_status_envelope_is_unsuccessful() {
+        let state = batch::AgentTaskBatchState::Failed;
+        let exit_code = state.exit_code();
+        let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
+            &Ok(json!({ "batch": { "state": state.outcome_status() } })),
+            exit_code,
+            "agent-task fanout status",
+            None,
+        );
+
+        assert_eq!(exit_code, 1);
+        assert!(!envelope.success);
+        assert_eq!(envelope.exit_code, 1);
+        assert_eq!(envelope.status, "failed");
+        assert_eq!(
+            envelope.data.expect("durable status")["batch"]["state"],
+            "failed"
         );
     }
 

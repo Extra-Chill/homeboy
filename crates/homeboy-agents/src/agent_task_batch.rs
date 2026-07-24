@@ -228,7 +228,7 @@ pub fn status(batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
     }
     let mut totals = totals_for_children(&batch.child_runs);
     totals.unavailable = unavailable_child_runs.len();
-    let state = state_for_totals(&totals);
+    let state = aggregate_state(&totals);
     if batch.state != state {
         batch.state = state;
         changed = true;
@@ -424,24 +424,6 @@ fn totals_for_children(children: &[AgentTaskBatchChildRun]) -> AgentTaskBatchTot
         }
     }
     totals
-}
-
-fn state_for_totals(totals: &AgentTaskBatchTotals) -> AgentTaskBatchState {
-    if totals.running > 0 {
-        AgentTaskBatchState::Running
-    } else if totals.queued > 0 {
-        AgentTaskBatchState::Queued
-    } else if totals.unavailable > 0 {
-        AgentTaskBatchState::PartialFailure
-    } else if totals.failed > 0 || totals.partial_failure > 0 {
-        AgentTaskBatchState::PartialFailure
-    } else if totals.cancelled > 0 && totals.succeeded == 0 {
-        AgentTaskBatchState::Cancelled
-    } else if totals.cancelled > 0 {
-        AgentTaskBatchState::PartialFailure
-    } else {
-        AgentTaskBatchState::Succeeded
-    }
 }
 
 fn child_issue(child: &AgentTaskBatchChildRun, problem: String) -> AgentTaskBatchChildIssue {
@@ -733,6 +715,91 @@ mod tests {
             .next_actions
             .iter()
             .any(|action| action.contains("partial results only")));
+    }
+
+    #[test]
+    fn aggregate_state_matrix_is_shared_by_immediate_and_durable_batches() {
+        for (name, totals, state, exit_code) in [
+            (
+                "all-success",
+                AgentTaskBatchTotals {
+                    succeeded: 2,
+                    ..Default::default()
+                },
+                AgentTaskBatchState::Succeeded,
+                0,
+            ),
+            (
+                "success-and-no-op",
+                AgentTaskBatchTotals {
+                    succeeded: 2,
+                    ..Default::default()
+                },
+                AgentTaskBatchState::Succeeded,
+                0,
+            ),
+            (
+                "mixed",
+                AgentTaskBatchTotals {
+                    succeeded: 1,
+                    failed: 1,
+                    ..Default::default()
+                },
+                AgentTaskBatchState::PartialFailure,
+                1,
+            ),
+            (
+                "all-failed",
+                AgentTaskBatchTotals {
+                    failed: 2,
+                    ..Default::default()
+                },
+                AgentTaskBatchState::Failed,
+                1,
+            ),
+            (
+                "coordinator-infrastructure-failure",
+                AgentTaskBatchTotals {
+                    failed: 1,
+                    ..Default::default()
+                },
+                AgentTaskBatchState::Failed,
+                1,
+            ),
+            (
+                "cancelled",
+                AgentTaskBatchTotals {
+                    cancelled: 2,
+                    ..Default::default()
+                },
+                AgentTaskBatchState::Cancelled,
+                1,
+            ),
+        ] {
+            let actual = aggregate_state(&totals);
+            assert_eq!(actual, state, "{name}");
+            assert_eq!(actual.exit_code(), exit_code, "{name}");
+        }
+    }
+
+    #[test]
+    fn durable_status_marks_all_failed_children_as_failed() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let plan = AgentTaskPlan::new("fanout/failed", vec![request("a"), request("b")]);
+        submit_plan_batch(&plan, Some("batch/failed")).expect("batch submitted");
+        for run_id in ["batch_failed-a", "batch_failed-b"] {
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.state = AgentTaskRunState::Failed;
+            })
+            .expect("stage failed child");
+        }
+
+        let report = status("batch/failed").expect("durable failed status");
+
+        assert_eq!(report.batch.state, AgentTaskBatchState::Failed);
+        assert_eq!(report.batch.state.outcome_status(), "failed");
+        assert_eq!(report.batch.state.exit_code(), 1);
+        assert_eq!(report.totals.failed, 2);
     }
 
     #[test]
