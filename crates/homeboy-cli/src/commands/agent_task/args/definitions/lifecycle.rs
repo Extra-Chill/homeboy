@@ -5,7 +5,9 @@ use super::cook::VerifyGateArgs;
 
 #[derive(Args, Debug)]
 pub struct RunPlanArgs {
-    #[arg(long, value_name = "PATH")]
+    /// Agent-task plan as a JSON spec: inline JSON, `@FILE` to read a file, or
+    /// `-` to read stdin. A bare path is NOT accepted — use `@/path/plan.json`.
+    #[arg(long, value_name = "JSON|@FILE|-")]
     pub plan: String,
     #[arg(long, value_name = "ID")]
     pub record_run_id: Option<String>,
@@ -20,7 +22,9 @@ pub struct RunArgs {
 }
 #[derive(Args, Debug)]
 pub struct SubmitArgs {
-    #[arg(long, value_name = "PATH")]
+    /// Agent-task plan as a JSON spec: inline JSON, `@FILE` to read a file, or
+    /// `-` to read stdin. A bare path is NOT accepted — use `@/path/plan.json`.
+    #[arg(long, value_name = "JSON|@FILE|-")]
     pub plan: String,
     #[arg(long, value_name = "ID")]
     pub run_id: Option<String>,
@@ -323,9 +327,14 @@ pub struct FinalizePrArgs {
 }
 #[derive(Args, Debug)]
 pub struct GateFeedbackArgs {
-    #[arg(long, value_name = "PATH")]
+    /// Promotion report as a JSON spec: inline JSON, `@FILE` to read a file, or
+    /// `-` to read stdin. A bare path is NOT accepted — use
+    /// `@/path/promotion.json`.
+    #[arg(long, value_name = "JSON|@FILE|-")]
     pub promotion: String,
-    #[arg(long = "source-task", value_name = "PATH")]
+    /// Source task as a JSON spec: inline JSON, `@FILE` to read a file, or `-`
+    /// to read stdin. A bare path is NOT accepted — use `@/path/task.json`.
+    #[arg(long = "source-task", value_name = "JSON|@FILE|-")]
     pub source_task: String,
     #[arg(long, default_value_t = 1, value_name = "N")]
     pub attempt: u32,

@@ -101,7 +101,41 @@ pub fn read_json_spec_to_string(spec: &str) -> Result<String> {
         return local_files::local().read(Path::new(path));
     }
 
+    // The remaining form is inline JSON. If the operator passed a bare path to
+    // an existing file (a common mistake, since these flags used to render as
+    // `<PATH>`), the string would otherwise be parsed as JSON and fail with an
+    // opaque "expected value" error. Detect that case and point at the `@FILE`
+    // form explicitly (#9891).
+    if !looks_like_inline_json(spec) && Path::new(spec.trim()).is_file() {
+        return Err(Error::validation_invalid_argument(
+            "json",
+            format!(
+                "'{}' is a file path, but this flag expects a JSON spec (inline JSON, @FILE, or - for stdin). Did you mean '@{}'?",
+                spec.trim(),
+                spec.trim()
+            ),
+            None,
+            None,
+        ));
+    }
+
     Ok(spec.to_string())
+}
+
+/// Whether a JSON spec string is plausibly inline JSON (object, array, string,
+/// or a JSON scalar) rather than a bare filesystem path.
+fn looks_like_inline_json(spec: &str) -> bool {
+    let trimmed = spec.trim_start();
+    trimmed.starts_with('{')
+        || trimmed.starts_with('[')
+        || trimmed.starts_with('"')
+        || trimmed.starts_with("true")
+        || trimmed.starts_with("false")
+        || trimmed.starts_with("null")
+        || trimmed
+            .chars()
+            .next()
+            .is_some_and(|c| c == '-' || c.is_ascii_digit())
 }
 
 /// Read a JSON value spec, preserving the report commands' legacy bare-path support.
@@ -197,6 +231,36 @@ mod tests {
         let value = read_json_value_spec_with_bare_path(path.to_str().unwrap(), "results").unwrap();
         fs::remove_file(path).unwrap();
         assert_eq!(value["source"], "file");
+    }
+
+    #[test]
+    fn json_spec_reads_inline_json_and_at_file() {
+        // Inline JSON passes through untouched.
+        assert_eq!(
+            read_json_spec_to_string(r#"{"a":1}"#).unwrap(),
+            r#"{"a":1}"#
+        );
+        // `@FILE` reads the file contents.
+        let path = temp_json_path("at-spec.json");
+        fs::write(&path, r#"{"from":"file"}"#).unwrap();
+        let raw = read_json_spec_to_string(&format!("@{}", path.display())).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert_eq!(raw, r#"{"from":"file"}"#);
+    }
+
+    #[test]
+    fn json_spec_bare_existing_path_errors_with_at_file_hint() {
+        // A bare path to an existing file is a common mistake (#9891): instead
+        // of being parsed as broken inline JSON, it must produce a targeted
+        // error pointing at the `@FILE` form.
+        let path = temp_json_path("bare-path.json");
+        fs::write(&path, r#"{"plan":true}"#).unwrap();
+        let spec = path.to_str().unwrap().to_string();
+        let err = read_json_spec_to_string(&spec).unwrap_err();
+        fs::remove_file(&path).unwrap();
+        let message = err.message;
+        assert!(message.contains("is a file path"), "{message}");
+        assert!(message.contains(&format!("@{spec}")), "{message}");
     }
 
     #[test]
