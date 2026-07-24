@@ -3550,6 +3550,46 @@ fn promotion_operation_claim_completes_once_and_replays_persisted_result() {
 }
 
 #[test]
+fn retry_dispatch_operation_key_claim_dispatches_once() {
+    // #8357: the detached retry-dispatch path reserves a durable claim keyed by
+    // the retry run id before the handoff and completes it after. A resumed pass
+    // (or a concurrent one) observes the completed claim / held lease and must
+    // not send a second handoff. This exercises that exactly-once contract at the
+    // claim boundary without the full git-backed cook loop.
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-dispatch-claim";
+        let next_run_id = "run-dispatch-claim-attempt-2";
+        let plan = AgentTaskPlan::new(cook_id, Vec::new());
+        agent_task_lifecycle::submit_plan(&plan, Some(next_run_id)).unwrap();
+
+        let operation_key = retry_dispatch_operation_key(next_run_id);
+        let lease = std::time::Duration::from_secs(60);
+
+        // First pass acquires the claim → performs the (modeled) dispatch → completes.
+        assert_eq!(
+            agent_task_lifecycle::claim_cook_operation(next_run_id, &operation_key, lease).unwrap(),
+            agent_task_lifecycle::ClaimOutcome::Acquired
+        );
+        agent_task_lifecycle::complete_cook_operation(
+            next_run_id,
+            &operation_key,
+            serde_json::json!({ "dispatched_run_id": next_run_id }),
+        )
+        .unwrap();
+
+        // A resumed pass observes AlreadyCompleted and must not re-dispatch.
+        match agent_task_lifecycle::claim_cook_operation(next_run_id, &operation_key, lease)
+            .unwrap()
+        {
+            agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(result) => {
+                assert_eq!(result["dispatched_run_id"], next_run_id);
+            }
+            other => panic!("expected AlreadyCompleted, got {other:?}"),
+        }
+    });
+}
+
+#[test]
 fn historical_applied_promotion_restores_only_its_exact_checkpoint_baseline() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let plan = AgentTaskPlan::new("cook-historical-baseline", Vec::new());
