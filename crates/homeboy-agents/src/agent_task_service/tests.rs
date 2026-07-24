@@ -289,6 +289,41 @@ fn provider_execution_reservation_is_exactly_once_and_terminal() {
 }
 
 #[test]
+fn local_reservation_advances_heartbeat_to_execution_start() {
+    // A local (in-process) cook must advance its heartbeat when the provider
+    // execution is reserved, so `status`/`activity` can distinguish an active
+    // provider from a hung preflight instead of showing the submission-time
+    // heartbeat for the whole run (#8396).
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        agent_task_lifecycle::submit_plan(&plan, Some("local-heartbeat")).expect("run submitted");
+        let task = &plan.tasks[0];
+
+        agent_task_lifecycle::reserve_provider_execution("local-heartbeat", task, 1)
+            .expect("reservation acquired");
+
+        let record = lifecycle_status("local-heartbeat").expect("durable record");
+        let started_at = record.metadata["provider_executions"][0]["started_at"]
+            .as_str()
+            .expect("running execution start recorded");
+        let heartbeat = record
+            .lifecycle
+            .heartbeat
+            .as_ref()
+            .expect("heartbeat advanced on reservation");
+        assert_eq!(
+            heartbeat.last_seen_at, started_at,
+            "heartbeat should advance to provider-execution start for a local cook"
+        );
+        assert_eq!(
+            heartbeat.owner_pid,
+            Some(std::process::id()),
+            "a local cook's owner PID is the reserving process"
+        );
+    });
+}
+
+#[test]
 fn concurrent_schedulers_dispatch_one_reserved_provider_execution() {
     with_isolated_home(|_| {
         let plan = test_plan();
