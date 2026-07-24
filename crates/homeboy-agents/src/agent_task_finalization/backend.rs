@@ -1031,14 +1031,13 @@ pub(super) fn validate_real_candidate_fingerprint(
             None,
         ));
     }
-    if normalize_changed_files(&options.changed_files)
-        != normalize_changed_files(&promotion.changed_files)
+    if super::normalize_changed_files(&options.changed_files)
+        != super::normalize_changed_files(&promotion.changed_files)
     {
-        return Err(Error::validation_invalid_argument(
-            "changed-file",
-            "caller changed files must exactly match the persisted promotion report before finalization",
-            None,
-            None,
+        return Err(super::changed_files_mismatch_error(
+            &options.run_id,
+            &options.changed_files,
+            &promotion.changed_files,
         ));
     }
     validate_candidate_fingerprint(options, &expected)
@@ -1093,13 +1092,6 @@ fn committed_candidate_matches(
     }
     let tree = git_output(&options.path, &["rev-parse", "HEAD^{tree}"])?;
     Ok(tree.trim() == fingerprint.tree)
-}
-
-fn normalize_changed_files(changed_files: &[String]) -> Vec<String> {
-    let mut normalized = changed_files.to_vec();
-    normalized.sort();
-    normalized.dedup();
-    normalized
 }
 
 fn deserialize_persisted_value<T: DeserializeOwned>(

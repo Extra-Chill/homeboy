@@ -78,11 +78,10 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             validate_durable_publication_eligibility(&lifecycle, &gate_proof.promotion)?;
         durable_changed_files = normalize_changed_files(&gate_proof.promotion.changed_files);
         if normalize_changed_files(&options.changed_files) != durable_changed_files {
-            return Err(Error::validation_invalid_argument(
-                "changed-file",
-                "caller changed files must exactly match the persisted promotion report before finalization",
-                None,
-                None,
+            return Err(changed_files_mismatch_error(
+                &options.run_id,
+                &options.changed_files,
+                &gate_proof.promotion.changed_files,
             ));
         }
         options.normalized_gate_results = gate_proof.promotion.gate_results;
@@ -304,11 +303,83 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     ))
 }
 
-fn normalize_changed_files(changed_files: &[String]) -> Vec<String> {
+pub(crate) fn normalize_changed_files(changed_files: &[String]) -> Vec<String> {
     let mut normalized = changed_files.to_vec();
     normalized.sort();
     normalized.dedup();
     normalized
+}
+
+/// Maximum number of individual paths listed in a changed-file mismatch
+/// diagnostic before the remainder is summarized as an omitted count. Keeps the
+/// fail-closed error bounded on large divergences while still naming the paths
+/// an operator needs to resolve the common small cases (#9870).
+const CHANGED_FILE_DIAGNOSTIC_PATH_LIMIT: usize = 20;
+
+/// Build a self-diagnosing changed-file mismatch error for finalization.
+///
+/// Instead of only stating the invariant, this reports the expected/actual
+/// counts, the paths `missing_from_caller` (expected but not supplied) and
+/// `unexpected_from_caller` (supplied but not expected), each bounded with an
+/// omitted count, and an exact inspection command for the full sets. This makes
+/// the fail-closed error self-diagnosing regardless of whether the root cause is
+/// a caller typo, a stale promotion scope, or genuine Git candidate divergence
+/// (#9870).
+pub(crate) fn changed_files_mismatch_error(
+    run_id: &str,
+    caller_changed_files: &[String],
+    expected_changed_files: &[String],
+) -> Error {
+    let caller = normalize_changed_files(caller_changed_files);
+    let expected = normalize_changed_files(expected_changed_files);
+    let missing_from_caller: Vec<String> = expected
+        .iter()
+        .filter(|path| !caller.contains(*path))
+        .cloned()
+        .collect();
+    let unexpected_from_caller: Vec<String> = caller
+        .iter()
+        .filter(|path| !expected.contains(*path))
+        .cloned()
+        .collect();
+
+    let problem = format!(
+        "caller changed files must exactly match the persisted promotion report before \
+         finalization. expected_count={} actual_count={}; missing_from_caller={}; \
+         unexpected_from_caller={}. Inspect the full recorded set with \
+         `homeboy agent-task status {run_id} --full` (promotion.changed_files). A caller \
+         typo lists an unexpected path; a stale promotion scope inflates the expected set \
+         beyond the current PR diff (see #9706 for adoption scope).",
+        expected.len(),
+        caller.len(),
+        bounded_path_summary(&missing_from_caller),
+        bounded_path_summary(&unexpected_from_caller),
+    );
+
+    Error::validation_invalid_argument("changed-file", problem, None, None)
+}
+
+/// Render a bounded, human-readable summary of a path set: up to
+/// [`CHANGED_FILE_DIAGNOSTIC_PATH_LIMIT`] paths followed by an omitted count.
+fn bounded_path_summary(paths: &[String]) -> String {
+    if paths.is_empty() {
+        return "[]".to_string();
+    }
+    let shown: Vec<&String> = paths
+        .iter()
+        .take(CHANGED_FILE_DIAGNOSTIC_PATH_LIMIT)
+        .collect();
+    let omitted = paths.len().saturating_sub(shown.len());
+    let joined = shown
+        .iter()
+        .map(|path| path.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if omitted > 0 {
+        format!("[{joined}, +{omitted} more]")
+    } else {
+        format!("[{joined}]")
+    }
 }
 
 fn validate_gate_proof_binding(

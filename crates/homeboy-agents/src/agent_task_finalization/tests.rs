@@ -1999,3 +1999,59 @@ fn options() -> AgentTaskPrFinalizationOptions {
         ],
     }
 }
+
+#[test]
+fn changed_files_mismatch_error_reports_missing_and_unexpected_paths() {
+    // Caller supplied a file the promotion did not, and omitted one it did:
+    // both divergences must be named, with accurate counts.
+    let expected = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
+    let caller = vec!["src/a.rs".to_string(), "src/typo.rs".to_string()];
+
+    let error = changed_files_mismatch_error("agent-task-1", &caller, &expected);
+    let message = error.message;
+
+    assert!(message.contains("expected_count=2"), "{message}");
+    assert!(message.contains("actual_count=2"), "{message}");
+    assert!(
+        message.contains("missing_from_caller=[src/b.rs]"),
+        "{message}"
+    );
+    assert!(
+        message.contains("unexpected_from_caller=[src/typo.rs]"),
+        "{message}"
+    );
+    assert!(
+        message.contains("homeboy agent-task status agent-task-1 --full"),
+        "{message}"
+    );
+}
+
+#[test]
+fn changed_files_mismatch_error_flags_stale_base_inflated_promotion() {
+    // Stale-base attribution inflates the expected set well beyond the caller's
+    // current PR diff; every extra expected path shows as missing_from_caller.
+    let caller = vec!["src/a.rs".to_string()];
+    let expected: Vec<String> = (0..6).map(|index| format!("stale/f{index}.rs")).collect();
+
+    let error = changed_files_mismatch_error("agent-task-2", &caller, &expected);
+    let message = error.message;
+
+    assert!(message.contains("expected_count=6"), "{message}");
+    assert!(message.contains("actual_count=1"), "{message}");
+    assert!(message.contains("unexpected_from_caller=[]"), "{message}");
+    // The stale base paths are all reported as missing from the caller.
+    assert!(message.contains("stale/f0.rs"), "{message}");
+}
+
+#[test]
+fn changed_files_mismatch_error_bounds_large_path_sets() {
+    let caller: Vec<String> = Vec::new();
+    let expected: Vec<String> = (0..30).map(|index| format!("dir/f{index:02}.rs")).collect();
+
+    let error = changed_files_mismatch_error("agent-task-3", &caller, &expected);
+    let message = error.message;
+
+    assert!(message.contains("expected_count=30"), "{message}");
+    // Only the bounded prefix is listed, with an explicit omitted count.
+    assert!(message.contains("+10 more"), "{message}");
+}
