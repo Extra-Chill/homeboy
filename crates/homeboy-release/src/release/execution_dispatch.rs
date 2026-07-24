@@ -535,7 +535,14 @@ fn run_changelog_bootstrap_preflight(
     step: &PlanStep,
     context: &ReleaseExecutionContext,
 ) -> ReleaseStepResult {
-    match super::planning_changelog::ensure_changelog_initialized(context.component) {
+    // The plan carries the authoritative dry-run flag on the step; fall back to
+    // the run-level option so a plan built without it still honours --dry-run.
+    let dry_run = step
+        .inputs
+        .get("dry_run")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(context.options.dry_run);
+    match super::planning_changelog::ensure_changelog_initialized(context.component, dry_run) {
         Ok(()) => ReleaseStepResult {
             id: step.id.clone(),
             step_type: step.kind.clone(),

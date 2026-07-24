@@ -86,7 +86,17 @@ pub(super) fn validate_working_tree_fail_fast(component: &Component) -> Result<(
         .collect();
 
     let build_artifacts = declared_build_artifact_paths(component);
-    let unexpected = filter_homeboy_managed_and_declared_artifacts(all_files, &build_artifacts);
+    let mut unexpected = filter_homeboy_managed_and_declared_artifacts(all_files, &build_artifacts);
+    // A changelog homeboy bootstrapped for this release is release-owned content,
+    // not operator drift. Excuse the declared changelog target (and the parent
+    // directory git collapses a wholly-untracked scaffold into) so the release
+    // cannot abort on a file it just wrote itself (#9964).
+    let bootstrapped = bootstrapped_changelog_paths(component);
+    unexpected.retain(|file| {
+        !bootstrapped
+            .iter()
+            .any(|allowed| paths_match(file, allowed))
+    });
     if unexpected.is_empty() {
         return Ok(());
     }
@@ -110,6 +120,36 @@ pub(super) fn validate_working_tree_fail_fast(component: &Component) -> Result<(
             ),
         ]),
     ))
+}
+
+/// Paths a first-release changelog bootstrap can legitimately make dirty.
+///
+/// Returns the declared changelog target plus every ancestor directory between
+/// it and the component root. `git status --untracked-files=normal` collapses a
+/// wholly-untracked directory into a single `docs/` entry rather than naming
+/// `docs/CHANGELOG.md`, so matching only the file path would never fire.
+fn bootstrapped_changelog_paths(component: &Component) -> Vec<String> {
+    let Some(target) = component.changelog_target.as_deref() else {
+        return Vec::new();
+    };
+    let target = target.trim().trim_start_matches("./").trim_matches('/');
+    if target.is_empty() {
+        return Vec::new();
+    }
+
+    let mut paths = vec![target.to_string()];
+    let mut parent = Path::new(target).parent();
+    while let Some(dir) = parent {
+        match dir.to_str() {
+            Some(dir) if !dir.is_empty() => {
+                paths.push(format!("{dir}/"));
+                paths.push(dir.to_string());
+            }
+            _ => break,
+        }
+        parent = dir.parent();
+    }
+    paths
 }
 
 const HOMEBOY_MANAGED_PREFIXES: &[&str] = &[
@@ -491,6 +531,51 @@ mod tests {
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains("Uncommitted changes detected"));
+        assert!(err.details.to_string().contains("src.rs"));
+    }
+
+    /// Regression for #9964: the gate must not abort on the changelog scaffold
+    /// homeboy itself wrote moments earlier. Git collapses a wholly untracked new
+    /// directory into a single `docs/` entry, so the allowlist has to cover the
+    /// parent directory form and not just `docs/CHANGELOG.md`.
+    #[test]
+    fn bootstrapped_changelog_directory_does_not_fail_the_working_tree_gate() {
+        let temp = git_repo();
+        let dir = temp.path();
+        std::fs::write(dir.join("README.md"), "initial\n").unwrap();
+        run_git(dir, &["add", "."]);
+        run_git(dir, &["commit", "-q", "-m", "chore: initial"]);
+
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/CHANGELOG.md"), "# Changelog\n").unwrap();
+
+        let mut component = git_component(dir);
+        component.changelog_target = Some("docs/CHANGELOG.md".to_string());
+
+        validate_working_tree_fail_fast(&component)
+            .expect("a bootstrapped changelog must not abort the release that created it");
+    }
+
+    /// The changelog allowlist must stay narrow: unrelated files inside the same
+    /// directory are still operator drift and must fail closed.
+    #[test]
+    fn changelog_allowance_does_not_excuse_other_files() {
+        let temp = git_repo();
+        let dir = temp.path();
+        std::fs::write(dir.join("README.md"), "initial\n").unwrap();
+        run_git(dir, &["add", "."]);
+        run_git(dir, &["commit", "-q", "-m", "chore: initial"]);
+
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/CHANGELOG.md"), "# Changelog\n").unwrap();
+        run_git(dir, &["add", "docs/CHANGELOG.md"]);
+        std::fs::write(dir.join("src.rs"), "unexpected\n").unwrap();
+
+        let mut component = git_component(dir);
+        component.changelog_target = Some("docs/CHANGELOG.md".to_string());
+
+        let err = validate_working_tree_fail_fast(&component)
+            .expect_err("unrelated dirty files must still fail fast");
         assert!(err.details.to_string().contains("src.rs"));
     }
 

@@ -140,7 +140,12 @@ fn is_file_not_found_error(err: &Error) -> bool {
 /// First-release bootstrap: if the component's configured `changelog_target`
 /// doesn't exist on disk (and no fallback candidate exists), create a minimal
 /// changelog scaffold so downstream finalization has a file to update.
-pub(super) fn ensure_changelog_initialized(component: &Component) -> Result<()> {
+///
+/// A dry run must not touch the working tree: leaving an untracked scaffold
+/// behind makes the *next* real release fail its own working-tree gate on a file
+/// homeboy wrote (#9964). `read_changelog_for_release` already seeds the initial
+/// content in memory for dry runs, so skipping the write here loses nothing.
+pub(super) fn ensure_changelog_initialized(component: &Component, dry_run: bool) -> Result<()> {
     let Some(ref target) = component.changelog_target else {
         return Ok(());
     };
@@ -155,12 +160,28 @@ pub(super) fn ensure_changelog_initialized(component: &Component) -> Result<()> 
         return Ok(());
     }
 
+    if dry_run {
+        homeboy_core::log_status!(
+            "release",
+            "Dry run: would initialize changelog at {} (first release for {})",
+            configured_path.display(),
+            component.id
+        );
+        return Ok(());
+    }
+
     if let Some(parent) = configured_path.parent() {
         homeboy_core::engine::local_files::local().ensure_dir(parent)?;
     }
 
     homeboy_core::engine::local_files::local()
         .write(&configured_path, changelog::INITIAL_CHANGELOG_CONTENT)?;
+
+    // Stage the scaffold immediately. It is release-owned content that the
+    // release commit will include anyway, and leaving it untracked makes git
+    // report the whole new parent directory (e.g. `docs/`) as dirty, which no
+    // file-level allowlist can match (#9964).
+    stage_bootstrapped_changelog(component, &configured_path);
 
     homeboy_core::log_status!(
         "release",
@@ -170,6 +191,39 @@ pub(super) fn ensure_changelog_initialized(component: &Component) -> Result<()> 
     );
 
     Ok(())
+}
+
+/// Stage the freshly bootstrapped changelog so it is tracked from the moment it
+/// exists. Best-effort: a staging failure must not abort the release, because
+/// the file itself is already written and the working-tree gate tolerates the
+/// component's declared changelog target either way.
+fn stage_bootstrapped_changelog(component: &Component, changelog_path: &std::path::Path) {
+    let output = std::process::Command::new("git")
+        .arg("add")
+        .arg("--")
+        .arg(changelog_path)
+        .current_dir(&component.local_path)
+        .output();
+
+    match output {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            homeboy_core::log_status!(
+                "release",
+                "Warning: could not stage bootstrapped changelog {}: {}",
+                changelog_path.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Err(err) => {
+            homeboy_core::log_status!(
+                "release",
+                "Warning: could not stage bootstrapped changelog {}: {}",
+                changelog_path.display(),
+                err
+            );
+        }
+    }
 }
 
 /// Group component-scoped commits into durable product-history changelog sections.
@@ -344,7 +398,7 @@ mod tests {
         let changelog_path = temp.path().join("CHANGELOG.md");
         assert!(!changelog_path.exists(), "precondition: no changelog yet");
 
-        ensure_changelog_initialized(&component).expect("preflight should bootstrap");
+        ensure_changelog_initialized(&component, false).expect("preflight should bootstrap");
 
         let content = std::fs::read_to_string(&changelog_path).expect("file created");
         assert_eq!(content, super::changelog::INITIAL_CHANGELOG_CONTENT);
@@ -363,7 +417,7 @@ mod tests {
         let docs_dir = temp.path().join("docs");
         assert!(!docs_dir.exists(), "precondition: no docs/ yet");
 
-        ensure_changelog_initialized(&component).expect("preflight should bootstrap");
+        ensure_changelog_initialized(&component, false).expect("preflight should bootstrap");
 
         assert!(docs_dir.is_dir(), "docs/ parent should be created");
         assert!(
@@ -380,7 +434,7 @@ mod tests {
         let original = "# Changelog\n\n## [1.0.0] - 2026-01-01\n\n### Added\n- real release\n";
         std::fs::write(&changelog_path, original).unwrap();
 
-        ensure_changelog_initialized(&component).expect("no-op on existing file");
+        ensure_changelog_initialized(&component, false).expect("no-op on existing file");
 
         let after = std::fs::read_to_string(&changelog_path).unwrap();
         assert_eq!(after, original, "existing changelog must not be rewritten");
@@ -395,7 +449,7 @@ mod tests {
         let fallback = temp.path().join("docs/CHANGELOG.md");
         std::fs::write(&fallback, "# Changelog\n\n## [0.1.0] - 2026-01-01\n").unwrap();
 
-        ensure_changelog_initialized(&component).expect("defer to fallback");
+        ensure_changelog_initialized(&component, false).expect("defer to fallback");
 
         assert!(
             !temp.path().join("CHANGELOG.md").exists(),
@@ -408,12 +462,59 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let component = component_with_changelog_target(&temp, None);
 
-        ensure_changelog_initialized(&component).expect("no-op without target");
+        ensure_changelog_initialized(&component, false).expect("no-op without target");
 
         if let Some(entry) = std::fs::read_dir(temp.path()).unwrap().next() {
             let path = entry.unwrap().path();
             panic!("should have created nothing, but found: {}", path.display());
         }
+    }
+
+    /// Regression for #9964: the bootstrapped changelog was left untracked, so
+    /// the release aborted on its own `working_tree` gate. Git reports a wholly
+    /// untracked new directory as `docs/`, which no file-level allowlist matches
+    /// — staging the file at creation keeps the tree clean instead.
+    #[test]
+    fn ensure_changelog_initialized_stages_the_bootstrapped_changelog() {
+        let temp = git_repo();
+        let component = component_with_changelog_target(&temp, Some("docs/CHANGELOG.md"));
+
+        ensure_changelog_initialized(&component, false).expect("preflight should bootstrap");
+
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(temp.path())
+            .output()
+            .expect("git status");
+        let status = String::from_utf8_lossy(&status.stdout);
+
+        assert!(
+            status.contains("A  docs/CHANGELOG.md"),
+            "bootstrapped changelog must be staged, got: {status:?}"
+        );
+        assert!(
+            !status.contains("?? docs/"),
+            "an untracked docs/ directory is what trips the working_tree gate: {status:?}"
+        );
+    }
+
+    /// Regression for #9964: a dry run must leave no scaffold behind, otherwise
+    /// the next real release fails its working-tree gate on a dry run's residue.
+    #[test]
+    fn ensure_changelog_initialized_dry_run_does_not_touch_the_working_tree() {
+        let temp = git_repo();
+        let component = component_with_changelog_target(&temp, Some("docs/CHANGELOG.md"));
+
+        ensure_changelog_initialized(&component, true).expect("dry run should be a no-op");
+
+        assert!(
+            !temp.path().join("docs").exists(),
+            "dry run must not create the changelog parent directory"
+        );
+        assert!(
+            !temp.path().join("docs/CHANGELOG.md").exists(),
+            "dry run must not write the changelog"
+        );
     }
 
     #[test]
