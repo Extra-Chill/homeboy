@@ -229,6 +229,18 @@ by an active lock or another queue issue, the output reports `status: blocked`,
 lists the exact worktree rows and retry commands, and exits non-zero before any
 provider process starts.
 
+Completed cook batches use one aggregate outcome across the result payload, the
+`homeboy/command-result/v3` envelope, and the shell exit code: `succeeded` exits
+zero; `partial_failure` means at least one child succeeded and at least one failed,
+and exits non-zero; `failed` means every child failed and exits non-zero. Child
+results and durable evidence remain available for `fanout status`, `artifacts`,
+and `resume`. This changes prior behavior where a failed `cook-batch --run-plan`
+could report a zero exit code; callers must treat nonzero as an unsuccessful batch.
+`fanout status` and `fanout resume` use the same aggregate state and exit policy.
+Active child cooks remain `queued` or `running` (including detached `in_flight`
+handoffs) with exit zero; a resume retains active children until their durable
+lifecycle reaches a terminal state.
+
 The generated plan uses the existing
 `homeboy/agent-task-batch-cook-fanout-plan/v1` contract. That means operators can
 save the returned `plan` object and resume with:

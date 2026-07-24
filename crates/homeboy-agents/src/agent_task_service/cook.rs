@@ -450,6 +450,7 @@ pub struct AgentTaskCookBatchOptions {
 pub struct AgentTaskCookBatchCellReport {
     pub cook_id: String,
     pub initial_run_id: String,
+    pub status: String,
     pub exit_code: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<AgentTaskCookReport>,
@@ -463,8 +464,12 @@ pub struct AgentTaskCookBatchReport {
     pub batch_id: String,
     pub status: String,
     pub total: usize,
+    pub queued: usize,
+    pub running: usize,
     pub succeeded: usize,
     pub failed: usize,
+    pub cancelled: usize,
+    pub timed_out: usize,
     pub cooks: Vec<AgentTaskCookBatchCellReport>,
 }
 
@@ -526,6 +531,7 @@ where
                     Ok(result) => AgentTaskCookBatchCellReport {
                         cook_id: cook.cook_id,
                         initial_run_id: cook.initial_run_id,
+                        status: result.value.status.clone(),
                         exit_code: result.exit_code,
                         result: Some(result.value),
                         error: None,
@@ -533,6 +539,7 @@ where
                     Err(error) => AgentTaskCookBatchCellReport {
                         cook_id: cook.cook_id,
                         initial_run_id: cook.initial_run_id,
+                        status: "failed".to_string(),
                         exit_code: 1,
                         result: None,
                         error: Some(error.to_string()),
@@ -548,24 +555,10 @@ where
     for (index, cell) in rx {
         cells[index] = Some(cell);
     }
-    let cooks = cells.into_iter().flatten().collect::<Vec<_>>();
-    let failed = cooks.iter().filter(|cell| cell.exit_code != 0).count();
-    Ok(AgentTaskRunResult {
-        exit_code: if failed == 0 { 0 } else { 1 },
-        value: AgentTaskCookBatchReport {
-            schema: "homeboy/agent-task-cook-batch/v1",
-            batch_id: options.batch_id,
-            status: if failed == 0 {
-                "succeeded".to_string()
-            } else {
-                "failed".to_string()
-            },
-            total,
-            succeeded: total - failed,
-            failed,
-            cooks,
-        },
-    })
+    Ok(cook_batch_result(
+        options.batch_id,
+        cells.into_iter().flatten().collect(),
+    ))
 }
 
 /// Resume a persisted cook batch after its original synchronous coordinator
@@ -636,6 +629,7 @@ where
                 AgentTaskCookBatchCellReport {
                     cook_id: report.cook_id.clone(),
                     initial_run_id: cook_id,
+                    status: report.status.clone(),
                     exit_code,
                     result: Some(report),
                     error: None,
@@ -644,6 +638,7 @@ where
             Err(error) => AgentTaskCookBatchCellReport {
                 cook_id: child.task_id.clone(),
                 initial_run_id: cook_id,
+                status: "failed".to_string(),
                 exit_code: 1,
                 result: None,
                 error: Some(error.to_string()),
@@ -659,23 +654,43 @@ where
         cells.push(cell);
     }
 
-    let failed = cells.iter().filter(|cell| cell.exit_code != 0).count();
-    Ok(AgentTaskRunResult {
-        exit_code: if failed == 0 { 0 } else { 1 },
+    Ok(cook_batch_result(batch.batch_id, cells))
+}
+
+fn cook_batch_result(
+    batch_id: String,
+    cooks: Vec<AgentTaskCookBatchCellReport>,
+) -> AgentTaskRunResult<AgentTaskCookBatchReport> {
+    let total = cooks.len();
+    let mut totals = crate::agent_task_batch::AgentTaskBatchTotals::default();
+    for cell in &cooks {
+        match cell.status.as_str() {
+            "queued" => totals.queued += 1,
+            "running" | "in_flight" => totals.running += 1,
+            "cancelled" => totals.cancelled += 1,
+            "timed_out" => totals.timed_out += 1,
+            _ if cell.exit_code == 0 => totals.succeeded += 1,
+            _ => totals.failed += 1,
+        }
+    }
+    let state = crate::agent_task_batch::aggregate_state(&totals);
+
+    AgentTaskRunResult {
+        exit_code: state.exit_code(),
         value: AgentTaskCookBatchReport {
             schema: "homeboy/agent-task-cook-batch/v1",
-            batch_id: batch.batch_id,
-            status: if failed == 0 {
-                "succeeded".to_string()
-            } else {
-                "failed".to_string()
-            },
+            batch_id,
+            status: state.outcome_status().to_string(),
             total,
-            succeeded: total - failed,
-            failed,
-            cooks: cells,
+            queued: totals.queued,
+            running: totals.running,
+            succeeded: totals.succeeded,
+            failed: totals.failed,
+            cancelled: totals.cancelled,
+            timed_out: totals.timed_out,
+            cooks,
         },
-    })
+    }
 }
 
 /// Reconstruct one batch child's cook from its durable recipe and re-run it.
@@ -788,11 +803,7 @@ fn child_finalization_value(cell: &AgentTaskCookBatchCellReport) -> Value {
     serde_json::json!({
         "resumed_at": chrono::Utc::now().to_rfc3339(),
         "exit_code": cell.exit_code,
-        "status": cell
-            .result
-            .as_ref()
-            .map(|report| report.status.clone())
-            .unwrap_or_else(|| "error".to_string()),
+        "status": cell.status,
         "error": cell.error,
     })
 }
@@ -802,7 +813,7 @@ fn cook_report_exit_code(report: &AgentTaskCookReport) -> i32 {
     // could not carry to a green, finalized state is a non-zero resume result
     // the operator must still act on.
     match report.status.as_str() {
-        "review_ready" | "green_no_finalize" => 0,
+        "queued" | "running" | "in_flight" | "review_ready" | "green_no_finalize" => 0,
         _ => {
             if report
                 .finalization
