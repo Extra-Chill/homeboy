@@ -5,7 +5,7 @@
 
 use super::types::{BlockSyntax, CommentSyntax, Grammar, StringSyntax};
 use super::{
-    find_unclosed_raw_string_on_line, line_closes_regular_string, line_has_unclosed_regular_string,
+    find_unclosed_raw_string_on_line, line_closes_regular_string, unclosed_regular_string_quote,
 };
 
 // ============================================================================
@@ -112,7 +112,14 @@ pub(crate) fn walk_lines<'a>(content: &'a str, grammar: &Grammar) -> Vec<Context
     let mut block_comment_end = String::new();
     let mut in_raw_string = false;
     let mut raw_string_close = String::new();
-    let mut in_regular_string = false;
+    let mut regular_string_quote = None;
+    let quote_chars: Vec<char> = grammar
+        .strings
+        .quotes
+        .iter()
+        .filter_map(|quote| quote.chars().next())
+        .collect();
+    let escape = grammar.strings.escape.chars().next().unwrap_or('\\');
 
     for (i, line) in content.lines().enumerate() {
         let trimmed = line.trim();
@@ -125,12 +132,12 @@ pub(crate) fn walk_lines<'a>(content: &'a str, grammar: &Grammar) -> Vec<Context
                 in_raw_string = false;
             }
             Region::StringLiteral
-        } else if in_regular_string {
+        } else if let Some(quote) = regular_string_quote {
             // Inside a multi-line regular string. Some grammar profiles permit
             // newline escapes in ordinary strings, and fixture source in tests
             // commonly uses that form.
-            if line_closes_regular_string(line) {
-                in_regular_string = false;
+            if line_closes_regular_string(line, quote, escape) {
+                regular_string_quote = None;
             }
             Region::StringLiteral
         } else if in_block_comment {
@@ -167,8 +174,10 @@ pub(crate) fn walk_lines<'a>(content: &'a str, grammar: &Grammar) -> Vec<Context
                 if let Some(close) = find_unclosed_raw_string_on_line(line) {
                     in_raw_string = true;
                     raw_string_close = close;
-                } else if line_has_unclosed_regular_string(line) {
-                    in_regular_string = true;
+                } else if let Some(quote) =
+                    unclosed_regular_string_quote(line, &quote_chars, escape)
+                {
+                    regular_string_quote = Some(quote);
                 }
                 // The opening line itself is Code (it has real code on it);
                 // subsequent lines inside the string are StringLiteral.
