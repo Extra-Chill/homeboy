@@ -54,6 +54,17 @@ fn promotion_operation_key(run_id: &str) -> String {
     format!("promote:{run_id}")
 }
 
+/// Lease window for a retry-dispatch operation claim. A detached dispatch may
+/// take a while to be accepted by the runner; the lease is generous so a healthy
+/// controller completes it, while a crashed controller's lease still elapses.
+const RETRY_DISPATCH_CLAIM_LEASE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Durable operation key for the dispatch of one retry attempt. A retry is
+/// one-per-generated-`run_id`, so the next run id is the stable identity (#8357).
+fn retry_dispatch_operation_key(next_run_id: &str) -> String {
+    format!("dispatch:{next_run_id}")
+}
+
 /// Promote a cook attempt under a durable exactly-once operation claim.
 ///
 /// `promote_or_load_attempt` already loads an already-persisted promotion, but
@@ -939,14 +950,41 @@ where
             baseline.artifact_provenance();
         if let Some(dispatcher) = &options.attempt_dispatcher {
             // A detached dispatcher may return before any executor-side
-            // lifecycle write. Persist the exact materialized plan first so a
-            // continuation resumes this baseline-bound workspace contract.
+            // lifecycle write, so a controller crash after the runner accepts
+            // the retry but before its state advances would re-dispatch on
+            // restart. Bracket the dispatch with a durable operation claim keyed
+            // by the retry run id: a completed claim means the retry is already
+            // dispatched, so a resumed pass continues from it instead of
+            // sending a second handoff (#8357).
+            // Persist the exact materialized plan first so a continuation resumes
+            // this baseline-bound workspace contract, and so the run record the
+            // claim is written onto exists.
             agent_task_lifecycle::submit_plan(&follow_up_plan, Some(&next_run_id))?;
-            dispatcher.dispatch_attempt(
-                follow_up_plan,
+            let operation_key = retry_dispatch_operation_key(&next_run_id);
+            match agent_task_lifecycle::claim_cook_operation(
                 &next_run_id,
-                Some(baseline.capability()),
-            )?;
+                &operation_key,
+                RETRY_DISPATCH_CLAIM_LEASE,
+            )? {
+                agent_task_lifecycle::ClaimOutcome::Acquired => {
+                    dispatcher.dispatch_attempt(
+                        follow_up_plan,
+                        &next_run_id,
+                        Some(baseline.capability()),
+                    )?;
+                    agent_task_lifecycle::complete_cook_operation(
+                        &next_run_id,
+                        &operation_key,
+                        serde_json::json!({ "dispatched_run_id": next_run_id }),
+                    )?;
+                }
+                // The retry was already durably dispatched (completed) or is
+                // owned by a concurrent pass (lease held). Either way, do not
+                // send a second handoff; the persisted plan and run state carry
+                // the existing dispatch forward.
+                agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_)
+                | agent_task_lifecycle::ClaimOutcome::LeaseHeld => {}
+            }
         } else {
             run_loaded_plan_with_derived_cook_baseline(
                 follow_up_plan,
