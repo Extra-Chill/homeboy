@@ -35,6 +35,7 @@ mod artifact_materialization;
 mod cancellation;
 pub mod controller_pin_reference_provider;
 mod conversion;
+mod cook_workspace_restore;
 mod failure_recording;
 mod health;
 mod lab_handoff_reconciliation;
