@@ -139,12 +139,21 @@ pub(super) fn component_cache_key(component: &component::Component) -> String {
     format!("{}\0{}", component.id, component.local_path)
 }
 
+/// Per-component `git fetch` bound so an unresponsive remote can't stall
+/// `homeboy status` indefinitely in a many-component workspace (#7378). The
+/// fetch is best-effort — a timeout or missing remote falls back to local tag
+/// data, exactly like the previous unbounded best-effort fetch.
+const STATUS_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 fn fetch_origin_tags(path: &str) {
-    // Best-effort fetch — silently proceeds if no remote or network issue.
-    let _ = homeboy::core::engine::command::run_in_optional(
-        path,
-        "git",
+    // Best-effort, timeout-bounded fetch — silently proceeds on no remote,
+    // network issue, or timeout, using whatever local tags are already present.
+    let _ = git::run_git_with_env_timeout(
+        std::path::Path::new(path),
         &["fetch", "--tags", "--quiet"],
+        "status fetch origin tags",
+        &[],
+        STATUS_FETCH_TIMEOUT,
     );
 }
 

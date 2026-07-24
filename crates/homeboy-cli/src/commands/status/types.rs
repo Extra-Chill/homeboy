@@ -273,6 +273,56 @@ impl StatusTimer {
     }
 }
 
+/// Emits a bounded, single-line progress indicator for the slow per-component
+/// git-inspection phase of `homeboy status`, so an operator sees what it is
+/// working on instead of a silent hang (#7378). Only writes to an interactive
+/// stderr (a TTY), so JSON/piped output stays clean; the final line is cleared
+/// on drop.
+pub(super) struct StatusProgress {
+    total: usize,
+    active: bool,
+}
+
+impl StatusProgress {
+    pub(super) fn new(total: usize) -> Self {
+        use std::io::IsTerminal;
+        Self {
+            total,
+            // Only render for a non-trivial component set on an interactive
+            // terminal — a single-component status is fast and needs no spinner.
+            active: total > 1 && std::io::stderr().is_terminal(),
+        }
+    }
+
+    pub(super) fn report(&self, index: usize, component_id: &str) {
+        if !self.active {
+            return;
+        }
+        use std::io::Write;
+        // Carriage-return in place so the phase occupies one line, not `total`.
+        let _ = write!(
+            std::io::stderr(),
+            "\r[status] inspecting {}/{}: {:<40}",
+            index + 1,
+            self.total,
+            component_id
+        );
+        let _ = std::io::stderr().flush();
+    }
+}
+
+impl Drop for StatusProgress {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        use std::io::Write;
+        // Clear the progress line so it does not linger above the report.
+        let _ = write!(std::io::stderr(), "\r{:<60}\r", "");
+        let _ = std::io::stderr().flush();
+    }
+}
+
 /// Summary counts for the project dashboard.
 #[derive(Debug, Serialize)]
 pub struct ProjectDashboardSummary {

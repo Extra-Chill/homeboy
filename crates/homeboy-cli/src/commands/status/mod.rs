@@ -32,7 +32,7 @@ pub use types::{
     ProjectStatusRow, StatusArgs, StatusOutput, StatusResult, StatusTiming,
     UnregisteredContextStatusOutput, UnreleasedMerge, UpstreamDrift,
 };
-use types::{StatusTimer, READY_TO_DEPLOY_NOTE, UNRELEASED_MERGES_NOTE};
+use types::{StatusProgress, StatusTimer, READY_TO_DEPLOY_NOTE, UNRELEASED_MERGES_NOTE};
 
 pub fn run(args: StatusArgs, _global: &super::GlobalArgs) -> CmdResult<StatusResult> {
     if args.path.is_some() {
@@ -128,7 +128,13 @@ fn summarize_components(
 
     if include_upstream_drift || include_unreleased_merges {
         timer.begin("inspect_upstream_and_unreleased");
-        for comp in &components {
+        // This phase runs a per-component `git fetch` and drift/merge probes. In
+        // a large workspace it is the slowest part of `status`, so emit a bounded
+        // progress line per component (to stderr, on a TTY) so operators see what
+        // it is working on instead of a silent hang (#7378).
+        let progress = StatusProgress::new(total);
+        for (index, comp) in components.iter().enumerate() {
+            progress.report(index, &comp.id);
             if include_upstream_drift {
                 if let Some(drift) = git_cache.fetch_upstream_drift_for(comp) {
                     if drift.is_behind() {
