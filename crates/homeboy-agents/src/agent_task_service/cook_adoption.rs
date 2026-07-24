@@ -1120,12 +1120,7 @@ fn resolve_cook_adoption_attempt(
     let attempts = recipe
         .attempts
         .iter()
-        .map(|attempt| {
-            format!(
-                "attempt {}: {} (plan {})",
-                attempt.attempt, attempt.run_id, attempt.plan.plan_id
-            )
-        })
+        .map(|attempt| attempt_adoption_policy_summary(recipe, attempt))
         .collect::<Vec<_>>()
         .join(", ");
     Err(Error::validation_invalid_argument(
@@ -1140,4 +1135,109 @@ fn resolve_cook_adoption_attempt(
                 .to_string(),
         ]),
     ))
+}
+
+/// Render only the fixed policy fields an operator needs to choose an attempt.
+/// Executor config and gate commands can contain credentials, so diagnostics
+/// report their semantics rather than their raw values.
+fn attempt_adoption_policy_summary(
+    recipe: &super::AgentTaskCookRecipe,
+    attempt: &super::AgentTaskCookRecipeAttempt,
+) -> String {
+    let finalization = &recipe.finalization;
+    let destination = compact_policy_value(finalization.get("to_worktree"));
+    let base = compact_policy_value(finalization.get("base"));
+    let head = compact_policy_value(finalization.get("head"));
+    let task_base = compact_policy_value(finalization.get("task_base_sha"));
+    let public_gates = recipe
+        .gate_policy
+        .get("verify")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let private_gates = recipe
+        .gate_policy
+        .get("private_verify")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let publication = if finalization
+        .get("no_finalize")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        "none".to_string()
+    } else {
+        format!(
+            "review-ready/protected:{}",
+            finalization
+                .get("protected_branches")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len)
+        )
+    };
+    let provider_summaries = attempt
+        .plan
+        .tasks
+        .iter()
+        .take(3)
+        .map(|task| {
+            format!(
+                "{}/{}@{}",
+                compact_text(&task.executor.backend),
+                compact_optional_text(task.executor.selector.as_deref()),
+                compact_optional_text(task.executor.model.as_deref())
+            )
+        })
+        .collect::<Vec<_>>();
+    let providers = if attempt.plan.tasks.len() > provider_summaries.len() {
+        format!(
+            "{}+{} more",
+            provider_summaries.join("+"),
+            attempt.plan.tasks.len() - provider_summaries.len()
+        )
+    } else {
+        provider_summaries.join("+")
+    };
+    let task_policy = attempt
+        .plan
+        .tasks
+        .first()
+        .map(|task| {
+            format!(
+                "{}/{}/{}",
+                compact_text(&task.policy.read),
+                compact_text(&task.policy.write),
+                compact_text(&task.policy.apply)
+            )
+        })
+        .unwrap_or_else(|| "none".to_string());
+    homeboy_core::redaction::redact_string(&format!(
+        "attempt {}: {} (plan {}; destination={destination}; base={base}; head={head}; task-base={task_base}; gates=public:{public_gates}/private:{private_gates}; provider/model={providers}; review/publication={publication}; task-policy={task_policy})",
+        attempt.attempt,
+        compact_text(&attempt.run_id),
+        compact_text(&attempt.plan.plan_id),
+    ))
+}
+
+fn compact_policy_value(value: Option<&Value>) -> String {
+    value
+        .and_then(Value::as_str)
+        .map(compact_text)
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn compact_optional_text(value: Option<&str>) -> String {
+    value
+        .map(compact_text)
+        .unwrap_or_else(|| "default".to_string())
+}
+
+fn compact_text(value: &str) -> String {
+    const MAX_CHARS: usize = 96;
+    let mut compact = value.chars();
+    let prefix = compact.by_ref().take(MAX_CHARS).collect::<String>();
+    if compact.next().is_some() {
+        format!("{prefix}...")
+    } else {
+        prefix
+    }
 }

@@ -3308,6 +3308,65 @@ fn adoption_attempt_selector_disambiguates_a_first_run_id_equal_to_its_cook_id()
 }
 
 #[test]
+fn adoption_ambiguity_describes_policy_choices_without_sensitive_config() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-adopt-policy-summary";
+        let first_run_id = "cook-adopt-policy-summary-attempt-1";
+        let second_run_id = "cook-adopt-policy-summary-attempt-2";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = first_run_id.to_string();
+        options.to_worktree = "homeboy@policy-destination".to_string();
+        options.base = "release".to_string();
+        options.head = Some("fix/policy-summary".to_string());
+        options.task_base_sha = Some("base-sha".to_string());
+        options.no_finalize = false;
+        options.protected_branches = vec!["release".to_string()];
+        options.gates.verify = vec!["echo super-secret-gate-value".to_string()];
+        options.gates.private_verify = vec!["private-check".to_string()];
+        options.initial_plan.tasks[0].executor.backend = "provider-one".to_string();
+        options.initial_plan.tasks[0].executor.selector = Some("primary".to_string());
+        options.initial_plan.tasks[0].executor.model = Some("model-one".to_string());
+        options.initial_plan.tasks[0].executor.config = serde_json::json!({
+            "api_token": "super-secret-config-value"
+        });
+        options.initial_plan.tasks[0].policy.apply = "review".to_string();
+        super::super::persist_initial_recipe(&options).expect("persist recipe");
+
+        let mut second_plan = options.initial_plan.clone();
+        second_plan.plan_id = "attempt-two-policy".to_string();
+        second_plan.tasks[0].executor.backend = "provider-two".to_string();
+        second_plan.tasks[0].executor.selector = Some("fallback".to_string());
+        second_plan.tasks[0].executor.model = Some("model-two".to_string());
+        second_plan.tasks[0].policy.apply = "publish".to_string();
+        super::super::record_recipe_attempt(cook_id, 2, second_run_id, &second_plan)
+            .expect("persist policy-different attempt");
+
+        let error = resolve_adoption_target(cook_id).expect_err("policies require selection");
+        for expected in [
+            "destination=homeboy@policy-destination",
+            "base=release",
+            "head=fix/policy-summary",
+            "task-base=base-sha",
+            "gates=public:1/private:1",
+            "provider/model=provider-one/primary@model-one",
+            "provider/model=provider-two/fallback@model-two",
+            "review/publication=review-ready/protected:1",
+            "task-policy=workspace/artifacts_only/review",
+            "task-policy=workspace/artifacts_only/publish",
+            "--attempt 1",
+        ] {
+            assert!(
+                error.message.contains(expected),
+                "missing {expected}: {error}"
+            );
+        }
+        assert!(!error.message.contains("super-secret-gate-value"));
+        assert!(!error.message.contains("super-secret-config-value"));
+        assert!(!error.message.contains("api_token"));
+    });
+}
+
+#[test]
 fn adoption_rejects_unknown_run_or_cook_ids() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let error = resolve_adoption_target("unknown-adoption-target")
