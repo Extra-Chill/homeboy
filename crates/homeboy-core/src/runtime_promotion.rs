@@ -9,6 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
+use std::time::Instant;
 
 use crate::build_identity;
 use crate::error::{Error, ErrorCode, Result};
@@ -22,6 +23,7 @@ const DEFAULT_TTL: Duration = Duration::from_secs(30 * 60);
 const PIN_DRAIN_POLL: Duration = Duration::from_millis(100);
 const SUBPROCESS_LEASE_ENV: &str = "HOMEBOY_RUNTIME_PROMOTION_LEASE";
 const ACQUIRE_DISAPPEARED_LEASE_RETRIES: usize = 1;
+const COMPATIBLE_WAIT_POLL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimePromotionLeaseRecord {
@@ -113,6 +115,47 @@ impl Drop for RuntimeGenerationPinGuard {
 /// attached by [`RuntimePromotionLease::authorize_subprocess`].
 pub fn acquire(operation: &str, target: impl Into<String>) -> Result<RuntimePromotionLease> {
     acquire_with_pin_policy(operation, target.into(), ForeignPinPolicy::Block)
+}
+
+/// Wait for a compatible owner to finish, then acquire the writer lease.
+///
+/// Only an owner targeting the same runtime generation and target is eligible
+/// for this handoff. Other promotions retain immediate, fail-closed contention
+/// behavior. The wait has no persisted queue entry, so a cancelled caller
+/// cannot strand later contenders.
+pub fn acquire_waiting_for_compatible(
+    operation: &str,
+    target: impl Into<String>,
+    timeout: Duration,
+    mut progress: impl FnMut(&RuntimePromotionLeaseRecord),
+) -> Result<RuntimePromotionLease> {
+    let target = target.into();
+    let generation = current_generation();
+    let deadline = Instant::now() + timeout;
+    let mut last_owner = None;
+
+    loop {
+        match acquire(operation, target.clone()) {
+            Ok(lease) => return Ok(lease),
+            Err(error) if is_contention_error(&error) => {
+                let owner = contention_owner(&error)?;
+                if !is_compatible_owner(&owner, &target, &generation) {
+                    return Err(error);
+                }
+                let owner_identity = format!("{}:{}:{}", owner.pid, owner.operation, owner.target);
+                if last_owner.as_ref() != Some(&owner_identity) {
+                    progress(&owner);
+                    last_owner = Some(owner_identity);
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(wait_timeout_error(&owner, timeout));
+                }
+                std::thread::sleep(remaining.min(COMPATIBLE_WAIT_POLL));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Acquire the global writer lease for a generation-preserving rotation.
@@ -441,8 +484,60 @@ fn blocked_error(held: &RuntimePromotionLeaseRecord, reclaimable: bool) -> Error
             "target": held.target,
             "holder_pid": held.pid,
             "holder_operation": held.operation,
+            "holder_generation": held.generation,
             "reclaimable": reclaimable,
             "tried": [action, "Follow: `homeboy self doctor`"],
+        }),
+    )
+}
+
+fn contention_owner(error: &Error) -> Result<RuntimePromotionLeaseRecord> {
+    let details = &error.details;
+    let pid = details["holder_pid"].as_u64().ok_or_else(|| {
+        Error::internal_unexpected("runtime promotion contention omitted holder pid")
+    })? as u32;
+    let string = |field: &str| {
+        details[field].as_str().map(str::to_string).ok_or_else(|| {
+            Error::internal_unexpected(format!("runtime promotion contention omitted {field}"))
+        })
+    };
+    Ok(RuntimePromotionLeaseRecord {
+        schema: "homeboy/runtime-promotion-lease/v2".to_string(),
+        pid,
+        operation: string("holder_operation")?,
+        target: string("target")?,
+        generation: string("holder_generation")?,
+        started_at: String::new(),
+        capability: String::new(),
+    })
+}
+
+fn is_compatible_owner(
+    owner: &RuntimePromotionLeaseRecord,
+    target: &str,
+    generation: &str,
+) -> bool {
+    owner.target == target && owner.generation == generation
+}
+
+fn wait_timeout_error(owner: &RuntimePromotionLeaseRecord, timeout: Duration) -> Error {
+    Error::new(
+        ErrorCode::RuntimePromotionWaitTimeout,
+        format!(
+            "runtime promotion wait timed out after {}s behind pid {} operation `{}` target `{}`",
+            timeout.as_secs(),
+            owner.pid,
+            owner.operation,
+            owner.target
+        ),
+        serde_json::json!({
+            "queue_state": "timed_out_waiting_for_compatible_owner",
+            "wait_timeout_seconds": timeout.as_secs(),
+            "target": owner.target,
+            "holder_pid": owner.pid,
+            "holder_operation": owner.operation,
+            "holder_generation": owner.generation,
+            "tried": ["The compatible promotion owner did not finish before the admission deadline."],
         }),
     )
 }
@@ -555,6 +650,121 @@ mod tests {
         assert!(error.message.contains("runner refresh"));
         assert!(error.message.contains("lab"));
         assert!(format!("{:?}", error).contains("self status"));
+    }
+
+    #[test]
+    fn compatible_contenders_wait_for_the_owner_then_each_acquire() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut owner = compatible_wait_owner();
+            let (queued, queued_result) = std::sync::mpsc::channel();
+            let contenders = (0..3)
+                .map(|_| {
+                    let queued = queued.clone();
+                    std::thread::spawn(move || {
+                        acquire_waiting_for_compatible(
+                            "contender",
+                            "lab",
+                            Duration::from_secs(1),
+                            |owner| queued.send(owner.pid).expect("report queued owner"),
+                        )
+                        .map(drop)
+                    })
+                })
+                .collect::<Vec<_>>();
+            drop(queued);
+
+            for _ in 0..3 {
+                assert_eq!(
+                    queued_result
+                        .recv_timeout(Duration::from_secs(1))
+                        .expect("contender reports the current owner"),
+                    owner.id()
+                );
+            }
+            owner.wait().expect("owner exits");
+
+            for contender in contenders {
+                contender
+                    .join()
+                    .expect("contender exits")
+                    .expect("compatible contender acquires after handoff");
+            }
+        });
+    }
+
+    #[test]
+    fn compatible_wait_timeout_leaves_no_queue_state() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut owner = compatible_wait_owner();
+            let error = acquire_waiting_for_compatible(
+                "cancelled contender",
+                "lab",
+                Duration::from_millis(25),
+                |_| {},
+            )
+            .expect_err("bounded contender wait times out");
+            assert_eq!(error.code, ErrorCode::RuntimePromotionWaitTimeout);
+            assert_eq!(
+                error.details["queue_state"],
+                "timed_out_waiting_for_compatible_owner"
+            );
+
+            owner.wait().expect("owner exits");
+            acquire("later contender", "lab")
+                .expect("timed-out contender did not leave a queue entry behind");
+        });
+    }
+
+    #[test]
+    fn incompatible_contender_remains_fail_closed() {
+        crate::test_support::with_isolated_home(|_| {
+            let _owner = acquire("owner", "lab").expect("owner acquires lease");
+            let error = acquire_waiting_for_compatible(
+                "other target",
+                "other-lab",
+                Duration::from_secs(1),
+                |_| panic!("incompatible contender must not join the queue"),
+            )
+            .expect_err("different promotion target remains serialized");
+            assert_eq!(error.code, ErrorCode::RuntimePromotionContended);
+        });
+    }
+
+    #[test]
+    fn compatibility_requires_the_same_target_and_generation() {
+        let owner = lease_record();
+        assert!(is_compatible_owner(&owner, "lab", "generation-a"));
+        assert!(!is_compatible_owner(&owner, "other-lab", "generation-a"));
+        assert!(!is_compatible_owner(&owner, "lab", "generation-b"));
+    }
+
+    fn compatible_wait_owner() -> std::process::Child {
+        let executable = std::env::current_exe().expect("resolve test executable");
+        let child = Command::new(executable)
+            .args([
+                "--ignored",
+                "--exact",
+                "runtime_promotion::tests::compatible_wait_owner_child",
+            ])
+            .spawn()
+            .expect("start compatible wait owner");
+        let lock = paths::runtime_promotion_dir()
+            .expect("runtime promotion directory")
+            .join(LEASE_DIR);
+        for _ in 0..50 {
+            if lock.exists() {
+                return child;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("compatible wait owner did not acquire the lease");
+    }
+
+    #[test]
+    #[ignore = "invoked by compatible promotion wait tests"]
+    fn compatible_wait_owner_child() {
+        let _lease = acquire("child owner", "lab").expect("child acquires lease");
+        std::thread::sleep(Duration::from_millis(250));
     }
 
     fn lease_record() -> RuntimePromotionLeaseRecord {

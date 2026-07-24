@@ -39,7 +39,7 @@ pub(super) fn preflight_agent_task_provider_on_runner(
     source_path: &Path,
     args: &[String],
     env: std::collections::HashMap<String, String>,
-    source_snapshot: SourceSnapshot,
+    source_snapshot: Option<SourceSnapshot>,
     required_extensions: Vec<String>,
     capability_preflight: Option<RunnerCapabilityPreflight>,
     runner_homeboy: &serde_json::Value,
@@ -67,13 +67,15 @@ pub(super) fn preflight_agent_task_provider_on_runner(
     // runner command prefix, not forwarded caller args — but assert the same
     // path-translation contract the offload dispatch site enforces so no
     // controller-local path can ever ride this preflight to the remote runner.
-    preflight_remote_argv_path_translation(
-        "Lab agent-task provider preflight",
-        runner_id,
-        &command,
-        source_path,
-        remote_cwd,
-    )?;
+    if source_snapshot.is_some() {
+        preflight_remote_argv_path_translation(
+            "Lab agent-task provider preflight",
+            runner_id,
+            &command,
+            source_path,
+            remote_cwd,
+        )?;
+    }
     let probe = probe_agent_task_providers_on_runner(
         runner_id,
         remote_cwd,
@@ -320,27 +322,50 @@ fn probe_agent_task_providers_on_runner(
     remote_cwd: &str,
     command: &[String],
     env: std::collections::HashMap<String, String>,
-    source_snapshot: SourceSnapshot,
+    source_snapshot: Option<SourceSnapshot>,
     required_extensions: Vec<String>,
     capability_preflight: Option<RunnerCapabilityPreflight>,
     status_snapshot: RunnerStatusReport,
 ) -> Result<AgentTaskProviderProbeOutput> {
-    let (output, exit_code) = exec_with_status_snapshot(
-        runner_id,
-        RunnerExecOptions::command(command.to_vec())
-            .with_cwd(remote_cwd)
-            .with_env(env)
-            .with_source_snapshot(source_snapshot)
-            .with_required_extensions(required_extensions)
-            .with_optional_capability_preflight(capability_preflight),
-        Some(status_snapshot),
-    )?;
+    let options = provider_probe_options(
+        command,
+        remote_cwd,
+        env,
+        source_snapshot,
+        required_extensions,
+        capability_preflight,
+    );
+    let (output, exit_code) = exec_with_status_snapshot(runner_id, options, Some(status_snapshot))?;
 
     Ok(AgentTaskProviderProbeOutput {
         stdout: output.stdout,
         stderr: output.stderr,
         exit_code,
     })
+}
+
+fn provider_probe_options(
+    command: &[String],
+    remote_cwd: &str,
+    env: std::collections::HashMap<String, String>,
+    source_snapshot: Option<SourceSnapshot>,
+    required_extensions: Vec<String>,
+    capability_preflight: Option<RunnerCapabilityPreflight>,
+) -> RunnerExecOptions {
+    if let Some(source_snapshot) = source_snapshot {
+        RunnerExecOptions::command(command.to_vec())
+            .with_cwd(remote_cwd)
+            .with_env(env)
+            .with_source_snapshot(source_snapshot)
+            .with_required_extensions(required_extensions)
+            .with_optional_capability_preflight(capability_preflight)
+    } else {
+        RunnerExecOptions::command(command.to_vec())
+            .with_cwd(remote_cwd)
+            .with_env(env)
+            .with_required_extensions(required_extensions)
+            .with_optional_capability_preflight(capability_preflight)
+    }
 }
 
 fn runner_provider_refresh_is_safe(status: &RunnerStatusReport) -> bool {
@@ -1252,5 +1277,34 @@ mod tests {
             err.details["runner_remediation_command"],
             serde_json::json!("homeboy runner refresh-homeboy homeboy-lab --ref main --reconnect")
         );
+    }
+
+    #[test]
+    fn admission_probe_omits_source_snapshot_but_final_probe_retains_it() {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let admission = provider_probe_options(
+            &command,
+            "/runner/workspace",
+            Default::default(),
+            None,
+            Vec::new(),
+            None,
+        );
+        assert!(admission.source_snapshot.is_none());
+
+        let snapshot = SourceSnapshot {
+            local_path: Some("/controller/workspace".to_string()),
+            remote_path: Some("/runner/workspace".to_string()),
+            ..Default::default()
+        };
+        let final_probe = provider_probe_options(
+            &command,
+            "/runner/workspace",
+            Default::default(),
+            Some(snapshot),
+            Vec::new(),
+            None,
+        );
+        assert!(final_probe.source_snapshot.is_some());
     }
 }

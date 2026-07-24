@@ -980,6 +980,30 @@ fn terminal_transport_recovery_replaces_lossy_historical_compact_aggregate() {
             aggregate.outcomes[0].metadata["terminal_recovery"],
             "authenticated_compact_summary"
         );
+        for evidence in &aggregate.outcomes[0].evidence_refs {
+            assert!(
+                !evidence.uri.starts_with("file://"),
+                "runner-local evidence must not reach the controller as a file URI"
+            );
+            let hydrated = crate::agent_task_service::hydrate_evidence_ref(
+                run_id,
+                evidence,
+                Some("task-a"),
+                None,
+                Some(&aggregate),
+            );
+            assert_eq!(hydrated.status, "ok", "{}", evidence.uri);
+        }
+        let projections = aggregate.outcomes[0].metadata["runner_evidence_projection"]
+            .as_object()
+            .expect("runner evidence projection metadata");
+        assert_eq!(projections.len(), 6);
+        assert!(projections.values().all(|projection| {
+            projection["source_runner_id"] == "homeboy-lab"
+                && projection["source_runner_job_id"] == runner_job_id
+                && projection["retention"] == "controller_aggregate"
+                && projection["redaction"] == "producer_redacted"
+        }));
         let report = artifacts(run_id).expect("recovered artifact projection");
         assert_eq!(report.artifacts.len(), 4);
         assert_eq!(report.artifacts[0].id, "patch");

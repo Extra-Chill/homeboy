@@ -398,6 +398,16 @@ fn run_split_placement_cook(
     // explicit `--placement` at argument parsing, so `--placement local` here
     // always means a fully local cook with no pinned runner.
     if cli.placement == homeboy::cli_surface::Placement::Local {
+        if cli.detach_after_handoff {
+            return Err(Error::validation_invalid_argument(
+                "detach-after-handoff",
+                "agent-task cook cannot detach after handoff with --placement local because no runner daemon owns the provider attempt",
+                None,
+                Some(vec![
+                    "Use --placement lab or --runner <runner-id> to detach after a runner daemon accepts the provider attempt.".to_string(),
+                ]),
+            ));
+        }
         return Ok(None);
     }
     let Some(runner_id) = runner_id else {

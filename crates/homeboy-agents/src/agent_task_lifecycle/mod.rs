@@ -35,18 +35,22 @@ mod artifact_materialization;
 mod cancellation;
 pub mod controller_pin_reference_provider;
 mod conversion;
+mod cook_workspace_restore;
 mod failure_recording;
 mod health;
 mod lab_handoff_reconciliation;
+mod lab_offload;
 mod lifecycle_candidate_adoption;
 mod lifecycle_ops;
 mod lifecycle_record_ops;
 mod lifecycle_runner_projection;
 mod lifecycle_transport_proxy;
+mod logs_projection;
 mod operation_claims;
 mod private_attachment;
 mod records;
 pub mod runner_continuation;
+mod runner_exec;
 
 pub use artifact_materialization::*;
 pub use cancellation::*;
@@ -54,11 +58,13 @@ pub use failure_recording::*;
 pub use health::*;
 pub use homeboy_core::controller_runtime::ControllerRuntimePruneResult;
 pub use lab_handoff_reconciliation::*;
+pub use lab_offload::*;
 pub use lifecycle_candidate_adoption::*;
 pub use lifecycle_ops::*;
 pub use lifecycle_record_ops::cook_attempt_run_id;
 pub use lifecycle_runner_projection::*;
 pub use lifecycle_transport_proxy::*;
+pub use logs_projection::*;
 pub use operation_claims::*;
 pub use private_attachment::*;
 pub use records::*;
@@ -69,6 +75,7 @@ pub use runner_continuation::{
 pub use runner_continuation::{
     register_runner_continuation_provider, RunnerContinuationProvider, RunnerJobReconciliation,
 };
+pub use runner_exec::*;
 
 pub(crate) use conversion::*;
 pub(crate) use lifecycle_record_ops::*;

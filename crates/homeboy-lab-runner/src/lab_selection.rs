@@ -255,27 +255,17 @@ fn connect_runner_for_offload(
     // Serialize with other controller processes before replacing a direct-SSH
     // session. The child `runner connect` receives this lease capability.
     let timeout = lab_connect_timeout(source);
-    let lease =
-        match homeboy_core::runtime_promotion::acquire("Lab runner handoff", runner_id.to_string())
-        {
-            Ok(lease) => lease,
-            Err(lease_error) => {
-                if let Some(session) = wait_for_contended_runner(
-                    lease_error.clone(),
-                    HANDOFF_ADMISSION_TIMEOUT,
-                    |remaining| crate::local_live_session(runner_id, remaining),
-                )? {
-                    return connected_runner_connect_report_from_session(
-                        runner_id,
-                        session,
-                        homeboy_core::paths::runner_session_file(runner_id)?
-                            .display()
-                            .to_string(),
-                    );
-                }
-                return Err(contended_runner_unavailable_error(runner_id, lease_error));
-            }
-        };
+    let lease = homeboy_core::runtime_promotion::acquire_waiting_for_compatible(
+        "Lab runner handoff",
+        runner_id.to_string(),
+        HANDOFF_ADMISSION_TIMEOUT,
+        |owner| {
+            eprintln!(
+                "Lab runner handoff: queued behind runtime promotion owner pid {} operation `{}` target `{}`; waiting for a compatible ready generation.",
+                owner.pid, owner.operation, owner.target
+            );
+        },
+    )?;
     if let Ok(report) = status(runner_id) {
         if report.connected {
             return connected_runner_connect_report(runner_id, report);

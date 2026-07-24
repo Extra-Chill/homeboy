@@ -593,7 +593,7 @@ pub(crate) fn exec_lab_context(
             &context.source_path,
             &context.remapped_args,
             env.clone(),
-            source_snapshot.clone(),
+            Some(source_snapshot.clone()),
             contract.required_extensions.clone(),
             context.capability_preflight.clone(),
             &provider.runner_homeboy,
@@ -1336,6 +1336,24 @@ pub(crate) fn run_lab_offload_inner(
         redact_argv_shell_display(&command_prefix.argv),
         runner_id,
     );
+    // Validate the selected provider on the runner before any workspace, runtime,
+    // or overlay materialization. This invokes the provider's portable readiness
+    // contract without spawning the provider process or reserving a Lab slot.
+    let mut provider_admission_env = crate::effective_env(runner_id)?;
+    provider_admission_env.extend(request.job_overrides.env.clone());
+    preflight_agent_task_provider_on_runner(
+        runner_id,
+        &command_prefix.argv,
+        &runner_workspace_root,
+        &source_path,
+        request.normalized_args,
+        provider_admission_env,
+        None,
+        Vec::new(),
+        None,
+        &runner_homeboy,
+        &runner_status,
+    )?;
     let capability_contract =
         lab_runner_capability_contract(&contract, &source_path, &command_prefix.required_tools);
     let capability_plan = capability_contract

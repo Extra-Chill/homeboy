@@ -6,7 +6,7 @@ use homeboy_core::observation::{LAB_OFFLOAD_METADATA_ENV, SOURCE_SNAPSHOT_METADA
 use homeboy_core::source_snapshot::SourceSnapshot;
 
 use super::snapshot::{
-    workspace_content_hash_for_policy, workspace_content_hash_v1,
+    snapshot_git_exclude_pathspecs, workspace_content_hash_for_policy, workspace_content_hash_v1,
     workspace_content_manifest_for_policy, WorkspaceContentManifest, WorkspaceContentManifestEntry,
 };
 use super::workspace_content_hash_algorithm;
@@ -248,25 +248,31 @@ fn verify_exact_snapshot_git_checkout(
     // reserved bookkeeping and @file paths are excluded from the verified
     // content hash, so they must not be reclassified as source dirt here.
     // All non-reserved paths still have to match the captured source state.
-    let dirty = !git(
-        workspace,
-        &[
-            "status",
-            "--porcelain",
-            "--untracked-files=all",
-            "--",
-            ".",
-            ":(exclude).homeboy/runner-workspace.json",
-            ":(exclude).homeboy/lab-at-files/**",
-        ],
-    )?
-    .is_empty();
+    let dirty = !git_status_ignoring_snapshot_excludes(workspace, provenance)?.is_empty();
     if dirty != provenance.source_dirty {
         return Err(
             "snapshot-git Git cleanliness does not match the verified source snapshot".to_string(),
         );
     }
     Ok(())
+}
+
+fn git_status_ignoring_snapshot_excludes(
+    workspace: &Path,
+    provenance: &VerifiedLabWorkspaceProvenance,
+) -> std::result::Result<String, String> {
+    let mut args = vec![
+        "status".to_string(),
+        "--porcelain".to_string(),
+        "--untracked-files=all".to_string(),
+        "--".to_string(),
+        ".".to_string(),
+        SYNTHETIC_BASELINE_PATHS[1].to_string(),
+        SYNTHETIC_BASELINE_PATHS[2].to_string(),
+    ];
+    args.extend(snapshot_git_exclude_pathspecs(&provenance.sync_excludes));
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    git(workspace, &args)
 }
 
 fn verify_git_materialization_root(
@@ -1898,6 +1904,67 @@ mod tests {
     }
 
     #[test]
+    fn exact_snapshot_git_checkout_ignores_declared_context_excludes_but_not_real_drift() {
+        let workspace = git_workspace();
+        std::fs::write(workspace.path().join("AGENTS.md"), "injected context\n")
+            .expect("context file");
+        git(workspace.path(), &["add", "AGENTS.md"]).expect("stage context file");
+        git(
+            workspace.path(),
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=test@homeboy.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "context baseline",
+            ],
+        )
+        .expect("commit context file");
+        let provenance = VerifiedLabWorkspaceProvenance {
+            source_revision: git(workspace.path(), &["rev-parse", "HEAD"])
+                .expect("source revision"),
+            source_dirty: false,
+            materialization_mode: "snapshot-git".to_string(),
+            runner_id: "lab".to_string(),
+            workspace_identity: "snapshot:verified-content".to_string(),
+            snapshot_hash: "sha256:verified-source".to_string(),
+            content_hash: String::new(),
+            content_hash_algorithm: "homeboy-workspace-content-v1".to_string(),
+            permission_policy: None,
+            content_manifest: None,
+            sync_excludes: vec!["AGENTS.md".to_string()],
+            local_source_path: None,
+            remote_workspace_path: workspace.path().display().to_string(),
+            synthetic_checkout_commit: None,
+            synthetic_checkout_ref: None,
+            synthetic_checkout_tree: None,
+        };
+
+        std::fs::remove_file(workspace.path().join("AGENTS.md")).expect("omit context file");
+        verify_exact_snapshot_git_checkout(workspace.path(), &provenance)
+            .expect("declared context omission is not source dirt");
+
+        std::fs::write(workspace.path().join("file.txt"), "changed\n").expect("tracked drift");
+        assert!(
+            verify_exact_snapshot_git_checkout(workspace.path(), &provenance)
+                .expect_err("tracked source drift must fail closed")
+                .contains("cleanliness does not match")
+        );
+        git(workspace.path(), &["checkout", "--", "file.txt"]).expect("restore tracked file");
+
+        std::fs::write(workspace.path().join("provider-output.txt"), "unexpected\n")
+            .expect("untracked drift");
+        assert!(
+            verify_exact_snapshot_git_checkout(workspace.path(), &provenance)
+                .expect_err("untracked source drift must fail closed")
+                .contains("cleanliness does not match")
+        );
+    }
+
+    #[test]
     fn snapshot_baseline_rejects_invalid_provenance_before_creating_git_metadata() {
         let workspace = tempfile::tempdir().expect("workspace");
         std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
@@ -2072,8 +2139,14 @@ mod tests {
             git_materialized,
         )
         .expect_err("changed snapshot-git workspace must fail");
-        assert!(error.contains("runner exec lab"));
-        assert!(error.contains("git status --short"));
+        assert!(
+            error.contains("homeboy runner exec --cwd") && error.contains(" lab -- git status"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains("git status --short"),
+            "unexpected error: {error}"
+        );
 
         let error = verify_lab_workspace(
             &workspace.path().display().to_string(),
