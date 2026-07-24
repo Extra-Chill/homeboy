@@ -816,9 +816,14 @@ const EXPLICIT_SOURCE_GIT_UPDATE_GUARD: &str = r#"HOMEBOY_REAL_GIT="$(command -v
 HOMEBOY_GIT_GUARD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-git-guard.XXXXXX")"
 cat > "$HOMEBOY_GIT_GUARD_DIR/git" <<'HOMEBOY_GIT_GUARD'
 #!/bin/sh
+# An explicitly selected --source-path is an immutable build input: build the
+# exact ref the caller checked out. Skip git subcommands that would rewrite or
+# move it. `switch`/`checkout` are skipped too so an upgrade command that runs
+# `git switch main` does not collide with another worktree that already has
+# main checked out (#6987) — the source stays on its current ref.
 for homeboy_git_arg in "$@"; do
   case "$homeboy_git_arg" in
-    pull|fetch|reset)
+    pull|fetch|reset|switch|checkout)
       echo "Skipping git $homeboy_git_arg for explicitly selected source checkout"
       exit 0
       ;;
