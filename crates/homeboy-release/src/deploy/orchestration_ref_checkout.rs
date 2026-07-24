@@ -8,6 +8,52 @@ use homeboy_core::git;
 
 const REMOTE_REF_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Clone the source repository for exact-ref materialization.
+///
+/// A `git clone --local` hardlinks the object store, which fails with
+/// `Invalid cross-device link` when the source and the Homeboy temp root live on
+/// different filesystems (a common split, e.g. workspace on `/var/lib` and temp
+/// on a mounted `/mnt/...`). Attempt the fast `--local` clone first, and on that
+/// specific cross-device failure retry with `--no-hardlinks`, which copies
+/// objects instead of linking them and works across devices (#9889).
+fn clone_exact_ref_source(source_root: &Path, source_arg: &str, worktree_arg: &str) -> Result<()> {
+    let local_result = git::run_git(
+        source_root,
+        &[
+            "clone",
+            "--no-checkout",
+            "--local",
+            source_arg,
+            worktree_arg,
+        ],
+        "clone exact deploy ref source",
+    );
+    match local_result {
+        Ok(_) => Ok(()),
+        Err(error) if is_cross_device_link_error(&error) => git::run_git(
+            source_root,
+            &[
+                "clone",
+                "--no-checkout",
+                "--no-hardlinks",
+                source_arg,
+                worktree_arg,
+            ],
+            "clone exact deploy ref source across filesystems",
+        )
+        .map(|_| ()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Whether a git failure is the cross-device hardlink error produced by
+/// `clone --local` when source and destination are on different filesystems.
+fn is_cross_device_link_error(error: &Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("cross-device link")
+        || (message.contains("failed to create link") && message.contains("invalid cross-device"))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExactRefIdentity {
     pub requested_ref: String,
@@ -64,16 +110,10 @@ impl ExactRefCheckout {
         })?;
         let worktree_path = parent.join(uuid::Uuid::new_v4().to_string());
         let worktree_arg = worktree_path.to_string_lossy().to_string();
-        git::run_git(
+        clone_exact_ref_source(
             &source_root,
-            &[
-                "clone",
-                "--no-checkout",
-                "--local",
-                source_root.to_str().unwrap_or_default(),
-                &worktree_arg,
-            ],
-            "clone exact deploy ref source",
+            source_root.to_str().unwrap_or_default(),
+            &worktree_arg,
         )?;
         git::run_git(
             &worktree_path,
@@ -928,6 +968,38 @@ mod tests {
         let file_error = resolve_exact_ref(&component, "accepted")
             .expect_err("file deploy strategy should be rejected");
         assert!(file_error.message.contains("file deploy sources"));
+    }
+
+    #[test]
+    fn cross_device_link_error_is_detected() {
+        // Mirrors the real run_git failure, whose Display message carries the
+        // git stderr detail (see git_failure_message).
+        let cross_device = Error::internal_unexpected(
+            "clone exact deploy ref source failed: fatal: failed to create link '/tmp/x/.git/objects/aa': Invalid cross-device link",
+        );
+        assert!(is_cross_device_link_error(&cross_device));
+
+        // An unrelated git failure must not trigger the --no-hardlinks retry.
+        let other = Error::internal_unexpected(
+            "clone exact deploy ref source failed: fatal: repository not found",
+        );
+        assert!(!is_cross_device_link_error(&other));
+    }
+
+    #[test]
+    fn clone_exact_ref_source_succeeds_on_same_filesystem() {
+        // Happy path: --local clone within one filesystem (the tempdir) works
+        // without needing the cross-device fallback.
+        let repo = fixture_repo();
+        let dest = tempfile::tempdir().expect("dest parent");
+        let worktree = dest.path().join("clone");
+        clone_exact_ref_source(
+            repo.path(),
+            repo.path().to_str().unwrap(),
+            worktree.to_str().unwrap(),
+        )
+        .expect("same-filesystem clone succeeds");
+        assert!(worktree.join(".git").exists());
     }
 
     fn fixture_repo() -> tempfile::TempDir {
