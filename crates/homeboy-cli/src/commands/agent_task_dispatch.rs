@@ -4,11 +4,14 @@ use homeboy::agents::agent_tasks::dispatch_service::{
     AgentTaskDispatchCommand, DispatchCoreInputs,
 };
 
-/// CLI surface for the dispatch inputs shared across dispatch carriers. Flattened
-/// into [`DispatchArgs`] so the `--tasks/--provider-config/--client-context/
-/// --attempts/--queue-only` flags stay identical while the field group is
-/// declared once (#5187). The `#[arg]` attributes reproduce the original flag
-/// names, value names, and defaults exactly.
+/// Provider dispatch inputs: how the agent task is provisioned and how many
+/// times it may run. Controls the task prompts, provider/client context, and
+/// the execution/retry budget shared by every dispatch entrypoint.
+//
+// Implementation note (not shown in `--help`): this group is flattened into
+// `DispatchArgs` so the `--tasks/--provider-config/--client-context/--attempts/
+// --queue-only` flags are declared once and stay identical across carriers
+// (#5187).
 #[derive(Args, Debug, Clone)]
 pub struct DispatchCoreArgs {
     /// JSON array/object of task prompts for waves. Supports @file and - for stdin.
