@@ -54,6 +54,10 @@ pub fn build_lint_runner(
         .settings(&string_settings)
         .settings_json(&json_settings)
         .with_run_dir(run_dir)
+        // Summary mode captures the lint/clippy stream into evidence rather than
+        // tee-ing the full warning output to the terminal, so `--summary` renders
+        // only the compact findings envelope on large repositories (#9845).
+        .passthrough(!summary)
         .env_if(summary, "HOMEBOY_SUMMARY_MODE", "1")
         .env_opt("HOMEBOY_LINT_FILE", &file.map(str::to_string))
         .env_opt("HOMEBOY_LINT_GLOB", &glob.map(str::to_string))
