@@ -18,8 +18,9 @@ use super::super::{
 use super::host::{is_local_host, is_transient_ssh_error};
 use super::local_exec::{
     execute_local_command, execute_local_command_in_dir_with_timeout,
-    execute_local_command_interactive, execute_local_command_with_stdin,
-    execute_local_command_with_stdin_and_timeout,
+    execute_local_command_interactive, execute_local_command_with_piped_stdin,
+    execute_local_command_with_stdin, execute_local_command_with_stdin_and_timeout,
+    piped_stdin_file, spawn_stdin_pump, StdinSource,
 };
 use super::{CommandOutput, SshClient};
 
@@ -377,6 +378,31 @@ impl SshClient {
         self.execute_with_stdin(&effective, SshStdin::None)
     }
 
+    /// Execute a command with bytes read directly from the controller's stdin.
+    ///
+    /// This is intentionally separate from [`execute`]: callers must opt in
+    /// after establishing that stdin is piped. Input-bearing commands are never
+    /// retried because a partial stream cannot be replayed safely.
+    pub fn execute_with_piped_stdin(&self, command: &str) -> CommandOutput {
+        let effective = self.prepend_env(command);
+        if self.is_local {
+            return execute_local_command_with_piped_stdin(&effective);
+        }
+
+        let stdin = match piped_stdin_file() {
+            Ok(stdin) => stdin,
+            Err(error) => return ssh_process_error(error),
+        };
+
+        let args = self.build_ssh_args(Some(&effective), false);
+        let mut cmd = Command::new("ssh");
+        cmd.args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        run_command_with_stdin_source(cmd, StdinSource::Piped(stdin))
+    }
+
     /// Execute a short, read-only probe with a hard wall-clock deadline.
     ///
     /// Status/version checks must return partial diagnostics instead of allowing
@@ -459,6 +485,82 @@ impl SshClient {
         }
         crate::server::process_cleanup::configure_process_group_cleanup(&mut cmd);
         execute_command_with_stdin_timeout(cmd, stdin, timeout)
+    }
+}
+
+pub(super) fn run_command_with_stdin_source(
+    mut cmd: Command,
+    source: StdinSource,
+) -> CommandOutput {
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => return ssh_process_error(error),
+    };
+    let writer = child
+        .stdin
+        .take()
+        .map(|pipe| spawn_stdin_pump(pipe, source));
+    let stdout = child.stdout.take().map(read_stream);
+    let stderr = child.stderr.take().map(read_stream);
+    let status = child.wait();
+    let stdin_failed = writer
+        .and_then(|writer| writer.finish_after_child())
+        .is_some_and(|result: std::io::Result<()>| result.is_err());
+    let stdout = stdout
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+    let mut stderr = stderr
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+    if stdin_failed {
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        stderr.push_str("Homeboy SSH stdin delivery failed before command completion.");
+    }
+    match status {
+        Ok(status) => {
+            let exit_code = status.code().unwrap_or(-1);
+            CommandOutput {
+                stdout,
+                stderr,
+                success: status.success() && !stdin_failed,
+                exit_code: if stdin_failed && exit_code == 0 {
+                    1
+                } else {
+                    exit_code
+                },
+                timed_out: false,
+                child_resource: None,
+            }
+        }
+        Err(error) => CommandOutput {
+            stdout,
+            stderr: format!("{stderr}\nSSH error: {error}"),
+            success: false,
+            exit_code: -1,
+            timed_out: false,
+            child_resource: None,
+        },
+    }
+}
+
+fn read_stream(mut pipe: impl Read + Send + 'static) -> thread::JoinHandle<String> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = pipe.read_to_end(&mut bytes);
+        String::from_utf8_lossy(&bytes).to_string()
+    })
+}
+
+fn ssh_process_error(error: std::io::Error) -> CommandOutput {
+    CommandOutput {
+        stdout: String::new(),
+        stderr: format!("SSH error: {error}"),
+        success: false,
+        exit_code: -1,
+        timed_out: false,
+        child_resource: None,
     }
 }
 

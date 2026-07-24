@@ -61,6 +61,13 @@ The connect action uses an interactive SSH session and does not print the JSON e
 
 When a command is provided, it is executed non-interactively and Homeboy captures stdout/stderr into the JSON response.
 
+Piped stdin is streamed byte-for-byte to the remote command, including binary data. Homeboy closes remote stdin after local EOF and reports a nonzero result if the local stream cannot be delivered. This supports normal Unix composition without staging an intermediate file:
+
+```sh
+git format-patch -1 --stdout | homeboy ssh homeboy-lab -- git -C /srv/project am
+printf 'payload' | homeboy ssh homeboy-lab -- sha256sum
+```
+
 Non-interactive command responses include `exit_code`, `success`, `result_classification`, and `failure_reason` when the command fails. This makes empty-output commands unambiguous: a command that exits `0` reports `success: true`, while a no-output failure reports the actual exit code and whether Homeboy classified it as a remote command failure or SSH transport failure.
 
 `homeboy ssh` shows the server shell environment. Runner-specific job environment is injected by `homeboy runner exec`; inspect it with `homeboy runner env <runner-id>` or `homeboy runner exec <runner-id> -- printenv NAME`.

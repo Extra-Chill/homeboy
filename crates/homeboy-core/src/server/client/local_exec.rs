@@ -1,5 +1,9 @@
-use std::io::{Read, Write};
-use std::process::{Command, Stdio};
+use std::io::{Cursor, Read, Write};
+use std::process::{ChildStdin, Command, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -26,7 +30,21 @@ pub fn execute_local_command(command: &str) -> CommandOutput {
 /// `sh -c` argv (where they would be visible in `ps`). The bytes are written on
 /// a dedicated thread and stdin is closed (EOF) once they are flushed.
 pub(crate) fn execute_local_command_with_stdin(command: &str, stdin: &[u8]) -> CommandOutput {
-    execute_local_command_in_dir_impl(command, None, None, None, Some(stdin.to_vec()))
+    execute_local_command_in_dir_impl(
+        command,
+        None,
+        None,
+        None,
+        Some(StdinSource::Reader(Box::new(Cursor::new(stdin.to_vec())))),
+    )
+}
+
+pub(crate) fn execute_local_command_with_piped_stdin(command: &str) -> CommandOutput {
+    let stdin = match piped_stdin_file() {
+        Ok(stdin) => stdin,
+        Err(error) => return stdin_source_error(error),
+    };
+    execute_local_command_in_dir_impl(command, None, None, None, Some(StdinSource::Piped(stdin)))
 }
 
 pub(crate) fn execute_local_command_with_stdin_and_timeout(
@@ -34,7 +52,13 @@ pub(crate) fn execute_local_command_with_stdin_and_timeout(
     stdin: &[u8],
     timeout: Duration,
 ) -> CommandOutput {
-    execute_local_command_in_dir_impl(command, None, None, Some(timeout), Some(stdin.to_vec()))
+    execute_local_command_in_dir_impl(
+        command,
+        None,
+        None,
+        Some(timeout),
+        Some(StdinSource::Reader(Box::new(Cursor::new(stdin.to_vec())))),
+    )
 }
 
 /// Run a local command, capturing stdout/stderr.
@@ -71,7 +95,7 @@ fn execute_local_command_in_dir_impl(
     current_dir: Option<&str>,
     env: Option<&[(&str, &str)]>,
     timeout: Option<Duration>,
-    stdin: Option<Vec<u8>>,
+    stdin: Option<StdinSource>,
 ) -> CommandOutput {
     run_local_command(
         command,
@@ -88,7 +112,7 @@ fn run_local_command(
     current_dir: Option<&str>,
     env: Option<&[(&str, &str)]>,
     timeout: Option<Duration>,
-    stdin: Option<Vec<u8>>,
+    stdin: Option<StdinSource>,
     stream_mode: StreamMode,
 ) -> CommandOutput {
     #[cfg(windows)]
@@ -142,15 +166,13 @@ fn run_local_command(
     );
     let monitor = ChildResourceMonitor::start(child.id(), command.to_string());
 
-    // Stream the provided stdin bytes on a dedicated thread, then close the pipe
-    // (EOF). The command's own stdin is empty for this path, so the buffer is
-    // small and never deadlocks against the captured stdout/stderr pipes.
-    let stdin_handle = stdin.and_then(|bytes| {
-        child.stdin.take().map(|mut pipe| {
-            thread::spawn(move || {
-                let _ = pipe.write_all(&bytes);
-            })
-        })
+    // Stream stdin independently while stdout/stderr are drained, so a large
+    // producer cannot deadlock against a verbose child command.
+    let stdin_handle = stdin.and_then(|source| {
+        child
+            .stdin
+            .take()
+            .map(|pipe| spawn_stdin_pump(pipe, source))
     });
 
     let stdout_handle = child.stdout.take().map(|pipe| {
@@ -172,9 +194,9 @@ fn run_local_command(
         wait_for_child_or_delegated_failure(&mut child, env, &mut cleanup_guard, timeout);
     let interrupted_signal = active_cleanup_signal();
 
-    if let Some(handle) = stdin_handle {
-        let _ = handle.join();
-    }
+    let stdin_failed = stdin_handle
+        .and_then(StdinPump::finish_after_child)
+        .is_some_and(|result| result.is_err());
     let stdout = stdout_handle
         .and_then(|h| h.join().ok())
         .unwrap_or_default();
@@ -185,21 +207,28 @@ fn run_local_command(
     let output = match status {
         Ok(status) => CommandOutput {
             stdout,
-            stderr: stderr_with_delegated_failure(
-                stderr_with_timeout(
-                    stderr_with_interruption(stderr, interrupted_signal),
-                    timed_out,
-                    timeout,
+            stderr: stdin_failure_message(
+                stderr_with_delegated_failure(
+                    stderr_with_timeout(
+                        stderr_with_interruption(stderr, interrupted_signal),
+                        timed_out,
+                        timeout,
+                    ),
+                    delegated_failure.as_ref(),
                 ),
-                delegated_failure.as_ref(),
+                stdin_failed,
             ),
             success: status.success()
                 && interrupted_signal.is_none()
                 && delegated_failure.is_none()
-                && !timed_out,
+                && !timed_out
+                && !stdin_failed,
             exit_code: timed_out_exit_code(
                 timed_out,
-                interrupted_exit_code(interrupted_signal, status.code().unwrap_or(-1)),
+                stdin_failure_exit_code(
+                    stdin_failed,
+                    interrupted_exit_code(interrupted_signal, status.code().unwrap_or(-1)),
+                ),
             ),
             timed_out,
             child_resource: Some(monitor.finish()),
@@ -230,6 +259,226 @@ fn run_local_command(
         cleanup_guard.cleanup();
     }
     output
+}
+
+pub(crate) enum StdinSource {
+    Reader(Box<dyn Read + Send>),
+    Piped(std::fs::File),
+}
+
+pub(crate) struct StdinPump {
+    cancelled: Arc<AtomicBool>,
+    cancellable: bool,
+    handle: thread::JoinHandle<std::io::Result<()>>,
+}
+
+impl StdinPump {
+    pub(crate) fn finish_after_child(self) -> Option<std::io::Result<()>> {
+        if self.cancellable {
+            self.cancelled.store(true, Ordering::Release);
+        }
+        self.handle.join().ok()
+    }
+}
+
+pub(crate) fn spawn_stdin_pump(pipe: ChildStdin, source: StdinSource) -> StdinPump {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let pump_cancelled = Arc::clone(&cancelled);
+    let cancellable = matches!(&source, StdinSource::Piped(_));
+    let handle = thread::spawn(move || match source {
+        StdinSource::Reader(mut reader) => copy_stdin_to_child(reader.as_mut(), pipe),
+        StdinSource::Piped(reader) => copy_piped_stdin_to_child(reader, pipe, pump_cancelled),
+    });
+    StdinPump {
+        cancelled,
+        cancellable,
+        handle,
+    }
+}
+
+fn copy_stdin_to_child(reader: &mut dyn Read, mut pipe: ChildStdin) -> std::io::Result<()> {
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(count) => pipe.write_all(&buffer[..count])?,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn copy_piped_stdin_to_child(
+    mut reader: std::fs::File,
+    mut pipe: ChildStdin,
+    cancelled: Arc<AtomicBool>,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let mut descriptor = libc::pollfd {
+        fd: reader.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let mut buffer = [0u8; 64 * 1024];
+    while !cancelled.load(Ordering::Acquire) {
+        let result = unsafe { libc::poll(&mut descriptor, 1, 20) };
+        if result < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+            continue;
+        }
+        if result == 0 {
+            continue;
+        }
+        match reader.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(count) => pipe.write_all(&buffer[..count])?,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn copy_piped_stdin_to_child(
+    mut reader: std::fs::File,
+    mut pipe: ChildStdin,
+    cancelled: Arc<AtomicBool>,
+) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_PIPE};
+    use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+
+    let handle = reader.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+    if unsafe { GetFileType(handle) } != FILE_TYPE_PIPE {
+        return copy_stdin_to_child(&mut reader, pipe);
+    }
+
+    let mut buffer = [0u8; 64 * 1024];
+    while !cancelled.load(Ordering::Acquire) {
+        let mut available = 0;
+        let result = unsafe {
+            PeekNamedPipe(
+                handle,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut available,
+                std::ptr::null_mut(),
+            )
+        };
+        if result == 0 {
+            let error = std::io::Error::last_os_error();
+            if windows_pipe_error_is_eof(error.raw_os_error(), available) {
+                return Ok(());
+            }
+            return Err(error);
+        }
+        if available == 0 {
+            thread::sleep(Duration::from_millis(20));
+            continue;
+        }
+        match reader.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(count) => pipe.write_all(&buffer[..count])?,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// Windows reports a closed anonymous pipe through `PeekNamedPipe` as an
+/// error rather than a zero-byte read. Treat only the no-bytes-remaining form
+/// as EOF so an empty pipeline keeps normal no-input command semantics.
+pub(super) fn windows_pipe_error_is_eof(error_code: Option<i32>, available: u32) -> bool {
+    available == 0 && matches!(error_code, Some(109 | 233))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn copy_piped_stdin_to_child(
+    mut reader: std::fs::File,
+    pipe: ChildStdin,
+    _cancelled: Arc<AtomicBool>,
+) -> std::io::Result<()> {
+    copy_stdin_to_child(&mut reader, pipe)
+}
+
+#[cfg(unix)]
+pub(crate) fn piped_stdin_file() -> std::io::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let descriptor = unsafe { libc::dup(std::io::stdin().as_raw_fd()) };
+    if descriptor < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(unsafe { std::fs::File::from_raw_fd(descriptor) })
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn piped_stdin_file() -> std::io::Result<std::fs::File> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows_sys::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    let process = unsafe { GetCurrentProcess() };
+    let mut duplicate: HANDLE = std::ptr::null_mut();
+    let result = unsafe {
+        DuplicateHandle(
+            process,
+            std::io::stdin().as_raw_handle() as HANDLE,
+            process,
+            &mut duplicate,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(unsafe { std::fs::File::from_raw_handle(duplicate) })
+    }
+}
+
+#[cfg(all(not(unix), not(windows)))]
+pub(crate) fn piped_stdin_file() -> std::io::Result<std::fs::File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "piped stdin forwarding is not available on this platform",
+    ))
+}
+
+fn stdin_source_error(error: std::io::Error) -> CommandOutput {
+    CommandOutput {
+        stdout: String::new(),
+        stderr: format!("Homeboy cannot forward piped stdin: {error}"),
+        success: false,
+        exit_code: -1,
+        timed_out: false,
+        child_resource: None,
+    }
+}
+
+fn stdin_failure_message(mut stderr: String, stdin_failed: bool) -> String {
+    if stdin_failed {
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        stderr.push_str("Homeboy stdin delivery failed before command completion.");
+    }
+    stderr
+}
+
+fn stdin_failure_exit_code(stdin_failed: bool, exit_code: i32) -> i32 {
+    if stdin_failed && exit_code == 0 {
+        1
+    } else {
+        exit_code
+    }
 }
 
 fn read_all<R: Read>(mut src: R) -> String {

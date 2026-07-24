@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::io::{Cursor, Read};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use super::super::{
@@ -9,11 +11,12 @@ use super::host::{get_local_ips, is_local_host};
 use super::local_exec::{
     execute_local_command_in_dir, execute_local_command_interactive,
     execute_local_command_passthrough, execute_local_command_stderr_passthrough,
+    windows_pipe_error_is_eof, StdinSource,
 };
 use super::ssh_client::{
     build_secret_env_stdin_block, execute_command_with_stdin_timeout,
-    execute_command_with_writer_factory, wrap_command_with_secret_env_read_loop,
-    SECRET_ENV_STDIN_SENTINEL,
+    execute_command_with_writer_factory, run_command_with_stdin_source,
+    wrap_command_with_secret_env_read_loop, SECRET_ENV_STDIN_SENTINEL,
 };
 use super::{CommandOutput, SshClient};
 
@@ -172,6 +175,210 @@ fn injected_stdin_write_failure_kills_a_term_ignoring_child_without_leaking_secr
     assert!(output.stderr.contains("stdin delivery failed"));
     assert!(!output.stdout.contains("stdin-failure-secret"));
     assert!(!output.stderr.contains("stdin-failure-secret"));
+}
+
+fn piped_command(script: &str) -> Command {
+    let mut command = Command::new("sh");
+    command
+        .args(["-c", script])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
+#[test]
+fn piped_stdin_preserves_binary_bytes_exactly() {
+    let path = tempfile::NamedTempFile::new().expect("temporary payload target");
+    let payload = [0, 255, 1, b'\n', 0, 42, 128];
+    let command = piped_command(&format!(
+        "cat > {}",
+        crate::engine::shell::quote_path(&path.path().to_string_lossy())
+    ));
+
+    let output =
+        run_command_with_stdin_source(command, StdinSource::Reader(Box::new(Cursor::new(payload))));
+
+    assert!(output.success, "{}", output.stderr);
+    assert_eq!(
+        std::fs::read(path.path()).expect("read received payload"),
+        payload
+    );
+}
+
+#[test]
+fn piped_stdin_handles_large_payload_with_backpressure() {
+    let payload = vec![0xA5; 8 * 1024 * 1024];
+    let output = run_command_with_stdin_source(
+        piped_command("cat >/dev/null; printf complete"),
+        StdinSource::Reader(Box::new(Cursor::new(payload))),
+    );
+
+    assert!(output.success, "{}", output.stderr);
+    assert_eq!(output.stdout, "complete");
+}
+
+#[test]
+fn closed_remote_stdin_cannot_report_success() {
+    let output = run_command_with_stdin_source(
+        piped_command("exec 0<&-; exit 0"),
+        StdinSource::Reader(Box::new(Cursor::new(vec![0x5A; 1024 * 1024]))),
+    );
+
+    assert!(!output.success);
+    assert_ne!(output.exit_code, 0);
+    assert!(output.stderr.contains("stdin delivery failed"));
+}
+
+#[test]
+fn empty_piped_stdin_allows_a_zero_exit_no_op() {
+    let output = run_command_with_stdin_source(
+        piped_command("true"),
+        StdinSource::Reader(Box::new(Cursor::new(Vec::new()))),
+    );
+
+    assert!(output.success, "{}", output.stderr);
+    assert_eq!(output.exit_code, 0);
+}
+
+#[cfg(unix)]
+fn idle_pipe() -> (std::fs::File, std::fs::File) {
+    use std::os::fd::FromRawFd;
+
+    let mut descriptors = [0; 2];
+    assert_eq!(unsafe { libc::pipe(descriptors.as_mut_ptr()) }, 0);
+    unsafe {
+        (
+            std::fs::File::from_raw_fd(descriptors[0]),
+            std::fs::File::from_raw_fd(descriptors[1]),
+        )
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn idle_piped_stdin_is_cancelled_after_zero_exit() {
+    let (reader, _producer) = idle_pipe();
+    let started = Instant::now();
+
+    let output = run_command_with_stdin_source(piped_command("exit 0"), StdinSource::Piped(reader));
+
+    assert!(output.success, "{}", output.stderr);
+    assert_eq!(output.exit_code, 0);
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[cfg(unix)]
+#[test]
+fn idle_piped_stdin_is_cancelled_after_nonzero_exit() {
+    let (reader, _producer) = idle_pipe();
+    let started = Instant::now();
+
+    let output =
+        run_command_with_stdin_source(piped_command("exit 42"), StdinSource::Piped(reader));
+
+    assert!(!output.success);
+    assert_eq!(output.exit_code, 42);
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn transport_failure_preserves_its_nonzero_exit_code() {
+    let output = run_command_with_stdin_source(
+        piped_command("cat >/dev/null; exit 255"),
+        StdinSource::Reader(Box::new(Cursor::new(b"payload".to_vec()))),
+    );
+
+    assert!(!output.success);
+    assert_eq!(output.exit_code, 255);
+}
+
+struct FailingReader;
+
+impl Read for FailingReader {
+    fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("producer failed"))
+    }
+}
+
+#[test]
+fn local_producer_failure_cannot_report_success() {
+    let output = run_command_with_stdin_source(
+        piped_command("cat >/dev/null"),
+        StdinSource::Reader(Box::new(FailingReader)),
+    );
+
+    assert!(!output.success);
+    assert_ne!(output.exit_code, 0);
+    assert!(output.stderr.contains("stdin delivery failed"));
+}
+
+#[test]
+fn windows_closed_pipe_errors_are_eof_only_when_empty() {
+    assert!(windows_pipe_error_is_eof(Some(109), 0));
+    assert!(windows_pipe_error_is_eof(Some(233), 0));
+    assert!(!windows_pipe_error_is_eof(Some(109), 1));
+    assert!(!windows_pipe_error_is_eof(Some(5), 0));
+    assert!(!windows_pipe_error_is_eof(None, 0));
+}
+
+#[cfg(windows)]
+fn closed_windows_pipe(bytes: &[u8]) -> std::fs::File {
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::Pipes::CreatePipe;
+
+    let mut reader: HANDLE = std::ptr::null_mut();
+    let mut writer: HANDLE = std::ptr::null_mut();
+    assert_ne!(
+        unsafe { CreatePipe(&mut reader, &mut writer, std::ptr::null(), 0) },
+        0
+    );
+    let reader = unsafe { std::fs::File::from_raw_handle(reader) };
+    let mut writer = unsafe { std::fs::File::from_raw_handle(writer) };
+    std::io::Write::write_all(&mut writer, bytes).expect("write pipe bytes");
+    drop(writer);
+    reader
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_empty_redirected_stdin_preserves_no_input_execution() {
+    let file = tempfile::tempfile().expect("empty redirected stdin file");
+    let output = run_command_with_stdin_source(piped_command("exit 0"), StdinSource::Piped(file));
+
+    assert!(output.success, "{}", output.stderr);
+    assert_eq!(output.exit_code, 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_closed_empty_pipe_is_eof() {
+    let output = run_command_with_stdin_source(
+        piped_command("exit 0"),
+        StdinSource::Piped(closed_windows_pipe(b"")),
+    );
+
+    assert!(output.success, "{}", output.stderr);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_closed_pipe_delivers_buffered_bytes_before_eof() {
+    let target = tempfile::NamedTempFile::new().expect("payload target");
+    let output = run_command_with_stdin_source(
+        piped_command(&format!(
+            "cat > {}",
+            crate::engine::shell::quote_path(&target.path().to_string_lossy())
+        )),
+        StdinSource::Piped(closed_windows_pipe(b"payload")),
+    );
+
+    assert!(output.success, "{}", output.stderr);
+    assert_eq!(
+        std::fs::read(target.path()).expect("read payload"),
+        b"payload"
+    );
 }
 
 #[test]
