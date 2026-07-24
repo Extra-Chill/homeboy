@@ -44,6 +44,96 @@ fn cook_rejects_queue_only_before_creating_a_durable_recipe() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn invalid_cook_inputs_do_not_mutate_a_configured_provider_destination() {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("provider tempdir");
+        let ensured = temp.path().join("ensured");
+        let provider = temp.path().join("provider");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  printf '%s\\n' '{{\"worktrees\":[]}}'\nelse\n  touch '{}'\nfi\n",
+                ensured.display()
+            ),
+        )
+        .expect("write provider");
+        let mut permissions = std::fs::metadata(&provider)
+            .expect("metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
+
+        let mut config = homeboy::core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            homeboy::core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                commands: homeboy::core::defaults::WorktreeProviderCommands {
+                    resolve: Some(vec![
+                        provider.display().to_string(),
+                        "resolve".to_string(),
+                        "{handle}".to_string(),
+                    ]),
+                    ensure: Some(vec![provider.display().to_string(), "ensure".to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy::core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                    },
+                ),
+            },
+        );
+        homeboy::core::defaults::save_config(&config).expect("save provider config");
+
+        for invalid_args in [vec!["--queue-only"], vec![]] {
+            let mut args = vec![
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--prompt",
+                "exercise validation",
+                "--to-worktree",
+                "missing@destination",
+                "--repo",
+                "homeboy",
+                "--base",
+                "main",
+                "--head",
+                "fix/9908",
+                "--task-url",
+                "https://github.com/Extra-Chill/homeboy/issues/9908",
+            ];
+            args.extend(invalid_args);
+            let cli = Cli::parse_from(args);
+            let Commands::AgentTask(agent_task) = cli.command else {
+                panic!("agent-task command")
+            };
+            let AgentTaskCommand::Cook(cook) = agent_task.command else {
+                panic!("cook command")
+            };
+            run_cook_with_executor(cook, ExtensionProviderAgentTaskExecutor::default())
+                .expect_err("invalid Cook input is rejected before provider ensure");
+        }
+        assert!(
+            !ensured.exists(),
+            "invalid Cook inputs must cause zero ensure mutations"
+        );
+    });
+}
+
 #[test]
 fn from_spec_dispatch_defaults_use_spec_git_checkout() {
     let repo = tempfile::tempdir().expect("repo dir");

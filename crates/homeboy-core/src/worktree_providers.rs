@@ -1345,6 +1345,7 @@ mod tests {
                         "{base}".to_string(),
                         "{head}".to_string(),
                         "{task_url}".to_string(),
+                        "{idempotency_key}".to_string(),
                     ]),
                     ..Default::default()
                 },
@@ -1377,7 +1378,166 @@ mod tests {
         assert_eq!(resolution.resolution.worktree.handle, "homeboy@fix-9908");
         assert_eq!(
             fs::read_to_string(state).expect("creation intent"),
-            "homeboy@fix-9908|homeboy|main|fix/9908|https://github.com/Extra-Chill/homeboy/issues/9908"
+            "homeboy@fix-9908|homeboy|main|fix/9908|https://github.com/Extra-Chill/homeboy/issues/9908|homeboy@fix-9908:homeboy:main:fix/9908"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_identical_provisioning_reuses_one_destination_and_idempotency_key() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Barrier};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("destination");
+        let lock = temp.path().join("ensure-lock");
+        let keys = temp.path().join("keys");
+        let script = temp.path().join("provider");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -d '{}' ]; then\n    printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-9908\",\"path\":\"{}\",\"branch\":\"fix/9908\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n  else\n    printf '%s\\n' '{{\"worktrees\":[]}}'\n  fi\nelse\n  printf '%s\\n' \"$7\" >> '{}'\n  if mkdir '{}' 2>/dev/null; then\n    git init -b fix/9908 '{}' >/dev/null\n    rmdir '{}'\n  else\n    while [ -d '{}' ]; do sleep 0.01; done\n  fi\nfi\n",
+                workspace.display(),
+                workspace.display(),
+                keys.display(),
+                lock.display(),
+                workspace.display(),
+                lock.display(),
+                lock.display(),
+            ),
+        )
+        .expect("write provider");
+        let mut permissions = fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).expect("executable");
+
+        let mut config = HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: true,
+                commands: WorktreeProviderCommands {
+                    resolve: Some(vec![
+                        script.display().to_string(),
+                        "resolve".to_string(),
+                        "{handle}".to_string(),
+                    ]),
+                    ensure: Some(vec![
+                        script.display().to_string(),
+                        "ensure".to_string(),
+                        "{handle}".to_string(),
+                        "{repo}".to_string(),
+                        "{base}".to_string(),
+                        "{head}".to_string(),
+                        "{task_url}".to_string(),
+                        "{idempotency_key}".to_string(),
+                    ]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(WorktreeProviderListResultMapping {
+                    items: "$.worktrees".to_string(),
+                    handle: "$.handle".to_string(),
+                    path: "$.path".to_string(),
+                    branch: "$.branch".to_string(),
+                    dirty: "$.safety.dirty".to_string(),
+                    unpushed: "$.safety.unpushed".to_string(),
+                    primary: "$.safety.primary".to_string(),
+                }),
+            },
+        );
+        let intent = WorktreeProviderCreateIntent {
+            handle: "homeboy@fix-9908".to_string(),
+            repo: "homeboy".to_string(),
+            base: "main".to_string(),
+            head: "fix/9908".to_string(),
+            task_url: "https://github.com/Extra-Chill/homeboy/issues/9908".to_string(),
+        };
+        let barrier = Arc::new(Barrier::new(2));
+        let mut joins = Vec::new();
+        for _ in 0..2 {
+            let config = config.clone();
+            let intent = intent.clone();
+            let barrier = barrier.clone();
+            joins.push(std::thread::spawn(move || {
+                barrier.wait();
+                provision_apply_enabled_worktree_provider_from_config(&intent, &config)
+                    .expect("concurrent ensure converges")
+            }));
+        }
+        let provisions = joins
+            .into_iter()
+            .map(|join| join.join().expect("thread"))
+            .collect::<Vec<_>>();
+
+        assert!(workspace.is_dir());
+        assert!(
+            provisions
+                .iter()
+                .all(|provision| provision.resolution.worktree.path
+                    == workspace.display().to_string())
+        );
+        assert!(
+            provisions
+                .iter()
+                .all(|provision| provision.idempotency_key
+                    == "homeboy@fix-9908:homeboy:main:fix/9908")
+        );
+        let keys = fs::read_to_string(keys).expect("ensure keys");
+        assert!(keys
+            .lines()
+            .all(|key| key == "homeboy@fix-9908:homeboy:main:fix/9908"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lookup_auth_and_malformed_failures_do_not_run_ensure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let ensured = temp.path().join("ensured");
+        let script = temp.path().join("provider");
+        fs::write(&script, format!("#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  case \"$2\" in auth) exit 77 ;; malformed) printf '{{' ;; esac\n  exit 0\nfi\ntouch '{}'\n", ensured.display())).expect("write provider");
+        let mut permissions = fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).expect("executable");
+        let mut config = HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: true,
+                commands: WorktreeProviderCommands {
+                    resolve: Some(vec![
+                        script.display().to_string(),
+                        "resolve".to_string(),
+                        "{handle}".to_string(),
+                    ]),
+                    ensure: Some(vec![script.display().to_string(), "ensure".to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(worktrees_mapping()),
+            },
+        );
+        for handle in ["auth", "malformed"] {
+            let error = provision_apply_enabled_worktree_provider_from_config(
+                &WorktreeProviderCreateIntent {
+                    handle: handle.to_string(),
+                    repo: "homeboy".to_string(),
+                    base: "main".to_string(),
+                    head: "fix/9908".to_string(),
+                    task_url: "https://example.test/9908".to_string(),
+                },
+                &config,
+            )
+            .expect_err("lookup failure is not absence");
+            assert!(error.message.contains("provider `fixture` resolve command"));
+        }
+        assert!(
+            !ensured.exists(),
+            "ensure must never follow an auth or malformed lookup failure"
         );
     }
 

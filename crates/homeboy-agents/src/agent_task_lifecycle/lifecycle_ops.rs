@@ -372,6 +372,16 @@ where
     if let Some(runner_id) = execution_runner_id.as_deref() {
         metadata["runner_id"] = json!(runner_id);
     }
+    // Surface controller-owned worktree convergence in the run record as well
+    // as the immutable plan, so status and resumed execution retain the same
+    // reviewer-facing evidence.
+    if let Some(provision) = plan
+        .tasks
+        .first()
+        .and_then(|task| task.metadata.get("worktree_provision"))
+    {
+        metadata["worktree_provision"] = provision.clone();
+    }
     if let Some(route) = homeboy_core::notification_route::current() {
         route.insert_into_metadata(&mut metadata);
     }
