@@ -1280,6 +1280,13 @@
       "description": "How the WP Codebox PHPUnit backend prepares WordPress tests. Use 'managed' for the Homeboy-managed WordPress test bootstrap, 'project' for the component's native PHPUnit bootstrap, or 'auto' to use project mode when phpunit.xml(.dist) declares a bootstrap attribute."
     },
     {
+      "id": "wp_codebox_multisite",
+      "label": "WP Codebox PHPUnit multisite",
+      "type": "boolean",
+      "default": false,
+      "description": "Explicitly enable multisite for plugin PHPUnit, including plugins that are not network-only. False forces single-site; HOMEBOY_WORDPRESS_MULTISITE remains the higher-precedence runtime override."
+    },
+    {
       "id": "wp_codebox_phpunit_project_bootstrap",
       "label": "WP Codebox PHPUnit project bootstrap",
       "type": "string",

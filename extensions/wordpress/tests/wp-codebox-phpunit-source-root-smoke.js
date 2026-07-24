@@ -60,6 +60,16 @@ process.stdout.write(JSON.stringify({
   fs.writeFileSync(fakeWpCodebox, `#!/usr/bin/env node
 const fs = require('node:fs');
 const path = require('node:path');
+if (process.argv[2] === 'recipe' && process.argv[3] === 'build') {
+  const options = JSON.parse(fs.readFileSync(process.argv[process.argv.indexOf('--options') + 1], 'utf8'));
+  const plugins = (options.extra_plugins || []).map((plugin) => ({ ...plugin, sourceRoot: plugin.source }));
+  fs.writeFileSync(process.argv[process.argv.indexOf('--output') + 1], JSON.stringify({
+    schema: 'wp-codebox/workspace-recipe/v1',
+    inputs: { extra_plugins: plugins },
+    workflow: { steps: [{ command: 'wordpress.phpunit', args: [] }] },
+  }));
+  process.exit(0);
+}
 const recipeIndex = process.argv.indexOf('--recipe');
 if (process.argv[2] !== 'recipe-run' || recipeIndex < 0) {
   process.exit(2);

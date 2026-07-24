@@ -20,6 +20,7 @@ const root = settings.wp_codebox_source_root || componentPath;
 const subpath = settings.wp_codebox_source_subpath || undefined;
 const pluginSourceDirectory = subpath ? path.join(root, subpath) : root;
 const multisite = await resolveMultisite(settings, pluginSourceDirectory);
+runPrepareSteps(settings.wp_codebox_prepare_steps, pluginSourceDirectory);
 const directory = await mkdtemp(path.join(tmpdir(), 'homeboy-wp-codebox-phpunit-'));
 const optionsPath = path.join(directory, 'options.json');
 const recipePath = path.join(directory, 'recipe.json');
@@ -213,6 +214,29 @@ function sandboxPluginDirectory(pluginSlug) {
 }
 function canonicalMounts(value) {
   return Array.isArray(value) ? value : [];
+}
+function runPrepareSteps(steps, sourceRoot) {
+  if (!Array.isArray(steps)) {
+    return;
+  }
+  for (const step of steps) {
+    if (!step || typeof step.command !== 'string' || step.command.trim() === '') {
+      throw new Error('wp_codebox_prepare_steps entries require a non-empty command');
+    }
+    const args = Array.isArray(step.args) && step.args.every((value) => typeof value === 'string') ? step.args : [];
+    const cwd = path.resolve(sourceRoot, typeof step.cwd === 'string' ? step.cwd : '.');
+    const relative = path.relative(sourceRoot, cwd);
+    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+      throw new Error(`wp_codebox_prepare_steps cwd escapes the source root: ${step.cwd}`);
+    }
+    const result = spawnSync(step.command, args, { cwd, encoding: 'utf8', stdio: 'inherit' });
+    if (result.error) {
+      throw result.error;
+    }
+    if (result.status !== 0) {
+      throw new Error(`wp_codebox_prepare_steps command failed (${step.command}, exit ${result.status ?? 1})`);
+    }
+  }
 }
 async function requireHarness(source) {
   try {
