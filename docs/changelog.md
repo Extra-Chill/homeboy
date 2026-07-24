@@ -4,6 +4,27 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.312.2] - 2026-07-24
+
+### Changed
+- cover core-boundary-leak comment skipping
+- split runner-exec tests out of submit_and_persist
+- extract log projection from lifecycle_ops
+- extract lab-offload recording from lifecycle_ops
+- extract runner-exec identity from lifecycle_ops
+- extract cook-workspace restore from lifecycle_ops
+
+### Fixed
+- skip comment lines in core-boundary-leak ecosystem scan
+- hydrate runtime overlay dependencies
+- clear ambient Lab transport metadata
+- preserve generic exec run ownership
+- honor snapshot exclusions during harvest
+- queue compatible promotion contenders
+- hydrate runner evidence on controller
+- reject local detach handoff
+- preflight agent provider readiness
+
 ## [0.312.1] - 2026-07-24
 
 ### Fixed
