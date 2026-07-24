@@ -51,12 +51,14 @@ pub(crate) fn run_cook(args: AgentTaskCookArgs) -> CmdResult<Value> {
 
 /// Converge a Cook promotion destination before compiling a task plan. This is
 /// controller-owned so local and Lab dispatch use the same managed checkout.
-pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::core::Result<()> {
+pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::core::Result<Value> {
     let destination = std::path::Path::new(&args.to_worktree);
     if destination.is_dir()
         || homeboy::core::worktree::resolve_workspace_ref_if_present(&args.to_worktree)?.is_some()
     {
-        return Ok(());
+        return Ok(
+            serde_json::json!({ "action": "existing", "kind": "path_or_homeboy", "handle": args.to_worktree }),
+        );
     }
 
     let repo = args.dispatch.repo.clone().ok_or_else(|| {
@@ -85,7 +87,25 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
         },
         &defaults::load_config(),
     )
-    .map(|_| ())
+    .map(|provision| {
+        serde_json::json!({
+            "action": provision.action,
+            "provider": provision.resolution.provider_id,
+            "idempotency_key": provision.idempotency_key,
+            "handle": provision.resolution.worktree.handle,
+            "path": provision.resolution.worktree.path,
+            "branch": provision.resolution.worktree.branch,
+        })
+    })
+}
+
+pub(crate) fn record_cook_provision(plan: &mut AgentTaskPlan, provision: Value) {
+    if let Some(task) = plan.tasks.first_mut() {
+        if !task.metadata.is_object() {
+            task.metadata = serde_json::json!({});
+        }
+        task.metadata["worktree_provision"] = provision;
+    }
 }
 
 pub(crate) fn validate_cook_request(args: &AgentTaskCookArgs) -> homeboy::core::Result<()> {
@@ -179,7 +199,7 @@ where
     // the requirement here is safe end to end (#7608). Finalizing cooks still
     // require a gate, but now say so with a copy-pasteable example instead of a
     // bare rejection.
-    provision_cook_destination(&args)?;
+    let provision = provision_cook_destination(&args)?;
 
     let mut dispatch_args = args.dispatch.clone();
     if dispatch_args.prompt.is_none() {
@@ -196,7 +216,7 @@ where
                 .unwrap_or_else(|| agent_task_lifecycle::cook_attempt_run_id(cook_id, 1)),
         );
     }
-    let (run_id, initial_plan) = if let Some(attempt_plan) = args.attempt_plan.as_deref() {
+    let (run_id, mut initial_plan) = if let Some(attempt_plan) = args.attempt_plan.as_deref() {
         let run_id = dispatch_args.run_id.clone().ok_or_else(|| {
             homeboy::core::Error::internal_unexpected(
                 "agent-task cook attempt plan requires an attempt run id".to_string(),
@@ -227,6 +247,7 @@ where
         };
         (run_id, plan)
     };
+    record_cook_provision(&mut initial_plan, provision);
     let cook_id = requested_cook_id.unwrap_or_else(|| run_id.clone());
     // Capture the resolved task workspace before dispatch. The provider may
     // commit and leave a clean tree, so resolving this after it runs would
