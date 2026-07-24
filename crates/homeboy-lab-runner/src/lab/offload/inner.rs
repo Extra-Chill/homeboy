@@ -1072,6 +1072,15 @@ fn promotion_handoff_intent(args: &[String], stdout: &str) -> Result<Option<Prom
     Ok(Some(PromotionPatchIntent { changed_files }))
 }
 
+fn final_preflight_homeboy_path<'a>(
+    converged_homeboy_path: Option<&'a str>,
+    runner: &'a Runner,
+) -> Result<&'a str> {
+    converged_homeboy_path
+        .map(Ok)
+        .unwrap_or_else(|| remote_runner_homeboy_path(runner, "Lab offload preflight"))
+}
+
 pub(crate) fn run_lab_offload_inner(
     request: LabOffloadRequest<'_>,
     selection: LabRunnerSelection,
@@ -1082,7 +1091,7 @@ pub(crate) fn run_lab_offload_inner(
     _runner_status: RunnerStatusReport,
 ) -> Result<LabOffloadOutcome> {
     let runner_id = &selection.runner_id;
-    let runner = load(runner_id)?;
+    let mut runner = load(runner_id)?;
     let mut runner_status = status_for_admission(runner_id)?;
     if runner.kind != super::super::super::RunnerKind::Ssh {
         return Err(Error::validation_invalid_argument(
@@ -1102,6 +1111,28 @@ pub(crate) fn run_lab_offload_inner(
         runner.settings.concurrency_limit,
         contract.hot_label,
     )?;
+
+    // A detached Cook must converge before deriving any provider-preflight
+    // input. Refresh can select a new runner executable, so the runner config,
+    // daemon session, and every command prefix below must come from a fresh
+    // observation rather than the stale pre-convergence snapshot.
+    let mut converged_homeboy_path = None;
+    if request.detach_after_handoff && request.durable_agent_task_plan.is_some() {
+        let converged = crate::lab_staging_controller::converge_lab_handoff_runtime(
+            runner_id,
+            selection.mode.clone(),
+            &homeboy_product_identity::build_identity().display,
+        )?;
+        runner = converged.runner;
+        runner_status = converged.status;
+        converged_homeboy_path = Some(converged.homeboy_path);
+        require_available_lab_runner(
+            runner_id,
+            &runner_status,
+            runner.settings.concurrency_limit,
+            contract.hot_label,
+        )?;
+    }
 
     let runner_workspace_root = request
         .job_overrides
@@ -1238,7 +1269,7 @@ pub(crate) fn run_lab_offload_inner(
             request.durable_agent_task_plan,
         )?;
     }
-    let homeboy_path = remote_runner_homeboy_path(&runner, "Lab offload preflight")?;
+    let homeboy_path = final_preflight_homeboy_path(converged_homeboy_path.as_deref(), &runner)?;
     let require_exact_runner_version = require_exact_runner_version(&runner.settings);
     let configured_build_identity =
         configured_runner_homeboy_build_identity(&runner, homeboy_path)?;
@@ -1311,17 +1342,7 @@ pub(crate) fn run_lab_offload_inner(
                 shell::quote_arg(runner_id)
             ))
     );
-    // A detached Cook must converge its exact controller build before provider
-    // readiness work. Otherwise a stale daemon can account for a provider run
-    // that will later execute an older lifecycle contract.
-    if request.detach_after_handoff && request.durable_agent_task_plan.is_some() {
-        crate::lab_staging_controller::converge_lab_handoff_runtime(
-            runner_id,
-            selection.mode.clone(),
-            &homeboy_product_identity::build_identity().display,
-        )?;
-        runner_status = crate::status_for_admission(runner_id)?;
-    } else if lab_runner_homeboy_has_blocking_drift_against_configured_identity(
+    if lab_runner_homeboy_has_blocking_drift_against_configured_identity(
         &runner_status,
         configured_build_identity.as_deref(),
         require_exact_runner_version,
@@ -2563,6 +2584,25 @@ mod tests {
             "cook"
         )
         .is_err());
+    }
+
+    #[test]
+    fn detached_provider_preflight_uses_the_converged_job_binary_path() {
+        let runner: Runner = serde_json::from_value(serde_json::json!({
+            "kind": "ssh",
+            "settings": { "homeboy_path": "/runner/stale-homeboy" },
+        }))
+        .expect("runner");
+        let path = final_preflight_homeboy_path(Some("/runner/current-homeboy"), &runner)
+            .expect("converged path");
+        let prefix = lab_offload_command_prefix(std::path::Path::new("/source"), path);
+
+        assert_eq!(path, "/runner/current-homeboy");
+        assert_eq!(prefix.argv.first().map(String::as_str), Some(path));
+        assert_ne!(
+            prefix.argv.first().map(String::as_str),
+            Some("/runner/stale-homeboy")
+        );
     }
 
     #[test]

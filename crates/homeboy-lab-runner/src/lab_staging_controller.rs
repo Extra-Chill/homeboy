@@ -427,6 +427,12 @@ enum HandoffConvergenceAction {
     Refuse,
 }
 
+pub(crate) struct ConvergedLabHandoffRuntime {
+    pub(crate) runner: crate::Runner,
+    pub(crate) status: crate::RunnerStatusReport,
+    pub(crate) homeboy_path: String,
+}
+
 fn handoff_convergence_action(
     runner: &crate::Runner,
     status: &crate::RunnerStatusReport,
@@ -468,7 +474,7 @@ pub(crate) fn converge_lab_handoff_runtime(
     runner_id: &str,
     tunnel_mode: crate::RunnerTunnelMode,
     requested: &str,
-) -> Result<()> {
+) -> Result<ConvergedLabHandoffRuntime> {
     for _ in 0..2 {
         let runner = crate::load(runner_id)?;
         let command = crate::remote_runner_homeboy_path(&runner, "Lab handoff convergence")?;
@@ -499,7 +505,14 @@ pub(crate) fn converge_lab_handoff_runtime(
             daemon.as_deref(),
             command,
         ) {
-            HandoffConvergenceAction::Ready => return Ok(()),
+            HandoffConvergenceAction::Ready => {
+                let homeboy_path = command.to_string();
+                return Ok(ConvergedLabHandoffRuntime {
+                    runner,
+                    status,
+                    homeboy_path,
+                });
+            }
             HandoffConvergenceAction::Refuse => {
                 return Err(handoff_identity_error(
                     runner_id,
