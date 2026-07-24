@@ -262,6 +262,12 @@ pub fn run_upgrade_with_method(
                 &runners_skipped,
                 Some(previous_version.as_str()),
             );
+            let runner_disposition = runner_convergence_disposition(
+                skip_runners,
+                &runners_updated,
+                &runners_skipped,
+                Some(previous_version.as_str()),
+            );
             return Ok(UpgradeResult {
                 command: "upgrade".to_string(),
                 install_method,
@@ -272,11 +278,21 @@ pub fn run_upgrade_with_method(
                 source_revision: None,
                 upgraded: false,
                 partial,
-                message: if partial {
-                    "PARTIAL: controller is already current, but configured runners did not converge"
-                        .to_string()
-                } else {
-                    "Already at latest version; configured runners converged".to_string()
+                runner_convergence: Some(runner_disposition),
+                message: match runner_disposition {
+                    RunnerConvergenceDisposition::Partial => {
+                        "PARTIAL: controller is already current, but configured runners did not converge"
+                            .to_string()
+                    }
+                    RunnerConvergenceDisposition::Skipped => {
+                        "Already at latest version; runner convergence skipped".to_string()
+                    }
+                    RunnerConvergenceDisposition::NoRunnersConfigured => {
+                        "Already at latest version; no configured runners".to_string()
+                    }
+                    RunnerConvergenceDisposition::Converged => {
+                        "Already at latest version; configured runners converged".to_string()
+                    }
                 },
                 restart_required: false,
                 extensions_unrefreshed: warn_unrefreshed_symlinked_extensions(&extensions_updated),
@@ -344,6 +360,13 @@ pub fn run_upgrade_with_method(
     let (services_restarted, services_pending_restart) =
         restart_resident_services_after_swap(success, skip_services);
 
+    let runner_disposition = runner_convergence_disposition(
+        skip_runners,
+        &runners_updated,
+        &runners_skipped,
+        new_version.as_deref(),
+    );
+
     Ok(UpgradeResult {
         command: "upgrade".to_string(),
         install_method,
@@ -358,10 +381,12 @@ pub fn run_upgrade_with_method(
             &runners_skipped,
             new_version.as_deref(),
         ),
+        runner_convergence: Some(runner_disposition),
         message: upgrade_message(
             success,
             new_version.as_deref(),
             new_build_identity.as_deref(),
+            runner_disposition,
             &runners_updated,
             &runners_skipped,
         ),
@@ -395,6 +420,8 @@ fn source_upgrade_noop_result(
         source_revision: None,
         upgraded: false,
         partial: false,
+        // No upgrade occurred, so there is no runner-convergence claim to make.
+        runner_convergence: None,
         message: decision.no_op_message(),
         restart_required: false,
         extensions_updated: Vec::new(),
@@ -475,6 +502,13 @@ fn run_targeted_runner_upgrade(
             &runners_skipped,
             Some(previous_version.as_str()),
         ),
+        // Targeted runner upgrade always attempts convergence (never skipped).
+        runner_convergence: Some(runner_convergence_disposition(
+            false,
+            &runners_updated,
+            &runners_skipped,
+            Some(previous_version.as_str()),
+        )),
         message: targeted_runner_message(
             source_checkout.is_some(),
             &previous_version,
@@ -505,10 +539,34 @@ fn runner_convergence_failed(
     })
 }
 
+/// Classify runner convergence from intent (`--skip-runners`) and evidence.
+///
+/// Distinguishes an explicit skip, zero configured runners, verified
+/// convergence, and partial convergence, so the rendered message and structured
+/// output never claim convergence that was not actually verified (#9842).
+fn runner_convergence_disposition(
+    runners_skipped_by_flag: bool,
+    updated: &[RunnerUpgradeEntry],
+    skipped: &[RunnerUpgradeEntry],
+    controller_version: Option<&str>,
+) -> RunnerConvergenceDisposition {
+    if runners_skipped_by_flag {
+        return RunnerConvergenceDisposition::Skipped;
+    }
+    if runner_convergence_failed(updated, skipped, controller_version) {
+        return RunnerConvergenceDisposition::Partial;
+    }
+    if updated.is_empty() && skipped.is_empty() {
+        return RunnerConvergenceDisposition::NoRunnersConfigured;
+    }
+    RunnerConvergenceDisposition::Converged
+}
+
 fn upgrade_message(
     success: bool,
     new_version: Option<&str>,
     new_build_identity: Option<&str>,
+    disposition: RunnerConvergenceDisposition,
     updated: &[RunnerUpgradeEntry],
     skipped: &[RunnerUpgradeEntry],
 ) -> String {
@@ -516,14 +574,22 @@ fn upgrade_message(
     let identity = new_build_identity
         .map(|identity| format!(" ({identity})"))
         .unwrap_or_default();
-    if runner_convergence_failed(updated, skipped, new_version) {
+    if disposition == RunnerConvergenceDisposition::Partial {
         return format!(
             "PARTIAL: controller upgraded to {controller}{identity}, but {} selected configured runner(s) did not converge",
             updated.len() + skipped.len()
         );
     }
     if success {
-        format!("Controller upgraded to {controller}{identity}; configured runners converged")
+        // Report the runner disposition honestly: an explicit skip is never
+        // rendered as convergence, and a fleet with no configured runners is
+        // distinguished from a verified convergence (#9842).
+        let runner_clause = match disposition {
+            RunnerConvergenceDisposition::Skipped => "runner convergence skipped",
+            RunnerConvergenceDisposition::NoRunnersConfigured => "no configured runners",
+            _ => "configured runners converged",
+        };
+        format!("Controller upgraded to {controller}{identity}; {runner_clause}")
     } else if new_version.is_some() {
         format!("Upgrade command completed but active controller is still {controller}")
     } else {
@@ -1821,8 +1887,47 @@ mod convergence_tests {
             &[],
             Some("0.304.0")
         ));
-        assert!(upgrade_message(true, Some("0.304.0"), None, &[runner], &[])
-            .starts_with("PARTIAL: controller upgraded to 0.304.0"));
+        let disposition =
+            runner_convergence_disposition(false, &[runner.clone()], &[], Some("0.304.0"));
+        assert_eq!(disposition, RunnerConvergenceDisposition::Partial);
+        assert!(
+            upgrade_message(true, Some("0.304.0"), None, disposition, &[runner], &[])
+                .starts_with("PARTIAL: controller upgraded to 0.304.0")
+        );
+    }
+
+    #[test]
+    fn skip_runners_reports_skipped_not_converged() {
+        // #9842: --skip-runners must never claim convergence.
+        let disposition = runner_convergence_disposition(true, &[], &[], Some("0.310.0"));
+        assert_eq!(disposition, RunnerConvergenceDisposition::Skipped);
+        let message = upgrade_message(true, Some("0.310.0"), None, disposition, &[], &[]);
+        assert!(message.contains("runner convergence skipped"), "{message}");
+        assert!(!message.contains("converged"), "{message}");
+    }
+
+    #[test]
+    fn no_configured_runners_is_distinct_from_converged() {
+        let disposition = runner_convergence_disposition(false, &[], &[], Some("0.310.0"));
+        assert_eq!(
+            disposition,
+            RunnerConvergenceDisposition::NoRunnersConfigured
+        );
+        let message = upgrade_message(true, Some("0.310.0"), None, disposition, &[], &[]);
+        assert!(message.contains("no configured runners"), "{message}");
+    }
+
+    #[test]
+    fn converged_runners_still_report_convergence() {
+        let runner = runner("0.301.2", "0.310.0", true);
+        let disposition =
+            runner_convergence_disposition(false, &[runner.clone()], &[], Some("0.310.0"));
+        assert_eq!(disposition, RunnerConvergenceDisposition::Converged);
+        let message = upgrade_message(true, Some("0.310.0"), None, disposition, &[runner], &[]);
+        assert!(
+            message.contains("configured runners converged"),
+            "{message}"
+        );
     }
 
     #[test]
