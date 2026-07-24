@@ -249,6 +249,20 @@ pub fn load_baseline(source_path: &Path) -> Option<AuditBaseline> {
         .map(normalize_loaded_baseline)
 }
 
+pub type BaselinePruneResult = generic::PruneResult;
+
+/// Safely remove specific fingerprints from the audit baseline in `homeboy.json`
+/// without hand-editing the JSON array. Only fingerprints actually present are
+/// removed; the rest are reported as not-found. The surviving rows stay sorted
+/// so the diff is exactly the removed lines — no trailing-comma churn (#6861).
+pub fn prune_baseline(
+    source_path: &Path,
+    fingerprints: &[String],
+) -> Result<BaselinePruneResult, String> {
+    let config = BaselineConfig::new(source_path, BASELINE_KEY);
+    generic::prune(&config, fingerprints).map_err(|error| error.message)
+}
+
 /// Compare an audit result against a saved baseline.
 pub fn compare(result: &CodeAuditResult, baseline: &AuditBaseline) -> BaselineComparison {
     let items: Vec<AuditFinding> = result.findings.iter().map(AuditFinding).collect();
