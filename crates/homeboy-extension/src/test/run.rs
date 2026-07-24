@@ -173,7 +173,7 @@ fn run_main_test_workflow_inner(
                     .build()]);
                 let hints = Some(vec![
                     format!(
-                        "Add or route a test for the changed source, or run the full suite: homeboy test {}",
+                        "Add or route a test for the changed source, or run the full suite: homeboy review test {}",
                         args.component_id
                     ),
                     "If these changes are intentionally test-exempt, exclude them from the release/test scope so the gate can pass with a typed reason.".to_string(),
@@ -209,7 +209,7 @@ fn run_main_test_workflow_inner(
                     "No impacted tests found for --changed-since {changed_ref} (no production or test source changed)"
                 ),
                 format!(
-                    "Run full suite if needed: homeboy test {}",
+                    "Run full suite if needed: homeboy review test {}",
                     args.component_id
                 ),
             ]);
@@ -402,7 +402,7 @@ fn run_main_test_workflow_inner(
 
     if status == "failed" && args.passthrough_args.is_empty() {
         hints.push(format!(
-            "To run specific tests: homeboy test {} -- --filter=TestName",
+            "To run specific tests: homeboy review test {} -- --filter=TestName",
             args.component_id
         ));
     }
@@ -430,7 +430,7 @@ fn run_main_test_workflow_inner(
 
     if !coverage_enabled {
         hints.push(format!(
-            "Collect coverage: homeboy test {} --coverage",
+            "Collect coverage: homeboy review test {} --coverage",
             args.component_id
         ));
     }
@@ -441,27 +441,29 @@ fn run_main_test_workflow_inner(
         && baseline_comparison.is_none()
     {
         hints.push(format!(
-            "Save test baseline: homeboy test {} --baseline",
+            "Save test baseline: homeboy review test {} --baseline",
             args.component_id
         ));
     }
 
     if baseline_comparison.is_some() && !args.baseline_flags.ratchet {
         hints.push(format!(
-            "Auto-update baseline on improvement: homeboy test {} --ratchet",
+            "Auto-update baseline on improvement: homeboy review test {} --ratchet",
             args.component_id
         ));
     }
 
     if status == "failed" && !args.analyze {
         hints.push(format!(
-            "Analyze failures: homeboy test {} --analyze",
+            "Analyze failures: homeboy review test {} --analyze",
             args.component_id
         ));
     }
 
     if args.passthrough_args.is_empty() {
-        hints.push("Pass args to test runner: homeboy test <component> -- [args]".to_string());
+        hints.push(
+            "Pass args to test runner: homeboy review test <component> -- [args]".to_string(),
+        );
     }
 
     hints.push("Full options: homeboy self docs commands/test".to_string());
