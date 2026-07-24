@@ -740,25 +740,53 @@ fn parse_override(raw: &str) -> homeboy::core::Result<AgentTaskReviewOverride> {
     })
 }
 
+const COMMAND_RESULT_ENVELOPE_SCHEMA: &str = "homeboy/command-result/v3";
+
+/// Deserialize a structured input that may be either the bare report/request or
+/// a `homeboy/command-result/v3` envelope wrapping it under `data`.
+///
+/// `agent-task promote --output` writes the command-result envelope, whose outer
+/// `status` (e.g. `failed`) is not a promotion status; deserializing it directly
+/// as a promotion report failed. Unwrap the envelope's `data` when present so the
+/// canonical producer (`promote --output`) composes directly with the consumer
+/// (`gate-feedback --promotion`) without a manual `jq '.data'` step (#9893).
+fn deserialize_maybe_enveloped<T: serde::de::DeserializeOwned>(
+    raw: &str,
+    context: &str,
+) -> homeboy::core::Result<T> {
+    let value: Value = serde_json::from_str(raw).map_err(|error| {
+        homeboy::core::Error::validation_invalid_json(
+            error,
+            Some(context.to_string()),
+            Some(raw.to_string()),
+        )
+    })?;
+
+    // A command-result envelope carries the real payload under `data`; a bare
+    // report is used as-is.
+    let payload =
+        if value.get("schema").and_then(Value::as_str) == Some(COMMAND_RESULT_ENVELOPE_SCHEMA) {
+            value.get("data").cloned().unwrap_or(value)
+        } else {
+            value
+        };
+
+    serde_json::from_value(payload).map_err(|error| {
+        homeboy::core::Error::validation_invalid_json(
+            error,
+            Some(context.to_string()),
+            Some(raw.to_string()),
+        )
+    })
+}
+
 pub(crate) fn gate_feedback(args: GateFeedbackArgs) -> CmdResult<Value> {
     let promotion_raw = config::read_json_spec_to_string(&args.promotion)?;
     let source_task_raw = config::read_json_spec_to_string(&args.source_task)?;
     let promotion_report: AgentTaskPromotionReport =
-        serde_json::from_str(&promotion_raw).map_err(|error| {
-            homeboy::core::Error::validation_invalid_json(
-                error,
-                Some("agent-task promotion report".to_string()),
-                Some(promotion_raw.clone()),
-            )
-        })?;
+        deserialize_maybe_enveloped(&promotion_raw, "agent-task promotion report")?;
     let source_request: AgentTaskRequest =
-        serde_json::from_str(&source_task_raw).map_err(|error| {
-            homeboy::core::Error::validation_invalid_json(
-                error,
-                Some("agent-task source request".to_string()),
-                Some(source_task_raw.clone()),
-            )
-        })?;
+        deserialize_maybe_enveloped(&source_task_raw, "agent-task source request")?;
     let current_diff = args
         .current_diff
         .as_deref()
@@ -1793,5 +1821,44 @@ mod tests {
         let all = vec![provider_fixture("opencode.executor", "opencode")];
         let scoped = scope_providers(&all, scoped_provider_backend(Some("nope"), false));
         assert!(scoped.is_empty());
+    }
+
+    #[derive(serde::Deserialize, Debug, PartialEq)]
+    struct SamplePayload {
+        status: String,
+    }
+
+    #[test]
+    fn deserialize_maybe_enveloped_unwraps_command_result_envelope() {
+        // #9893: `promote --output` emits a command-result envelope whose outer
+        // status is not a promotion status; the payload under `data` is used.
+        let enveloped = r#"{
+            "schema": "homeboy/command-result/v3",
+            "success": false,
+            "status": "failed",
+            "data": { "status": "gate_failed" }
+        }"#;
+        let payload: SamplePayload =
+            deserialize_maybe_enveloped(enveloped, "sample").expect("unwrap envelope");
+        assert_eq!(payload.status, "gate_failed");
+    }
+
+    #[test]
+    fn deserialize_maybe_enveloped_accepts_bare_report() {
+        // A bare report (already `jq '.data'`-ed, or produced directly) still works.
+        let bare = r#"{ "status": "applied" }"#;
+        let payload: SamplePayload =
+            deserialize_maybe_enveloped(bare, "sample").expect("bare report");
+        assert_eq!(payload.status, "applied");
+    }
+
+    #[test]
+    fn deserialize_maybe_enveloped_surfaces_invalid_json() {
+        let err = deserialize_maybe_enveloped::<SamplePayload>("not json", "sample")
+            .expect_err("invalid json should error");
+        assert_eq!(
+            err.code,
+            homeboy::core::error::ErrorCode::ValidationInvalidJson
+        );
     }
 }
