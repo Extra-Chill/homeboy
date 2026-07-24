@@ -5,6 +5,7 @@
 use super::super::cook_adoption::{
     adopt_cook_candidate, adopt_cook_candidate_with_dispatcher_and_backend,
     candidate_adoption_source, concrete_adoption_ai_model, resolve_adoption_target,
+    resolve_adoption_target_with_attempt,
 };
 use super::super::cook_baseline::git_output;
 use super::super::cook_promotion::{
@@ -3323,12 +3324,98 @@ fn adoption_by_cook_id_rejects_conflicting_recipe_attempts_with_explicit_choices
         assert!(error.message.contains(second_run_id));
         assert!(error
             .message
-            .contains(&format!("homeboy agent-task adopt {first_run_id}")));
+            .contains(&format!("homeboy agent-task adopt {cook_id} --attempt 1")));
 
         let (record, recipe) = resolve_adoption_target(second_run_id)
             .expect("an exact existing attempt run id selects its owning recipe");
         assert_eq!(recipe.cook_id, cook_id);
         assert_eq!(record.run_id, second_run_id);
+    });
+}
+
+#[test]
+fn adoption_attempt_selector_disambiguates_a_first_run_id_equal_to_its_cook_id() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-adopt-attempt-id-collision";
+        let second_run_id = "cook-adopt-attempt-id-collision-attempt-2";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = cook_id.to_string();
+        super::super::persist_initial_recipe(&options).expect("persist recipe");
+        let mut conflicting_plan = options.initial_plan.clone();
+        conflicting_plan.plan_id = "attempt-two-policy".to_string();
+        super::super::record_recipe_attempt(cook_id, 2, second_run_id, &conflicting_plan)
+            .expect("persist conflicting second recipe attempt");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(cook_id))
+            .expect("persist first lifecycle record");
+
+        let error = resolve_adoption_target(cook_id)
+            .expect_err("conflicting attempts require an explicit selector");
+        assert!(error.message.contains("--attempt 1"));
+        assert!(error.message.contains("plan attempt-two-policy"));
+
+        let (record, recipe) = resolve_adoption_target_with_attempt(cook_id, Some(1))
+            .expect("attempt selector resolves the first attempt despite the ID collision");
+        assert_eq!(recipe.cook_id, cook_id);
+        assert_eq!(record.run_id, cook_id);
+    });
+}
+
+#[test]
+fn adoption_ambiguity_describes_policy_choices_without_sensitive_config() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-adopt-policy-summary";
+        let first_run_id = "cook-adopt-policy-summary-attempt-1";
+        let second_run_id = "cook-adopt-policy-summary-attempt-2";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = first_run_id.to_string();
+        options.to_worktree = "homeboy@policy-destination".to_string();
+        options.base = "release".to_string();
+        options.head = Some("fix/policy-summary".to_string());
+        options.task_base_sha = Some("base-sha".to_string());
+        options.no_finalize = false;
+        options.protected_branches = vec!["release".to_string()];
+        options.gates.verify = vec!["echo super-secret-gate-value".to_string()];
+        options.gates.private_verify = vec!["private-check".to_string()];
+        options.initial_plan.tasks[0].executor.backend = "provider-one".to_string();
+        options.initial_plan.tasks[0].executor.selector = Some("primary".to_string());
+        options.initial_plan.tasks[0].executor.model = Some("model-one".to_string());
+        options.initial_plan.tasks[0].executor.config = serde_json::json!({
+            "api_token": "super-secret-config-value"
+        });
+        options.initial_plan.tasks[0].policy.apply = "review".to_string();
+        super::super::persist_initial_recipe(&options).expect("persist recipe");
+
+        let mut second_plan = options.initial_plan.clone();
+        second_plan.plan_id = "attempt-two-policy".to_string();
+        second_plan.tasks[0].executor.backend = "provider-two".to_string();
+        second_plan.tasks[0].executor.selector = Some("fallback".to_string());
+        second_plan.tasks[0].executor.model = Some("model-two".to_string());
+        second_plan.tasks[0].policy.apply = "publish".to_string();
+        super::super::record_recipe_attempt(cook_id, 2, second_run_id, &second_plan)
+            .expect("persist policy-different attempt");
+
+        let error = resolve_adoption_target(cook_id).expect_err("policies require selection");
+        for expected in [
+            "destination=homeboy@policy-destination",
+            "base=release",
+            "head=fix/policy-summary",
+            "task-base=base-sha",
+            "gates=public:1/private:1",
+            "provider/model=provider-one/primary@model-one",
+            "provider/model=provider-two/fallback@model-two",
+            "review/publication=review-ready/protected:1",
+            "task-policy=workspace/artifacts_only/review",
+            "task-policy=workspace/artifacts_only/publish",
+            "--attempt 1",
+        ] {
+            assert!(
+                error.message.contains(expected),
+                "missing {expected}: {error}"
+            );
+        }
+        assert!(!error.message.contains("super-secret-gate-value"));
+        assert!(!error.message.contains("super-secret-config-value"));
+        assert!(!error.message.contains("api_token"));
     });
 }
 

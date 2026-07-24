@@ -167,8 +167,33 @@ pub fn adopt_cook_candidate_with_options_dispatcher_and_executor<E>(
 where
     E: crate::agent_task_scheduler::AgentTaskExecutorAdapter + Clone,
 {
-    adopt_cook_candidate_with_dispatcher_and_backend(
+    adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt(
         cook_or_run_id,
+        None,
+        candidate_ref,
+        adoption,
+        reconstruct_dispatcher,
+        executor,
+    )
+}
+
+/// Adopt a candidate against an explicit numbered Cook attempt.
+pub fn adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt<E>(
+    cook_or_run_id: &str,
+    attempt: Option<u32>,
+    candidate_ref: &str,
+    adoption: AgentTaskCandidateAdoptionOptions,
+    reconstruct_dispatcher: impl FnOnce(
+        &Value,
+    ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+    executor: E,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
+where
+    E: crate::agent_task_scheduler::AgentTaskExecutorAdapter + Clone,
+{
+    adopt_cook_candidate_with_dispatcher_and_backend_for_attempt(
+        cook_or_run_id,
+        attempt,
         candidate_ref,
         adoption,
         reconstruct_dispatcher,
@@ -190,7 +215,32 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend<
     executor: E,
     backend: &mut B,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
-    let (record, recipe) = resolve_adoption_target(cook_or_run_id)?;
+    adopt_cook_candidate_with_dispatcher_and_backend_for_attempt(
+        cook_or_run_id,
+        None,
+        candidate_ref,
+        adoption,
+        reconstruct_dispatcher,
+        executor,
+        backend,
+    )
+}
+
+pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
+    E: crate::agent_task_scheduler::AgentTaskExecutorAdapter + Clone,
+    B: AgentTaskPrFinalizationBackend,
+>(
+    cook_or_run_id: &str,
+    attempt: Option<u32>,
+    candidate_ref: &str,
+    adoption: AgentTaskCandidateAdoptionOptions,
+    reconstruct_dispatcher: impl FnOnce(
+        &Value,
+    ) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+    executor: E,
+    backend: &mut B,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    let (record, recipe) = resolve_adoption_target_with_attempt(cook_or_run_id, attempt)?;
     let cook_id = &recipe.cook_id;
     let mut options = super::reconstruct_adoption_options(&recipe)?;
     let run_id = record.run_id.clone();
@@ -929,18 +979,62 @@ pub(crate) fn resolve_adoption_target(
     agent_task_lifecycle::AgentTaskRunRecord,
     super::AgentTaskCookRecipe,
 )> {
+    resolve_adoption_target_with_attempt(cook_or_run_id, None)
+}
+
+/// Resolve an adoption target, optionally selecting a numbered attempt from a
+/// durable Cook recipe. The selector is needed when attempt one shares its ID
+/// with the logical Cook and later attempts have different policies.
+pub(crate) fn resolve_adoption_target_with_attempt(
+    cook_or_run_id: &str,
+    selected_attempt: Option<u32>,
+) -> Result<(
+    agent_task_lifecycle::AgentTaskRunRecord,
+    super::AgentTaskCookRecipe,
+)> {
     // A durable Cook id names its immutable recipe, not whichever attempt the
     // mutable Cook index most recently observed. Resolve recipes before run
     // records so a later failed attempt cannot steal adoption ownership from
     // the original equivalent source attempt.
     if super::recipe_exists(cook_or_run_id)? {
         let recipe = super::load_recipe(cook_or_run_id)?;
-        let attempt = resolve_cook_adoption_attempt(&recipe)?;
+        let attempt = match selected_attempt {
+            Some(attempt_number) => recipe
+                .attempts
+                .iter()
+                .find(|attempt| attempt.attempt == attempt_number)
+                .ok_or_else(|| {
+                    let eligible = recipe
+                        .attempts
+                        .iter()
+                        .map(|attempt| attempt.attempt.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Error::validation_invalid_argument(
+                        "attempt",
+                        format!(
+                            "candidate adoption Cook has no attempt {attempt_number}; eligible attempts: {eligible}"
+                        ),
+                        Some(attempt_number.to_string()),
+                        None,
+                    )
+                })?,
+            None => resolve_cook_adoption_attempt(&recipe)?,
+        };
         if agent_task_lifecycle::run_record_exists(&attempt.run_id)? {
             return Ok((agent_task_lifecycle::status(&attempt.run_id)?, recipe));
         }
         let run_id = attempt.run_id.clone();
         return materialize_adoption_attempt(recipe, run_id);
+    }
+
+    if selected_attempt.is_some() {
+        return Err(Error::validation_invalid_argument(
+            "attempt",
+            "candidate adoption --attempt requires a durable Cook id",
+            selected_attempt.map(|attempt| attempt.to_string()),
+            None,
+        ));
     }
 
     // Runner-side lifecycle projection can omit the controller's `cook_id`
@@ -1026,19 +1120,124 @@ fn resolve_cook_adoption_attempt(
     let attempts = recipe
         .attempts
         .iter()
-        .map(|attempt| format!("attempt {}: {}", attempt.attempt, attempt.run_id))
+        .map(|attempt| attempt_adoption_policy_summary(recipe, attempt))
         .collect::<Vec<_>>()
         .join(", ");
     Err(Error::validation_invalid_argument(
         "cook_recipe.attempts",
         format!(
-            "candidate adoption by cook id is ambiguous because durable attempt plans differ ({attempts}); rerun with the exact owning run id, for example `homeboy agent-task adopt {}`",
-            first.run_id
+            "candidate adoption by cook id is ambiguous because durable attempt plans differ ({attempts}); select the candidate's owning policy explicitly, for example `homeboy agent-task adopt {} --attempt {}`",
+            recipe.cook_id, first.attempt
         ),
         Some(recipe.cook_id.clone()),
         Some(vec![
-            "Pass an attempt run id to select the candidate's exact recorded policy."
+            "Pass --attempt N with the Cook id to select the candidate's exact recorded policy."
                 .to_string(),
         ]),
     ))
+}
+
+/// Render only the fixed policy fields an operator needs to choose an attempt.
+/// Executor config and gate commands can contain credentials, so diagnostics
+/// report their semantics rather than their raw values.
+fn attempt_adoption_policy_summary(
+    recipe: &super::AgentTaskCookRecipe,
+    attempt: &super::AgentTaskCookRecipeAttempt,
+) -> String {
+    let finalization = &recipe.finalization;
+    let destination = compact_policy_value(finalization.get("to_worktree"));
+    let base = compact_policy_value(finalization.get("base"));
+    let head = compact_policy_value(finalization.get("head"));
+    let task_base = compact_policy_value(finalization.get("task_base_sha"));
+    let public_gates = recipe
+        .gate_policy
+        .get("verify")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let private_gates = recipe
+        .gate_policy
+        .get("private_verify")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let publication = if finalization
+        .get("no_finalize")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        "none".to_string()
+    } else {
+        format!(
+            "review-ready/protected:{}",
+            finalization
+                .get("protected_branches")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len)
+        )
+    };
+    let provider_summaries = attempt
+        .plan
+        .tasks
+        .iter()
+        .take(3)
+        .map(|task| {
+            format!(
+                "{}/{}@{}",
+                compact_text(&task.executor.backend),
+                compact_optional_text(task.executor.selector.as_deref()),
+                compact_optional_text(task.executor.model.as_deref())
+            )
+        })
+        .collect::<Vec<_>>();
+    let providers = if attempt.plan.tasks.len() > provider_summaries.len() {
+        format!(
+            "{}+{} more",
+            provider_summaries.join("+"),
+            attempt.plan.tasks.len() - provider_summaries.len()
+        )
+    } else {
+        provider_summaries.join("+")
+    };
+    let task_policy = attempt
+        .plan
+        .tasks
+        .first()
+        .map(|task| {
+            format!(
+                "{}/{}/{}",
+                compact_text(&task.policy.read),
+                compact_text(&task.policy.write),
+                compact_text(&task.policy.apply)
+            )
+        })
+        .unwrap_or_else(|| "none".to_string());
+    homeboy_core::redaction::redact_string(&format!(
+        "attempt {}: {} (plan {}; destination={destination}; base={base}; head={head}; task-base={task_base}; gates=public:{public_gates}/private:{private_gates}; provider/model={providers}; review/publication={publication}; task-policy={task_policy})",
+        attempt.attempt,
+        compact_text(&attempt.run_id),
+        compact_text(&attempt.plan.plan_id),
+    ))
+}
+
+fn compact_policy_value(value: Option<&Value>) -> String {
+    value
+        .and_then(Value::as_str)
+        .map(compact_text)
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn compact_optional_text(value: Option<&str>) -> String {
+    value
+        .map(compact_text)
+        .unwrap_or_else(|| "default".to_string())
+}
+
+fn compact_text(value: &str) -> String {
+    const MAX_CHARS: usize = 96;
+    let mut compact = value.chars();
+    let prefix = compact.by_ref().take(MAX_CHARS).collect::<String>();
+    if compact.next().is_some() {
+        format!("{prefix}...")
+    } else {
+        prefix
+    }
 }

@@ -385,16 +385,18 @@ pub(crate) fn promotion_is_resumable(previous: &Value, rerun_completed_gates: bo
 }
 
 pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {
-    let result = agent_task_service::adopt_cook_candidate_with_options_dispatcher_and_executor(
-        &args.run_or_cook_id,
-        &args.candidate_ref,
-        agent_task_service::AgentTaskCandidateAdoptionOptions {
-            ai_model: args.ai_model.clone(),
-            replace_interrupted: args.replace_interrupted,
-        },
-        crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
-        ExtensionProviderAgentTaskExecutor::discover(),
-    )?;
+    let result =
+        agent_task_service::adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt(
+            &args.run_or_cook_id,
+            args.attempt,
+            &args.candidate_ref,
+            agent_task_service::AgentTaskCandidateAdoptionOptions {
+                ai_model: args.ai_model.clone(),
+                replace_interrupted: args.replace_interrupted,
+            },
+            crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
+            ExtensionProviderAgentTaskExecutor::discover(),
+        )?;
     let exit_code = result.exit_code;
     let mut value = super::status::compact_cook_report(
         serde_json::to_value(result.value).unwrap_or(Value::Null),
@@ -403,6 +405,7 @@ pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {
     value["adoption"] = serde_json::json!({
         "schema": "homeboy/agent-task-candidate-adoption/v1",
         "source": args.run_or_cook_id,
+        "attempt": args.attempt,
         "candidate_ref": args.candidate_ref,
         "ai_model": args.ai_model,
         "replace_interrupted": args.replace_interrupted,
