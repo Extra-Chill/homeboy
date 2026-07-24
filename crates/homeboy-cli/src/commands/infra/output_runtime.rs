@@ -230,7 +230,6 @@ fn write_lock_record(file: &std::fs::File, token: &str) -> homeboy::core::Result
         .map_err(|error| output_io_error(Path::new("Cook output lock"), error))?;
     let record = serde_json::json!({
         "pid": std::process::id(),
-        "process_start": process_start_identity(std::process::id()),
         "token": token,
     });
     file.write_all(record.to_string().as_bytes())
@@ -248,17 +247,6 @@ fn lock_matches(file: &std::fs::File, token: &str) -> bool {
             .ok()
             .and_then(|value| value["token"].as_str().map(str::to_string))
             == Some(token.to_string())
-}
-
-fn process_start_identity(pid: u32) -> Option<String> {
-    std::process::Command::new("ps")
-        .args(["-o", "lstart=", "-p", &pid.to_string()])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 #[cfg(unix)]
@@ -858,7 +846,6 @@ mod tests {
             &lock,
             serde_json::json!({
                 "pid": std::process::id(),
-                "process_start": "reused-pid-start",
                 "token": "old-owner"
             })
             .to_string(),
@@ -869,7 +856,7 @@ mod tests {
         let record: Value = serde_json::from_str(&std::fs::read_to_string(&lock).unwrap()).unwrap();
         assert_eq!(record["pid"], std::process::id());
         assert_ne!(record["token"], "old-owner");
-        assert_ne!(record["process_start"], "reused-pid-start");
+        assert!(record.get("process_start").is_none());
         drop(lease);
     }
 

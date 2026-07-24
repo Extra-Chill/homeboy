@@ -1281,10 +1281,19 @@ where
     if let Some(model) = adopted_model {
         options.ai_model = Some(model);
     }
+    materialize_initial_cook_attempt(&options)?;
+    // The recipe alone is resumable input, not a status-addressable run. Publish
+    // the run identity only after initial materialization and a lifecycle read
+    // prove status/log recovery resolves for this exact attempt.
+    let materialized_run = agent_task_lifecycle::status(&options.initial_run_id)?;
+    if materialized_run.run_id != options.initial_run_id {
+        return Err(Error::internal_unexpected(
+            "materialized Cook lifecycle record does not match its initial run id",
+        ));
+    }
     if let Some(observer) = durable_observer {
         observer(&options.cook_id, &options.initial_run_id)?;
     }
-    materialize_initial_cook_attempt(&options)?;
     // Transport readiness can serialize on a reconnect/runtime-promotion
     // lease. Complete it before entering the provider-attempt loop so that
     // waiting for a shared Lab session never consumes a cook attempt.
