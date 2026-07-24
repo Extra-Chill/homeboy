@@ -126,6 +126,66 @@ where
     }
 }
 
+/// Test cook side-effect boundary with injectable `finalize` and
+/// `recover_moving_base` closures, so recovery/finalization control flow can be
+/// exercised without real Git/GitHub mutations. `promote` delegates to the real
+/// promotion path (tests that need to intercept promotion persist a promotion
+/// first, exactly as before).
+#[cfg(test)]
+pub(crate) struct TestCookSideEffects<F, R> {
+    finalize: F,
+    recover: R,
+}
+
+#[cfg(test)]
+impl<F, R> TestCookSideEffects<F, R>
+where
+    F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
+    R: FnMut(
+        &AgentTaskCookServiceOptions,
+        &MovingBaseCookRecovery,
+    ) -> Result<AgentTaskPromotionReport>,
+{
+    pub(crate) fn new(finalize: F, recover: R) -> Self {
+        Self { finalize, recover }
+    }
+}
+
+#[cfg(test)]
+impl<F, R> CookSideEffectService for TestCookSideEffects<F, R>
+where
+    F: FnMut(&AgentTaskCookServiceOptions, &str, &AgentTaskPromotionReport) -> Result<Value>,
+    R: FnMut(
+        &AgentTaskCookServiceOptions,
+        &MovingBaseCookRecovery,
+    ) -> Result<AgentTaskPromotionReport>,
+{
+    fn promote(
+        &mut self,
+        options: &AgentTaskCookServiceOptions,
+        run_id: &str,
+    ) -> Result<AgentTaskPromotionReport> {
+        promote_or_load_attempt(options, run_id)
+    }
+
+    fn recover_moving_base(
+        &mut self,
+        options: &AgentTaskCookServiceOptions,
+        recovery: &MovingBaseCookRecovery,
+    ) -> Result<AgentTaskPromotionReport> {
+        (self.recover)(options, recovery)
+    }
+
+    fn finalize(
+        &mut self,
+        options: &AgentTaskCookServiceOptions,
+        run_id: &str,
+        promotion: &AgentTaskPromotionReport,
+    ) -> Result<Value> {
+        (self.finalize)(options, run_id, promotion)
+    }
+}
+
 /// The promotion checkpoint captures this before gates run, when it is the only
 /// complete authorization for reusing the dirty managed destination.
 pub(crate) fn gate_feedback_current_diff(promotion: &AgentTaskPromotionReport) -> String {
