@@ -795,9 +795,7 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     };
     let catalog_version = catalog.version.clone();
     let executor = ExtensionProviderAgentTaskExecutor::from_catalog(catalog);
-    let providers = executor.providers();
-    let fallback_sources =
-        homeboy::agents::agent_tasks::provider::provider_secret_sources_for_providers(providers);
+    let all_providers = executor.providers();
     if args.validate_readiness {
         let backend = args.backend.as_deref().ok_or_else(|| {
             homeboy::core::Error::validation_invalid_argument(
@@ -815,12 +813,38 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
             args.selector.as_deref(),
         )?;
     }
+
+    // Default to the requested backend's slice. Dumping the whole multi-backend
+    // catalog (every backend's providers, identity catalog, dispatch layers, and
+    // diagnostics) for a single-backend readiness query overflowed the caller
+    // display limit and buried the answer (#9654). `--catalog`/`--all` opts back
+    // into the full catalog; an absent `--backend` still shows everything.
+    let scoped_backend = (!args.catalog).then(|| args.backend.as_deref()).flatten();
+    let scoped_providers: Vec<AgentTaskExecutorProvider> = match scoped_backend {
+        Some(backend) => all_providers
+            .iter()
+            .filter(|provider| provider.backend == backend)
+            .cloned()
+            .collect(),
+        None => all_providers.to_vec(),
+    };
+    let providers: &[AgentTaskExecutorProvider] = &scoped_providers;
+    let fallback_sources =
+        homeboy::agents::agent_tasks::provider::provider_secret_sources_for_providers(providers);
+
     Ok((
         serde_json::json!({
             "schema": "homeboy/agent-task-providers/v1",
             "catalog": {
                 "refreshed": args.refresh,
                 "version": catalog_version,
+            },
+            "scope": {
+                "backend": scoped_backend,
+                "filtered": scoped_backend.is_some(),
+                "shown": providers.len(),
+                "total": all_providers.len(),
+                "catalog_command": "homeboy agent-task providers --catalog",
             },
             "dispatch_config_layers": dispatch_config_layers(providers),
             "provider_identity_catalog": provider_identity_catalog(providers),
