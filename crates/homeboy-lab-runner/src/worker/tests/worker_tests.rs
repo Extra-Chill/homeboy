@@ -287,6 +287,24 @@ fn private_at_file_snapshot_survives_source_replacement_before_exec() {
         .strip_prefix('@')
         .expect("rewritten @file")
         .to_string();
+    assert_ne!(
+        std::path::Path::new(&snapshot).parent(),
+        source.parent(),
+        "verified snapshot is outside the source-owner directory"
+    );
+    assert_eq!(
+        std::fs::metadata(
+            std::path::Path::new(&snapshot)
+                .parent()
+                .expect("snapshot parent")
+        )
+        .expect("snapshot parent metadata")
+        .permissions()
+        .mode()
+            & 0o777,
+        0o700,
+        "worker-owned snapshot directory is private"
+    );
     std::fs::write(&source, b"replaced after validation").expect("replace source");
 
     assert_eq!(std::fs::read(&snapshot).expect("read snapshot"), verified);
@@ -368,13 +386,9 @@ fn private_at_file_snapshot_is_atomically_published_with_owner_only_mode() {
     use std::os::unix::fs::PermissionsExt;
 
     let directory = tempfile::tempdir().expect("private file directory");
-    let source = directory.path().join("private-sha256-source-plan.json");
 
-    let snapshot = write_private_at_file_snapshot(
-        source.to_str().expect("source path"),
-        b"complete verified content",
-    )
-    .expect("write snapshot");
+    let snapshot = write_private_at_file_snapshot(directory.path(), b"complete verified content")
+        .expect("write snapshot");
 
     assert_eq!(
         std::fs::read(&snapshot).expect("read snapshot"),
@@ -415,6 +429,23 @@ fn private_at_file_request(path: &std::path::Path) -> RemoteRunnerJobRequest {
         lifecycle: None,
         metadata: None,
     }
+}
+
+#[cfg(not(unix))]
+#[test]
+fn private_at_file_is_rejected_without_unix_filesystem_guarantees() {
+    let directory = tempfile::tempdir().expect("private file directory");
+    let source = directory.path().join(
+        "private-sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-plan.json",
+    );
+    let request = private_at_file_request(&source);
+    let mut envelope = request.execution_envelope();
+
+    let error = verify_private_at_files(&mut envelope).expect_err("private input rejected");
+
+    assert!(error
+        .message
+        .contains("require Unix owner-only filesystem guarantees"));
 }
 
 #[test]
