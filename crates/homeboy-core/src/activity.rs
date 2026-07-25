@@ -142,7 +142,7 @@ fn reclassify_stale_running(items: &mut [ActivityItem]) {
         item.state = ActivityState::Stale;
         let reconcile = action(
             "reconcile stale activity",
-            "homeboy agent-task active --reconcile",
+            format!("homeboy agent-task reconcile {} --dry-run", item.id),
         );
         if !item
             .next_actions
@@ -392,10 +392,13 @@ mod tests {
             .find(|item| item.id == "stale-running")
             .expect("stale row present");
         assert_eq!(reclassified.state, ActivityState::Stale);
-        assert!(reclassified
-            .next_actions
-            .iter()
-            .any(|action| action.command == "homeboy agent-task active --reconcile"));
+        assert!(
+            reclassified
+                .next_actions
+                .iter()
+                .any(|action| action.command
+                    == "homeboy agent-task reconcile stale-running --dry-run")
+        );
     }
 
     #[test]

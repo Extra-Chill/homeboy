@@ -28,7 +28,8 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `submit` | Persist an agent-task plan and return a durable run id without executing it. |
 | `status <run-id>` | Read durable run status. |
 | `list [--limit <n>]` | List durable runs, newest first. |
-| `active [--limit <n>] [--reconcile [--dry-run]]` | List queued and running durable runs, newest first, or reconcile stale active records. |
+| `active [--limit <n>] [--reconcile [--dry-run\|--apply]]` | List queued and running durable runs, newest first, or preview/reconcile the explicit fleet mutation set. |
+| `reconcile <run-id> [--dry-run\|--apply]` | Preview or reconcile one durable run after refreshing its authoritative provider state. |
 | `latest [--limit <n>]` | Show the latest durable run. |
 | `logs <run-id> [--raw]` | Read the canonical durable event stream; `--raw` adds transport frames for diagnostics. |
 | `artifacts <run-id>` | List artifacts and evidence refs recorded for a completed run. |
@@ -38,7 +39,7 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 | `retry <run-id>` | Submit a fresh durable run from an existing run's plan. |
 | `prompts save\|list\|show\|remove` | Manage markdown prompts in Homeboy-owned storage. |
 
-`agent-task list`, `agent-task active`, and `agent-task latest` accept `--limit <n>` to cap discovery output. `agent-task active --reconcile` cancels stale, suspect, or unreconciled active records through the durable lifecycle path; add `--dry-run` to report candidates without mutating records.
+`agent-task list`, `agent-task active`, and `agent-task latest` accept `--limit <n>` to cap discovery output. `agent-task reconcile <run-id>` is the recovery path emitted by status and activity: it previews only that run by default, refreshes runner/provider state before classification, and requires `--apply` to mutate it. If ownership or provider state changes before apply, it reports a no-op. `agent-task active --reconcile` is an explicit fleet operation: it previews every candidate by default and requires `--apply` to reconcile the displayed set.
 
 Machine-readable `cook`, `resume`, `adopt`, and `status` responses default to bounded summaries: stable ids, states, totals, timestamps when present, artifact/evidence references, and actionable failure reasons are retained while nested provider evidence is projected away. Use `cook --full`, `resume --full`, `adopt --full`, or the emitted `full_command`; use the emitted `evidence_command` (with `--task` or `--kind`) to retrieve selected durable evidence.
 

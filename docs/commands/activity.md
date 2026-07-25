@@ -28,4 +28,4 @@ Human output is a compact table followed by next-action command lines per item.
 
 ## Scope
 
-This is a local read model only. List, show, and watch do not reconcile or otherwise mutate persisted state. Use the structured `reconcile` actions when shown, such as `homeboy runs reconcile` or `homeboy agent-task active --reconcile`, to invoke the existing explicit reconciliation services. It does not create a daemon, event bus, or offloaded job, and the Lab contract marks it local-only.
+This is a local read model only. List, show, and watch do not reconcile or otherwise mutate persisted state. Agent-task stale actions target the inspected run with `homeboy agent-task reconcile <run-id> --dry-run`; review the authoritative provider-state preview, then add `--apply` to authorize that one lifecycle mutation. It does not create a daemon, event bus, or offloaded job, and the Lab contract marks it local-only.

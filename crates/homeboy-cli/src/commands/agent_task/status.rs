@@ -114,18 +114,25 @@ pub(super) fn list_active(
         map.insert("buckets".to_string(), buckets);
         map.insert(
             "reconcile_hint".to_string(),
-            json!("run `homeboy agent-task active --reconcile` (or the per-run `commands.reconcile`) to safely cancel stale-running records without manual state edits"),
+            json!("run the per-run `commands.reconcile` preview, then repeat it with `--apply` after reviewing authoritative provider state"),
         );
     }
     attach_agent_task_discovery_actionable(&mut value);
     Ok((value, 0))
 }
 
-/// `agent-task active --reconcile`: safely cancel stale/suspect/unreconciled
-/// running records through the lifecycle cancel path. With `dry_run`, the
-/// candidates are reported but no record is mutated (#5682).
+/// `agent-task active --reconcile`: preview stale/suspect/unreconciled records
+/// across the fleet. `--apply` is required to mutate the previewed set (#10001).
 pub(super) fn reconcile_active(dry_run: bool) -> CmdResult<Value> {
     let report = agent_task_service_direct::reconcile_stale_active_runs(dry_run)?;
+    let exit = if report.failed > 0 { 1 } else { 0 };
+    Ok((serde_json::to_value(report).unwrap_or(Value::Null), exit))
+}
+
+/// `agent-task reconcile <run-id>` always addresses exactly one durable run.
+/// It previews by default; `--apply` is the explicit operator authorization.
+pub(super) fn reconcile_run(run_id: &str, dry_run: bool) -> CmdResult<Value> {
+    let report = agent_task_service_direct::reconcile_run(run_id, dry_run)?;
     let exit = if report.failed > 0 { 1 } else { 0 };
     Ok((serde_json::to_value(report).unwrap_or(Value::Null), exit))
 }
@@ -212,7 +219,10 @@ fn attach_agent_task_status_actionable(value: &mut Value, run_id: &str) {
         metadata.next_actions.push(
             CommandNextAction::new(
                 "reconcile stale run",
-                "homeboy agent-task active --reconcile".to_string(),
+                format!(
+                    "homeboy agent-task reconcile {} --dry-run",
+                    quote_arg(run_id)
+                ),
             )
             .with_kind(CommandNextActionKind::Repair),
         );
@@ -1493,7 +1503,7 @@ fn liveness_summary(record: &Value, run_id: &str) -> Value {
         "next_action": if terminal {
             format!("homeboy agent-task review {run_id}")
         } else if stale {
-            "homeboy agent-task active --reconcile".to_string()
+            format!("homeboy agent-task reconcile {} --dry-run", quote_arg(run_id))
         } else if waiting_for_capacity {
             "await runner completion or reconnect; the runner will claim this FIFO queue entry under its capacity lease".to_string()
         } else {
@@ -2129,7 +2139,7 @@ mod tests {
         assert_eq!(stale["liveness"]["provider_boundary"]["status"], "absent");
         assert_eq!(
             stale["liveness"]["next_action"],
-            "homeboy agent-task active --reconcile"
+            "homeboy agent-task reconcile agent-task-ghost --dry-run"
         );
 
         let accepted_handoff = compact_status_summary(

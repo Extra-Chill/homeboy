@@ -128,7 +128,10 @@ fn actions_for_agent_task(run_id: &str, state: ActivityState) -> Vec<ActivityNex
         ));
     }
     if matches!(state, ActivityState::Stale) {
-        actions.push(action("reconcile", "homeboy agent-task active --reconcile"));
+        actions.push(action(
+            "reconcile",
+            format!("homeboy agent-task reconcile {run_id} --dry-run"),
+        ));
     }
     actions
 }

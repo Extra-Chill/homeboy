@@ -857,7 +857,7 @@ fn discovery_active_classifies_liveness_and_source() {
         assert_eq!(summary.stale, 1);
         assert_eq!(
             summary.reconcile_command,
-            "homeboy agent-task active --reconcile"
+            "homeboy agent-task active --reconcile --dry-run"
         );
     });
 }
@@ -917,6 +917,93 @@ fn reconcile_cancels_stale_running_record_without_manual_edit() {
         let empty = reconcile_stale_active_runs(false).expect("nothing to reconcile");
         assert_eq!(empty.considered, 0);
         assert_eq!(empty.reconciled, 0);
+    });
+}
+
+#[test]
+fn scoped_reconcile_applies_only_the_inspected_run_and_preserves_other_stale_records() {
+    with_isolated_home(|_| {
+        for run_id in ["run-scoped-target", "run-scoped-unrelated"] {
+            agent_task_lifecycle::submit_plan(&discovery_plan(), Some(run_id)).expect("submitted");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Running);
+                record.tasks[0].state = AgentTaskState::Running;
+                record.metadata = serde_json::json!({ "runner_pid": u32::MAX });
+            })
+            .expect("stale record stored");
+        }
+
+        // Normalize the unrelated record before snapshotting it. The scoped
+        // operation must not write it while reconciling the requested run.
+        let unrelated_before = serde_json::to_value(
+            lifecycle_status("run-scoped-unrelated").expect("unrelated status"),
+        )
+        .expect("serialize unrelated record");
+
+        let preview = reconcile_run("run-scoped-target", true).expect("scoped preview");
+        assert_eq!(preview.scope, "run:run-scoped-target");
+        assert_eq!(preview.authorization, "preview");
+        assert_eq!(preview.considered, 1);
+        assert_eq!(preview.runs[0].action, "would-reconcile");
+        assert_eq!(
+            lifecycle_status("run-scoped-target")
+                .expect("target after preview")
+                .state,
+            AgentTaskRunState::Running
+        );
+
+        let applied = reconcile_run("run-scoped-target", false).expect("scoped apply");
+        assert_eq!(applied.authorization, "explicit-apply");
+        assert_eq!(applied.reconciled, 1);
+        assert_eq!(
+            lifecycle_status("run-scoped-target")
+                .expect("target after apply")
+                .state,
+            AgentTaskRunState::Cancelled
+        );
+        assert_eq!(
+            serde_json::to_value(
+                lifecycle_status("run-scoped-unrelated").expect("unrelated after")
+            )
+            .expect("serialize unrelated record"),
+            unrelated_before
+        );
+    });
+}
+
+#[test]
+fn scoped_reconcile_is_a_no_op_when_the_owner_becomes_live_after_preview() {
+    with_isolated_home(|_| {
+        agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-owner-changed"))
+            .expect("submitted");
+        agent_task_lifecycle::rewrite_record_for_test("run-owner-changed", |record| {
+            agent_task_lifecycle::set_run_state(record, AgentTaskRunState::Running);
+            record.tasks[0].state = AgentTaskState::Running;
+            record.metadata = serde_json::json!({ "runner_pid": u32::MAX });
+        })
+        .expect("stale record stored");
+
+        assert_eq!(
+            reconcile_run("run-owner-changed", true)
+                .expect("preview")
+                .runs[0]
+                .action,
+            "would-reconcile"
+        );
+        agent_task_lifecycle::rewrite_record_for_test("run-owner-changed", |record| {
+            record.metadata = serde_json::json!({ "runner_pid": std::process::id() });
+        })
+        .expect("live owner stored");
+
+        let report = reconcile_run("run-owner-changed", false).expect("apply after owner change");
+        assert_eq!(report.reconciled, 0);
+        assert_eq!(report.runs[0].action, "no-op");
+        assert_eq!(
+            lifecycle_status("run-owner-changed")
+                .expect("owner-changed record")
+                .state,
+            AgentTaskRunState::Running
+        );
     });
 }
 
@@ -1053,7 +1140,7 @@ fn discovery_runner_backed_run_emits_runner_scoped_commands() {
         );
         assert_eq!(
             run.commands.reconcile,
-            "homeboy --runner homeboy-lab agent-task cancel run-runner-commands --reason stale-running"
+            "homeboy --runner homeboy-lab agent-task reconcile run-runner-commands --dry-run"
         );
     });
 }

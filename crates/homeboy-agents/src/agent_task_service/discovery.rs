@@ -284,7 +284,7 @@ fn discovery_report(
 
 fn liveness_summary(runs: &[AgentTaskDiscoveryRun]) -> AgentTaskLivenessSummary {
     let mut summary = AgentTaskLivenessSummary {
-        reconcile_command: "homeboy agent-task active --reconcile",
+        reconcile_command: "homeboy agent-task active --reconcile --dry-run",
         ..Default::default()
     };
     for run in runs {
@@ -448,7 +448,7 @@ fn discovery_run(
             promote: aggregate_path
                 .map(|path| format!("homeboy agent-task promote {path} --to-worktree <handle>"))
                 .unwrap_or_else(|| format!("{command_prefix} review {run_id}")),
-            reconcile: format!("{command_prefix} cancel {run_id} --reason stale-running"),
+            reconcile: format!("{command_prefix} reconcile {run_id} --dry-run"),
         },
     }
 }
