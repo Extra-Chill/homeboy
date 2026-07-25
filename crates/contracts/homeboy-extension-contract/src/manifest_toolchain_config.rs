@@ -266,7 +266,17 @@ pub struct TestConfig {
     /// hint before invoking the extension test runner.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub passthrough_filter: Option<TestPassthroughFilter>,
+
+    /// Explicit extension-owned policy for an intentional no-test scope.
+    /// The extension must write a nonce-bound result envelope to the
+    /// invocation-provided evidence file before Homeboy accepts a neutral result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_tests_applicable: Option<TestNoTestsApplicablePolicy>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TestNoTestsApplicablePolicy {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TestChangedFileRouting {

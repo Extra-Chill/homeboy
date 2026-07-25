@@ -22,6 +22,7 @@ pub use homeboy_extension_contract::test_results::TestRunWorkflowResult;
 pub use homeboy_extension_contract::test_workflow::RawTestOutput;
 use homeboy_refactor_contract::AppliedRefactor;
 use regex::Regex;
+use serde::Deserialize;
 use serde::Serialize;
 use std::path::Path;
 
@@ -47,46 +48,63 @@ pub struct TestRunWorkflowArgs {
 
 const RAW_OUTPUT_TAIL_LINES: usize = 80;
 const COMPILER_FAILURE_LIMIT: usize = 20;
-const PHPUNIT_NO_DISCOVERY_MARKER: &str = "NO PHPUNIT TEST FILES DISCOVERED";
-const REQUIRE_PHPUNIT_TESTS_SETTING: &str = "require_phpunit_tests";
+const NO_TESTS_APPLICABLE_SCHEMA: &str = "homeboy/no-tests-applicable/v1";
+const NO_TESTS_APPLICABLE_FILE_ENV: &str = "HOMEBOY_NO_TESTS_APPLICABLE_FILE";
+const NO_TESTS_APPLICABLE_NONCE_ENV: &str = "HOMEBOY_NO_TESTS_APPLICABLE_NONCE";
+const NO_TESTS_APPLICABLE_EXTENSION_ENV: &str = "HOMEBOY_NO_TESTS_APPLICABLE_EXTENSION_ID";
+const NO_TESTS_APPLICABLE_STEP: &str = "test";
 
+#[derive(Deserialize)]
+struct NoTestsApplicableEvidence {
+    schema: String,
+    extension_id: String,
+    step: String,
+    nonce: String,
+    reason: String,
+}
 fn test_run_status(
     runner_success: bool,
     test_counts: Option<&TestCounts>,
-    phpunit_no_discovery: bool,
-    require_phpunit_tests: bool,
+    no_tests_applicable: bool,
 ) -> &'static str {
     if !runner_success {
         return "failed";
     }
 
-    if phpunit_no_discovery {
-        return if require_phpunit_tests {
-            "failed"
-        } else {
-            "skipped"
-        };
+    if no_tests_applicable {
+        return "skipped";
     }
 
-    if test_counts.map(|counts| counts.failed == 0).unwrap_or(true) {
+    // A zero count or an all-skipped result proves only that the runner
+    // started. A passing test gate needs evidence that it executed a test.
+    if test_counts.is_some_and(|counts| counts.passed + counts.failed > 0 && counts.failed == 0) {
         "passed"
     } else {
         "failed"
     }
 }
 
-fn phpunit_no_discovery(stdout: &str, stderr: &str) -> bool {
-    stdout.contains(PHPUNIT_NO_DISCOVERY_MARKER) || stderr.contains(PHPUNIT_NO_DISCOVERY_MARKER)
-}
-
-fn setting_truthy(settings: &[(String, String)], key: &str) -> bool {
-    settings.iter().any(|(setting_key, value)| {
-        setting_key == key
-            && matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-    })
+fn no_tests_applicable(
+    policy_enabled: bool,
+    evidence_file: &Path,
+    extension_id: &str,
+    nonce: &str,
+    test_counts: Option<&TestCounts>,
+) -> bool {
+    if !policy_enabled || test_counts.is_some_and(|counts| counts.passed + counts.failed > 0) {
+        return false;
+    }
+    let Ok(raw) = std::fs::read_to_string(evidence_file) else {
+        return false;
+    };
+    let Ok(evidence) = serde_json::from_str::<NoTestsApplicableEvidence>(&raw) else {
+        return false;
+    };
+    evidence.schema == NO_TESTS_APPLICABLE_SCHEMA
+        && evidence.extension_id == extension_id
+        && evidence.step == NO_TESTS_APPLICABLE_STEP
+        && evidence.nonce == nonce
+        && !evidence.reason.trim().is_empty()
 }
 
 pub fn run_main_test_workflow(
@@ -239,10 +257,19 @@ fn run_main_test_workflow_inner(
     }
 
     let test_context = crate::test::resolve_test_command(component).ok();
-    let result_parse = test_context
+    let test_config = test_context
         .as_ref()
         .and_then(|context| crate::load_extension(&context.extension_id).ok())
-        .and_then(|extension| extension.test.and_then(|test| test.result_parse));
+        .and_then(|extension| extension.test);
+    let result_parse = test_config
+        .as_ref()
+        .and_then(|test| test.result_parse.as_ref());
+    let no_tests_policy_enabled = test_config
+        .as_ref()
+        .and_then(|test| test.no_tests_applicable.as_ref())
+        .is_some();
+    let no_tests_evidence_file = run_dir.step_file(run_dir::files::NO_TESTS_APPLICABLE);
+    let no_tests_nonce = uuid::Uuid::new_v4().to_string();
 
     let runner = build_test_runner(
         component,
@@ -259,6 +286,25 @@ fn run_main_test_workflow_inner(
         .ci_env
         .iter()
         .fold(runner, |runner, (key, value)| runner.env(key, value));
+    let runner = runner
+        .env_if(
+            no_tests_policy_enabled,
+            NO_TESTS_APPLICABLE_FILE_ENV,
+            no_tests_evidence_file.to_string_lossy().as_ref(),
+        )
+        .env_if(
+            no_tests_policy_enabled,
+            NO_TESTS_APPLICABLE_NONCE_ENV,
+            &no_tests_nonce,
+        )
+        .env_if(
+            no_tests_policy_enabled,
+            NO_TESTS_APPLICABLE_EXTENSION_ENV,
+            test_context
+                .as_ref()
+                .map(|context| context.extension_id.as_str())
+                .unwrap_or_default(),
+        );
     // In summary mode, capture the child's stdout/stderr into run evidence
     // instead of tee-ing the full compiler/test stream to the terminal. The
     // output is still persisted to artifacts below and a bounded failure tail
@@ -294,28 +340,28 @@ fn run_main_test_workflow_inner(
         run_declared_result_parser(component, context, spec, &output.stdout, run_dir)?;
     }
 
-    let mut test_counts = parse_test_results_file_with_spec(&results_file, result_parse.as_ref())?
-        .or_else(|| {
+    let test_counts =
+        parse_test_results_file_with_spec(&results_file, result_parse)?.or_else(|| {
             result_parse
                 .as_ref()
                 .and_then(|spec| parse_test_results_text_with_spec(&output.stdout, spec))
                 .or_else(|| parse_test_results_text(&output.stdout))
         });
-    let phpunit_no_discovery = phpunit_no_discovery(&output.stdout, &output.stderr);
-    if phpunit_no_discovery && test_counts.is_none() {
-        test_counts = Some(TestCounts::new(0, 0, 0, 0));
-    }
-    let require_phpunit_tests = setting_truthy(&args.settings, REQUIRE_PHPUNIT_TESTS_SETTING);
+    let no_tests_applicable = no_tests_applicable(
+        no_tests_policy_enabled,
+        &no_tests_evidence_file,
+        test_context
+            .as_ref()
+            .map(|context| context.extension_id.as_str())
+            .unwrap_or_default(),
+        &no_tests_nonce,
+        test_counts.as_ref(),
+    );
 
     // Autofix is owned by `refactor --from test --write`; the test command is read-only.
     let test_autofix: Option<AppliedRefactor> = None;
 
-    let status = test_run_status(
-        output.success,
-        test_counts.as_ref(),
-        phpunit_no_discovery,
-        require_phpunit_tests,
-    );
+    let status = test_run_status(output.success, test_counts.as_ref(), no_tests_applicable);
 
     let coverage = coverage_file
         .as_deref()
@@ -356,7 +402,7 @@ fn run_main_test_workflow_inner(
         None
     };
 
-    if args.baseline_flags.baseline && !phpunit_no_discovery {
+    if args.baseline_flags.baseline && !no_tests_applicable {
         if let Some(ref counts) = test_counts {
             let _ = baseline::save_baseline(source_path, &args.component_id, counts)?;
         }
@@ -365,9 +411,7 @@ fn run_main_test_workflow_inner(
     let mut baseline_comparison = None;
     let mut baseline_exit_override = None;
 
-    if !args.baseline_flags.baseline
-        && !args.baseline_flags.ignore_baseline
-        && !phpunit_no_discovery
+    if !args.baseline_flags.baseline && !args.baseline_flags.ignore_baseline && !no_tests_applicable
     {
         if let Some(ref counts) = test_counts {
             let resolved_baseline = baseline::load_baseline(source_path).or_else(|| {
@@ -407,18 +451,21 @@ fn run_main_test_workflow_inner(
         ));
     }
 
-    if phpunit_no_discovery {
-        if require_phpunit_tests {
-            hints.push(format!(
-                "PHPUnit discovery is required by {}=true, but no PHPUnit test files were found.",
-                REQUIRE_PHPUNIT_TESTS_SETTING
-            ));
-        } else {
-            hints.push(format!(
-                "Set --setting {}=true when this component is expected to contain PHPUnit tests.",
-                REQUIRE_PHPUNIT_TESTS_SETTING
-            ));
-        }
+    if status == "failed" && output.success && test_counts.is_none() {
+        hints.push(
+            "The test runner succeeded without verifiable test results. Configure its extension result parser or emit a test-results sidecar."
+                .to_string(),
+        );
+    } else if status == "failed"
+        && output.success
+        && test_counts
+            .as_ref()
+            .is_some_and(|counts| counts.passed + counts.failed == 0)
+    {
+        hints.push(
+            "The test runner reported no executed tests. Fix the selected test filter or declare an extension no_tests_applicable policy with evidence."
+                .to_string(),
+        );
     }
 
     if !args.skip_lint {
@@ -436,7 +483,7 @@ fn run_main_test_workflow_inner(
     }
 
     if test_counts.is_some()
-        && !phpunit_no_discovery
+        && !no_tests_applicable
         && !args.baseline_flags.baseline
         && baseline_comparison.is_none()
     {
@@ -1317,47 +1364,70 @@ mod tests {
     #[test]
     fn status_requires_successful_runner_even_with_zero_failures() {
         let counts = TestCounts::new(3, 3, 0, 0);
-        assert_eq!(
-            test_run_status(false, Some(&counts), false, false),
-            "failed"
-        );
+        assert_eq!(test_run_status(false, Some(&counts), false), "failed");
     }
 
     #[test]
     fn status_passes_successful_runner_with_zero_failures() {
         let counts = TestCounts::new(3, 3, 0, 0);
-        assert_eq!(test_run_status(true, Some(&counts), false, false), "passed");
+        assert_eq!(test_run_status(true, Some(&counts), false), "passed");
     }
 
     #[test]
     fn status_fails_successful_runner_with_parsed_failures() {
         let counts = TestCounts::new(3, 2, 1, 0);
-        assert_eq!(test_run_status(true, Some(&counts), false, false), "failed");
+        assert_eq!(test_run_status(true, Some(&counts), false), "failed");
     }
 
     #[test]
-    fn status_skips_successful_phpunit_no_discovery_by_default() {
-        assert_eq!(test_run_status(true, None, true, false), "skipped");
+    fn status_fails_successful_runner_without_result_evidence() {
+        assert_eq!(test_run_status(true, None, false), "failed");
     }
 
     #[test]
-    fn status_fails_successful_phpunit_no_discovery_when_required() {
-        assert_eq!(test_run_status(true, None, true, true), "failed");
+    fn status_fails_all_skipped_tests() {
+        assert_eq!(
+            test_run_status(true, Some(&TestCounts::new(1, 0, 0, 1)), false),
+            "failed"
+        );
     }
 
     #[test]
-    fn detects_phpunit_no_discovery_marker() {
-        assert!(phpunit_no_discovery(
-            "NO PHPUNIT TEST FILES DISCOVERED\nSkipping PHPUnit tests",
-            ""
+    fn no_test_policy_requires_bound_structured_evidence() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let evidence_file = temp.path().join("no-tests-applicable.json");
+        std::fs::write(&evidence_file, r#"{"schema":"homeboy/no-tests-applicable/v1","extension_id":"fixture","step":"test","nonce":"nonce","reason":"docs only"}"#).expect("write evidence");
+        assert!(no_tests_applicable(
+            true,
+            &evidence_file,
+            "fixture",
+            "nonce",
+            None
         ));
-        assert!(!phpunit_no_discovery("smoke scripts passed", ""));
-    }
-
-    #[test]
-    fn setting_truthy_accepts_boolean_spellings() {
-        let settings = vec![(REQUIRE_PHPUNIT_TESTS_SETTING.to_string(), "yes".to_string())];
-        assert!(setting_truthy(&settings, REQUIRE_PHPUNIT_TESTS_SETTING));
+        std::fs::write(&evidence_file, r#"{"schema":"homeboy/no-tests-applicable/v1","extension_id":"fixture","step":"test","nonce":"wrong","reason":"docs only"}"#).expect("write wrong nonce");
+        assert!(!no_tests_applicable(
+            true,
+            &evidence_file,
+            "fixture",
+            "nonce",
+            None
+        ));
+        std::fs::write(&evidence_file, r#"{"schema":"homeboy/no-tests-applicable/v1","extension_id":"fixture","step":"lint","nonce":"nonce","reason":"docs only"}"#).expect("write wrong step");
+        assert!(!no_tests_applicable(
+            true,
+            &evidence_file,
+            "fixture",
+            "nonce",
+            None
+        ));
+        std::fs::write(&evidence_file, "not json").expect("write malformed evidence");
+        assert!(!no_tests_applicable(
+            true,
+            &evidence_file,
+            "fixture",
+            "nonce",
+            None
+        ));
     }
 
     #[test]

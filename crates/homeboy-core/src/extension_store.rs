@@ -171,6 +171,29 @@ mod tests {
     }
 
     #[test]
+    fn load_rejects_legacy_no_test_markers_without_echoing_values() {
+        crate::test_support::with_isolated_home(|_| {
+            for id in ["empty-markers", "whitespace-marker"] {
+                let extension_dir = paths::extensions().unwrap().join(id);
+                std::fs::create_dir_all(&extension_dir).unwrap();
+                std::fs::write(
+                    extension_dir.join(format!("{id}.json")),
+                    format!(
+                        r#"{{"name":"Fixture","version":"1.0.0","test":{{"no_tests_applicable":{{"evidence_markers":["super-secret-marker"]}}}}}}"#
+                    ),
+                )
+                .unwrap();
+
+                let error = load_extension(id).expect_err("invalid test policy should be rejected");
+                assert!(
+                    !error.to_string().contains("super-secret-marker"),
+                    "manifest marker values must not appear in diagnostics: {error}"
+                );
+            }
+        });
+    }
+
+    #[test]
     fn test_find_extension_by_tool() {
         crate::test_support::with_isolated_home(|_| {
             assert!(find_extension_by_tool("missing-tool").is_none());

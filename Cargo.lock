@@ -983,6 +983,7 @@ dependencies = [
  "sha2",
  "shellexpand",
  "tempfile",
+ "uuid",
 ]
 
 [[package]]

@@ -36,6 +36,7 @@ pub mod files {
     pub const LINT_CHANGED_FILES: &str = "lint-changed-files.txt";
     pub const TEST_RESULTS: &str = "test-results.json";
     pub const TEST_FAILURES: &str = "test-failures.json";
+    pub const NO_TESTS_APPLICABLE: &str = "no-tests-applicable.json";
     pub const COVERAGE: &str = "coverage.json";
     pub const FIX_RESULTS: &str = "fix-results.json";
     pub const BENCH_RESULTS: &str = "bench-results.json";

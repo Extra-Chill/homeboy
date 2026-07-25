@@ -230,6 +230,7 @@ impl ExtensionManifest {
         }
         Ok(())
     }
+
     pub fn has_cli(&self) -> bool {
         self.cli.is_some()
     }
