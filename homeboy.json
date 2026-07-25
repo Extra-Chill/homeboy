@@ -154,14 +154,10 @@
           "#[cfg(test)]"
         ],
         "include_path_contains": [
+          "crates/homeboy-agents/src/",
+          "crates/homeboy-cli/src/commands/",
           "crates/homeboy-core/src/",
-          "crates/homeboy-cli/src/commands/component.rs",
-          "crates/homeboy-cli/src/commands/extension.rs",
-          "crates/homeboy-cli/src/commands/lint.rs",
-          "crates/homeboy-cli/src/commands/report.rs",
-          "crates/homeboy-cli/src/commands/resources/",
-          "crates/homeboy-cli/src/commands/review/",
-          "crates/homeboy-cli/src/commands/test.rs"
+          "crates/homeboy-release/src/"
         ],
         "kind": "core_boundary_leak",
         "suggestion": "Move ecosystem-specific behavior into extension metadata/rules, or add an explicit audit allowlist for intentional examples.",
