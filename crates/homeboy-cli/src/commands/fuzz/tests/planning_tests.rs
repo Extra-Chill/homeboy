@@ -1280,6 +1280,11 @@ fn fuzz_compare_parses_envelope_paths() {
 }
 
 #[test]
+fn fuzz_inspect_rejects_ambiguous_full_result_modes() {
+    assert!(FuzzCli::try_parse_from(["fuzz", "inspect", "run-1", "--raw", "--full"]).is_err());
+}
+
+#[test]
 fn fuzz_output_contract_has_stable_variant_discriminators() {
     let contract = serde_json::to_value(FuzzOutput::Contract(run_contract())).unwrap();
     assert_eq!(contract["variant"], "contract");
@@ -1327,6 +1332,7 @@ fn fuzz_output_contract_has_stable_variant_discriminators() {
         },
         evidence_refs: Vec::new(),
         evidence_followups: Vec::new(),
+        diagnostic: None,
     }))
     .unwrap();
     assert_eq!(run["variant"], "run");

@@ -19,6 +19,7 @@ use homeboy::rig::{self, FuzzPrepareReport, RigSpec};
 use homeboy_extension::{self, ExtensionCapability, ExtensionRunner, FuzzConfig};
 use uuid::Uuid;
 
+use super::inspect::fuzz_failure_diagnostic;
 use super::planning::{load_sequence_plan, plan_inventory_selection, with_sequence_plan_metadata};
 use super::report::{
     evaluate_expected_metric_gates, evaluate_fuzz_gates_for_profile, fuzz_coverage_completeness,
@@ -213,6 +214,33 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         &results_path,
     );
     let campaign_contract = fuzz_campaign_contract(fuzz_config.as_ref(), args.seed.as_deref());
+    let diagnostic = (!success)
+        .then(|| {
+            let result = serde_json::json!({
+                "workload_id": workload_id,
+                "campaign": results,
+            });
+            homeboy::core::observation::ObservationStore::open_initialized()
+                .ok()
+                .and_then(|store| {
+                    homeboy::core::observation::runs_service::require_run(&store, &effective_run_id)
+                        .ok()
+                })
+                .map(|run| {
+                    fuzz_failure_diagnostic(
+                        &run,
+                        Some(&effective_run_id),
+                        &result,
+                        &[&runner_output.stderr, &runner_output.stdout],
+                        persisted_evidence
+                            .evidence_refs
+                            .iter()
+                            .map(|reference| reference.canonical_uri().to_string())
+                            .collect(),
+                    )
+                })
+        })
+        .flatten();
     run_dir.finish(success);
 
     Ok((
@@ -259,6 +287,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
             runner_contract: fuzz_runner_contract(fuzz_config.as_ref()),
             evidence_refs: persisted_evidence.evidence_refs,
             evidence_followups,
+            diagnostic,
         },
         exit_code,
     ))

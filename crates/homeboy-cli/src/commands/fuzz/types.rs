@@ -171,7 +171,7 @@ pub(crate) enum FuzzCommand {
     Replay(FuzzReplayArgs),
     /// Resolve minimization metadata for persisted fuzz cases
     Minimize(FuzzMinimizeArgs),
-    /// Print the raw fuzz runner result for a run without spelunking runner logs
+    /// Print a compact fuzz failure diagnosis or the complete runner result
     Inspect(FuzzInspectArgs),
 }
 
@@ -189,9 +189,13 @@ pub(crate) struct FuzzInspectArgs {
     #[arg(value_name = "RUN_ID")]
     pub(crate) run_id: String,
 
-    /// Print the result body as raw bytes/text instead of pretty JSON.
-    #[arg(long = "raw")]
+    /// Print the complete result body as raw bytes/text.
+    #[arg(long = "raw", conflicts_with = "full")]
     pub(crate) raw: bool,
+
+    /// Print the complete parsed result body instead of the bounded diagnosis.
+    #[arg(long = "full", conflicts_with = "raw")]
+    pub(crate) full: bool,
 }
 
 #[derive(Args, Clone)]

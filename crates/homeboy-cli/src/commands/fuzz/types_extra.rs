@@ -63,15 +63,45 @@ pub struct FuzzDoctorExtensionOutput {
     pub update_command: String,
 }
 
-/// Raw fuzz-result inspection output for `homeboy fuzz inspect <run-id>`.
-///
-/// Surfaces the bytes a runner wrote to `HOMEBOY_FUZZ_RESULTS_FILE`
-/// (and/or the persisted result envelope) without requiring the operator
-/// to spelunk runner job logs or chase remote temp paths.
+/// Bounded failure projection shared by local execution and persisted inspection.
+#[derive(Clone, Serialize)]
+pub struct FuzzFailureDiagnostic {
+    pub run_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rig_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workload_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub case_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    pub classification: String,
+    pub root_cause_chain: Vec<String>,
+    pub executions: u64,
+    pub source_identity: FuzzDiagnosticSourceIdentity,
+    pub evidence_refs: Vec<String>,
+    pub inspect_command: String,
+}
+
+#[derive(Clone, Serialize)]
+pub struct FuzzDiagnosticSourceIdentity {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub homeboy_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_sha: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+}
+
+/// Compact fuzz-result inspection output for `homeboy fuzz inspect <run-id>`.
 #[derive(Serialize)]
 pub struct FuzzInspectOutput {
     pub command: String,
-    pub status: String,
+    pub inspection_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub campaign_status: Option<String>,
     pub run_id: String,
     /// The run id that actually owns the raw fuzz-result artifact. For a
     /// Lab-offloaded run this is the downstream `fuzz` run discovered via the
@@ -85,10 +115,12 @@ pub struct FuzzInspectOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence_ref: Option<EvidenceRef>,
     pub fetch_command: Option<String>,
-    /// Parsed JSON body when the raw result is valid JSON; otherwise null.
+    /// Complete parsed JSON body, only present with `--full`.
     pub result: Option<serde_json::Value>,
-    /// Raw text body when the result is not valid JSON (or `--raw` text fallback).
+    /// Complete raw text body, present with `--raw` or invalid JSON.
     pub raw: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<FuzzFailureDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub envelope_summary: Option<homeboy::fuzz::FuzzResultEnvelopeArtifactSummary>,
     pub candidates: Vec<FuzzInspectCandidate>,
@@ -175,6 +207,8 @@ pub struct FuzzRunOutput {
     pub runner_contract: FuzzRunnerContract,
     pub evidence_refs: Vec<EvidenceRef>,
     pub evidence_followups: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<FuzzFailureDiagnostic>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]

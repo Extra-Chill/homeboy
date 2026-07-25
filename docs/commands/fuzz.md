@@ -16,6 +16,7 @@ homeboy fuzz report <results-file> [<component>] [--run-id <id>] [--inventory <p
 homeboy fuzz compare <baseline-envelope> <candidate-envelope> [--hotspot-policy <advisory|blocking|off>]
 homeboy fuzz replay [<artifact-or-case>] [--artifact <path>] [--case-id <id>] [--run-id <id>] [-- <runner-args>]
 homeboy fuzz minimize [<artifact-or-case>] [--artifact <path>] [--case-id <id>] [--run-id <id>] [--dry-run] [-- <runner-args>]
+homeboy fuzz inspect <run-id> [--raw|--full]
 ```
 
 ## Description
@@ -56,7 +57,9 @@ homeboy runs artifact get <run-id> <artifact-id> --output <path>
 homeboy fuzz replay --run-id <run-id> --case-id <case-id> --dry-run
 ```
 
-`homeboy runs show` renders the compact summary, coverage metadata when the
+`homeboy fuzz inspect <run-id>` renders a bounded failure diagnosis by default,
+with separate `inspection_status` and `campaign_status` fields. Use `--raw` or
+`--full` when the complete runner result is needed. `homeboy runs show` renders the compact summary, coverage metadata when the
 runner provides it, and fetch commands for recorded artifacts such as failing
 cases, repro cases, and coverage reports. Use `homeboy runs artifact get` for
 artifact bytes that are stored locally or mirrored from a runner.

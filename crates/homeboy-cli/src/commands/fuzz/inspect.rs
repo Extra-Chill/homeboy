@@ -1,10 +1,11 @@
 use std::path::Path;
 
 use homeboy::core::artifact_ref::{artifact_uri, EvidenceRef};
-use homeboy::core::observation::{runs_service, ArtifactRecord, ObservationStore};
+use homeboy::core::observation::{runs_service, ArtifactRecord, ObservationStore, RunRecord};
 use homeboy::fuzz::inspect_fuzz_result_envelope_artifact;
 
 use super::types::{FuzzInspectArgs, FuzzInspectCandidate, FuzzInspectOutput};
+use super::types_extra::{FuzzDiagnosticSourceIdentity, FuzzFailureDiagnostic};
 use homeboy::fuzz::fuzz_result_envelope_evidence_ref;
 
 /// Artifact kinds that hold the raw fuzz runner input/result pair, ordered by
@@ -15,10 +16,9 @@ const RAW_FUZZ_RESULT_KINDS: &[&str] = &["fuzz_results", "fuzz_result_envelope"]
 
 /// Implement `homeboy fuzz inspect <run-id>`.
 ///
-/// Resolves the raw fuzz runner result for a run and prints it directly so an
-/// operator debugging a remote Lab fuzz failure does not have to chase a remote
-/// temp path or read large runner job logs. Works against either the `fuzz` run
-/// id or the Lab `runner-exec` run id that offloaded it, because
+/// Resolves the raw fuzz runner result for a run and emits a bounded diagnosis.
+/// `--raw` and `--full` retain exact artifact access. Works against either the
+/// `fuzz` run id or the Lab `runner-exec` run id that offloaded it, because
 /// [`runs_service::list_artifacts_for_run`] already folds in downstream Lab job
 /// artifacts that share the same `remote_job_id`.
 pub(super) fn run_inspect(args: FuzzInspectArgs) -> homeboy::core::Result<FuzzInspectOutput> {
@@ -68,7 +68,8 @@ pub(super) fn run_inspect(args: FuzzInspectArgs) -> homeboy::core::Result<FuzzIn
     else {
         return Ok(FuzzInspectOutput {
             command: "fuzz.inspect".to_string(),
-            status: "not_found".to_string(),
+            inspection_status: "not_found".to_string(),
+            campaign_status: None,
             run_id: args.run_id.clone(),
             source_run_id: args.run_id.clone(),
             artifact_id: String::new(),
@@ -79,6 +80,7 @@ pub(super) fn run_inspect(args: FuzzInspectArgs) -> homeboy::core::Result<FuzzIn
             fetch_command: None,
             result: None,
             raw: None,
+            diagnostic: None,
             envelope_summary: None,
             candidates: candidate_index,
             next_steps: vec![
@@ -104,7 +106,8 @@ pub(super) fn run_inspect(args: FuzzInspectArgs) -> homeboy::core::Result<FuzzIn
     if !path.is_file() {
         return Ok(FuzzInspectOutput {
             command: "fuzz.inspect".to_string(),
-            status: "unavailable".to_string(),
+            inspection_status: "unavailable".to_string(),
+            campaign_status: None,
             run_id: args.run_id.clone(),
             source_run_id: selected.run_id.clone(),
             artifact_id: selected.id.clone(),
@@ -115,6 +118,7 @@ pub(super) fn run_inspect(args: FuzzInspectArgs) -> homeboy::core::Result<FuzzIn
             fetch_command: fetch_command.clone(),
             result: None,
             raw: None,
+            diagnostic: None,
             envelope_summary: None,
             candidates: candidate_index,
             next_steps: vec![
@@ -135,32 +139,54 @@ pub(super) fn run_inspect(args: FuzzInspectArgs) -> homeboy::core::Result<FuzzIn
     })?;
     let text = String::from_utf8_lossy(&bytes).to_string();
 
+    let parsed = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
     let (result, raw) = if args.raw {
-        (None, Some(text))
+        (None, Some(text.clone()))
+    } else if args.full {
+        (parsed.clone(), parsed.is_none().then_some(text.clone()))
     } else {
-        match serde_json::from_slice::<serde_json::Value>(&bytes) {
-            Ok(value) => (Some(value), None),
-            Err(_) => (None, Some(text)),
-        }
+        (None, None)
     };
+    let diagnostic_input = parsed
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({ "error": bounded(&text, 600) }));
 
     let envelope_summary = inspect_fuzz_result_envelope_artifact(selected)
         .filter(|inspection| inspection.valid)
         .and_then(|inspection| inspection.summary);
+    // The selected artifact can belong to a downstream Lab fuzz run rather than
+    // the runner-exec run used for lookup. Its record is the diagnostic source.
+    let diagnostic_run = runs_service::require_run(&store, &selected.run_id)?;
 
     Ok(FuzzInspectOutput {
         command: "fuzz.inspect".to_string(),
-        status: "ok".to_string(),
+        inspection_status: "ok".to_string(),
+        campaign_status: parsed.as_ref().and_then(campaign_status),
         run_id: args.run_id.clone(),
         source_run_id: selected.run_id.clone(),
         artifact_id: selected.id.clone(),
         artifact_kind: selected.kind.clone(),
         artifact_path: selected.path.clone(),
-        canonical_ref,
-        evidence_ref,
+        canonical_ref: canonical_ref.clone(),
+        evidence_ref: evidence_ref.clone(),
         fetch_command,
         result,
         raw,
+        diagnostic: Some(fuzz_failure_diagnostic(
+            &diagnostic_run,
+            Some(&selected.run_id),
+            &diagnostic_input,
+            &[],
+            canonical_ref
+                .iter()
+                .cloned()
+                .chain(
+                    evidence_ref
+                        .iter()
+                        .map(|reference| reference.canonical_uri().to_string()),
+                )
+                .collect(),
+        )),
         envelope_summary,
         candidates: candidate_index,
         next_steps: vec![
@@ -174,6 +200,175 @@ pub(super) fn run_inspect(args: FuzzInspectArgs) -> homeboy::core::Result<FuzzIn
             ),
         ],
     })
+}
+
+pub(super) fn fuzz_failure_diagnostic(
+    run: &RunRecord,
+    source_run_id: Option<&str>,
+    result: &serde_json::Value,
+    output: &[&str],
+    mut evidence_refs: Vec<String>,
+) -> FuzzFailureDiagnostic {
+    let campaign = result.get("campaign").unwrap_or(result);
+    let failed_case = campaign
+        .get("cases")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|cases| {
+            cases
+                .iter()
+                .find(|case| {
+                    matches!(
+                        case.get("status").and_then(serde_json::Value::as_str),
+                        Some("failed" | "error")
+                    )
+                })
+                .or_else(|| cases.first())
+        });
+    let case_id = failed_case
+        .and_then(|case| case.get("id").or_else(|| case.get("case_id")))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| find_string(result, &["case_id"]));
+    let phase = find_string(result, &["phase", "phase_id"]);
+    let mut causes = diagnostic_strings(result);
+    causes.extend(
+        output
+            .iter()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| bounded(value, 600)),
+    );
+    causes.sort();
+    causes.dedup();
+    let joined = causes.join("\n");
+    let classification = if joined.contains("ELOOP") {
+        "pre_execution_assembly_failure"
+    } else if joined.contains("PHP")
+        && (joined.contains("Missing ") || joined.contains("exit code"))
+    {
+        "php_bootstrap_fatal"
+    } else if causes.is_empty() {
+        "failed_campaign"
+    } else {
+        "workload_execution_failure"
+    }
+    .to_string();
+    causes.truncate(4);
+    let executions = if classification == "pre_execution_assembly_failure" {
+        0
+    } else {
+        find_u64(result, &["executions", "execution_count", "executionCount"])
+            .unwrap_or_else(|| u64::from(case_id.is_some()))
+    };
+    if let Some(source_run_id) = source_run_id {
+        evidence_refs.push(format!("homeboy://run/{source_run_id}"));
+    }
+    evidence_refs.sort();
+    evidence_refs.dedup();
+    let runtime = find_string(result, &["runtime", "runtime_id", "runtime_kind"]);
+    FuzzFailureDiagnostic {
+        run_id: run.id.clone(),
+        rig_id: run
+            .rig_id
+            .clone()
+            .or_else(|| find_string(result, &["rig_id"])),
+        workload_id: find_string(result, &["workload_id"]),
+        case_id,
+        phase,
+        classification,
+        root_cause_chain: causes,
+        executions,
+        source_identity: FuzzDiagnosticSourceIdentity {
+            component: run
+                .component_id
+                .clone()
+                .or_else(|| find_string(result, &["component"])),
+            homeboy_version: run.homeboy_version.clone(),
+            git_sha: run.git_sha.clone(),
+            runtime,
+        },
+        evidence_refs,
+        inspect_command: format!("homeboy fuzz inspect {}", run.id),
+    }
+}
+
+fn campaign_status(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("campaign")
+        .unwrap_or(value)
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+fn find_string(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    match value {
+        serde_json::Value::Object(object) => object.iter().find_map(|(key, value)| {
+            (keys.contains(&key.as_str()))
+                .then(|| value.as_str().map(str::to_string))
+                .flatten()
+                .or_else(|| find_string(value, keys))
+        }),
+        serde_json::Value::Array(values) => {
+            values.iter().find_map(|value| find_string(value, keys))
+        }
+        _ => None,
+    }
+}
+
+fn find_u64(value: &serde_json::Value, keys: &[&str]) -> Option<u64> {
+    match value {
+        serde_json::Value::Object(object) => object.iter().find_map(|(key, value)| {
+            (keys.contains(&key.as_str()))
+                .then(|| value.as_u64())
+                .flatten()
+                .or_else(|| find_u64(value, keys))
+        }),
+        serde_json::Value::Array(values) => values.iter().find_map(|value| find_u64(value, keys)),
+        _ => None,
+    }
+}
+
+fn diagnostic_strings(value: &serde_json::Value) -> Vec<String> {
+    const KEYS: &[&str] = &[
+        "error",
+        "message",
+        "failure_reason",
+        "stderr",
+        "stdout",
+        "reason",
+    ];
+    fn visit(value: &serde_json::Value, key: Option<&str>, values: &mut Vec<String>) {
+        if values.len() >= 12 {
+            return;
+        }
+        match value {
+            serde_json::Value::Object(object) => {
+                for (key, value) in object {
+                    visit(value, Some(key), values);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for value in items {
+                    visit(value, key, values);
+                }
+            }
+            serde_json::Value::String(value) if key.is_some_and(|key| KEYS.contains(&key)) => {
+                values.push(bounded(value, 600))
+            }
+            _ => {}
+        }
+    }
+    let mut values = Vec::new();
+    visit(value, None, &mut values);
+    values
+}
+
+fn bounded(value: &str, limit: usize) -> String {
+    let mut result = value.chars().take(limit).collect::<String>();
+    if value.chars().count() > limit {
+        result.push_str("...[truncated]");
+    }
+    result
 }
 
 fn fuzz_inspect_evidence_ref(artifact: &ArtifactRecord) -> Option<EvidenceRef> {
@@ -226,10 +421,11 @@ mod tests {
             let output = run_inspect(FuzzInspectArgs {
                 run_id: run.id.clone(),
                 raw: false,
+                full: true,
             })
             .expect("inspect");
 
-            assert_eq!(output.status, "ok");
+            assert_eq!(output.inspection_status, "ok");
             assert_eq!(output.artifact_kind, "fuzz_results");
             assert_eq!(output.source_run_id, run.id);
             let result = output.result.expect("parsed json result");
@@ -289,11 +485,19 @@ mod tests {
             let output = run_inspect(FuzzInspectArgs {
                 run_id: runner_run.id.clone(),
                 raw: false,
+                full: true,
             })
             .expect("inspect");
 
-            assert_eq!(output.status, "ok");
+            assert_eq!(output.inspection_status, "ok");
             assert_eq!(output.source_run_id, fuzz_run.id);
+            assert_eq!(
+                output
+                    .diagnostic
+                    .as_ref()
+                    .map(|diagnostic| diagnostic.run_id.as_str()),
+                Some(fuzz_run.id.as_str())
+            );
             assert_eq!(
                 output
                     .result
@@ -323,10 +527,11 @@ mod tests {
             let output = run_inspect(FuzzInspectArgs {
                 run_id: run.id.clone(),
                 raw: true,
+                full: false,
             })
             .expect("inspect");
 
-            assert_eq!(output.status, "ok");
+            assert_eq!(output.inspection_status, "ok");
             assert!(output.result.is_none());
             assert_eq!(output.raw.as_deref(), Some("{\"ok\":true}"));
         });
@@ -363,10 +568,11 @@ mod tests {
             let output = run_inspect(FuzzInspectArgs {
                 run_id: run.id.clone(),
                 raw: false,
+                full: true,
             })
             .expect("inspect");
 
-            assert_eq!(output.status, "ok");
+            assert_eq!(output.inspection_status, "ok");
             assert_eq!(output.artifact_kind, "runner-output");
             assert!(output
                 .canonical_ref
@@ -410,16 +616,104 @@ mod tests {
             let output = run_inspect(FuzzInspectArgs {
                 run_id: run.id.clone(),
                 raw: false,
+                full: false,
             })
             .expect("inspect");
 
-            assert_eq!(output.status, "not_found");
+            assert_eq!(output.inspection_status, "not_found");
             assert!(output.result.is_none());
             assert!(output.candidates.is_empty());
             assert!(output
                 .next_steps
                 .iter()
                 .any(|step| step.contains("runs evidence")));
+        });
+    }
+
+    #[test]
+    fn inspect_bounds_nested_codebox_failure_and_projects_statuses() {
+        with_isolated_home(|home| {
+            let _artifact_root =
+                ArtifactRootOverrideGuard::new(home.path().join("agent-readable-artifacts"));
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run("fuzz", serde_json::json!({ "exit_code": 255 })))
+                .expect("run");
+            store
+                .finish_run(&run.id, RunStatus::Fail, None)
+                .expect("finish");
+            let result = serde_json::json!({
+                "campaign": {
+                    "id": "codebox-campaign",
+                    "status": "failed",
+                    "cases": [{
+                        "id": "case-17",
+                        "status": "failed",
+                        "workload_id": "wordpress.run-php",
+                        "observed": {
+                            "phase": "bootstrap",
+                            "runtime_kind": "wp-codebox",
+                            "stderr": "PHP.run() failed with exit code 255\\nMissing /wordpress/wp-content/plugins/jetpack/jetpack_vendor/automattic/jetpack-assets/actions.php",
+                            "stdout": "x".repeat(700_000),
+                            "generated": { "base64_payload": "y".repeat(700_000) }
+                        }
+                    }]
+                }
+            });
+            let path = home.path().join("codebox-results.json");
+            std::fs::write(&path, serde_json::to_vec(&result).unwrap()).expect("write");
+            store
+                .record_artifact(&run.id, "fuzz_results", &path)
+                .expect("record");
+
+            let output = run_inspect(FuzzInspectArgs {
+                run_id: run.id.clone(),
+                raw: false,
+                full: false,
+            })
+            .expect("inspect");
+
+            assert_eq!(output.inspection_status, "ok");
+            assert_eq!(output.campaign_status.as_deref(), Some("failed"));
+            assert!(output.result.is_none());
+            assert!(output.raw.is_none());
+            let diagnostic = output.diagnostic.expect("diagnostic");
+            assert_eq!(diagnostic.classification, "php_bootstrap_fatal");
+            assert_eq!(diagnostic.case_id.as_deref(), Some("case-17"));
+            assert_eq!(diagnostic.phase.as_deref(), Some("bootstrap"));
+            assert_eq!(diagnostic.executions, 1);
+            assert!(diagnostic
+                .root_cause_chain
+                .join(" ")
+                .contains("actions.php"));
+            assert!(serde_json::to_vec(&diagnostic).unwrap().len() < 10_000);
+        });
+    }
+
+    #[test]
+    fn inspect_marks_eloop_as_pre_execution_with_zero_executions() {
+        with_isolated_home(|home| {
+            let _artifact_root =
+                ArtifactRootOverrideGuard::new(home.path().join("agent-readable-artifacts"));
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run("fuzz", serde_json::json!({})))
+                .expect("run");
+            let path = home.path().join("eloop-results.json");
+            std::fs::write(&path, br#"{"campaign":{"id":"assembly","status":"failed","metadata":{"error":"ELOOP: too many symbolic links while staging WP Codebox workload"}}}"#).expect("write");
+            store
+                .record_artifact(&run.id, "fuzz_results", &path)
+                .expect("record");
+
+            let output = run_inspect(FuzzInspectArgs {
+                run_id: run.id,
+                raw: false,
+                full: false,
+            })
+            .expect("inspect");
+            let diagnostic = output.diagnostic.expect("diagnostic");
+            assert_eq!(diagnostic.classification, "pre_execution_assembly_failure");
+            assert_eq!(diagnostic.executions, 0);
         });
     }
 }
