@@ -340,9 +340,10 @@ pub fn runner_exec_declaration_is_promoted(
     declaration: &str,
 ) -> bool {
     run.metadata_json
-        .pointer(&format!(
-            "/runner_exec_declaration_promotions/{role}:{declaration}/state"
-        ))
+        .get("runner_exec_declaration_promotions")
+        .and_then(Value::as_object)
+        .and_then(|promotions| promotions.get(&format!("{role}:{declaration}")))
+        .and_then(|promotion| promotion.get("state"))
         .and_then(Value::as_str)
         == Some("promoted")
 }

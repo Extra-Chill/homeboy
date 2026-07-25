@@ -219,3 +219,48 @@ fn record_evicted_evidence_loss(
     store.finish_run(&run.id, RunStatus::Fail, Some(metadata))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use homeboy_core::test_support::with_isolated_home;
+    use homeboy_core::{Error, ErrorCode};
+
+    #[test]
+    fn daemon_eviction_preserves_literal_declaration_paths_in_loss_detection() {
+        with_isolated_home(|_| {
+            let run_id = "evicted-escaped-declaration";
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_job_identity(
+                run_id,
+                "runner",
+                "job",
+                "/workspace",
+                &["true".to_string()],
+            )
+            .expect("run");
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_declarations(
+                run_id,
+                &["artifacts/result.json".to_string(), "a~b/c".to_string()],
+                &[],
+                &[],
+            )
+            .expect("declarations");
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store.get_run(run_id).expect("read").expect("run");
+            let error = Error {
+                code: ErrorCode::ValidationInvalidArgument,
+                message: "daemon job evicted".to_string(),
+                details: json!({ "http_status": 404 }),
+                hints: Vec::new(),
+                retryable: None,
+            };
+            record_evicted_evidence_loss(&store, &run, &error).expect("eviction recorded");
+            let terminal = store.get_run(run_id).expect("read").expect("terminal run");
+            assert_eq!(terminal.status, "fail");
+            assert_eq!(
+                terminal.metadata_json["runner_terminal_projection"]["classification"],
+                "daemon_evicted_before_terminal_projection"
+            );
+        });
+    }
+}

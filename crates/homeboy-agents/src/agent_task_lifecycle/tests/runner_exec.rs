@@ -313,6 +313,45 @@ fn synchronous_diagnostic_ssh_and_local_runs_finish_with_artifacts_and_replay_sa
     });
 }
 
+#[test]
+fn declaration_replay_uses_literal_path_and_tilde_keys() {
+    with_isolated_home(|_| {
+        let run_id = "escaped-declaration-recovery";
+        ensure_generic_runner_exec_run(run_id, "runner", "/workspace", &["true".to_string()])
+            .expect("run");
+        let declarations = ["artifacts/result.json", "a~b/c"];
+        record_runner_exec_artifact_declarations(
+            run_id,
+            &declarations
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>(),
+            &[],
+            &[],
+        )
+        .expect("declarations");
+        for declaration in declarations {
+            record_runner_exec_declaration_promotion(run_id, "artifact", declaration, &[])
+                .expect("promotion checkpoint");
+            // A duplicate recovery writes the same key and must remain visible.
+            record_runner_exec_declaration_promotion(run_id, "artifact", declaration, &[])
+                .expect("duplicate checkpoint");
+        }
+        let run = homeboy_core::observation::ObservationStore::open_initialized()
+            .expect("store")
+            .get_run(run_id)
+            .expect("read")
+            .expect("run");
+        for declaration in declarations {
+            assert!(runner_exec_declaration_is_promoted(
+                &run,
+                "artifact",
+                declaration,
+            ));
+        }
+    });
+}
+
 fn runner_snapshot(status: &str) -> RunnerJobLogSnapshot {
     let job_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").expect("job id");
     let status = match status {
