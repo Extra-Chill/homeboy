@@ -396,7 +396,54 @@ fn resolve_path_override(path: &str) -> Result<Component> {
         }
     }
 
+    // A managed task worktree of a registered component has no portable
+    // homeboy.json, so the checks above miss it. Match it to its registered
+    // component by shared git common dir or `<component>@<branch>` naming, so a
+    // bare-path resolution (e.g. top-level `homeboy status` from the worktree)
+    // resolves the same component `git status` does instead of a synthetic one
+    // (#9895).
+    if let Some(component) = registered_component_for_worktree_path(dir) {
+        return Ok(component);
+    }
+
     Ok(synthetic_component_for_path(path))
+}
+
+/// Whether `component_id` names a component registered in the standalone/project
+/// registry (as opposed to a synthetic ad-hoc target).
+fn component_is_registered(component_id: &str) -> bool {
+    crate::component::inventory()
+        .map(|components| components.iter().any(|c| c.id == component_id))
+        .unwrap_or(false)
+}
+
+/// Resolve a bare path to the registered component whose checkout owns it as a
+/// worktree — shared git common dir, or `<component>@<branch>` named beside the
+/// registered checkout. Returns the registered component rebased onto the
+/// worktree path. `None` when the path is not a worktree of any registered
+/// component (#9895).
+fn registered_component_for_worktree_path(dir: &Path) -> Option<Component> {
+    let cwd_git_root = detect_git_root(dir)?;
+    let components = crate::component::inventory().ok()?;
+    for mut registered in components {
+        let registered_path =
+            PathBuf::from(shellexpand::tilde(&registered.local_path).into_owned());
+        // A worktree is a *distinct* checkout of the registered component's repo:
+        // it shares the git common dir but the registered checkout does not live
+        // inside this working tree. Excluding the contained case avoids matching a
+        // monorepo root to one of its sub-directory components, which must remain
+        // a monorepo root rather than a single component (#9895).
+        let registered_is_contained = path_is_at_or_inside(&cwd_git_root, &registered_path);
+        if !registered_is_contained
+            && (same_git_common_dir(&registered_path, &cwd_git_root)
+                || is_named_component_worktree(&registered.id, &registered_path, &cwd_git_root))
+        {
+            registered.local_path = cwd_git_root.to_string_lossy().to_string();
+            crate::component::resolve_remote_path(&mut registered);
+            return Some(registered);
+        }
+    }
+    None
 }
 
 fn path_has_portable_config(path: &Path) -> Result<bool> {
@@ -453,7 +500,11 @@ pub fn resolve_target(spec: TargetSpec<'_>) -> Result<ResolvedTarget> {
     let synthetic = explicit_path
         .map(|path| path_has_portable_config(Path::new(path)).map(|has_config| !has_config))
         .transpose()?
-        .unwrap_or(false);
+        .unwrap_or(false)
+        // A registered component resolved for a managed worktree has no portable
+        // homeboy.json at the worktree path, but it is a real registered
+        // component — not a synthetic ad-hoc target (#9895).
+        && !component_is_registered(&component.id);
     if synthetic && !spec.allow_synthetic {
         return Err(Error::validation_invalid_argument(
             "target",
