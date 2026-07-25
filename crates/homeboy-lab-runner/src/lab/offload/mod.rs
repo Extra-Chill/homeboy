@@ -117,6 +117,7 @@ use super::super::{
     RunnerFileTransfer, RunnerStaleDaemonWarning, RunnerStatusReport, RunnerTunnelMode,
     RunnerWorkspaceApplyOutput, RunnerWorkspaceOutputPaths, RunnerWorkspaceSyncMode,
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, WorkspaceCleanupPolicy,
+    WorkspaceTerminalOutcome,
 };
 use crate::runtime_materializer::{
     resolve_lab_agent_runtime, runtime_execution_evidence, RunnerRuntimeMaterializerOperations,

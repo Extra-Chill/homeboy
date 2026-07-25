@@ -995,7 +995,13 @@ pub(crate) fn exec_lab_context(
                 agent_task_lifecycle::run_owes_candidate_follow_up(run_id).unwrap_or(false)
             })
             .unwrap_or(false);
-        workspace.set_success(exit_code == 0 && !owes_candidate_follow_up);
+        workspace.set_terminal_outcome(if exit_code == 0 && !owes_candidate_follow_up {
+            WorkspaceTerminalOutcome::Success
+        } else if exit_code == 130 {
+            WorkspaceTerminalOutcome::Cancelled
+        } else {
+            WorkspaceTerminalOutcome::Failure
+        });
     }
     Ok(LabOffloadOutcome::Offloaded {
         plan: context.plan,

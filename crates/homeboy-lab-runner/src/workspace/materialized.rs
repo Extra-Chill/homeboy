@@ -15,7 +15,10 @@
 //! propagated, and the controller-side `runner workspace prune` remains the
 //! backstop.
 
-use super::sync::reap_run_workspace;
+use homeboy_core::resource_lifecycle_index::ResourceLifecycleResourceStatus;
+
+use super::sync::{reap_run_workspace, record_workspace_terminal_evidence};
+use super::types::RunnerWorkspaceTerminalEvidence;
 
 /// Teardown policy for a run-owned materialized workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,11 +37,32 @@ pub(crate) enum WorkspaceCleanupPolicy {
 }
 
 impl WorkspaceCleanupPolicy {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::DeleteAlways => "delete-on-terminal",
             Self::PreserveOnFailure => "preserve-on-failure",
             Self::PreserveAlways => "preserve-always",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkspaceTerminalOutcome {
+    Success,
+    Failure,
+    Cancelled,
+    Panic,
+    UncertainHandoff,
+}
+
+impl WorkspaceTerminalOutcome {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failure => "failure",
+            Self::Cancelled => "cancelled",
+            Self::Panic => "panic",
+            Self::UncertainHandoff => "uncertain_handoff",
         }
     }
 }
@@ -66,7 +90,7 @@ pub(crate) struct MaterializedWorkspace {
     remote_path: String,
     artifact_dir: Option<String>,
     policy: WorkspaceCleanupPolicy,
-    succeeded: bool,
+    outcome: WorkspaceTerminalOutcome,
     relinquished: bool,
 }
 
@@ -82,15 +106,15 @@ impl MaterializedWorkspace {
             remote_path,
             artifact_dir,
             policy,
-            succeeded: false,
+            outcome: WorkspaceTerminalOutcome::Failure,
             relinquished: false,
         }
     }
 
-    /// Record the run outcome. Under the default `PreserveOnFailure` policy the
-    /// workspace is reaped on drop only when `succeeded` is `true`.
-    pub(crate) fn set_success(&mut self, succeeded: bool) {
-        self.succeeded = succeeded;
+    /// Set a known terminal outcome when the caller can distinguish cancellation
+    /// from failure before this run-owned handle is dropped.
+    pub(crate) fn set_terminal_outcome(&mut self, outcome: WorkspaceTerminalOutcome) {
+        self.outcome = outcome;
     }
 
     /// Relinquish run-scoped ownership without reaping — e.g. the remote run
@@ -98,6 +122,7 @@ impl MaterializedWorkspace {
     /// the checkout. After this the handle never reaps on drop.
     pub(crate) fn preserve(&mut self) {
         self.relinquished = true;
+        self.outcome = WorkspaceTerminalOutcome::UncertainHandoff;
     }
 
     fn should_reap(&self) -> bool {
@@ -109,15 +134,47 @@ impl MaterializedWorkspace {
         match self.policy {
             WorkspaceCleanupPolicy::DeleteAlways => true,
             WorkspaceCleanupPolicy::PreserveAlways => false,
-            WorkspaceCleanupPolicy::PreserveOnFailure => self.succeeded,
+            WorkspaceCleanupPolicy::PreserveOnFailure => {
+                self.outcome == WorkspaceTerminalOutcome::Success
+            }
         }
     }
 
-    fn outcome(&self) -> &'static str {
-        if self.succeeded {
-            "success"
+    fn terminal_outcome(&self) -> WorkspaceTerminalOutcome {
+        if std::thread::panicking() {
+            WorkspaceTerminalOutcome::Panic
         } else {
-            "failure-or-cancellation"
+            self.outcome
+        }
+    }
+
+    fn reclaim_command(&self) -> String {
+        format!(
+            "homeboy runner workspace prune {} --apply --min-age-hours 0",
+            homeboy_core::engine::shell::quote_arg(&self.runner_id),
+        )
+    }
+
+    fn record_terminal_evidence(&self, retained: bool, status: ResourceLifecycleResourceStatus) {
+        let evidence = RunnerWorkspaceTerminalEvidence {
+            schema: "homeboy/runner-workspace-terminal-evidence/v1".to_string(),
+            policy: self.policy.label().to_string(),
+            final_outcome: self.terminal_outcome().label().to_string(),
+            lifecycle_owner: if self.relinquished {
+                "runner.job".to_string()
+            } else {
+                "runner.workspace".to_string()
+            },
+            retained_location: retained.then(|| self.remote_path.clone()),
+            reclaim_command: retained.then(|| self.reclaim_command()),
+        };
+        if let Err(error) =
+            record_workspace_terminal_evidence(&self.runner_id, &self.remote_path, evidence, status)
+        {
+            eprintln!(
+                "Lab offload: warning: could not persist terminal workspace evidence for `{}` on runner `{}`: {}",
+                self.remote_path, self.runner_id, error.message
+            );
         }
     }
 }
@@ -125,18 +182,23 @@ impl MaterializedWorkspace {
 impl Drop for MaterializedWorkspace {
     fn drop(&mut self) {
         if !self.should_reap() {
+            self.record_terminal_evidence(true, ResourceLifecycleResourceStatus::Retained);
             if !self.relinquished && !std::thread::panicking() {
                 eprintln!(
                     "Lab offload: retained run-scoped workspace `{}` on runner `{}` (policy={}, outcome={}, lifecycle_owner=runner.workspace, reclaim=`homeboy runner workspace prune {} --apply --min-age-hours 0`).",
                     self.remote_path,
                     self.runner_id,
                     self.policy.label(),
-                    self.outcome(),
+                    self.terminal_outcome().label(),
                     homeboy_core::engine::shell::quote_arg(&self.runner_id),
                 );
             }
             return;
         }
+        // Persist cleanup-pending truth before deletion. The metadata is then
+        // removed atomically with the workspace, so it cannot be mistaken for
+        // retained evidence after a successful reap.
+        self.record_terminal_evidence(false, ResourceLifecycleResourceStatus::CleanupPending);
         match reap_run_workspace(
             &self.runner_id,
             &self.remote_path,
@@ -144,12 +206,18 @@ impl Drop for MaterializedWorkspace {
         ) {
             Ok(()) => eprintln!(
                 "Lab offload: reaped run-scoped workspace `{}` on runner `{}` (policy={}, outcome={}, lifecycle_owner=runner.workspace).",
-                self.remote_path, self.runner_id, self.policy.label(), self.outcome()
+                self.remote_path,
+                self.runner_id,
+                self.policy.label(),
+                self.terminal_outcome().label()
             ),
-            Err(err) => eprintln!(
-                "Lab offload: warning: could not reap run-scoped workspace `{}` on runner `{}`: {}. Reclaim leftover lab workspaces with `homeboy runner workspace prune {}`.",
-                self.remote_path, self.runner_id, err.message, self.runner_id
-            ),
+            Err(err) => {
+                self.record_terminal_evidence(true, ResourceLifecycleResourceStatus::Failed);
+                eprintln!(
+                    "Lab offload: warning: could not reap run-scoped workspace `{}` on runner `{}`: {}. Reclaim leftover lab workspaces with `{}`.",
+                    self.remote_path, self.runner_id, err.message, self.reclaim_command()
+                );
+            }
         }
     }
 }

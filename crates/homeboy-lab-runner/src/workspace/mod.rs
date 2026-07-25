@@ -38,7 +38,9 @@ pub use types::{
     RunnerWorkspaceUpdateOutput,
 };
 
-pub(crate) use materialized::{MaterializedWorkspace, WorkspaceCleanupPolicy};
+pub(crate) use materialized::{
+    MaterializedWorkspace, WorkspaceCleanupPolicy, WorkspaceTerminalOutcome,
+};
 pub(crate) use materializer::{
     dependency_cache_manifest_command, dependency_cache_restore_command,
     dependency_cache_save_command,

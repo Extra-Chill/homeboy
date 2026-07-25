@@ -4,10 +4,12 @@ use std::process::Command;
 
 use crate::workspace::sync::{
     prune_scan_command, prune_workspaces, sync_workspace, update_workspace_resource_lifecycle,
+    WORKSPACE_METADATA_FILE,
 };
 use crate::workspace::types::{
     RunnerWorkspacePruneOptions, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
+use crate::{MaterializedWorkspace, WorkspaceCleanupPolicy, WorkspaceTerminalOutcome};
 
 #[test]
 fn prune_workspaces_previews_orphans_without_deleting_by_default() {
@@ -205,6 +207,24 @@ fn preserved_failure_lifecycle_is_registered_for_ttl_pruning() {
             lifecycle,
         )
         .expect("register ttl lifecycle");
+        {
+            let mut handle = MaterializedWorkspace::new(
+                "lab-local-prune-retained".to_string(),
+                synced.remote_path.clone(),
+                None,
+                WorkspaceCleanupPolicy::PreserveOnFailure,
+            );
+            handle.set_terminal_outcome(WorkspaceTerminalOutcome::Failure);
+        }
+        let metadata =
+            fs::read_to_string(Path::new(&synced.remote_path).join(WORKSPACE_METADATA_FILE))
+                .expect("terminal metadata");
+        let metadata: serde_json::Value = serde_json::from_str(&metadata).expect("metadata json");
+        assert_eq!(metadata["terminal_evidence"]["final_outcome"], "failure");
+        assert_eq!(
+            metadata["terminal_evidence"]["retained_location"],
+            synced.remote_path
+        );
 
         let (preview, _) = prune_workspaces(
             "lab-local-prune-retained",

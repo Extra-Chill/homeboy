@@ -507,6 +507,28 @@ pub(super) struct RunnerWorkspaceMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     pub resource_lifecycle: Option<ResourceLifecycleRecord>,
+    /// Terminal ownership truth is written by the run-owned cleanup handle.
+    /// Older metadata intentionally has no terminal evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub terminal_evidence: Option<RunnerWorkspaceTerminalEvidence>,
+}
+
+/// Final workspace disposition recorded by the owner that observed it.
+///
+/// Kept separate from `ResourceLifecycleRecord` so the stable shared lifecycle
+/// schema remains descriptive of the resource while this runner-local metadata
+/// captures the terminal execution fact.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct RunnerWorkspaceTerminalEvidence {
+    pub schema: String,
+    pub policy: String,
+    pub final_outcome: String,
+    pub lifecycle_owner: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retained_location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reclaim_command: Option<String>,
 }
 
 // RunnerWorkspaceCurrentSummary now lives in the shared runner-contract crate

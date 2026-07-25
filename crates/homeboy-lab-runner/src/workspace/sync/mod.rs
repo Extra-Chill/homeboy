@@ -34,8 +34,8 @@ use super::types::{
     RunnerWorkspaceMaterializationPlan, RunnerWorkspaceMetadata, RunnerWorkspacePruneEntry,
     RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry,
     RunnerWorkspaceSnapshotEntry, RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, RunnerWorkspaceUpdateOptions,
-    RunnerWorkspaceUpdateOutput, DEFAULT_EXCLUDES,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, RunnerWorkspaceTerminalEvidence,
+    RunnerWorkspaceUpdateOptions, RunnerWorkspaceUpdateOutput, DEFAULT_EXCLUDES,
 };
 use super::util::{
     deterministic_remote_path, git_output, parent_remote_path, ssh_client_for_runner,
@@ -1215,6 +1215,7 @@ fn workspace_metadata(
         run_id: run_id.map(str::to_string),
         job_id: None,
         resource_lifecycle: Some(resource_lifecycle),
+        terminal_evidence: None,
     }
 }
 
@@ -1281,6 +1282,50 @@ pub(crate) fn update_workspace_resource_lifecycle(
             Error::internal_json(error.to_string(), Some(format!("parse {metadata_path}")))
         })?;
     metadata.resource_lifecycle = Some(resource_lifecycle);
+    write_workspace_metadata(&runner, metadata)
+}
+
+/// Persist the final disposition observed by the run-owned workspace handle.
+///
+/// Publishing uses the same temp-file-and-rename writer as lifecycle updates,
+/// so readers see either the old metadata or one complete terminal record.
+/// Repeating an identical terminal update is intentionally idempotent.
+pub(crate) fn record_workspace_terminal_evidence(
+    runner_id: &str,
+    remote_path: &str,
+    evidence: RunnerWorkspaceTerminalEvidence,
+    lifecycle_status: ResourceLifecycleResourceStatus,
+) -> Result<()> {
+    let runner = load(runner_id)?;
+    let metadata_path = format!(
+        "{}/{}",
+        remote_path.trim_end_matches('/'),
+        WORKSPACE_METADATA_FILE
+    );
+    let content = match runner.kind {
+        RunnerKind::Local => fs::read_to_string(&metadata_path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("read {metadata_path}")))
+        })?,
+        RunnerKind::Ssh => {
+            let (_, client) = ssh_client_for_runner(&runner)?;
+            let output = client.execute_with_timeout(
+                &format!("cat {}", shell::quote_arg(&metadata_path)),
+                WORKSPACE_METADATA_TIMEOUT,
+            );
+            if !output.success {
+                return Err(workspace_metadata_ssh_error(&output));
+            }
+            output.stdout
+        }
+    };
+    let mut metadata: RunnerWorkspaceMetadata =
+        serde_json::from_str(&content).map_err(|error| {
+            Error::internal_json(error.to_string(), Some(format!("parse {metadata_path}")))
+        })?;
+    if let Some(lifecycle) = metadata.resource_lifecycle.as_mut() {
+        lifecycle.status = lifecycle_status;
+    }
+    metadata.terminal_evidence = Some(evidence);
     write_workspace_metadata(&runner, metadata)
 }
 
@@ -1360,12 +1405,27 @@ fn write_workspace_metadata(
                     )
                 })?;
             }
-            fs::write(path, json).map_err(|err| {
+            let mut staged =
+                tempfile::NamedTempFile::new_in(parent_or_current_dir(path)).map_err(|err| {
+                    Error::internal_io(
+                        err.to_string(),
+                        Some("create workspace metadata staging file".to_string()),
+                    )
+                })?;
+            use std::io::Write;
+            staged.write_all(json.as_bytes()).map_err(|err| {
                 Error::internal_io(
                     err.to_string(),
                     Some("write workspace metadata".to_string()),
                 )
-            })
+            })?;
+            staged.persist(path).map_err(|err| {
+                Error::internal_io(
+                    err.error.to_string(),
+                    Some("publish workspace metadata".to_string()),
+                )
+            })?;
+            Ok(())
         }
         RunnerKind::Ssh => {
             let parent = parent_remote_path(&metadata_path);
@@ -1419,6 +1479,12 @@ fn write_workspace_metadata(
             }
         }
     }
+}
+
+fn parent_or_current_dir(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
 }
 
 fn retry_idempotent_ssh_operation(

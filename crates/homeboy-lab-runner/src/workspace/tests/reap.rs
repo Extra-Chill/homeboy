@@ -1,9 +1,9 @@
 use std::fs;
 use std::path::Path;
 
-use crate::workspace::sync::{reap_run_workspace, sync_workspace};
+use crate::workspace::sync::{reap_run_workspace, sync_workspace, WORKSPACE_METADATA_FILE};
 use crate::workspace::types::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
-use crate::{MaterializedWorkspace, WorkspaceCleanupPolicy};
+use crate::{MaterializedWorkspace, WorkspaceCleanupPolicy, WorkspaceTerminalOutcome};
 
 fn sync_options(path: String) -> RunnerWorkspaceSyncOptions {
     RunnerWorkspaceSyncOptions {
@@ -105,7 +105,7 @@ fn materialized_workspace_reaps_on_success_under_default_policy() {
                 None,
                 WorkspaceCleanupPolicy::default(),
             );
-            handle.set_success(true);
+            handle.set_terminal_outcome(WorkspaceTerminalOutcome::Success);
         } // drop reaps under the default delete-on-success policy
 
         assert!(
@@ -129,13 +129,57 @@ fn materialized_workspace_preserves_on_failure_under_default_policy() {
                 WorkspaceCleanupPolicy::default(),
             );
             // A failed run is the default outcome (success never recorded).
-            handle.set_success(false);
+            handle.set_terminal_outcome(WorkspaceTerminalOutcome::Failure);
         } // drop preserves the workspace for post-mortem evidence
 
         assert!(
             Path::new(&remote_path).exists(),
             "failure path must preserve the run-scoped workspace as evidence"
         );
+    });
+}
+
+#[test]
+fn terminal_evidence_records_retained_outcome_owner_location_and_reclaim_command() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        for (outcome, expected_owner) in [
+            (WorkspaceTerminalOutcome::Failure, "runner.workspace"),
+            (WorkspaceTerminalOutcome::Cancelled, "runner.workspace"),
+            (WorkspaceTerminalOutcome::UncertainHandoff, "runner.job"),
+        ] {
+            let runner_id = format!("lab-local-terminal-evidence-{}", outcome.label());
+            let remote_path = sync_local_workspace(&runner_id, runner_root.path());
+            {
+                let mut handle = MaterializedWorkspace::new(
+                    runner_id.clone(),
+                    remote_path.clone(),
+                    None,
+                    WorkspaceCleanupPolicy::PreserveOnFailure,
+                );
+                if outcome == WorkspaceTerminalOutcome::UncertainHandoff {
+                    handle.preserve();
+                } else {
+                    handle.set_terminal_outcome(outcome);
+                }
+            }
+
+            let metadata =
+                fs::read_to_string(Path::new(&remote_path).join(WORKSPACE_METADATA_FILE))
+                    .expect("terminal metadata");
+            let metadata: serde_json::Value =
+                serde_json::from_str(&metadata).expect("metadata json");
+            let evidence = &metadata["terminal_evidence"];
+            assert_eq!(evidence["policy"], "preserve-on-failure");
+            assert_eq!(evidence["final_outcome"], outcome.label());
+            assert_eq!(evidence["lifecycle_owner"], expected_owner);
+            assert_eq!(evidence["retained_location"], remote_path);
+            assert_eq!(
+                evidence["reclaim_command"],
+                format!("homeboy runner workspace prune {runner_id} --apply --min-age-hours 0")
+            );
+            assert_eq!(metadata["resource_lifecycle"]["status"], "retained");
+        }
     });
 }
 
@@ -152,13 +196,17 @@ fn preserve_on_failure_keeps_cancelled_workspace_for_ttl_reclamation() {
                 None,
                 WorkspaceCleanupPolicy::PreserveOnFailure,
             );
-            handle.set_success(false);
+            handle.set_terminal_outcome(WorkspaceTerminalOutcome::Cancelled);
         }
 
         assert!(
             Path::new(&remote_path).exists(),
             "cancellation must retain the workspace under preserve-on-failure"
         );
+        let metadata = fs::read_to_string(Path::new(&remote_path).join(WORKSPACE_METADATA_FILE))
+            .expect("cancelled terminal metadata");
+        let metadata: serde_json::Value = serde_json::from_str(&metadata).expect("metadata json");
+        assert_eq!(metadata["terminal_evidence"]["final_outcome"], "cancelled");
     });
 }
 
@@ -180,6 +228,14 @@ fn preserve_on_failure_keeps_workspace_when_unwinding_from_panic() {
 
         assert!(result.is_err());
         assert!(Path::new(&remote_path).exists());
+        let metadata = fs::read_to_string(Path::new(&remote_path).join(WORKSPACE_METADATA_FILE))
+            .expect("panic terminal metadata");
+        let metadata: serde_json::Value = serde_json::from_str(&metadata).expect("metadata json");
+        assert_eq!(metadata["terminal_evidence"]["final_outcome"], "panic");
+        assert_eq!(
+            metadata["terminal_evidence"]["retained_location"],
+            remote_path
+        );
     });
 }
 
@@ -196,7 +252,7 @@ fn materialized_workspace_preserve_disarms_reap_even_on_success() {
                 None,
                 WorkspaceCleanupPolicy::default(),
             );
-            handle.set_success(true);
+            handle.set_terminal_outcome(WorkspaceTerminalOutcome::Success);
             // A detached/in-flight remote job still owns the workspace.
             handle.preserve();
         }
@@ -252,7 +308,7 @@ fn materialized_workspace_preserve_always_policy_never_reaps() {
                 None,
                 WorkspaceCleanupPolicy::PreserveAlways,
             );
-            handle.set_success(true);
+            handle.set_terminal_outcome(WorkspaceTerminalOutcome::Success);
         }
 
         assert!(
@@ -289,7 +345,13 @@ fn job_runtime_cleanup_reaps_success_failure_and_cancellation_without_touching_r
                     Some(artifact_dir.clone()),
                     WorkspaceCleanupPolicy::DeleteAlways,
                 );
-                handle.set_success(outcome == "success");
+                handle.set_terminal_outcome(if outcome == "success" {
+                    WorkspaceTerminalOutcome::Success
+                } else if outcome == "cancelled" {
+                    WorkspaceTerminalOutcome::Cancelled
+                } else {
+                    WorkspaceTerminalOutcome::Failure
+                });
             }
 
             assert!(

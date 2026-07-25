@@ -100,7 +100,9 @@ pub(crate) use workspace::verify_lab_workspace;
 #[cfg(test)]
 pub(crate) use workspace::workspace_resource_lifecycle;
 
-pub(crate) use workspace::{MaterializedWorkspace, WorkspaceCleanupPolicy};
+pub(crate) use workspace::{
+    MaterializedWorkspace, WorkspaceCleanupPolicy, WorkspaceTerminalOutcome,
+};
 
 pub use apply::{
     apply_change_artifact, apply_workspace_patch, RunnerWorkspaceApplyOptions,
