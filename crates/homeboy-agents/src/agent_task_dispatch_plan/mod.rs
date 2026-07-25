@@ -458,6 +458,14 @@ fn resolve_dispatch_workspace(
     }
 
     let resolution = worktree_providers::resolve_worktree_provider(workspace).map_err(|error| {
+        if error
+            .details
+            .pointer("/workspace/classification")
+            .and_then(Value::as_str)
+            == Some("workspace.resolved_but_dirty")
+        {
+            return error;
+        }
         Error::validation_invalid_argument(
             "workspace",
             format!(
