@@ -2410,6 +2410,87 @@ fn cancelling_daemon_exec_job_terminates_process_tree() {
     );
 }
 
+#[cfg(unix)]
+fn wait_for_pid_file(path: &std::path::Path) -> libc::pid_t {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::fs::read_to_string(path)
+        .expect("child pid fixture")
+        .trim()
+        .parse()
+        .expect("numeric child pid")
+}
+
+#[cfg(unix)]
+fn assert_pid_exits(pid: libc::pid_t) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_ne!(
+        unsafe { libc::kill(pid, 0) },
+        0,
+        "process {pid} remained live"
+    );
+}
+
+#[cfg(unix)]
+fn shell_quote_path(path: &std::path::Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "'\"'\"'"))
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_cancellation_reaps_cooperative_child_process_group() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let descendant = temp.path().join("descendant.pid");
+    let mut command = Command::new("sh");
+    command.args([
+        "-c",
+        &format!(
+            "sleep 30 & echo $! > {}; wait",
+            shell_quote_path(&descendant)
+        ),
+    ]);
+    crate::engine::command::isolate_process_tree(&mut command);
+    let mut child = command.spawn().expect("spawn cooperative process group");
+    let descendant_pid = wait_for_pid_file(&descendant);
+
+    let output =
+        crate::engine::command::wait_with_bounded_output_until_cancelled(&mut child, 1024, || true)
+            .expect("bounded cancellation reaps cooperative group");
+
+    assert!(!output.status.success());
+    assert_pid_exits(descendant_pid);
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_cancellation_escalates_and_reaps_term_resistant_parent_and_descendant() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let descendant = temp.path().join("descendant.pid");
+    let mut command = Command::new("sh");
+    command.args([
+        "-c",
+        &format!(
+            "trap '' TERM; sh -c 'trap \"\" TERM; while :; do :; done' & echo $! > {}; wait",
+            shell_quote_path(&descendant)
+        ),
+    ]);
+    crate::engine::command::isolate_process_tree(&mut command);
+    let mut child = command.spawn().expect("spawn resistant process group");
+    let root_pid = child.id() as libc::pid_t;
+    let descendant_pid = wait_for_pid_file(&descendant);
+
+    crate::engine::command::wait_with_bounded_output_until_cancelled(&mut child, 1024, || true)
+        .expect("bounded cancellation escalates and reaps resistant group");
+
+    assert_pid_exits(root_pid);
+    assert_pid_exits(descendant_pid);
+}
+
 #[test]
 fn routes_registered_artifact_downloads_and_sync_manifest() {
     let _home = HomeGuard::new();

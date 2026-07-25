@@ -236,18 +236,6 @@ pub(super) fn write_cook_index_attempt(
     if index
         .attempts
         .iter()
-        .any(|entry| entry.attempt == attempt && entry.run_id != run_id)
-    {
-        return Err(Error::validation_invalid_argument(
-            "cook_attempt",
-            "durable Cook index maps this attempt to a different run",
-            Some(cook_id),
-            None,
-        ));
-    }
-    if index
-        .attempts
-        .iter()
         .any(|entry| entry.run_id == run_id && entry.attempt != attempt)
     {
         return Err(Error::validation_invalid_argument(

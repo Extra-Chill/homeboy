@@ -267,19 +267,33 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
 
 #[test]
 fn aggregate_promotion_forwards_canonical_gate_feedback_baseline() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let patch_path = temp.path().join("remediation.patch");
-    std::fs::write(&patch_path, VALID_PATCH).expect("write remediation patch");
-    let baseline = serde_json::json!({
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let patch_path = temp.path().join("remediation.patch");
+        std::fs::write(&patch_path, VALID_PATCH).expect("write remediation patch");
+        let baseline_patch = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n";
+        let baseline_sha256 = sha256_hex(baseline_patch);
+        record_controller_projection(
+            "source-run",
+            "source-task",
+            "baseline-patch",
+            baseline_patch,
+        );
+        let baseline = serde_json::json!({
         "source_run_id": "source-run",
         "source_task_id": "source-task",
         "source_patch_task_id": "source-task",
         "to_worktree": "fixture@target",
         "current_diff": "diff --git a/a b/a",
         "failed_gates": [],
-        "patch_artifact": { "path": "/candidate.patch", "sha256": "a".repeat(64) }
-    });
-    let source = serde_json::json!({
+        "patch_artifact": {
+            "id": "baseline-patch",
+            "kind": "patch",
+            "path": "/home/lab/ephemeral/candidate.patch",
+            "sha256": baseline_sha256
+        }
+        });
+        let source = serde_json::json!({
         "schema": "homeboy/agent-task-aggregate/v1",
         "plan_id": "follow-up-plan",
         "status": "succeeded",
@@ -314,37 +328,46 @@ fn aggregate_promotion_forwards_canonical_gate_feedback_baseline() {
                 "metadata": { "normalized_from": "artifact" }
             }]
         }]
-    })
-    .to_string();
-    let mut provider = FakePromotionWorkspaceProvider {
-        workspace_path: Some(temp.path().to_path_buf()),
-        ..Default::default()
-    };
-    promote_with_provider(
-        AgentTaskPromotionOptions {
-            source,
-            source_run_id: Some("follow-up-run".to_string()),
-            source_path: None,
-            source_worktree_path: None,
-            base_ref: None,
-            task_base_sha: None,
-            candidate_ref: None,
-            to_worktree: "fixture@target".to_string(),
-            task_id: Some("follow-up".to_string()),
-            artifact_id: Some("patch".to_string()),
-            dry_run: false,
-            gates: VerifyGateOptions::default(),
-            provider_command: None,
-            provider_invocation: None,
-        },
-        &mut provider,
-    )
-    .expect("aggregate promotion");
-    assert_eq!(
-        provider.apply_calls[0].gate_feedback_baseline,
-        Some(baseline),
-        "only canonical artifact metadata authorizes the dirty target"
-    );
+        })
+        .to_string();
+        let mut provider = FakePromotionWorkspaceProvider {
+            workspace_path: Some(temp.path().to_path_buf()),
+            ..Default::default()
+        };
+        promote_with_provider(
+            AgentTaskPromotionOptions {
+                source,
+                source_run_id: Some("follow-up-run".to_string()),
+                source_path: None,
+                source_worktree_path: None,
+                base_ref: None,
+                task_base_sha: None,
+                candidate_ref: None,
+                to_worktree: "fixture@target".to_string(),
+                task_id: Some("follow-up".to_string()),
+                artifact_id: Some("patch".to_string()),
+                dry_run: false,
+                gates: VerifyGateOptions::default(),
+                provider_command: None,
+                provider_invocation: None,
+            },
+            &mut provider,
+        )
+        .expect("aggregate promotion");
+        let forwarded = provider.apply_calls[0]
+            .gate_feedback_baseline
+            .as_ref()
+            .expect("baseline forwarded");
+        assert!(forwarded["patch_artifact"].get("path").is_none());
+        assert_eq!(
+            forwarded["patch_artifact"]["controller_artifact"]["run_id"],
+            "source-run"
+        );
+        assert_eq!(
+            forwarded["patch_artifact"]["controller_artifact"]["sha256"],
+            baseline_sha256
+        );
+    });
 }
 
 #[test]
@@ -631,6 +654,79 @@ fn promote_no_op_outcome_uses_audited_committed_candidate() {
     );
     assert_eq!(report.provenance["candidate"]["fingerprint"]["base"], base);
     assert_eq!(report.deterministic_gates.len(), 1);
+    assert_eq!(provider.apply_calls.len(), 1);
+    assert_eq!(provider.verify_calls.len(), 1);
+}
+
+#[test]
+fn adopt_no_op_pre_existing_candidate_when_base_equals_candidate() {
+    // #8895: a recovery agent prepares an immutable candidate commit, the cook
+    // records that commit AS the task base, and the provider reviews it and
+    // returns no-op. With an explicit candidate_ref the base is rebased to the
+    // candidate's parent so the immutable commit is adopted and promoted.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).expect("create repo");
+    git(&repo, &["init"]);
+    git(&repo, &["config", "user.email", "agent@example.test"]);
+    git(&repo, &["config", "user.name", "Agent"]);
+    git(&repo, &["checkout", "-b", "main"]);
+    std::fs::write(repo.join("lib.rs"), "base\n").expect("write base");
+    git(&repo, &["add", "lib.rs"]);
+    git(&repo, &["commit", "-m", "base"]);
+    // The pre-existing immutable candidate the recovery agent committed.
+    std::fs::write(repo.join("lib.rs"), "candidate\n").expect("write candidate");
+    git(&repo, &["commit", "-am", "recovery: prepared candidate"]);
+    let candidate = git_head(&repo, "HEAD");
+
+    let source_path = temp.path().join("outcome.json");
+    let source = serde_json::json!({
+        "schema": AGENT_TASK_OUTCOME_SCHEMA,
+        "task_id": "task",
+        "status": "no_op",
+        "artifacts": []
+    })
+    .to_string();
+    std::fs::write(&source_path, &source).expect("write no-op outcome");
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(repo.clone()),
+        ..Default::default()
+    };
+
+    let report = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("run".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: Some(repo.clone()),
+            base_ref: None,
+            // The cook recorded the candidate commit itself as the task base.
+            task_base_sha: Some(candidate.clone()),
+            candidate_ref: Some(candidate.clone()),
+            to_worktree: "repo@promotion".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec!["true".to_string()],
+                private_verify: Vec::new(),
+                private_gate_reveal: AgentTaskGateRevealPolicy::FullEvidence,
+                ..Default::default()
+            },
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect("pre-existing immutable candidate is adopted after no-op review");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+    assert_eq!(report.patch_artifact.id, "committed-changes");
+    assert_eq!(report.changed_files, vec!["lib.rs"]);
+    assert_eq!(
+        report.provenance["candidate"]["fingerprint"]["head"],
+        candidate
+    );
     assert_eq!(provider.apply_calls.len(), 1);
     assert_eq!(provider.verify_calls.len(), 1);
 }

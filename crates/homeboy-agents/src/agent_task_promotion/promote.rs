@@ -538,8 +538,11 @@ pub(super) fn promote_with_provider_and_checkpoint(
             None,
         ));
     }
-    let gate_feedback_baseline =
-        gate_feedback_baseline_for_artifact(&source_for_provenance, &outcome, &artifact)?;
+    let gate_feedback_baseline = bind_gate_feedback_baseline(gate_feedback_baseline_for_artifact(
+        &source_for_provenance,
+        &outcome,
+        &artifact,
+    )?)?;
     let promotion_chain_baseline =
         promotion_chain_baseline_for_artifact(&source_for_provenance, &outcome, &artifact)?;
     let destination_baseline = promotion_chain_baseline
@@ -652,13 +655,11 @@ pub(super) fn promote_with_provider_and_checkpoint(
     let mut command_evidence = Vec::new();
     let mut applied_worktree_path = None;
     {
-        let normalized_patch_file;
-        let provider_patch_path = if normalized_patch.content == patch {
-            patch_path.display().to_string()
-        } else {
-            normalized_patch_file = write_normalized_patch(&normalized_patch.content)?;
-            normalized_patch_file.path().display().to_string()
-        };
+        // The provider reads an owned snapshot of the verified bytes. Never
+        // hand it the producer/controller path after validation: that path can
+        // be replaced before the provider opens it.
+        let normalized_patch_file = write_normalized_patch(&normalized_patch.content)?;
+        let provider_patch_path = normalized_patch_file.path().display().to_string();
         let target = provider.apply_patch(AgentTaskPromotionApplyRequest {
             schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
             to_workspace: options.to_worktree.clone(),
@@ -927,6 +928,109 @@ fn gate_feedback_baseline_for_artifact(
     Ok(baseline)
 }
 
+/// Replace a runner-local baseline path with the controller artifact-store
+/// identity before a follow-up can reuse a dirty destination. Older baselines
+/// without source identity retain their existing strict path/hash contract.
+fn bind_gate_feedback_baseline(baseline: Option<Value>) -> Result<Option<Value>> {
+    let Some(mut baseline) = baseline else {
+        return Ok(None);
+    };
+    let source_run_id = baseline
+        .get("source_run_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let source_task_id = baseline
+        .get("source_task_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let Some(artifact) = baseline.get("patch_artifact").and_then(Value::as_object) else {
+        return Ok(Some(baseline));
+    };
+    let run_id = artifact
+        .get("run_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or(source_run_id);
+    let task_id = artifact
+        .get("task_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or(source_task_id);
+    let (Some(run_id), Some(task_id)) = (run_id, task_id) else {
+        return Ok(Some(baseline));
+    };
+    let artifact_id = artifact
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "gate_feedback_candidate_baseline",
+                "gate-feedback baseline with a source run requires a patch artifact id",
+                None,
+                None,
+            )
+        })?;
+    let kind = artifact
+        .get("kind")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("patch")
+        .to_string();
+    let sha256 = artifact
+        .get("sha256")
+        .and_then(Value::as_str)
+        .filter(|value| valid_sha256(value))
+        .map(str::to_string)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "gate_feedback_candidate_baseline",
+                "gate-feedback baseline with a source run requires a valid patch artifact sha256",
+                Some(artifact_id.clone()),
+                None,
+            )
+        })?;
+    let (record_id, _) = crate::agent_task_lifecycle::verified_controller_artifact_projection(
+        &run_id,
+        &task_id,
+        &artifact_id,
+        &kind,
+        &sha256,
+        None,
+    )?
+    .ok_or_else(|| Error::validation_invalid_argument(
+        "gate_feedback_candidate_baseline",
+        format!(
+            "controller artifact mirror is missing for baseline run '{run_id}', task '{task_id}', and artifact '{artifact_id}'"
+        ),
+        Some(artifact_id.clone()),
+        None,
+    ))?;
+    let artifact = baseline
+        .get_mut("patch_artifact")
+        .and_then(Value::as_object_mut)
+        .expect("patch artifact was checked above");
+    artifact.remove("path");
+    artifact.insert(
+        "controller_artifact".to_string(),
+        json!({
+            "schema": "homeboy/controller-artifact-reference/v1",
+            "run_id": run_id,
+            "task_id": task_id,
+            "logical_artifact_id": artifact_id,
+            "kind": kind,
+            "sha256": sha256,
+            "record_id": record_id,
+        }),
+    );
+    Ok(Some(baseline))
+}
+
 fn source_canonical_artifact<'a>(
     source: &'a Value,
     task_id: &str,
@@ -1099,28 +1203,42 @@ fn promote_committed_changes(
     artifact: Option<&AgentTaskArtifact>,
     committed_patch: CommittedChangesPatch,
 ) -> Result<AgentTaskPromotionReport> {
-    let normalized_patch = normalize_promotion_patch(
-        &std::fs::read_to_string(&committed_patch.patch_path).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!(
-                    "read committed changes promotion patch {}",
-                    committed_patch.patch_path.display()
-                )),
-            )
-        })?,
-        &options.to_worktree,
+    let patch = std::fs::read_to_string(&committed_patch.patch_path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!(
+                "read committed changes promotion patch {}",
+                committed_patch.patch_path.display()
+            )),
+        )
+    })?;
+    let actual_sha256 = format!("{:x}", Sha256::digest(patch.as_bytes()));
+    if actual_sha256 != committed_patch.sha256 {
+        return Err(Error::validation_invalid_argument(
+            "committed_changes.sha256",
+            format!(
+                "committed changes patch sha256 mismatch: expected {}, read {actual_sha256}",
+                committed_patch.sha256
+            ),
+            Some(committed_patch.patch_path.display().to_string()),
+            None,
+        ));
+    }
+    let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
+    let provider_patch = write_normalized_patch(&normalized_patch.content)?;
+    let gate_feedback_baseline = bind_gate_feedback_baseline(
+        artifact
+            .and_then(|artifact| artifact.metadata.get("gate_feedback_baseline"))
+            .cloned(),
     )?;
     let mut command_evidence = Vec::new();
     let target = provider.apply_patch(AgentTaskPromotionApplyRequest {
         schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
         to_workspace: options.to_worktree.clone(),
         patch: Some(normalized_patch.content.clone()),
-        patch_path: committed_patch.patch_path.display().to_string(),
+        patch_path: provider_patch.path().display().to_string(),
         changed_files: normalized_patch.changed_files.clone(),
-        gate_feedback_baseline: artifact
-            .and_then(|artifact| artifact.metadata.get("gate_feedback_baseline"))
-            .cloned(),
+        gate_feedback_baseline,
         dry_run: options.dry_run,
         trusted_unpushed_candidate_destination: options.candidate_ref.as_ref().map(|_| {
             TrustedUnpushedCandidateDestination {

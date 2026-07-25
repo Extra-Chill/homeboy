@@ -172,6 +172,14 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     });
     options.review_dossier.evidence.dedup();
     options.review_dossier.validate(&options.review_profile)?;
+    // A review-form-only adoption follow-up can supply a `used_for` claiming no
+    // code was changed, but the finalized candidate here has AI-authored changed
+    // files — publishing that disclosure would materially understate the work
+    // and mislead reviewers (#9897). Fail closed against the patch lineage.
+    crate::agent_task_review_dossier::validate_used_for_against_changed_files(
+        &options.review_dossier,
+        &changed_files,
+    )?;
     let proof = build_finalization_proof(&options, options.normalized_gate_results.clone());
     let mut intent =
         build_pr_publication_intent(&options, &head, &changed_files, proof.clone(), &base);

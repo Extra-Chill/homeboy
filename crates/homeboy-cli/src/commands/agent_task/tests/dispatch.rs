@@ -2,10 +2,32 @@
 
 use super::support::*;
 use clap::Parser;
+use homeboy::agents::agent_task_service::{
+    AgentTaskCookAttemptDispatcher, DerivedCookBaselineCapability,
+};
+use homeboy::core::{Error, Result};
 
 use crate::cli_surface::{Cli, Commands};
 
 use super::super::AgentTaskCommand;
+
+#[derive(Debug)]
+struct RecipeOnlyDispatcher;
+
+impl AgentTaskCookAttemptDispatcher for RecipeOnlyDispatcher {
+    fn durable_recipe(&self) -> Result<Value> {
+        Ok(json!({ "kind": "recipe-only" }))
+    }
+
+    fn dispatch_attempt(
+        &self,
+        _plan: AgentTaskPlan,
+        _run_id: &str,
+        _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    ) -> Result<()> {
+        Err(Error::internal_unexpected("stop after durable recipe"))
+    }
+}
 
 #[test]
 fn cook_rejects_queue_only_before_creating_a_durable_recipe() {
@@ -42,6 +64,144 @@ fn cook_rejects_queue_only_before_creating_a_durable_recipe() {
             .contains("cannot queue its controller-owned lifecycle"));
         assert!(!homeboy::agents::agent_task_service::recipe_exists("cook-queue-only").unwrap());
     });
+}
+
+#[test]
+fn cook_goal_frames_explicit_task_without_creating_another_provider_cell() {
+    with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        init_runtime_component_checkout(workspace.path());
+        let cli = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--goal",
+            "Preserve the durable provider-cell contract",
+            "--task",
+            "Implement the targeted repair",
+            "--cwd",
+            workspace.path().to_str().expect("workspace path"),
+            "--to-worktree",
+            workspace.path().to_str().expect("workspace path"),
+            "--backend",
+            "fixture",
+            "--no-finalize",
+            "--run-id",
+            "cook-goal-task-one-cell",
+        ]);
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task cook command");
+        };
+        let AgentTaskCommand::Cook(cook) = agent_task.command else {
+            panic!("cook command");
+        };
+
+        let _ = run_cook_with_executor_and_dispatcher(
+            cook,
+            CapturingExecutor::default(),
+            Some(Arc::new(RecipeOnlyDispatcher)),
+        );
+
+        let recipe = homeboy::agents::agent_task_service::load_recipe("cook-goal-task-one-cell")
+            .expect("durable cook recipe");
+        let plan = &recipe.attempts[0].plan;
+        assert_eq!(plan.tasks.len(), 1);
+        assert_eq!(plan.options.execution_budget.max_provider_executions, 1);
+        assert_eq!(
+            plan.metadata["cook_goal"],
+            "Preserve the durable provider-cell contract"
+        );
+        assert_eq!(plan.tasks[0].instructions, "Implement the targeted repair");
+        assert_eq!(
+            plan.tasks[0].metadata["cook_goal"],
+            "Preserve the durable provider-cell contract"
+        );
+    });
+}
+
+#[test]
+fn cook_goal_without_explicit_work_remains_one_provider_cell() {
+    with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        init_runtime_component_checkout(workspace.path());
+        let cli = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--goal",
+            "Implement the targeted repair",
+            "--cwd",
+            workspace.path().to_str().expect("workspace path"),
+            "--to-worktree",
+            workspace.path().to_str().expect("workspace path"),
+            "--backend",
+            "fixture",
+            "--no-finalize",
+            "--run-id",
+            "cook-goal-only-one-cell",
+        ]);
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task cook command");
+        };
+        let AgentTaskCommand::Cook(cook) = agent_task.command else {
+            panic!("cook command");
+        };
+
+        let _ = run_cook_with_executor_and_dispatcher(
+            cook,
+            CapturingExecutor::default(),
+            Some(Arc::new(RecipeOnlyDispatcher)),
+        );
+
+        let recipe = homeboy::agents::agent_task_service::load_recipe("cook-goal-only-one-cell")
+            .expect("durable cook recipe");
+        let plan = &recipe.attempts[0].plan;
+        assert_eq!(plan.tasks.len(), 1);
+        assert_eq!(plan.tasks[0].instructions, "Implement the targeted repair");
+        assert_eq!(
+            plan.tasks[0].metadata["cook_goal"],
+            "Implement the targeted repair"
+        );
+    });
+}
+
+#[test]
+fn cook_goal_never_becomes_an_extra_prompt_when_work_is_explicit() {
+    for (work_flag, work_value) in [
+        ("--prompt", "implement the repair"),
+        ("--tasks", "@provider-cells.json"),
+    ] {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--goal",
+            "Preserve one cell per explicit task",
+            work_flag,
+            work_value,
+            "--to-worktree",
+            "homeboy@provider-cells",
+            "--backend",
+            "fixture",
+            "--no-finalize",
+        ]);
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("agent-task cook command");
+        };
+        let AgentTaskCommand::Cook(cook) = agent_task.command else {
+            panic!("cook command");
+        };
+
+        let dispatch = super::super::run::dispatch_args_for_cook(&cook);
+        assert_eq!(
+            dispatch.prompt.as_deref(),
+            (work_flag == "--prompt").then_some(work_value)
+        );
+        assert_eq!(
+            dispatch.core.tasks_json.as_deref(),
+            (work_flag == "--tasks").then_some(work_value)
+        );
+    }
 }
 
 #[cfg(unix)]

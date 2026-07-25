@@ -237,8 +237,9 @@ pub struct AgentTaskCookArgs {
     pub attempt_run_id: Option<String>,
     #[arg(long, hide = true)]
     pub attempt_plan: Option<String>,
-    /// One-line statement of what a successful cook must achieve. Recorded with
-    /// the run and used to frame the agent's task and the review.
+    /// One-line statement of what a successful cook must achieve. Recorded as
+    /// framing metadata for every provider cell and used for review. Without
+    /// --prompt, --task, or --tasks, it supplies the one provider task.
     #[arg(long, value_name = "TEXT")]
     pub goal: Option<String>,
     /// Workspace handle the cook edits, verifies, and finalizes into (e.g.

@@ -892,20 +892,7 @@ fn materialize_agent_task_cook_plan(
     };
     crate::commands::agent_task::run::validate_cook_request(cook)?;
     let provision = crate::commands::agent_task::run::provision_cook_destination(cook)?;
-    let mut dispatch = cook.dispatch.clone();
-    if dispatch.prompt.is_none() {
-        dispatch.prompt = cook.goal.clone();
-    }
-    if dispatch.cwd.is_none() && dispatch.workspace.is_none() {
-        dispatch.workspace = Some(cook.to_worktree.clone());
-    }
-    let mut request =
-        homeboy::agents::agent_tasks::dispatch_service::resolve_dispatch_request(dispatch.into())?;
-    let mut plan = homeboy::agents::agent_tasks::dispatch_service::build_controller_dispatch_plan(
-        &mut request,
-    )?;
-    crate::commands::agent_task::run::record_cook_provision(&mut plan, provision);
-    Ok(Some(plan))
+    crate::commands::agent_task::run::compile_cook_plan(cook, provision).map(Some)
 }
 
 fn lab_route_dispatch_timeout(command: &Commands) -> Option<std::time::Duration> {

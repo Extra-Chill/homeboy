@@ -1,6 +1,7 @@
 //! Workspace sync / remap staging for the standard (non-resident) offload path.
 
 use super::*;
+use crate::lab_workspaces::workspace_mapping_entry_for_materialized_file;
 use crate::offload_changed_since::{
     degrade_changed_since_to_full_scope, remove_controller_changed_since_args,
 };
@@ -510,7 +511,48 @@ fn prepare_lab_offload_workspace_stage_inner(
         &remapped_args,
         &path_remaps,
         Path::new(&synced.local_path),
-        |spec| sync_inline_agent_task_file(runner_id, spec),
+        |spec| {
+            let temp = tempfile::tempdir().map_err(|err| {
+                Error::internal_io(
+                    err.to_string(),
+                    Some("create remapped agent-task plan workspace".to_string()),
+                )
+            })?;
+            let plan_file = temp.path().join(spec.filename);
+            if spec.role == "agent_task_attempt_plan_remapped" {
+                crate::lab::agent_task_bridge::write_private_remapped_agent_task_plan(
+                    &plan_file, spec.spec,
+                )?;
+            } else {
+                std::fs::write(&plan_file, spec.spec).map_err(|err| {
+                    Error::internal_io(
+                        err.to_string(),
+                        Some("write remapped agent-task plan".to_string()),
+                    )
+                })?;
+            }
+            let mut specs = lab_at_file_specs(
+                &[format!("@{}", plan_file.display())],
+                Path::new(&synced.local_path),
+                &remote_cwd,
+            )?;
+            for file in &mut specs {
+                file.require_private();
+            }
+            materialize_lab_at_files_on_runner(runner_id, &specs)?;
+            let file = specs
+                .into_iter()
+                .next()
+                .ok_or_else(|| Error::internal_unexpected("missing remapped agent-task file"))?;
+            Ok(Some((
+                file.remote_spec.clone(),
+                workspace_mapping_entry_for_materialized_file(
+                    spec.role,
+                    file.local_path.display().to_string(),
+                    file.remote_path,
+                ),
+            )))
+        },
     )?;
     let remapped_args = agent_task_specs.argv;
     for synced_entry in agent_task_specs.workspace_entries {

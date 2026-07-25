@@ -828,6 +828,67 @@ fn lab_cook_attempt_preserves_authorized_dirty_baseline_in_the_run_plan() {
 }
 
 #[test]
+fn lab_cook_materializes_goal_and_explicit_task_as_one_durable_cell() {
+    crate::test_support::with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path());
+        let workspace = workspace.path().display().to_string();
+        let cook = Cli::parse_from([
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--goal",
+            "Preserve one provider cell",
+            "--task",
+            "Repair the Lab Cook compiler",
+            "--cwd",
+            &workspace,
+            "--to-worktree",
+            &workspace,
+            "--backend",
+            "fixture",
+            "--no-finalize",
+            "--run-id",
+            "cook-lab-goal-task",
+        ]);
+
+        let plan = materialize_agent_task_cook_plan(&cook)
+            .expect("materialize Lab Cook plan")
+            .expect("Cook plan");
+        assert_eq!(plan.tasks.len(), 1);
+        assert_eq!(plan.options.execution_budget.max_provider_executions, 1);
+        assert_eq!(plan.metadata["cook_goal"], "Preserve one provider cell");
+        assert_eq!(plan.tasks[0].instructions, "Repair the Lab Cook compiler");
+        assert_eq!(
+            plan.tasks[0].metadata["cook_goal"],
+            "Preserve one provider cell"
+        );
+
+        agent_task_lifecycle::submit_plan(&plan, Some("cook-lab-goal-task"))
+            .expect("persist Cook plan");
+        let retry_args = [
+            "homeboy",
+            "agent-task",
+            "retry",
+            "cook-lab-goal-task",
+            "--run",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let retry = Cli::parse_from(&retry_args);
+        let handoff = materialize_agent_task_retry_handoff(&retry, &retry_args)
+            .expect("materialize retry handoff")
+            .expect("retry handoff");
+        // The Homeboy projection is rebuilt when loading durable JSON; verify
+        // the provider-cell contract, which is what retry/resume dispatches.
+        assert_eq!(handoff.plan.tasks, plan.tasks);
+        assert_eq!(handoff.plan.options, plan.options);
+        assert_eq!(handoff.plan.metadata, plan.metadata);
+    });
+}
+
+#[test]
 fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_failure() {
     crate::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");

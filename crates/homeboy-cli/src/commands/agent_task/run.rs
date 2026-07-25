@@ -20,6 +20,7 @@ use homeboy::core::worktree_providers::{
     provision_apply_enabled_worktree_provider_from_config, WorktreeProviderCreateIntent,
 };
 
+use super::super::agent_task_dispatch::DispatchArgs;
 use super::super::CmdResult;
 use super::args::{
     AgentTaskCookArgs, PromotionProviderArgs, RetryArgs, RunArgs, RunPlanArgs, StatusArgs,
@@ -213,13 +214,9 @@ where
     // the requirement here is safe end to end (#7608). Finalizing cooks still
     // require a gate, but now say so with a copy-pasteable example instead of a
     // bare rejection.
-    let mut dispatch_args = args.dispatch.clone();
-    if dispatch_args.prompt.is_none() {
-        dispatch_args.prompt = args.goal.clone();
-    }
-    if dispatch_args.cwd.is_none() && dispatch_args.workspace.is_none() {
-        dispatch_args.workspace = Some(args.to_worktree.clone());
-    }
+    let provision = provision_cook_destination(&args)?;
+
+    let mut dispatch_args = dispatch_args_for_cook(&args);
     let requested_cook_id = dispatch_args.run_id.clone();
     if let Some(cook_id) = requested_cook_id.as_deref() {
         dispatch_args.run_id = Some(
@@ -237,7 +234,6 @@ where
     if let Some(progress) = progress {
         progress("preparing", None, None)?;
     }
-    let provision = provision_cook_destination(&args)?;
     let (run_id, mut initial_plan) = if let Some(attempt_plan) = args.attempt_plan.as_deref() {
         let run_id = dispatch_args.run_id.clone().ok_or_else(|| {
             homeboy::core::Error::internal_unexpected(
@@ -246,26 +242,13 @@ where
         })?;
         (run_id, agent_task_service::read_plan(attempt_plan)?)
     } else {
-        let mut request = dispatch_service::resolve_dispatch_request(dispatch_args.into())?;
-        let plan = match dispatch_service::build_controller_dispatch_plan(&mut request) {
-            Ok(plan) => plan,
-            // A managed promotion handle may be intentionally unavailable until
-            // after provider execution. Keep the compiled task durable and let
-            // promotion report its established controlled policy failure.
-            Err(error)
-                if request.workspace.as_deref() == Some(args.to_worktree.as_str())
-                    && error.message.contains(
-                        "neither an existing directory nor a resolvable managed worktree handle",
-                    ) =>
-            {
-                request.workspace = None;
-                dispatch_service::build_controller_dispatch_plan(&mut request)?
-            }
-            Err(error) => return Err(error),
-        };
+        let plan = compile_cook_plan(&args, provision.clone())?;
         (run_id, plan)
     };
-    record_cook_provision(&mut initial_plan, provision);
+    if args.attempt_plan.is_some() {
+        record_cook_provision(&mut initial_plan, provision);
+        record_cook_goal(&mut initial_plan, args.goal.as_deref());
+    }
     // Capture the resolved task workspace before dispatch. The provider may
     // commit and leave a clean tree, so resolving this after it runs would
     // silently widen the promotion range.
@@ -338,6 +321,64 @@ where
         ),
         result.exit_code,
     ))
+}
+
+pub(super) fn dispatch_args_for_cook(args: &AgentTaskCookArgs) -> DispatchArgs {
+    let mut dispatch_args = args.dispatch.clone();
+    let has_explicit_work = dispatch_args.prompt.is_some()
+        || !dispatch_args.tasks.is_empty()
+        || dispatch_args.core.tasks_json.is_some();
+    if !has_explicit_work {
+        dispatch_args.prompt = args.goal.clone();
+    }
+    dispatch_args
+}
+
+/// Compile the one durable provider-cell plan used by local Cook and Lab handoff.
+pub(crate) fn compile_cook_plan(
+    args: &AgentTaskCookArgs,
+    provision: Value,
+) -> homeboy::core::Result<AgentTaskPlan> {
+    let mut dispatch = dispatch_args_for_cook(args);
+    if dispatch.cwd.is_none() && dispatch.workspace.is_none() {
+        dispatch.workspace = Some(args.to_worktree.clone());
+    }
+    let mut request = dispatch_service::resolve_dispatch_request(dispatch.into())?;
+    let mut plan = match dispatch_service::build_controller_dispatch_plan(&mut request) {
+        Ok(plan) => plan,
+        // A managed promotion handle may be intentionally unavailable until
+        // after provider execution. Keep the compiled task durable and let
+        // promotion report its established controlled policy failure.
+        Err(error)
+            if request.workspace.as_deref() == Some(args.to_worktree.as_str())
+                && error.message.contains(
+                    "neither an existing directory nor a resolvable managed worktree handle",
+                ) =>
+        {
+            request.workspace = None;
+            dispatch_service::build_controller_dispatch_plan(&mut request)?
+        }
+        Err(error) => return Err(error),
+    };
+    record_cook_provision(&mut plan, provision);
+    record_cook_goal(&mut plan, args.goal.as_deref());
+    Ok(plan)
+}
+
+fn record_cook_goal(plan: &mut AgentTaskPlan, goal: Option<&str>) {
+    let Some(goal) = goal else {
+        return;
+    };
+    if !plan.metadata.is_object() {
+        plan.metadata = serde_json::json!({});
+    }
+    plan.metadata["cook_goal"] = serde_json::json!(goal);
+    for task in &mut plan.tasks {
+        if !task.metadata.is_object() {
+            task.metadata = serde_json::json!({});
+        }
+        task.metadata["cook_goal"] = serde_json::json!(goal);
+    }
 }
 
 fn git_head_sha(path: &Path) -> Option<String> {

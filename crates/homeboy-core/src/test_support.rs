@@ -1137,7 +1137,26 @@ fn handle_reverse_broker_request(
         if let Some(parent) = Path::new(path).parent() {
             std::fs::create_dir_all(parent).expect("broker fixture upload parent");
         }
-        std::fs::write(path, content).expect("broker fixture upload write");
+        if request.body["private"].as_bool().unwrap_or(false) {
+            use std::io::Write;
+            let temporary = format!("{path}.fixture-private.tmp");
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options
+                .open(&temporary)
+                .expect("broker fixture private create");
+            file.write_all(&content)
+                .expect("broker fixture private write");
+            file.sync_all().expect("broker fixture private sync");
+            std::fs::rename(&temporary, path).expect("broker fixture private publish");
+        } else {
+            std::fs::write(path, content).expect("broker fixture upload write");
+        }
         return ok(json!({ "uploaded": true }));
     }
     if request.method == "POST" && request.path == "/files/download" {

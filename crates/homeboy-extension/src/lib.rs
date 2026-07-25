@@ -129,7 +129,7 @@ pub use refactor_protocol::{
     RewrittenImport,
 };
 pub use repair::{relink, replace, replace_with_revision, ReplaceResult};
-pub use runner::{ExtensionRunner, RunnerOutput};
+pub use runner::{ExtensionRunner, RunnerOutput, STRICT_VALIDATION_DEPENDENCIES_ENV};
 pub use runtime_helper::{
     helper_path, BASH_PREFLIGHT_ENV, COMMAND_CAPTURE_ENV, RUNNER_PRELUDE_ENV, RUNNER_STEPS_ENV,
 };

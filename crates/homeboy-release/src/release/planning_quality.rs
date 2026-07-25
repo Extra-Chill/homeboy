@@ -144,6 +144,12 @@ pub(super) fn validate_lint_quality(component: &Component) -> LintQualityOutcome
         None,
         &release_run_dir,
     )
+    .map(|runner| {
+        // The release lint gate is blocking, so a validation dependency resolved
+        // from a stale local checkout must not silently determine the outcome —
+        // fail closed on a behind-upstream dependency (#9643).
+        runner.env(extension::STRICT_VALIDATION_DEPENDENCIES_ENV, "1")
+    })
     .and_then(|runner| runner.run())
     {
         Ok(output) => output,

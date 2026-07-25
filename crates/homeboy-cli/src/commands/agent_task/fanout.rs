@@ -116,7 +116,9 @@ fn submit_fanout_batch(args: AgentTaskFanoutSubmitBatchArgs) -> CmdResult<Value>
 }
 
 fn batch_status(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
-    Ok((command_json_value(batch::status(&args.batch_id)?)?, 0))
+    let report = batch::status(&args.batch_id)?;
+    let exit_code = report.batch.state.exit_code();
+    Ok((command_json_value(report)?, exit_code))
 }
 
 /// Resume a durable fanout batch after its synchronous coordinator exited.
@@ -131,26 +133,37 @@ fn batch_resume(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
         crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
     )?;
     let exit_code = result.exit_code;
-    let report = result.value;
-    Ok((
+    Ok(batch_resume_result(result.value, exit_code, &args.batch_id))
+}
+
+fn batch_resume_result(
+    report: agent_task_service::AgentTaskCookBatchReport,
+    exit_code: i32,
+    batch_id: &str,
+) -> (Value, i32) {
+    (
         serde_json::json!({
             "schema": "homeboy/agent-task-cook-batch-resume/v1",
             "batch_id": report.batch_id,
             "status": report.status,
             "summary": {
                 "total": report.total,
+                "queued": report.queued,
+                "running": report.running,
                 "succeeded": report.succeeded,
                 "failed": report.failed,
+                "cancelled": report.cancelled,
+                "timed_out": report.timed_out,
             },
             "cooks": report.cooks,
             "commands": {
-                "status": format!("homeboy agent-task fanout status {}", args.batch_id),
-                "artifacts": format!("homeboy agent-task fanout artifacts {}", args.batch_id),
-                "resume": format!("homeboy agent-task fanout resume {}", args.batch_id),
+                "status": format!("homeboy agent-task fanout status {batch_id}"),
+                "artifacts": format!("homeboy agent-task fanout artifacts {batch_id}"),
+                "resume": format!("homeboy agent-task fanout resume {batch_id}"),
             },
         }),
         exit_code,
-    ))
+    )
 }
 
 fn batch_artifacts(args: AgentTaskFanoutBatchStatusArgs) -> CmdResult<Value> {
@@ -312,7 +325,15 @@ fn batch_cook_result(
             "schema": AGENT_TASK_BATCH_COOK_FANOUT_RUN_SCHEMA,
             "fanout_id": plan.fanout_id,
             "status": report.status,
-            "summary": { "total": report.total, "succeeded": report.succeeded, "failed": report.failed },
+            "summary": {
+                "total": report.total,
+                "queued": report.queued,
+                "running": report.running,
+                "succeeded": report.succeeded,
+                "failed": report.failed,
+                "cancelled": report.cancelled,
+                "timed_out": report.timed_out,
+            },
             "cooks": cooks,
             "commands": {
                 "status": format!("homeboy agent-task fanout status {}", plan.fanout_id),
@@ -397,7 +418,10 @@ fn cook_batch_inner(
     } else {
         "ready"
     };
-    let exit_code = if blocked == 0 { 0 } else { 1 };
+    // A completed batch's aggregate result is authoritative. Worktree blocking
+    // remains a pre-execution failure, while child failures retain their durable
+    // evidence and produce the same nonzero result at every CLI boundary.
+    let exit_code = cook_batch_outer_exit_code(blocked, &run_result);
 
     Ok((
         serde_json::json!({
@@ -426,6 +450,17 @@ fn cook_batch_inner(
         }),
         exit_code,
     ))
+}
+
+fn cook_batch_outer_exit_code(blocked: usize, run_result: &Option<Value>) -> i32 {
+    if blocked > 0 {
+        1
+    } else {
+        run_result
+            .as_ref()
+            .and_then(|value| value["exit_code"].as_i64())
+            .unwrap_or(0) as i32
+    }
 }
 
 fn queue_or_reuse_worktrees(
@@ -1890,6 +1925,166 @@ mod tests {
             .as_str()
             .expect("resume command")
             .contains("fanout run-plan"));
+    }
+
+    #[test]
+    fn batch_cook_cli_envelope_preserves_partial_failure_and_nonzero_exit() {
+        let plan = test_batch_plan();
+        let result = agent_task_service::AgentTaskRunResult {
+            exit_code: 1,
+            value: agent_task_service::AgentTaskCookBatchReport {
+                schema: "homeboy/agent-task-cook-batch/v1",
+                batch_id: plan.fanout_id.clone(),
+                status: "partial_failure".to_string(),
+                total: 2,
+                queued: 0,
+                running: 0,
+                succeeded: 1,
+                failed: 1,
+                cancelled: 0,
+                timed_out: 0,
+                cooks: vec![
+                    agent_task_service::AgentTaskCookBatchCellReport {
+                        cook_id: "first".to_string(),
+                        initial_run_id: "first-run".to_string(),
+                        status: "review_ready".to_string(),
+                        exit_code: 0,
+                        result: None,
+                        error: None,
+                    },
+                    agent_task_service::AgentTaskCookBatchCellReport {
+                        cook_id: "second".to_string(),
+                        initial_run_id: "second-run".to_string(),
+                        status: "failed".to_string(),
+                        exit_code: 1,
+                        result: None,
+                        error: Some("controller admission failed".to_string()),
+                    },
+                ],
+            },
+        };
+        let mut all_failed_report = result.value.clone();
+        all_failed_report.status = "failed".to_string();
+        all_failed_report.succeeded = 0;
+        all_failed_report.failed = 2;
+        for cell in &mut all_failed_report.cooks {
+            cell.exit_code = 1;
+        }
+        let mut active_failed_report = result.value.clone();
+        active_failed_report.status = "running".to_string();
+        active_failed_report.queued = 0;
+        active_failed_report.running = 1;
+        active_failed_report.succeeded = 0;
+        active_failed_report.failed = 1;
+        active_failed_report.cooks[0].status = "in_flight".to_string();
+        let (data, exit_code) = batch_cook_result(&plan, result);
+        let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
+            &Ok(data),
+            exit_code,
+            "agent-task fanout cook-batch",
+            None,
+        );
+
+        assert_eq!(exit_code, 1);
+        assert!(!envelope.success);
+        assert_eq!(envelope.exit_code, 1);
+        assert_eq!(envelope.status, "partial_failure");
+        assert_eq!(
+            envelope.data.expect("batch data")["status"],
+            "partial_failure"
+        );
+
+        let (data, exit_code) = batch_cook_result(
+            &plan,
+            agent_task_service::AgentTaskRunResult {
+                exit_code: 1,
+                value: all_failed_report,
+            },
+        );
+        let envelope = crate::commands::utils::response::cli_response_for_json_result_for_command(
+            &Ok(data),
+            exit_code,
+            "agent-task fanout cook-batch",
+            None,
+        );
+        assert_eq!(exit_code, 1);
+        assert!(!envelope.success);
+        assert_eq!(envelope.status, "failed");
+
+        let (immediate, exit_code) = batch_cook_result(
+            &plan,
+            agent_task_service::AgentTaskRunResult {
+                exit_code: 0,
+                value: active_failed_report.clone(),
+            },
+        );
+        let (resumed, resume_exit_code) =
+            batch_resume_result(active_failed_report, 0, "test-batch");
+        for (name, value, code) in [
+            ("immediate", immediate, exit_code),
+            ("resume", resumed, resume_exit_code),
+        ] {
+            assert_eq!(value["status"], "running", "{name}");
+            assert_eq!(code, 0, "{name}");
+            let summary = &value["summary"];
+            assert_eq!(
+                summary["queued"].as_u64().unwrap_or_default()
+                    + summary["running"].as_u64().unwrap_or_default()
+                    + summary["succeeded"].as_u64().unwrap_or_default()
+                    + summary["failed"].as_u64().unwrap_or_default()
+                    + summary["cancelled"].as_u64().unwrap_or_default()
+                    + summary["timed_out"].as_u64().unwrap_or_default(),
+                summary["total"].as_u64().unwrap_or_default(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn cook_batch_outer_exit_code_uses_completed_child_outcome() {
+        assert_eq!(cook_batch_outer_exit_code(0, &None), 0);
+        assert_eq!(
+            cook_batch_outer_exit_code(0, &Some(json!({ "exit_code": 1 }))),
+            1
+        );
+        assert_eq!(
+            cook_batch_outer_exit_code(1, &Some(json!({ "exit_code": 0 }))),
+            1
+        );
+    }
+
+    #[test]
+    fn durable_batch_status_envelope_preserves_canonical_terminal_state() {
+        for state in [
+            batch::AgentTaskBatchState::Queued,
+            batch::AgentTaskBatchState::Running,
+            batch::AgentTaskBatchState::Succeeded,
+            batch::AgentTaskBatchState::PartialFailure,
+            batch::AgentTaskBatchState::Failed,
+            batch::AgentTaskBatchState::Cancelled,
+            batch::AgentTaskBatchState::TimedOut,
+        ] {
+            let exit_code = state.exit_code();
+            let envelope =
+                crate::commands::utils::response::cli_response_for_json_result_for_command(
+                    &Ok(json!({
+                        "status": state.outcome_status(),
+                        "batch": { "state": state.outcome_status() }
+                    })),
+                    exit_code,
+                    "agent-task fanout status",
+                    None,
+                );
+
+            assert_eq!(envelope.success, exit_code == 0, "{state:?}");
+            assert_eq!(envelope.exit_code, exit_code, "{state:?}");
+            assert_eq!(envelope.status, state.outcome_status(), "{state:?}");
+            assert_eq!(
+                envelope.data.expect("durable status")["batch"]["state"],
+                state.outcome_status(),
+                "{state:?}"
+            );
+        }
     }
 
     #[test]
