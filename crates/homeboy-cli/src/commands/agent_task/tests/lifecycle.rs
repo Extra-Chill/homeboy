@@ -842,6 +842,32 @@ fn execution_states_distinguish_patch_noop_provider_failure_and_gate_failure() {
     assert_eq!(patch["gate"]["state"], "passed");
     assert_eq!(patch["promotion"]["state"], "applied");
 
+    let missing = execution_states(
+        fixture_execution_outcome(
+            AgentTaskOutcomeStatus::Succeeded,
+            None,
+            vec![AgentTaskArtifact {
+                schema: AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+                id: "missing-patch".to_string(),
+                kind: "patch".to_string(),
+                name: None,
+                label: None,
+                role: None,
+                semantic_key: None,
+                path: None,
+                url: None,
+                mime: None,
+                size_bytes: Some(1),
+                sha256: None,
+                metadata: json!({ "executor_artifact_finalized": true }),
+            }],
+            Value::Null,
+        ),
+        "not_attempted",
+    );
+    assert_eq!(missing["candidate"]["state"], "missing");
+    assert_eq!(missing["candidate"]["tasks"][0]["reason_code"], "missing");
+
     let no_op_aggregate = aggregate_for_execution_outcome(fixture_execution_outcome(
         AgentTaskOutcomeStatus::NoOp,
         None,

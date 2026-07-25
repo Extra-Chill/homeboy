@@ -23,6 +23,7 @@ use super::args::{
     CancelArgs, DiagnoseArgs, EvidenceArgs, LogsArgs, ReplayProviderBoundaryArgs,
     RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
 };
+use super::candidate::{classify_candidates, CandidateState};
 use crate::commands::utils::response::{
     CommandActionableMetadata, CommandAgentTaskRef, CommandNextAction, CommandNextActionKind,
     CommandResultRefs, ACTIONABLE_METADATA_KEY,
@@ -200,10 +201,13 @@ fn attach_agent_task_status_actionable(value: &mut Value, run_id: &str) {
         ..Default::default()
     };
 
-    let review_command = format!("homeboy agent-task review {run_id}");
-    metadata.next_actions.push(
-        CommandNextAction::new("review run", review_command).with_kind(CommandNextActionKind::Show),
-    );
+    if classify_candidates(value).state().is_recoverable() {
+        let review_command = format!("homeboy agent-task review {run_id}");
+        metadata.next_actions.push(
+            CommandNextAction::new("review run", review_command)
+                .with_kind(CommandNextActionKind::Show),
+        );
+    }
 
     if let Some(command) = transport_proxy_recovery_command(value) {
         metadata.next_actions.push(
@@ -932,6 +936,7 @@ fn enrich_with_diagnostic_summary(value: &mut Value, run_id: &str) -> homeboy::c
         value["failure_reasons"] = Value::Array(failure_reasons);
     }
     value["execution_states"] = execution_states_from_aggregate(&aggregate, value);
+    value["aggregate"] = serde_json::to_value(&aggregate).unwrap_or(Value::Null);
     Ok(())
 }
 
@@ -964,6 +969,8 @@ pub(crate) fn execution_states_from_aggregate(
 ) -> Value {
     let review =
         homeboy::agents::agent_tasks::AgentTaskAggregateReport::from(aggregate.outcomes.clone());
+    let canonical = classify_candidates(&json!({ "aggregate": aggregate }));
+    let candidate_state = canonical.state();
     let provider = aggregate
         .outcomes
         .iter()
@@ -994,6 +1001,11 @@ pub(crate) fn execution_states_from_aggregate(
         .map(|task| {
             let reason_code = if task.status == AgentTaskOutcomeStatus::NoOp {
                 "no_changes_produced"
+            } else if candidate_state != CandidateState::PatchAvailable
+                && task.decision
+                    == homeboy::agents::agent_tasks::AgentTaskReconciliationDecision::ApplyCandidate
+            {
+                candidate_state.as_str()
             } else {
                 match task.decision {
                 homeboy::agents::agent_tasks::AgentTaskReconciliationDecision::NoOp => {
@@ -1052,13 +1064,7 @@ pub(crate) fn execution_states_from_aggregate(
         "schema": "homeboy/agent-task-execution-states/v1",
         "provider": provider,
         "candidate": {
-            "state": if review.summary.apply_candidates > 0 {
-                "patch_available"
-            } else if review.summary.no_op > 0 {
-                "no_changes_produced"
-            } else {
-                "not_available"
-            },
+            "state": candidate_state.as_str(),
             "tasks": candidates,
         },
         "gate": {
@@ -1495,6 +1501,7 @@ fn liveness_summary(record: &Value, run_id: &str) -> Value {
         .and_then(|queue| queue.get("state"))
         .and_then(Value::as_str)
         == Some("waiting_for_capacity");
+    let candidate_recoverable = classify_candidates(record).state().is_recoverable();
 
     // A local cook runs the provider in an in-process thread, so it has neither
     // provider handles nor a runner job id. `reserve_provider_execution` still
@@ -1521,7 +1528,7 @@ fn liveness_summary(record: &Value, run_id: &str) -> Value {
         },
         "stale_reason": metadata.get("stale_running_reason"),
         "runner_queue": metadata.get("runner_queue"),
-        "next_action": if terminal {
+        "next_action": if terminal && candidate_recoverable {
             format!("homeboy agent-task review {run_id}")
         } else if stale {
             format!("homeboy agent-task reconcile {} --dry-run", quote_arg(run_id))
@@ -1794,16 +1801,28 @@ fn work_summary(
     let committed_changes = provider_committed_changes(record)
         || aggregate.is_some_and(aggregate_has_committed_changes)
         || latest_promotion.is_some_and(promotion_reports_committed_changes);
+    let canonical = classify_candidates(&json!({ "aggregate": aggregate }));
     let classification = work_classification(
         record,
         promotion_status,
         artifact_ref_count,
         evidence_ref_count,
         committed_changes,
+        canonical.state(),
     );
 
     json!({
         "classification": classification,
+        "candidate_state": canonical.state().as_str(),
+        "candidate_counts": {
+            "patch_available": canonical.available,
+            "empty": canonical.empty,
+            "missing": canonical.missing,
+            "unreadable": canonical.unreadable,
+            "conflicting": canonical.conflicting,
+            "retained_only": canonical.retained_only,
+            "unknown": canonical.unknown,
+        },
         "provider_execution_status": provider_status,
         "promotion_status": promotion_status,
         "artifact_ref_count": artifact_ref_count,
@@ -1845,9 +1864,13 @@ fn work_classification(
     artifact_ref_count: usize,
     evidence_ref_count: usize,
     committed_changes: bool,
+    candidate_state: CandidateState,
 ) -> &'static str {
     if committed_changes && promotion_status.is_some_and(is_no_change_promotion_status) {
         return "committed_changes_pending_promotion";
+    }
+    if candidate_state == CandidateState::PatchAvailable {
+        return "provider_completed_patch_available";
     }
     if promotion_status.is_some_and(is_no_change_promotion_status) {
         if artifact_ref_count == 0 && evidence_ref_count == 0 {
