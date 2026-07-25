@@ -276,6 +276,10 @@ pub(super) enum RunnerCommand {
         /// to thousands of lines on a long-lived runner.
         #[arg(long)]
         generations: bool,
+
+        /// Return complete status, runtime diagnostics, followups, and generation detail.
+        #[arg(long)]
+        full: bool,
     },
     /// Close a runner tunnel and remove its persisted session state
     Disconnect {

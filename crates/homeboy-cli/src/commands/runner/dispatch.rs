@@ -168,9 +168,11 @@ pub fn run(
                 confirm_control_plane_lost,
             },
         )),
-        RunnerCommand::Status { id, generations } => {
-            map_registry(status_mod::status(id.as_deref(), generations))
-        }
+        RunnerCommand::Status {
+            id,
+            generations,
+            full,
+        } => map_registry(status_mod::status(id.as_deref(), generations, full)),
         RunnerCommand::Disconnect { id } => map_registry(registry::disconnect(&id)),
         RunnerCommand::RefreshHomeboy {
             runner_id,

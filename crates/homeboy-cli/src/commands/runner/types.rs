@@ -40,6 +40,12 @@ pub struct RunnerExtra {
     pub operator_hints: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub operator_commands: Vec<RunnerOperatorCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operator_summary: Option<RunnerOperatorSummary>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub operator_summaries: Vec<RunnerOperatorSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation: Option<RunnerTruncation>,
 }
 
 impl Default for RunnerExtra {
@@ -55,8 +61,33 @@ impl Default for RunnerExtra {
             generation_inventory: Vec::new(),
             operator_hints: Vec::new(),
             operator_commands: Vec::new(),
+            operator_summary: None,
+            operator_summaries: Vec::new(),
+            truncation: None,
         }
     }
+}
+
+/// Bounded default status contract. Detailed status remains behind `--full`.
+#[derive(Debug, Serialize)]
+pub struct RunnerOperatorSummary {
+    pub identity: String,
+    pub state: String,
+    pub risk: Vec<String>,
+    pub next_action: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerTruncation {
+    pub omitted_generations: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub omitted_sessions: usize,
+    pub evidence_ref: String,
+    pub full_command: String,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Serialize)]

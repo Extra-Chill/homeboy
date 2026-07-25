@@ -8,10 +8,13 @@ fn providers_output_includes_core_capability_contract() {
         let (value, status) = review::providers(ProvidersArgs {
             backend: None,
             selector: None,
+            runtime: None,
+            status: None,
             secret_env: Vec::new(),
             validate_readiness: false,
             refresh: false,
             catalog: false,
+            full: false,
         })
         .expect("providers output");
 

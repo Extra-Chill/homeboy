@@ -845,6 +845,10 @@ fn scope_providers(
     }
 }
 
+const DEFAULT_PROVIDER_LIMIT: usize = 10;
+const DEFAULT_DIAGNOSTIC_LIMIT: usize = 10;
+const DEFAULT_TEXT_LIMIT: usize = 256;
+
 pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     let catalog = if args.refresh {
         AgentTaskProviderCatalog::refresh()
@@ -879,9 +883,53 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     // into the full catalog; an absent `--backend` still shows everything.
     let scoped_backend = scoped_provider_backend(args.backend.as_deref(), args.catalog);
     let scoped_providers = scope_providers(all_providers, scoped_backend);
-    let providers: &[AgentTaskExecutorProvider] = &scoped_providers;
+    let filtered_providers = scoped_providers
+        .iter()
+        .filter(|provider| {
+            args.selector
+                .as_deref()
+                .is_none_or(|selector| provider.id == selector)
+                && args
+                    .runtime
+                    .as_deref()
+                    .is_none_or(|runtime| provider.runtime_id.as_deref() == Some(runtime))
+                && args
+                    .status
+                    .as_deref()
+                    .is_none_or(|status| provider_status(provider).eq_ignore_ascii_case(status))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let providers: &[AgentTaskExecutorProvider] = &filtered_providers;
     let fallback_sources =
         homeboy::agents::agent_tasks::provider::provider_secret_sources_for_providers(providers);
+
+    let full_command = provider_full_command(&args);
+    let shown_providers = if args.full {
+        providers.to_vec()
+    } else {
+        providers
+            .iter()
+            .take(DEFAULT_PROVIDER_LIMIT)
+            .cloned()
+            .collect()
+    };
+    let diagnostics = executor.diagnostics();
+    let shown_diagnostics = if args.full {
+        diagnostics
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|diagnostic| serde_json::to_value(diagnostic).unwrap_or(Value::Null))
+            .collect::<Vec<_>>()
+    } else {
+        diagnostics
+            .iter()
+            .take(DEFAULT_DIAGNOSTIC_LIMIT)
+            .map(compact_diagnostic)
+            .collect::<Vec<_>>()
+    };
 
     Ok((
         serde_json::json!({
@@ -892,25 +940,117 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
             },
             "scope": {
                 "backend": scoped_backend,
-                "filtered": scoped_backend.is_some(),
-                "shown": providers.len(),
+                "filtered": scoped_backend.is_some()
+                    || args.selector.is_some()
+                    || args.runtime.is_some()
+                    || args.status.is_some(),
+                "shown": shown_providers.len(),
+                "matched": providers.len(),
                 "total": all_providers.len(),
                 "catalog_command": "homeboy agent-task providers --catalog",
             },
-            "dispatch_config_layers": dispatch_config_layers(providers),
-            "provider_identity_catalog": provider_identity_catalog(providers),
+            "operator_summary": {
+                "identity": "agent-task providers",
+                "state": if providers.is_empty() { "empty" } else { "available" },
+                "risk": if diagnostics.is_empty() { Vec::new() } else { vec![format!("{} discovery diagnostic(s)", diagnostics.len())] },
+                "next_action": full_command.clone(),
+            },
+            "truncation": {
+                "providers": { "shown": shown_providers.len(), "omitted": providers.len().saturating_sub(shown_providers.len()), "evidence_ref": "agent-task:provider-catalog", "full_command": full_command.clone() },
+                "diagnostics": { "shown": shown_diagnostics.len(), "omitted": diagnostics.len().saturating_sub(shown_diagnostics.len()), "evidence_ref": "agent-task:provider-discovery-diagnostics", "full_command": full_command },
+            },
+            "dispatch_config_layers": if args.full { dispatch_config_layers(providers) } else { Value::Null },
+            "provider_identity_catalog": if args.full { provider_identity_catalog(providers) } else { Vec::new() },
             "capability_contract": homeboy::agents::agent_tasks::provider::provider_capability_contract(),
-            "providers": providers,
+            "providers": if args.full { serde_json::to_value(shown_providers).unwrap_or(Value::Null) } else { Value::Array(shown_providers.iter().map(compact_provider).collect()) },
             "readiness_validation": {
                 "validated": args.validate_readiness,
                 "backend": args.backend,
                 "selector": args.selector,
             },
-            "diagnostics": executor.diagnostics(),
+            "diagnostics": shown_diagnostics,
             "secret_env": homeboy::agents::agent_tasks::secrets::secret_env_status_with_fallbacks(&args.secret_env, &fallback_sources),
         }),
         0,
     ))
+}
+
+fn provider_status(provider: &AgentTaskExecutorProvider) -> &'static str {
+    if provider.default_backend {
+        "default"
+    } else {
+        "available"
+    }
+}
+
+fn compact_provider(provider: &AgentTaskExecutorProvider) -> Value {
+    serde_json::json!({
+        "id": bounded_text(&provider.id, 160),
+        "label": provider.label.as_deref().map(|value| bounded_text(value, 160)),
+        "backend": bounded_text(&provider.backend, 160),
+        "runtime_id": provider.runtime_id.as_deref().map(|value| bounded_text(value, 160)),
+        "extension_id": provider.extension_id.as_deref().map(|value| bounded_text(value, 160)),
+        "status": provider_status(provider),
+        "default_backend": provider.default_backend,
+        "capabilities": provider.capabilities.iter().take(8).map(|value| bounded_text(value, 96)).collect::<Vec<_>>(),
+    })
+}
+
+fn compact_diagnostic(diagnostic: &impl serde::Serialize) -> Value {
+    let mut value = serde_json::to_value(diagnostic).unwrap_or(Value::Null);
+    if let Some(Value::String(message)) = value.get_mut("message") {
+        *message = bounded_text(message, DEFAULT_TEXT_LIMIT);
+    }
+    if let Some(object) = value.as_object_mut() {
+        for key in ["response_body", "body", "stdout", "stderr"] {
+            if let Some(bytes) = object.get(key).and_then(Value::as_str).map(str::len) {
+                object.insert(
+                    key.to_string(),
+                    serde_json::json!({
+                        "summarized": true,
+                        "omitted_bytes": bytes,
+                        "evidence_ref": "agent-task:provider-discovery-diagnostics",
+                    }),
+                );
+            }
+        }
+    }
+    value
+}
+
+fn bounded_text(value: &str, limit: usize) -> String {
+    let mut chars = value.chars();
+    let bounded = chars.by_ref().take(limit).collect::<String>();
+    if chars.next().is_some() {
+        format!("{bounded}...")
+    } else {
+        bounded
+    }
+}
+
+fn provider_full_command(args: &ProvidersArgs) -> String {
+    let mut command = "homeboy agent-task providers --full".to_string();
+    for (flag, value) in [
+        ("backend", args.backend.as_deref()),
+        ("selector", args.selector.as_deref()),
+        ("runtime", args.runtime.as_deref()),
+        ("status", args.status.as_deref()),
+    ] {
+        if let Some(value) = value {
+            command.push_str(&format!(" --{flag} {}", shell_arg(value)));
+        }
+    }
+    command
+}
+
+fn shell_arg(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn provider_identity_catalog(providers: &[AgentTaskExecutorProvider]) -> Vec<Value> {
@@ -1347,6 +1487,53 @@ mod tests {
         AgentTaskOutcomeStatus, AgentTaskReconciliationDecision, AGENT_TASK_ARTIFACT_SCHEMA,
     };
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn compact_provider_bounds_extensions_and_large_diagnostics() {
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
+            "id": "provider-".to_string() + &"x".repeat(10_000),
+            "backend": "backend-".to_string() + &"x".repeat(10_000),
+            "extension_id": "extension-".to_string() + &"x".repeat(10_000),
+            "runtime_id": "runtime-".to_string() + &"x".repeat(10_000),
+            "capabilities": vec!["capability-".to_string() + &"x".repeat(10_000); 100],
+        }))
+        .expect("provider fixture");
+        let providers = std::iter::repeat(provider)
+            .take(DEFAULT_PROVIDER_LIMIT + 100)
+            .map(|provider| compact_provider(&provider))
+            .take(DEFAULT_PROVIDER_LIMIT)
+            .collect::<Vec<_>>();
+        let diagnostic = compact_diagnostic(&serde_json::json!({
+            "class": "provider.error",
+            "message": "x".repeat(100_000),
+            "response_body": "x".repeat(100_000),
+        }));
+
+        assert_eq!(providers.len(), DEFAULT_PROVIDER_LIMIT);
+        assert!(serde_json::to_vec(&providers).expect("provider JSON").len() < 20_000);
+        assert!(diagnostic["message"].as_str().expect("message").len() <= DEFAULT_TEXT_LIMIT + 3);
+        assert_eq!(diagnostic["response_body"]["omitted_bytes"], 100_000);
+    }
+
+    #[test]
+    fn provider_full_command_quotes_filter_values() {
+        let command = provider_full_command(&ProvidersArgs {
+            backend: Some("backend; touch /tmp/unwanted".to_string()),
+            selector: Some("provider id".to_string()),
+            runtime: None,
+            status: None,
+            secret_env: Vec::new(),
+            validate_readiness: false,
+            refresh: false,
+            catalog: false,
+            full: false,
+        });
+
+        assert_eq!(
+            command,
+            "homeboy agent-task providers --full --backend 'backend; touch /tmp/unwanted' --selector 'provider id'"
+        );
+    }
 
     fn recoverable_review_aggregate(
         temp: &tempfile::TempDir,

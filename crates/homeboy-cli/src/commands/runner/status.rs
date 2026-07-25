@@ -16,21 +16,25 @@ use super::super::CmdResult;
 use super::types::{
     LabFollowup, LabRunnerHomeboyOutput, LabSelectedRunnerOutput, RunnerArtifactFeatureDiagnostics,
     RunnerConnectionOutput, RunnerExecutableRequirementDiagnostics, RunnerExtra,
-    RunnerHomeboyBinaryRole, RunnerOperatorCommand, RunnerOutput, RunnerRuntimeDiagnostics,
-    RunnerRuntimePackageDiagnostics, RunnerToolDiagnostics, RunnerWorkflowBinaryGuidance,
-    RuntimeDiagnostic, RuntimePackageOutput, RuntimeProbeValue, SelectedRuntimeOutput,
+    RunnerHomeboyBinaryRole, RunnerOperatorCommand, RunnerOperatorSummary, RunnerOutput,
+    RunnerRuntimeDiagnostics, RunnerRuntimePackageDiagnostics, RunnerToolDiagnostics,
+    RunnerTruncation, RunnerWorkflowBinaryGuidance, RuntimeDiagnostic, RuntimePackageOutput,
+    RuntimeProbeValue, SelectedRuntimeOutput,
 };
 
-pub(super) fn status(id: Option<&str>, include_generations: bool) -> CmdResult<RunnerOutput> {
+const DEFAULT_STATUS_SESSION_LIMIT: usize = 20;
+
+pub(super) fn status(
+    id: Option<&str>,
+    include_generations: bool,
+    full: bool,
+) -> CmdResult<RunnerOutput> {
     let preferred_lab_runner = runner::resolve_default_lab_runner()?;
     if let Some(id) = id {
         let report = runner::status(id)?;
         // Also polls draining generations and retires only those that report
         // authoritative zero active jobs.
         let generation_inventory = runner::runner_generation_inventory(id)?;
-        let operator_hints = runner_status_operator_hints(&report);
-        let operator_commands = runner_status_operator_commands(&report);
-        let selected_lab_runner = selected_lab_runner_status(Some(id), Some(report.clone()))?;
         // Lead with the compact authoritative admission answer, summarizing the
         // draining generations by count rather than expanding the full ledger
         // (#9478/#9522). The full inventory stays available as detail below.
@@ -42,11 +46,39 @@ pub(super) fn status(id: Option<&str>, include_generations: bool) -> CmdResult<R
         // already carries the count, and on a long-lived runner the full
         // inventory runs to thousands of lines that make old ownership look like
         // current load. `--generations` opts back into the full detail.
-        let generation_inventory = if include_generations {
+        let generation_count = generation_inventory.len();
+        let generation_inventory = if include_generations || full {
             generation_inventory
         } else {
             Vec::new()
         };
+        if !full {
+            return Ok((
+                RunnerOutput {
+                    command: "runner.status".to_string(),
+                    id: Some(id.to_string()),
+                    extra: RunnerExtra {
+                        admission_summary,
+                        operator_summary: Some(operator_summary(&report)),
+                        truncation: Some(RunnerTruncation {
+                            omitted_generations: generation_count
+                                .saturating_sub(generation_inventory.len()),
+                            omitted_sessions: 0,
+                            evidence_ref: format!("runner:{}:generation-inventory", id),
+                            full_command: format!("homeboy runner status {} --full", shell_arg(id)),
+                        }),
+                        generation_inventory,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                0,
+            ));
+        }
+
+        let operator_hints = runner_status_operator_hints(&report);
+        let operator_commands = runner_status_operator_commands(&report);
+        let selected_lab_runner = selected_lab_runner_status(Some(id), Some(report.clone()))?;
         return Ok((
             RunnerOutput {
                 command: "runner.status".to_string(),
@@ -69,6 +101,31 @@ pub(super) fn status(id: Option<&str>, include_generations: bool) -> CmdResult<R
     }
 
     let sessions = runner::statuses()?;
+    if !full {
+        let omitted = sessions.len().saturating_sub(DEFAULT_STATUS_SESSION_LIMIT);
+        let sessions = sessions
+            .iter()
+            .take(DEFAULT_STATUS_SESSION_LIMIT)
+            .map(operator_summary)
+            .collect::<Vec<_>>();
+        return Ok((
+            RunnerOutput {
+                command: "runner.status".to_string(),
+                extra: RunnerExtra {
+                    operator_summaries: sessions,
+                    truncation: Some(RunnerTruncation {
+                        omitted_generations: 0,
+                        omitted_sessions: omitted,
+                        evidence_ref: "runner:session-inventory".to_string(),
+                        full_command: "homeboy runner status --full".to_string(),
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            0,
+        ));
+    }
     let operator_hints = sessions
         .iter()
         .flat_map(runner_status_operator_hints)
@@ -95,6 +152,41 @@ pub(super) fn status(id: Option<&str>, include_generations: bool) -> CmdResult<R
         },
         0,
     ))
+}
+
+fn operator_summary(report: &RunnerStatusReport) -> RunnerOperatorSummary {
+    let mut risk = Vec::new();
+    if !report.connected {
+        risk.push("disconnected".to_string());
+    }
+    if report.stale_daemon.is_some() {
+        risk.push("stale_daemon".to_string());
+    }
+    if report.active_job_count > 0 {
+        risk.push(format!("{} active job(s)", report.active_job_count));
+    }
+    if let Some(error) = &report.active_job_error {
+        risk.push(error.code.clone());
+    }
+    RunnerOperatorSummary {
+        identity: bounded_status_text(&report.runner_id),
+        state: format!("{:?}", report.state).to_ascii_lowercase(),
+        risk,
+        next_action: format!(
+            "homeboy runner status {} --full",
+            shell_arg(&report.runner_id)
+        ),
+    }
+}
+
+fn bounded_status_text(value: &str) -> String {
+    let mut chars = value.chars();
+    let bounded = chars.by_ref().take(256).collect::<String>();
+    if chars.next().is_some() {
+        format!("{bounded}...")
+    } else {
+        bounded
+    }
 }
 
 fn selected_lab_runner_status(
