@@ -34,6 +34,7 @@ pub(super) fn exec(
     read_only_artifact: bool,
     raw: bool,
     command: Vec<String>,
+    extension_env_providers: Vec<String>,
 ) -> CmdResult<RunnerExecOutput> {
     let script = script_file
         .as_deref()
@@ -52,6 +53,7 @@ pub(super) fn exec(
         .collect::<HashMap<_, _>>();
     env.extend(raw_env);
     let required_commands = prepared_command.first().cloned().into_iter().collect();
+    let extension_env_providers = normalize_extension_env_providers(extension_env_providers);
     let has_declared_outputs = !artifact_outputs.is_empty()
         || !artifact_dir_outputs.is_empty()
         || !summary_outputs.is_empty();
@@ -134,7 +136,8 @@ pub(super) fn exec(
                 required_commands,
                 ..Default::default()
             }),
-            required_extensions: Vec::new(),
+            required_extensions: extension_env_providers.clone(),
+            extension_env_providers,
             accepted_extension_settings: Vec::new(),
             require_paths,
             lab_runner_workload: None,
@@ -262,6 +265,17 @@ pub(super) fn exec(
         }
     }
     Ok((output, exit_code))
+}
+
+fn normalize_extension_env_providers(extension_ids: Vec<String>) -> Vec<String> {
+    let mut providers = Vec::new();
+    for extension_id in extension_ids {
+        let extension_id = extension_id.trim();
+        if !extension_id.is_empty() && !providers.iter().any(|value| value == extension_id) {
+            providers.push(extension_id.to_string());
+        }
+    }
+    providers
 }
 
 pub(super) fn should_print_handoff(raw: bool, read_only_artifact: bool) -> bool {

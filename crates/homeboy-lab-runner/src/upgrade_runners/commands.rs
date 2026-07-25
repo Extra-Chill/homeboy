@@ -160,6 +160,7 @@ pub fn runner_exec_options(runner: &Runner, command: Vec<String>) -> RunnerExecO
         path_materialization_plan: None,
         capability_preflight: Some(runner_upgrade_capability_plan()),
         required_extensions: Vec::new(),
+        extension_env_providers: Vec::new(),
         accepted_extension_settings: Vec::new(),
         require_paths: Vec::new(),
         lab_runner_workload: None,

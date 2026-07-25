@@ -23,6 +23,10 @@ pub struct EnvProviderConfig {
     /// The script runs with the same generic Homeboy execution context as the
     /// target command and prints a JSON object of environment variables to add.
     pub script: String,
+    /// Secret names the provider expects the runner to resolve through its
+    /// existing secret-env references. Values never travel in provider plans.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_env: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

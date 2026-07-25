@@ -50,7 +50,22 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
             })?),
         };
 
-        let plan = prepare_daemon_local_process(RunnerProcessRequest {
+        let provider_secret_names = request
+            .extension_env_providers
+            .iter()
+            .map(|id| homeboy_extension::env_provider_secret_names(id))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let secret_env_plan = super::execution::runner_exec_secret_env_plan(
+            &request.command,
+            None,
+            &provider_secret_names,
+            &request.env,
+            secret_env_plan,
+        );
+        let mut plan = prepare_daemon_local_process(RunnerProcessRequest {
             runner_id: request.runner_id,
             runner,
             cwd: request.cwd,
@@ -58,12 +73,32 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
             command: request.command,
             env: request.env,
             secret_env_names: request.secret_env_names,
-            secret_env_plan,
+            secret_env_plan: Some(secret_env_plan),
             capture_patch: request.capture_patch,
             raw_exec: request.raw_exec,
             source_snapshot: request.source_snapshot,
             require_paths: request.require_paths,
             validate_require_paths_on_host: request.validate_require_paths_on_host,
+        })?;
+        let contributions = homeboy_extension::resolve_installed_env_providers(
+            &request.extension_env_providers,
+            std::path::Path::new(&plan.cwd),
+            &plan
+                .env
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect::<Vec<_>>(),
+        )?;
+        for contribution in &contributions {
+            for (key, value) in &contribution.public_env {
+                plan.env.insert(key.clone(), value.clone());
+            }
+        }
+        let extension_env_provenance = serde_json::to_value(&contributions).map_err(|err| {
+            homeboy_core::error::Error::internal_json(
+                err.to_string(),
+                Some("serialize extension env provenance".to_string()),
+            )
         })?;
 
         Ok(PreparedDaemonExec::new(
@@ -76,6 +111,7 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
             plan.require_paths.clone(),
             plan.runner.settings.concurrency_limit,
             plan.runner.settings.heartbeat_only_stall.clone(),
+            extension_env_provenance,
             Arc::new(plan),
         ))
     }
@@ -121,6 +157,7 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
             capture: output
                 .capture
                 .and_then(|capture| serde_json::to_value(capture).ok()),
+            extension_env_provenance: prepared.extension_env_provenance.clone(),
         })
     }
 }

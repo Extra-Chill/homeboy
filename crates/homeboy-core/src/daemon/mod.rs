@@ -597,6 +597,8 @@ struct ExecRequest {
     path_materialization_plan: Option<PathMaterializationPlan>,
     #[serde(default)]
     require_paths: Vec<String>,
+    #[serde(default)]
+    extension_env_providers: Vec<String>,
     #[serde(rename = "runner_workload", default)]
     lab_runner_workload: Option<LabRunnerWorkload>,
     #[serde(default)]
@@ -1647,6 +1649,7 @@ fn enqueue_exec_job(
         raw_exec: request.raw_exec,
         source_snapshot: request.source_snapshot,
         require_paths: request.require_paths,
+        extension_env_providers: request.extension_env_providers,
         validate_require_paths_on_host: true,
     })?;
     let source_snapshot = Some(plan.source_snapshot.clone());
@@ -1679,6 +1682,7 @@ fn enqueue_exec_job(
         "capture_patch": request.capture_patch,
         "source_snapshot": source_snapshot,
         "path_materialization_plan": path_materialization_plan,
+        "extension_env_providers": plan.extension_env_provenance,
         "lifecycle": lifecycle.clone(),
     });
 
@@ -1955,6 +1959,7 @@ fn enqueue_exec_job(
                     "patch": patch,
                     "metrics": metrics,
                     "capture": capture,
+                    "extension_env_providers": plan.extension_env_provenance,
                 });
                 if exit_code != 0 {
                     job.result(result.clone())?;
@@ -2877,6 +2882,7 @@ mod tests {
                 request.require_paths,
                 Some(1),
                 crate::server::HeartbeatOnlyStallPolicy::default(),
+                serde_json::Value::Null,
                 Arc::new(()),
             ))
         }

@@ -35,6 +35,7 @@ pub(super) fn exec_via_reverse_broker(
     source_snapshot_override: Option<SourceSnapshot>,
     path_materialization_plan: Option<PathMaterializationPlan>,
     require_paths: Vec<String>,
+    extension_env_providers: Vec<String>,
     lab_runner_workload: Option<LabRunnerWorkload>,
     run_id: Option<String>,
     run_id_owns_generic_exec: bool,
@@ -108,6 +109,7 @@ pub(super) fn exec_via_reverse_broker(
             ..Default::default()
         }),
         require_paths: require_paths.clone(),
+        extension_env_providers,
     };
     let command_assets = durable_command_assets(&command, path_materialization_plan.as_ref())?;
     if !command_assets.is_empty() {

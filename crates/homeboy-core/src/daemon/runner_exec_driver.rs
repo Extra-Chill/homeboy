@@ -43,6 +43,8 @@ pub struct RunnerExecPrepareRequest {
     pub raw_exec: bool,
     pub source_snapshot: Option<SourceSnapshot>,
     pub require_paths: Vec<String>,
+    /// Ordered installed extension IDs whose runner-local scripts contribute env.
+    pub extension_env_providers: Vec<String>,
     pub validate_require_paths_on_host: bool,
 }
 
@@ -61,6 +63,8 @@ pub struct PreparedDaemonExec {
     /// local child before creating its bounded pre-spawn reservation.
     pub concurrency_limit: Option<usize>,
     pub heartbeat_only_stall: HeartbeatOnlyStallPolicy,
+    /// Non-secret provider identity and emitted key provenance for durable output.
+    pub extension_env_provenance: Value,
     /// Opaque driver-owned plan handle carried back into `execute`. The daemon
     /// never inspects it; it exists so the driver can reconstruct the full
     /// runner process without re-preparing.
@@ -80,6 +84,7 @@ impl PreparedDaemonExec {
         require_paths: Vec<String>,
         concurrency_limit: Option<usize>,
         heartbeat_only_stall: HeartbeatOnlyStallPolicy,
+        extension_env_provenance: Value,
         plan_token: Arc<dyn std::any::Any + Send + Sync>,
     ) -> Self {
         Self {
@@ -92,6 +97,7 @@ impl PreparedDaemonExec {
             require_paths,
             concurrency_limit,
             heartbeat_only_stall,
+            extension_env_provenance,
             plan_token,
         }
     }
@@ -108,6 +114,7 @@ pub struct DaemonExecOutput {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+    pub extension_env_provenance: Value,
     /// Serialized `RunnerResourceMetrics`, if any.
     pub metrics: Option<Value>,
     /// Serialized command-capture metadata, if any.

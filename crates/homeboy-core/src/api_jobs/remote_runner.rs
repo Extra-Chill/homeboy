@@ -72,6 +72,8 @@ pub struct RemoteRunnerJobRequest {
     pub path_materialization_plan: Option<PathMaterializationPlan>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub require_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extension_env_providers: Vec<String>,
     #[serde(
         rename = "runner_workload",
         default,
@@ -123,6 +125,7 @@ impl RemoteRunnerJobRequest {
             "source_snapshot": request.source_snapshot,
             "path_materialization_plan": request.path_materialization_plan,
             "require_paths": request.require_paths,
+            "extension_env_providers": request.extension_env_providers,
             "runner_workload": request.lab_runner_workload,
             "command_assets": request
                 .metadata
@@ -214,6 +217,7 @@ impl RemoteRunnerJobRequest {
                 .collect(),
             source_snapshot: request.source_snapshot,
             require_paths: request.require_paths,
+            extension_env_providers: request.extension_env_providers,
         });
         if let Some(path_materialization_plan) = request.path_materialization_plan {
             envelope.metadata = merge_metadata_value(

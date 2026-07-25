@@ -5,6 +5,108 @@ use homeboy_engine_primitives::shell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EnvProviderContribution {
+    pub extension_id: String,
+    pub version: String,
+    pub script: String,
+    pub public_env: Vec<(String, String)>,
+    pub secret_env_names: Vec<String>,
+}
+
+pub fn declared_secret_names(extension_id: &str) -> Result<Vec<String>> {
+    let extension = homeboy_core::extension_store::load_extension(extension_id)?;
+    let Some(config) = extension.env_provider else {
+        return Err(Error::validation_invalid_argument(
+            "extension_env",
+            format!("Extension '{extension_id}' does not declare an env_provider"),
+            Some(extension_id.to_string()),
+            None,
+        ));
+    };
+    let mut names = config.secret_env;
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+/// Resolve an installed extension's environment contribution on the machine
+/// that will execute the workload. The caller retains only this non-secret
+/// provenance; secret values remain in the runner's secret-env resolver.
+pub fn resolve_installed(
+    extension_id: &str,
+    component_path: &Path,
+    base_env: &[(String, String)],
+) -> Result<EnvProviderContribution> {
+    let extension = homeboy_core::extension_store::load_extension(extension_id)?;
+    let Some(script) = extension.env_provider_script() else {
+        return Err(Error::validation_invalid_argument(
+            "extension_env",
+            format!("Extension '{extension_id}' does not declare an env_provider"),
+            Some(extension_id.to_string()),
+            Some(vec![format!(
+                "Add env_provider.script to the '{extension_id}' extension manifest."
+            )]),
+        ));
+    };
+    let secret_env_names = declared_secret_names(extension_id)?;
+    let public_env = env_vars(&extension, component_path, base_env)?;
+    for (name, _) in &public_env {
+        if secret_env_names.iter().any(|secret| secret == name)
+            || homeboy_core::redaction::RedactionPolicy::default().is_sensitive_key(name)
+        {
+            return Err(Error::validation_invalid_argument(
+                "extension_env",
+                format!("Extension '{extension_id}' emitted sensitive '{name}' as public env"),
+                Some(name.clone()),
+                Some(vec!["Declare secret names in env_provider.secret_env and resolve them through runner secret_env instead of provider output.".to_string()]),
+            ));
+        }
+    }
+    Ok(EnvProviderContribution {
+        extension_id: extension.id.clone(),
+        version: extension.version.clone(),
+        script: script.to_string(),
+        public_env,
+        secret_env_names,
+    })
+}
+
+/// Resolve providers in request order and reject any ambiguous contribution
+/// before the workload can start. The returned values contain no secrets.
+pub fn resolve_installed_all(
+    extension_ids: &[String],
+    component_path: &Path,
+    base_env: &[(String, String)],
+) -> Result<Vec<EnvProviderContribution>> {
+    let mut effective_env = base_env.to_vec();
+    let mut owners = HashMap::new();
+    for (name, _) in base_env {
+        owners.insert(name.clone(), "request".to_string());
+    }
+    let mut contributions = Vec::new();
+    for extension_id in extension_ids {
+        let contribution = resolve_installed(extension_id, component_path, &effective_env)?;
+        for (name, value) in &contribution.public_env {
+            if let Some(owner) = owners.get(name) {
+                return Err(Error::validation_invalid_argument(
+                    "extension_env",
+                    format!(
+                        "Extension '{}' contributes '{name}', which is already set by {owner}",
+                        contribution.extension_id
+                    ),
+                    Some(name.clone()),
+                    Some(vec!["Use one provider for each environment variable or remove the conflicting request environment value.".to_string()]),
+                ));
+            }
+            owners.insert(name.clone(), contribution.extension_id.clone());
+            effective_env.push((name.clone(), value.clone()));
+        }
+        contributions.push(contribution);
+    }
+    Ok(contributions)
+}
+
 pub(crate) fn env_vars(
     extension: &ExtensionManifest,
     component_path: &Path,

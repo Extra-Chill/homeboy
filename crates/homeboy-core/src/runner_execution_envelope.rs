@@ -87,6 +87,9 @@ pub struct RunnerExecutionDispatch {
     pub source_snapshot: Option<SourceSnapshot>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub require_paths: Vec<String>,
+    /// Ordered IDs of runner-installed extensions that contribute runtime env.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extension_env_providers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

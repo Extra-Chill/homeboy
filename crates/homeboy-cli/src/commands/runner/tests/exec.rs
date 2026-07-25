@@ -15,6 +15,78 @@ use homeboy::runner::runners::{
 };
 
 #[test]
+fn synced_node_workload_receives_runner_extension_environment() {
+    use std::fs;
+
+    homeboy::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        let project = tempfile::tempdir().expect("project");
+        let extension = tempfile::tempdir().expect("extension");
+        fs::write(
+            extension.path().join("fixture.json"),
+            r#"{"id":"fixture","name":"Fixture","version":"1.2.3","env_provider":{"script":"env.sh"}}"#,
+        )
+        .expect("manifest");
+        fs::write(
+            extension.path().join("env.sh"),
+            "#!/bin/sh\nprintf '%s\\n' '{\"FIXTURE_RUNTIME\":\"runner-local\"}'\n",
+        )
+        .expect("provider");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                extension.path().join("env.sh"),
+                fs::Permissions::from_mode(0o755),
+            )
+            .expect("provider executable");
+        }
+        homeboy_extension::install(&extension.path().display().to_string(), Some("fixture"))
+            .expect("install fixture extension");
+        runner::create(
+            &format!(
+                r#"{{"id":"lab-node","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let (output, code) = exec(
+            "lab-node",
+            None,
+            Some(project.path().display().to_string()),
+            None,
+            false,
+            false,
+            Vec::new(),
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            false,
+            vec![
+                "node".to_string(),
+                "-e".to_string(),
+                "if (process.env.FIXTURE_RUNTIME !== 'runner-local') process.exit(1)".to_string(),
+            ],
+            vec!["fixture".to_string()],
+        )
+        .expect("synced Node execution");
+
+        assert_eq!(code, 0, "{}", output.stderr);
+        assert_eq!(output.stdout, "");
+    });
+}
+
+#[test]
 fn raw_exec_command_run_keeps_structured_output_and_presentation_streams() {
     let run = raw_exec_command_run(
         RunnerExecOutput {
@@ -342,6 +414,7 @@ fn runner_exec_promotes_declared_artifacts_to_run_store() {
                 "printf hello > out.txt && mkdir reports && printf '{}' > reports/result.json"
                     .to_string(),
             ],
+            Vec::new(),
         )
         .expect("runner exec");
 
@@ -420,6 +493,7 @@ fn runner_exec_promotes_declared_summaries_as_typed_evidence() {
                 "-c".to_string(),
                 r#"printf '{"matrix":{"passed":1}}' > summary.json"#.to_string(),
             ],
+            Vec::new(),
         )
         .expect("runner exec");
 
@@ -502,6 +576,7 @@ fn runner_exec_structured_summary_is_independent_of_large_stdout() {
                 "-c".to_string(),
                 r#"yes noisy | head -n 2000; printf '{"status":"pass","count":2000}' > summary.json"#.to_string(),
             ],
+            Vec::new(),
         )
         .expect("runner exec");
 
@@ -908,6 +983,7 @@ fn runner_exec_rejects_artifacts_without_run_id() {
         false,
         false,
         vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
+        Vec::new(),
     )
     .expect_err("artifact requires run id");
 
@@ -944,6 +1020,7 @@ fn read_only_artifact_exec_rejects_capture_patch() {
             "-c".to_string(),
             "cat result.json".to_string(),
         ],
+        Vec::new(),
     )
     .expect_err("read-only retrieval cannot capture a patch");
 
@@ -978,6 +1055,7 @@ fn read_only_artifact_exec_rejects_declared_outputs() {
             "-c".to_string(),
             "cat result.json".to_string(),
         ],
+        Vec::new(),
     )
     .expect_err("read-only retrieval cannot declare new artifact outputs");
 
@@ -1040,6 +1118,7 @@ fn runner_exec_rejects_summaries_without_run_id() {
         false,
         false,
         vec!["sh".to_string(), "-c".to_string(), "printf ok".to_string()],
+        Vec::new(),
     )
     .expect_err("summary requires run id");
 

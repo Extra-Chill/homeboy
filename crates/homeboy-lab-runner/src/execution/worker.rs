@@ -39,10 +39,18 @@ pub(super) fn exec_worker_local_with_process_output(
     options: RunnerExecOptions,
     execute: impl FnOnce(&PreparedRunnerProcess) -> Result<ProcessOutput>,
 ) -> Result<(RunnerExecOutput, i32)> {
+    let provider_secret_names = options
+        .extension_env_providers
+        .iter()
+        .map(|id| homeboy_extension::env_provider_secret_names(id))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     let secret_env_plan = runner_exec_secret_env_plan(
         &options.command,
         options.capability_preflight.as_ref(),
-        &options.secret_env_names,
+        &[options.secret_env_names.clone(), provider_secret_names].concat(),
         &options.env,
         options.secret_env_plan.clone(),
     );
@@ -67,6 +75,20 @@ pub(super) fn exec_worker_local_with_process_output(
     })?;
     let run_id_hint =
         apply_explicit_runner_exec_run_id_env(&mut plan.env, options.run_id.as_deref());
+    let contributions = homeboy_extension::resolve_installed_env_providers(
+        &options.extension_env_providers,
+        std::path::Path::new(&plan.cwd),
+        &plan
+            .env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<Vec<_>>(),
+    )?;
+    for contribution in &contributions {
+        for (key, value) in &contribution.public_env {
+            plan.env.insert(key.clone(), value.clone());
+        }
+    }
     super::super::workload::validate_lab_runner_workload_dispatch(
         options.lab_runner_workload.as_ref(),
         runner_id,
