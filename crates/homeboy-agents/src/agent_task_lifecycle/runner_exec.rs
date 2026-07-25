@@ -427,6 +427,44 @@ pub fn project_terminal_runner_exec_result(
     Ok(true)
 }
 
+/// Finish a synchronous transport that has no daemon job identity (diagnostic
+/// SSH/local execution) after its declared evidence is safely retained.
+pub fn finish_runner_exec_direct(run_id: &str, transport: &str, exit_code: i32) -> Result<bool> {
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let Some(mut run) = store.get_run(&sanitize_run_id(run_id))? else {
+        return Ok(false);
+    };
+    if run.metadata_json.get("kind").and_then(Value::as_str) != Some(RUNNER_EXEC_RUN_KIND)
+        || RunStatus::from_label(&run.status).is_some_and(RunStatus::is_terminal)
+    {
+        return Ok(false);
+    }
+    let metadata = run.metadata_json.as_object_mut().expect("metadata object");
+    metadata.insert(
+        "runner_execution_record".to_string(),
+        json!({
+            "transport": transport, "status": if exit_code == 0 { "succeeded" } else { "failed" },
+            "exit_code": exit_code,
+        }),
+    );
+    metadata.insert(
+        "runner_terminal_projection".to_string(),
+        json!({
+            "state": "projected", "transport": transport, "artifact_promotion": "complete",
+        }),
+    );
+    store.finish_run(
+        &run.id,
+        if exit_code == 0 {
+            RunStatus::Pass
+        } else {
+            RunStatus::Fail
+        },
+        Some(run.metadata_json),
+    )?;
+    Ok(true)
+}
+
 fn validate_runner_exec_snapshot_binding(
     run: &homeboy_core::observation::RunRecord,
     snapshot: &RunnerJobLogSnapshot,

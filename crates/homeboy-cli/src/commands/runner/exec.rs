@@ -241,6 +241,18 @@ pub(super) fn exec(
                     events: events.clone(),
                 },
             )?;
+        } else if matches!(
+            output.mode,
+            runner::RunnerExecMode::DiagnosticSsh | runner::RunnerExecMode::Local
+        ) {
+            homeboy_agents::agent_task_lifecycle::finish_runner_exec_direct(
+                run_id,
+                match output.mode {
+                    runner::RunnerExecMode::DiagnosticSsh => "diagnostic_ssh",
+                    _ => "local",
+                },
+                exit_code,
+            )?;
         }
         if matches!(
             output.mode,
