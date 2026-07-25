@@ -1839,7 +1839,18 @@ where
             }
         }
         agent_task_lifecycle::record_cook_attempt(&cook_id, attempt, &run_id)?;
-        let record = agent_task_lifecycle::status(&run_id)?;
+        let mut record = agent_task_lifecycle::status(&run_id)?;
+        // A local controller can disappear after the provider ledger records a
+        // terminal result but before the run projection is terminalized. Repair
+        // only this Cook attempt, never the active fleet, before deciding whether
+        // an absent aggregate is safe to continue from.
+        if record.state == agent_task_lifecycle::AgentTaskRunState::Running
+            && record.is_stale_running()
+            && record.aggregate_path.is_none()
+        {
+            super::reconcile_run(&run_id, false)?;
+            record = agent_task_lifecycle::status(&run_id)?;
+        }
         let controller_owned_staging = record
             .metadata
             .get("lab_staging_controller_job_id")
@@ -1876,7 +1887,10 @@ where
         budget_limit.get_or_insert_with(|| plan.options.execution_budget.clone());
         let aggregate = match agent_task_lifecycle::read_aggregate(&run_id) {
             Ok(aggregate) => aggregate,
-            Err(_error) if record.state.is_terminal() => {
+            // An aggregate path is authoritative evidence that an aggregate was
+            // committed. Its read failure must surface for repair rather than be
+            // misclassified as an interruption and bypass immutable output.
+            Err(_error) if record.state.is_terminal() && record.aggregate_path.is_none() => {
                 let phase = pre_artifact_interruption_phase(&record);
                 // Aggregates normally provide this accounting. A missing
                 // aggregate must still carry only ledger-proven executions
@@ -1900,6 +1914,22 @@ where
                         phase,
                         format!(
                             "attempt {attempt} is terminal without aggregate evidence ({}) and the Cook retry budget is exhausted; inspect durable provider execution metadata before starting a new Cook",
+                            phase.name(),
+                        ),
+                        1,
+                    ));
+                }
+                let budget_limit = budget_limit
+                    .as_ref()
+                    .expect("budget is initialized from the loaded attempt plan");
+                if budget_remaining(budget_limit, observed_budget_used).is_none() {
+                    return Ok(pre_artifact_interruption_report(
+                        cook_id,
+                        attempts,
+                        &run_id,
+                        phase,
+                        format!(
+                            "attempt {attempt} is terminal without aggregate evidence ({}) and its ledger-proven provider execution exhausts the Cook provider budget; inspect the durable attempt before increasing the budget",
                             phase.name(),
                         ),
                         1,

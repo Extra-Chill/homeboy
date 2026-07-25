@@ -150,6 +150,7 @@ fn pre_artifact_interruption_classifies_provider_ledger_without_phantom_executio
         agent_task_lifecycle::cancel_run(&run_id, Some("controller interrupted")).unwrap();
 
         let before = agent_task_lifecycle::status(&run_id).unwrap();
+        assert!(before.aggregate_path.is_none());
         assert_eq!(
             pre_artifact_interruption_phase(&before),
             PreArtifactInterruptionPhase::BeforeProviderStart
@@ -175,6 +176,28 @@ fn pre_artifact_interruption_classifies_provider_ledger_without_phantom_executio
             pre_artifact_interruption_phase(&agent_task_lifecycle::status(&run_id).unwrap()),
             PreArtifactInterruptionPhase::AfterProviderReturn
         );
+        assert!(agent_task_lifecycle::read_aggregate(&run_id).is_err());
+    });
+}
+
+#[test]
+fn pre_artifact_interruption_does_not_bypass_an_authoritative_aggregate_path() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = batch_cook_options(
+            "cook-pre-artifact-aggregate-authority",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        let run_id = options.initial_run_id.clone();
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&run_id)).unwrap();
+        agent_task_lifecycle::cancel_run(&run_id, Some("controller interrupted")).unwrap();
+        agent_task_lifecycle::rewrite_record_for_test(&run_id, |record| {
+            record.aggregate_path = Some("authoritative/aggregate.json".to_string());
+        })
+        .unwrap();
+
+        let record = agent_task_lifecycle::status(&run_id).unwrap();
+        assert!(record.state.is_terminal());
+        assert!(record.aggregate_path.is_some());
         assert!(agent_task_lifecycle::read_aggregate(&run_id).is_err());
     });
 }
