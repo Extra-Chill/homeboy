@@ -347,6 +347,115 @@ pub fn runner_exec_declaration_is_promoted(
         == Some("promoted")
 }
 
+/// Bind a directory declaration to one immutable recursive tree before any of
+/// its children are copied. A replay of changed runner-side output fails closed
+/// instead of mixing two directory versions under one declaration.
+pub fn checkpoint_runner_exec_directory_tree(
+    run_id: &str,
+    declaration: &str,
+    tree_sha256: &str,
+) -> Result<()> {
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let Some(mut run) = store.get_run(&sanitize_run_id(run_id))? else {
+        return Ok(());
+    };
+    if run.metadata_json.get("kind").and_then(Value::as_str) != Some(RUNNER_EXEC_RUN_KIND) {
+        return Ok(());
+    }
+    let metadata = run.metadata_json.as_object_mut().expect("metadata object");
+    let mut checkpoints = metadata
+        .get("runner_exec_directory_promotions")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(existing) = checkpoints
+        .get(declaration)
+        .and_then(|value| value.get("tree_sha256"))
+        .and_then(Value::as_str)
+        .filter(|existing| *existing != tree_sha256)
+    {
+        return Err(Error::validation_invalid_argument(
+            "artifact_dir",
+            format!(
+                "runner exec artifact directory changed after promotion checkpoint ({existing})"
+            ),
+            Some(declaration.to_string()),
+            None,
+        ));
+    }
+    checkpoints
+        .entry(declaration.to_string())
+        .or_insert_with(|| json!({ "tree_sha256": tree_sha256, "children": {} }));
+    metadata.insert(
+        "runner_exec_directory_promotions".to_string(),
+        Value::Object(checkpoints),
+    );
+    store.upsert_imported_run_preserving_terminal(&run)
+}
+
+pub fn runner_exec_directory_child_is_promoted(
+    run_id: &str,
+    declaration: &str,
+    relative_child: &str,
+) -> Result<bool> {
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let Some(run) = store.get_run(&sanitize_run_id(run_id))? else {
+        return Ok(false);
+    };
+    Ok(run
+        .metadata_json
+        .get("runner_exec_directory_promotions")
+        .and_then(|value| value.get(declaration))
+        .and_then(|value| value.get("children"))
+        .and_then(|value| value.get(relative_child))
+        .and_then(|value| value.get("state"))
+        .and_then(Value::as_str)
+        == Some("promoted"))
+}
+
+pub fn record_runner_exec_directory_child_promotion(
+    run_id: &str,
+    declaration: &str,
+    relative_child: &str,
+    artifact: &homeboy_core::observation::ArtifactRecord,
+) -> Result<()> {
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let Some(mut run) = store.get_run(&sanitize_run_id(run_id))? else {
+        return Ok(());
+    };
+    let metadata = run.metadata_json.as_object_mut().expect("metadata object");
+    let mut checkpoints = metadata
+        .get("runner_exec_directory_promotions")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let checkpoint = checkpoints
+        .get_mut(declaration)
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| {
+            Error::internal_unexpected("runner-exec directory child has no tree checkpoint")
+        })?;
+    let children = checkpoint
+        .entry("children")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .expect("directory children object");
+    children.insert(
+        relative_child.to_string(),
+        json!({
+            "state": "promoted",
+            "id": artifact.id,
+            "sha256": artifact.sha256,
+            "artifact_type": artifact.artifact_type,
+        }),
+    );
+    metadata.insert(
+        "runner_exec_directory_promotions".to_string(),
+        Value::Object(checkpoints),
+    );
+    store.upsert_imported_run_preserving_terminal(&run)
+}
+
 /// Finalize a generic runner-exec observation from a daemon-owned terminal
 /// snapshot. Agent-task projections intentionally remain separate: this record
 /// has no task aggregate to parse, so the daemon result itself is authoritative.

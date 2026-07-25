@@ -267,6 +267,52 @@ fn generic_runner_exec_rejects_stale_terminal_snapshot_binding() {
     });
 }
 
+#[test]
+fn synchronous_diagnostic_ssh_and_local_runs_finish_with_artifacts_and_replay_safely() {
+    with_isolated_home(|_| {
+        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+        let temp = tempfile::NamedTempFile::new().expect("artifact");
+        std::fs::write(temp.path(), "diagnostic output").expect("write artifact");
+        for (run_id, transport, exit_code, expected_status) in [
+            ("diagnostic-ssh-success", "diagnostic_ssh", 0, "pass"),
+            ("local-failure", "local", 17, "fail"),
+        ] {
+            ensure_generic_runner_exec_run(run_id, "runner", "/workspace", &["true".to_string()])
+                .expect("synchronous run");
+            record_runner_exec_artifact_declarations(
+                run_id,
+                &["diagnostic.log".to_string()],
+                &[],
+                &[],
+            )
+            .expect("artifact declaration");
+            let artifact = store
+                .record_artifact_with_id(
+                    run_id,
+                    "diagnostic_log",
+                    temp.path(),
+                    &format!("{run_id}-artifact"),
+                    serde_json::json!({ "promoted_by": "runner.exec" }),
+                )
+                .expect("artifact retained before direct terminal projection");
+            record_runner_exec_artifact_refs(run_id, &[artifact]).expect("artifact refs");
+            assert!(
+                finish_runner_exec_direct(run_id, transport, exit_code).expect("direct terminal")
+            );
+            assert!(
+                !finish_runner_exec_direct(run_id, transport, exit_code).expect("restart replay")
+            );
+            let run = store.get_run(run_id).expect("read").expect("run");
+            assert_eq!(run.status, expected_status);
+            assert_eq!(
+                run.metadata_json["runner_execution_record"]["transport"],
+                transport
+            );
+            assert_eq!(store.list_artifacts(run_id).expect("artifacts").len(), 1);
+        }
+    });
+}
+
 fn runner_snapshot(status: &str) -> RunnerJobLogSnapshot {
     let job_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").expect("job id");
     let status = match status {

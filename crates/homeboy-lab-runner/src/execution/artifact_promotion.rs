@@ -74,38 +74,41 @@ pub fn promote_runner_exec_artifact_dirs(
                 None,
             ));
         }
-        let mut children = fs::read_dir(&record_dir)
-            .map_err(|err| {
-                Error::internal_io(
-                    err.to_string(),
-                    Some(format!("read {}", record_dir.display())),
-                )
-            })?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|err| {
-                Error::internal_io(
-                    err.to_string(),
-                    Some(format!("read {}", record_dir.display())),
-                )
-            })?;
-        children.sort_by_key(|entry| entry.file_name());
-        for child in children {
-            let record_path = child.path();
-            let metadata = child.metadata().map_err(|err| {
-                Error::internal_io(
-                    err.to_string(),
-                    Some(format!("stat {}", record_path.display())),
-                )
-            })?;
-            if !metadata.is_file() && !metadata.is_dir() {
+        let tree_sha256 = homeboy_core::observation::directory_tree_sha256(&record_dir)?;
+        homeboy_agents::agent_task_lifecycle::checkpoint_runner_exec_directory_tree(
+            run_id,
+            declared_dir,
+            &tree_sha256,
+        )?;
+        for (relative, record_path) in runner_exec_directory_children(&record_dir)? {
+            let relative_string = relative.display().to_string();
+            if homeboy_agents::agent_task_lifecycle::runner_exec_directory_child_is_promoted(
+                run_id,
+                declared_dir,
+                &relative_string,
+            )? {
                 continue;
             }
-            let name = child.file_name().to_string_lossy().to_string();
-            let declared_path = Path::new(declared_dir).join(&name).display().to_string();
-            let runner_path = runner_dir.join(&name);
+            let name = relative
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("artifact");
+            let declared_path = Path::new(declared_dir)
+                .join(&relative)
+                .display()
+                .to_string();
+            let runner_path = runner_dir.join(&relative);
+            let artifact_id = runner_exec_directory_child_id(
+                run_id,
+                &output.runner_id,
+                declared_dir,
+                &relative_string,
+            );
             let mut artifact_metadata = serde_json::json!({
                 "artifact_dir": declared_dir,
                 "declared_path": declared_path,
+                "relative_child": relative_string,
+                "tree_sha256": tree_sha256,
                 "evidence_role": RunnerExecEvidenceRole::Artifact.as_str(),
                 "promoted_by": "runner.exec",
                 "runner_path": runner_path.display().to_string(),
@@ -114,16 +117,106 @@ pub fn promote_runner_exec_artifact_dirs(
                 artifact_metadata["source"] = serde_json::json!("runner_path_attach");
                 artifact_metadata["runner_id"] = serde_json::json!(runner.id.clone());
             }
-            records.extend(record_runner_exec_output(
+            let record = record_runner_exec_directory_child(
                 &store,
                 run_id,
-                &runner_exec_artifact_kind(&name),
+                &runner_exec_artifact_kind(name),
                 &record_path,
+                &artifact_id,
                 artifact_metadata,
-            )?);
+            )?;
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_directory_child_promotion(
+                run_id,
+                declared_dir,
+                &relative_string,
+                &record,
+            )?;
+            records.push(record);
         }
     }
     Ok(records)
+}
+
+fn runner_exec_directory_children(root: &Path) -> homeboy_core::Result<Vec<(PathBuf, PathBuf)>> {
+    fn collect(
+        root: &Path,
+        relative: &Path,
+        children: &mut Vec<(PathBuf, PathBuf)>,
+    ) -> homeboy_core::Result<()> {
+        let directory = root.join(relative);
+        let mut entries = fs::read_dir(&directory)
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("read {}", directory.display())),
+                )
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("read {}", directory.display())),
+                )
+            })?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let child_relative = relative.join(entry.file_name());
+            let metadata = entry.metadata().map_err(|error| {
+                Error::internal_io(error.to_string(), Some(format!("stat {}", path.display())))
+            })?;
+            if metadata.is_dir() {
+                children.push((child_relative.clone(), path));
+                collect(root, &child_relative, children)?;
+            } else if metadata.is_file() {
+                children.push((child_relative, path));
+            } else {
+                return Err(Error::validation_invalid_argument(
+                    "artifact_dir",
+                    format!(
+                        "runner exec artifact directory contains unsupported entry: {}",
+                        path.display()
+                    ),
+                    Some(path.display().to_string()),
+                    None,
+                ));
+            }
+        }
+        Ok(())
+    }
+    let mut children = Vec::new();
+    collect(root, Path::new(""), &mut children)?;
+    Ok(children)
+}
+
+fn runner_exec_directory_child_id(
+    run_id: &str,
+    binding: &str,
+    declaration: &str,
+    relative_child: &str,
+) -> String {
+    format!(
+        "runner-exec-dir-{:x}",
+        Sha256::digest(
+            format!("{run_id}\0{binding}\0artifact_dir\0{declaration}\0{relative_child}")
+                .as_bytes()
+        )
+    )
+}
+
+fn record_runner_exec_directory_child(
+    store: &ObservationStore,
+    run_id: &str,
+    kind: &str,
+    path: &Path,
+    artifact_id: &str,
+    metadata: serde_json::Value,
+) -> homeboy_core::Result<ArtifactRecord> {
+    if path.is_dir() {
+        return store.record_directory_artifact_with_id(run_id, kind, path, artifact_id, metadata);
+    }
+    let (kind, metadata) = typed_artifact_metadata(kind, path, metadata);
+    store.record_artifact_with_id(run_id, &kind, path, artifact_id, metadata)
 }
 
 /// Promote declared summary outputs into observation-store artifacts.
@@ -647,5 +740,118 @@ impl RunnerExecEvidenceRole {
             Self::Artifact => runner_exec_artifact_kind(declared),
             Self::Summary => runner_exec_summary_kind(declared),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use homeboy_core::test_support::with_isolated_home;
+
+    fn output(cwd: &Path) -> RunnerExecOutput {
+        RunnerExecOutput {
+            variant: "exec",
+            command: "runner.exec",
+            runner_id: "local".to_string(),
+            dry_run: false,
+            mode: runner::RunnerExecMode::Local,
+            argv: vec!["true".to_string()],
+            remote_cwd: cwd.display().to_string(),
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            source_snapshot: None,
+            job: None,
+            runner_job: None,
+            job_id: None,
+            job_events: None,
+            mirror_run_id: None,
+            patch: None,
+            mutation_artifacts: None,
+            artifacts: Vec::new(),
+            promoted_outputs: Vec::new(),
+            structured_summaries: Vec::new(),
+            metrics: None,
+            capture: None,
+            execution_record: None,
+            runner_result: None,
+            handoff: None,
+            diagnostics: None,
+        }
+    }
+
+    #[test]
+    fn directory_replay_resumes_after_first_child_and_rejects_tree_mutation() {
+        with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let directory = temp.path().join("evidence");
+            fs::create_dir(&directory).expect("directory");
+            fs::write(directory.join("first.txt"), "first").expect("first child");
+            fs::write(directory.join("second.txt"), "second").expect("second child");
+            let run_id = "directory-crash-recovery";
+            homeboy_agents::agent_task_lifecycle::ensure_generic_runner_exec_run(
+                run_id,
+                "local",
+                &temp.path().display().to_string(),
+                &["true".to_string()],
+            )
+            .expect("run");
+
+            let tree = homeboy_core::observation::directory_tree_sha256(&directory).expect("tree");
+            homeboy_agents::agent_task_lifecycle::checkpoint_runner_exec_directory_tree(
+                run_id, "evidence", &tree,
+            )
+            .expect("tree checkpoint");
+            let store = ObservationStore::open_initialized().expect("store");
+            let first_id = runner_exec_directory_child_id(run_id, "local", "evidence", "first.txt");
+            let first = store
+                .record_artifact_with_id(
+                    run_id,
+                    "first_txt",
+                    directory.join("first.txt"),
+                    &first_id,
+                    serde_json::json!({}),
+                )
+                .expect("first artifact before simulated crash");
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_directory_child_promotion(
+                run_id,
+                "evidence",
+                "first.txt",
+                &first,
+            )
+            .expect("first child checkpoint");
+
+            let resumed = promote_runner_exec_artifact_dirs(
+                run_id,
+                &output(temp.path()),
+                &["evidence".to_string()],
+            )
+            .expect("recovery resumes only missing child");
+            assert_eq!(resumed.len(), 1);
+            assert_eq!(
+                resumed[0].id,
+                runner_exec_directory_child_id(run_id, "local", "evidence", "second.txt")
+            );
+            assert!(promote_runner_exec_artifact_dirs(
+                run_id,
+                &output(temp.path()),
+                &["evidence".to_string()],
+            )
+            .expect("duplicate replay")
+            .is_empty());
+            assert_eq!(store.list_artifacts(run_id).expect("artifacts").len(), 2);
+
+            fs::write(directory.join("second.txt"), "changed").expect("mutate tree");
+            let error = promote_runner_exec_artifact_dirs(
+                run_id,
+                &output(temp.path()),
+                &["evidence".to_string()],
+            )
+            .expect_err("tree mutation must not reuse the declaration checkpoint");
+            assert_eq!(
+                error.code,
+                homeboy_core::ErrorCode::ValidationInvalidArgument
+            );
+        });
     }
 }
