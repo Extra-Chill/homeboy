@@ -1238,6 +1238,41 @@ where
 fn run_cook_with_boundaries_observed<E, S>(
     options: AgentTaskCookServiceOptions,
     executor: E,
+    side_effects: S,
+    durable_observer: Option<&CookProgressObserver<'_>>,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    S: CookSideEffectService,
+{
+    let result =
+        run_cook_with_boundaries_observed_inner(options, executor, side_effects, durable_observer)?;
+    if let Some(run_id) = result.value.latest_run_id.as_deref() {
+        let attempt = result
+            .value
+            .attempts
+            .last()
+            .map(|attempt| attempt.attempt)
+            .unwrap_or(1);
+        let phase = match result.value.status.as_str() {
+            "queued" | "running" | "in_flight" => "in_flight",
+            _ => "terminal",
+        };
+        report_cook_progress(
+            durable_observer,
+            &result.value.cook_id,
+            run_id,
+            phase,
+            attempt,
+            Some(&result.value.status),
+        )?;
+    }
+    Ok(result)
+}
+
+fn run_cook_with_boundaries_observed_inner<E, S>(
+    options: AgentTaskCookServiceOptions,
+    executor: E,
     mut side_effects: S,
     durable_observer: Option<&CookProgressObserver<'_>>,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>>

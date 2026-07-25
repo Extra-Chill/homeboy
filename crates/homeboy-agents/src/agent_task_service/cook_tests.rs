@@ -1553,13 +1553,18 @@ fn cook_repairs_initial_alias_after_submit_before_index_interruption() {
                     cook_id.to_string(),
                     run_id.to_string()
                 ),
+                (
+                    "in_flight".to_string(),
+                    cook_id.to_string(),
+                    run_id.to_string()
+                ),
             ]
         );
         assert_eq!(
             agent_task_lifecycle::status(run_id)
                 .expect("durable progress")
                 .metadata["cook_progress"]["phase"],
-            "provider_start"
+            "in_flight"
         );
         let index = agent_task_lifecycle::cook_index(cook_id).expect("repaired Cook index");
         assert_eq!(index.latest_run_id, run_id);

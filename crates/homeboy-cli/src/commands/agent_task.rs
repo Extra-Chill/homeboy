@@ -44,14 +44,12 @@ pub(crate) use status::diagnostic_summary_from_aggregate;
 
 pub fn run(args: AgentTaskArgs, _global: &GlobalArgs) -> CmdResult<Value> {
     let progress = |phase: &str, cook_id: Option<&str>, run_id: Option<&str>| {
-        if crate::commands::utils::tty::is_stdout_tty() {
-            let identity = match (cook_id, run_id) {
-                (_, Some(run_id)) => format!(" [{run_id}]"),
-                (Some(cook_id), None) => format!(" [{cook_id}]"),
-                (None, None) => String::new(),
-            };
-            eprintln!("cook: {phase}{identity}");
-        }
+        let identity = match (cook_id, run_id) {
+            (_, Some(run_id)) => format!(" [{run_id}]"),
+            (Some(cook_id), None) => format!(" [{cook_id}]"),
+            (None, None) => String::new(),
+        };
+        crate::commands::utils::tty::status(&format!("cook: {phase}{identity}"));
         Ok(())
     };
     run_with_cook_progress(args, Some(&progress))
