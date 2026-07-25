@@ -311,6 +311,14 @@ pub fn baseline_with_reference_findings(
     baseline
 }
 
+/// Build a transient baseline from the authoritative changed-scope result.
+///
+/// This preserves non-blocking contextual semantics when no persisted baseline
+/// exists without running an equivalent detector pipeline over an archive.
+pub fn baseline_from_result(result: &CodeAuditResult) -> AuditBaseline {
+    baseline_with_reference_findings(None, result)
+}
+
 /// Load an audit baseline from a git ref (e.g., `origin/main`).
 ///
 /// Uses `git show` to read the persisted baseline without checkout.
@@ -920,6 +928,26 @@ mod tests {
         );
 
         assert!(comparison.new_items.is_empty());
+    }
+
+    #[test]
+    fn result_baseline_marks_the_same_authoritative_findings_known() {
+        let result = make_result(
+            vec![make_finding_with_kind(
+                "structural",
+                "src/changed.rs",
+                "large file",
+                AuditFindingKind::GodFile,
+            )],
+            "fixture",
+        );
+
+        let baseline = baseline_from_result(&result);
+        assert_eq!(baseline.item_count, 1);
+        assert_eq!(
+            baseline.known_fingerprints,
+            vec!["structural::src/changed.rs::GodFile"]
+        );
     }
 
     #[test]

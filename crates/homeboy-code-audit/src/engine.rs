@@ -581,7 +581,6 @@ pub(super) fn audit_internal(
             .into_iter()
             .flat_map(|(_, _, fingerprints)| fingerprints)
             .collect(),
-        dead_code_references,
     };
 
     Ok(AuditWithAnalysis {
