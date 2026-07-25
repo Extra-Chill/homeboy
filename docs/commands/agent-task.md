@@ -41,6 +41,20 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 
 `agent-task list`, `agent-task active`, and `agent-task latest` accept `--limit <n>` to cap discovery output. `agent-task reconcile <run-id>` is the recovery path emitted by status and activity: it previews only that run by default, refreshes runner/provider state before classification, and requires `--apply` to mutate it. If ownership or provider state changes before apply, it reports a no-op. `agent-task active --reconcile` is an explicit fleet operation: it previews every candidate by default and requires `--apply` to reconcile the displayed set.
 
+### Resource Behavior
+
+Resource admission follows command capability rather than command names. Bounded
+controller metadata reads (`status`, `logs`, metadata-only `artifacts`, `list`,
+`active`, `latest`, and their fanout/loop/controller equivalents) run locally by
+default and produce no hot-machine or Lab-routing guidance. This keeps recovery
+inspection available when a runner is disconnected, stale, or reports conflicting
+readiness. An explicit `--runner` retains runner-resident polling for status,
+logs, artifacts, list, active, latest, and fanout state reads when the durable
+state lives there. Provider execution, deterministic gates, explicit evidence or
+provider-boundary hydration, and review remain subject to their admission and
+routing contracts. Reconciliation is an explicit workload even when it begins
+with an inspection.
+
 Machine-readable `cook`, `resume`, `adopt`, and `status` responses default to bounded summaries: stable ids, states, totals, timestamps when present, artifact/evidence references, and actionable failure reasons are retained while nested provider evidence is projected away. Use `cook --full`, `resume --full`, `adopt --full`, or the emitted `full_command`; use the emitted `evidence_command` (with `--task` or `--kind`) to retrieve selected durable evidence.
 
 `agent-task replay-provider-boundary <run-id>` is a focused inspect/replay path for
@@ -694,10 +708,11 @@ It includes schema ids, provider capability metadata, status/failure enum values
 and default redaction policy metadata without naming or depending on any specific
 executor provider.
 
-`agent-task status`, `logs`, `artifacts`, and `review` are read-only durable
-lifecycle inspection commands. They do not start workloads and are not gated by
-warm-machine resource policy; use `homeboy runner exec <runner> -- homeboy
-agent-task status <run-id>` when the durable state lives on a Lab runner host.
+`agent-task status`, `logs`, and `artifacts` are read-only durable lifecycle
+inspection commands. They do not start workloads and are not gated by warm-machine
+resource policy; use `homeboy runner exec <runner> -- homeboy agent-task status
+<run-id>` when the durable state lives on a Lab runner host. `agent-task review`
+hydrates aggregate evidence and remains resource-managed.
 
 ## Deterministic Smoke Gate
 

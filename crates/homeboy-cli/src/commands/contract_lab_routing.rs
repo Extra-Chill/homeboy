@@ -185,6 +185,8 @@ impl Commands {
                     | agent_task::AgentTaskCommand::Logs(_)
                     | agent_task::AgentTaskCommand::Artifacts(_)
                     | agent_task::AgentTaskCommand::Evidence(_)
+                    | agent_task::AgentTaskCommand::Diagnose(_)
+                    | agent_task::AgentTaskCommand::ReplayProviderBoundary(_)
                     | agent_task::AgentTaskCommand::Review(_)
                     | agent_task::AgentTaskCommand::List(_)
                     | agent_task::AgentTaskCommand::Active(_)

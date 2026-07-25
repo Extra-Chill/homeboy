@@ -744,8 +744,6 @@ fn detached_agent_task_handoffs_do_not_use_trace_dispatch_timeout() {
         "cook-7971",
         "--runner",
         "homeboy-lab",
-        "--placement",
-        "lab",
     ]);
     let batch = Cli::parse_from([
         "homeboy",
@@ -769,8 +767,6 @@ fn detached_agent_task_handoffs_do_not_use_trace_dispatch_timeout() {
         "--run",
         "--runner",
         "homeboy-lab",
-        "--placement",
-        "lab",
     ]);
 
     for cli in [&cook, &batch, &retry] {

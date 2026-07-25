@@ -160,8 +160,6 @@ fn agent_task_promote_with_runner_only_source_remains_lab_portable() {
         "homeboy@fix-7964",
         "--runner",
         "homeboy-lab",
-        "--placement",
-        "lab",
         "--dry-run",
     ]);
 
