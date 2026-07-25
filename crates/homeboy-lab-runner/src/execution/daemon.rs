@@ -332,15 +332,6 @@ pub(super) fn exec_via_daemon(
         run_id.as_deref(),
         mirror_run_id.as_deref(),
     )?;
-    if let Some(run_id) = run_id.as_deref() {
-        homeboy_agents::agent_task_lifecycle::project_terminal_runner_result(
-            run_id,
-            &homeboy_core::api_jobs::RunnerJobLogSnapshot {
-                job: job.clone(),
-                events: events.clone(),
-            },
-        )?;
-    }
     fire_runner_direct_notification(
         run_id.as_deref(),
         &job,
@@ -404,10 +395,6 @@ pub(super) fn exec_via_daemon(
         Some(&runner_result),
     );
     persist_runner_execution_transition(&execution_record, &cwd, &command)?;
-    // A completed job is a durable lifecycle transition. It is the primary
-    // trigger for draining-generation retirement, not a side effect of status.
-    super::super::generation_store::reconcile(&runner.id, accepted_session.as_ref())?;
-
     Ok((
         RunnerExecOutput {
             variant: "exec",

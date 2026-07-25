@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rusqlite::{params, OptionalExtension};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::*;
@@ -343,6 +344,36 @@ impl ObservationStore {
         path: impl AsRef<Path>,
         metadata_json: serde_json::Value,
     ) -> Result<ArtifactRecord> {
+        self.record_directory_artifact_with_id_and_metadata(run_id, kind, path, None, metadata_json)
+    }
+
+    /// Record a directory under a caller-owned stable id. Replays return the
+    /// existing record only when its immutable tree digest and owner agree.
+    pub fn record_directory_artifact_with_id(
+        &self,
+        run_id: &str,
+        kind: &str,
+        path: impl AsRef<Path>,
+        artifact_id: &str,
+        metadata_json: serde_json::Value,
+    ) -> Result<ArtifactRecord> {
+        self.record_directory_artifact_with_id_and_metadata(
+            run_id,
+            kind,
+            path,
+            Some(artifact_id),
+            metadata_json,
+        )
+    }
+
+    fn record_directory_artifact_with_id_and_metadata(
+        &self,
+        run_id: &str,
+        kind: &str,
+        path: impl AsRef<Path>,
+        artifact_id: Option<&str>,
+        metadata_json: serde_json::Value,
+    ) -> Result<ArtifactRecord> {
         validate_required("run_id", run_id)?;
         validate_required("kind", kind)?;
         if self.get_run(run_id)?.is_none() {
@@ -381,7 +412,31 @@ impl ObservationStore {
             ));
         }
 
-        let id = Uuid::new_v4().to_string();
+        let id = artifact_id
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let tree_sha256 = directory_tree_sha256(path)?;
+        if let Some(existing) = self.get_artifact(&id)? {
+            let existing_matches = existing.run_id == run_id
+                && existing.kind == kind
+                && existing.artifact_type == "directory"
+                && existing.sha256.as_deref() == Some(tree_sha256.as_str())
+                && Path::new(&existing.path).is_dir()
+                && directory_tree_sha256(Path::new(&existing.path))
+                    .ok()
+                    .as_deref()
+                    == Some(tree_sha256.as_str());
+            if existing_matches {
+                return Ok(existing);
+            }
+            return Err(Error::validation_invalid_argument(
+                "artifact_id",
+                format!("stable artifact id '{id}' already records different content or ownership"),
+                Some(id),
+                None,
+            ));
+        }
         let created_at = chrono::Utc::now().to_rfc3339();
         let stored_path = persisted_artifact_path(run_id, &id, path)?;
         copy_artifact_directory(path, &stored_path)?;
@@ -401,7 +456,7 @@ impl ObservationStore {
                     kind,
                     "directory",
                     path_string,
-                    Option::<String>::None,
+                    Some(tree_sha256.clone()),
                     Option::<String>::None,
                     Option::<String>::None,
                     viewer_links_json,
@@ -972,6 +1027,77 @@ impl ObservationStore {
         })?;
         Ok(())
     }
+}
+
+/// Hash a directory tree independent of traversal order. Paths and entry types
+/// are included so a rename or file/directory swap cannot reuse prior evidence.
+pub fn directory_tree_sha256(path: &Path) -> Result<String> {
+    let mut entries = Vec::new();
+    collect_directory_tree_entries(path, Path::new(""), &mut entries)?;
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut digest = Sha256::new();
+    for (relative, kind, content) in entries {
+        digest.update(relative.as_os_str().as_encoded_bytes());
+        digest.update([0]);
+        digest.update(kind.as_bytes());
+        digest.update([0]);
+        digest.update(content.as_bytes());
+        digest.update([0]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn collect_directory_tree_entries(
+    root: &Path,
+    relative: &Path,
+    entries: &mut Vec<(PathBuf, &'static str, String)>,
+) -> Result<()> {
+    let directory = root.join(relative);
+    let mut children = fs::read_dir(&directory)
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("read {}", directory.display())),
+            )
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("read {}", directory.display())),
+            )
+        })?;
+    children.sort_by_key(|entry| entry.file_name());
+    for child in children {
+        let child_relative = relative.join(child.file_name());
+        let metadata = child.metadata().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("stat {}", child.path().display())),
+            )
+        })?;
+        if metadata.is_dir() {
+            entries.push((child_relative.clone(), "directory", String::new()));
+            collect_directory_tree_entries(root, &child_relative, entries)?;
+        } else if metadata.is_file() {
+            entries.push((
+                child_relative,
+                "file",
+                crate::artifact_metadata::sha256_file(&child.path())?,
+            ));
+        } else {
+            return Err(Error::validation_invalid_argument(
+                "path",
+                format!(
+                    "artifact directory contains unsupported entry: {}",
+                    child.path().display()
+                ),
+                Some(child.path().display().to_string()),
+                None,
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn remote_projection_identity_matches(

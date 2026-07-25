@@ -3,7 +3,7 @@
 #![cfg(test)]
 
 use super::*;
-use homeboy_core::api_jobs::{Job, JobStore, RemoteRunnerJobRequest};
+use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStatus, RunnerJobLogSnapshot};
 use homeboy_core::test_support::with_isolated_home;
 
 #[test]
@@ -173,4 +173,230 @@ fn generic_runner_exec_run_supports_artifact_attachment() {
             .expect("declared summary attaches to the generic run");
         assert_eq!(artifact.run_id, "adhoc-evidence-9485");
     });
+}
+
+#[test]
+fn generic_runner_exec_terminal_projection_is_authoritative_and_idempotent() {
+    with_isolated_home(|_| {
+        let command = vec!["node".to_string(), "fuzz.mjs".to_string()];
+        for (run_id, status, expected_status) in [
+            ("runner-projection-success", "succeeded", "pass"),
+            ("runner-projection-failure", "failed", "fail"),
+            ("runner-projection-cancel", "cancelled", "fail"),
+        ] {
+            record_runner_exec_job_identity(
+                run_id,
+                "homeboy-lab",
+                "00000000-0000-0000-0000-000000000123",
+                "/runner/workspace",
+                &command,
+            )
+            .expect("generic run bound to daemon job");
+            record_runner_exec_artifact_declarations(
+                run_id,
+                &["case-log.jsonl".to_string()],
+                &["artifacts".to_string()],
+                &["results.json".to_string()],
+            )
+            .expect("declared artifact contract persists before execution");
+
+            let snapshot = runner_snapshot(status);
+            record_runner_exec_terminal_checkpoint(run_id, &snapshot)
+                .expect("terminal snapshot checkpoint persists before promotion");
+            record_runner_exec_artifact_refs(run_id, &[])
+                .expect("empty declared promotion completes before terminal projection");
+            assert!(project_terminal_runner_exec_result(run_id, &snapshot)
+                .expect("terminal daemon result projects"));
+            assert!(!project_terminal_runner_exec_result(run_id, &snapshot)
+                .expect("duplicate terminal projection is ignored"));
+
+            let store =
+                homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+            let run = store
+                .get_run(run_id)
+                .expect("read run")
+                .expect("projected run");
+            assert_eq!(run.status, expected_status);
+            assert!(run.finished_at.is_some());
+            assert_eq!(
+                run.metadata_json["runner_terminal_projection"]["state"],
+                "projected"
+            );
+            assert_eq!(
+                run.metadata_json["runner_execution_record"]["status"],
+                status
+            );
+            assert_eq!(
+                run.metadata_json["runner_exec_artifact_declarations"]["summaries"][0],
+                "results.json"
+            );
+            if status != "succeeded" {
+                assert_eq!(
+                    run.metadata_json["runner_failure_diagnostics"]["job_status"],
+                    status
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn generic_runner_exec_rejects_stale_terminal_snapshot_binding() {
+    with_isolated_home(|_| {
+        let command = vec!["true".to_string()];
+        record_runner_exec_job_identity(
+            "runner-projection-stale",
+            "homeboy-lab",
+            "00000000-0000-0000-0000-000000000123",
+            "/runner/workspace",
+            &command,
+        )
+        .expect("bound run");
+        let mut stale = runner_snapshot("succeeded");
+        stale.job.id =
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000124").expect("stale job id");
+        let error = project_terminal_runner_exec_result("runner-projection-stale", &stale)
+            .expect_err("delayed terminal snapshot is rejected");
+        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+        let run = homeboy_core::observation::ObservationStore::open_initialized()
+            .expect("store")
+            .get_run("runner-projection-stale")
+            .expect("read")
+            .expect("run");
+        assert_eq!(run.status, "running");
+    });
+}
+
+#[test]
+fn synchronous_diagnostic_ssh_and_local_runs_finish_with_artifacts_and_replay_safely() {
+    with_isolated_home(|_| {
+        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+        let temp = tempfile::NamedTempFile::new().expect("artifact");
+        std::fs::write(temp.path(), "diagnostic output").expect("write artifact");
+        for (run_id, transport, exit_code, expected_status) in [
+            ("diagnostic-ssh-success", "diagnostic_ssh", 0, "pass"),
+            ("local-failure", "local", 17, "fail"),
+        ] {
+            ensure_generic_runner_exec_run(run_id, "runner", "/workspace", &["true".to_string()])
+                .expect("synchronous run");
+            record_runner_exec_artifact_declarations(
+                run_id,
+                &["diagnostic.log".to_string()],
+                &[],
+                &[],
+            )
+            .expect("artifact declaration");
+            let artifact = store
+                .record_artifact_with_id(
+                    run_id,
+                    "diagnostic_log",
+                    temp.path(),
+                    &format!("{run_id}-artifact"),
+                    serde_json::json!({ "promoted_by": "runner.exec" }),
+                )
+                .expect("artifact retained before direct terminal projection");
+            record_runner_exec_artifact_refs(run_id, &[artifact]).expect("artifact refs");
+            assert!(
+                finish_runner_exec_direct(run_id, transport, exit_code).expect("direct terminal")
+            );
+            assert!(
+                !finish_runner_exec_direct(run_id, transport, exit_code).expect("restart replay")
+            );
+            let run = store.get_run(run_id).expect("read").expect("run");
+            assert_eq!(run.status, expected_status);
+            assert_eq!(
+                run.metadata_json["runner_execution_record"]["transport"],
+                transport
+            );
+            assert_eq!(store.list_artifacts(run_id).expect("artifacts").len(), 1);
+        }
+    });
+}
+
+#[test]
+fn declaration_replay_uses_literal_path_and_tilde_keys() {
+    with_isolated_home(|_| {
+        let run_id = "escaped-declaration-recovery";
+        ensure_generic_runner_exec_run(run_id, "runner", "/workspace", &["true".to_string()])
+            .expect("run");
+        let declarations = ["artifacts/result.json", "a~b/c"];
+        record_runner_exec_artifact_declarations(
+            run_id,
+            &declarations
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>(),
+            &[],
+            &[],
+        )
+        .expect("declarations");
+        for declaration in declarations {
+            record_runner_exec_declaration_promotion(run_id, "artifact", declaration, &[])
+                .expect("promotion checkpoint");
+            // A duplicate recovery writes the same key and must remain visible.
+            record_runner_exec_declaration_promotion(run_id, "artifact", declaration, &[])
+                .expect("duplicate checkpoint");
+        }
+        let run = homeboy_core::observation::ObservationStore::open_initialized()
+            .expect("store")
+            .get_run(run_id)
+            .expect("read")
+            .expect("run");
+        for declaration in declarations {
+            assert!(runner_exec_declaration_is_promoted(
+                &run,
+                "artifact",
+                declaration,
+            ));
+        }
+    });
+}
+
+fn runner_snapshot(status: &str) -> RunnerJobLogSnapshot {
+    let job_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").expect("job id");
+    let status = match status {
+        "succeeded" => JobStatus::Succeeded,
+        "failed" => JobStatus::Failed,
+        "cancelled" => JobStatus::Cancelled,
+        _ => panic!("terminal status"),
+    };
+    RunnerJobLogSnapshot {
+        job: Job {
+            id: job_id,
+            operation: "exec".to_string(),
+            status,
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            started_at_ms: Some(1),
+            finished_at_ms: Some(2),
+            event_count: 1,
+            source_snapshot: None,
+            path_materialization_plan: None,
+            stale_reason: None,
+            daemon_lease_id: None,
+            target_runner_id: Some("homeboy-lab".to_string()),
+            target_project_id: None,
+            claim_id: None,
+            claimed_by_runner_id: None,
+            claimed_at_ms: None,
+            claim_expires_at_ms: None,
+            artifacts: Vec::new(),
+            runner_job_projection: None,
+        },
+        events: vec![JobEvent {
+            sequence: 1,
+            job_id,
+            kind: if status == JobStatus::Succeeded {
+                JobEventKind::Result
+            } else {
+                JobEventKind::Error
+            },
+            timestamp_ms: 2,
+            message: Some("terminal result".to_string()),
+            data: Some(serde_json::json!({
+                "exit_code": if status == JobStatus::Succeeded { 0 } else { 1 },
+                "classification": "timeout",
+            })),
+        }],
+    }
 }

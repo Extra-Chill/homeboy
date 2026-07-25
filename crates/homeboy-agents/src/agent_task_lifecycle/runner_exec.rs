@@ -4,7 +4,8 @@
 
 use serde_json::{json, Value};
 
-use homeboy_core::api_jobs::RemoteRunnerJobRequest;
+use homeboy_core::api_jobs::{JobStatus, RemoteRunnerJobRequest, RunnerJobLogSnapshot};
+use homeboy_core::observation::RunStatus;
 
 use super::*;
 
@@ -163,6 +164,448 @@ pub fn ensure_generic_runner_exec_run(
     remote_command: &[String],
 ) -> Result<homeboy_core::observation::RunRecord> {
     ensure_runner_exec_observation_run(run_id, runner_id, remote_workspace, remote_command, None)
+}
+
+/// Persist the output contract before submitting a daemon job. This gives a
+/// restarted controller the exact runner-side paths it must retain, rather than
+/// relying on ephemeral CLI arguments after the daemon has completed.
+pub fn record_runner_exec_artifact_declarations(
+    run_id: &str,
+    artifacts: &[String],
+    artifact_dirs: &[String],
+    summaries: &[String],
+) -> Result<()> {
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let run_id = sanitize_run_id(run_id);
+    let Some(mut run) = store.get_run(&run_id)? else {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            format!("generic runner-exec run record not found: {run_id}"),
+            Some(run_id),
+            None,
+        ));
+    };
+    if run.metadata_json.get("kind").and_then(Value::as_str) != Some(RUNNER_EXEC_RUN_KIND) {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "runner-exec artifact declarations require a generic runner-exec run",
+            Some(run.id),
+            None,
+        ));
+    }
+    let metadata = run.metadata_json.as_object_mut().expect("metadata object");
+    metadata.insert(
+        "runner_exec_artifact_declarations".to_string(),
+        json!({
+            "artifacts": artifacts,
+            "artifact_dirs": artifact_dirs,
+            "summaries": summaries,
+        }),
+    );
+    metadata.insert(
+        "runner_terminal_projection".to_string(),
+        json!({
+            "state": "awaiting_daemon_terminal",
+            "artifact_promotion": "pending",
+        }),
+    );
+    store.upsert_imported_run_preserving_terminal(&run)
+}
+
+/// Checkpoint the authoritative terminal snapshot before copying declared
+/// evidence. A restart can resume promotion from this durable boundary instead
+/// of terminalizing a run whose runner-side files were never retained.
+pub fn record_runner_exec_terminal_checkpoint(
+    run_id: &str,
+    snapshot: &RunnerJobLogSnapshot,
+) -> Result<()> {
+    if !snapshot.job.status.is_terminal() {
+        return Ok(());
+    }
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let run_id = sanitize_run_id(run_id);
+    let Some(mut run) = store.get_run(&run_id)? else {
+        return Ok(());
+    };
+    if run.metadata_json.get("kind").and_then(Value::as_str) != Some(RUNNER_EXEC_RUN_KIND) {
+        return Ok(());
+    }
+    validate_runner_exec_snapshot_binding(&run, snapshot)?;
+    run.metadata_json
+        .as_object_mut()
+        .expect("metadata object")
+        .insert(
+            "runner_terminal_projection".to_string(),
+            json!({
+                "state": "terminal_checkpointed",
+                "artifact_promotion": "pending",
+                "job_id": snapshot.job.id,
+                "status": snapshot.job.status,
+                "event_count": snapshot.events.len(),
+            }),
+        );
+    store.upsert_imported_run_preserving_terminal(&run)
+}
+
+/// Retain controller-owned artifact IDs alongside the original declarations.
+/// These IDs remain usable after the daemon evicts its job/event retention.
+pub fn record_runner_exec_artifact_refs(
+    run_id: &str,
+    artifacts: &[homeboy_core::observation::ArtifactRecord],
+) -> Result<()> {
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let run_id = sanitize_run_id(run_id);
+    let Some(mut run) = store.get_run(&run_id)? else {
+        return Ok(());
+    };
+    if run.metadata_json.get("kind").and_then(Value::as_str) != Some(RUNNER_EXEC_RUN_KIND) {
+        return Ok(());
+    }
+    let metadata = run.metadata_json.as_object_mut().expect("metadata object");
+    let mut refs = metadata
+        .get("runner_exec_artifact_refs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for artifact in artifacts {
+        if refs.iter().any(|entry| entry["id"] == artifact.id) {
+            continue;
+        }
+        refs.push(json!({
+            "id": artifact.id.clone(),
+            "kind": artifact.kind.clone(),
+            "path": artifact.path.clone(),
+        }));
+    }
+    let artifact_count = refs.len();
+    metadata.insert("runner_exec_artifact_refs".to_string(), Value::Array(refs));
+    metadata.insert(
+        "runner_terminal_projection".to_string(),
+        json!({
+            "state": "terminal_checkpointed",
+            "artifact_promotion": "complete",
+            "artifact_count": artifact_count,
+        }),
+    );
+    store.upsert_imported_run_preserving_terminal(&run)
+}
+
+/// Persist one declaration's completed promotion immediately. The artifact IDs
+/// and content hashes make a replay skip that declaration after a crash while
+/// allowing later declarations to resume independently.
+pub fn record_runner_exec_declaration_promotion(
+    run_id: &str,
+    role: &str,
+    declaration: &str,
+    artifacts: &[homeboy_core::observation::ArtifactRecord],
+) -> Result<()> {
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let run_id = sanitize_run_id(run_id);
+    let Some(mut run) = store.get_run(&run_id)? else {
+        return Ok(());
+    };
+    if run.metadata_json.get("kind").and_then(Value::as_str) != Some(RUNNER_EXEC_RUN_KIND) {
+        return Ok(());
+    }
+    let metadata = run.metadata_json.as_object_mut().expect("metadata object");
+    let key = format!("{role}:{declaration}");
+    let mut states = metadata
+        .get("runner_exec_declaration_promotions")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    states.insert(
+        key,
+        json!({
+            "role": role,
+            "declaration": declaration,
+            "state": "promoted",
+            "artifacts": artifacts.iter().map(|artifact| json!({
+                "id": artifact.id,
+                "sha256": artifact.sha256,
+                "path": artifact.path,
+            })).collect::<Vec<_>>(),
+        }),
+    );
+    metadata.insert(
+        "runner_exec_declaration_promotions".to_string(),
+        Value::Object(states),
+    );
+    store.upsert_imported_run_preserving_terminal(&run)
+}
+
+pub fn runner_exec_declaration_is_promoted(
+    run: &homeboy_core::observation::RunRecord,
+    role: &str,
+    declaration: &str,
+) -> bool {
+    run.metadata_json
+        .get("runner_exec_declaration_promotions")
+        .and_then(Value::as_object)
+        .and_then(|promotions| promotions.get(&format!("{role}:{declaration}")))
+        .and_then(|promotion| promotion.get("state"))
+        .and_then(Value::as_str)
+        == Some("promoted")
+}
+
+/// Bind a directory declaration to one immutable recursive tree before any of
+/// its children are copied. A replay of changed runner-side output fails closed
+/// instead of mixing two directory versions under one declaration.
+pub fn checkpoint_runner_exec_directory_tree(
+    run_id: &str,
+    declaration: &str,
+    tree_sha256: &str,
+) -> Result<()> {
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let Some(mut run) = store.get_run(&sanitize_run_id(run_id))? else {
+        return Ok(());
+    };
+    if run.metadata_json.get("kind").and_then(Value::as_str) != Some(RUNNER_EXEC_RUN_KIND) {
+        return Ok(());
+    }
+    let metadata = run.metadata_json.as_object_mut().expect("metadata object");
+    let mut checkpoints = metadata
+        .get("runner_exec_directory_promotions")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(existing) = checkpoints
+        .get(declaration)
+        .and_then(|value| value.get("tree_sha256"))
+        .and_then(Value::as_str)
+        .filter(|existing| *existing != tree_sha256)
+    {
+        return Err(Error::validation_invalid_argument(
+            "artifact_dir",
+            format!(
+                "runner exec artifact directory changed after promotion checkpoint ({existing})"
+            ),
+            Some(declaration.to_string()),
+            None,
+        ));
+    }
+    checkpoints
+        .entry(declaration.to_string())
+        .or_insert_with(|| json!({ "tree_sha256": tree_sha256, "children": {} }));
+    metadata.insert(
+        "runner_exec_directory_promotions".to_string(),
+        Value::Object(checkpoints),
+    );
+    store.upsert_imported_run_preserving_terminal(&run)
+}
+
+pub fn runner_exec_directory_child_is_promoted(
+    run_id: &str,
+    declaration: &str,
+    relative_child: &str,
+) -> Result<bool> {
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let Some(run) = store.get_run(&sanitize_run_id(run_id))? else {
+        return Ok(false);
+    };
+    Ok(run
+        .metadata_json
+        .get("runner_exec_directory_promotions")
+        .and_then(|value| value.get(declaration))
+        .and_then(|value| value.get("children"))
+        .and_then(|value| value.get(relative_child))
+        .and_then(|value| value.get("state"))
+        .and_then(Value::as_str)
+        == Some("promoted"))
+}
+
+pub fn record_runner_exec_directory_child_promotion(
+    run_id: &str,
+    declaration: &str,
+    relative_child: &str,
+    artifact: &homeboy_core::observation::ArtifactRecord,
+) -> Result<()> {
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let Some(mut run) = store.get_run(&sanitize_run_id(run_id))? else {
+        return Ok(());
+    };
+    let metadata = run.metadata_json.as_object_mut().expect("metadata object");
+    let mut checkpoints = metadata
+        .get("runner_exec_directory_promotions")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let checkpoint = checkpoints
+        .get_mut(declaration)
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| {
+            Error::internal_unexpected("runner-exec directory child has no tree checkpoint")
+        })?;
+    let children = checkpoint
+        .entry("children")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .expect("directory children object");
+    children.insert(
+        relative_child.to_string(),
+        json!({
+            "state": "promoted",
+            "id": artifact.id,
+            "sha256": artifact.sha256,
+            "artifact_type": artifact.artifact_type,
+        }),
+    );
+    metadata.insert(
+        "runner_exec_directory_promotions".to_string(),
+        Value::Object(checkpoints),
+    );
+    store.upsert_imported_run_preserving_terminal(&run)
+}
+
+/// Finalize a generic runner-exec observation from a daemon-owned terminal
+/// snapshot. Agent-task projections intentionally remain separate: this record
+/// has no task aggregate to parse, so the daemon result itself is authoritative.
+pub fn project_terminal_runner_exec_result(
+    run_id: &str,
+    snapshot: &RunnerJobLogSnapshot,
+) -> Result<bool> {
+    if !snapshot.job.status.is_terminal() {
+        return Ok(false);
+    }
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let Some(mut run) = store.get_run(&sanitize_run_id(run_id))? else {
+        return Ok(false);
+    };
+    if run.metadata_json.get("kind").and_then(Value::as_str) != Some(RUNNER_EXEC_RUN_KIND) {
+        return Ok(false);
+    }
+    if RunStatus::from_label(&run.status).is_some_and(RunStatus::is_terminal) {
+        return Ok(false);
+    }
+
+    let runner_id = validate_runner_exec_snapshot_binding(&run, snapshot)?;
+    if run
+        .metadata_json
+        .pointer("/runner_terminal_projection/artifact_promotion")
+        .and_then(Value::as_str)
+        == Some("pending")
+    {
+        return Err(Error::internal_unexpected(
+            "runner-exec terminal projection requires declared artifact promotion before finalization",
+        ));
+    }
+    let exit_code = if snapshot.job.status == JobStatus::Succeeded {
+        0
+    } else {
+        1
+    };
+    let metadata = run.metadata_json.as_object_mut().expect("metadata object");
+    metadata.insert("runner_job_id".to_string(), json!(snapshot.job.id));
+    metadata.insert("runner_job_status".to_string(), json!(snapshot.job.status));
+    metadata.insert("runner_job_events".to_string(), json!(snapshot.events));
+    let mut execution_record =
+        homeboy_core::runner_execution_envelope::RunnerExecutionRecord::terminal(
+            snapshot.job.id.to_string(),
+            runner_id,
+            "daemon",
+            exit_code,
+        )
+        .with_job_id(snapshot.job.id.to_string());
+    if snapshot.job.status == JobStatus::Cancelled {
+        execution_record.status = "cancelled".to_string();
+    }
+    metadata.insert(
+        "runner_execution_record".to_string(),
+        serde_json::to_value(execution_record).unwrap_or(Value::Null),
+    );
+    metadata.insert(
+        "runner_terminal_projection".to_string(),
+        json!({
+            "state": "projected",
+            "job_id": snapshot.job.id,
+            "status": snapshot.job.status,
+            "event_count": snapshot.events.len(),
+        }),
+    );
+    if snapshot.job.status != JobStatus::Succeeded {
+        metadata.insert(
+            "runner_failure_diagnostics".to_string(),
+            json!({ "job_status": snapshot.job.status, "events": snapshot.events }),
+        );
+    }
+    let status = if snapshot.job.status == JobStatus::Succeeded {
+        RunStatus::Pass
+    } else {
+        RunStatus::Fail
+    };
+    store.finish_run(&run.id, status, Some(run.metadata_json))?;
+    Ok(true)
+}
+
+/// Finish a synchronous transport that has no daemon job identity (diagnostic
+/// SSH/local execution) after its declared evidence is safely retained.
+pub fn finish_runner_exec_direct(run_id: &str, transport: &str, exit_code: i32) -> Result<bool> {
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let Some(mut run) = store.get_run(&sanitize_run_id(run_id))? else {
+        return Ok(false);
+    };
+    if run.metadata_json.get("kind").and_then(Value::as_str) != Some(RUNNER_EXEC_RUN_KIND)
+        || RunStatus::from_label(&run.status).is_some_and(RunStatus::is_terminal)
+    {
+        return Ok(false);
+    }
+    let metadata = run.metadata_json.as_object_mut().expect("metadata object");
+    metadata.insert(
+        "runner_execution_record".to_string(),
+        json!({
+            "transport": transport, "status": if exit_code == 0 { "succeeded" } else { "failed" },
+            "exit_code": exit_code,
+        }),
+    );
+    metadata.insert(
+        "runner_terminal_projection".to_string(),
+        json!({
+            "state": "projected", "transport": transport, "artifact_promotion": "complete",
+        }),
+    );
+    store.finish_run(
+        &run.id,
+        if exit_code == 0 {
+            RunStatus::Pass
+        } else {
+            RunStatus::Fail
+        },
+        Some(run.metadata_json),
+    )?;
+    Ok(true)
+}
+
+fn validate_runner_exec_snapshot_binding(
+    run: &homeboy_core::observation::RunRecord,
+    snapshot: &RunnerJobLogSnapshot,
+) -> Result<String> {
+    let runner_id = run
+        .metadata_json
+        .get("runner_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let runner_job_id = run
+        .metadata_json
+        .get("runner_job_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let snapshot_runner_id = snapshot.job.target_runner_id.as_deref().unwrap_or_default();
+    if runner_id.is_empty()
+        || runner_job_id.is_empty()
+        || runner_id != snapshot_runner_id
+        || runner_job_id != snapshot.job.id.to_string()
+    {
+        return Err(Error::validation_invalid_argument(
+            "runner_job_id",
+            format!(
+                "terminal runner snapshot does not match durable binding ({runner_id}/{runner_job_id})"
+            ),
+            Some(run.id.clone()),
+            None,
+        ));
+    }
+    Ok(runner_id)
 }
 
 /// Persist redacted submission ownership before a reverse-broker POST. The

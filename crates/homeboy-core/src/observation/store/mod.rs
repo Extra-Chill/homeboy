@@ -22,6 +22,7 @@ use super::records::{
     TriageItemRecord, TriagePullRequestSignals,
 };
 use crate::{paths, Error, Result};
+pub use artifacts::directory_tree_sha256;
 
 pub(crate) use helpers::*;
 
