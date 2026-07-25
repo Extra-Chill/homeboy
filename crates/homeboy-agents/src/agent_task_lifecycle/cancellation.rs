@@ -148,6 +148,21 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
     } else {
         LiveCancellationOutcome::NotRunning
     };
+    // A runner cancellation can race with the daemon publishing its terminal
+    // result. The daemon outcome is authoritative: project it rather than
+    // overwriting completed work with a controller-only cancellation.
+    if let LiveCancellationOutcome::RunnerJobCancelled { job, events } = &cancellation {
+        if job.status.is_terminal() && job.status != homeboy_core::api_jobs::JobStatus::Cancelled {
+            reconcile_runner_job_snapshot(
+                &mut record,
+                &homeboy_core::api_jobs::RunnerJobLogSnapshot {
+                    job: job.clone(),
+                    events: events.clone(),
+                },
+            )?;
+            return Ok(record);
+        }
+    }
     let runner_id = record.runner_id().map(str::to_string);
     let runner_job_id = record.runner_job_id().map(str::to_string);
 
@@ -272,8 +287,15 @@ fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancell
         if let (Some(runner_id), Some(runner_job_id)) =
             (runner_id.as_deref(), runner_job_id.as_deref())
         {
-            if let Ok((job, events)) = cancel_runner_job(runner_id, runner_job_id, &record.run_id) {
-                return Ok(LiveCancellationOutcome::RunnerJobCancelled { job, events });
+            match cancel_runner_job(runner_id, runner_job_id, &record.run_id) {
+                Ok((job, events)) => {
+                    return Ok(LiveCancellationOutcome::RunnerJobCancelled { job, events });
+                }
+                // An accepted Lab handoff has an authoritative remote owner.
+                // Leaving it active while only cancelling this projection loses
+                // the result, so propagate the failure before mutating the run.
+                Err(error) if record.has_accepted_lab_handoff() => return Err(error),
+                Err(_) => {}
             }
         }
         let mut recovery_commands = Vec::new();
