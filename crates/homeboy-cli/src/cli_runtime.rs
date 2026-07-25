@@ -9,6 +9,7 @@ use crate::cli_surface::{
     Commands, DynamicCommandDescriptor, ExtensionCommandArgContract, ExtensionCommandArgsContract,
     ExtensionCommandHealth, ExtensionCommandManifest,
 };
+use crate::command_capability::{classify as classify_command_capability, CommandCapability};
 use crate::commands;
 use crate::commands::cli;
 use crate::commands::output_runtime;
@@ -55,6 +56,7 @@ struct ExtensionCliDiscovery {
 enum StartupFastPath {
     Help,
     Version,
+    Identity,
 }
 
 pub fn run_startup_fast_path(args: &[String]) -> Option<std::process::ExitCode> {
@@ -65,6 +67,16 @@ pub fn run_startup_fast_path(args: &[String]) -> Option<std::process::ExitCode> 
             println!();
         }
         StartupFastPath::Version => println!("{}", upgrade::current_build_version()),
+        StartupFastPath::Identity => {
+            output_runtime::emit_json_result(
+                Ok(
+                    serde_json::to_value(homeboy::core::build_identity::current())
+                        .expect("build identity serializes"),
+                ),
+                None,
+                0,
+            );
+        }
     }
 
     Some(std::process::ExitCode::SUCCESS)
@@ -595,9 +607,16 @@ fn is_top_level_version_request(args: &[String]) -> bool {
 }
 
 fn startup_fast_path(args: &[String]) -> Option<StartupFastPath> {
+    if classify_command_capability(args) != CommandCapability::ReadOnly {
+        return None;
+    }
+
     match args {
         [_, flag] if flag == "--help" || flag == "-h" => Some(StartupFastPath::Help),
         [_, flag] if flag == "--version" || flag == "-V" => Some(StartupFastPath::Version),
+        [_, command, subcommand] if command == "self" && subcommand == "identity" => {
+            Some(StartupFastPath::Identity)
+        }
         _ => None,
     }
 }
