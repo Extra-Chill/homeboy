@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::agent_task_gate::{AgentTaskGateReport, VerifyGateOptions};
+use crate::agent_task_gate::{AgentTaskGateReport, AgentTaskGateStatus, VerifyGateOptions};
 use homeboy_core::command_invocation::CommandInvocation;
-use homeboy_core::gate::HomeboyGateResult;
+use homeboy_core::gate::{HomeboyGateResult, HomeboyGateVisibility};
 use homeboy_core::git::output_allow_empty;
 use homeboy_core::stream_capture::StreamCaptureMetadata;
 
@@ -72,6 +72,86 @@ pub struct AgentTaskPromotionReport {
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub provenance: Value,
     pub operator_notification: AgentTaskPromotionNotification,
+}
+
+/// The single durable projection of deterministic gate evidence for a promoted
+/// candidate. Detailed gate reports are authoritative; `gate_results` and the
+/// promotion status are compatibility views derived from them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentTaskPromotionGateOutcome {
+    pub status: AgentTaskPromotionStatus,
+    pub gate_results: Vec<HomeboyGateResult>,
+}
+
+impl AgentTaskPromotionReport {
+    pub fn gate_outcome(&self) -> AgentTaskPromotionGateOutcome {
+        let gate_results = self
+            .deterministic_gates
+            .iter()
+            .cloned()
+            .map(HomeboyGateResult::from)
+            .collect::<Vec<_>>();
+        let all_gates_passed = !self.deterministic_gates.is_empty()
+            && self.deterministic_gates.iter().all(durable_gate_passed);
+        let status = if self.status == AgentTaskPromotionStatus::GateFailed && all_gates_passed {
+            AgentTaskPromotionStatus::Applied
+        } else {
+            self.status
+        };
+        AgentTaskPromotionGateOutcome {
+            status,
+            gate_results,
+        }
+    }
+
+    /// Rebuild compatibility fields from the authoritative detailed reports
+    /// before a report crosses a durable boundary.
+    pub fn normalize_gate_outcome(&mut self) {
+        let outcome = self.gate_outcome();
+        self.status = outcome.status;
+        self.gate_results = outcome.gate_results;
+    }
+
+    /// A reviewer-visible command needs a durable passing gate for this exact
+    /// command and immutable candidate. Status-only evidence never qualifies.
+    pub fn has_visible_passed_gate_for_command(&self, command: &str) -> bool {
+        self.gate_outcome().status == AgentTaskPromotionStatus::Applied
+            && self.deterministic_gates.iter().any(|gate| {
+                gate.visibility == HomeboyGateVisibility::Visible
+                    && gate.command.as_slice() == ["sh", "-lc", command]
+                    && durable_gate_passed(gate)
+                    && self.gate_candidate_identity_matches(gate)
+            })
+    }
+
+    fn gate_candidate_identity_matches(&self, gate: &AgentTaskGateReport) -> bool {
+        let Some(candidate) = gate.candidate_checkout.as_ref() else {
+            return false;
+        };
+        let Some(recorded) = self.provenance.get("candidate_checkout") else {
+            return false;
+        };
+        if serde_json::to_value(candidate).ok().as_ref() != Some(recorded) {
+            return false;
+        }
+        self.provenance
+            .pointer("/adoption/candidate_ref")
+            .and_then(Value::as_str)
+            .is_none_or(|adopted| adopted == candidate.commit)
+    }
+}
+
+fn durable_gate_passed(gate: &AgentTaskGateReport) -> bool {
+    match gate.status {
+        AgentTaskGateStatus::Succeeded => gate.exit_code == 0,
+        AgentTaskGateStatus::AcceptedInheritedFailure => {
+            gate.exit_code != 0
+                && gate.baseline_comparison.as_ref().is_some_and(|comparison| {
+                    comparison.matches_candidate_failure && !comparison.base_ref.is_empty()
+                })
+        }
+        AgentTaskGateStatus::Failed => false,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

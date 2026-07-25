@@ -118,10 +118,13 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         .filter(|gate| gate.status == AgentTaskGateStatus::Failed)
         .map(gate_failure)
         .collect();
-    let failed_gate_results: Vec<HomeboyGateResult> =
-        normalized_promotion_gate_results(&options.promotion_report)
-            .filter(|gate| gate.status == HomeboyGateStatus::Failed)
-            .collect();
+    let failed_gate_results: Vec<HomeboyGateResult> = options
+        .promotion_report
+        .gate_outcome()
+        .gate_results
+        .into_iter()
+        .filter(|gate| gate.status == HomeboyGateStatus::Failed)
+        .collect();
     let retry_budget_remaining = options.max_attempts.saturating_sub(options.attempt);
     let quality = classify_cook_loop_quality(&options.promotion_report);
     let should_retry = options.promotion_report.status == AgentTaskPromotionStatus::GateFailed
@@ -216,9 +219,12 @@ fn classify_cook_loop_quality(report: &AgentTaskPromotionReport) -> AgentTaskCoo
         };
     }
 
-    let has_passed_gate = normalized_promotion_gate_results(report)
+    let outcome = report.gate_outcome();
+    let has_passed_gate = outcome
+        .gate_results
+        .iter()
         .any(|gate| gate.status == HomeboyGateStatus::Passed);
-    if report.status == AgentTaskPromotionStatus::Applied && has_passed_gate {
+    if outcome.status == AgentTaskPromotionStatus::Applied && has_passed_gate {
         return AgentTaskCookLoopQualityReport {
             classification: AgentTaskCookLoopQualityClassification::VerifiedPatch,
             summary: "cook produced a patch and deterministic gates passed".to_string(),
@@ -230,42 +236,6 @@ fn classify_cook_loop_quality(report: &AgentTaskPromotionReport) -> AgentTaskCoo
         classification: AgentTaskCookLoopQualityClassification::PatchProduced,
         summary: "cook produced a patch that needs promotion or verification".to_string(),
         signals,
-    }
-}
-
-fn normalized_promotion_gate_results(
-    report: &AgentTaskPromotionReport,
-) -> impl Iterator<Item = HomeboyGateResult> + '_ {
-    if report.gate_results.is_empty() {
-        EitherGateResults::Legacy(
-            report
-                .deterministic_gates
-                .iter()
-                .cloned()
-                .map(HomeboyGateResult::from),
-        )
-    } else {
-        EitherGateResults::Normalized(report.gate_results.iter().cloned())
-    }
-}
-
-enum EitherGateResults<L, R> {
-    Legacy(L),
-    Normalized(R),
-}
-
-impl<T, L, R> Iterator for EitherGateResults<L, R>
-where
-    L: Iterator<Item = T>,
-    R: Iterator<Item = T>,
-{
-    type Item = T;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Legacy(iter) => iter.next(),
-            Self::Normalized(iter) => iter.next(),
-        }
     }
 }
 

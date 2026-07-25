@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 
 use homeboy::agents::agent_task_service as agent_task_service_direct;
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
+use homeboy::agents::agent_tasks::promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
 use homeboy::agents::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy::agents::agent_tasks::service as agent_task_service;
 use homeboy::agents::agent_tasks::{AgentTaskEvidenceRef, AgentTaskOutcomeStatus};
@@ -1020,9 +1021,24 @@ pub(crate) fn execution_states_from_aggregate(
         })
         .collect::<Vec<_>>();
     let promotion_status = record
-        .pointer("/metadata/latest_promotion/status")
-        .and_then(Value::as_str)
-        .unwrap_or("not_attempted");
+        .pointer("/metadata/latest_promotion")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<AgentTaskPromotionReport>(value).ok())
+        .map(|promotion| match promotion.gate_outcome().status {
+            AgentTaskPromotionStatus::DryRun => "dry_run",
+            AgentTaskPromotionStatus::VerificationPending => "verification_pending",
+            AgentTaskPromotionStatus::Applied => "applied",
+            AgentTaskPromotionStatus::GateFailed => "gate_failed",
+            AgentTaskPromotionStatus::VerifiedNoChanges => "verified_no_changes",
+            AgentTaskPromotionStatus::NoChangesGateFailed => "no_changes_gate_failed",
+            AgentTaskPromotionStatus::NoChanges => "no_changes",
+        })
+        .unwrap_or_else(|| {
+            record
+                .pointer("/metadata/latest_promotion/status")
+                .and_then(Value::as_str)
+                .unwrap_or("not_attempted")
+        });
     let finalization_status = record
         .pointer("/metadata/cook_finalization/status")
         .and_then(Value::as_str)

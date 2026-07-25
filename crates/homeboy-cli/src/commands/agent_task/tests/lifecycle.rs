@@ -888,6 +888,47 @@ fn execution_states_distinguish_patch_noop_provider_failure_and_gate_failure() {
     assert_eq!(gate_failure["gate"]["state"], "failed");
 }
 
+#[test]
+fn execution_states_prefer_adopted_normalized_gate_outcome_over_stale_attempt_failure() {
+    let states = super::super::status::execution_states_from_aggregate(
+        &aggregate_for_execution_outcome(fixture_execution_outcome(
+            AgentTaskOutcomeStatus::ProviderError,
+            Some(AgentTaskFailureClassification::Provider),
+            Vec::new(),
+            Value::Null,
+        )),
+        &json!({
+            "metadata": {
+                "latest_promotion": {
+                    "schema": "homeboy/agent-task-promotion-report/v1",
+                    "status": "gate_failed",
+                    "source": {"kind": "aggregate", "task_id": "task", "run_id": "run"},
+                    "to_worktree": "worktree",
+                    "target": {"worktree": "worktree"},
+                    "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch"},
+                    "deterministic_gates": [{
+                        "id": "gate",
+                        "visibility": "visible",
+                        "reveal_policy": "full_evidence",
+                        "status": "accepted_inherited_failure",
+                        "command": ["sh", "-lc", "cargo test"],
+                        "exit_code": 1,
+                        "baseline_comparison": {
+                            "base_ref": "immutable-base",
+                            "exit_code": 1,
+                            "failure_fingerprint": "inherited",
+                            "matches_candidate_failure": true
+                        }
+                    }],
+                    "operator_notification": {"status": "completed", "message": "complete"}
+                }
+            }
+        }),
+    );
+    assert_eq!(states["gate"]["state"], "passed");
+    assert_eq!(states["promotion"]["state"], "applied");
+}
+
 fn execution_states(outcome: AgentTaskOutcome, promotion_status: &str) -> Value {
     super::super::status::execution_states_from_aggregate(
         &aggregate_for_execution_outcome(outcome),

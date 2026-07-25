@@ -906,14 +906,7 @@ fn compare_adoption_gate_failures_to_base(
     }
     let all_failures_inherited = baseline_result?;
     if all_failures_inherited {
-        promotion.status = crate::agent_task_promotion::AgentTaskPromotionStatus::Applied;
-        for result in &mut promotion.gate_results {
-            if result.status == homeboy_core::gate::HomeboyGateStatus::Failed {
-                result.status = homeboy_core::gate::HomeboyGateStatus::Passed;
-                result.summary = "candidate failure matches the immutable baseline; no candidate regression detected".to_string();
-                result.retryable = Some(false);
-            }
-        }
+        promotion.normalize_gate_outcome();
     }
     Ok(())
 }
