@@ -35,6 +35,13 @@ pub use types::{
 use types::{StatusProgress, StatusTimer, READY_TO_DEPLOY_NOTE, UNRELEASED_MERGES_NOTE};
 
 pub fn run(args: StatusArgs, _global: &super::GlobalArgs) -> CmdResult<StatusResult> {
+    // Refreshing remote refs changes Git metadata, so serialize it with other
+    // runtime mutations. Default status is intentionally snapshot-only.
+    let _refresh_lease = args
+        .refresh
+        .then(|| homeboy::core::runtime_promotion::acquire("status refresh", "status"))
+        .transpose()?;
+
     if args.path.is_some() {
         return run_path_status(&args);
     }
@@ -119,7 +126,7 @@ fn summarize_components(
     let mut upstream_drift = Vec::new();
     let mut unreleased_merges = Vec::new();
     let mut clean: usize = 0;
-    let mut git_cache = StatusGitCache::default();
+    let mut git_cache = StatusGitCache::with_refresh(args.refresh);
 
     let has_filter =
         args.uncommitted || args.needs_release || args.ready || args.docs_only || args.unreleased;
@@ -286,7 +293,7 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
         .collect();
     timer.finish("fetch_remote_versions");
 
-    let mut git_cache = StatusGitCache::default();
+    let mut git_cache = StatusGitCache::with_refresh(args.refresh);
 
     // Fetch upstream drift for all components
     timer.begin("inspect_upstream_drift");
@@ -543,6 +550,7 @@ mod tests {
             outdated: false,
             unreleased: false,
             timings: false,
+            refresh: false,
         }
     }
 
@@ -559,6 +567,7 @@ mod tests {
             outdated: false,
             unreleased: false,
             timings: false,
+            refresh: false,
         }
     }
 

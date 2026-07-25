@@ -80,6 +80,17 @@ pub fn collect_status() -> SelfStatus {
     )
 }
 
+/// Collect only facts available from this process. This is the status view used
+/// by lock-bypassing diagnostics: package-manager and network probes can write
+/// caches outside Homeboy's runtime directory.
+pub fn collect_status_read_only() -> SelfStatus {
+    collect_status_with(
+        std::env::current_exe().ok(),
+        || Err("external release probe skipped for read-only status".to_string()),
+        |_command, _args| Err("external install probe skipped for read-only status".to_string()),
+    )
+}
+
 pub fn collect_status_with<F, R>(
     active_binary: Option<PathBuf>,
     fetch_latest_github: F,

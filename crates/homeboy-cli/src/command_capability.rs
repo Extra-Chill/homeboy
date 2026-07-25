@@ -25,9 +25,11 @@ pub fn classify(args: &[String]) -> CommandCapability {
         {
             CommandCapability::ReadOnly
         }
-        // `status` can fetch repository metadata, but it never changes the
-        // selected controller runtime and must remain available for recovery.
-        [command, ..] if command == "status" => CommandCapability::ReadOnly,
+        [command, rest @ ..]
+            if command == "status" && !rest.iter().any(|arg| arg == "--refresh") =>
+        {
+            CommandCapability::ReadOnly
+        }
         _ => CommandCapability::Mutation,
     }
 }
@@ -59,6 +61,7 @@ mod tests {
             args(&["homeboy", "upgrade"]),
             args(&["homeboy", "agent-task", "retry", "run-1", "--run"]),
             args(&["homeboy", "runtime", "promotion-takeover"]),
+            args(&["homeboy", "status", "--refresh"]),
         ] {
             assert_eq!(classify(&command), CommandCapability::Mutation);
         }
