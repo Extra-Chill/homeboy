@@ -411,6 +411,31 @@ fn fuzz_list_ignores_prepare_step_failure() {
 }
 
 #[test]
+fn fuzz_list_marks_forced_local_remote_discovery_as_requested() {
+    with_isolated_home(|home| {
+        let component_dir = home.path().join("component");
+        fs::create_dir_all(&component_dir).expect("component dir");
+        write_generic_fuzz_extension(home.path());
+        write_fuzz_prepare_rig(
+            home.path(),
+            &component_dir,
+            "false",
+            "runtime/ready.txt",
+            "materialize runtime dependency",
+        );
+        let mut args = fuzz_list_args();
+        args.remote_discovery = true;
+
+        let output = run_list(args).expect("local metadata listing should not prepare");
+
+        assert_eq!(
+            output.diagnostics.executable_availability,
+            "remote_discovery_requested"
+        );
+    });
+}
+
+#[test]
 fn fuzz_list_reports_ambiguous_duplicate_rig_workloads_without_running_them() {
     with_isolated_home(|home| {
         let component_dir = home.path().join("component");

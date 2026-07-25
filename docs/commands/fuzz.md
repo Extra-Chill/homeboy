@@ -47,8 +47,8 @@ rig package, declared default component, extension provider, and workload paths
 without materializing a workspace, running prepare hooks, or handing off to Lab.
 The output includes package source/revision evidence, component mapping, and
 completeness/ambiguity diagnostics. Pass `--remote-discovery` only when
-runner-specific availability is required; that projection runs on the selected
-runner.
+runner-specific availability is required; it requests that projection on the
+selected runner.
 
 Run one workload through the fuzz command surface:
 

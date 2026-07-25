@@ -251,7 +251,7 @@ pub(super) fn run_list(args: FuzzListArgs) -> homeboy::core::Result<FuzzListOutp
             },
             ambiguity,
             executable_availability: if args.remote_discovery {
-                "runner_discovered".to_string()
+                "remote_discovery_requested".to_string()
             } else {
                 "not_requested".to_string()
             },
