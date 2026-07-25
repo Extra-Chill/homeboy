@@ -11,7 +11,12 @@ use homeboy_core::server::CommandOutput;
 use homeboy_engine_primitives::shell;
 use serde_json::json;
 
-const STRICT_VALIDATION_DEPENDENCIES_ENV: &str = "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES";
+/// Env var that makes a validation runner fail closed when a resolved
+/// validation dependency's local checkout is behind its upstream, instead of
+/// warning and proceeding. Set for blocking gates (differential CI lint, and
+/// the release preflight lint) so a stale dependency cannot silently determine
+/// the outcome (#9643).
+pub const STRICT_VALIDATION_DEPENDENCIES_ENV: &str = "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES";
 const STALE_VALIDATION_DEPENDENCY_PREFIX: &str = "Resolved validation dependency";
 const FAILURE_TAIL_LINES: usize = 80;
 
