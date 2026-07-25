@@ -60,10 +60,169 @@ fn promotion_operation_key(run_id: &str) -> String {
 /// controller completes it, while a crashed controller's lease still elapses.
 const RETRY_DISPATCH_CLAIM_LEASE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
+/// A missing aggregate is a controller interruption, not provider output. Keep
+/// its claim separate from retry dispatch because no next run exists yet.
+const PRE_ARTIFACT_INTERRUPTION_CLAIM_LEASE: std::time::Duration =
+    std::time::Duration::from_secs(30 * 60);
+
 /// Durable operation key for the dispatch of one retry attempt. A retry is
 /// one-per-generated-`run_id`, so the next run id is the stable identity (#8357).
 fn retry_dispatch_operation_key(next_run_id: &str) -> String {
     format!("dispatch:{next_run_id}")
+}
+
+fn pre_artifact_interruption_operation_key(run_id: &str) -> String {
+    format!("pre-artifact-interruption:{run_id}")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreArtifactInterruptionPhase {
+    BeforeProviderStart,
+    DuringProviderExecution,
+    AfterProviderReturn,
+}
+
+impl PreArtifactInterruptionPhase {
+    fn name(self) -> &'static str {
+        match self {
+            Self::BeforeProviderStart => "before_provider_start",
+            Self::DuringProviderExecution => "during_provider_execution",
+            Self::AfterProviderReturn => "after_provider_return_before_aggregate_persistence",
+        }
+    }
+}
+
+/// Classify a terminal attempt without an aggregate from the durable provider
+/// ledger. A reservation is proof that a provider started; absent reservations
+/// consume nothing. This deliberately does not manufacture aggregate events.
+fn pre_artifact_interruption_phase(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> PreArtifactInterruptionPhase {
+    let executions = record.metadata["provider_executions"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if executions.is_empty() {
+        PreArtifactInterruptionPhase::BeforeProviderStart
+    } else if executions
+        .iter()
+        .any(|execution| execution["state"] == "running")
+    {
+        PreArtifactInterruptionPhase::DuringProviderExecution
+    } else {
+        PreArtifactInterruptionPhase::AfterProviderReturn
+    }
+}
+
+fn pre_artifact_execution_count(record: &agent_task_lifecycle::AgentTaskRunRecord) -> u32 {
+    record.metadata["provider_executions"]
+        .as_array()
+        .map(|executions| executions.len().try_into().unwrap_or(u32::MAX))
+        .unwrap_or_default()
+}
+
+fn pre_artifact_interruption_report(
+    cook_id: String,
+    attempts: Vec<AgentTaskCookAttemptReport>,
+    run_id: &str,
+    phase: PreArtifactInterruptionPhase,
+    reason: String,
+    exit_code: i32,
+) -> AgentTaskRunResult<AgentTaskCookReport> {
+    let mut report = cook_report(
+        cook_id,
+        "pre_artifact_interruption",
+        attempts,
+        None,
+        Some(reason),
+        exit_code,
+        Some(run_id),
+    );
+    report.value.terminal_phase = Some(phase.name().to_string());
+    report.value.terminal_failure_classification = Some("pre_artifact_interruption".to_string());
+    report
+}
+
+/// Claim exactly one recipe continuation for a terminal run that never
+/// persisted an aggregate. The claim is on the interrupted run, so concurrent
+/// controllers converge before they can append competing recipe attempts.
+fn claim_pre_artifact_interruption_retry(
+    cook_id: &str,
+    attempt: u32,
+    run_id: &str,
+    plan: &AgentTaskPlan,
+) -> Result<Option<(u32, String)>> {
+    let next_attempt = attempt.checked_add(1).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "cook_recipe.attempts",
+            "durable cook attempt sequence is exhausted",
+            Some(cook_id.to_string()),
+            None,
+        )
+    })?;
+    let operation_key = pre_artifact_interruption_operation_key(run_id);
+    let recipe_next_attempt = || {
+        super::load_recipe(cook_id).map(|recipe| {
+            recipe
+                .attempts
+                .iter()
+                .find(|recorded| recorded.attempt == next_attempt && recorded.plan == *plan)
+                .map(|recorded| recorded.run_id.clone())
+        })
+    };
+
+    match agent_task_lifecycle::claim_cook_operation(
+        run_id,
+        &operation_key,
+        PRE_ARTIFACT_INTERRUPTION_CLAIM_LEASE,
+    )? {
+        agent_task_lifecycle::ClaimOutcome::Acquired => {
+            let next_run_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, next_attempt);
+            super::record_recipe_attempt(cook_id, next_attempt, &next_run_id, plan)?;
+            agent_task_lifecycle::complete_cook_operation(
+                run_id,
+                &operation_key,
+                serde_json::json!({
+                    "next_attempt": next_attempt,
+                    "next_run_id": next_run_id,
+                }),
+            )?;
+            Ok(Some((next_attempt, next_run_id)))
+        }
+        agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(result) => {
+            let recorded_attempt = result["next_attempt"].as_u64();
+            let recorded_run_id = result["next_run_id"].as_str();
+            if let Some(next_run_id) = recipe_next_attempt()? {
+                if recorded_attempt == Some(u64::from(next_attempt))
+                    && recorded_run_id == Some(next_run_id.as_str())
+                {
+                    return Ok(Some((next_attempt, next_run_id)));
+                }
+            }
+            {
+                Err(Error::internal_unexpected(
+                    "pre-artifact interruption continuation claim conflicts with the durable cook recipe",
+                ))
+            }
+        }
+        agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
+            // A crash after recipe append but before claim completion is safe to
+            // finish: the immutable next attempt is already fully identified.
+            if let Some(next_run_id) = recipe_next_attempt()? {
+                agent_task_lifecycle::complete_cook_operation(
+                    run_id,
+                    &operation_key,
+                    serde_json::json!({
+                        "next_attempt": next_attempt,
+                        "next_run_id": next_run_id,
+                    }),
+                )?;
+                Ok(Some((next_attempt, next_run_id)))
+            } else {
+                Ok(None)
+            }
+        }
+    }
 }
 
 /// Lease window for a finalization operation claim. PR finalization (commit,
@@ -1680,7 +1839,18 @@ where
             }
         }
         agent_task_lifecycle::record_cook_attempt(&cook_id, attempt, &run_id)?;
-        let record = agent_task_lifecycle::status(&run_id)?;
+        let mut record = agent_task_lifecycle::status(&run_id)?;
+        // A local controller can disappear after the provider ledger records a
+        // terminal result but before the run projection is terminalized. Repair
+        // only this Cook attempt, never the active fleet, before deciding whether
+        // an absent aggregate is safe to continue from.
+        if record.state == agent_task_lifecycle::AgentTaskRunState::Running
+            && record.is_stale_running()
+            && record.aggregate_path.is_none()
+        {
+            super::reconcile_run(&run_id, false)?;
+            record = agent_task_lifecycle::status(&run_id)?;
+        }
         let controller_owned_staging = record
             .metadata
             .get("lab_staging_controller_job_id")
@@ -1715,7 +1885,79 @@ where
         }
         let plan = agent_task_lifecycle::load_plan_for_execution(&run_id)?;
         budget_limit.get_or_insert_with(|| plan.options.execution_budget.clone());
-        let aggregate = agent_task_lifecycle::read_aggregate(&run_id)?;
+        let aggregate = match agent_task_lifecycle::read_aggregate(&run_id) {
+            Ok(aggregate) => aggregate,
+            // An aggregate path is authoritative evidence that an aggregate was
+            // committed. Its read failure must surface for repair rather than be
+            // misclassified as an interruption and bypass immutable output.
+            Err(_error) if record.state.is_terminal() && record.aggregate_path.is_none() => {
+                let phase = pre_artifact_interruption_phase(&record);
+                // Aggregates normally provide this accounting. A missing
+                // aggregate must still carry only ledger-proven executions
+                // into later remediation budget decisions.
+                observed_budget_used.executions = observed_budget_used
+                    .executions
+                    .saturating_add(pre_artifact_execution_count(&record));
+                attempts.push(AgentTaskCookAttemptReport {
+                    attempt,
+                    run_id: run_id.clone(),
+                    run_state: format!("{:?}", record.state),
+                    aggregate_path: record.aggregate_path.clone(),
+                    promotion: None,
+                    feedback: None,
+                });
+                if attempt >= max_attempts {
+                    return Ok(pre_artifact_interruption_report(
+                        cook_id,
+                        attempts,
+                        &run_id,
+                        phase,
+                        format!(
+                            "attempt {attempt} is terminal without aggregate evidence ({}) and the Cook retry budget is exhausted; inspect durable provider execution metadata before starting a new Cook",
+                            phase.name(),
+                        ),
+                        1,
+                    ));
+                }
+                let budget_limit = budget_limit
+                    .as_ref()
+                    .expect("budget is initialized from the loaded attempt plan");
+                if budget_remaining(budget_limit, observed_budget_used).is_none() {
+                    return Ok(pre_artifact_interruption_report(
+                        cook_id,
+                        attempts,
+                        &run_id,
+                        phase,
+                        format!(
+                            "attempt {attempt} is terminal without aggregate evidence ({}) and its ledger-proven provider execution exhausts the Cook provider budget; inspect the durable attempt before increasing the budget",
+                            phase.name(),
+                        ),
+                        1,
+                    ));
+                }
+                match claim_pre_artifact_interruption_retry(&cook_id, attempt, &run_id, &plan)? {
+                    Some((_next_attempt, next_run_id)) => {
+                        run_id = next_run_id;
+                        next_plan = Some(plan);
+                        continue;
+                    }
+                    None => {
+                        return Ok(pre_artifact_interruption_report(
+                            cook_id,
+                            attempts,
+                            &run_id,
+                            phase,
+                            format!(
+                                "attempt {attempt} is terminal without aggregate evidence ({}) and another controller is claiming its retry; resume Cook after the durable claim completes",
+                                phase.name(),
+                            ),
+                            0,
+                        ));
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        };
         observed_budget_used.add(execution_budget_usage(&aggregate));
         let mut budget_used = observed_budget_used;
         budget_used.same_provider_retries = budget_used
