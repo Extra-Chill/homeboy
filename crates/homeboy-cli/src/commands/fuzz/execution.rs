@@ -163,7 +163,13 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         // This transient root is not included in the runner's directory artifact;
         // the content-addressed files below are persisted exactly once by the store.
         let payload_root = run_dir.step_file("fuzz-payloads");
-        let payloads = homeboy::fuzz::externalize_fuzz_campaign_payloads(campaign, &payload_root)?;
+        let payloads = homeboy::fuzz::externalize_fuzz_campaign_payloads(
+            campaign,
+            &payload_root,
+            args.run_id.as_deref().unwrap_or("fuzz"),
+            homeboy::fuzz::FuzzPayloadBudget::default(),
+        )?
+        .payloads;
         let json = serde_json::to_vec_pretty(campaign).map_err(|error| {
             homeboy::core::Error::internal_unexpected(format!(
                 "failed to encode bounded fuzz results: {error}"

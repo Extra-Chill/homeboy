@@ -68,8 +68,8 @@ pub use parse::{
     parse_fuzz_workload_file,
 };
 pub use payloads::{
-    externalize_fuzz_campaign_payloads, FuzzPayload, FUZZ_PAYLOAD_ARTIFACT_KIND,
-    INLINE_FUZZ_PAYLOAD_LIMIT_BYTES,
+    externalize_fuzz_campaign_payloads, FuzzPayload, FuzzPayloadBudget, FuzzPayloadExternalization,
+    FUZZ_PAYLOAD_ARTIFACT_KIND, INLINE_FUZZ_PAYLOAD_LIMIT_BYTES,
 };
 pub use result_envelope_persistence::{
     fuzz_result_envelope_evidence_ref, fuzz_result_envelope_json, persist_fuzz_result_envelope,
