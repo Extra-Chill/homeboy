@@ -426,6 +426,20 @@ pub fn compare_deployed_versions(
 // homeboy-release-contract (see the DeployReason/ComponentStatus note above).
 pub use homeboy_release_contract::{ReleaseState, ReleaseStateBuckets, ReleaseStateStatus};
 
+/// Bounded, portable evidence from a local/remote tree comparison.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContentManifestComparison {
+    pub algorithm: String,
+    pub scope: String,
+    pub local_digest: Option<String>,
+    pub remote_digest: Option<String>,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub differences: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
+}
+
 /// Result for a single component deployment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 
@@ -436,6 +450,8 @@ pub struct ComponentDeployResult {
     pub deploy_reason: Option<DeployReason>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub component_status: Option<ComponentStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_manifest: Option<ContentManifestComparison>,
     pub local_version: Option<String>,
     pub remote_version: Option<String>,
     pub local_path: Option<String>,
@@ -498,6 +514,7 @@ impl ComponentDeployResult {
             status: String::new(),
             deploy_reason: None,
             component_status: None,
+            content_manifest: None,
             local_version: None,
             remote_version: None,
             local_path: Some(component.local_path.clone()),
@@ -594,6 +611,11 @@ impl ComponentDeployResult {
 
     pub(super) fn with_component_status(mut self, status: ComponentStatus) -> Self {
         self.component_status = Some(status);
+        self
+    }
+
+    pub(super) fn with_content_manifest(mut self, manifest: ContentManifestComparison) -> Self {
+        self.content_manifest = Some(manifest);
         self
     }
 

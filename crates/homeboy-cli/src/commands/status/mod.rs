@@ -498,7 +498,10 @@ fn deployed_version_dashboard_status(
             ProjectComponentDashboardStatus::Current
         }
         homeboy_release::deploy::ComponentStatus::BehindUpstream
-        | homeboy_release::deploy::ComponentStatus::SourceStale => {
+        | homeboy_release::deploy::ComponentStatus::SourceStale
+        | homeboy_release::deploy::ComponentStatus::RemoteModified
+        | homeboy_release::deploy::ComponentStatus::Missing
+        | homeboy_release::deploy::ComponentStatus::MixedDrift => {
             unreachable!("version comparison only returns version statuses")
         }
     }

@@ -41,6 +41,12 @@ pub enum ComponentStatus {
     BehindUpstream,
     /// Remote matches a configured source checkout that is stale or detached
     SourceStale,
+    /// The target has the same release version but different deployed content.
+    RemoteModified,
+    /// The target does not exist.
+    Missing,
+    /// Local and remote both differ from the known release identity.
+    MixedDrift,
     /// Cannot determine status
     Unknown,
 }

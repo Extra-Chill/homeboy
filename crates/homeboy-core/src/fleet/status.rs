@@ -372,6 +372,9 @@ fn resolve_component_drift(
         Some(ComponentStatus::BehindRemote) => FleetComponentDrift::BehindRemote,
         Some(ComponentStatus::BehindUpstream) => FleetComponentDrift::BehindUpstream,
         Some(ComponentStatus::SourceStale) => FleetComponentDrift::BehindUpstream,
+        Some(ComponentStatus::RemoteModified)
+        | Some(ComponentStatus::Missing)
+        | Some(ComponentStatus::MixedDrift) => FleetComponentDrift::Unknown,
         Some(ComponentStatus::Unknown) | None => FleetComponentDrift::Unknown,
     };
 

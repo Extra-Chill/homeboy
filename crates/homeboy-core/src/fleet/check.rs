@@ -56,6 +56,9 @@ pub fn collect_check(
                         Some(ComponentStatus::BehindRemote) => "behind_remote",
                         Some(ComponentStatus::BehindUpstream) => "behind_upstream",
                         Some(ComponentStatus::SourceStale) => "source_stale",
+                        Some(ComponentStatus::RemoteModified) => "remote_modified",
+                        Some(ComponentStatus::Missing) => "missing",
+                        Some(ComponentStatus::MixedDrift) => "mixed_drift",
                         Some(ComponentStatus::Unknown) | None => "unknown",
                     };
 

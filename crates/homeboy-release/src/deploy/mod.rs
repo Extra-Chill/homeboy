@@ -1,4 +1,5 @@
 pub(crate) mod binding;
+mod content_manifest;
 mod effect;
 mod execution;
 mod generated_artifacts;

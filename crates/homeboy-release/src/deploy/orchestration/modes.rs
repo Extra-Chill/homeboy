@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::project::Project;
+use homeboy_core::server::SshClient;
 
 use super::super::execution::{release_artifact_plan, ReleaseArtifactPlan};
 use super::super::orchestration_ref_checkout::resolve_exact_ref;
@@ -25,14 +26,31 @@ pub(super) fn run_check_mode(
     project: &Project,
     base_path: &str,
     config: &DeployConfig,
+    client: &SshClient,
 ) -> DeployOrchestrationResult {
     let mut git_probe_cache = GitProbeCache::default();
     let mut results: Vec<ComponentDeployResult> = components
         .iter()
         .map(|c| {
-            let status =
+            let mut status =
                 calculate_component_status_with_git_cache(c, remote_versions, &mut git_probe_cache);
             let release_state = calculate_release_state(c);
+            let manifest = super::super::content_manifest::compare(
+                std::path::Path::new(&c.local_path),
+                &super::super::path_roots::resolve_effective_remote_path(project, c, base_path)
+                    .unwrap_or_default(),
+                client,
+            );
+            if manifest.status == "missing" {
+                status = ComponentStatus::Missing;
+            } else if manifest.status == "different" && matches!(status, ComponentStatus::UpToDate)
+            {
+                status = ComponentStatus::RemoteModified;
+            } else if manifest.status == "different"
+                && matches!(status, ComponentStatus::BehindRemote)
+            {
+                status = ComponentStatus::MixedDrift;
+            }
             let mut result = ComponentDeployResult::new_for_project(c, project, base_path)
                 .with_status("checked")
                 .with_versions(
@@ -40,6 +58,7 @@ pub(super) fn run_check_mode(
                     remote_versions.get(&c.id).cloned(),
                 )
                 .with_component_status(status)
+                .with_content_manifest(manifest)
                 .with_source_identity(c, config.head);
             if let Some(state) = release_state {
                 result = result.with_release_state(state);
@@ -607,6 +626,7 @@ mod tests {
             &Project::default(),
             "/srv/site",
             &config,
+            &local_client(),
         );
         assert_eq!(checked.results[0].status, "checked");
         assert_eq!(checked.results[0].local_version.as_deref(), Some("1.2.3"));
@@ -637,6 +657,18 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn local_client() -> SshClient {
+        SshClient {
+            host: "localhost".to_string(),
+            user: "test".to_string(),
+            port: 22,
+            identity_file: None,
+            auth: None,
+            is_local: true,
+            env: Default::default(),
+        }
     }
 
     fn git_output(path: &Path, args: &[&str]) -> String {
