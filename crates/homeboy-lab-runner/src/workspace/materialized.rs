@@ -33,6 +33,16 @@ pub(crate) enum WorkspaceCleanupPolicy {
     PreserveAlways,
 }
 
+impl WorkspaceCleanupPolicy {
+    fn label(self) -> &'static str {
+        match self {
+            Self::DeleteAlways => "delete-on-terminal",
+            Self::PreserveOnFailure => "preserve-on-failure",
+            Self::PreserveAlways => "preserve-always",
+        }
+    }
+}
+
 impl Default for WorkspaceCleanupPolicy {
     fn default() -> Self {
         Self::PreserveOnFailure
@@ -102,11 +112,29 @@ impl MaterializedWorkspace {
             WorkspaceCleanupPolicy::PreserveOnFailure => self.succeeded,
         }
     }
+
+    fn outcome(&self) -> &'static str {
+        if self.succeeded {
+            "success"
+        } else {
+            "failure-or-cancellation"
+        }
+    }
 }
 
 impl Drop for MaterializedWorkspace {
     fn drop(&mut self) {
         if !self.should_reap() {
+            if !self.relinquished && !std::thread::panicking() {
+                eprintln!(
+                    "Lab offload: retained run-scoped workspace `{}` on runner `{}` (policy={}, outcome={}, lifecycle_owner=runner.workspace, reclaim=`homeboy runner workspace prune {} --apply --min-age-hours 0`).",
+                    self.remote_path,
+                    self.runner_id,
+                    self.policy.label(),
+                    self.outcome(),
+                    self.runner_id,
+                );
+            }
             return;
         }
         match reap_run_workspace(
@@ -115,8 +143,8 @@ impl Drop for MaterializedWorkspace {
             self.artifact_dir.as_deref(),
         ) {
             Ok(()) => eprintln!(
-                "Lab offload: reaped run-scoped workspace `{}` on runner `{}` (delete-on-success cleanup policy).",
-                self.remote_path, self.runner_id
+                "Lab offload: reaped run-scoped workspace `{}` on runner `{}` (policy={}, outcome={}, lifecycle_owner=runner.workspace).",
+                self.remote_path, self.runner_id, self.policy.label(), self.outcome()
             ),
             Err(err) => eprintln!(
                 "Lab offload: warning: could not reap run-scoped workspace `{}` on runner `{}`: {}. Reclaim leftover lab workspaces with `homeboy runner workspace prune {}`.",

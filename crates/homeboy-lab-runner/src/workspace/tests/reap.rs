@@ -140,6 +140,50 @@ fn materialized_workspace_preserves_on_failure_under_default_policy() {
 }
 
 #[test]
+fn preserve_on_failure_keeps_cancelled_workspace_for_ttl_reclamation() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        let remote_path = sync_local_workspace("lab-local-mat-cancelled", runner_root.path());
+
+        {
+            let mut handle = MaterializedWorkspace::new(
+                "lab-local-mat-cancelled".to_string(),
+                remote_path.clone(),
+                None,
+                WorkspaceCleanupPolicy::PreserveOnFailure,
+            );
+            handle.set_success(false);
+        }
+
+        assert!(
+            Path::new(&remote_path).exists(),
+            "cancellation must retain the workspace under preserve-on-failure"
+        );
+    });
+}
+
+#[test]
+fn preserve_on_failure_keeps_workspace_when_unwinding_from_panic() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        let remote_path = sync_local_workspace("lab-local-mat-panic", runner_root.path());
+
+        let result = std::panic::catch_unwind(|| {
+            let _handle = MaterializedWorkspace::new(
+                "lab-local-mat-panic".to_string(),
+                remote_path.clone(),
+                None,
+                WorkspaceCleanupPolicy::PreserveOnFailure,
+            );
+            panic!("test unwind");
+        });
+
+        assert!(result.is_err());
+        assert!(Path::new(&remote_path).exists());
+    });
+}
+
+#[test]
 fn materialized_workspace_preserve_disarms_reap_even_on_success() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");

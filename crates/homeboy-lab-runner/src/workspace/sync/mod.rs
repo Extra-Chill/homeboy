@@ -1245,6 +1245,45 @@ pub(crate) fn workspace_resource_lifecycle(
     }
 }
 
+/// Update the lifecycle record stored beside an already materialized runner
+/// workspace. Runner pruning reads this exact metadata, so failure retention
+/// stays on the same bounded TTL cleanup path as every other Lab workspace.
+pub(crate) fn update_workspace_resource_lifecycle(
+    runner_id: &str,
+    remote_path: &str,
+    resource_lifecycle: ResourceLifecycleRecord,
+) -> Result<()> {
+    resource_lifecycle.validate(0)?;
+    let runner = load(runner_id)?;
+    let metadata_path = format!(
+        "{}/{}",
+        remote_path.trim_end_matches('/'),
+        WORKSPACE_METADATA_FILE
+    );
+    let content = match runner.kind {
+        RunnerKind::Local => fs::read_to_string(&metadata_path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("read {metadata_path}")))
+        })?,
+        RunnerKind::Ssh => {
+            let (_, client) = ssh_client_for_runner(&runner)?;
+            let output = client.execute_with_timeout(
+                &format!("cat {}", shell::quote_arg(&metadata_path)),
+                WORKSPACE_METADATA_TIMEOUT,
+            );
+            if !output.success {
+                return Err(workspace_metadata_ssh_error(&output));
+            }
+            output.stdout
+        }
+    };
+    let mut metadata: RunnerWorkspaceMetadata =
+        serde_json::from_str(&content).map_err(|error| {
+            Error::internal_json(error.to_string(), Some(format!("parse {metadata_path}")))
+        })?;
+    metadata.resource_lifecycle = Some(resource_lifecycle);
+    write_workspace_metadata(&runner, metadata)
+}
+
 pub(crate) fn workspace_repo_from_path(path: &str) -> String {
     Path::new(path)
         .file_name()

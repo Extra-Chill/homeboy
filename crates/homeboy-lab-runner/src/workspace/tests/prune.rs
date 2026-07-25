@@ -2,7 +2,9 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use crate::workspace::sync::{prune_scan_command, prune_workspaces, sync_workspace};
+use crate::workspace::sync::{
+    prune_scan_command, prune_workspaces, sync_workspace, update_workspace_resource_lifecycle,
+};
 use crate::workspace::types::{
     RunnerWorkspacePruneOptions, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
@@ -165,6 +167,58 @@ fn prune_workspaces_reaps_ttl_expired_lifecycle_workspace_with_live_source() {
         assert_eq!(output.candidates[0].reason, "resource_ttl_expired");
         assert!(Path::new(&synced.remote_path).exists());
         assert!(source.exists());
+    });
+}
+
+#[test]
+fn preserved_failure_lifecycle_is_registered_for_ttl_pruning() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let source_parent = tempfile::tempdir().expect("source parent");
+        let source = source_parent.path().join("live-source");
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        fs::create_dir_all(&source).expect("source dir");
+        fs::write(source.join("file.txt"), "live\n").expect("source file");
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-local-prune-retained","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+        let (synced, _) = sync_workspace(
+            "lab-local-prune-retained",
+            sync_options(source.display().to_string()),
+        )
+        .expect("sync workspace");
+        let mut lifecycle = synced.resource_lifecycle;
+        lifecycle.cleanup_policy =
+            homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteAfterTtl;
+        lifecycle.ttl = Some("2020-01-01T00:00:00Z".to_string());
+        lifecycle.cleanup_command = Some(
+            "homeboy runner workspace prune lab-local-prune-retained --apply --min-age-hours 0"
+                .to_string(),
+        );
+        update_workspace_resource_lifecycle(
+            "lab-local-prune-retained",
+            &synced.remote_path,
+            lifecycle,
+        )
+        .expect("register ttl lifecycle");
+
+        let (output, _) = prune_workspaces(
+            "lab-local-prune-retained",
+            RunnerWorkspacePruneOptions {
+                apply: false,
+                min_age_hours: 0,
+                limit: 10,
+                passes: 1,
+            },
+        )
+        .expect("prune preview");
+
+        assert_eq!(output.candidates[0].reason, "resource_ttl_expired");
+        assert_eq!(output.candidates[0].remote_path, synced.remote_path);
     });
 }
 

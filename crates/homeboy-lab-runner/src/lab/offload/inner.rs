@@ -1647,13 +1647,30 @@ pub(crate) fn run_lab_offload_inner(
             "Lab workspace staging changed the pre-acceptance agent-task lifecycle identity",
         ));
     }
-    // This workspace owns the admitted rig and extension snapshots. Every
-    // terminal result, including failure and cancellation, must release them.
+    // The safe default deletes every known terminal result. The explicit debug
+    // profile keeps failures only through the registered runner TTL lifecycle.
     // Detached and uncertain in-flight work explicitly relinquishes ownership.
-    let cleanup_policy = WorkspaceCleanupPolicy::DeleteAlways;
+    let cleanup_policy = request
+        .preserve_workspace_on_failure
+        .then_some(WorkspaceCleanupPolicy::PreserveOnFailure)
+        .unwrap_or(WorkspaceCleanupPolicy::DeleteAlways);
     let mut workspace_resource_lifecycle = synced.resource_lifecycle.clone();
-    workspace_resource_lifecycle.cleanup_policy =
-        homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteOnTerminal;
+    if request.preserve_workspace_on_failure {
+        workspace_resource_lifecycle.cleanup_policy =
+            homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteAfterTtl;
+        workspace_resource_lifecycle.ttl = Some(runner_workspace_ttl());
+    } else {
+        workspace_resource_lifecycle.cleanup_policy =
+            homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteOnTerminal;
+    }
+    workspace_resource_lifecycle.cleanup_command = Some(format!(
+        "homeboy runner workspace prune {runner_id} --apply --min-age-hours 0"
+    ));
+    crate::update_workspace_resource_lifecycle(
+        runner_id,
+        &remote_cwd,
+        workspace_resource_lifecycle.clone(),
+    )?;
     let mut materialized_workspace = MaterializedWorkspace::new(
         runner_id.to_string(),
         remote_cwd.clone(),
@@ -1785,6 +1802,17 @@ pub(crate) fn run_lab_offload_inner(
         dependency_hydration_metadata(&dependency_hydration.record);
     lab_metadata["workspace_resource_lifecycle"] =
         serde_json::to_value(&workspace_resource_lifecycle).unwrap_or(serde_json::json!(null));
+    lab_metadata["workspace_cleanup"] = serde_json::json!({
+        "policy": if request.preserve_workspace_on_failure {
+            "preserve-on-failure"
+        } else {
+            "delete-on-terminal"
+        },
+        "lifecycle_owner": workspace_resource_lifecycle.owner,
+        "retained_artifact_location": remote_cwd,
+        "cleanup_command": workspace_resource_lifecycle.cleanup_command,
+        "ttl": workspace_resource_lifecycle.ttl,
+    });
     lab_metadata["materialization_proof"] = lab_materialization_proof_metadata(
         &source_snapshot,
         &synced.snapshot_identity,
@@ -2050,6 +2078,14 @@ pub(crate) fn run_lab_offload_inner(
         print_handoff: true,
         detach_after_handoff: request.detach_after_handoff,
     })
+}
+
+fn runner_workspace_ttl() -> String {
+    homeboy_core::defaults::load_config()
+        .lab
+        .runner_workspace_ttl
+        .filter(|ttl| !ttl.trim().is_empty())
+        .unwrap_or_else(|| "P7D".to_string())
 }
 
 pub(crate) struct ControllerJobRetrievalCommands {
@@ -2463,6 +2499,7 @@ mod tests {
             allow_local_fallback: true,
             allow_dirty_lab_workspace: false,
             skip_deps_hydration: false,
+            preserve_workspace_on_failure: false,
             capture_patch: false,
             mutation_flag: None,
             detach_after_handoff: false,

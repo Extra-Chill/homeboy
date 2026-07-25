@@ -90,6 +90,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub skip_deps_hydration: bool,
 
+    /// Preserve a failed Lab workspace for bounded TTL-based inspection.
+    #[arg(long, global = true)]
+    pub preserve_workspace_on_failure: bool,
+
     /// Add a job-scoped environment variable to a Lab offload without mutating runner config.
     #[arg(long, global = true, value_name = "KEY=VALUE")]
     pub runner_env: Vec<String>,
@@ -1080,6 +1084,20 @@ mod tests {
 
         assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
         assert!(cli.skip_deps_hydration);
+    }
+
+    #[test]
+    fn preserve_workspace_on_failure_global_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "trace",
+            "--runner",
+            "homeboy-lab",
+            "--preserve-workspace-on-failure",
+        ])
+        .expect("Lab failure-retention profile should parse");
+
+        assert!(cli.preserve_workspace_on_failure);
     }
 
     #[test]

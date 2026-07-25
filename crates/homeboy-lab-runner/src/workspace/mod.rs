@@ -18,6 +18,7 @@ mod types;
 mod util;
 
 pub use pull::{plan_workspace_pull, pull_workspace};
+pub(crate) use sync::update_workspace_resource_lifecycle;
 #[cfg(test)]
 pub(crate) use sync::workspace_resource_lifecycle;
 pub use sync::{
