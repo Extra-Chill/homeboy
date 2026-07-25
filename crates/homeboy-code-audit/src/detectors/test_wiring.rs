@@ -294,4 +294,25 @@ mod tests {
 
         assert!(findings.is_empty());
     }
+
+    #[test]
+    fn accepts_nested_repository_test_path_when_crate_source_references_it() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut config = nested_repository_policy();
+        config.test_wiring.policies[0]
+            .source_path_globs
+            .push("crates/**/*.rs".to_string());
+        write(
+            &dir.path().join("crates/homeboy-core/src/http_api.rs"),
+            "#[path = \"../../../tests/core/http_api_test.rs\"]\nmod http_api_test;\n",
+        );
+        write(
+            &dir.path().join("tests/core/http_api_test.rs"),
+            "#[test] fn works() {}\n",
+        );
+
+        let findings = run(dir.path(), &config);
+
+        assert!(findings.is_empty());
+    }
 }
