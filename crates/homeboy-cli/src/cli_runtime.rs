@@ -416,6 +416,10 @@ impl CliRuntime {
             return std::process::ExitCode::from(exit_code_to_u8(exit_code));
         }
 
+        // Persist the actual preflight decision with the command intent before
+        // placement routing can consume controller transport markers.
+        crate::commands::utils::execution_provenance::capture(&cli, &normalized);
+
         let route_result =
             crate::commands::route::route_after_parse(&cli, &normalized, output_file.as_deref());
         if managed_runner_placement {
