@@ -1,6 +1,8 @@
 use std::time::Duration;
 
+use reqwest::header::CONTENT_TYPE;
 use serde_json::Value;
+use uuid::Uuid;
 
 use super::*;
 
@@ -58,30 +60,33 @@ pub(crate) fn disconnect_with_session(
         }
     }
     if let Some(session) = &mut session {
-        // The legacy controller record names only the admission owner. Drain
-        // generations have their own lease and tunnel, so teardown is complete
-        // only after every persisted endpoint is resolved independently.
-        let mut generations =
+        // Retained generations are historical routing evidence, not authority
+        // to mutate every port they once used. Resolve one current daemon via
+        // SSH and clean up stale local tunnel processes only after its stop.
+        let retained_generations =
             super::super::generation_store::live_sessions(runner_id, Some(session))?;
-        let mut reconciled_tunnel_pids = Vec::new();
-        if let Some(authoritative_session) =
-            reconcile_authoritative_idle_stale_generations(runner_id, session, &generations)?
-        {
-            reconciled_tunnel_pids.extend(
-                generations
-                    .iter()
-                    .filter_map(|generation| generation.tunnel_pid),
-            );
+        let mut reconciled_tunnel_pids = retained_generations
+            .iter()
+            .filter(|generation| {
+                generation.remote_daemon_lease_id != session.remote_daemon_lease_id
+            })
+            .filter_map(|generation| generation.tunnel_pid)
+            .collect::<Vec<_>>();
+        if let Some(authoritative_session) = reconcile_authoritative_idle_stale_generations(
+            runner_id,
+            session,
+            &retained_generations,
+        )? {
+            reconciled_tunnel_pids.extend(retained_generations.iter().filter_map(|generation| {
+                (generation.remote_daemon_lease_id != authoritative_session.remote_daemon_lease_id)
+                    .then_some(generation.tunnel_pid)
+                    .flatten()
+            }));
             reconciled_tunnel_pids.sort_unstable();
             reconciled_tunnel_pids.dedup();
             *session = authoritative_session.clone();
-            // The one re-probed owner remains for the ordinary lease-bound
-            // disconnect below. Keep the durable ledger and every tunnel until
-            // that stop succeeds so failed recovery remains fully reversible.
-            let mut authoritative_session = authoritative_session;
-            authoritative_session.tunnel_pid = None;
-            generations = vec![authoritative_session];
         }
+        let generations = vec![session.clone()];
         let mut unresolved = Vec::new();
         for generation in generations {
             if generation.mode == RunnerTunnelMode::DirectSsh {
@@ -243,9 +248,11 @@ pub(super) fn disconnect_remote_daemon(
         "direct SSH runner session has no daemon lease; refusing unbound remote stop".to_string()
     })?;
     let client = Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(5))
         .build()
         .map_err(|error| format!("build daemon lifecycle client: {error}"))?;
+    probe_daemon_endpoint_identity(&client, session)?;
     let response = match client
         .post(format!(
             "{}/lifecycle/stop",
@@ -263,6 +270,12 @@ pub(super) fn disconnect_remote_daemon(
         }
     };
     let status = response.status();
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
     let body = response
         .text()
         .map_err(|error| format!("read lease-bound daemon stop response: {error}"))?;
@@ -270,14 +283,75 @@ pub(super) fn disconnect_remote_daemon(
         return Err(format!(
             "lease-bound daemon stop was refused with HTTP {}: {}",
             status.as_u16(),
-            response_body_excerpt(&body)
+            response_body_excerpt(&content_type, &body)
         ));
     }
     verify_remote_daemon_stopped(session)
 }
 
-fn response_body_excerpt(body: &str) -> String {
-    const LIMIT: usize = 2_000;
+fn probe_daemon_endpoint_identity(
+    client: &Client,
+    session: &RunnerSession,
+) -> std::result::Result<(), String> {
+    const PROTOCOL: &str = "homeboy.daemon.endpoint-identity.v1";
+    let local_url = session.local_url.as_deref().ok_or_else(|| {
+        "endpoint_identity_mismatch: direct SSH runner session has no live daemon tunnel"
+            .to_string()
+    })?;
+    let expected_lease = session.remote_daemon_lease_id.as_deref().ok_or_else(|| {
+        "endpoint_identity_mismatch: direct SSH runner session has no daemon lease".to_string()
+    })?;
+    let expected_pid = session.remote_daemon_pid.ok_or_else(|| {
+        "endpoint_identity_mismatch: direct SSH runner session has no daemon PID".to_string()
+    })?;
+    let nonce = Uuid::new_v4().simple().to_string();
+    let response = client
+        .get(format!(
+            "{}/lifecycle/identity?nonce={nonce}",
+            local_url.trim_end_matches('/')
+        ))
+        .send()
+        .map_err(|error| {
+            format!("endpoint_identity_mismatch: read-only daemon identity probe failed: {error}")
+        })?;
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let body = response
+        .text()
+        .map_err(|error| format!("endpoint_identity_mismatch: read identity response: {error}"))?;
+    if !status.is_success() || !content_type.starts_with("application/json") {
+        return Err(format!(
+            "endpoint_identity_mismatch: identity probe returned HTTP {} ({})",
+            status.as_u16(),
+            response_body_excerpt(&content_type, &body)
+        ));
+    }
+    let body: Value = serde_json::from_str(&body).map_err(|_| {
+        "endpoint_identity_mismatch: identity probe returned malformed JSON".to_string()
+    })?;
+    let identity = body.get("data").unwrap_or(&body);
+    let matches = identity.get("protocol").and_then(Value::as_str) == Some(PROTOCOL)
+        && identity.get("nonce").and_then(Value::as_str) == Some(nonce.as_str())
+        && identity.pointer("/daemon/schema").and_then(Value::as_str)
+            == Some("homeboy.daemon.session_lease.v1")
+        && identity.pointer("/daemon/lease_id").and_then(Value::as_str) == Some(expected_lease)
+        && identity.pointer("/daemon/pid").and_then(Value::as_u64) == Some(expected_pid.into())
+        && !session.runner_id.trim().is_empty();
+    matches.then_some(()).ok_or_else(|| {
+        "endpoint_identity_mismatch: daemon identity did not match the expected runner, lease, generation, protocol, or nonce".to_string()
+    })
+}
+
+fn response_body_excerpt(content_type: &str, body: &str) -> String {
+    const LIMIT: usize = 160;
+    if !content_type.starts_with("application/json") {
+        return "foreign non-JSON response body redacted".to_string();
+    }
     let trimmed = body.trim();
     if trimmed.len() <= LIMIT {
         return trimmed.to_string();
@@ -791,6 +865,49 @@ mod tests {
             remote_daemon::RemoteDaemonConnectAction::Start,
             "refresh must start a replacement rather than reattach the stale lease"
         );
+    }
+
+    #[test]
+    fn foreign_loopback_html_is_identity_mismatch_and_never_receives_stop() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("foreign listener");
+        let address = listener.local_addr().expect("foreign address");
+        let mutations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_mutations = Arc::clone(&mutations);
+        let server = thread::spawn(move || {
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            let deadline = std::time::Instant::now() + Duration::from_millis(750);
+            while std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut request = [0; 4096];
+                        let length = stream.read(&mut request).expect("foreign request");
+                        let request = String::from_utf8_lossy(&request[..length]);
+                        if request.starts_with("POST /lifecycle/stop") {
+                            observed_mutations.fetch_add(1, Ordering::SeqCst);
+                        }
+                        let body = format!("<html>{}</html>", "foreign-response ".repeat(10_000));
+                        stream.write_all(format!("HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).expect("foreign response");
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("foreign listener failed: {error}"),
+                }
+            }
+        });
+        let mut session = direct_ssh_session("lease-live");
+        session.local_url = Some(format!("http://{address}"));
+
+        let error = disconnect_remote_daemon(&session, false)
+            .expect_err("foreign endpoint must not receive a lifecycle mutation");
+
+        server.join().expect("foreign server");
+        assert!(error.contains("endpoint_identity_mismatch"));
+        assert!(error.contains("foreign non-JSON response body redacted"));
+        assert_eq!(mutations.load(Ordering::SeqCst), 0);
+        assert!(!error.contains("foreign-response"));
     }
 
     #[test]
