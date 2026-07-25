@@ -16,6 +16,7 @@ use crate::agent_task_service::reconcile_stale_active_runs;
 use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStore, RemoteRunnerJobRequest};
 use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 struct TerminalSnapshotProvider {
@@ -934,6 +935,60 @@ fn cancellation_race_projects_runner_success_instead_of_cancelling_controller_pr
         assert_eq!(terminal.tasks[0].state, AgentTaskState::Succeeded);
         assert!(terminal.metadata.get("cancel_reason").is_none());
         assert!(store::read_aggregate(run_id).is_ok());
+    });
+}
+
+#[test]
+fn accepted_runner_cancellation_does_not_signal_a_controller_local_pid() {
+    with_isolated_home(|_| {
+        let run_id = "cook-9969-runner-cancellation-authority";
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000009970",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        })
+        .expect("accepted runner handoff");
+
+        let mut local_controller = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("start controller-local sentinel");
+        rewrite_record_for_test(run_id, |record| {
+            record.metadata["runner_pid"] = json!(local_controller.id());
+        })
+        .expect("persist stale controller pid");
+
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        snapshot.job.id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000009970")
+            .expect("valid runner job id");
+        snapshot.job.status = homeboy_core::api_jobs::JobStatus::Cancelled;
+        let _cancel = super::cancellation::test_cancel_hook::install(Box::new(
+            move |runner_id, runner_job_id, durable_run_id| {
+                assert_eq!(runner_id, "homeboy-lab");
+                assert_eq!(runner_job_id, snapshot.job.id.to_string());
+                assert_eq!(durable_run_id, run_id);
+                Ok((snapshot.job.clone(), snapshot.events.clone()))
+            },
+        ));
+
+        let cancelled = cancel_run(run_id, Some("operator cancellation"))
+            .expect("runner cancellation succeeds");
+        let controller_was_not_signalled = local_controller
+            .try_wait()
+            .expect("inspect controller-local sentinel")
+            .is_none();
+        let _ = local_controller.kill();
+        let _ = local_controller.wait();
+
+        assert!(controller_was_not_signalled);
+        assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+        assert_eq!(
+            cancelled.metadata["live_cancellation"]["cancellation"],
+            "runner_job_cancel"
+        );
     });
 }
 

@@ -269,18 +269,10 @@ struct UnsupportedLiveCancellation {
 fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancellationOutcome> {
     let owner_pid = record.owner_pid();
 
-    // Local, live owner process: terminate its tree directly (SIGTERM then
-    // SIGKILL escalation handled inside terminate_process_tree).
-    if let Some(pid) = owner_pid {
-        if record.owner_process_is_running() {
-            let termination = homeboy_core::process::terminate_process_tree(pid)?;
-            return Ok(LiveCancellationOutcome::Terminated(termination));
-        }
-    }
-
     // Runner-backed run whose provider process tree lives on a different host:
-    // we cannot signal it from this controller. Emit deterministic recovery
-    // commands keyed on the recorded runner + pid instead of failing.
+    // its accepted daemon job is authoritative over any controller-local PID.
+    // A PID left by the caller can be stale or reused, so it must never be
+    // signalled instead of the owning runner job.
     if record.is_runner_backed() {
         let runner_id = record.runner_id().map(str::to_string);
         let runner_job_id = record.runner_job_id().map(str::to_string);
@@ -326,6 +318,15 @@ fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancell
                 recovery_commands,
             },
         ));
+    }
+
+    // Local, live owner process: terminate its tree directly (SIGTERM then
+    // SIGKILL escalation handled inside terminate_process_tree).
+    if let Some(pid) = owner_pid {
+        if record.owner_process_is_running() {
+            let termination = homeboy_core::process::terminate_process_tree(pid)?;
+            return Ok(LiveCancellationOutcome::Terminated(termination));
+        }
     }
 
     // No reachable live process (stale running record, or no recorded pid): the
