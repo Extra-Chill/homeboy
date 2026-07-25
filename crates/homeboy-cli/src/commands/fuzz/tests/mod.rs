@@ -20,9 +20,9 @@ use super::report::{
 };
 use super::types::{
     FuzzCommand, FuzzDiscoverArgs, FuzzExecutionOutput, FuzzGateProfileArg, FuzzIsolationArg,
-    FuzzListArgs, FuzzListOutput, FuzzMinimizeArgs, FuzzOutput, FuzzPlanArgs, FuzzPlanStrategy,
-    FuzzReplayArgs, FuzzReportArgs, FuzzRunArgs, FuzzRunOutput, FuzzRunnerContract,
-    FuzzValidateArgs, FuzzWorkloadOutput,
+    FuzzListArgs, FuzzListComponentMapping, FuzzListDiagnostics, FuzzListOutput, FuzzMinimizeArgs,
+    FuzzOutput, FuzzPlanArgs, FuzzPlanStrategy, FuzzReplayArgs, FuzzReportArgs, FuzzRunArgs,
+    FuzzRunOutput, FuzzRunnerContract, FuzzValidateArgs, FuzzWorkloadOutput,
 };
 use super::workloads::{
     fuzz_workloads, resolve_component_id, resolve_fuzz_context, resolve_profile_workload_id,

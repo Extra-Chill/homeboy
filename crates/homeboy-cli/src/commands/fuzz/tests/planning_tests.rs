@@ -15,6 +15,11 @@ fn lab_workload_arguments_follow_subcommands_and_option_values() {
         cli.args.lab_rig_workload_arguments().unwrap().component,
         None
     );
+    assert!(!cli.args.is_lab_offload_command());
+
+    let cli = FuzzCli::try_parse_from(["fuzz", "list", "--rig", "r", "--remote-discovery"])
+        .expect("remote discovery should parse");
+    assert!(cli.args.is_lab_offload_command());
 }
 
 #[test]
@@ -1297,8 +1302,20 @@ fn fuzz_output_contract_has_stable_variant_discriminators() {
         command: "fuzz.list".to_string(),
         component: "component-a".to_string(),
         rig_id: None,
+        rig_package: None,
+        component_mapping: FuzzListComponentMapping {
+            requested_component: None,
+            resolved_component: "component-a".to_string(),
+            path: "/tmp/component-a".to_string(),
+        },
+        extension_provider: None,
         workloads: Vec::new(),
         count: 0,
+        diagnostics: FuzzListDiagnostics {
+            completeness: "complete".to_string(),
+            ambiguity: Vec::new(),
+            executable_availability: "not_requested".to_string(),
+        },
         run_hint: "hint".to_string(),
     }))
     .unwrap();

@@ -58,19 +58,14 @@ impl FuzzArgs {
         matches!(self.command, None | Some(FuzzCommand::Run(_)))
     }
 
-    /// Fuzz subcommands that offload to the configured Lab runner. `run`
-    /// executes the workload remotely; `list` enumerates the runner-resident
-    /// rig/extension fuzz workloads so the operator sees the same inventory the
-    /// runner would execute rather than the (possibly empty) local one. This
-    /// mirrors `bench`'s `is_lab_offload_command`, which routes its discovery
-    /// subcommands to the runner alongside `run`.
+    /// Fuzz subcommands that offload to the configured Lab runner. Listing is
+    /// local metadata discovery unless runner availability is requested.
     pub fn is_lab_offload_command(&self) -> bool {
         matches!(
             self.command,
-            None | Some(FuzzCommand::Run(_))
-                | Some(FuzzCommand::RunCampaign(_))
-                | Some(FuzzCommand::List(_))
+            None | Some(FuzzCommand::Run(_)) | Some(FuzzCommand::RunCampaign(_))
         ) || matches!(&self.command, Some(FuzzCommand::Plan(plan)) if plan.execute)
+            || matches!(&self.command, Some(FuzzCommand::List(args)) if args.remote_discovery)
     }
 
     pub(crate) fn lab_route_required_extension_ids(&self) -> Vec<String> {
@@ -226,6 +221,11 @@ pub(crate) struct FuzzListArgs {
     /// rig-declared fuzz workloads.
     #[arg(long, value_name = "RIG_ID")]
     pub(crate) rig: Option<String>,
+
+    /// Query the selected runner for runner-specific availability. Without
+    /// this flag list reads only local installed rig metadata.
+    #[arg(long)]
+    pub(crate) remote_discovery: bool,
 
     #[command(flatten)]
     pub(crate) extension_override: ExtensionOverrideArgs,
@@ -755,7 +755,7 @@ pub use super::types_extra::{
     FuzzContractGateProfileOutput, FuzzContractOutput, FuzzCoverageCompletenessOutput,
     FuzzCoverageSelectorSummaryOutput, FuzzDiscoverOutput, FuzzDiscoverSummary,
     FuzzExecutionOutput, FuzzGateEvaluation, FuzzGateStatusChange, FuzzInspectCandidate,
-    FuzzInspectOutput, FuzzListOutput, FuzzOutput, FuzzPlanOutput, FuzzReplayArtifactAccess,
-    FuzzReplayEnv, FuzzReplayExecution, FuzzReplayOutput, FuzzReportOutput, FuzzRunOutput,
-    FuzzRunnerContract, FuzzValidateOutput, FuzzWorkloadOutput,
+    FuzzInspectOutput, FuzzListComponentMapping, FuzzListDiagnostics, FuzzListOutput, FuzzOutput,
+    FuzzPlanOutput, FuzzReplayArtifactAccess, FuzzReplayEnv, FuzzReplayExecution, FuzzReplayOutput,
+    FuzzReportOutput, FuzzRunOutput, FuzzRunnerContract, FuzzValidateOutput, FuzzWorkloadOutput,
 };

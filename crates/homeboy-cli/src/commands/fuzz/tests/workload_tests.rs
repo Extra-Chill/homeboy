@@ -1,4 +1,6 @@
 use super::*;
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 #[test]
 fn fuzz_workloads_include_rig_declared_paths() {
@@ -320,7 +322,7 @@ fn resolve_profile_workload_id_rejects_unknown_profile_with_available_profiles()
 }
 
 #[test]
-fn fuzz_list_materializes_prepare_dependencies_before_workload_validation() {
+fn fuzz_list_does_not_materialize_prepare_dependencies() {
     with_isolated_home(|home| {
         let component_dir = home.path().join("component");
         fs::create_dir_all(&component_dir).expect("component dir");
@@ -328,20 +330,22 @@ fn fuzz_list_materializes_prepare_dependencies_before_workload_validation() {
         write_fuzz_prepare_rig(
             home.path(),
             &component_dir,
-            r#"mkdir -p runtime && printf ready > runtime/ready.txt"#,
+            r#"sleep 2; mkdir -p runtime && printf ready > runtime/ready.txt"#,
             "runtime/ready.txt",
             "materialize runtime dependency",
         );
 
+        let started = Instant::now();
         let output = run_list(fuzz_list_args()).expect("fuzz list");
 
         assert_eq!(output.count, 1);
-        assert!(component_dir.join("runtime/ready.txt").is_file());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(!component_dir.join("runtime/ready.txt").exists());
     });
 }
 
 #[test]
-fn fuzz_list_runs_declared_dependency_materialization_before_prepare_validation() {
+fn fuzz_list_does_not_run_declared_dependency_materialization() {
     with_isolated_home(|home| {
         let component_dir = home.path().join("component");
         fs::create_dir_all(&component_dir).expect("component dir");
@@ -351,12 +355,12 @@ fn fuzz_list_runs_declared_dependency_materialization_before_prepare_validation(
         let output = run_list(fuzz_list_args()).expect("fuzz list");
 
         assert_eq!(output.count, 1);
-        assert!(component_dir.join("runtime/ready.txt").is_file());
+        assert!(!component_dir.join("runtime/ready.txt").exists());
     });
 }
 
 #[test]
-fn fuzz_list_materializes_declared_plugin_subpath_dependency_before_prepare_validation() {
+fn fuzz_list_does_not_materialize_declared_plugin_subpath_dependency() {
     with_isolated_home(|home| {
         let component_dir = home.path().join("woocommerce");
         fs::create_dir_all(component_dir.join("plugins/woocommerce")).expect("plugin dir");
@@ -366,34 +370,28 @@ fn fuzz_list_materializes_declared_plugin_subpath_dependency_before_prepare_vali
         let output = run_list(fuzz_list_args()).expect("fuzz list");
 
         assert_eq!(output.count, 1);
-        assert!(component_dir
+        assert!(!component_dir
             .join("plugins/woocommerce/vendor/autoload_packages.php")
-            .is_file());
+            .exists());
     });
 }
 
 #[test]
-fn fuzz_list_reports_structured_dependency_materialization_failure() {
+fn fuzz_list_ignores_dependency_materialization_failure() {
     with_isolated_home(|home| {
         let component_dir = home.path().join("component");
         fs::create_dir_all(&component_dir).expect("component dir");
         write_generic_fuzz_extension(home.path());
         write_dependency_materialization_failure_rig(home.path(), &component_dir);
 
-        let error = match run_list(fuzz_list_args()) {
-            Ok(_) => panic!("dependency materialization should fail"),
-            Err(error) => error,
-        };
-        let message = error.to_string();
+        let output = run_list(fuzz_list_args()).expect("metadata listing should not prepare");
 
-        assert!(message.contains("fuzz_prepare"));
-        assert!(message.contains("dependency materialization runtime-dependencies"));
-        assert!(message.contains("did not produce required outputs"));
+        assert_eq!(output.count, 1);
     });
 }
 
 #[test]
-fn fuzz_list_reports_structured_prepare_step_failure() {
+fn fuzz_list_ignores_prepare_step_failure() {
     with_isolated_home(|home| {
         let component_dir = home.path().join("component");
         fs::create_dir_all(&component_dir).expect("component dir");
@@ -406,15 +404,157 @@ fn fuzz_list_reports_structured_prepare_step_failure() {
             "materialize runtime dependency",
         );
 
-        let error = match run_list(fuzz_list_args()) {
-            Ok(_) => panic!("prepare should fail"),
-            Err(error) => error,
-        };
-        let message = error.to_string();
+        let output = run_list(fuzz_list_args()).expect("metadata listing should not prepare");
 
-        assert!(message.contains("fuzz_prepare"));
-        assert!(message.contains("requirement `materialize runtime dependency` failed"));
-        assert!(message.contains("prepare command failed"));
+        assert_eq!(output.count, 1);
+    });
+}
+
+#[test]
+fn fuzz_list_marks_forced_local_remote_discovery_as_requested() {
+    with_isolated_home(|home| {
+        let component_dir = home.path().join("component");
+        fs::create_dir_all(&component_dir).expect("component dir");
+        write_generic_fuzz_extension(home.path());
+        write_fuzz_prepare_rig(
+            home.path(),
+            &component_dir,
+            "false",
+            "runtime/ready.txt",
+            "materialize runtime dependency",
+        );
+        let mut args = fuzz_list_args();
+        args.remote_discovery = true;
+
+        let output = run_list(args).expect("local metadata listing should not prepare");
+
+        assert_eq!(
+            output.diagnostics.executable_availability,
+            "remote_discovery_requested"
+        );
+    });
+}
+
+#[test]
+fn fuzz_list_reports_ambiguous_duplicate_rig_workloads_without_running_them() {
+    with_isolated_home(|home| {
+        let component_dir = home.path().join("component");
+        fs::create_dir_all(&component_dir).expect("component dir");
+        write_generic_fuzz_extension(home.path());
+        let rig_dir = home.path().join(".config/homeboy/rigs");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("package-fuzz.json"),
+            serde_json::json!({
+                "id": "package-fuzz",
+                "components": {
+                    "package": {
+                        "path": component_dir,
+                        "extensions": { "generic": { "settings": {} } }
+                    }
+                },
+                "fuzz": { "default_component": "package" },
+                "fuzz_workloads": {
+                    "generic": [
+                        { "path": "fuzz/duplicate.json" },
+                        { "path": "fuzz/duplicate.json" }
+                    ]
+                }
+            })
+            .to_string(),
+        )
+        .expect("rig config");
+
+        let output = run_list(fuzz_list_args()).expect("fuzz list");
+
+        assert_eq!(output.diagnostics.completeness, "ambiguous");
+        assert!(output
+            .diagnostics
+            .ambiguity
+            .iter()
+            .any(|message| message.contains("duplicate declared fuzz workload id")));
+    });
+}
+
+#[test]
+fn fuzz_list_reports_stale_installed_rig_package_provenance() {
+    with_isolated_home(|home| {
+        write_generic_fuzz_extension(home.path());
+        let component_dir = home.path().join("component");
+        fs::create_dir_all(&component_dir).expect("component dir");
+        let package = tempfile::tempdir().expect("rig package");
+        let rig_dir = package.path().join("rigs/package-fuzz");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            serde_json::json!({
+                "id": "package-fuzz",
+                "components": {
+                    "package": {
+                        "path": component_dir,
+                        "extensions": { "generic": { "settings": {} } }
+                    }
+                },
+                "fuzz": { "default_component": "package" },
+                "fuzz_workloads": { "generic": [{ "path": "fuzz/package.json" }] }
+            })
+            .to_string(),
+        )
+        .expect("rig config");
+        for args in [
+            vec!["init"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        ] {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(package.path())
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git command should succeed");
+        }
+        homeboy::rig::install(
+            package.path().to_string_lossy().as_ref(),
+            Some("package-fuzz"),
+            false,
+        )
+        .expect("install rig package");
+        let status = Command::new("git")
+            .args([
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "advance source",
+            ])
+            .current_dir(package.path())
+            .status()
+            .expect("advance source revision");
+        assert!(status.success());
+
+        let output = run_list(fuzz_list_args()).expect("fuzz list");
+
+        assert_eq!(output.diagnostics.completeness, "incomplete");
+        assert!(output
+            .diagnostics
+            .ambiguity
+            .iter()
+            .any(|message| message.contains("rig package freshness is Stale")));
+        assert!(output
+            .rig_package
+            .as_ref()
+            .is_some_and(|package| !package.freshness_verified));
     });
 }
 
@@ -425,6 +565,7 @@ fn fuzz_list_args() -> FuzzListArgs {
             path: None,
         },
         rig: Some("package-fuzz".to_string()),
+        remote_discovery: false,
         extension_override: ExtensionOverrideArgs::default(),
         setting_args: SettingArgs::default(),
     }
