@@ -43,12 +43,25 @@ pub use args::{
 pub(crate) use status::diagnostic_summary_from_aggregate;
 
 pub fn run(args: AgentTaskArgs, _global: &GlobalArgs) -> CmdResult<Value> {
-    run_with_cook_progress(args, None)
+    let progress = |phase: &str, cook_id: Option<&str>, run_id: Option<&str>| {
+        if crate::commands::utils::tty::is_stdout_tty() {
+            let identity = match (cook_id, run_id) {
+                (_, Some(run_id)) => format!(" [{run_id}]"),
+                (Some(cook_id), None) => format!(" [{cook_id}]"),
+                (None, None) => String::new(),
+            };
+            eprintln!("cook: {phase}{identity}");
+        }
+        Ok(())
+    };
+    run_with_cook_progress(args, Some(&progress))
 }
 
 pub(crate) fn run_with_cook_progress(
     args: AgentTaskArgs,
-    progress: Option<&dyn Fn(&str, Option<&str>, Option<&str>) -> homeboy::core::Result<()>>,
+    progress: Option<
+        &(dyn Fn(&str, Option<&str>, Option<&str>) -> homeboy::core::Result<()> + Send + Sync),
+    >,
 ) -> CmdResult<Value> {
     match args.command {
         AgentTaskCommand::Doctor(doctor_args) => doctor::doctor(doctor_args),

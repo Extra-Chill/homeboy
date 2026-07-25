@@ -5,6 +5,7 @@
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
 
 use crate::agent_task_cook_loop::{
     evaluate_cook_loop, AgentTaskCookLoopOptions, AgentTaskCookLoopReport, AgentTaskCookLoopStatus,
@@ -69,6 +70,27 @@ fn retry_dispatch_operation_key(next_run_id: &str) -> String {
 /// push, `gh pr create`) can take a while; the lease is generous so a healthy
 /// controller completes it, while a crashed controller's lease still elapses.
 const FINALIZATION_CLAIM_LEASE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Foreground liveness is deliberately bounded. Provider-native progress still
+/// wins when available; this durable heartbeat covers quiet providers.
+const COOK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+
+pub type CookProgressObserver<'a> = dyn Fn(&str, &str, &str) -> Result<()> + Send + Sync + 'a;
+
+fn report_cook_progress(
+    observer: Option<&CookProgressObserver<'_>>,
+    cook_id: &str,
+    run_id: &str,
+    phase: &str,
+    attempt: u32,
+    detail: Option<&str>,
+) -> Result<()> {
+    agent_task_lifecycle::record_cook_progress(run_id, phase, attempt, detail)?;
+    if let Some(observer) = observer {
+        observer(phase, cook_id, run_id)?;
+    }
+    Ok(())
+}
 
 /// Durable operation key for finalizing one cook candidate. Keyed by the run id
 /// plus the promoted candidate fingerprint (patch SHA), so re-finalizing the
@@ -1179,7 +1201,7 @@ where
 pub fn run_cook_with_durable_observer<E>(
     options: AgentTaskCookServiceOptions,
     executor: E,
-    observer: &dyn Fn(&str, &str) -> Result<()>,
+    observer: &CookProgressObserver<'_>,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
 where
     E: AgentTaskExecutorAdapter + Clone,
@@ -1217,7 +1239,7 @@ fn run_cook_with_boundaries_observed<E, S>(
     options: AgentTaskCookServiceOptions,
     executor: E,
     mut side_effects: S,
-    durable_observer: Option<&dyn Fn(&str, &str) -> Result<()>>,
+    durable_observer: Option<&CookProgressObserver<'_>>,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
 where
     E: AgentTaskExecutorAdapter + Clone,
@@ -1310,9 +1332,14 @@ where
             "materialized Cook lifecycle record does not match its initial run id",
         ));
     }
-    if let Some(observer) = durable_observer {
-        observer(&options.cook_id, &options.initial_run_id)?;
-    }
+    report_cook_progress(
+        durable_observer,
+        &options.cook_id,
+        &options.initial_run_id,
+        "provider_ready",
+        1,
+        None,
+    )?;
     // Transport readiness can serialize on a reconnect/runtime-promotion
     // lease. Complete it before entering the provider-attempt loop so that
     // waiting for a shared Lab session never consumes a cook attempt.
@@ -1395,6 +1422,18 @@ where
             })
             .unwrap_or(true);
         if needs_execution {
+            report_cook_progress(
+                durable_observer,
+                &cook_id,
+                &run_id,
+                if attempt == 1 {
+                    "provider_start"
+                } else {
+                    "retry"
+                },
+                attempt,
+                None,
+            )?;
             validate_cook_workspace(&options)?;
             // Claim the durable attempt before candidate baseline staging. That
             // staging can take longer than the foreground controller's timeout;
@@ -1513,14 +1552,35 @@ where
                     )
                 } else {
                     validate_cook_workspace(&options)?;
-                    run_loaded_plan_with_derived_cook_baseline(
-                        dispatch_plan,
-                        Some(&run_id),
-                        executor.clone(),
-                        effective_baseline.map(CookFollowUpBaseline::capability),
-                        Some(cook_attempt_harvest_context(&options.harvest_context)),
-                    )
-                    .map(|_| ())
+                    let (heartbeat_stop, heartbeat_wait) = mpsc::channel();
+                    let heartbeat_run_id = run_id.clone();
+                    let heartbeat_cook_id = cook_id.clone();
+                    std::thread::scope(|scope| {
+                        scope.spawn(move || {
+                            while let Err(mpsc::RecvTimeoutError::Timeout) =
+                                heartbeat_wait.recv_timeout(COOK_HEARTBEAT_INTERVAL)
+                            {
+                                let _ = report_cook_progress(
+                                    durable_observer,
+                                    &heartbeat_cook_id,
+                                    &heartbeat_run_id,
+                                    "heartbeat",
+                                    attempt,
+                                    Some("provider execution is still running"),
+                                );
+                            }
+                        });
+                        let result = run_loaded_plan_with_derived_cook_baseline(
+                            dispatch_plan,
+                            Some(&run_id),
+                            executor.clone(),
+                            effective_baseline.map(CookFollowUpBaseline::capability),
+                            Some(cook_attempt_harvest_context(&options.harvest_context)),
+                        )
+                        .map(|_| ());
+                        let _ = heartbeat_stop.send(());
+                        result
+                    })
                 }
             })();
             if let Err(error) = execution {
@@ -1686,6 +1746,14 @@ where
             ));
         }
 
+        report_cook_progress(
+            durable_observer,
+            &cook_id,
+            &run_id,
+            "promotion",
+            attempt,
+            None,
+        )?;
         let promotion = match side_effects.promote(&options, &run_id) {
             Ok(report) => report,
             Err(error) => {
@@ -1814,6 +1882,14 @@ where
                     },
                     None => promotion,
                 };
+                report_cook_progress(
+                    durable_observer,
+                    &cook_id,
+                    &run_id,
+                    "finalization",
+                    attempt,
+                    None,
+                )?;
                 let finalization = match side_effects.finalize(&options, &run_id, &promotion) {
                     Ok(finalization) => {
                         if active_moving_base_recovery.is_some() {
