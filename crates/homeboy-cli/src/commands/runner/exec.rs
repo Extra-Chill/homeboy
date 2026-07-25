@@ -159,18 +159,59 @@ pub(super) fn exec(
                 },
             )?;
         }
-        let artifacts = runner::promote_runner_exec_artifacts(run_id, &output, &artifact_outputs)?;
+        let mut artifacts = Vec::new();
+        for declaration in &artifact_outputs {
+            let promoted = runner::promote_runner_exec_artifacts(
+                run_id,
+                &output,
+                std::slice::from_ref(declaration),
+            )?;
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
+                run_id,
+                "artifact",
+                declaration,
+                &promoted,
+            )?;
+            artifacts.extend(promoted);
+        }
         let promoted_artifacts = artifacts
             .iter()
             .filter_map(|record| runner::promoted_output(&output, record))
             .collect::<Vec<_>>();
-        let artifact_dir_records =
-            runner::promote_runner_exec_artifact_dirs(run_id, &output, &artifact_dir_outputs)?;
+        let mut artifact_dir_records = Vec::new();
+        for declaration in &artifact_dir_outputs {
+            let promoted = runner::promote_runner_exec_artifact_dirs(
+                run_id,
+                &output,
+                std::slice::from_ref(declaration),
+            )?;
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
+                run_id,
+                "artifact_dir",
+                declaration,
+                &promoted,
+            )?;
+            artifact_dir_records.extend(promoted);
+        }
         let promoted_artifact_dir_records = artifact_dir_records
             .iter()
             .filter_map(|record| runner::promoted_output(&output, record))
             .collect::<Vec<_>>();
-        let summaries = runner::promote_runner_exec_summaries(run_id, &output, &summary_outputs)?;
+        let mut summaries = Vec::new();
+        for declaration in &summary_outputs {
+            let promoted = runner::promote_runner_exec_summaries(
+                run_id,
+                &output,
+                std::slice::from_ref(declaration),
+            )?;
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
+                run_id,
+                "summary",
+                declaration,
+                &promoted,
+            )?;
+            summaries.extend(promoted);
+        }
         let structured_summaries = summaries
             .iter()
             .filter_map(|summary| runner::runner_exec_structured_summary(&output, summary))
@@ -200,6 +241,9 @@ pub(super) fn exec(
                     events: events.clone(),
                 },
             )?;
+        }
+        if matches!(output.mode, runner::RunnerExecMode::Daemon) {
+            homeboy_lab_runner::reconcile_runner_generation_after_evidence(&output.runner_id)?;
         }
     }
     Ok((output, exit_code))

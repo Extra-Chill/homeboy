@@ -123,6 +123,15 @@ pub use failure::runner_exec_failure_error;
 pub use handoff::{runner_job_cancel, runner_job_cancel_projection};
 pub use recovery::reconcile_terminal_runner_exec_runs;
 
+/// Retire a completed direct daemon generation only after controller-owned
+/// evidence has been checkpointed and projected.
+pub fn reconcile_runner_generation_after_evidence(runner_id: &str) -> Result<()> {
+    let session = super::connection::status(runner_id)
+        .ok()
+        .and_then(|report| report.session);
+    super::generation_store::reconcile(runner_id, session.as_ref())
+}
+
 #[derive(Debug, Clone)]
 pub struct RunnerExecOptions {
     pub cwd: Option<String>,

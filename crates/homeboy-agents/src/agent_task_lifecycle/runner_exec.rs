@@ -290,6 +290,63 @@ pub fn record_runner_exec_artifact_refs(
     store.upsert_imported_run_preserving_terminal(&run)
 }
 
+/// Persist one declaration's completed promotion immediately. The artifact IDs
+/// and content hashes make a replay skip that declaration after a crash while
+/// allowing later declarations to resume independently.
+pub fn record_runner_exec_declaration_promotion(
+    run_id: &str,
+    role: &str,
+    declaration: &str,
+    artifacts: &[homeboy_core::observation::ArtifactRecord],
+) -> Result<()> {
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let run_id = sanitize_run_id(run_id);
+    let Some(mut run) = store.get_run(&run_id)? else {
+        return Ok(());
+    };
+    if run.metadata_json.get("kind").and_then(Value::as_str) != Some(RUNNER_EXEC_RUN_KIND) {
+        return Ok(());
+    }
+    let metadata = run.metadata_json.as_object_mut().expect("metadata object");
+    let key = format!("{role}:{declaration}");
+    let mut states = metadata
+        .get("runner_exec_declaration_promotions")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    states.insert(
+        key,
+        json!({
+            "role": role,
+            "declaration": declaration,
+            "state": "promoted",
+            "artifacts": artifacts.iter().map(|artifact| json!({
+                "id": artifact.id,
+                "sha256": artifact.sha256,
+                "path": artifact.path,
+            })).collect::<Vec<_>>(),
+        }),
+    );
+    metadata.insert(
+        "runner_exec_declaration_promotions".to_string(),
+        Value::Object(states),
+    );
+    store.upsert_imported_run_preserving_terminal(&run)
+}
+
+pub fn runner_exec_declaration_is_promoted(
+    run: &homeboy_core::observation::RunRecord,
+    role: &str,
+    declaration: &str,
+) -> bool {
+    run.metadata_json
+        .pointer(&format!(
+            "/runner_exec_declaration_promotions/{role}:{declaration}/state"
+        ))
+        .and_then(Value::as_str)
+        == Some("promoted")
+}
+
 /// Finalize a generic runner-exec observation from a daemon-owned terminal
 /// snapshot. Agent-task projections intentionally remain separate: this record
 /// has no task aggregate to parse, so the daemon result itself is authoritative.

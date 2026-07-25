@@ -54,10 +54,72 @@ pub fn reconcile_terminal_runner_exec_runs() -> Result<usize> {
                 .unwrap_or_default()
         };
         let output = recovered_output(&run, &snapshot, cwd);
-        let artifacts = promote_runner_exec_artifacts(&run.id, &output, &strings("artifacts"))?;
-        let directories =
-            promote_runner_exec_artifact_dirs(&run.id, &output, &strings("artifact_dirs"))?;
-        let summaries = promote_runner_exec_summaries(&run.id, &output, &strings("summaries"))?;
+        let mut artifacts = Vec::new();
+        for declaration in strings("artifacts") {
+            if homeboy_agents::agent_task_lifecycle::runner_exec_declaration_is_promoted(
+                &run,
+                "artifact",
+                &declaration,
+            ) {
+                continue;
+            }
+            let promoted = promote_runner_exec_artifacts(
+                &run.id,
+                &output,
+                std::slice::from_ref(&declaration),
+            )?;
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
+                &run.id,
+                "artifact",
+                &declaration,
+                &promoted,
+            )?;
+            artifacts.extend(promoted);
+        }
+        let mut directories = Vec::new();
+        for declaration in strings("artifact_dirs") {
+            if homeboy_agents::agent_task_lifecycle::runner_exec_declaration_is_promoted(
+                &run,
+                "artifact_dir",
+                &declaration,
+            ) {
+                continue;
+            }
+            let promoted = promote_runner_exec_artifact_dirs(
+                &run.id,
+                &output,
+                std::slice::from_ref(&declaration),
+            )?;
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
+                &run.id,
+                "artifact_dir",
+                &declaration,
+                &promoted,
+            )?;
+            directories.extend(promoted);
+        }
+        let mut summaries = Vec::new();
+        for declaration in strings("summaries") {
+            if homeboy_agents::agent_task_lifecycle::runner_exec_declaration_is_promoted(
+                &run,
+                "summary",
+                &declaration,
+            ) {
+                continue;
+            }
+            let promoted = promote_runner_exec_summaries(
+                &run.id,
+                &output,
+                std::slice::from_ref(&declaration),
+            )?;
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
+                &run.id,
+                "summary",
+                &declaration,
+                &promoted,
+            )?;
+            summaries.extend(promoted);
+        }
         let retained = artifacts
             .iter()
             .chain(directories.iter())
@@ -127,19 +189,30 @@ fn record_evicted_evidence_loss(
     run: &homeboy_core::observation::RunRecord,
     error: &Error,
 ) -> Result<()> {
-    if run
+    let checkpointed = run
         .metadata_json
         .pointer("/runner_terminal_projection/state")
         .and_then(Value::as_str)
-        != Some("terminal_checkpointed")
-        || error.details.get("http_status").and_then(Value::as_u64) != Some(404)
-    {
+        == Some("terminal_checkpointed");
+    if error.details.get("http_status").and_then(Value::as_u64) != Some(404) {
+        return Ok(());
+    }
+    let has_declarations = run
+        .metadata_json
+        .get("runner_exec_artifact_declarations")
+        .and_then(Value::as_object)
+        .is_some_and(|declarations| {
+            declarations
+                .values()
+                .any(|value| value.as_array().is_some_and(|values| !values.is_empty()))
+        });
+    if !checkpointed && !has_declarations {
         return Ok(());
     }
     let mut metadata = run.metadata_json.clone();
     metadata["runner_terminal_projection"] = json!({
         "state": "unrecoverable_evidence_loss",
-        "classification": "daemon_evicted_missing_declared_artifacts",
+        "classification": if checkpointed { "daemon_evicted_missing_declared_artifacts" } else { "daemon_evicted_before_terminal_projection" },
         "runner_id": run.metadata_json["runner_id"],
         "runner_job_id": run.metadata_json["runner_job_id"],
     });

@@ -395,10 +395,6 @@ pub(super) fn exec_via_daemon(
         Some(&runner_result),
     );
     persist_runner_execution_transition(&execution_record, &cwd, &command)?;
-    // A completed job is a durable lifecycle transition. It is the primary
-    // trigger for draining-generation retirement, not a side effect of status.
-    super::super::generation_store::reconcile(&runner.id, accepted_session.as_ref())?;
-
     Ok((
         RunnerExecOutput {
             variant: "exec",
