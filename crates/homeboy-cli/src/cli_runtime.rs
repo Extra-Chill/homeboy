@@ -1114,7 +1114,7 @@ const ARGUMENT_MIGRATIONS: &[ArgumentMigration] = &[ArgumentMigration {
     command_path: &["agent-task", "cook"],
     historical_flags: &["--provider", "--provider-id", "--dispatch-selector"],
     diagnostic: "executor selection now uses `--backend <backend>` and optional `--selector <provider-id>`.\n\
-Example: `homeboy agent-task cook --backend opencode --selector opencode.agent-task-executor ...`\n\
+Example: `homeboy agent-task cook --backend opencode --selector opencode.agent-task-executor --to-worktree repo@branch --goal 'Describe the task' --verify 'cargo test' --no-finalize`\n\
 List available executor providers: `homeboy agent-task providers`\n\
 `--provider-argv` is promotion-only: it configures the deprecated promotion apply-provider invocation and cannot select an executor.",
 }];
