@@ -123,6 +123,7 @@ pub(super) fn review_observation_initial_metadata(
         "ci_profile": args.ci_profile,
         "report": args.report,
         "changed_file_count": changed_file_count,
+        "execution_provenance": crate::commands::utils::execution_provenance::captured(),
         "observation_status": "running",
     })
 }

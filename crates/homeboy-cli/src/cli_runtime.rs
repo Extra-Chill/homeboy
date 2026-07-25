@@ -373,6 +373,7 @@ impl CliRuntime {
         commands::set_skip_deps_hydration(cli.skip_deps_hydration);
         normalize_runs_runner_options(&mut cli, &normalized);
         normalize_cook_runner_option(&mut cli, &normalized);
+        crate::commands::utils::execution_provenance::capture(&cli, &normalized);
 
         if matches!(&cli.command, Commands::Runs(args) if args.is_bundle_export()) {
             output_file = None;

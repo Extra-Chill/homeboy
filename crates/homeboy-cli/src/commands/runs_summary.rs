@@ -77,6 +77,7 @@ fn render_run_detail(run: &Value) -> String {
     if let Some(finished) = string_value(run, &["finished_at"]) {
         lines.push(format!("Finished: {finished}"));
     }
+    lines.extend(execution_provenance_lines(run));
 
     lines.extend(failure_summary_lines(run));
 
@@ -93,6 +94,43 @@ fn render_run_detail(run: &Value) -> String {
     lines.push(format!("Full output: homeboy runs show {run_id} --json"));
 
     finish(lines)
+}
+
+fn execution_provenance_lines(run: &Value) -> Vec<String> {
+    let Some(provenance) = value_at(run, &["metadata", "execution_provenance"]) else {
+        return Vec::new();
+    };
+    let Some(intent) = provenance.get("operator_intent") else {
+        return Vec::new();
+    };
+    let mut lines = vec!["Execution provenance:".to_string()];
+    if let Some(command) = intent.get("rerun_command").and_then(Value::as_str) {
+        lines.push(format!("  rerun: {command}"));
+    }
+    if let Some(placement) = intent.get("placement").and_then(Value::as_str) {
+        lines.push(format!("  requested placement: {placement}"));
+    }
+    if let Some(runner) = intent.get("runner_id").and_then(Value::as_str) {
+        lines.push(format!("  requested runner: {runner}"));
+    }
+    if let Some(execution) = provenance.get("resolved_execution") {
+        let location = execution
+            .get("location")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let runner = execution.get("runner_id").and_then(Value::as_str);
+        lines.push(match runner {
+            Some(runner) => format!("  resolved execution: {location} ({runner})"),
+            None => format!("  resolved execution: {location}"),
+        });
+    }
+    if let Some(origin) = provenance
+        .pointer("/resource_policy/decision_origin")
+        .and_then(Value::as_str)
+    {
+        lines.push(format!("  policy decision: {origin}"));
+    }
+    lines
 }
 
 fn failure_summary_lines(run: &Value) -> Vec<String> {
@@ -280,6 +318,32 @@ mod tests {
         assert!(!summary.contains("get: homeboy runs artifact get bench-run-42 admin_url"));
         // Compact: no raw JSON braces.
         assert!(!summary.contains("{\n"));
+    }
+
+    #[test]
+    fn show_summary_surfaces_execution_provenance_and_rerun_command() {
+        let payload = json!({
+            "variant": "show",
+            "payload": { "run": {
+                "id": "review-1", "kind": "review", "status": "pass", "artifacts": [],
+                "metadata": { "execution_provenance": {
+                    "operator_intent": {
+                        "rerun_command": "homeboy --placement local review --changed-since=origin/main",
+                        "placement": "local", "runner_id": null
+                    },
+                    "resolved_execution": { "location": "controller", "runner_id": null },
+                    "resource_policy": { "decision_origin": "explicit" }
+                }}
+            }}
+        });
+
+        let summary = render_runs_show_summary(&payload).expect("summary");
+        assert!(summary.contains("Execution provenance:\n"));
+        assert!(summary
+            .contains("rerun: homeboy --placement local review --changed-since=origin/main\n"));
+        assert!(summary.contains("requested placement: local\n"));
+        assert!(summary.contains("resolved execution: controller\n"));
+        assert!(summary.contains("policy decision: explicit\n"));
     }
 
     #[test]
