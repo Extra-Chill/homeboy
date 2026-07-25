@@ -11,7 +11,7 @@ use homeboy_extension::ExtensionCapability;
 use super::super::{CmdResult, GlobalArgs};
 use super::compare::run_compare;
 use super::doctor::run_doctor;
-use super::execution::{fuzz_prepare_failure_message, run_run};
+use super::execution::run_run;
 use super::inspect::run_inspect;
 use super::planning::{run_campaign, run_plan};
 use super::replay::{run_minimize, run_replay};
@@ -19,7 +19,8 @@ use super::report::{run_report, run_validate};
 use super::stable::run_stable;
 use super::types::{
     FuzzArgs, FuzzCommand, FuzzContractOutput, FuzzDiscoverArgs, FuzzDiscoverOutput,
-    FuzzDiscoverSummary, FuzzListArgs, FuzzListOutput, FuzzOutput,
+    FuzzDiscoverSummary, FuzzListArgs, FuzzListComponentMapping, FuzzListDiagnostics,
+    FuzzListOutput, FuzzOutput,
 };
 use super::workloads::{fuzz_workloads, load_rig, resolve_component_id, resolve_fuzz_context};
 
@@ -166,18 +167,6 @@ pub(super) fn run_contract() -> FuzzContractOutput {
 
 pub(super) fn run_list(args: FuzzListArgs) -> homeboy::core::Result<FuzzListOutput> {
     let rig_context = load_rig(args.rig.as_deref(), &args.setting_args)?;
-    if let Some(context) = rig_context.as_ref() {
-        let prepare_settings = fuzz_list_prepare_settings(&args);
-        if let Some(prepare) = homeboy::rig::run_fuzz_prepare(&context.spec, &prepare_settings)? {
-            if !prepare.success {
-                return Err(homeboy::core::Error::rig_pipeline_failed(
-                    &context.spec.id,
-                    "fuzz_prepare",
-                    fuzz_prepare_failure_message(&prepare),
-                ));
-            }
-        }
-    }
     let effective_id = resolve_component_id(
         &args.comp,
         rig_context.as_ref().map(|context| &context.spec),
@@ -195,27 +184,78 @@ pub(super) fn run_list(args: FuzzListArgs) -> homeboy::core::Result<FuzzListOutp
         rig_context.as_ref(),
         ctx.extension_id.as_deref(),
     );
+    let mut ambiguity = Vec::new();
+    if let Some(context) = rig_context.as_ref() {
+        let extensions = homeboy::rig::extension_ids_for_workloads(
+            &context.spec,
+            homeboy::rig::RigWorkloadKind::Fuzz,
+        );
+        if extensions.len() > 1 && ctx.extension_id.is_none() {
+            ambiguity.push(format!(
+                "rig declares multiple fuzz workload extensions: {}",
+                extensions.join(", ")
+            ));
+        }
+    }
+    let mut workload_ids = workloads
+        .iter()
+        .map(|workload| workload.id.as_str())
+        .collect::<Vec<_>>();
+    workload_ids.sort_unstable();
+    for duplicate in workload_ids
+        .windows(2)
+        .filter_map(|ids| (ids[0] == ids[1]).then_some(ids[0]))
+    {
+        ambiguity.push(format!("duplicate declared fuzz workload id: {duplicate}"));
+    }
+    let rig_package = rig_context
+        .as_ref()
+        .and_then(|context| homeboy::rig::package_evidence(&context.spec.id));
+    if let Some(package) = rig_package
+        .as_ref()
+        .filter(|package| !package.freshness_verified)
+    {
+        ambiguity.push(format!(
+            "rig package freshness is {:?}: {}",
+            package.freshness,
+            package
+                .freshness_message
+                .as_deref()
+                .unwrap_or("source revision could not be verified")
+        ));
+    }
 
     Ok(FuzzListOutput {
         command: "fuzz.list".to_string(),
-        component: ctx.component_id,
+        component: ctx.component_id.clone(),
         rig_id: rig_context.map(|context| context.spec.id),
+        rig_package,
+        component_mapping: FuzzListComponentMapping {
+            requested_component: args.comp.id().map(str::to_string),
+            resolved_component: effective_id,
+            path: ctx.component.local_path.clone(),
+        },
+        extension_provider: ctx.extension_id.clone(),
         count: workloads.len(),
         workloads,
+        diagnostics: FuzzListDiagnostics {
+            completeness: if ambiguity.is_empty() {
+                "complete".to_string()
+            } else if ambiguity
+                .iter()
+                .any(|message| message.starts_with("rig package freshness"))
+            {
+                "incomplete".to_string()
+            } else {
+                "ambiguous".to_string()
+            },
+            ambiguity,
+            executable_availability: if args.remote_discovery {
+                "runner_discovered".to_string()
+            } else {
+                "not_requested".to_string()
+            },
+        },
         run_hint: "Select one workload with `homeboy fuzz run <component> --workload <id>`; offload heavy campaigns with the global `--runner <id>` flag when configured.".to_string(),
     })
-}
-
-fn fuzz_list_prepare_settings(args: &FuzzListArgs) -> Vec<(String, String)> {
-    args.setting_args
-        .setting
-        .iter()
-        .cloned()
-        .chain(
-            args.setting_args
-                .setting_json
-                .iter()
-                .map(|(key, value)| (key.clone(), value.to_string())),
-        )
-        .collect()
 }

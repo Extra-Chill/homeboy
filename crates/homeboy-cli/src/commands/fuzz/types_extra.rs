@@ -177,9 +177,27 @@ pub struct FuzzListOutput {
     pub command: String,
     pub component: String,
     pub rig_id: Option<String>,
+    pub rig_package: Option<homeboy_extension::bench::parsing::RigPackageEvidence>,
+    pub component_mapping: FuzzListComponentMapping,
+    pub extension_provider: Option<String>,
     pub workloads: Vec<FuzzWorkloadOutput>,
     pub count: usize,
+    pub diagnostics: FuzzListDiagnostics,
     pub run_hint: String,
+}
+
+#[derive(Serialize)]
+pub struct FuzzListComponentMapping {
+    pub requested_component: Option<String>,
+    pub resolved_component: String,
+    pub path: String,
+}
+
+#[derive(Serialize)]
+pub struct FuzzListDiagnostics {
+    pub completeness: String,
+    pub ambiguity: Vec<String>,
+    pub executable_availability: String,
 }
 
 #[derive(Serialize)]

@@ -7,7 +7,7 @@ List and run generic fuzz workloads for a Homeboy component or rig.
 ```bash
 homeboy fuzz [<component>] [--rig <id>] [--workload <id>] [--profile <id|lab>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--sequence-plan <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [--action-model <path>] [--exploration-policy <path>] [--allow-destructive [--isolation-proof <path>]] [--allow-local-destructive-fuzz] [-- <runner-args>]
 homeboy fuzz run [<component>] [--rig <id>] [--workload <id>] [--profile <id|lab>] [--run-id <id>] [--seed <seed>] [--inventory <path>] [--sequence-plan <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--require-case-log] [--require-coverage-summary] [--require-result-envelope] [--max-duration <duration>] [--action-model <path>] [--exploration-policy <path>] [--allow-destructive [--isolation-proof <path>]] [--allow-local-destructive-fuzz] [-- <runner-args>]
-homeboy fuzz list [<component>] [--rig <id>]
+homeboy fuzz list [<component>] [--rig <id>] [--remote-discovery]
 homeboy fuzz plan [<component>] [--rig <id>] [--workload <id>] [--inventory <path>] [--sequence-plan <path>] [--gate-profile <measurement|evidence|coverage-complete|strict>] [--strategy <all|read-only|crud|coverage-gaps>] [--operation <filter>] [--operation-family <family>] [--case-budget <count>] [--duration-budget-seconds <seconds>] [--action-model <path>] [--exploration-policy <path>] [--campaign-manifest <path>] [--campaign-workload <id>] [--lab-runner <id>] [--required-artifact <id>] [--execute|--dry-run] [--resume] [--allow-destructive [--isolation-proof <path>]]
 homeboy fuzz stable plan --manifest <path> [--stable-id <id[,id]>] [--runner <id>] [--artifact-root <dir>] [--run-id-prefix <id>] [--tracker-ref <kind:id>] [--detach-after-handoff] [--component <id>] [--since <duration>] [--limit <n>] [--hotspot-limit <n>]
 homeboy fuzz run-campaign [<component>] [--rig <id>] [--campaign-manifest <path>] [--campaign-workload <id>] [--dry-run] [--resume] [fuzz run options]
@@ -41,6 +41,14 @@ homeboy fuzz list --rig <rig-id>
 Use the listed workload id in `fuzz run`, then use `runs show`, `runs evidence`,
 or run-backed replay/minimize to inspect the executable/proven state and recorded
 artifacts.
+
+Rig-backed `fuzz list` is bounded local metadata discovery. It reads the installed
+rig package, declared default component, extension provider, and workload paths
+without materializing a workspace, running prepare hooks, or handing off to Lab.
+The output includes package source/revision evidence, component mapping, and
+completeness/ambiguity diagnostics. Pass `--remote-discovery` only when
+runner-specific availability is required; that projection runs on the selected
+runner.
 
 Run one workload through the fuzz command surface:
 
