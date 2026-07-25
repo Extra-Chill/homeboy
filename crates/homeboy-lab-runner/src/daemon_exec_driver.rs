@@ -146,10 +146,16 @@ impl RunnerExecDriver for RunnerDaemonExecDriver {
             require_child_identity_acknowledgement,
             child_started,
         )?;
+        let (stdout, stderr) = super::execution::redaction::redact_runner_exec_streams(
+            output.stdout,
+            output.stderr,
+            &plan.env,
+            &plan.secret_env_names,
+        );
 
         Ok(DaemonExecOutput {
-            stdout: output.stdout,
-            stderr: output.stderr,
+            stdout,
+            stderr,
             exit_code: output.exit_code,
             metrics: output
                 .metrics

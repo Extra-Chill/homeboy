@@ -151,6 +151,78 @@ fn exec_applies_request_env_to_daemon_command() {
 }
 
 #[test]
+fn daemon_exec_injects_extension_env_and_redacts_provider_secret() {
+    register_driver();
+    let _home = create_lab_local_runner();
+    let extension = tempfile::tempdir().expect("extension");
+    let secret = extension.path().join("fixture-secret");
+    std::fs::write(&secret, "runner-secret\n").expect("secret");
+    std::fs::write(
+        extension.path().join("fixture.json"),
+        r#"{"id":"fixture","name":"Fixture","version":"1.2.3","env_provider":{"script":"env.sh","secret_env":["FIXTURE_SECRET"]}}"#,
+    )
+    .expect("manifest");
+    std::fs::write(
+        extension.path().join("env.sh"),
+        "#!/bin/sh\nprintf '%s\\n' '{\"FIXTURE_RUNTIME\":\"runner-local\"}'\n",
+    )
+    .expect("provider");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            extension.path().join("env.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .expect("provider executable");
+    }
+    homeboy_extension::install(&extension.path().display().to_string(), Some("fixture"))
+        .expect("install fixture extension");
+    let store = JobStore::default();
+    let response = route_with_body(
+        "POST",
+        "/exec",
+        Some(serde_json::json!({
+            "runner_id": "lab-local",
+            "runner": {
+                "id": "lab-local",
+                "kind": "local",
+                "secret_env": { "FIXTURE_SECRET": { "file": secret } }
+            },
+            "cwd": std::env::current_dir().expect("cwd"),
+            "command": ["sh", "-c", "test \"$FIXTURE_RUNTIME\" = runner-local && test -n \"$FIXTURE_SECRET\" && printf '%s' \"$FIXTURE_SECRET\""],
+            "extension_env_providers": ["fixture"]
+        })),
+        &store,
+    );
+
+    assert_eq!(response.status_code, 200);
+    let job_id = response.body["body"]["job"]["id"]
+        .as_str()
+        .expect("job id")
+        .to_string();
+    let job = wait_for_job(&store, &job_id);
+    assert_eq!(job.status, JobStatus::Succeeded);
+
+    let result = store
+        .events(job.id)
+        .expect("events")
+        .into_iter()
+        .find(|event| event.kind == JobEventKind::Result)
+        .and_then(|event| event.data)
+        .expect("result");
+    assert!(!result.to_string().contains("runner-secret"));
+    assert_eq!(
+        result["extension_env_providers"][0]["extension_id"],
+        "fixture"
+    );
+    assert_eq!(
+        result["extension_env_providers"][0]["secret_env_names"],
+        serde_json::json!(["FIXTURE_SECRET"])
+    );
+}
+
+#[test]
 fn exec_failed_command_marks_job_failed_after_result_event() {
     register_driver();
     let _home = create_lab_local_runner();

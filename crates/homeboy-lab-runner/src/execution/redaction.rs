@@ -15,7 +15,7 @@ use super::super::{
 #[allow(unused_imports)]
 use super::*;
 
-pub(super) fn redact_runner_exec_streams(
+pub(crate) fn redact_runner_exec_streams(
     stdout: String,
     stderr: String,
     env: &HashMap<String, String>,

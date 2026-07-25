@@ -64,7 +64,7 @@ mod paths;
 mod policy;
 mod process;
 mod recovery;
-mod redaction;
+pub(crate) mod redaction;
 mod secrets;
 mod worker;
 
