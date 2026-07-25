@@ -22,7 +22,10 @@ use super::pipeline::{
     run_pipeline_with_settings, run_prepare_requirement_steps, PipelineOutcome,
     PipelineStepOutcome,
 };
-use super::resource_lifecycle::{rig_resource_lifecycle_index, RigResourceLifecycleOptions};
+use super::resource_lifecycle::{
+    dependency_materialization_cache_lifecycle_record, rig_resource_lifecycle_index,
+    RigResourceLifecycleOptions,
+};
 use super::service::{self, ServiceStatus};
 use super::spec::{DependencyMaterializationOutputKind, RigSpec, ServiceKind, SymlinkSpec};
 use super::state::{
@@ -1044,7 +1047,12 @@ impl RigRunObserver {
                 .unwrap_or_else(|| super::expand::expand_resources(rig)),
             _ => return,
         };
-        if resources.is_empty() {
+        let cache_enabled = rig
+            .requirements
+            .dependency_materialization
+            .iter()
+            .any(|step| !step.cache_key_inputs.is_empty() && !step.expected_outputs.is_empty());
+        if resources.is_empty() && !cache_enabled {
             return;
         }
 
@@ -1060,7 +1068,16 @@ impl RigRunObserver {
         if let Some(cleanup) = &rig.lifecycle.cleanup {
             options.cleanup_intent = cleanup.resource_cleanup_intent();
         }
-        let index = rig_resource_lifecycle_index(&rig.id, &resources, options);
+        let mut index = rig_resource_lifecycle_index(&rig.id, &resources, options.clone());
+        if cache_enabled {
+            if let Ok(root) = super::dependency_materialization_cache::cache_root() {
+                index
+                    .resources
+                    .push(dependency_materialization_cache_lifecycle_record(
+                        &options, &root,
+                    ));
+            }
+        }
         if index.resources.is_empty() || index.validate().is_err() {
             return;
         }

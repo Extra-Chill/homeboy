@@ -15,6 +15,7 @@
 
 use std::collections::HashMap;
 
+use crate::dependency_materialization_cache::{CacheResult, DependencyMaterializationCache};
 use crate::pipeline::PipelineOutcome;
 use crate::runner::{
     head_sha_and_branch, run_check, run_check_groups, run_down, run_down_with_settings,
@@ -1084,6 +1085,149 @@ fn dependency_materialization_cache_restores_verified_outputs_in_a_fresh_workspa
         assert!(
             evidence.iter().any(|event| event["status"] == "saved"),
             "cache save must be retained as structured evidence: {evidence:?}"
+        );
+    });
+}
+
+#[test]
+fn dependency_materialization_cache_rolls_back_all_outputs_when_a_restore_is_invalid() {
+    with_isolated_home(|root| {
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        for workspace in [&first, &second] {
+            std::fs::create_dir_all(workspace.join("output")).expect("workspace");
+            std::fs::write(workspace.join("lock"), "same input\n").expect("lock");
+        }
+        std::fs::write(first.join("output/one"), "new one").expect("first one");
+        std::fs::write(first.join("output/two"), "new two").expect("first two");
+        std::fs::write(second.join("output/one"), "old one").expect("second one");
+        std::fs::write(second.join("output/two"), "old two").expect("second two");
+        let rig_for = |workspace: &std::path::Path| RigSpec {
+            id: "dependency-cache-rollback".to_string(),
+            requirements: RigRequirementsSpec {
+                dependency_materialization: vec![DependencyMaterializationStepSpec {
+                    id: "install".to_string(),
+                    command: Some("printf ignored".to_string()),
+                    cwd: Some(workspace.display().to_string()),
+                    cache_key_inputs: vec!["lock".to_string()],
+                    expected_outputs: vec![
+                        DependencyMaterializationOutputSpec {
+                            path: "output/one".to_string(),
+                            kind: DependencyMaterializationOutputKind::File,
+                            required: true,
+                        },
+                        DependencyMaterializationOutputSpec {
+                            path: "output/two".to_string(),
+                            kind: DependencyMaterializationOutputKind::File,
+                            required: true,
+                        },
+                    ],
+                    safety: DependencyMaterializationSafety::WritesCache,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..minimal_spec("dependency-cache-rollback")
+        };
+        let first_rig = rig_for(&first);
+        let first_step = &first_rig.requirements.dependency_materialization[0];
+        let cache = DependencyMaterializationCache::new(&first_rig, first_step, &[])
+            .expect("cache")
+            .expect("enabled cache");
+        cache.save().expect("save cache");
+        let cache_root = homeboy_paths::homeboy_data()
+            .expect("data root")
+            .join("cache/dependency-materialization/v1");
+        let entry = std::fs::read_dir(cache_root)
+            .expect("entries")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.is_dir())
+            .expect("entry");
+        std::fs::write(entry.join("outputs/output/two"), "corrupt").expect("corrupt second output");
+
+        let second_rig = rig_for(&second);
+        let second_step = &second_rig.requirements.dependency_materialization[0];
+        let restore = DependencyMaterializationCache::new(&second_rig, second_step, &[])
+            .expect("cache")
+            .expect("enabled cache")
+            .restore()
+            .expect("safe miss");
+        assert!(matches!(restore, CacheResult::Miss { .. }));
+        assert_eq!(
+            std::fs::read_to_string(second.join("output/one")).unwrap(),
+            "old one"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second.join("output/two")).unwrap(),
+            "old two"
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn dependency_materialization_cache_key_includes_resolved_tool_version() {
+    with_isolated_home(|root| {
+        let bin = root.path().join(".local/bin");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&bin).expect("bin");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::write(workspace.join("lock"), "same input\n").expect("lock");
+        let tool = bin.join("cache-tool");
+        std::fs::write(
+            &tool,
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo tool-v1; fi\n",
+        )
+        .expect("tool");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).expect("tool mode");
+        let rig = RigSpec {
+            id: "dependency-cache-tool-version".to_string(),
+            requirements: RigRequirementsSpec {
+                dependency_materialization: vec![DependencyMaterializationStepSpec {
+                    id: "install".to_string(),
+                    command: Some("cache-tool install".to_string()),
+                    cwd: Some(workspace.display().to_string()),
+                    cache_key_inputs: vec!["lock".to_string()],
+                    expected_outputs: vec![DependencyMaterializationOutputSpec {
+                        path: "output".to_string(),
+                        kind: DependencyMaterializationOutputKind::File,
+                        required: true,
+                    }],
+                    safety: DependencyMaterializationSafety::WritesCache,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..minimal_spec("dependency-cache-tool-version")
+        };
+        let key_v1 = DependencyMaterializationCache::new(
+            &rig,
+            &rig.requirements.dependency_materialization[0],
+            &[],
+        )
+        .expect("cache")
+        .expect("enabled")
+        .key()
+        .to_string();
+        std::fs::write(
+            &tool,
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo tool-v2; fi\n",
+        )
+        .expect("replace tool");
+        let key_v2 = DependencyMaterializationCache::new(
+            &rig,
+            &rig.requirements.dependency_materialization[0],
+            &[],
+        )
+        .expect("cache")
+        .expect("enabled")
+        .key()
+        .to_string();
+        assert_ne!(
+            key_v1, key_v2,
+            "a resolved tool version change invalidates the cache"
         );
     });
 }

@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,7 @@ use crate::spec::{
 use homeboy_core::error::{Error, Result};
 
 const SCHEMA: &str = "homeboy/dependency-materialization-cache/v1";
+const MAX_TOOL_VERSION_BYTES: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Manifest {
@@ -34,7 +36,15 @@ struct Provenance {
     source: String,
     platform: String,
     environment_sha256: String,
+    tools: Vec<ToolIdentity>,
     inputs: Vec<Input>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ToolIdentity {
+    command: String,
+    executable: String,
+    version: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,13 +62,13 @@ struct Output {
     bytes: u64,
 }
 
-pub(crate) enum CacheResult {
+pub enum CacheResult {
     Hit { bytes: u64 },
     Miss { reason: String },
     Saved { bytes: u64 },
 }
 
-pub(crate) struct DependencyMaterializationCache {
+pub struct DependencyMaterializationCache {
     root: PathBuf,
     entry: PathBuf,
     key: String,
@@ -68,7 +78,7 @@ pub(crate) struct DependencyMaterializationCache {
 }
 
 impl DependencyMaterializationCache {
-    pub(crate) fn new(
+    pub fn new(
         rig: &RigSpec,
         step: &DependencyMaterializationStepSpec,
         settings: &[(String, String)],
@@ -159,6 +169,7 @@ impl DependencyMaterializationCache {
             source,
             platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
             environment_sha256,
+            tools: resolved_tool_identities(step)?,
             inputs,
         };
         let key = hash_bytes(
@@ -177,10 +188,7 @@ impl DependencyMaterializationCache {
                 )
             })?,
         );
-        let root = homeboy_paths::homeboy_data()?
-            .join("cache")
-            .join("dependency-materialization")
-            .join("v1");
+        let root = cache_root()?;
         Ok(Some(Self {
             entry: root.join(&key),
             root,
@@ -191,7 +199,7 @@ impl DependencyMaterializationCache {
         }))
     }
 
-    pub(crate) fn restore(&self) -> Result<CacheResult> {
+    pub fn restore(&self) -> Result<CacheResult> {
         let _lock = self.lock()?;
         let manifest_path = self.entry.join("manifest.json");
         let manifest: Manifest = match read_json::<Manifest>(&manifest_path) {
@@ -226,6 +234,14 @@ impl DependencyMaterializationCache {
                 });
             }
         }
+        let staging = self.workspace.join(format!(
+            ".homeboy-cache-restore-{}-{}",
+            self.key,
+            std::process::id()
+        ));
+        clear_path(&staging)?;
+        fs::create_dir_all(&staging)
+            .map_err(|error| io_error("create dependency cache restore staging", error))?;
         let mut bytes = 0;
         for output in &manifest.outputs {
             let (_, destination, kind) = self
@@ -238,19 +254,26 @@ impl DependencyMaterializationCache {
                     )
                 })?;
             let source = self.entry.join("outputs").join(&output.path);
-            let destination = contained_path(&self.workspace, destination)?;
-            copy_replace(&source, &destination)?;
-            if !kind_matches(&destination, *kind) || hash_path(&destination)? != output.sha256 {
+            let _destination = contained_path(&self.workspace, destination)?;
+            let staged = staging.join(&output.path);
+            copy_replace(&source, &staged)?;
+            if !kind_matches(&staged, *kind) || hash_path(&staged)? != output.sha256 {
+                let _ = clear_path(&staging);
                 return self.evidence(CacheResult::Miss {
                     reason: "restore_verification_failed".to_string(),
                 });
             }
             bytes += output.bytes;
         }
+        publish_restore_transaction(&self.workspace, &staging, &self.outputs)?;
         self.evidence(CacheResult::Hit { bytes })
     }
 
-    pub(crate) fn save(&self) -> Result<()> {
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub fn save(&self) -> Result<()> {
         let _lock = self.lock()?;
         let staging = self
             .root
@@ -350,6 +373,127 @@ impl DependencyMaterializationCache {
         }
         Ok(result)
     }
+}
+
+/// Durable root shared by local and runner-side Homeboy processes. Lab invokes
+/// the same rig materialization contract on the runner outside its workspace.
+pub fn cache_root() -> Result<PathBuf> {
+    Ok(homeboy_paths::homeboy_data()?
+        .join("cache")
+        .join("dependency-materialization")
+        .join("v1"))
+}
+
+fn resolved_tool_identities(step: &DependencyMaterializationStepSpec) -> Result<Vec<ToolIdentity>> {
+    let Some(command) = step.command.as_deref() else {
+        return Ok(step
+            .provider
+            .as_ref()
+            .map(|provider| {
+                vec![ToolIdentity {
+                    command: format!("provider:{provider}"),
+                    executable: format!("provider:{provider}"),
+                    version: "provider-contract-v1".to_string(),
+                }]
+            })
+            .unwrap_or_default());
+    };
+    let command = command.split_whitespace().next().unwrap_or_default();
+    if command.is_empty() {
+        return Ok(Vec::new());
+    }
+    let resolved = crate::toolchain::command_step_path()
+        .as_deref()
+        .and_then(|path| {
+            std::env::split_paths(path)
+                .map(|directory| directory.join(command))
+                .find(|path| path.is_file())
+        });
+    let executable = resolved
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| command.to_string());
+    let version = resolved
+        .as_ref()
+        .and_then(|path| Command::new(path).arg("--version").output().ok())
+        .map(|output| {
+            let bytes = if output.stdout.is_empty() {
+                output.stderr
+            } else {
+                output.stdout
+            };
+            String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_TOOL_VERSION_BYTES)])
+                .trim()
+                .to_string()
+        })
+        .filter(|version| !version.is_empty())
+        .unwrap_or_else(|| "unavailable".to_string());
+    Ok(vec![ToolIdentity {
+        command: command.to_string(),
+        executable,
+        version,
+    }])
+}
+
+fn publish_restore_transaction(
+    workspace: &Path,
+    staging: &Path,
+    outputs: &[(String, PathBuf, DependencyMaterializationOutputKind)],
+) -> Result<()> {
+    let backup = workspace.join(format!(".homeboy-cache-backup-{}", std::process::id()));
+    clear_path(&backup)?;
+    fs::create_dir_all(&backup)
+        .map_err(|error| io_error("create dependency cache rollback staging", error))?;
+    let result = (|| {
+        for (relative, destination, _) in outputs {
+            let destination = contained_path(workspace, destination)?;
+            if destination.exists() {
+                let prior = backup.join(relative);
+                if let Some(parent) = prior.parent() {
+                    fs::create_dir_all(parent).map_err(|error| {
+                        io_error("create dependency cache rollback parent", error)
+                    })?;
+                }
+                fs::rename(&destination, prior)
+                    .map_err(|error| io_error("stage dependency cache rollback", error))?;
+            }
+        }
+        for (relative, destination, _) in outputs {
+            let destination = contained_path(workspace, destination)?;
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| io_error("create dependency cache output parent", error))?;
+            }
+            fs::rename(staging.join(relative), destination)
+                .map_err(|error| io_error("publish dependency cache restore", error))?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        for (relative, destination, _) in outputs {
+            let destination = contained_path(workspace, destination)?;
+            let _ = clear_path(&destination);
+            let prior = backup.join(relative);
+            if prior.exists() {
+                let _ = fs::rename(prior, destination);
+            }
+        }
+    }
+    let _ = clear_path(&backup);
+    let _ = clear_path(staging);
+    result
+}
+
+fn clear_path(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            fs::remove_dir_all(path)
+        }
+        Ok(_) => fs::remove_file(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io_error("inspect dependency cache staging", error)),
+    }
+    .map_err(|error| io_error("clear dependency cache staging", error))
 }
 
 fn contained_path(root: &Path, path: impl AsRef<Path>) -> Result<PathBuf> {
