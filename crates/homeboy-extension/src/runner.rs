@@ -11,7 +11,12 @@ use homeboy_core::server::CommandOutput;
 use homeboy_engine_primitives::shell;
 use serde_json::json;
 
-const STRICT_VALIDATION_DEPENDENCIES_ENV: &str = "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES";
+/// Env var that makes a validation runner fail closed when a resolved
+/// validation dependency's local checkout is behind its upstream, instead of
+/// warning and proceeding. Set for blocking gates (differential CI lint, and
+/// the release preflight lint) so a stale dependency cannot silently determine
+/// the outcome (#9643).
+pub const STRICT_VALIDATION_DEPENDENCIES_ENV: &str = "HOMEBOY_STRICT_VALIDATION_DEPENDENCIES";
 const STALE_VALIDATION_DEPENDENCY_PREFIX: &str = "Resolved validation dependency";
 const FAILURE_TAIL_LINES: usize = 80;
 
@@ -793,5 +798,24 @@ mod tests {
             "Resolved validation dependency 'sample-plugin' to local checkout '/tmp/sample-plugin'.";
 
         assert!(stale_validation_dependency_message("", stderr).is_none());
+    }
+
+    #[test]
+    fn strict_validation_dependencies_flag_reflects_env() {
+        // A runner without the strict env proceeds (warn-and-continue); setting
+        // HOMEBOY_STRICT_VALIDATION_DEPENDENCIES=1 makes it fail closed on a
+        // behind-upstream dependency — this is what the release lint gate sets
+        // so a stale checkout cannot silently determine the outcome (#9643).
+        let lenient = ExtensionRunner::for_context(context());
+        assert!(!lenient.strict_validation_dependencies());
+
+        let strict =
+            ExtensionRunner::for_context(context()).env(STRICT_VALIDATION_DEPENDENCIES_ENV, "1");
+        assert!(strict.strict_validation_dependencies());
+
+        // Only an explicit truthy value enables strict mode.
+        let disabled =
+            ExtensionRunner::for_context(context()).env(STRICT_VALIDATION_DEPENDENCIES_ENV, "0");
+        assert!(!disabled.strict_validation_dependencies());
     }
 }
