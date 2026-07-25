@@ -193,9 +193,8 @@ impl DeadCodeReferenceAnalysis {
         }
     }
 
-    /// Replace only paths changed since the reference with fingerprints from the
-    /// archived reference tree. All other source and external reference facts are
-    /// immutable across the two projections and stay shared.
+    /// Replace changed paths with base-tree fingerprints while retaining shared
+    /// external and unchanged component reference facts.
     pub(super) fn project_reference(
         &self,
         reference_root: &Path,
@@ -263,10 +262,6 @@ mod tests {
         let _reference_projection =
             analysis.project_reference(reference.path(), &["changed.rs".to_string()]);
 
-        assert_eq!(
-            repository_reference_visit_count(),
-            1,
-            "changed-since reference projection must not repeat the repository-wide dead-code reference walk"
-        );
+        assert_eq!(repository_reference_visit_count(), 1);
     }
 }

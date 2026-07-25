@@ -380,11 +380,11 @@ fn run_comparison_workflow(
     }
 }
 
-/// Audit a selected git ref without modifying the caller's checkout.
+/// Audit the selected base ref without modifying the caller's checkout.
 ///
-/// `git archive` materializes tracked source into an isolated temporary directory;
-/// the candidate's changed-file scope, plan, reference paths, and extension
-/// overrides are applied to produce comparable canonical finding identities.
+/// Candidate and base trees differ by definition, so their detector results
+/// cannot be substituted for one another. Shared dead-code reference inputs are
+/// projected onto the archive to avoid a second repository-wide reference walk.
 fn audit_reference_result(
     args: &AuditRunWorkflowArgs,
     git_ref: &str,
@@ -440,14 +440,13 @@ fn audit_reference_result(
     }
 
     let changed = changed_files_for_scope(args, git_ref)?;
-    let reference_path = reference_root.path().to_string_lossy();
     let dead_code_references = candidate_analysis
         .dead_code_references
         .as_ref()
         .map(|references| references.project_reference(reference_root.path(), &changed));
     let mut reference = crate::audit_path_scoped_with_plan_and_analysis(
         &args.component_id,
-        &reference_path,
+        &reference_root.path().to_string_lossy(),
         &changed,
         None,
         &audit_plan(args),

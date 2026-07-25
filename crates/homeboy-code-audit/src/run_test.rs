@@ -415,6 +415,42 @@ fn changed_since_comparison_counts_new_findings_as_introduced() {
 }
 
 #[test]
+fn changed_since_without_persisted_baseline_keeps_introduced_findings_blocking() {
+    let mut finding = make_finding(AuditFinding::UnreferencedExport, "src/changed.rs");
+    finding.convention = "dead_code".to_string();
+    let result = make_result(vec![finding]);
+    let baseline = make_baseline(vec![]);
+
+    let workflow = build_comparison_output(
+        result,
+        &make_analysis(),
+        baseline,
+        &make_changed_since_args(),
+        make_timing(),
+    )
+    .expect("comparison output builds from the base-tree baseline");
+
+    assert_eq!(workflow.exit_code, 1);
+    match workflow.output {
+        crate::report::AuditCommandOutput::Compared {
+            changed_since,
+            baseline_comparison,
+            ..
+        } => {
+            assert_eq!(baseline_comparison.new_items.len(), 1);
+            assert_eq!(
+                changed_since,
+                Some(crate::report::AuditChangedSinceSummary {
+                    introduced_findings: 1,
+                    contextual_findings: 0,
+                })
+            );
+        }
+        _ => panic!("expected compared output"),
+    }
+}
+
+#[test]
 fn json_summary_names_baseline_known_findings_separately_from_blocking_findings() {
     let mut known_finding = make_finding(AuditFinding::GodFile, "src/large.rs");
     known_finding.convention = "structural".to_string();
