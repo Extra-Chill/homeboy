@@ -233,13 +233,11 @@ fn fuzz_doctor_supports_runner_lab_placement_route() {
         "nodejs",
         "--runner",
         "homeboy-lab",
-        "--placement",
-        "lab",
     ]);
 
     let command = lab_offload_command(&cli.command).unwrap().unwrap();
     assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-    assert_eq!(cli.placement, crate::cli_surface::Placement::Lab);
+    assert_eq!(cli.placement, crate::cli_surface::Placement::Auto);
     assert_eq!(command.hot_label, "fuzz doctor");
     assert!(lab_runner_supports_contract_label(command.hot_label));
     assert!(command.is_portable());
@@ -550,8 +548,6 @@ fn agent_task_controller_run_from_spec_supports_lab_placement_runner_routing() {
         "homeboy",
         "--runner",
         "homeboy-lab",
-        "--placement",
-        "lab",
         "agent-task",
         "controller",
         "run-from-spec",
@@ -562,7 +558,7 @@ fn agent_task_controller_run_from_spec_supports_lab_placement_runner_routing() {
 
     let command = lab_offload_command(&cli.command).unwrap().unwrap();
     assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
-    assert_eq!(cli.placement, crate::cli_surface::Placement::Lab);
+    assert_eq!(cli.placement, crate::cli_surface::Placement::Auto);
     assert_eq!(
         command.hot_label,
         "agent-task controller from-spec --resume/run-from-spec/materialize"
