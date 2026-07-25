@@ -242,7 +242,10 @@ pub(super) fn exec(
                 },
             )?;
         }
-        if matches!(output.mode, runner::RunnerExecMode::Daemon) {
+        if matches!(
+            output.mode,
+            runner::RunnerExecMode::Daemon | runner::RunnerExecMode::ReverseBroker
+        ) {
             homeboy_lab_runner::reconcile_runner_generation_after_evidence(&output.runner_id)?;
         }
     }

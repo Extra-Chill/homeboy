@@ -7,6 +7,7 @@
 //! and building the promoted-output/structured-summary views. It operates on
 //! core runner types, not command types.
 
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -252,7 +253,27 @@ fn record_runner_exec_output(
     }
 
     let (kind, metadata) = typed_artifact_metadata(kind, record_path, metadata);
-    let record = store.record_artifact_with_metadata(run_id, &kind, record_path, metadata)?;
+    let role = metadata
+        .get("evidence_role")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("artifact");
+    let declaration = metadata
+        .get("declared_path")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(record_path.to_str().unwrap_or_default());
+    let content_hash = homeboy_core::artifact_metadata::sha256_file(record_path)?;
+    let binding = metadata
+        .get("runner_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let artifact_id = format!(
+        "runner-exec-{:x}",
+        Sha256::digest(
+            format!("{run_id}\0{binding}\0{role}\0{declaration}\0{content_hash}").as_bytes()
+        )
+    );
+    let record =
+        store.record_artifact_with_id(run_id, &kind, record_path, &artifact_id, metadata)?;
     let mut records = vec![record.clone()];
     records.extend(persist_derived_fuzz_artifacts(store, run_id, &record)?);
     Ok(records)
