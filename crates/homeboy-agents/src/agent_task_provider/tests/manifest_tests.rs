@@ -305,6 +305,96 @@ process.stdin.on('end', () => {
     assert!(!original.join("provider-observation.json").exists());
 }
 
+#[cfg(unix)]
+fn workspace_attestation(path: &std::path::Path) -> Value {
+    use std::os::unix::fs::MetadataExt;
+
+    let canonical = std::fs::canonicalize(path).expect("canonical workspace");
+    let metadata = std::fs::symlink_metadata(&canonical).expect("workspace metadata");
+    let git_file = canonical.join(".git");
+    let git_content = std::fs::read_to_string(&git_file).expect("linked git file");
+    let gitdir_target = git_content
+        .strip_prefix("gitdir: ")
+        .map(str::trim)
+        .and_then(|target| std::fs::canonicalize(canonical.join(target)).ok())
+        .expect("canonical gitdir target");
+    serde_json::json!({
+        "canonical_path": canonical,
+        "device": metadata.dev(),
+        "inode": metadata.ino(),
+        "git_file_is_file": true,
+        "git_file_content": git_content,
+        "gitdir_target": gitdir_target,
+    })
+}
+
+#[cfg(unix)]
+fn linked_workspace(temp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+    let workspace = temp.path().join("workspace");
+    let gitdir = temp.path().join("gitdir");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::create_dir_all(&gitdir).expect("gitdir");
+    std::fs::write(workspace.join(".git"), "gitdir: ../gitdir\n").expect("linked git file");
+    (workspace, gitdir)
+}
+
+#[cfg(unix)]
+#[test]
+fn provider_refuses_git_file_replaced_by_directory_before_spawn() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (workspace, _) = linked_workspace(&temp);
+    let attestation = workspace_attestation(&workspace);
+    let marker = workspace.join("provider-started");
+    let script = script(&format!(
+        "require('fs').writeFileSync({:?}, 'started')",
+        marker.display().to_string()
+    ));
+    let (mut request, provider) = request("attested-workspace", format!("node {script}"));
+    request.workspace.root = Some(workspace.display().to_string());
+    request.metadata = serde_json::json!({ "cook_workspace_identity": attestation });
+
+    std::fs::remove_file(workspace.join(".git")).expect("remove linked git file");
+    std::fs::create_dir(workspace.join(".git")).expect("replace with git directory");
+
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
+    assert_eq!(
+        outcome.diagnostics[0].class,
+        "agent_task.workspace_identity_changed"
+    );
+    assert!(!marker.exists(), "provider command must not start");
+}
+
+#[cfg(unix)]
+#[test]
+fn provider_refuses_linked_git_target_swap_before_spawn() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (workspace, _) = linked_workspace(&temp);
+    let attestation = workspace_attestation(&workspace);
+    let marker = workspace.join("provider-started");
+    let script = script(&format!(
+        "require('fs').writeFileSync({:?}, 'started')",
+        marker.display().to_string()
+    ));
+    let (mut request, provider) = request("attested-workspace", format!("node {script}"));
+    request.workspace.root = Some(workspace.display().to_string());
+    request.metadata = serde_json::json!({ "cook_workspace_identity": attestation });
+
+    std::fs::create_dir_all(temp.path().join("replacement-gitdir")).expect("replacement gitdir");
+    std::fs::write(workspace.join(".git"), "gitdir: ../replacement-gitdir\n")
+        .expect("replace linked git target");
+
+    let outcome = run_provider_command_once(&request, &provider);
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
+    assert_eq!(
+        outcome.diagnostics[0].class,
+        "agent_task.workspace_identity_changed"
+    );
+    assert!(!marker.exists(), "provider command must not start");
+}
+
 #[test]
 fn provider_manifest_rejects_deprecated_string_command() {
     let error = serde_json::from_value::<AgentTaskExecutorProvider>(json!({

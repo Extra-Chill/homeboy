@@ -778,6 +778,51 @@ fn validate_provider_handle(
     Ok(())
 }
 
+/// Verify that a provider target is a linked Git worktree rooted at the exact
+/// path it returned. A primary checkout has a `.git` directory, whereas a
+/// linked worktree has a `.git` file; this filesystem proof prevents stale or
+/// misleading provider safety metadata from redirecting a Cook into a primary.
+pub fn validate_task_worktree_root(path: &std::path::Path, handle: &str) -> Result<()> {
+    let canonical = std::fs::canonicalize(path).map_err(|error| {
+        Error::validation_invalid_argument(
+            "to_worktree",
+            format!("task worktree `{handle}` cannot be canonicalized: {error}"),
+            Some(handle.to_string()),
+            None,
+        )
+    })?;
+    let git_root =
+        crate::git::repo_root(&canonical).and_then(|root| std::fs::canonicalize(root).ok());
+    if git_root.as_deref() != Some(canonical.as_path()) {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            format!("task worktree `{handle}` does not resolve to its exact Git root"),
+            Some(handle.to_string()),
+            Some(vec!["Refresh the workspace provider and select the declared task worktree, not a parent, child, or path alias.".to_string()]),
+        ));
+    }
+    let git_metadata = std::fs::symlink_metadata(canonical.join(".git")).map_err(|error| {
+        Error::validation_invalid_argument(
+            "to_worktree",
+            format!("task worktree `{handle}` is missing linked-worktree Git metadata: {error}"),
+            Some(handle.to_string()),
+            Some(vec![
+                "Create the destination through the configured worktree provider, then retry Cook."
+                    .to_string(),
+            ]),
+        )
+    })?;
+    if !git_metadata.file_type().is_file() {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            format!("task worktree `{handle}` is a primary or non-linked checkout; refusing provider execution"),
+            Some(handle.to_string()),
+            Some(vec!["Create or select the declared linked task worktree through the configured worktree provider, then retry Cook.".to_string()]),
+        ));
+    }
+    Ok(())
+}
+
 fn trusted_unpushed_destination_matches(
     path: &std::path::Path,
     trusted: Option<&TrustedUnpushedWorktree>,
@@ -1299,6 +1344,70 @@ mod tests {
                 .items,
             "$.result.items"
         );
+    }
+
+    #[test]
+    fn rejects_primary_checkout_even_when_provider_metadata_is_stale() {
+        let primary = tempfile::tempdir().expect("primary checkout");
+        let output = Command::new("git")
+            .args(["init"])
+            .current_dir(primary.path())
+            .output()
+            .expect("initialize primary checkout");
+        assert!(output.status.success());
+
+        let error = validate_task_worktree_root(primary.path(), "repo@task")
+            .expect_err("primary checkout must never become a provider workspace");
+        assert!(error.message.contains("primary or non-linked checkout"));
+        assert!(primary.path().join(".git").is_dir());
+    }
+
+    #[test]
+    fn accepts_direct_linked_task_worktree_path() {
+        let primary = tempfile::tempdir().expect("primary checkout");
+        let task = tempfile::tempdir().expect("task parent");
+        let output = Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(primary.path())
+            .output()
+            .expect("initialize primary checkout");
+        assert!(output.status.success());
+        std::fs::write(primary.path().join("README"), "base\n").expect("write base");
+        for args in [
+            ["add", "README"].as_slice(),
+            [
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "base",
+            ]
+            .as_slice(),
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(primary.path())
+                .status()
+                .expect("git")
+                .success());
+        }
+        let task_path = task.path().join("repo@task");
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "task",
+                task_path.to_str().expect("utf8")
+            ])
+            .current_dir(primary.path())
+            .status()
+            .expect("create linked task worktree")
+            .success());
+        validate_task_worktree_root(&task_path, task_path.to_str().expect("utf8"))
+            .expect("direct linked task worktree is valid");
     }
 
     #[cfg(unix)]

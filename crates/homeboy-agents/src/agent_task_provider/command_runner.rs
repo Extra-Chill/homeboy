@@ -261,6 +261,20 @@ pub(super) fn run_materialized_provider_command_once(
         .as_deref()
         .map(PathBuf::from)
         .or(provider_cwd);
+    let cwd_identity = cwd.as_deref().map(workspace_identity).transpose();
+    let cwd_identity = match cwd_identity {
+        Ok(identity) => identity,
+        Err(message) => {
+            return failure_outcome(
+                request,
+                AgentTaskOutcomeStatus::ProviderError,
+                AgentTaskFailureClassification::InvalidInput,
+                "agent_task.workspace_identity_invalid",
+                message,
+                json!({ "provider": provider.id }),
+            )
+        }
+    };
 
     if let Some(preflight) = provider_preflight_failure(request, provider, &program, &cwd, &command)
     {
@@ -333,6 +347,27 @@ pub(super) fn run_materialized_provider_command_once(
             .map(|(key, value)| (key.as_str(), value.as_str())),
     );
     if let Some(cwd) = cwd {
+        if let Some(attestation) = request.request.metadata.get("cook_workspace_identity") {
+            if !workspace_matches_attestation(&cwd, attestation) {
+                return failure_outcome(
+                    request, AgentTaskOutcomeStatus::ProviderError,
+                    AgentTaskFailureClassification::InvalidInput,
+                    "agent_task.workspace_identity_changed",
+                    "provider workspace no longer matches the Cook identity attestation; refusing execution".to_string(),
+                    json!({ "provider": provider.id, "workspace": cwd }),
+                );
+            }
+        }
+        if workspace_identity(&cwd).as_ref().ok() != cwd_identity.as_ref() {
+            return failure_outcome(
+                request,
+                AgentTaskOutcomeStatus::ProviderError,
+                AgentTaskFailureClassification::InvalidInput,
+                "agent_task.workspace_identity_changed",
+                "provider workspace changed after validation; refusing execution".to_string(),
+                json!({ "provider": provider.id, "workspace": cwd }),
+            );
+        }
         command_builder.current_dir(cwd);
     }
 
@@ -556,6 +591,75 @@ pub(super) fn run_materialized_provider_command_once(
             ),
         ),
     }
+}
+
+#[cfg(unix)]
+fn workspace_matches_attestation(path: &std::path::Path, attestation: &serde_json::Value) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(canonical) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    let Ok(metadata) = std::fs::symlink_metadata(&canonical) else {
+        return false;
+    };
+    !metadata.file_type().is_symlink()
+        && attestation["canonical_path"].as_str() == canonical.to_str()
+        && attestation["device"].as_u64() == Some(metadata.dev())
+        && attestation["inode"].as_u64() == Some(metadata.ino())
+        && linked_git_metadata_matches(&canonical, attestation)
+}
+
+#[cfg(unix)]
+fn linked_git_metadata_matches(
+    worktree: &std::path::Path,
+    attestation: &serde_json::Value,
+) -> bool {
+    let git_file = worktree.join(".git");
+    let Ok(metadata) = std::fs::symlink_metadata(&git_file) else {
+        return false;
+    };
+    if !metadata.file_type().is_file() || attestation["git_file_is_file"] != true {
+        return false;
+    }
+    let Ok(content) = std::fs::read_to_string(&git_file) else {
+        return false;
+    };
+    if attestation["git_file_content"].as_str() != Some(content.as_str()) {
+        return false;
+    }
+    let target = content
+        .strip_prefix("gitdir: ")
+        .map(str::trim)
+        .and_then(|target| std::fs::canonicalize(worktree.join(target)).ok());
+    target.as_deref().and_then(|path| path.to_str()) == attestation["gitdir_target"].as_str()
+}
+
+#[cfg(not(unix))]
+fn workspace_matches_attestation(path: &std::path::Path, attestation: &serde_json::Value) -> bool {
+    std::fs::canonicalize(path)
+        .ok()
+        .and_then(|path| path.to_str().map(str::to_string))
+        .as_deref()
+        == attestation["canonical_path"].as_str()
+}
+
+#[cfg(unix)]
+fn workspace_identity(path: &std::path::Path) -> std::result::Result<(u64, u64), String> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("provider workspace must be a non-symlink directory".to_string());
+    }
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn workspace_identity(path: &std::path::Path) -> std::result::Result<(), String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("provider workspace must be a non-symlink directory".to_string());
+    }
+    Ok(())
 }
 
 fn execution_deadline_outcome(

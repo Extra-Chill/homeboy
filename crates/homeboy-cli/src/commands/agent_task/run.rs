@@ -3,7 +3,7 @@
 
 use serde_json::Value;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
@@ -53,12 +53,59 @@ pub(crate) fn run_cook(args: AgentTaskCookArgs) -> CmdResult<Value> {
 /// Converge a Cook promotion destination before compiling a task plan. This is
 /// controller-owned so local and Lab dispatch use the same managed checkout.
 pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::core::Result<Value> {
-    let destination = std::path::Path::new(&args.to_worktree);
-    if destination.is_dir()
-        || homeboy::core::worktree::resolve_workspace_ref_if_present(&args.to_worktree)?.is_some()
+    let direct_path = Path::new(&args.to_worktree);
+    if direct_path.is_dir() {
+        homeboy::core::worktree_providers::validate_task_worktree_root(
+            direct_path,
+            &args.to_worktree,
+        )?;
+        let path = std::fs::canonicalize(direct_path).map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(direct_path.display().to_string()),
+            )
+        })?;
+        return Ok(serde_json::json!({
+            "action": "existing",
+            "kind": "direct_task_worktree",
+            "handle": args.to_worktree,
+            "path": path,
+        }));
+    }
+    if let Some(record) =
+        homeboy::core::worktree::resolve_workspace_ref_if_present(&args.to_worktree)?
     {
+        if record.state() != &homeboy::core::worktree::TaskWorktreeState::Active {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "to_worktree",
+                format!(
+                    "Homeboy workspace `{}` is no longer active",
+                    record.handle()
+                ),
+                Some(args.to_worktree.clone()),
+                None,
+            ));
+        }
+        let path = PathBuf::from(record.path());
+        homeboy::core::worktree_providers::validate_task_worktree_root(&path, &args.to_worktree)?;
         return Ok(
-            serde_json::json!({ "action": "existing", "kind": "path_or_homeboy", "handle": args.to_worktree }),
+            serde_json::json!({ "action": "existing", "kind": record.source_kind(), "handle": args.to_worktree, "path": path }),
+        );
+    }
+
+    if let Ok(resolution) =
+        homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
+            &args.to_worktree,
+            &defaults::load_config(),
+            None,
+        )
+    {
+        homeboy::core::worktree_providers::validate_task_worktree_root(
+            Path::new(&resolution.worktree.path),
+            &args.to_worktree,
+        )?;
+        return Ok(
+            serde_json::json!({ "action": "existing", "kind": "provider", "provider": resolution.provider_id, "handle": resolution.worktree.handle, "path": resolution.worktree.path, "branch": resolution.worktree.branch }),
         );
     }
 
@@ -339,10 +386,20 @@ pub(crate) fn compile_cook_plan(
     args: &AgentTaskCookArgs,
     provision: Value,
 ) -> homeboy::core::Result<AgentTaskPlan> {
+    let workspace = provision
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            homeboy::core::Error::internal_unexpected(
+                "Cook destination provisioning did not return a task worktree path".to_string(),
+            )
+        })?
+        .to_string();
     let mut dispatch = dispatch_args_for_cook(args);
-    if dispatch.cwd.is_none() && dispatch.workspace.is_none() {
-        dispatch.workspace = Some(args.to_worktree.clone());
-    }
+    // Cook providers always receive the declared task checkout. `--cwd` is a
+    // dispatch input, never authority to replace the writable Cook workspace.
+    dispatch.cwd = None;
+    dispatch.workspace = Some(workspace);
     let mut request = dispatch_service::resolve_dispatch_request(dispatch.into())?;
     let mut plan = match dispatch_service::build_controller_dispatch_plan(&mut request) {
         Ok(plan) => plan,
@@ -361,8 +418,59 @@ pub(crate) fn compile_cook_plan(
         Err(error) => return Err(error),
     };
     record_cook_provision(&mut plan, provision);
+    for task in &mut plan.tasks {
+        let root = task.workspace.root.as_deref().ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "workspace",
+                "Cook requires a bound task worktree",
+                None,
+                None,
+            )
+        })?;
+        task.metadata["cook_workspace_identity"] = workspace_identity_attestation(Path::new(root))?;
+    }
     record_cook_goal(&mut plan, args.goal.as_deref());
     Ok(plan)
+}
+
+#[cfg(unix)]
+fn workspace_identity_attestation(path: &Path) -> homeboy::core::Result<Value> {
+    use std::os::unix::fs::MetadataExt;
+    let canonical = std::fs::canonicalize(path).map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
+    })?;
+    let metadata = std::fs::symlink_metadata(&canonical).map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(canonical.display().to_string()))
+    })?;
+    let git_dir = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(&canonical)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
+    let git_file = canonical.join(".git");
+    let git_metadata = std::fs::symlink_metadata(&git_file).map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(git_file.display().to_string()))
+    })?;
+    let git_content = std::fs::read_to_string(&git_file).map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(git_file.display().to_string()))
+    })?;
+    let gitdir_target = git_content
+        .strip_prefix("gitdir: ")
+        .map(str::trim)
+        .and_then(|target| std::fs::canonicalize(canonical.join(target)).ok());
+    Ok(
+        serde_json::json!({ "canonical_path": canonical, "device": metadata.dev(), "inode": metadata.ino(), "git_dir": git_dir, "git_file_is_file": git_metadata.file_type().is_file(), "git_file_content": git_content, "gitdir_target": gitdir_target }),
+    )
+}
+
+#[cfg(not(unix))]
+fn workspace_identity_attestation(path: &Path) -> homeboy::core::Result<Value> {
+    let canonical = std::fs::canonicalize(path).map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
+    })?;
+    Ok(serde_json::json!({ "canonical_path": canonical }))
 }
 
 fn record_cook_goal(plan: &mut AgentTaskPlan, goal: Option<&str>) {

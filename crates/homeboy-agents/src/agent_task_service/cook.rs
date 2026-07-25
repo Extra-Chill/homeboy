@@ -1057,6 +1057,10 @@ where
         follow_up_plan.tasks[0].workspace.root = Some(baseline.path.display().to_string());
         follow_up_plan.tasks[0].inputs["cook_loop"]["artifact_provenance"] =
             baseline.artifact_provenance();
+        // Follow-up retries intentionally move into an authenticated baseline.
+        // Refresh the durable execution attestation before this plan can be
+        // persisted or handed to a local or detached provider.
+        bind_dispatch_workspace_attestations(&mut follow_up_plan)?;
         if let Some(dispatcher) = &options.attempt_dispatcher {
             // A detached dispatcher may return before any executor-side
             // lifecycle write, so a controller crash after the runner accepts
@@ -1219,6 +1223,7 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
+    validate_cook_workspace(&options)?;
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are
     // caller-owned overrides and retain their existing behavior. A typed
@@ -1292,6 +1297,9 @@ where
     if let Some(model) = adopted_model {
         options.ai_model = Some(model);
     }
+    // A persisted recipe can replace the just-validated inputs. Re-check its
+    // workspace before it reaches transport preparation or a resumed attempt.
+    validate_cook_workspace(&options)?;
     materialize_initial_cook_attempt(&options)?;
     // The recipe alone is resumable input, not a status-addressable run. Publish
     // the run identity only after initial materialization and a lifecycle read
@@ -1387,6 +1395,7 @@ where
             })
             .unwrap_or(true);
         if needs_execution {
+            validate_cook_workspace(&options)?;
             // Claim the durable attempt before candidate baseline staging. That
             // staging can take longer than the foreground controller's timeout;
             // a restarted controller must find the same immutable plan rather
@@ -1494,13 +1503,16 @@ where
                         });
                     }
                 }
+                bind_dispatch_workspace_attestations(&mut dispatch_plan)?;
                 if let Some(dispatcher) = &options.attempt_dispatcher {
+                    validate_cook_workspace(&options)?;
                     dispatcher.dispatch_attempt(
                         dispatch_plan,
                         &run_id,
                         effective_baseline.map(CookFollowUpBaseline::capability),
                     )
                 } else {
+                    validate_cook_workspace(&options)?;
                     run_loaded_plan_with_derived_cook_baseline(
                         dispatch_plan,
                         Some(&run_id),
@@ -1970,6 +1982,128 @@ where
         1,
         Some(&run_id),
     ))
+}
+
+/// Only Cook's authenticated baseline transition may replace a durable task
+/// workspace identity. Preserve the predecessor as provenance; callers cannot
+/// mint this attestation through an arbitrary provider request.
+fn bind_dispatch_workspace_attestations(plan: &mut AgentTaskPlan) -> Result<()> {
+    for task in &mut plan.tasks {
+        let root = task.workspace.root.as_deref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "workspace",
+                "Cook dispatch requires a workspace root",
+                Some(task.task_id.clone()),
+                None,
+            )
+        })?;
+        let prior = task.metadata.get("cook_workspace_identity").cloned();
+        let identity = dispatch_workspace_identity(std::path::Path::new(root))?;
+        task.metadata["cook_workspace_identity"] = identity;
+        if let Some(prior) = prior {
+            task.metadata["cook_workspace_identity_predecessor"] = prior;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn dispatch_workspace_identity(path: &std::path::Path) -> Result<Value> {
+    use std::os::unix::fs::MetadataExt;
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    let metadata = std::fs::symlink_metadata(&canonical).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(canonical.display().to_string()))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(Error::validation_invalid_argument(
+            "workspace",
+            "Cook baseline workspace must be a non-symlink directory",
+            Some(canonical.display().to_string()),
+            None,
+        ));
+    }
+    let git_file = canonical.join(".git");
+    let git_metadata = std::fs::symlink_metadata(&git_file).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(git_file.display().to_string()))
+    })?;
+    let git_content = std::fs::read_to_string(&git_file).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(git_file.display().to_string()))
+    })?;
+    let gitdir_target = git_content
+        .strip_prefix("gitdir: ")
+        .map(str::trim)
+        .and_then(|target| std::fs::canonicalize(canonical.join(target)).ok());
+    Ok(serde_json::json!({
+        "canonical_path": canonical,
+        "device": metadata.dev(),
+        "inode": metadata.ino(),
+        "git_file_is_file": git_metadata.file_type().is_file(),
+        "git_file_content": git_content,
+        "gitdir_target": gitdir_target,
+    }))
+}
+
+#[cfg(not(unix))]
+fn dispatch_workspace_identity(path: &std::path::Path) -> Result<Value> {
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    Ok(serde_json::json!({ "canonical_path": canonical }))
+}
+
+/// Re-resolve the declared Cook target before a provider can run. Durable
+/// recipes may outlive provider metadata, so the filesystem identity is checked
+/// again on local, Lab, retry, and resume paths rather than trusting the plan.
+fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> {
+    let direct_path = std::path::Path::new(&options.to_worktree);
+    let target = if direct_path.is_dir() {
+        direct_path.to_path_buf()
+    } else if let Some(record) =
+        homeboy_core::worktree::resolve_workspace_ref_if_present(&options.to_worktree)?
+    {
+        if record.state() != &homeboy_core::worktree::TaskWorktreeState::Active {
+            return Err(Error::validation_invalid_argument(
+                "to_worktree",
+                "declared Cook task worktree is no longer active",
+                Some(options.to_worktree.clone()),
+                None,
+            ));
+        }
+        PathBuf::from(record.path())
+    } else {
+        homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
+            &options.to_worktree,
+            &homeboy_core::defaults::load_config(),
+            None,
+        )?
+        .worktree
+        .path
+        .into()
+    };
+    homeboy_core::worktree_providers::validate_task_worktree_root(&target, &options.to_worktree)?;
+    let source = options.source_worktree_path.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace",
+            "Cook requires the provider workspace to be the declared task worktree",
+            Some(options.to_worktree.clone()),
+            Some(vec!["Create or select the task worktree through the configured workspace provider, then retry Cook.".to_string()]),
+        )
+    })?;
+    let target = std::fs::canonicalize(&target).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(target.display().to_string()))
+    })?;
+    let source = std::fs::canonicalize(source).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(source.display().to_string()))
+    })?;
+    if source != target {
+        return Err(Error::validation_invalid_argument(
+            "workspace",
+            "Cook provider workspace differs from its declared task worktree; refusing provider execution",
+            Some(options.to_worktree.clone()),
+            Some(vec!["Re-run Cook without a source CWD override so Homeboy binds the declared task worktree.".to_string()]),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
