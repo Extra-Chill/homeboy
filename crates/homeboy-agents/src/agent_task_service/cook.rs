@@ -1265,6 +1265,9 @@ where
     if let Some(model) = adopted_model {
         options.ai_model = Some(model);
     }
+    // A persisted recipe can replace the just-validated inputs. Re-check its
+    // workspace before it reaches transport preparation or a resumed attempt.
+    validate_cook_workspace(&options)?;
     materialize_initial_cook_attempt(&options)?;
     // Transport readiness can serialize on a reconnect/runtime-promotion
     // lease. Complete it before entering the provider-attempt loop so that
@@ -1348,6 +1351,7 @@ where
             })
             .unwrap_or(true);
         if needs_execution {
+            validate_cook_workspace(&options)?;
             // Claim the durable attempt before candidate baseline staging. That
             // staging can take longer than the foreground controller's timeout;
             // a restarted controller must find the same immutable plan rather
@@ -1456,12 +1460,14 @@ where
                     }
                 }
                 if let Some(dispatcher) = &options.attempt_dispatcher {
+                    validate_cook_workspace(&options)?;
                     dispatcher.dispatch_attempt(
                         dispatch_plan,
                         &run_id,
                         effective_baseline.map(CookFollowUpBaseline::capability),
                     )
                 } else {
+                    validate_cook_workspace(&options)?;
                     run_loaded_plan_with_derived_cook_baseline(
                         dispatch_plan,
                         Some(&run_id),
@@ -1937,7 +1943,10 @@ where
 /// recipes may outlive provider metadata, so the filesystem identity is checked
 /// again on local, Lab, retry, and resume paths rather than trusting the plan.
 fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> {
-    let target = if let Some(record) =
+    let direct_path = std::path::Path::new(&options.to_worktree);
+    let target = if direct_path.is_dir() {
+        direct_path.to_path_buf()
+    } else if let Some(record) =
         homeboy_core::worktree::resolve_workspace_ref_if_present(&options.to_worktree)?
     {
         if record.state() != &homeboy_core::worktree::TaskWorktreeState::Active {

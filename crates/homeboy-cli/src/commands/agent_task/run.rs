@@ -53,6 +53,19 @@ pub(crate) fn run_cook(args: AgentTaskCookArgs) -> CmdResult<Value> {
 /// Converge a Cook promotion destination before compiling a task plan. This is
 /// controller-owned so local and Lab dispatch use the same managed checkout.
 pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::core::Result<Value> {
+    let direct_path = Path::new(&args.to_worktree);
+    if direct_path.is_dir() {
+        homeboy::core::worktree_providers::validate_task_worktree_root(
+            direct_path,
+            &args.to_worktree,
+        )?;
+        return Ok(serde_json::json!({
+            "action": "existing",
+            "kind": "direct_task_worktree",
+            "handle": args.to_worktree,
+            "path": direct_path,
+        }));
+    }
     if let Some(record) =
         homeboy::core::worktree::resolve_workspace_ref_if_present(&args.to_worktree)?
     {

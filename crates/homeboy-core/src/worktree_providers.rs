@@ -1362,6 +1362,54 @@ mod tests {
         assert!(primary.path().join(".git").is_dir());
     }
 
+    #[test]
+    fn accepts_direct_linked_task_worktree_path() {
+        let primary = tempfile::tempdir().expect("primary checkout");
+        let task = tempfile::tempdir().expect("task parent");
+        let output = Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(primary.path())
+            .output()
+            .expect("initialize primary checkout");
+        assert!(output.status.success());
+        std::fs::write(primary.path().join("README"), "base\n").expect("write base");
+        for args in [
+            ["add", "README"].as_slice(),
+            [
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "base",
+            ]
+            .as_slice(),
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(primary.path())
+                .status()
+                .expect("git")
+                .success());
+        }
+        let task_path = task.path().join("repo@task");
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "task",
+                task_path.to_str().expect("utf8")
+            ])
+            .current_dir(primary.path())
+            .status()
+            .expect("create linked task worktree")
+            .success());
+        validate_task_worktree_root(&task_path, task_path.to_str().expect("utf8"))
+            .expect("direct linked task worktree is valid");
+    }
+
     #[cfg(unix)]
     #[test]
     fn provision_creates_missing_destination_from_explicit_generic_intent() {
