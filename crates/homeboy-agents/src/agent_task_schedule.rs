@@ -351,6 +351,20 @@ mod aggregate {
         pub queue: AgentTaskQueueStatus,
     }
 
+    impl AgentTaskAggregate {
+        /// Candidate aggregates record their controller decision on the winner.
+        /// Consumers must use this rather than outcome order, which is completion
+        /// order and can include cancelled or deferred siblings.
+        pub fn selected_outcome(&self) -> Option<&AgentTaskOutcome> {
+            let task_id = self.outcomes.iter().find_map(|outcome| {
+                outcome.metadata["candidate_selection"]["selected_task_id"].as_str()
+            })?;
+            self.outcomes
+                .iter()
+                .find(|outcome| outcome.task_id == task_id)
+        }
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     pub struct AgentTaskChildRun {
         pub task_id: String,

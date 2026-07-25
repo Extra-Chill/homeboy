@@ -109,14 +109,10 @@ pub(crate) fn promote_attempt(
 /// Cook only promotes the candidate selected by the scheduler. A single-task
 /// aggregate has no selection projection and retains the historical behavior.
 fn selected_candidate_task_id(run_id: &str) -> Result<Option<String>> {
-    Ok(agent_task_lifecycle::read_aggregate(run_id)?
-        .outcomes
-        .iter()
-        .find_map(|outcome| {
-            outcome.metadata["candidate_selection"]["selected_task_id"]
-                .as_str()
-                .map(str::to_string)
-        }))
+    let aggregate = agent_task_lifecycle::read_aggregate(run_id)?;
+    Ok(aggregate
+        .selected_outcome()
+        .map(|outcome| outcome.task_id.clone()))
 }
 
 /// Promotion is the durable boundary between a terminal provider result and

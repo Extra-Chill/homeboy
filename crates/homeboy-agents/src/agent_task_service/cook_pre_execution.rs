@@ -191,7 +191,11 @@ pub(crate) fn terminal_executor_matches(
     durable_provider_executions: Option<&Value>,
     follow_up: &AgentTaskExecutor,
 ) -> Option<bool> {
-    let outcome = aggregate.outcomes.last()?;
+    let outcome = aggregate.selected_outcome().or_else(|| {
+        (aggregate.outcomes.len() == 1)
+            .then(|| aggregate.outcomes.first())
+            .flatten()
+    })?;
     let terminal = terminal_executor_identity(outcome, plan, durable_provider_executions)?;
     Some(
         terminal.backend == follow_up.backend

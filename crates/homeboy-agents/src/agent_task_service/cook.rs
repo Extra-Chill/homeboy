@@ -513,19 +513,11 @@ pub(crate) fn gate_feedback_current_diff(promotion: &AgentTaskPromotionReport) -
 fn review_form_from_aggregate(
     aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
 ) -> Result<Option<crate::agent_task_review_dossier::AiFilledReviewForm>> {
-    let selected_task_id = aggregate
-        .outcomes
-        .iter()
-        .find_map(|outcome| outcome.metadata["candidate_selection"]["selected_task_id"].as_str());
-    let Some(outcome) = selected_task_id
-        .and_then(|task_id| {
-            aggregate
-                .outcomes
-                .iter()
-                .find(|outcome| outcome.task_id == task_id)
-        })
-        .or_else(|| aggregate.outcomes.last())
-    else {
+    let Some(outcome) = aggregate.selected_outcome().or_else(|| {
+        (aggregate.outcomes.len() == 1)
+            .then(|| aggregate.outcomes.first())
+            .flatten()
+    }) else {
         return Ok(None);
     };
     crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(&outcome.outputs)
@@ -1453,6 +1445,7 @@ where
     S: CookSideEffectService,
 {
     validate_cook_workspace(&options)?;
+    validate_cook_candidate_group(&options.initial_plan)?;
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are
     // caller-owned overrides and retain their existing behavior. A typed
@@ -1994,23 +1987,7 @@ where
                 Some(&run_id),
             ));
         };
-        if plan.tasks.len() > 1
-            && (source_request.group_key.is_none()
-                || plan
-                    .tasks
-                    .iter()
-                    .any(|task| task.group_key != source_request.group_key))
-        {
-            return Ok(cook_report(
-                cook_id,
-                "policy_failure",
-                attempts,
-                None,
-                Some("Cook candidates must share one explicit candidate group".to_string()),
-                1,
-                Some(&run_id),
-            ));
-        }
+        validate_cook_candidate_group(&plan)?;
 
         let adopted_continuation = adopted_attempt_is_ready_for_cook_continuation(&record)?;
         if !matches!(
@@ -2354,6 +2331,43 @@ where
         1,
         Some(&run_id),
     ))
+}
+
+/// A multi-candidate Cook has one controller-owned destination. Reject ambiguous
+/// plans before any provider preflight or scheduler execution can spend work.
+fn validate_cook_candidate_group(plan: &AgentTaskPlan) -> Result<()> {
+    if plan.tasks.len() <= 1
+        || plan.options.candidate_completion
+            == crate::agent_task_scheduler::AgentTaskCandidateCompletionPolicy::WaitAll
+    {
+        return Ok(());
+    }
+    let group_key = plan.group_key.as_deref().or_else(|| {
+        plan.tasks
+            .first()
+            .and_then(|task| task.group_key.as_deref())
+    });
+    let Some(group_key) = group_key else {
+        return Err(Error::validation_invalid_argument(
+            "group_key",
+            "Cook first-green candidates require one explicit shared group",
+            None,
+            None,
+        ));
+    };
+    if plan
+        .tasks
+        .iter()
+        .any(|task| task.group_key.as_deref() != Some(group_key))
+    {
+        return Err(Error::validation_invalid_argument(
+            "group_key",
+            "every Cook candidate must use the plan shared group",
+            Some(group_key.to_string()),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 /// Only Cook's authenticated baseline transition may replace a durable task

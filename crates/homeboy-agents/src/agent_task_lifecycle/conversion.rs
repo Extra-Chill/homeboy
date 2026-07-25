@@ -51,7 +51,11 @@ pub(crate) fn latest_executor_evidence(
     plan: &AgentTaskPlan,
     aggregate: &AgentTaskAggregate,
 ) -> Option<AgentTaskLatestExecutorEvidence> {
-    let outcome = aggregate.outcomes.last()?;
+    let outcome = aggregate.selected_outcome().or_else(|| {
+        (aggregate.outcomes.len() == 1)
+            .then(|| aggregate.outcomes.first())
+            .flatten()
+    })?;
     let request = plan
         .tasks
         .iter()

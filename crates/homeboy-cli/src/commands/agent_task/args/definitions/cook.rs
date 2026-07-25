@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand};
 use std::collections::BTreeMap;
 
+use homeboy::agents::agent_task_scheduler::AgentTaskCandidateCompletionPolicy;
 use homeboy::agents::agent_tasks::gate::{
     AgentTaskGateEnvironmentMode, AgentTaskGateEnvironmentPolicy, AgentTaskGateRevealPolicy,
     VerifyGateOptions,
@@ -241,6 +242,10 @@ mod tests {
 pub struct AgentTaskCookArgs {
     #[command(flatten)]
     pub dispatch: DispatchArgs,
+    /// Completion rule for isolated candidates: wait for all results (default)
+    /// or promote the first successful candidate.
+    #[arg(long, default_value_t = AgentTaskCandidateCompletionPolicy::WaitAll, value_name = "POLICY")]
+    pub candidate_completion: AgentTaskCandidateCompletionPolicy,
     #[arg(long, hide = true)]
     pub attempt_run_id: Option<String>,
     #[arg(long, hide = true)]

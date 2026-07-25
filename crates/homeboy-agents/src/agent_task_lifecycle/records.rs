@@ -958,6 +958,23 @@ pub struct AgentTaskRunStatus {
     pub artifact_refs: Vec<AgentTaskArtifactRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub normalized_events: Vec<AgentTaskEventEnvelope>,
+    /// Additive projection for multi-candidate Cook runs. Older consumers retain
+    /// the existing status fields and omit this when the plan has one task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<AgentTaskCandidateStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskCandidateStatus {
+    pub policy: crate::agent_task_scheduler::AgentTaskCandidateCompletionPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_task_id: Option<String>,
+    pub candidates: Vec<AgentTaskRunTask>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_timeout_ms: Option<u64>,
+    pub cancellation_supervision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion_action: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

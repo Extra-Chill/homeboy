@@ -143,6 +143,27 @@ pub enum AgentTaskCandidateCompletionPolicy {
     FirstGreen,
 }
 
+impl std::str::FromStr for AgentTaskCandidateCompletionPolicy {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "wait_all" => Ok(Self::WaitAll),
+            "first_green" => Ok(Self::FirstGreen),
+            _ => Err("expected wait_all or first_green".to_string()),
+        }
+    }
+}
+
+impl std::fmt::Display for AgentTaskCandidateCompletionPolicy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::WaitAll => "wait_all",
+            Self::FirstGreen => "first_green",
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskAdaptiveConcurrencyPolicy {
     #[serde(default = "default_adaptive_min_concurrency")]
