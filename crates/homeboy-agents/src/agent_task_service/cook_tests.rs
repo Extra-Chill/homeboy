@@ -3760,12 +3760,67 @@ fn promotion(run_id: &str) -> AgentTaskPromotionReport {
             "target": {"worktree": "homeboy@8058", "path": "/repo"},
             "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch"},
             "changed_files": ["src/lib.rs"],
-            "deterministic_gates": [{"id": "gate", "visibility": "visible", "reveal_policy": "full_evidence", "status": "succeeded", "command": ["sh", "-lc", "cargo test --locked agent_task_promotion --lib"], "exit_code": 0}],
+            "deterministic_gates": [{"id": "gate", "visibility": "visible", "reveal_policy": "full_evidence", "status": "succeeded", "command": ["sh", "-lc", "cargo test --locked agent_task_promotion --lib"], "exit_code": 0, "candidate_checkout": {"schema": "homeboy/agent-task-gate-candidate-checkout/v1", "commit": "candidate", "tree": "candidate-tree", "candidate_sha256": "candidate-sha"}}],
             "gate_results": [{"id": "gate", "name": "cargo test --locked agent_task_promotion --lib", "kind": "command", "status": "passed"}],
             "operator_notification": {"status": "completed", "message": "complete"},
             "verified_base": {"base": "main", "sha": "verified-base"},
-            "provenance": {"worktree_path": "/repo"}
+            "provenance": {"worktree_path": "/repo", "candidate_checkout": {"schema": "homeboy/agent-task-gate-candidate-checkout/v1", "commit": "candidate", "tree": "candidate-tree", "candidate_sha256": "candidate-sha"}}
         })).unwrap()
+}
+
+#[test]
+fn adopted_baseline_gate_outcome_is_candidate_bound_and_recovery_safe() {
+    let run_id = "cook-10010-attempt-1";
+    let command = "cargo test --locked agent_task_promotion --lib";
+    let mut accepted = promotion(run_id);
+    accepted.status = crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed;
+    accepted.deterministic_gates[0].status =
+        crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure;
+    accepted.deterministic_gates[0].exit_code = 1;
+    accepted.deterministic_gates[0].baseline_comparison =
+        Some(crate::agent_task_gate::AgentTaskGateBaselineComparison {
+            base_ref: "immutable-base".to_string(),
+            exit_code: 1,
+            failure_fingerprint: "inherited failure".to_string(),
+            matches_candidate_failure: true,
+        });
+    accepted.normalize_gate_outcome();
+
+    assert_eq!(
+        accepted.status,
+        crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+    );
+    assert_eq!(
+        accepted.gate_results[0].status,
+        homeboy_core::gate::HomeboyGateStatus::Passed
+    );
+    assert!(accepted.has_visible_passed_gate_for_command(command));
+
+    let mut regression = accepted.clone();
+    regression.status = crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed;
+    regression.deterministic_gates[0]
+        .baseline_comparison
+        .as_mut()
+        .unwrap()
+        .matches_candidate_failure = false;
+    regression.normalize_gate_outcome();
+    assert_eq!(
+        regression.status,
+        crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
+    );
+    assert!(!regression.has_visible_passed_gate_for_command(command));
+
+    let mut wrong_command = accepted.clone();
+    wrong_command.deterministic_gates[0].command[2] = "cargo test arbitrary".to_string();
+    assert!(!wrong_command.has_visible_passed_gate_for_command(command));
+
+    let mut wrong_candidate = accepted;
+    wrong_candidate.deterministic_gates[0]
+        .candidate_checkout
+        .as_mut()
+        .unwrap()
+        .commit = "other-candidate".to_string();
+    assert!(!wrong_candidate.has_visible_passed_gate_for_command(command));
 }
 
 #[test]
@@ -4239,7 +4294,7 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
 }
 
 #[test]
-fn recovery_hydrates_durable_cook_evidence_and_can_preflight_without_mutation() {
+fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mutation() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-9750";
         let run_id = "cook-9750-attempt-1";
@@ -4253,11 +4308,29 @@ fn recovery_hydrates_durable_cook_evidence_and_can_preflight_without_mutation() 
         persist_initial_recipe(&options).unwrap();
         agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).unwrap();
         seed_review_form_aggregate(run_id, &options.initial_plan);
-        agent_task_lifecycle::record_promotion(
-            run_id,
-            serde_json::to_value(promotion(run_id)).unwrap(),
-        )
-        .unwrap();
+        let mut adopted = promotion(run_id);
+        adopted.status = crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed;
+        adopted.deterministic_gates[0].status =
+            crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure;
+        adopted.deterministic_gates[0].exit_code = 1;
+        adopted.deterministic_gates[0].baseline_comparison =
+            Some(crate::agent_task_gate::AgentTaskGateBaselineComparison {
+                base_ref: "immutable-base".to_string(),
+                exit_code: 1,
+                failure_fingerprint: "inherited failure".to_string(),
+                matches_candidate_failure: true,
+            });
+        adopted.operator_notification =
+            crate::agent_task_promotion::AgentTaskPromotionNotification {
+                status: "blocked".to_string(),
+                message: "patch promoted, but deterministic gates failed".to_string(),
+                resumable_blocker: Some("stale gate failure".to_string()),
+                next_command: None,
+            };
+        // This simulates a restart after adoption before a stale owning attempt
+        // status can be reconciled. Recovery derives the durable gate outcome.
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(adopted).unwrap())
+            .unwrap();
 
         let mut preflight_backend = CaptureBackend::default();
         let preflight =
@@ -4267,6 +4340,15 @@ fn recovery_hydrates_durable_cook_evidence_and_can_preflight_without_mutation() 
         assert!(!preflight_backend.committed);
         assert!(!preflight_backend.pushed);
         assert!(!preflight_backend.created);
+        let preflight_record = agent_task_lifecycle::status(run_id).unwrap();
+        assert_eq!(
+            preflight_record.metadata["latest_promotion"]["status"],
+            "gate_failed"
+        );
+        assert_eq!(
+            preflight_record.metadata["latest_promotion"]["operator_notification"]["status"],
+            "blocked"
+        );
 
         let mut publish_backend = CaptureBackend::default();
         let report = recover_cook_pr_with_backend(
@@ -4287,6 +4369,16 @@ fn recovery_hydrates_durable_cook_evidence_and_can_preflight_without_mutation() 
         assert!(publish_backend
             .body
             .contains("Recovered from durable Cook evidence."));
+        let record = agent_task_lifecycle::status(run_id).unwrap();
+        assert_eq!(record.metadata["latest_promotion"]["status"], "applied");
+        assert_eq!(
+            record.metadata["latest_promotion"]["operator_notification"]["status"],
+            "completed"
+        );
+        assert!(
+            record.metadata["latest_promotion"]["operator_notification"]["resumable_blocker"]
+                .is_null()
+        );
     });
 }
 

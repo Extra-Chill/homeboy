@@ -205,6 +205,7 @@ pub(crate) fn persisted_promotion_for_attempt(
         return Err(error);
     }
     restore_gate_feedback_baseline(&record, &mut promotion)?;
+    promotion.normalize_gate_outcome();
     Ok(Some(promotion))
 }
 
@@ -659,6 +660,8 @@ pub(crate) fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     promotion: &AgentTaskPromotionReport,
     backend: &mut B,
 ) -> Result<Value> {
+    let mut promotion = promotion.clone();
+    promotion.normalize_gate_outcome();
     if promotion.status != AgentTaskPromotionStatus::Applied {
         return Err(Error::validation_invalid_argument(
             "promotion",
@@ -667,12 +670,12 @@ pub(crate) fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             None,
         ));
     }
+    let finalization =
+        cook_finalization_options(options, successful_run_id, &promotion, Vec::new())?;
     crate::agent_task_lifecycle::record_promotion(
         successful_run_id,
-        serde_json::to_value(promotion).unwrap_or(Value::Null),
+        serde_json::to_value(&promotion).unwrap_or(Value::Null),
     )?;
-    let finalization =
-        cook_finalization_options(options, successful_run_id, promotion, Vec::new())?;
     finalize_pr_with_backend(finalization, backend)
         .map(|report| serde_json::to_value(report).unwrap_or(Value::Null))
 }
@@ -802,9 +805,9 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     } else {
         let mut applied_run_id = None;
         for attempt in recipe.attempts.iter().rev() {
-            if persisted_promotion_for_attempt(&attempt.run_id)?
-                .is_some_and(|promotion| promotion.status == AgentTaskPromotionStatus::Applied)
-            {
+            if persisted_promotion_for_attempt(&attempt.run_id)?.is_some_and(|promotion| {
+                promotion.gate_outcome().status == AgentTaskPromotionStatus::Applied
+            }) {
                 applied_run_id = Some(attempt.run_id.clone());
                 break;
             }
@@ -826,7 +829,7 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             None,
         )
     })?;
-    if promotion.status != AgentTaskPromotionStatus::Applied {
+    if promotion.gate_outcome().status != AgentTaskPromotionStatus::Applied {
         return Err(Error::validation_invalid_argument(
             "latest_promotion.status",
             "recovery requires an applied promotion with green gates",
@@ -836,6 +839,12 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     }
     let options = super::cook_recipe::reconstruct_adoption_options(&recipe)?;
     let finalization = cook_finalization_options(&options, &run_id, &promotion, overrides)?;
+    if !preflight {
+        agent_task_lifecycle::record_promotion(
+            &run_id,
+            serde_json::to_value(&promotion).unwrap_or(Value::Null),
+        )?;
+    }
     let report = if preflight {
         preflight_pr_with_backend(finalization, backend)?
     } else {
@@ -873,11 +882,7 @@ fn cook_review_dossier(
         .verify
         .iter()
         .map(|command| {
-            let matched = promotion.deterministic_gates.iter().any(|gate| {
-                gate.status == crate::agent_task_gate::AgentTaskGateStatus::Succeeded
-                    && gate.visibility == homeboy_core::gate::HomeboyGateVisibility::Visible
-                    && gate.command.as_slice() == ["sh", "-lc", command]
-            });
+            let matched = promotion.has_visible_passed_gate_for_command(command);
             if !matched {
                 return Err(Error::validation_invalid_argument(
                     "verification",
