@@ -389,7 +389,8 @@
           "require_explicit_wiring": true,
           "severity": "warning",
           "source_path_globs": [
-            "src/**/*.rs"
+            "src/**/*.rs",
+            "crates/**/*.rs"
           ],
           "suggestion": "Wire `{test_path}` from the covered source module with an explicit path include, or move it to a top-level auto-discovered test path.",
           "support_test_path_globs": [],
