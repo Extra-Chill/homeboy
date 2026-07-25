@@ -111,6 +111,39 @@ else
   printf 'PASS: unsupported strict platform refuses launch before double-fork escape\n'
 fi
 
+python3 - "${ROOT_DIR}/scripts/core/run-with-liveness-timeout-supervisor.py" <<'PY'
+import importlib.util
+import os
+import signal
+import sys
+
+spec = importlib.util.spec_from_file_location("supervisor", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+module.identity = lambda pid: 7
+original_kill = module.os.kill
+module.os.kill = lambda pid, sig: (_ for _ in ()).throw(ProcessLookupError())
+assert module.signal_identity(101, 7, signal.SIGTERM)
+
+calls = []
+module.identity = lambda pid: 8
+module.os.kill = lambda pid, sig: calls.append((pid, sig))
+assert module.signal_identity(101, 7, signal.SIGKILL)
+assert calls == []
+
+module.identity = lambda pid: 7
+module.os.kill = lambda pid, sig: (_ for _ in ()).throw(PermissionError())
+assert not module.signal_identity(101, 7, signal.SIGTERM)
+module.os.kill = original_kill
+PY
+printf 'PASS: supervisor treats ESRCH as exited, avoids PID reuse, and fails permission denial\n'
+
+if [ "$(uname -s)" = Linux ]; then
+  HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF=true HOMEBOY_ACTION_CGROUP_ROOT="${TMP_DIR}/denied-cgroup" HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS=5 bash "${RUNNER}" "rapid child exits" bash -c 'for _ in $(seq 1 200); do (exit 0) & done; wait' >"${TMP_DIR}/rapid.log" 2>&1
+  printf 'PASS: Linux supervisor reaps rapid child exits without signal races\n'
+fi
+
 set +e
 HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS=invalid bash "${RUNNER}" "invalid timeout" bash -c 'exit 0' >"${TMP_DIR}/invalid.log" 2>&1
 exit_code=$?
