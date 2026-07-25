@@ -579,6 +579,7 @@ runs:
         && steps.select-results.outputs.results != ''
         && (
           contains(steps.select-results.outputs.results, '"fail"')
+          || contains(steps.select-results.outputs.results, '"timeout"')
           || contains(steps.select-results.outputs.results, '"baseline_red"')
           || contains(steps.select-results.outputs.results, '"inconclusive"')
         )
@@ -619,6 +620,8 @@ runs:
         OPERATIONS_COMMANDS: ${{ steps.resolve-commands.outputs.operations-commands }}
         EXTRA_ARGS: ${{ inputs.args }}
         RUN_GROUP_PREFIX: homeboy
+        HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}
+        HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS: ${{ inputs.cleanup-timeout-seconds }}
       run: bash ${{ github.action_path }}/scripts/operations/run-operations.sh
 
     # Re-check PR state just before enforcement/reporting. A PR can merge while

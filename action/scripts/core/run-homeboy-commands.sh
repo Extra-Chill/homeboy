@@ -79,6 +79,10 @@ for CMD in "${CMD_ARRAY[@]}"; do
   if [ "${CMD_EXIT}" -eq 0 ]; then
     echo "::notice::homeboy ${CMD}: PASSED"
     RESULTS=$(echo "${RESULTS}" | jq -c --arg cmd "${CMD}" '. + {($cmd): "pass"}')
+  elif [ "${CMD_EXIT}" -eq 124 ]; then
+    echo "::error::homeboy ${CMD}: TIMED OUT (exit code 124); inspect the retained command log above."
+    RESULTS=$(echo "${RESULTS}" | jq -c --arg cmd "${CMD}" '. + {($cmd): "timeout"}')
+    OVERALL_EXIT=1
   else
     echo "::error::homeboy ${CMD}: FAILED (exit code ${CMD_EXIT})"
     RESULTS=$(echo "${RESULTS}" | jq -c --arg cmd "${CMD}" '. + {($cmd): "fail"}')

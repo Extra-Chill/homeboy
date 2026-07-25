@@ -108,7 +108,7 @@ if ! grep -q 'baseline homeboy review test exceeded its 1s execution timeout' "$
   printf 'FAIL: baseline timeout did not emit actionable liveness evidence\n'
   exit 1
 fi
-if ! jq -e '."review test" | .status == "fail" and .exit_code == 124 and .structured_output == true' "${timeout_output_dir}/baseline-status.json" >/dev/null; then
+if ! jq -e '."review test" | .status == "timeout" and .exit_code == 124 and .structured_output == true' "${timeout_output_dir}/baseline-status.json" >/dev/null; then
   printf 'FAIL: baseline timeout did not preserve differential failure semantics\n'
   exit 1
 fi

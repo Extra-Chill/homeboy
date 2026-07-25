@@ -89,7 +89,9 @@ for CMD in "${BASELINE_RUN_COMMANDS[@]}"; do
   fi
 
   STATUS="pass"
-  if [ "${CMD_EXIT}" -ne 0 ]; then
+  if [ "${CMD_EXIT}" -eq 124 ]; then
+    STATUS="timeout"
+  elif [ "${CMD_EXIT}" -ne 0 ]; then
     STATUS="fail"
   fi
 

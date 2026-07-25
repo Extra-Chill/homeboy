@@ -11,7 +11,7 @@ results_are_complete() {
     . as $results |
     ($commands | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $expected |
     ($results | type) == "object"
-    and all($expected[]; . as $command | $results[$command] == "pass" or $results[$command] == "fail")
+    and all($expected[]; . as $command | $results[$command] == "pass" or $results[$command] == "fail" or $results[$command] == "timeout")
   ' >/dev/null 2>&1
 }
 

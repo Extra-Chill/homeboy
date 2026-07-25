@@ -100,6 +100,8 @@ def lint_count(payload: dict[str, Any] | None) -> int | None:
 
 def quality_base_command(command: str) -> str:
     parts = command.split()
+    if len(parts) == 1 and parts[0] in {"audit", "lint", "test"}:
+        return parts[0]
     if len(parts) >= 2 and parts[0] == "review" and parts[1] in {"audit", "lint", "test"}:
         return parts[1]
     return ""
