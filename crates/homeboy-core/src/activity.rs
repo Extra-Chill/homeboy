@@ -140,9 +140,18 @@ fn reclassify_stale_running(items: &mut [ActivityItem]) {
             continue;
         }
         item.state = ActivityState::Stale;
+        if item.kind != "agent-task" {
+            continue;
+        }
+        let command_prefix = item
+            .runner
+            .runner_id
+            .as_deref()
+            .map(|runner_id| format!("homeboy runner exec {runner_id} -- homeboy agent-task"))
+            .unwrap_or_else(|| "homeboy agent-task".to_string());
         let reconcile = action(
             "reconcile stale activity",
-            "homeboy agent-task active --reconcile",
+            format!("{command_prefix} reconcile {} --dry-run", item.id),
         );
         if !item
             .next_actions
@@ -392,10 +401,26 @@ mod tests {
             .find(|item| item.id == "stale-running")
             .expect("stale row present");
         assert_eq!(reclassified.state, ActivityState::Stale);
-        assert!(reclassified
-            .next_actions
-            .iter()
-            .any(|action| action.command == "homeboy agent-task active --reconcile"));
+        assert!(reclassified.next_actions.iter().all(|action| {
+            action.command != "homeboy agent-task reconcile stale-running --dry-run"
+        }));
+    }
+
+    #[test]
+    fn stale_agent_task_reconciliation_runs_on_the_owning_runner() {
+        let now = chrono::Utc::now();
+        let mut stale = item("agent-task-stale", ActivityState::Running);
+        stale.kind = "agent-task".to_string();
+        stale.updated_at = Some((now - chrono::Duration::hours(6)).to_rfc3339());
+        stale.runner.runner_id = Some("lab-a".to_string());
+
+        let report = report_from_items(vec![stale], "homeboy activity");
+
+        assert_eq!(report.items[0].state, ActivityState::Stale);
+        assert!(report.items[0].next_actions.iter().any(|action| {
+            action.command
+                == "homeboy runner exec lab-a -- homeboy agent-task reconcile agent-task-stale --dry-run"
+        }));
     }
 
     #[test]

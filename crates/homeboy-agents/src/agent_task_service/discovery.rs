@@ -284,7 +284,7 @@ fn discovery_report(
 
 fn liveness_summary(runs: &[AgentTaskDiscoveryRun]) -> AgentTaskLivenessSummary {
     let mut summary = AgentTaskLivenessSummary {
-        reconcile_command: "homeboy agent-task active --reconcile",
+        reconcile_command: "homeboy agent-task active --reconcile --dry-run",
         ..Default::default()
     };
     for run in runs {
@@ -408,7 +408,9 @@ fn discovery_run(
         "homeboy agent-task".to_string()
     } else {
         match runner_id.as_deref() {
-            Some(runner_id) => format!("homeboy --runner {runner_id} agent-task"),
+            // Lifecycle records resident on a runner must execute there. The
+            // global `--runner` flag is only for portable Lab offload commands.
+            Some(runner_id) => format!("homeboy runner exec {runner_id} -- homeboy agent-task"),
             None => "homeboy agent-task".to_string(),
         }
     };
@@ -448,7 +450,7 @@ fn discovery_run(
             promote: aggregate_path
                 .map(|path| format!("homeboy agent-task promote {path} --to-worktree <handle>"))
                 .unwrap_or_else(|| format!("{command_prefix} review {run_id}")),
-            reconcile: format!("{command_prefix} cancel {run_id} --reason stale-running"),
+            reconcile: format!("{command_prefix} reconcile {run_id} --dry-run"),
         },
     }
 }

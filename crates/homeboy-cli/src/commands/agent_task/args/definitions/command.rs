@@ -53,6 +53,8 @@ pub enum AgentTaskCommand {
     Status(StatusArgs),
     List(ListArgs),
     Active(ActiveArgs),
+    /// Preview or apply reconciliation for one durable run.
+    Reconcile(ReconcileArgs),
     ReconcileRecords(ReconcileRecordsArgs),
     Latest(LatestArgs),
     Logs(LogsArgs),
@@ -97,8 +99,18 @@ pub struct ActiveArgs {
     pub limit: Option<usize>,
     #[arg(long = "reconcile")]
     pub reconcile: bool,
-    #[arg(long = "dry-run", requires = "reconcile")]
+    #[arg(long = "dry-run", requires = "reconcile", conflicts_with = "apply")]
     pub dry_run: bool,
+    #[arg(long = "apply", requires = "reconcile", conflicts_with = "dry_run")]
+    pub apply: bool,
+}
+#[derive(Args, Debug)]
+pub struct ReconcileArgs {
+    pub run_id: String,
+    #[arg(long = "dry-run", conflicts_with = "apply")]
+    pub dry_run: bool,
+    #[arg(long = "apply", conflicts_with = "dry_run")]
+    pub apply: bool,
 }
 #[derive(Args, Debug)]
 pub struct ReconcileRecordsArgs {

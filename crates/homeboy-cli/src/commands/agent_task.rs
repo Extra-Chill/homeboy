@@ -87,11 +87,12 @@ pub(crate) fn run_with_cook_progress(
         ),
         AgentTaskCommand::Active(active_args) => {
             if active_args.reconcile {
-                status::reconcile_active(active_args.dry_run)
+                status::reconcile_active(!active_args.apply)
             } else {
                 status::list_active(active_args.into())
             }
         }
+        AgentTaskCommand::Reconcile(args) => status::reconcile_run(&args.run_id, !args.apply),
         AgentTaskCommand::ReconcileRecords(args) => status::reconcile_records(args.dry_run),
         AgentTaskCommand::Latest(latest_args) => status::list_runs(
             agent_task_service::AgentTaskDiscoveryFilter::Latest,

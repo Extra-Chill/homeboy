@@ -298,9 +298,17 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         }
         ["agent-task", "active"] => {
             metadata.mutating(
-                "reads active runs by default; --reconcile cancels stale active records unless --dry-run is passed",
+                "reads active runs by default; --reconcile previews the full fleet mutation set and --apply authorizes its cancellation",
             );
             metadata.dry_run_flag = Some("--dry-run");
+            metadata.dangerous_flags = vec!["--apply"];
+        }
+        ["agent-task", "reconcile"] => {
+            metadata.mutating(
+                "previews reconciliation for one durable run; --apply authorizes a scoped lifecycle mutation after provider-state inspection",
+            );
+            metadata.dry_run_flag = Some("--dry-run");
+            metadata.dangerous_flags = vec!["--apply"];
         }
         ["agent-task", "controller", "init"]
         | ["agent-task", "controller", "from-spec"]
