@@ -436,16 +436,7 @@ fn run_dependencies_preflight(
         return failed_result(&step.id, &step.kind, err);
     }
     match homeboy_core::deps::install_for_resolved(context.component, component_path) {
-        Ok(Some(result)) => ReleaseStepResult {
-            id: step.id.clone(),
-            step_type: step.kind.clone(),
-            status: ReleaseStepStatus::Success,
-            data: Some(serde_json::json!({
-                "ran": !result.installs.is_empty(),
-                "dependencies": result,
-            })),
-            ..Default::default()
-        },
+        Ok(Some(result)) => dependency_preflight_result(step, result),
         Ok(None) => ReleaseStepResult {
             id: step.id.clone(),
             step_type: step.kind.clone(),
@@ -455,6 +446,63 @@ fn run_dependencies_preflight(
         },
         Err(err) => failed_result(&step.id, &step.kind, err),
     }
+}
+
+/// A dependency provider captures command output even when its installer exits
+/// unsuccessfully. Release preflight must convert those structured outcomes
+/// into a blocking failure before any versioning or publication step can run.
+fn dependency_preflight_result(
+    step: &PlanStep,
+    result: homeboy_core::deps::DependencyInstallResult,
+) -> ReleaseStepResult {
+    let failures: Vec<serde_json::Value> = result
+        .installs
+        .iter()
+        .enumerate()
+        .filter(|(_, install)| !install.skipped && install.status != Some(0))
+        .map(|(index, install)| {
+            serde_json::json!({
+                "install_index": index,
+                "status": install.status,
+                "reason": if install.status.is_some() {
+                    "nonzero_exit"
+                } else {
+                    "missing_exit_status"
+                },
+            })
+        })
+        .collect();
+    let data = Some(serde_json::json!({
+        "ran": !result.installs.is_empty(),
+        "dependencies": result,
+        "failures": failures,
+    }));
+
+    if failures.is_empty() {
+        return ReleaseStepResult {
+            id: step.id.clone(),
+            step_type: step.kind.clone(),
+            status: ReleaseStepStatus::Success,
+            data,
+            ..Default::default()
+        };
+    }
+
+    executor::step_failed(
+        &step.id,
+        &step.kind,
+        data,
+        Some(format!(
+            "Dependency installation failed for component '{}' with package manager(s): {}",
+            result.component_id,
+            if result.package_manager.is_empty() {
+                "unknown".to_string()
+            } else {
+                result.package_manager
+            }
+        )),
+        Vec::new(),
+    )
 }
 
 /// Generated Composer locks are safe to reuse only when the component commits
@@ -814,13 +862,15 @@ fn dirty_side_effect_failure(step: &PlanStep, files: Vec<String>) -> ReleaseStep
 #[cfg(test)]
 mod tests {
     use super::{
-        execute_release_plan_step, planned_release_tag_name, release_step_is_plan_only,
-        release_step_is_show_stopper, release_step_unexpected_dirty_files, ReleaseExecutionContext,
+        dependency_preflight_result, execute_release_plan_step, planned_release_tag_name,
+        release_step_is_plan_only, release_step_is_show_stopper,
+        release_step_unexpected_dirty_files, ReleaseExecutionContext,
     };
     use crate::release::types::{
         ReleaseOptions, ReleaseState, ReleaseStepResult, ReleaseStepStatus,
     };
     use homeboy_core::component::{Component, ComponentScriptsConfig, VersionTarget};
+    use homeboy_core::deps::{DependencyCommandResult, DependencyInstallResult};
     use homeboy_core::plan::PlanStep;
     use homeboy_extension::ExtensionManifest;
 
@@ -1041,6 +1091,96 @@ mod tests {
             .expect("lint dispatch")
             .expect("lint result");
         assert_eq!(lint.status, ReleaseStepStatus::Success);
+    }
+
+    #[test]
+    fn dependency_preflight_fails_npm_composer_and_custom_installers_without_exposing_output() {
+        for package_manager in ["npm", "composer", "custom-installer"] {
+            let result = dependency_preflight_result(
+                &plan_step("preflight.dependencies"),
+                dependency_install_result(
+                    package_manager,
+                    vec![dependency_command(Some(1), false)],
+                ),
+            );
+
+            assert_eq!(result.status, ReleaseStepStatus::Failed);
+            assert!(release_step_is_show_stopper(&result));
+            assert!(result
+                .error
+                .as_deref()
+                .expect("failure error")
+                .contains(package_manager));
+            assert!(
+                !result
+                    .error
+                    .as_deref()
+                    .expect("failure error")
+                    .contains("private install output"),
+                "command output remains structured diagnostics, not public error text"
+            );
+            assert_eq!(
+                result.data.as_ref().expect("failure data")["failures"][0]["status"],
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn dependency_preflight_aggregates_mixed_installs_and_allows_explicit_skips() {
+        let result = dependency_preflight_result(
+            &plan_step("preflight.dependencies"),
+            dependency_install_result(
+                "npm,composer,custom-installer",
+                vec![
+                    dependency_command(Some(0), false),
+                    dependency_command(Some(1), false),
+                    dependency_command(Some(1), true),
+                ],
+            ),
+        );
+
+        assert_eq!(result.status, ReleaseStepStatus::Failed);
+        assert_eq!(
+            result.data.as_ref().expect("failure data")["failures"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            result.data.as_ref().expect("failure data")["failures"][0]["install_index"],
+            1
+        );
+        assert_eq!(
+            result.data.as_ref().expect("failure data")["dependencies"]["installs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3,
+            "all command diagnostics remain available for retry investigation"
+        );
+    }
+
+    #[test]
+    fn dependency_preflight_fails_missing_exit_status_before_release_side_effects() {
+        let result = dependency_preflight_result(
+            &plan_step("preflight.dependencies"),
+            dependency_install_result("npm", vec![dependency_command(None, false)]),
+        );
+
+        assert_eq!(result.status, ReleaseStepStatus::Failed);
+        assert!(release_step_is_show_stopper(&result));
+        assert_eq!(
+            result.data.as_ref().expect("failure data")["failures"][0]["reason"],
+            "missing_exit_status"
+        );
+        assert!(
+            result.data.as_ref().expect("failure data").get("version").is_none()
+                && result.data.as_ref().expect("failure data").get("tag").is_none()
+                && result.data.as_ref().expect("failure data").get("push").is_none(),
+            "the failed preflight produces diagnostics only; release mutation steps are not reached"
+        );
     }
 
     #[test]
@@ -1885,6 +2025,28 @@ mod tests {
             status: ReleaseStepStatus::Failed,
             error: Some("failed".to_string()),
             ..Default::default()
+        }
+    }
+
+    fn dependency_install_result(
+        package_manager: &str,
+        installs: Vec<DependencyCommandResult>,
+    ) -> DependencyInstallResult {
+        DependencyInstallResult {
+            component_id: "fixture-component".to_string(),
+            component_path: "/private/fixture-component".to_string(),
+            package_manager: package_manager.to_string(),
+            installs,
+        }
+    }
+
+    fn dependency_command(status: Option<i32>, skipped: bool) -> DependencyCommandResult {
+        DependencyCommandResult {
+            command: vec!["fixture-installer".to_string()],
+            skipped,
+            status,
+            stdout: "private install output".to_string(),
+            stderr: "private install error".to_string(),
         }
     }
 
