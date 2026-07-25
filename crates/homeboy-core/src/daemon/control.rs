@@ -9,13 +9,15 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::execution_contract::encode_uri_component;
-use crate::process::pid_is_running;
+use crate::process::{
+    pid_has_ownership_token, pid_is_running, terminate_pid_with_sigterm_and_wait,
+};
 
 use super::{
     acquire_daemon_operation_lock, acquire_daemon_operation_lock_for_ensure, parse_bind_addr,
@@ -1734,7 +1736,124 @@ where
     spawn_and_wait()
 }
 
+const STARTUP_LEASE_OBSERVATIONS: usize = 100;
+const STARTUP_LEASE_POLL: Duration = Duration::from_millis(50);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StartupLeaseObservation {
+    observed_pid: Option<u32>,
+    observed_lease_id: Option<String>,
+    observed_token: Option<String>,
+}
+
+/// A launch token is an attempt identity, never a general daemon readiness
+/// signal. The spawned `supervise` launcher and its `serve` child have distinct
+/// PIDs, so the live child lease is identified by its unique token.
+fn observe_startup_lease<ReadStatus, Sleep>(
+    _launcher_pid: u32,
+    startup_token: &str,
+    observations: usize,
+    mut read_status: ReadStatus,
+    mut sleep: Sleep,
+) -> Result<std::result::Result<DaemonStartResult, StartupLeaseObservation>>
+where
+    ReadStatus: FnMut() -> Result<super::DaemonStatus>,
+    Sleep: FnMut(),
+{
+    let mut observed = StartupLeaseObservation {
+        observed_pid: None,
+        observed_lease_id: None,
+        observed_token: None,
+    };
+    for attempt in 0..=observations {
+        let status = read_status()?;
+        if let Some(state) = status.state {
+            if status.running && state.startup_token == startup_token {
+                return Ok(Ok(DaemonStartResult {
+                    pid: state.pid,
+                    address: state.address,
+                    state_path: state.state_path,
+                    lease_id: state.lease_id,
+                }));
+            }
+            observed.observed_pid = Some(state.pid);
+            observed.observed_lease_id = Some(state.lease_id);
+            observed.observed_token =
+                (!state.startup_token.is_empty()).then_some(state.startup_token);
+        }
+        if attempt < observations {
+            sleep();
+        }
+    }
+    Ok(Err(observed))
+}
+
+fn cleanup_startup_attempt(pid: u32, startup_token: &str) -> Result<Vec<String>> {
+    let mut cleanup = Vec::new();
+    let state_path = crate::paths::daemon_state_file()?;
+    let status = read_status()?;
+    if let Some(state) = status
+        .state
+        .filter(|state| state.startup_token == startup_token)
+    {
+        let identity = super::DaemonLeaseIdentity::from_state(&state);
+        if !pid_is_running(state.pid) {
+            super::remove_lease_if_identity_matches(&state_path, &identity)?;
+            cleanup.push(format!("removed stale token lease for pid {}", state.pid));
+        } else if pid_has_ownership_token(state.pid, DAEMON_STARTUP_TOKEN_ENV, startup_token)? {
+            terminate_pid_with_sigterm_and_wait(state.pid, super::FORCE_STOP_WAIT)?;
+            super::remove_lease_if_identity_matches(&state_path, &identity)?;
+            cleanup.push(format!("terminated token-owned daemon pid {}", state.pid));
+        } else {
+            cleanup.push(format!(
+                "retained lease for pid {} because its token ownership could not be proven",
+                state.pid
+            ));
+        }
+    }
+    if pid_is_running(pid) && pid_has_ownership_token(pid, DAEMON_STARTUP_TOKEN_ENV, startup_token)?
+    {
+        terminate_pid_with_sigterm_and_wait(pid, super::FORCE_STOP_WAIT)?;
+        cleanup.push(format!("terminated token-owned launcher pid {pid}"));
+    }
+    Ok(cleanup)
+}
+
+fn startup_timeout_error(
+    pid: u32,
+    startup_token: &str,
+    observation: StartupLeaseObservation,
+    cleanup: Vec<String>,
+) -> Error {
+    let mut error = Error::internal_unexpected(format!(
+        "daemon process {pid} did not publish its isolated startup token before timeout"
+    ))
+    .with_hint("The daemon startup was not accepted because the expected token and PID did not match. Retry the Lab Cook; provider budget was not consumed.".to_string());
+    error.retryable = Some(true);
+    error.details = serde_json::json!({
+        "classification": "retryable_pre_provider_startup",
+        "expected": { "pid": pid, "startup_token": startup_token },
+        "observed": {
+            "pid": observation.observed_pid,
+            "lease_id": observation.observed_lease_id,
+            "startup_token": observation.observed_token,
+        },
+        "cleanup": cleanup,
+        "safe_next_action": "Retry the same Lab Cook. Inspect `homeboy daemon status` if the failure repeats.",
+    });
+    error
+}
+
 fn spawn_and_wait_for_lease(addr: &str, startup_token: &str) -> Result<DaemonStartResult> {
+    spawn_and_wait_for_lease_attempt(addr, startup_token, true, Vec::new())
+}
+
+fn spawn_and_wait_for_lease_attempt(
+    addr: &str,
+    startup_token: &str,
+    allow_retry: bool,
+    mut cleanup_evidence: Vec<String>,
+) -> Result<DaemonStartResult> {
     let exe = std::env::current_exe().map_err(|e| {
         Error::internal_io(
             e.to_string(),
@@ -1761,36 +1880,35 @@ fn spawn_and_wait_for_lease(addr: &str, startup_token: &str) -> Result<DaemonSta
         .map_err(|e| Error::internal_io(e.to_string(), Some("spawn daemon".to_string())))?;
     let pid = child.id();
 
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let status = read_status()?;
-        if let Some(state) = status.state {
-            if state.pid == pid && state.startup_token == startup_token {
-                return Ok(DaemonStartResult {
-                    pid,
-                    address: state.address,
-                    state_path: state.state_path,
-                    lease_id: state.lease_id,
-                });
+    match observe_startup_lease(
+        pid,
+        startup_token,
+        STARTUP_LEASE_OBSERVATIONS,
+        read_status,
+        || thread::sleep(STARTUP_LEASE_POLL),
+    )? {
+        Ok(result) => Ok(result),
+        Err(observation) => {
+            let cleanup = cleanup_startup_attempt(pid, startup_token)?;
+            cleanup_evidence.extend(cleanup);
+            if allow_retry {
+                // A launcher can lose the first publication race during an SSH
+                // handoff. Retry once with a new token; never adopt another
+                // controller's lease as this attempt's daemon.
+                return spawn_and_wait_for_lease_attempt(
+                    addr,
+                    &uuid::Uuid::new_v4().to_string(),
+                    false,
+                    cleanup_evidence,
+                );
             }
-            if status.running {
-                return Ok(DaemonStartResult {
-                    pid: state.pid,
-                    address: state.address,
-                    state_path: state.state_path,
-                    lease_id: state.lease_id,
-                });
-            }
+            Err(startup_timeout_error(
+                pid,
+                startup_token,
+                observation,
+                cleanup_evidence,
+            ))
         }
-
-        if Instant::now() >= deadline {
-            return Err(Error::internal_unexpected(format!(
-                "daemon process {} did not publish matching startup token before timeout",
-                pid
-            )));
-        }
-
-        thread::sleep(Duration::from_millis(50));
     }
 }
 

@@ -7,7 +7,7 @@ use std::{os::unix::process::CommandExt, process::Command};
 
 use super::{
     artifact_content_url, ensure_running_with_operations, fetch_artifact_to_path,
-    reconcile_dead_lease_and_ensure_running_with_operations,
+    observe_startup_lease, reconcile_dead_lease_and_ensure_running_with_operations,
     reconcile_leaseless_orphan_store_with_operations,
 };
 use crate::api_jobs::{JobEventKind, JobStatus, JobStore};
@@ -1318,6 +1318,52 @@ fn ensure_running_concurrent_callers_converge_on_same_daemon() {
         assert_eq!(first.address, second.address);
         assert_eq!(state.lock().expect("state").starts, 1);
     });
+}
+
+#[test]
+fn startup_observation_requires_a_live_attempt_token() {
+    let expected = "attempt-token";
+    let wrong = fake_status(Some(fake_daemon(4242, "other-lease")), true);
+    let result = observe_startup_lease(4343, expected, 0, || Ok(wrong.clone()), || {})
+        .expect("observe startup");
+    let observed = result.expect_err("wrong daemon must not be adopted");
+    assert_eq!(observed.observed_pid, Some(4242));
+    assert_eq!(observed.observed_lease_id.as_deref(), Some("other-lease"));
+
+    let mut stale = fake_status(Some(fake_daemon(4242, "stale-lease")), true);
+    stale.state.as_mut().expect("state").startup_token = expected.to_string();
+    let result = observe_startup_lease(4343, expected, 0, || Ok(stale.clone()), || {})
+        .expect("observe startup");
+    assert!(
+        result.is_ok(),
+        "the matching token identifies the serve child of this launcher"
+    );
+
+    let mut dead = fake_status(Some(fake_daemon(4242, "dead-lease")), false);
+    dead.state.as_mut().expect("state").startup_token = expected.to_string();
+    let result = observe_startup_lease(4343, expected, 0, || Ok(dead.clone()), || {})
+        .expect("observe startup");
+    assert!(result.is_err(), "a stale matching token is not ready");
+}
+
+#[test]
+fn startup_observation_waits_for_delayed_token_without_provider_work() {
+    let expected = "attempt-token";
+    let missing = fake_status(None, false);
+    let mut ready = fake_status(Some(fake_daemon(4343, "lease-new")), true);
+    ready.state.as_mut().expect("state").startup_token = expected.to_string();
+    let states = Arc::new(Mutex::new(vec![missing, ready]));
+    let read_states = Arc::clone(&states);
+    let result = observe_startup_lease(
+        4343,
+        expected,
+        1,
+        move || Ok(read_states.lock().expect("states").remove(0)),
+        || {},
+    )
+    .expect("observe delayed startup")
+    .expect("matching delayed token is ready");
+    assert_eq!(result.lease_id, "lease-new");
 }
 
 #[test]

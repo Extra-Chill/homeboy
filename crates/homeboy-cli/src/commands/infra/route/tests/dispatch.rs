@@ -126,6 +126,7 @@ fn cook_dispatch_stages_runner_identity_without_starting_handoff_lease() {
             .expect_err("missing Lab target rejects after controller staging");
 
         assert!(!error.message.is_empty());
+        assert_eq!(error.retryable, Some(true));
         let record = agent_task_lifecycle::status("cook-preacceptance-order")
             .expect("controller record remains inspectable after preacceptance failure");
         assert!(record.lab_handoff.is_none());
@@ -137,6 +138,15 @@ fn cook_dispatch_stages_runner_identity_without_starting_handoff_lease() {
         assert_eq!(
             record.metadata["pre_execution_failure"]["phase"],
             "lab_handoff_preacceptance"
+        );
+        assert_eq!(record.metadata["pre_execution_failure"]["retryable"], true);
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["failure_classification"],
+            "transient"
+        );
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["provider_executions_consumed"],
+            0
         );
     });
 }
