@@ -9,11 +9,11 @@
 //! [`MaterializedWorkspace`] is the run-owned handle that closes that gap: it
 //! carries a [`WorkspaceCleanupPolicy`] and reaps the remote workspace (and its
 //! artifact sibling) on drop. The default policy
-//! [`WorkspaceCleanupPolicy::PreserveOnFailure`] reaps only when the run is
-//! marked successful, preserving the remote tree on failure so post-mortem
-//! evidence survives. Reap is best-effort: a teardown error is logged, never
-//! propagated, and the controller-side `runner workspace prune` remains the
-//! backstop.
+//! [`WorkspaceCleanupPolicy::DeleteAlways`] reaps every known terminal outcome.
+//! The explicit `PreserveOnFailure` debugging policy retains failed workspaces
+//! through the registered TTL lifecycle. Reap is best-effort: a teardown error
+//! is logged, never propagated, and the controller-side `runner workspace prune`
+//! remains the backstop.
 
 use homeboy_core::resource_lifecycle_index::ResourceLifecycleResourceStatus;
 
@@ -27,9 +27,7 @@ pub(crate) enum WorkspaceCleanupPolicy {
     /// must never survive a completed or cancelled offload.
     DeleteAlways,
     /// Reap the workspace when the run succeeds; preserve it on failure so
-    /// post-mortem evidence survives on the lab. Default — chosen to avoid
-    /// behavior shock (failed runs keep their evidence as before) while still
-    /// reclaiming the common success path that previously leaked.
+    /// post-mortem evidence survives on the lab through its registered TTL.
     PreserveOnFailure,
     /// Never auto-reap; rely entirely on the operator-driven
     /// `runner workspace prune` CLI (the legacy behavior).
@@ -69,7 +67,7 @@ impl WorkspaceTerminalOutcome {
 
 impl Default for WorkspaceCleanupPolicy {
     fn default() -> Self {
-        Self::PreserveOnFailure
+        Self::DeleteAlways
     }
 }
 
@@ -78,12 +76,13 @@ impl Default for WorkspaceCleanupPolicy {
 /// directory) on drop, according to its [`WorkspaceCleanupPolicy`].
 ///
 /// Create one right after the run materializes its workspace and let it own the
-/// remainder of the offload scope. Mark the run outcome with [`set_success`] on
+/// remainder of the offload scope. Mark the run outcome with
+/// [`set_terminal_outcome`] on
 /// the success path; call [`preserve`] on any path that hands the checkout off
 /// to a still-running remote job (detach, in-flight daemon disconnect) so the
 /// live job keeps its workspace.
 ///
-/// [`set_success`]: MaterializedWorkspace::set_success
+/// [`set_terminal_outcome`]: MaterializedWorkspace::set_terminal_outcome
 /// [`preserve`]: MaterializedWorkspace::preserve
 pub(crate) struct MaterializedWorkspace {
     runner_id: String,
@@ -166,11 +165,15 @@ impl MaterializedWorkspace {
                 "runner.workspace".to_string()
             },
             retained_location: retained.then(|| self.remote_path.clone()),
-            reclaim_command: retained.then(|| self.reclaim_command()),
+            reclaim_command: (retained && !self.relinquished).then(|| self.reclaim_command()),
         };
-        if let Err(error) =
-            record_workspace_terminal_evidence(&self.runner_id, &self.remote_path, evidence, status)
-        {
+        if let Err(error) = record_workspace_terminal_evidence(
+            &self.runner_id,
+            &self.remote_path,
+            evidence,
+            status,
+            self.relinquished,
+        ) {
             eprintln!(
                 "Lab offload: warning: could not persist terminal workspace evidence for `{}` on runner `{}`: {}",
                 self.remote_path, self.runner_id, error.message

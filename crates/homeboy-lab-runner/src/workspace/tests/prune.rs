@@ -264,6 +264,63 @@ fn preserved_failure_lifecycle_is_registered_for_ttl_pruning() {
 }
 
 #[test]
+fn uncertain_handoff_disarms_ttl_pruning() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let source_parent = tempfile::tempdir().expect("source parent");
+        let source = source_parent.path().join("live-source");
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        fs::create_dir_all(&source).expect("source dir");
+        fs::write(source.join("file.txt"), "live\n").expect("source file");
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-local-prune-handoff","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+        let (synced, _) = sync_workspace(
+            "lab-local-prune-handoff",
+            sync_options(source.display().to_string()),
+        )
+        .expect("sync workspace");
+        let mut lifecycle = synced.resource_lifecycle;
+        lifecycle.cleanup_policy =
+            homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteAfterTtl;
+        lifecycle.ttl = Some("2020-01-01T00:00:00Z".to_string());
+        update_workspace_resource_lifecycle(
+            "lab-local-prune-handoff",
+            &synced.remote_path,
+            lifecycle,
+        )
+        .expect("register ttl lifecycle");
+        {
+            let mut handle = MaterializedWorkspace::new(
+                "lab-local-prune-handoff".to_string(),
+                synced.remote_path.clone(),
+                None,
+                WorkspaceCleanupPolicy::PreserveOnFailure,
+            );
+            handle.preserve();
+        }
+
+        let (preview, _) = prune_workspaces(
+            "lab-local-prune-handoff",
+            RunnerWorkspacePruneOptions {
+                apply: false,
+                min_age_hours: 0,
+                limit: 10,
+                passes: 1,
+            },
+        )
+        .expect("prune preview");
+
+        assert!(preview.candidates.is_empty());
+        assert!(Path::new(&synced.remote_path).exists());
+    });
+}
+
+#[test]
 fn prune_workspaces_preview_reports_synthetic_odd_path_without_deleting() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");

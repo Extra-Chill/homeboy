@@ -116,7 +116,7 @@ fn materialized_workspace_reaps_on_success_under_default_policy() {
 }
 
 #[test]
-fn materialized_workspace_preserves_on_failure_under_default_policy() {
+fn materialized_workspace_preserves_on_failure_under_explicit_debug_policy() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let remote_path = sync_local_workspace("lab-local-mat-failure", runner_root.path());
@@ -126,7 +126,7 @@ fn materialized_workspace_preserves_on_failure_under_default_policy() {
                 "lab-local-mat-failure".to_string(),
                 remote_path.clone(),
                 None,
-                WorkspaceCleanupPolicy::default(),
+                WorkspaceCleanupPolicy::PreserveOnFailure,
             );
             // A failed run is the default outcome (success never recorded).
             handle.set_terminal_outcome(WorkspaceTerminalOutcome::Failure);
@@ -174,11 +174,17 @@ fn terminal_evidence_records_retained_outcome_owner_location_and_reclaim_command
             assert_eq!(evidence["final_outcome"], outcome.label());
             assert_eq!(evidence["lifecycle_owner"], expected_owner);
             assert_eq!(evidence["retained_location"], remote_path);
-            assert_eq!(
-                evidence["reclaim_command"],
-                format!("homeboy runner workspace prune {runner_id} --apply --min-age-hours 0")
-            );
             assert_eq!(metadata["resource_lifecycle"]["status"], "retained");
+            if outcome == WorkspaceTerminalOutcome::UncertainHandoff {
+                assert_eq!(metadata["resource_lifecycle"]["cleanup_policy"], "preserve");
+                assert!(metadata["resource_lifecycle"]["ttl"].is_null());
+                assert!(evidence["reclaim_command"].is_null());
+            } else {
+                assert_eq!(
+                    evidence["reclaim_command"],
+                    format!("homeboy runner workspace prune {runner_id} --apply --min-age-hours 0")
+                );
+            }
         }
     });
 }
@@ -236,6 +242,32 @@ fn preserve_on_failure_keeps_workspace_when_unwinding_from_panic() {
             metadata["terminal_evidence"]["retained_location"],
             remote_path
         );
+    });
+}
+
+#[test]
+fn delete_on_terminal_keeps_workspace_when_unwinding_from_panic() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        let remote_path = sync_local_workspace("lab-local-mat-default-panic", runner_root.path());
+
+        let result = std::panic::catch_unwind(|| {
+            let _handle = MaterializedWorkspace::new(
+                "lab-local-mat-default-panic".to_string(),
+                remote_path.clone(),
+                None,
+                WorkspaceCleanupPolicy::DeleteAlways,
+            );
+            panic!("test unwind");
+        });
+
+        assert!(result.is_err());
+        assert!(Path::new(&remote_path).exists());
+        let metadata = fs::read_to_string(Path::new(&remote_path).join(WORKSPACE_METADATA_FILE))
+            .expect("panic terminal metadata");
+        let metadata: serde_json::Value = serde_json::from_str(&metadata).expect("metadata json");
+        assert_eq!(metadata["terminal_evidence"]["final_outcome"], "panic");
+        assert_eq!(metadata["resource_lifecycle"]["status"], "retained");
     });
 }
 

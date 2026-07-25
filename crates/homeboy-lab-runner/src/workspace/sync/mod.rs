@@ -1295,6 +1295,7 @@ pub(crate) fn record_workspace_terminal_evidence(
     remote_path: &str,
     evidence: RunnerWorkspaceTerminalEvidence,
     lifecycle_status: ResourceLifecycleResourceStatus,
+    relinquished: bool,
 ) -> Result<()> {
     let runner = load(runner_id)?;
     let metadata_path = format!(
@@ -1324,6 +1325,14 @@ pub(crate) fn record_workspace_terminal_evidence(
         })?;
     if let Some(lifecycle) = metadata.resource_lifecycle.as_mut() {
         lifecycle.status = lifecycle_status;
+        // A detached or uncertain daemon handoff still has a live job owner.
+        // Prevent every automatic reclaimer from treating this workspace as a
+        // terminal TTL artifact until that owner publishes a terminal result.
+        if relinquished {
+            lifecycle.cleanup_policy = ResourceCleanupPolicy::Preserve;
+            lifecycle.ttl = None;
+            lifecycle.cleanup_command = None;
+        }
     }
     metadata.terminal_evidence = Some(evidence);
     write_workspace_metadata(&runner, metadata)
