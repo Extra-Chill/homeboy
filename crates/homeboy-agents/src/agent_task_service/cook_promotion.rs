@@ -647,12 +647,6 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend<B: AgentTaskPrFinalizationBa
     promotion: &AgentTaskPromotionReport,
     backend: &mut B,
 ) -> Result<Value> {
-    let record = agent_task_lifecycle::status(successful_run_id)?;
-    if let Some(finalization) = record.metadata.get("cook_finalization") {
-        if publication_binding_complete(finalization) {
-            return Ok(finalization.clone());
-        }
-    }
     let finalization =
         finalize_cook_pr_with_backend(options, successful_run_id, promotion, backend)?;
     agent_task_lifecycle::record_cook_finalization(successful_run_id, finalization.clone())?;
@@ -840,16 +834,6 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             None,
         ));
     }
-    if !preflight {
-        if let Some(finalization) = agent_task_lifecycle::status(&run_id)?
-            .metadata
-            .get("cook_finalization")
-        {
-            if publication_binding_complete(finalization) {
-                return Ok(finalization.clone());
-            }
-        }
-    }
     let options = super::cook_recipe::reconstruct_adoption_options(&recipe)?;
     let finalization = cook_finalization_options(&options, &run_id, &promotion, overrides)?;
     let report = if preflight {
@@ -862,30 +846,6 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
         agent_task_lifecycle::record_cook_finalization(&run_id, value.clone())?;
     }
     Ok(value)
-}
-
-/// Older persisted finalizations remain readable, but cannot prove the
-/// candidate-to-remote-to-PR chain. Reconcile them through the idempotent PR
-/// update path on resume instead of reporting stale publication success.
-pub(crate) fn publication_binding_complete(finalization: &Value) -> bool {
-    let Some(binding) = finalization
-        .pointer("/publication_proof/binding")
-        .and_then(Value::as_object)
-    else {
-        return false;
-    };
-    let candidate = binding.get("candidate_sha").and_then(Value::as_str);
-    candidate.is_some_and(|candidate| {
-        !candidate.is_empty()
-            && binding.get("remote_sha").and_then(Value::as_str) == Some(candidate)
-            && binding.get("pr_head_sha").and_then(Value::as_str) == Some(candidate)
-            && binding
-                .get("candidate_tree")
-                .and_then(Value::as_str)
-                .is_some_and(|tree| !tree.is_empty())
-            && binding.get("repository").and_then(Value::as_str)
-                == binding.get("head_repository").and_then(Value::as_str)
-    })
 }
 
 fn cook_review_dossier(
