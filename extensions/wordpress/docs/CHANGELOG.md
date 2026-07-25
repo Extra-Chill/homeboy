@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.32.0] - 2026-07-25
+
+### Added
+- configure WP Codebox database providers
+
 ## [3.31.10] - 2026-07-24
 
 ### Fixed
