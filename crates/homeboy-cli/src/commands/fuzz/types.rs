@@ -190,11 +190,11 @@ pub(crate) struct FuzzInspectArgs {
     pub(crate) run_id: String,
 
     /// Print the complete result body as raw bytes/text.
-    #[arg(long = "raw")]
+    #[arg(long = "raw", conflicts_with = "full")]
     pub(crate) raw: bool,
 
     /// Print the complete parsed result body instead of the bounded diagnosis.
-    #[arg(long = "full")]
+    #[arg(long = "full", conflicts_with = "raw")]
     pub(crate) full: bool,
 }
 

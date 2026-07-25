@@ -154,6 +154,9 @@ pub(super) fn run_inspect(args: FuzzInspectArgs) -> homeboy::core::Result<FuzzIn
     let envelope_summary = inspect_fuzz_result_envelope_artifact(selected)
         .filter(|inspection| inspection.valid)
         .and_then(|inspection| inspection.summary);
+    // The selected artifact can belong to a downstream Lab fuzz run rather than
+    // the runner-exec run used for lookup. Its record is the diagnostic source.
+    let diagnostic_run = runs_service::require_run(&store, &selected.run_id)?;
 
     Ok(FuzzInspectOutput {
         command: "fuzz.inspect".to_string(),
@@ -170,7 +173,7 @@ pub(super) fn run_inspect(args: FuzzInspectArgs) -> homeboy::core::Result<FuzzIn
         result,
         raw,
         diagnostic: Some(fuzz_failure_diagnostic(
-            &run,
+            &diagnostic_run,
             Some(&selected.run_id),
             &diagnostic_input,
             &[],
@@ -488,6 +491,13 @@ mod tests {
 
             assert_eq!(output.inspection_status, "ok");
             assert_eq!(output.source_run_id, fuzz_run.id);
+            assert_eq!(
+                output
+                    .diagnostic
+                    .as_ref()
+                    .map(|diagnostic| diagnostic.run_id.as_str()),
+                Some(fuzz_run.id.as_str())
+            );
             assert_eq!(
                 output
                     .result
