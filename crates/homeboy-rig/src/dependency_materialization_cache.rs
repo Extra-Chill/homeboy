@@ -457,10 +457,12 @@ fn bounded_tool_version(path: &Path) -> Option<String> {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    // Descendants can inherit a pipe after the probed process exits. Never let
-    // that keep cache-key construction blocked; readers are byte-bounded.
-    let stdout = stdout_rx.recv_timeout(TOOL_VERSION_TIMEOUT).ok()?;
-    let stderr = stderr_rx.recv_timeout(TOOL_VERSION_TIMEOUT).ok()?;
+    // Descendants can inherit a pipe after the probed process exits. Preserve
+    // the process deadline for both readers rather than extending it per pipe.
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let stdout = stdout_rx.recv_timeout(remaining).ok()?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let stderr = stderr_rx.recv_timeout(remaining).ok()?;
     let bytes = if stdout.is_empty() { stderr } else { stdout };
     String::from_utf8_lossy(&bytes).trim().to_string().into()
 }
@@ -815,4 +817,40 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
 }
 fn io_error(context: &str, error: std::io::Error) -> Error {
     Error::internal_io(error.to_string(), Some(context.to_string()))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn tool(script: &str) -> tempfile::TempPath {
+        let file = tempfile::NamedTempFile::new().expect("tool");
+        std::fs::write(file.path(), script).expect("tool script");
+        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("tool mode");
+        file.into_temp_path()
+    }
+
+    #[test]
+    fn tool_version_probe_limits_captured_output() {
+        let tool = tool("#!/bin/sh\nyes x | head -c 8192\n");
+
+        let version = bounded_tool_version(&tool).expect("version");
+
+        assert_eq!(version.len(), MAX_TOOL_VERSION_BYTES - 1);
+    }
+
+    #[test]
+    fn tool_version_probe_times_out() {
+        let tool = tool("#!/bin/sh\nsleep 30\n");
+        let started = Instant::now();
+
+        let _ = bounded_tool_version(&tool);
+
+        assert!(
+            started.elapsed() < TOOL_VERSION_TIMEOUT + Duration::from_secs(2),
+            "version probe must terminate within its timeout"
+        );
+    }
 }
