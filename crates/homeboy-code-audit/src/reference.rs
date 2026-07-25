@@ -2,7 +2,6 @@
 //!
 //! Mechanically split out of `mod.rs`; behavior is preserved unchanged.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use super::{conventions, fingerprint, walker};
@@ -190,9 +189,4 @@ impl DeadCodeReferenceAnalysis {
             component: fingerprint_component_reference_files(root),
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 }
