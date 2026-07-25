@@ -536,6 +536,7 @@ fn build_config(args: &DeployArgs, skip_build: bool) -> DeployConfig {
         preflighted_component_identities: args.preflighted_component_identities.clone(),
         tagged: args.tagged,
         prepared_artifact: None,
+        prepared_projection: None,
         resume_run_id: args.resume.clone(),
     }
 }
