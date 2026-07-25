@@ -157,6 +157,12 @@ pub struct ProvidersArgs {
         value_name = "PROVIDER_ID"
     )]
     pub selector: Option<String>,
+    /// Restrict results to the runtime that owns the provider.
+    #[arg(long = "runtime", value_name = "RUNTIME")]
+    pub runtime: Option<String>,
+    /// Restrict results to `default` or `available` providers.
+    #[arg(long = "status", value_name = "STATUS")]
+    pub status: Option<String>,
     #[arg(long = "secret-env", value_name = "ENV")]
     pub secret_env: Vec<String>,
     #[arg(long = "validate-readiness")]
@@ -168,6 +174,9 @@ pub struct ProvidersArgs {
     /// stays within caller display limits (#9654).
     #[arg(long = "catalog", visible_alias = "all")]
     pub catalog: bool,
+    /// Return the complete provider declarations and discovery diagnostics.
+    #[arg(long)]
+    pub full: bool,
 }
 #[derive(Args, Debug)]
 pub struct AgentTaskDoctorArgs {
