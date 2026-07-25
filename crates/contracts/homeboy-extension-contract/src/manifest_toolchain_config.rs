@@ -276,8 +276,7 @@ pub struct TestConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct TestNoTestsApplicablePolicy {
-}
+pub struct TestNoTestsApplicablePolicy {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TestChangedFileRouting {
