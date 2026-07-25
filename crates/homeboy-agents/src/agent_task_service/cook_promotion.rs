@@ -647,10 +647,6 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend<B: AgentTaskPrFinalizationBa
     promotion: &AgentTaskPromotionReport,
     backend: &mut B,
 ) -> Result<Value> {
-    let record = agent_task_lifecycle::status(successful_run_id)?;
-    if let Some(finalization) = record.metadata.get("cook_finalization") {
-        return Ok(finalization.clone());
-    }
     let finalization =
         finalize_cook_pr_with_backend(options, successful_run_id, promotion, backend)?;
     agent_task_lifecycle::record_cook_finalization(successful_run_id, finalization.clone())?;
@@ -837,14 +833,6 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             Some(run_id),
             None,
         ));
-    }
-    if !preflight {
-        if let Some(finalization) = agent_task_lifecycle::status(&run_id)?
-            .metadata
-            .get("cook_finalization")
-        {
-            return Ok(finalization.clone());
-        }
     }
     let options = super::cook_recipe::reconstruct_adoption_options(&recipe)?;
     let finalization = cook_finalization_options(&options, &run_id, &promotion, overrides)?;

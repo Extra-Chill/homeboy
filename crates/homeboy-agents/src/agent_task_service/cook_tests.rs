@@ -21,7 +21,8 @@ use crate::agent_task::{
 };
 use crate::agent_task_finalization::{
     AgentTaskPrDurableGateProof, AgentTaskPrFinalizationBackend, AgentTaskPrRef,
-    AgentTaskPublicationGitTracking, RealAgentTaskPrFinalizationBackend,
+    AgentTaskPublicationBinding, AgentTaskPublicationGitTracking,
+    RealAgentTaskPrFinalizationBackend,
 };
 use crate::agent_task_scheduler::AgentTaskState;
 use homeboy_core::run_lifecycle_record::{
@@ -3706,6 +3707,25 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
         self.body = body.to_string();
         unreachable!("test creates a PR")
     }
+    fn verify_publication_binding(
+        &mut self,
+        _path: &str,
+        _base: &str,
+        _head: &str,
+        candidate_sha: &str,
+        changed_files: &[String],
+        _pr: &AgentTaskPrRef,
+    ) -> Result<AgentTaskPublicationBinding> {
+        Ok(AgentTaskPublicationBinding {
+            candidate_sha: candidate_sha.to_string(),
+            candidate_tree: "candidate-tree".to_string(),
+            remote_sha: candidate_sha.to_string(),
+            pr_head_sha: candidate_sha.to_string(),
+            repository: "Extra-Chill/homeboy".to_string(),
+            head_repository: "Extra-Chill/homeboy".to_string(),
+            changed_files: changed_files.to_vec(),
+        })
+    }
 }
 
 fn promotion(run_id: &str) -> AgentTaskPromotionReport {
@@ -3871,12 +3891,12 @@ fn retry_dispatch_operation_key_claim_dispatches_once() {
 }
 
 #[test]
-fn finalization_operation_claim_finalizes_once_and_replays_recorded_result() {
+fn finalization_operation_claim_revalidates_completed_publication() {
     // #8357: finalization runs its external effects (commit/push/PR) then records
     // the result. The claim brackets it: the first pass finalizes exactly once and
-    // completes the claim, and a resumed pass replays the recorded finalization
-    // via AlreadyCompleted without opening a second PR. Uses an injected finalize
-    // closure so no real Git/GitHub mutation occurs.
+    // completes the claim, and a resumed pass revalidates the recorded
+    // publication via AlreadyCompleted. Uses an injected finalize closure so no
+    // real Git/GitHub mutation occurs.
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-finalize-claim";
         let run_id = "run-finalize-claim";
@@ -3900,15 +3920,15 @@ fn finalization_operation_claim_finalizes_once_and_replays_recorded_result() {
         assert_eq!(first["status"], "review_ready");
         assert_eq!(finalize_calls.load(Ordering::SeqCst), 1);
 
-        // A resumed pass replays the recorded finalization; the effect closure is
-        // NOT invoked a second time.
+        // A resumed pass must re-read publication identities rather than trust a
+        // prior durable report.
         let replayed =
             finalize_with_operation_claim(&options, run_id, &promotion, &mut finalize).unwrap();
         assert_eq!(replayed["status"], "review_ready");
         assert_eq!(
             finalize_calls.load(Ordering::SeqCst),
-            1,
-            "a resumed finalization must not re-run the external PR effect"
+            2,
+            "a resumed finalization must revalidate publication identity"
         );
 
         let operation_key = finalization_operation_key(run_id, &promotion);
@@ -3920,10 +3940,10 @@ fn finalization_operation_claim_finalizes_once_and_replays_recorded_result() {
 }
 
 #[test]
-fn duplicate_controller_passes_produce_one_promotion_and_one_finalization() {
+fn duplicate_controller_passes_revalidate_one_promoted_candidate() {
     // #8357 acceptance (AC5 + AC7): duplicate/concurrent controller passes over
-    // the same candidate must produce exactly one promotion checkpoint and one
-    // finalization side effect. Drive the PRODUCTION `DefaultCookSideEffects`
+    // the same candidate must produce exactly one promotion checkpoint and
+    // revalidate one published candidate. Drive the PRODUCTION `DefaultCookSideEffects`
     // boundary (which routes promote/finalize through the durable operation
     // claims) with an injected finalize effect, so no real Git/GitHub mutation
     // occurs. Promotion is seeded as already-applied so `promote` takes its load
@@ -3960,11 +3980,11 @@ fn duplicate_controller_passes_produce_one_promotion_and_one_finalization() {
             finalizations.push(finalization);
         }
 
-        // Exactly one finalization side effect across all passes.
+        // Every pass revalidates live publication identity for the same candidate.
         assert_eq!(
             finalize_calls.load(Ordering::SeqCst),
-            1,
-            "duplicate controller passes must produce exactly one finalization side effect"
+            3,
+            "duplicate controller passes must revalidate the published candidate"
         );
         // Every pass observes the same review-ready finalization.
         for finalization in &finalizations {

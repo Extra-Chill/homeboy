@@ -87,8 +87,8 @@ fn finalization_operation_key(run_id: &str, promotion: &AgentTaskPromotionReport
 /// and only then records the result. A controller crash after the PR is created
 /// but before the result is durable would open a second PR on restart. The claim
 /// closes it: reserve `finalize:<run_id>:<sha>` before the effect and complete it
-/// with the finalization result after it is durable. A resumed pass replays the
-/// recorded finalization via `AlreadyCompleted` instead of finalizing again
+/// with the finalization result after it is durable. A resumed pass revalidates
+/// the existing PR idempotently, including its live Git and GitHub identities
 /// (#8357).
 fn finalize_with_operation_claim(
     options: &AgentTaskCookServiceOptions,
@@ -106,15 +106,11 @@ fn finalize_with_operation_claim(
         &operation_key,
         FINALIZATION_CLAIM_LEASE,
     )? {
-        // The candidate was already finalized. Replay the recorded finalization
-        // (`finalize_or_load_cook_pr` also loads the persisted result) rather
-        // than opening a second PR.
-        agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(result) => {
-            if result.is_null() {
-                finalize(options, run_id, promotion)
-            } else {
-                Ok(result)
-            }
+        // A completed claim only proves an earlier publication. Re-run the
+        // idempotent finalizer so a later force-push or PR-head mutation cannot
+        // be returned as a still-valid publication.
+        agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(_) => {
+            finalize(options, run_id, promotion)
         }
         // A concurrent pass owns a fresh lease. The load-or-finalize path still
         // returns an already-recorded finalization when present; do not mark the
