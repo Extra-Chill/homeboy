@@ -1397,6 +1397,38 @@ mod tests {
     }
 
     #[test]
+    fn apply_deletes_expired_cache_lifecycle_record() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let cache_root = tempdir.path().join("cache");
+        std::fs::create_dir_all(&cache_root).expect("cache root");
+        std::fs::write(cache_root.join("entry"), "cached").expect("cache entry");
+        let resource = ResourceLifecycleRecord {
+            owner: "homeboy.rig.dependency_materialization_cache".to_string(),
+            path: cache_root.display().to_string(),
+            root_bound: Some(tempdir.path().display().to_string()),
+            kind: "dependency_materialization_cache".to_string(),
+            ttl: Some("0s".to_string()),
+            cleanup_policy: ResourceCleanupPolicy::DeleteAfterTtl,
+            cleanup_intent: ResourceCleanupIntent::Apply,
+            ..record(ResourceLifecycleResourceStatus::Active)
+        };
+
+        let cleanup = build_cleanup_output(
+            &[resource],
+            &RunsResourcesArgs {
+                apply: true,
+                cleanup_root: Some(tempdir.path().to_path_buf()),
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .expect("cleanup apply");
+
+        assert_eq!(cleanup.applied_count, 1);
+        assert!(!cache_root.exists());
+    }
+
+    #[test]
     fn apply_reaps_runner_workspace_through_runner_transport() {
         crate::test_support::with_isolated_home(|_| {
             let workspace_root = tempfile::tempdir().expect("workspace root");

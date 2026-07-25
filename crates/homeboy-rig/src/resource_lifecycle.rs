@@ -92,7 +92,9 @@ pub fn dependency_materialization_cache_lifecycle_record(
         ttl: Some("P30D".to_string()),
         cleanup_policy: ResourceCleanupPolicy::DeleteAfterTtl,
         evidence_retention: ResourceEvidenceRetention::Manifest,
-        cleanup_intent: options.cleanup_intent,
+        // Cache ownership is explicit: dry-run commands still only plan, while
+        // an operator's --apply may reclaim expired content-addressed entries.
+        cleanup_intent: ResourceCleanupIntent::Apply,
         cleanup_command: Some(format!(
             "homeboy runs resources --run-id {} --cleanup-plan",
             options.run_id

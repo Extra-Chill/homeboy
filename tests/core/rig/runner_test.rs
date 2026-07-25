@@ -15,7 +15,9 @@
 
 use std::collections::HashMap;
 
-use crate::dependency_materialization_cache::{CacheResult, DependencyMaterializationCache};
+use crate::dependency_materialization_cache::{
+    inject_restore_publish_failure_after, CacheResult, DependencyMaterializationCache,
+};
 use crate::pipeline::PipelineOutcome;
 use crate::runner::{
     head_sha_and_branch, run_check, run_check_groups, run_down, run_down_with_settings,
@@ -1161,6 +1163,79 @@ fn dependency_materialization_cache_rolls_back_all_outputs_when_a_restore_is_inv
         assert_eq!(
             std::fs::read_to_string(second.join("output/two")).unwrap(),
             "old two"
+        );
+    });
+}
+
+#[test]
+fn dependency_materialization_cache_rolls_back_published_and_absent_outputs_on_publish_failure() {
+    with_isolated_home(|root| {
+        let source = root.path().join("source");
+        let destination = root.path().join("destination");
+        for workspace in [&source, &destination] {
+            std::fs::create_dir_all(workspace.join("output")).expect("workspace");
+            std::fs::write(workspace.join("lock"), "same input\n").expect("lock");
+        }
+        let rig_for = |workspace: &std::path::Path| RigSpec {
+            id: "dependency-cache-publish-rollback".to_string(),
+            requirements: RigRequirementsSpec {
+                dependency_materialization: vec![DependencyMaterializationStepSpec {
+                    id: "install".to_string(),
+                    command: Some("printf ignored".to_string()),
+                    cwd: Some(workspace.display().to_string()),
+                    cache_key_inputs: vec!["lock".to_string()],
+                    expected_outputs: vec![
+                        DependencyMaterializationOutputSpec {
+                            path: "output/one".to_string(),
+                            kind: DependencyMaterializationOutputKind::File,
+                            required: true,
+                        },
+                        DependencyMaterializationOutputSpec {
+                            path: "output/two".to_string(),
+                            kind: DependencyMaterializationOutputKind::File,
+                            required: true,
+                        },
+                    ],
+                    safety: DependencyMaterializationSafety::WritesCache,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..minimal_spec("dependency-cache-publish-rollback")
+        };
+        let source_rig = rig_for(&source);
+        let cache = DependencyMaterializationCache::new(
+            &source_rig,
+            &source_rig.requirements.dependency_materialization[0],
+            &[],
+        )
+        .expect("cache")
+        .expect("enabled cache");
+        let destination_rig = rig_for(&destination);
+        let restore_cache = DependencyMaterializationCache::new(
+            &destination_rig,
+            &destination_rig.requirements.dependency_materialization[0],
+            &[],
+        )
+        .expect("cache")
+        .expect("enabled cache");
+        std::fs::write(source.join("output/one"), "new one").expect("source one");
+        std::fs::write(source.join("output/two"), "new two").expect("source two");
+        std::fs::write(destination.join("output/one"), "old one").expect("destination one");
+        cache.save().expect("save cache");
+
+        inject_restore_publish_failure_after(1);
+        let restore = restore_cache.restore();
+        inject_restore_publish_failure_after(usize::MAX);
+
+        assert!(restore.is_err(), "injected failure must abort restore");
+        assert_eq!(
+            std::fs::read_to_string(destination.join("output/one")).unwrap(),
+            "old one"
+        );
+        assert!(
+            !destination.join("output/two").exists(),
+            "an output absent before restore remains absent after rollback"
         );
     });
 }

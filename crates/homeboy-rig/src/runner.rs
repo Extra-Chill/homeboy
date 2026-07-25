@@ -74,8 +74,12 @@ pub struct BenchPrepareReport {
 #[derive(Debug, Clone, Serialize)]
 pub struct FuzzPrepareReport {
     pub rig_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
     pub pipeline: PipelineOutcome,
     pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_index: Option<RigRunArtifactIndex>,
 }
 
 /// Report from `rig down`.
@@ -375,24 +379,47 @@ pub fn run_fuzz_prepare(
         return Ok(None);
     }
 
-    let dependency_outcome = run_dependency_materialization_steps(rig, "fuzz_prepare", settings)?;
-    let pipeline_outcome =
-        if dependency_outcome.is_success() && rig.pipeline.contains_key("fuzz_prepare") {
-            run_pipeline_with_settings(rig, "fuzz_prepare", true, settings)?
-        } else {
-            PipelineOutcome {
-                name: "fuzz_prepare".to_string(),
-                steps: Vec::new(),
-                passed: 0,
-                failed: 0,
-            }
-        };
-    let outcome = merge_prepare_outcomes("fuzz_prepare", dependency_outcome, pipeline_outcome);
-    Ok(Some(FuzzPrepareReport {
-        rig_id: rig.id.clone(),
-        success: outcome.is_success(),
-        pipeline: outcome,
-    }))
+    // Dependency-cache evidence must belong to a real, completed run rather
+    // than depending on a caller to have installed a rig observer.
+    let observer = RigRunObserver::start(rig, "fuzz_prepare");
+    let execute = || {
+        let dependency_outcome =
+            run_dependency_materialization_steps(rig, "fuzz_prepare", settings)?;
+        let pipeline_outcome =
+            if dependency_outcome.is_success() && rig.pipeline.contains_key("fuzz_prepare") {
+                run_pipeline_with_settings(rig, "fuzz_prepare", true, settings)?
+            } else {
+                PipelineOutcome {
+                    name: "fuzz_prepare".to_string(),
+                    steps: Vec::new(),
+                    passed: 0,
+                    failed: 0,
+                }
+            };
+        let outcome = merge_prepare_outcomes("fuzz_prepare", dependency_outcome, pipeline_outcome);
+        Ok(FuzzPrepareReport {
+            rig_id: rig.id.clone(),
+            run_id: None,
+            success: outcome.is_success(),
+            pipeline: outcome,
+            artifact_index: None,
+        })
+    };
+    let mut result = match observer.as_ref() {
+        Some(observer) => observer.with_command_context(execute),
+        None => execute(),
+    };
+    let artifact_index = RigRunObserver::finish(
+        observer.as_ref(),
+        rig,
+        result.as_ref().ok().map(|report| &report.pipeline),
+        &result,
+    );
+    if let Ok(report) = result.as_mut() {
+        report.run_id = observer.as_ref().map(|observer| observer.run_id.clone());
+        report.artifact_index = artifact_index;
+    }
+    result.map(Some)
 }
 
 fn run_dependency_materialization_steps(
@@ -1036,7 +1063,7 @@ impl RigRunObserver {
         let resources = match self.command.as_str() {
             "up" if status == RunStatus::Pass => super::expand::expand_resources(rig),
             "up" => super::expand::expand_resources(rig),
-            "check" => super::expand::expand_resources(rig),
+            "check" | "fuzz_prepare" => super::expand::expand_resources(rig),
             "down" => RigState::load(&rig.id)
                 .ok()
                 .and_then(|state| {
@@ -1060,6 +1087,8 @@ impl RigRunObserver {
             "up" if status == RunStatus::Pass => ResourceLifecycleResourceStatus::Active,
             "up" => ResourceLifecycleResourceStatus::Failed,
             "check" => ResourceLifecycleResourceStatus::Declared,
+            "fuzz_prepare" if status == RunStatus::Pass => ResourceLifecycleResourceStatus::Active,
+            "fuzz_prepare" => ResourceLifecycleResourceStatus::Failed,
             "down" if status == RunStatus::Pass => ResourceLifecycleResourceStatus::Cleaned,
             "down" => ResourceLifecycleResourceStatus::CleanupPending,
             _ => return,

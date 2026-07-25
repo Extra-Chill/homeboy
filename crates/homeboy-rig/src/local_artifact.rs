@@ -91,8 +91,19 @@ pub fn register_current_run_artifact(
     path: impl AsRef<Path>,
 ) -> Result<LocalArtifactRegistration> {
     validate_kind(kind)?;
-    let run_id = required_env(homeboy_core::observation::ACTIVE_RUN_ID_ENV)?;
-    let manifest_path = required_env(RIG_ARTIFACT_MANIFEST_ENV)?;
+    let (run_id, manifest_path) = REGISTRATION_CONTEXT
+        .with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .map(|context| (context.run_id.clone(), context.manifest_path.clone()))
+        })
+        .map(Ok)
+        .unwrap_or_else(|| {
+            Ok((
+                required_env(homeboy_core::observation::ACTIVE_RUN_ID_ENV)?,
+                required_env(RIG_ARTIFACT_MANIFEST_ENV)?,
+            ))
+        })?;
     let manifest_path = Path::new(&manifest_path);
     if !manifest_path.is_absolute() || !manifest_path.is_file() {
         return Err(Error::validation_invalid_argument(

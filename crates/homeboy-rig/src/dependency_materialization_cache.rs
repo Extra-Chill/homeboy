@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
@@ -19,6 +21,7 @@ use homeboy_core::error::{Error, Result};
 
 const SCHEMA: &str = "homeboy/dependency-materialization-cache/v1";
 const MAX_TOOL_VERSION_BYTES: usize = 4096;
+const TOOL_VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Manifest {
@@ -415,17 +418,7 @@ fn resolved_tool_identities(step: &DependencyMaterializationStepSpec) -> Result<
         .unwrap_or_else(|| command.to_string());
     let version = resolved
         .as_ref()
-        .and_then(|path| Command::new(path).arg("--version").output().ok())
-        .map(|output| {
-            let bytes = if output.stdout.is_empty() {
-                output.stderr
-            } else {
-                output.stdout
-            };
-            String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_TOOL_VERSION_BYTES)])
-                .trim()
-                .to_string()
-        })
+        .and_then(|path| bounded_tool_version(path))
         .filter(|version| !version.is_empty())
         .unwrap_or_else(|| "unavailable".to_string());
     Ok(vec![ToolIdentity {
@@ -433,6 +426,56 @@ fn resolved_tool_identities(step: &DependencyMaterializationStepSpec) -> Result<
         executable,
         version,
     }])
+}
+
+fn bounded_tool_version(path: &Path) -> Option<String> {
+    let mut child = Command::new(path)
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let mut stderr = child.stderr.take()?;
+    let (stdout_tx, stdout_rx) = mpsc::sync_channel(1);
+    let (stderr_tx, stderr_rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = stdout_tx.send(read_limited(&mut stdout));
+    });
+    std::thread::spawn(move || {
+        let _ = stderr_tx.send(read_limited(&mut stderr));
+    });
+    let deadline = Instant::now() + TOOL_VERSION_TIMEOUT;
+    loop {
+        if child.try_wait().ok()?.is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Descendants can inherit a pipe after the probed process exits. Never let
+    // that keep cache-key construction blocked; readers are byte-bounded.
+    let stdout = stdout_rx.recv_timeout(TOOL_VERSION_TIMEOUT).ok()?;
+    let stderr = stderr_rx.recv_timeout(TOOL_VERSION_TIMEOUT).ok()?;
+    let bytes = if stdout.is_empty() { stderr } else { stdout };
+    String::from_utf8_lossy(&bytes).trim().to_string().into()
+}
+
+fn read_limited(reader: &mut impl Read) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(MAX_TOOL_VERSION_BYTES);
+    let mut chunk = [0; 1024];
+    while bytes.len() < MAX_TOOL_VERSION_BYTES {
+        let limit = (MAX_TOOL_VERSION_BYTES - bytes.len()).min(chunk.len());
+        match reader.read(&mut chunk[..limit]) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+        }
+    }
+    bytes
 }
 
 fn publish_restore_transaction(
@@ -466,6 +509,11 @@ fn publish_restore_transaction(
             }
             fs::rename(staging.join(relative), destination)
                 .map_err(|error| io_error("publish dependency cache restore", error))?;
+            if should_fail_restore_publish() {
+                return Err(Error::internal_unexpected(
+                    "injected dependency cache restore publish failure".to_string(),
+                ));
+            }
         }
         Ok(())
     })();
@@ -482,6 +530,27 @@ fn publish_restore_transaction(
     let _ = clear_path(&backup);
     let _ = clear_path(staging);
     result
+}
+
+#[cfg(test)]
+static RESTORE_PUBLISH_FAILURE_AFTER: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+#[cfg(test)]
+pub fn inject_restore_publish_failure_after(publishes: usize) {
+    RESTORE_PUBLISH_FAILURE_AFTER.store(publishes, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn should_fail_restore_publish() -> bool {
+    #[cfg(test)]
+    {
+        let remaining = RESTORE_PUBLISH_FAILURE_AFTER.load(std::sync::atomic::Ordering::SeqCst);
+        if remaining == 0 {
+            return true;
+        }
+        RESTORE_PUBLISH_FAILURE_AFTER.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    false
 }
 
 fn clear_path(path: &Path) -> Result<()> {
