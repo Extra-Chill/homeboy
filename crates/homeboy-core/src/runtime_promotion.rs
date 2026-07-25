@@ -5,6 +5,7 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -54,9 +55,16 @@ pub struct RuntimePromotionLeaseRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SubprocessLeaseCapability {
     owner_pid: u32,
+    owner_linux_starttime_ticks: u64,
     target: String,
     generation: String,
     capability: String,
+}
+
+thread_local! {
+    // Direct reentrancy is deliberately capability-based. A matching PID alone
+    // is not ownership evidence because PIDs are reusable after a restart.
+    static LOCAL_LEASE_CAPABILITIES: RefCell<Vec<SubprocessLeaseCapability>> = const { RefCell::new(Vec::new()) };
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +110,12 @@ enum LeaseRecordReadError {
 impl Drop for RuntimePromotionLease {
     fn drop(&mut self) {
         if self.primary {
+            forget_local_capability(
+                self.owner_pid,
+                &self.target,
+                &self.generation,
+                &self.capability,
+            );
             // Never remove a lease that an explicit takeover or another owner
             // has replaced since this guard was acquired.
             if read_record(&self.path).is_ok_and(|record| {
@@ -229,6 +243,7 @@ fn acquire_with_pin_policy(
                 }
                 return Err(error);
             }
+            remember_local_capability(&record)?;
             RuntimePromotionLease {
                 path,
                 primary: true,
@@ -240,8 +255,7 @@ fn acquire_with_pin_policy(
             }
         }
         Some(held) => {
-            let same_transaction = held.target == target && held.generation == generation;
-            if held.pid == pid && same_transaction {
+            if authorizes_local_reentrancy(&held, &target, &generation) {
                 return Ok(RuntimePromotionLease {
                     path,
                     primary: false,
@@ -338,6 +352,12 @@ impl RuntimePromotionLease {
     pub fn authorize_subprocess(&self, command: &mut Command) {
         let capability = SubprocessLeaseCapability {
             owner_pid: self.owner_pid,
+            owner_linux_starttime_ticks: crate::process::linux_process_starttime_ticks(
+                self.owner_pid,
+            )
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
             target: self.target.clone(),
             generation: self.generation.clone(),
             capability: self.capability.clone(),
@@ -536,13 +556,76 @@ fn authorizes_subprocess(
     generation: &str,
     capability: &SubprocessLeaseCapability,
 ) -> bool {
+    authorizes_subprocess_with(
+        held,
+        target,
+        generation,
+        capability,
+        crate::process::process_identity_state,
+    )
+}
+
+fn authorizes_subprocess_with(
+    held: &RuntimePromotionLeaseRecord,
+    target: &str,
+    generation: &str,
+    capability: &SubprocessLeaseCapability,
+    inspect: impl FnOnce(u32, Option<u64>) -> crate::process::ProcessIdentityState,
+) -> bool {
     !held.capability.is_empty()
         && capability.owner_pid == held.pid
+        && held.linux_starttime_ticks == Some(capability.owner_linux_starttime_ticks)
         && capability.target == held.target
         && capability.generation == held.generation
         && capability.capability == held.capability
         && target == held.target
         && generation == held.generation
+        && matches!(
+            inspect(held.pid, held.linux_starttime_ticks),
+            crate::process::ProcessIdentityState::Live
+        )
+}
+
+fn remember_local_capability(record: &RuntimePromotionLeaseRecord) -> Result<()> {
+    let Some(owner_linux_starttime_ticks) = record.linux_starttime_ticks else {
+        return Ok(());
+    };
+    let capability = SubprocessLeaseCapability {
+        owner_pid: record.pid,
+        owner_linux_starttime_ticks,
+        target: record.target.clone(),
+        generation: record.generation.clone(),
+        capability: record.capability.clone(),
+    };
+    LOCAL_LEASE_CAPABILITIES.with(|capabilities| capabilities.borrow_mut().push(capability));
+    Ok(())
+}
+
+fn forget_local_capability(pid: u32, target: &str, generation: &str, token: &str) {
+    LOCAL_LEASE_CAPABILITIES.with(|capabilities| {
+        let mut capabilities = capabilities.borrow_mut();
+        if let Some(index) = capabilities.iter().rposition(|capability| {
+            capability.owner_pid == pid
+                && capability.target == target
+                && capability.generation == generation
+                && capability.capability == token
+        }) {
+            capabilities.remove(index);
+        }
+    });
+}
+
+fn authorizes_local_reentrancy(
+    held: &RuntimePromotionLeaseRecord,
+    target: &str,
+    generation: &str,
+) -> bool {
+    LOCAL_LEASE_CAPABILITIES.with(|capabilities| {
+        capabilities
+            .borrow()
+            .iter()
+            .any(|capability| authorizes_subprocess(held, target, generation, capability))
+    })
 }
 
 fn blocked_error(held: &RuntimePromotionLeaseRecord, reclaimable: bool) -> Error {
@@ -913,7 +996,7 @@ mod tests {
             target: "lab".to_string(),
             generation: "generation-a".to_string(),
             started_at: now(),
-            linux_starttime_ticks: None,
+            linux_starttime_ticks: Some(42),
             heartbeat_at: now(),
             expires_at: expiry(),
             capability: "unforgeable-capability".to_string(),
@@ -923,6 +1006,7 @@ mod tests {
     fn capability(record: &RuntimePromotionLeaseRecord) -> SubprocessLeaseCapability {
         SubprocessLeaseCapability {
             owner_pid: record.pid,
+            owner_linux_starttime_ticks: record.linux_starttime_ticks.expect("test identity"),
             target: record.target.clone(),
             generation: record.generation.clone(),
             capability: record.capability.clone(),
@@ -1194,6 +1278,9 @@ mod tests {
 
     #[test]
     fn authorized_child_reenters_only_its_parent_transaction() {
+        if !cfg!(target_os = "linux") {
+            return;
+        }
         crate::test_support::with_isolated_home(|_| {
             let lease = acquire("parent", "lab").expect("parent acquires lease");
             let executable = std::env::current_exe().expect("resolve test executable");
@@ -1223,6 +1310,7 @@ mod tests {
             "generation-a",
             &SubprocessLeaseCapability {
                 owner_pid: 99,
+                owner_linux_starttime_ticks: 42,
                 target: "lab".to_string(),
                 generation: "generation-a".to_string(),
                 capability: "unforgeable-capability".to_string(),
@@ -1273,6 +1361,70 @@ mod tests {
             "generation-b",
             &capability(&held)
         ));
+    }
+
+    #[test]
+    fn exact_capability_and_process_identity_are_required_for_reentrancy() {
+        let held = lease_record();
+        let capability = capability(&held);
+        assert!(authorizes_subprocess_with(
+            &held,
+            "lab",
+            "generation-a",
+            &capability,
+            |_, _| crate::process::ProcessIdentityState::Live,
+        ));
+
+        let mut forged = capability.clone();
+        forged.capability = "forged".to_string();
+        assert!(!authorizes_subprocess_with(
+            &held,
+            "lab",
+            "generation-a",
+            &forged,
+            |_, _| crate::process::ProcessIdentityState::Live,
+        ));
+        assert!(!authorizes_subprocess_with(
+            &held,
+            "lab",
+            "generation-a",
+            &capability,
+            |_, _| crate::process::ProcessIdentityState::IdentityMismatch,
+        ));
+    }
+
+    #[test]
+    fn legacy_lease_without_start_identity_cannot_grant_nested_ownership() {
+        let mut held = lease_record();
+        held.linux_starttime_ticks = None;
+        let capability = SubprocessLeaseCapability {
+            owner_pid: held.pid,
+            owner_linux_starttime_ticks: 42,
+            target: held.target.clone(),
+            generation: held.generation.clone(),
+            capability: held.capability.clone(),
+        };
+        assert!(!authorizes_subprocess_with(
+            &held,
+            "lab",
+            "generation-a",
+            &capability,
+            |_, _| crate::process::ProcessIdentityState::Live,
+        ));
+    }
+
+    #[test]
+    fn nested_lease_requires_local_capability_on_platforms_with_process_identity() {
+        if !cfg!(target_os = "linux") {
+            return;
+        }
+        crate::test_support::with_isolated_home(|_| {
+            let outer = acquire("outer", "lab").expect("outer acquires");
+            let inner = acquire("inner", "lab").expect("exact local capability reenters");
+            assert!(!inner.primary, "nested lease must not own cleanup");
+            drop(inner);
+            drop(outer);
+        });
     }
 
     #[test]
