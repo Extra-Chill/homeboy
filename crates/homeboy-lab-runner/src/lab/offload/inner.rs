@@ -1664,7 +1664,8 @@ pub(crate) fn run_lab_offload_inner(
             homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteOnTerminal;
     }
     workspace_resource_lifecycle.cleanup_command = Some(format!(
-        "homeboy runner workspace prune {runner_id} --apply --min-age-hours 0"
+        "homeboy runner workspace prune {} --apply --min-age-hours 0",
+        homeboy_core::engine::shell::quote_arg(runner_id),
     ));
     crate::update_workspace_resource_lifecycle(
         runner_id,

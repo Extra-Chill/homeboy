@@ -132,7 +132,7 @@ impl Drop for MaterializedWorkspace {
                     self.runner_id,
                     self.policy.label(),
                     self.outcome(),
-                    self.runner_id,
+                    homeboy_core::engine::shell::quote_arg(&self.runner_id),
                 );
             }
             return;

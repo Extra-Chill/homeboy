@@ -206,7 +206,7 @@ fn preserved_failure_lifecycle_is_registered_for_ttl_pruning() {
         )
         .expect("register ttl lifecycle");
 
-        let (output, _) = prune_workspaces(
+        let (preview, _) = prune_workspaces(
             "lab-local-prune-retained",
             RunnerWorkspacePruneOptions {
                 apply: false,
@@ -217,8 +217,29 @@ fn preserved_failure_lifecycle_is_registered_for_ttl_pruning() {
         )
         .expect("prune preview");
 
-        assert_eq!(output.candidates[0].reason, "resource_ttl_expired");
-        assert_eq!(output.candidates[0].remote_path, synced.remote_path);
+        assert_eq!(preview.candidates[0].reason, "resource_ttl_expired");
+        assert_eq!(preview.candidates[0].remote_path, synced.remote_path);
+        assert!(Path::new(&synced.remote_path).exists());
+
+        let (applied, exit_code) = prune_workspaces(
+            "lab-local-prune-retained",
+            RunnerWorkspacePruneOptions {
+                apply: true,
+                min_age_hours: 0,
+                limit: 10,
+                passes: 1,
+            },
+        )
+        .expect("apply ttl prune");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(applied.removed.len(), 1);
+        assert_eq!(applied.removed[0].reason, "resource_ttl_expired");
+        assert_eq!(applied.removed[0].remote_path, synced.remote_path);
+        assert!(
+            !Path::new(&synced.remote_path).exists(),
+            "registered TTL lifecycle must be reaped by the owning runner prune path"
+        );
     });
 }
 
