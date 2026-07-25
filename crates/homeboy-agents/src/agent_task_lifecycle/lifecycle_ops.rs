@@ -779,6 +779,36 @@ pub fn reserve_provider_execution(
     Ok(reservation)
 }
 
+/// Persist the controller-owned Cook phase independently of provider output.
+/// This gives foreground observers a restart-safe liveness source without
+/// treating an arbitrary provider transcript line as durable state.
+pub fn record_cook_progress(
+    run_id: &str,
+    phase: &str,
+    attempt: u32,
+    detail: Option<&str>,
+) -> Result<AgentTaskRunRecord> {
+    let run_id = sanitize_run_id(run_id);
+    let record = store::mutate_record(&run_id, |record| {
+        let now = now_timestamp();
+        record.ensure_metadata_object().insert(
+            "cook_progress".to_string(),
+            json!({
+                "phase": phase,
+                "attempt": attempt,
+                "detail": detail,
+                "updated_at": now,
+            }),
+        );
+        if !record.state.is_terminal() && !record.is_runner_backed() {
+            record.updated_at = Some(now_timestamp());
+            update_lifecycle_heartbeat(record);
+        }
+        true
+    })?;
+    record.ok_or_else(|| Error::internal_unexpected("Cook progress record was unchanged"))
+}
+
 /// Record the provider's terminal result before controller-owned patch
 /// harvesting. Harvesting can fail or be interrupted independently of the
 /// provider execution, so it must not leave this reservation running.

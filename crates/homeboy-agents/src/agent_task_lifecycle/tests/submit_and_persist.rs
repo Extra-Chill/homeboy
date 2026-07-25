@@ -18,6 +18,26 @@ use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
 #[test]
+fn cook_progress_is_durable_across_active_and_terminal_lifecycle_states() {
+    with_isolated_home(|_| {
+        let run_id = "cook-progress-lifecycle";
+        submit_plan(&test_plan(), Some(run_id)).expect("submit run");
+
+        let active = record_cook_progress(run_id, "provider_start", 1, Some("fixture provider"))
+            .expect("record active progress");
+        assert_eq!(active.metadata["cook_progress"]["phase"], "provider_start");
+        assert!(active.lifecycle.heartbeat.is_some());
+
+        let cancelled = cancel_run(run_id, Some("fixture cancellation")).expect("cancel run");
+        assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+        let terminal = record_cook_progress(run_id, "terminal", 1, Some("cancelled"))
+            .expect("retain terminal progress");
+        assert_eq!(terminal.state, AgentTaskRunState::Cancelled);
+        assert_eq!(terminal.metadata["cook_progress"]["phase"], "terminal");
+    });
+}
+
+#[test]
 fn provider_run_result_reads_declared_output_alias() {
     let role_aliases: AgentTaskProviderRoleAliases = serde_json::from_value(json!({
         "outputs": {

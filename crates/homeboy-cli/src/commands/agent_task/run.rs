@@ -246,7 +246,9 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress<E>(
     attempt_dispatcher: Option<
         Arc<dyn crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher>,
     >,
-    progress: Option<&dyn Fn(&str, Option<&str>, Option<&str>) -> homeboy::core::Result<()>>,
+    progress: Option<
+        &(dyn Fn(&str, Option<&str>, Option<&str>) -> homeboy::core::Result<()> + Send + Sync),
+    >,
 ) -> CmdResult<Value>
 where
     E: AgentTaskExecutorAdapter + Clone,
@@ -313,9 +315,9 @@ where
         .commit_message
         .clone()
         .unwrap_or_else(|| default_loop_commit_message(&args));
-    let durable_observer = |cook_id: &str, run_id: &str| {
+    let durable_observer = |phase: &str, cook_id: &str, run_id: &str| {
         progress
-            .map(|progress| progress("in_flight", Some(cook_id), Some(run_id)))
+            .map(|progress| progress(phase, Some(cook_id), Some(run_id)))
             .unwrap_or(Ok(()))
     };
     let result = agent_task_service::run_cook_with_durable_observer(

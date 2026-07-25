@@ -1524,25 +1524,48 @@ fn cook_repairs_initial_alias_after_submit_before_index_interruption() {
 
         let observed = Arc::new(Mutex::new(Vec::new()));
         let observer_records = observed.clone();
-        let result = run_cook_with_durable_observer(options, UnusedExecutor, &move |cook, run| {
-            let status =
-                agent_task_lifecycle::status(cook).expect("Cook alias resolves in observer");
-            let logs =
-                agent_task_lifecycle::logs(cook).expect("Cook alias logs resolve in observer");
-            assert_eq!(status.run_id, run);
-            assert!(!logs.events.is_empty());
-            observer_records
-                .lock()
-                .expect("observer records lock")
-                .push((cook.to_string(), run.to_string()));
-            Ok(())
-        })
-        .expect("restart repairs the Cook alias");
+        let result =
+            run_cook_with_durable_observer(options, UnusedExecutor, &move |phase, cook, run| {
+                let status =
+                    agent_task_lifecycle::status(cook).expect("Cook alias resolves in observer");
+                let logs =
+                    agent_task_lifecycle::logs(cook).expect("Cook alias logs resolve in observer");
+                assert_eq!(status.run_id, run);
+                assert!(!logs.events.is_empty());
+                observer_records
+                    .lock()
+                    .expect("observer records lock")
+                    .push((phase.to_string(), cook.to_string(), run.to_string()));
+                Ok(())
+            })
+            .expect("restart repairs the Cook alias");
 
         assert_eq!(result.value.latest_run_id.as_deref(), Some(run_id));
         assert_eq!(
             observed.lock().expect("observer records lock").as_slice(),
-            &[(cook_id.to_string(), run_id.to_string())]
+            &[
+                (
+                    "provider_ready".to_string(),
+                    cook_id.to_string(),
+                    run_id.to_string()
+                ),
+                (
+                    "provider_start".to_string(),
+                    cook_id.to_string(),
+                    run_id.to_string()
+                ),
+                (
+                    "in_flight".to_string(),
+                    cook_id.to_string(),
+                    run_id.to_string()
+                ),
+            ]
+        );
+        assert_eq!(
+            agent_task_lifecycle::status(run_id)
+                .expect("durable progress")
+                .metadata["cook_progress"]["phase"],
+            "in_flight"
         );
         let index = agent_task_lifecycle::cook_index(cook_id).expect("repaired Cook index");
         assert_eq!(index.latest_run_id, run_id);
