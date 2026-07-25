@@ -16,6 +16,10 @@ use std::sync::Mutex;
 
 use serde_json::Value;
 
+use homeboy_gate_contract::proof::HomeboyProofValidationDiagnostic;
+
+use super::validation::{diagnostic, path};
+
 /// A single loop-spec validation finding: a stable diagnostic code and a
 /// human-readable message. The caller attaches the JSON path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,5 +69,62 @@ pub(crate) fn validate_materialized_loop_spec(spec: &Value) -> Vec<LoopSpecValid
     match slot.as_deref() {
         Some(provider) => provider.validate_materialized_loop_spec(spec),
         None => NoopProvider.validate_materialized_loop_spec(spec),
+    }
+}
+
+/// Validate a `homeboy/agent-task-loop-spec-materialization/v1` proof record:
+/// require the embedded `spec` and run it through the loop-spec provider. These
+/// agent-task-loop schemas are dispatched by the proof verb but are loop-spec
+/// behavior, so they live here rather than in generic proof validation (#6770).
+pub(super) fn validate_loop_spec_materialization_record(
+    value: &Value,
+    diagnostics: &mut Vec<HomeboyProofValidationDiagnostic>,
+) {
+    let Some(spec) = value.get("spec") else {
+        diagnostics.push(diagnostic(
+            "materialized_spec_missing",
+            "materialized controller output must include spec",
+            path("/spec"),
+        ));
+        return;
+    };
+    // Loop-spec schema + rule validation is agent-task behavior, delegated
+    // through the loop-spec validation hook so proof validation does not depend
+    // on the agent-task subsystem.
+    for finding in validate_materialized_loop_spec(spec) {
+        diagnostics.push(diagnostic(finding.code, finding.message, path("/spec")));
+    }
+}
+
+/// Validate a `homeboy/agent-task-loop-controller/v1` proof record: a completed
+/// controller must carry a terminal outcome and retain no executable
+/// next_actions. Loop-controller behavior, dispatched by the proof verb (#6770).
+pub(super) fn validate_controller_record(
+    value: &Value,
+    diagnostics: &mut Vec<HomeboyProofValidationDiagnostic>,
+) {
+    if value.get("state").and_then(Value::as_str) == Some("completed") {
+        if value
+            .get("terminal_outcomes")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+        {
+            diagnostics.push(diagnostic(
+                "completion_outcome_missing",
+                "completed controller records must include a terminal outcome explaining deterministic completion",
+                path("/terminal_outcomes"),
+            ));
+        }
+        if value
+            .get("next_actions")
+            .and_then(Value::as_array)
+            .is_some_and(|actions| !actions.is_empty())
+        {
+            diagnostics.push(diagnostic(
+                "completion_has_pending_actions",
+                "completed controller records must not retain executable next_actions",
+                path("/next_actions"),
+            ));
+        }
     }
 }

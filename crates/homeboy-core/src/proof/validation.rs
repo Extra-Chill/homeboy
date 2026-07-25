@@ -31,10 +31,13 @@ pub fn validate_proof_value(value: Value) -> HomeboyProofValidationReport {
             )),
         },
         Some("homeboy/agent-task-loop-spec-materialization/v1") => {
-            validate_materialized_loop_spec(&value, &mut diagnostics);
+            super::loop_spec_validation::validate_loop_spec_materialization_record(
+                &value,
+                &mut diagnostics,
+            );
         }
         Some("homeboy/agent-task-loop-controller/v1") => {
-            validate_controller_record(&value, &mut diagnostics);
+            super::loop_spec_validation::validate_controller_record(&value, &mut diagnostics);
         }
         Some(schema) => diagnostics.push(diagnostic(
             "unsupported_schema",
@@ -200,56 +203,6 @@ fn artifact_satisfies_requirement(
             .unwrap_or(true)
 }
 
-fn validate_materialized_loop_spec(
-    value: &Value,
-    diagnostics: &mut Vec<HomeboyProofValidationDiagnostic>,
-) {
-    let Some(spec) = value.get("spec") else {
-        diagnostics.push(diagnostic(
-            "materialized_spec_missing",
-            "materialized controller output must include spec",
-            path("/spec"),
-        ));
-        return;
-    };
-    // Loop-spec schema + rule validation is agent-task behavior, delegated
-    // through the loop-spec validation hook so proof validation does not depend
-    // on the agent-task subsystem.
-    for finding in crate::proof::loop_spec_validation::validate_materialized_loop_spec(spec) {
-        diagnostics.push(diagnostic(finding.code, finding.message, path("/spec")));
-    }
-}
-
-fn validate_controller_record(
-    value: &Value,
-    diagnostics: &mut Vec<HomeboyProofValidationDiagnostic>,
-) {
-    if value.get("state").and_then(Value::as_str) == Some("completed") {
-        if value
-            .get("terminal_outcomes")
-            .and_then(Value::as_array)
-            .is_none_or(Vec::is_empty)
-        {
-            diagnostics.push(diagnostic(
-                "completion_outcome_missing",
-                "completed controller records must include a terminal outcome explaining deterministic completion",
-                path("/terminal_outcomes"),
-            ));
-        }
-        if value
-            .get("next_actions")
-            .and_then(Value::as_array)
-            .is_some_and(|actions| !actions.is_empty())
-        {
-            diagnostics.push(diagnostic(
-                "completion_has_pending_actions",
-                "completed controller records must not retain executable next_actions",
-                path("/next_actions"),
-            ));
-        }
-    }
-}
-
 fn validate_evidence_ref(
     reference: &str,
     path: String,
@@ -276,7 +229,7 @@ fn is_non_local_evidence_ref(reference: &str) -> bool {
     validated_public_url(reference).is_some()
 }
 
-fn diagnostic(
+pub(super) fn diagnostic(
     code: impl Into<String>,
     message: impl Into<String>,
     path: Option<String>,
@@ -288,7 +241,7 @@ fn diagnostic(
     }
 }
 
-fn path(value: &str) -> Option<String> {
+pub(super) fn path(value: &str) -> Option<String> {
     Some(value.to_string())
 }
 
