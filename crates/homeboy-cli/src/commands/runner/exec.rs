@@ -150,6 +150,15 @@ pub(super) fn exec(
         },
     )?;
     if let Some(run_id) = validated_run_id.as_deref() {
+        if let (Some(job), Some(events)) = (output.job.as_ref(), output.job_events.as_ref()) {
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_terminal_checkpoint(
+                run_id,
+                &homeboy::core::api_jobs::RunnerJobLogSnapshot {
+                    job: job.clone(),
+                    events: events.clone(),
+                },
+            )?;
+        }
         let artifacts = runner::promote_runner_exec_artifacts(run_id, &output, &artifact_outputs)?;
         let promoted_artifacts = artifacts
             .iter()
@@ -183,6 +192,15 @@ pub(super) fn exec(
             .cloned()
             .collect::<Vec<_>>();
         homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_refs(run_id, &retained)?;
+        if let (Some(job), Some(events)) = (output.job.as_ref(), output.job_events.as_ref()) {
+            homeboy_agents::agent_task_lifecycle::project_terminal_runner_result(
+                run_id,
+                &homeboy::core::api_jobs::RunnerJobLogSnapshot {
+                    job: job.clone(),
+                    events: events.clone(),
+                },
+            )?;
+        }
     }
     Ok((output, exit_code))
 }

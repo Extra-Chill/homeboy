@@ -164,6 +164,9 @@ impl CliRuntime {
         // can reconcile and resume runs dispatched to a remote runner without
         // core depending on runner behavior.
         crate::runner::register_runner_continuation_provider();
+        // Recover completed generic runner-exec jobs before this invocation can
+        // open a daemon store whose retention policy might evict their evidence.
+        let _ = crate::runner::reconcile_terminal_runner_exec_runs();
         // Register the runner daemon-exec driver so the daemon's /exec endpoint
         // can prepare and run a runner job as a local child without core
         // depending on runner process-execution behavior.

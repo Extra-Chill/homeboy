@@ -201,6 +201,10 @@ fn generic_runner_exec_terminal_projection_is_authoritative_and_idempotent() {
             .expect("declared artifact contract persists before execution");
 
             let snapshot = runner_snapshot(status);
+            record_runner_exec_terminal_checkpoint(run_id, &snapshot)
+                .expect("terminal snapshot checkpoint persists before promotion");
+            record_runner_exec_artifact_refs(run_id, &[])
+                .expect("empty declared promotion completes before terminal projection");
             assert!(project_terminal_runner_exec_result(run_id, &snapshot)
                 .expect("terminal daemon result projects"));
             assert!(!project_terminal_runner_exec_result(run_id, &snapshot)

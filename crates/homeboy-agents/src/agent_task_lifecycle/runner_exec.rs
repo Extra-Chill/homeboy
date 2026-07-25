@@ -202,6 +202,48 @@ pub fn record_runner_exec_artifact_declarations(
             "summaries": summaries,
         }),
     );
+    metadata.insert(
+        "runner_terminal_projection".to_string(),
+        json!({
+            "state": "awaiting_daemon_terminal",
+            "artifact_promotion": "pending",
+        }),
+    );
+    store.upsert_imported_run_preserving_terminal(&run)
+}
+
+/// Checkpoint the authoritative terminal snapshot before copying declared
+/// evidence. A restart can resume promotion from this durable boundary instead
+/// of terminalizing a run whose runner-side files were never retained.
+pub fn record_runner_exec_terminal_checkpoint(
+    run_id: &str,
+    snapshot: &RunnerJobLogSnapshot,
+) -> Result<()> {
+    if !snapshot.job.status.is_terminal() {
+        return Ok(());
+    }
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let run_id = sanitize_run_id(run_id);
+    let Some(mut run) = store.get_run(&run_id)? else {
+        return Ok(());
+    };
+    if run.metadata_json.get("kind").and_then(Value::as_str) != Some(RUNNER_EXEC_RUN_KIND) {
+        return Ok(());
+    }
+    validate_runner_exec_snapshot_binding(&run, snapshot)?;
+    run.metadata_json
+        .as_object_mut()
+        .expect("metadata object")
+        .insert(
+            "runner_terminal_projection".to_string(),
+            json!({
+                "state": "terminal_checkpointed",
+                "artifact_promotion": "pending",
+                "job_id": snapshot.job.id,
+                "status": snapshot.job.status,
+                "event_count": snapshot.events.len(),
+            }),
+        );
     store.upsert_imported_run_preserving_terminal(&run)
 }
 
@@ -211,9 +253,6 @@ pub fn record_runner_exec_artifact_refs(
     run_id: &str,
     artifacts: &[homeboy_core::observation::ArtifactRecord],
 ) -> Result<()> {
-    if artifacts.is_empty() {
-        return Ok(());
-    }
     let store = homeboy_core::observation::ObservationStore::open_initialized()?;
     let run_id = sanitize_run_id(run_id);
     let Some(mut run) = store.get_run(&run_id)? else {
@@ -238,7 +277,16 @@ pub fn record_runner_exec_artifact_refs(
             "path": artifact.path.clone(),
         }));
     }
+    let artifact_count = refs.len();
     metadata.insert("runner_exec_artifact_refs".to_string(), Value::Array(refs));
+    metadata.insert(
+        "runner_terminal_projection".to_string(),
+        json!({
+            "state": "terminal_checkpointed",
+            "artifact_promotion": "complete",
+            "artifact_count": artifact_count,
+        }),
+    );
     store.upsert_imported_run_preserving_terminal(&run)
 }
 
@@ -263,30 +311,15 @@ pub fn project_terminal_runner_exec_result(
         return Ok(false);
     }
 
-    let runner_id = run
+    let runner_id = validate_runner_exec_snapshot_binding(&run, snapshot)?;
+    if run
         .metadata_json
-        .get("runner_id")
+        .pointer("/runner_terminal_projection/artifact_promotion")
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let runner_job_id = run
-        .metadata_json
-        .get("runner_job_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let snapshot_runner_id = snapshot.job.target_runner_id.as_deref().unwrap_or_default();
-    if runner_id.is_empty()
-        || runner_job_id.is_empty()
-        || runner_id != snapshot_runner_id
-        || runner_job_id != snapshot.job.id.to_string()
+        == Some("pending")
     {
-        return Err(Error::validation_invalid_argument(
-            "runner_job_id",
-            format!(
-                "terminal runner snapshot does not match durable binding ({runner_id}/{runner_job_id})"
-            ),
-            Some(run.id),
-            None,
+        return Err(Error::internal_unexpected(
+            "runner-exec terminal projection requires declared artifact promotion before finalization",
         ));
     }
     let exit_code = if snapshot.job.status == JobStatus::Succeeded {
@@ -335,6 +368,39 @@ pub fn project_terminal_runner_exec_result(
     };
     store.finish_run(&run.id, status, Some(run.metadata_json))?;
     Ok(true)
+}
+
+fn validate_runner_exec_snapshot_binding(
+    run: &homeboy_core::observation::RunRecord,
+    snapshot: &RunnerJobLogSnapshot,
+) -> Result<String> {
+    let runner_id = run
+        .metadata_json
+        .get("runner_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let runner_job_id = run
+        .metadata_json
+        .get("runner_job_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let snapshot_runner_id = snapshot.job.target_runner_id.as_deref().unwrap_or_default();
+    if runner_id.is_empty()
+        || runner_job_id.is_empty()
+        || runner_id != snapshot_runner_id
+        || runner_job_id != snapshot.job.id.to_string()
+    {
+        return Err(Error::validation_invalid_argument(
+            "runner_job_id",
+            format!(
+                "terminal runner snapshot does not match durable binding ({runner_id}/{runner_job_id})"
+            ),
+            Some(run.id.clone()),
+            None,
+        ));
+    }
+    Ok(runner_id)
 }
 
 /// Persist redacted submission ownership before a reverse-broker POST. The

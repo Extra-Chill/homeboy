@@ -272,16 +272,6 @@ pub(super) fn exec_via_reverse_broker(
         &redaction_env,
         &redaction_secret_env_names,
     );
-    if let Some(run_id) = run_id.as_deref() {
-        homeboy_agents::agent_task_lifecycle::project_terminal_runner_result(
-            run_id,
-            &homeboy_core::api_jobs::RunnerJobLogSnapshot {
-                job: job.clone(),
-                events: events.clone(),
-            },
-        )?;
-    }
-
     let mirror = if mirror_evidence {
         mirror_reverse_broker_evidence(
             runner,
