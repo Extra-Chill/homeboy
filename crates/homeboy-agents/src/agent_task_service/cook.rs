@@ -1057,6 +1057,10 @@ where
         follow_up_plan.tasks[0].workspace.root = Some(baseline.path.display().to_string());
         follow_up_plan.tasks[0].inputs["cook_loop"]["artifact_provenance"] =
             baseline.artifact_provenance();
+        // Follow-up retries intentionally move into an authenticated baseline.
+        // Refresh the durable execution attestation before this plan can be
+        // persisted or handed to a local or detached provider.
+        bind_dispatch_workspace_attestations(&mut follow_up_plan)?;
         if let Some(dispatcher) = &options.attempt_dispatcher {
             // A detached dispatcher may return before any executor-side
             // lifecycle write, so a controller crash after the runner accepts
