@@ -43,6 +43,7 @@ pub(super) fn agent_task_resource_behavior(
             AgentTaskResourceBehavior::LocalControl
         }
         agent_task::AgentTaskCommand::Cook(_)
+        | agent_task::AgentTaskCommand::CookContinue(_)
         | agent_task::AgentTaskCommand::RunPlan(_)
         | agent_task::AgentTaskCommand::Run(_)
         | agent_task::AgentTaskCommand::RunNext
