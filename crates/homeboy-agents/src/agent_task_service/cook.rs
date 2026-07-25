@@ -513,7 +513,19 @@ pub(crate) fn gate_feedback_current_diff(promotion: &AgentTaskPromotionReport) -
 fn review_form_from_aggregate(
     aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
 ) -> Result<Option<crate::agent_task_review_dossier::AiFilledReviewForm>> {
-    let Some(outcome) = aggregate.outcomes.last() else {
+    let selected_task_id = aggregate
+        .outcomes
+        .iter()
+        .find_map(|outcome| outcome.metadata["candidate_selection"]["selected_task_id"].as_str());
+    let Some(outcome) = selected_task_id
+        .and_then(|task_id| {
+            aggregate
+                .outcomes
+                .iter()
+                .find(|outcome| outcome.task_id == task_id)
+        })
+        .or_else(|| aggregate.outcomes.last())
+    else {
         return Ok(None);
     };
     crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(&outcome.outputs)
@@ -1982,13 +1994,19 @@ where
                 Some(&run_id),
             ));
         };
-        if plan.tasks.len() != 1 {
+        if plan.tasks.len() > 1
+            && (source_request.group_key.is_none()
+                || plan
+                    .tasks
+                    .iter()
+                    .any(|task| task.group_key != source_request.group_key))
+        {
             return Ok(cook_report(
                 cook_id,
                 "policy_failure",
                 attempts,
                 None,
-                Some("agent-task cook currently supports one task per cook attempt".to_string()),
+                Some("Cook candidates must share one explicit candidate group".to_string()),
                 1,
                 Some(&run_id),
             ));

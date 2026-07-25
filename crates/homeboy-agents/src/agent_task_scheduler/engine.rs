@@ -160,6 +160,7 @@ where
         }));
         let mut adaptive_decisions = Vec::new();
         let mut last_effective_concurrency = None;
+        let candidate_completion = plan.options.candidate_completion;
 
         for task in &queued {
             events.push(event(
@@ -951,6 +952,49 @@ where
                         &outcome,
                     );
                     record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
+                    if candidate_completion == AgentTaskCandidateCompletionPolicy::FirstGreen
+                        && outcomes.last().is_some_and(|outcome| {
+                            outcome.status == AgentTaskOutcomeStatus::Succeeded
+                        })
+                    {
+                        let selected_task_id = outcomes
+                            .last()
+                            .expect("selected candidate outcome")
+                            .task_id
+                            .clone();
+                        if let Some(selected) = outcomes.last_mut() {
+                            if !selected.metadata.is_object() {
+                                selected.metadata = serde_json::json!({});
+                            }
+                            selected.metadata["candidate_selection"] = serde_json::json!({
+                                "policy": "first_green",
+                                "selected_task_id": selected_task_id,
+                                "promotion_action": "promote_selected_candidate_only",
+                            });
+                        }
+                        AgentTaskScheduleSupport::cancel_queued(
+                            &mut queued,
+                            &mut outcomes,
+                            &mut events,
+                        );
+                        // Reuse the scheduler's durable deferred-cleanup owner.
+                        // It keeps the join handle until the provider terminates,
+                        // preserves late artifacts, and never reopens this result.
+                        for task in &mut running {
+                            self.executor.cancel(&task.task_id);
+                            task.timeout_cancel_requested = true;
+                            task.timeout_ms = Some(0);
+                            task.started_at = Instant::now() - timeout_with_grace(0);
+                        }
+                        AgentTaskScheduleSupport::expire_timed_out_tasks(
+                            &mut running,
+                            &mut quarantined,
+                            &mut outcomes,
+                            &mut events,
+                            self.executor.as_ref(),
+                        );
+                        break;
+                    }
                 }
                 Err(Some(mpsc::RecvTimeoutError::Timeout)) => {}
                 Err(Some(mpsc::RecvTimeoutError::Disconnected)) | Err(None) => break,
@@ -961,6 +1005,22 @@ where
             AgentTaskScheduleSupport::artifact_lineage(&outcomes, &plan.artifact_outputs);
         let child_runs = child_runs_for_outcomes(&outcomes);
         let artifact_bindings = artifact_bindings_for_outcomes(&outcomes);
+
+        if candidate_completion == AgentTaskCandidateCompletionPolicy::WaitAll {
+            if let Some(selected) = outcomes
+                .iter_mut()
+                .find(|outcome| outcome.status == AgentTaskOutcomeStatus::Succeeded)
+            {
+                if !selected.metadata.is_object() {
+                    selected.metadata = serde_json::json!({});
+                }
+                selected.metadata["candidate_selection"] = serde_json::json!({
+                    "policy": "wait_all",
+                    "selected_task_id": selected.task_id,
+                    "promotion_action": "promote_selected_candidate_only",
+                });
+            }
+        }
 
         AgentTaskAggregate {
             schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),

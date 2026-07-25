@@ -107,6 +107,10 @@ pub struct AgentTaskScheduleOptions {
     /// `metadata.provider_rotation` object overrides both (#6978).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotation: Option<AgentTaskProviderRotationPolicy>,
+    /// Completion rule for tasks sharing a candidate group. The default retains
+    /// every result for comparison before the controller selects one.
+    #[serde(default)]
+    pub candidate_completion: AgentTaskCandidateCompletionPolicy,
 }
 
 impl Default for AgentTaskScheduleOptions {
@@ -123,8 +127,20 @@ impl Default for AgentTaskScheduleOptions {
             retry: AgentTaskRetryPolicy::default(),
             execution_budget: AgentTaskExecutionBudget::default(),
             rotation: None,
+            candidate_completion: AgentTaskCandidateCompletionPolicy::WaitAll,
         }
     }
+}
+
+/// Controls when an explicitly grouped set of isolated candidates is selected.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskCandidateCompletionPolicy {
+    /// Preserve the established comparison workflow.
+    #[default]
+    WaitAll,
+    /// Select the first successful candidate and durably cancel siblings.
+    FirstGreen,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
