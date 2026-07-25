@@ -227,6 +227,14 @@ mod tests {
         );
         assert!(help.contains("before opening the pull request"), "{help}");
     }
+
+    #[test]
+    fn cook_help_advertises_one_prompt_source_not_wave_inputs() {
+        let help = rendered_cook_help();
+        assert!(help.contains("--prompt"), "{help}");
+        assert!(!help.contains("--task <"), "{help}");
+        assert!(!help.contains("--tasks <"), "{help}");
+    }
 }
 
 #[derive(Args, Debug, Clone)]
@@ -238,8 +246,8 @@ pub struct AgentTaskCookArgs {
     #[arg(long, hide = true)]
     pub attempt_plan: Option<String>,
     /// One-line statement of what a successful cook must achieve. Recorded as
-    /// framing metadata for every provider cell and used for review. Without
-    /// --prompt, --task, or --tasks, it supplies the one provider task.
+    /// framing metadata for the provider task and used for review. Without
+    /// --prompt, it supplies the one provider task.
     #[arg(long, value_name = "TEXT")]
     pub goal: Option<String>,
     /// Workspace handle the cook edits, verifies, and finalizes into (e.g.

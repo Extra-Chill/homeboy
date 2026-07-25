@@ -14,8 +14,8 @@ use homeboy::agents::agent_tasks::dispatch_service::{
 // (#5187).
 #[derive(Args, Debug, Clone)]
 pub struct DispatchCoreArgs {
-    /// JSON array/object of task prompts for waves. Supports @file and - for stdin.
-    #[arg(long = "tasks", value_name = "JSON")]
+    /// Reserved batch input. Use `agent-task fanout cook-batch` for task waves.
+    #[arg(long = "tasks", value_name = "JSON", hide = true)]
     pub tasks_json: Option<String>,
 
     /// Provider config JSON object, @file, or - for stdin. Merged with workspace metadata.
@@ -97,12 +97,12 @@ impl From<DispatchCoreArgs> for DispatchCoreInputs {
 
 #[derive(Args, Debug, Clone)]
 pub struct DispatchArgs {
-    /// Inline prompt, @file, or - for stdin. Repeat --task for waves.
+    /// Inline prompt, @file, or - for stdin.
     #[arg(long, value_name = "PROMPT")]
     pub prompt: Option<String>,
 
-    /// Additional task prompt, @file, or - for stdin. Each --task creates one minion cell.
-    #[arg(long = "task", value_name = "PROMPT")]
+    /// Reserved batch input retained for forward-compatible command decoding.
+    #[arg(long = "task", value_name = "PROMPT", hide = true)]
     pub tasks: Vec<String>,
 
     /// Existing local repo checkout or worktree path to cook in.

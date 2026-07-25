@@ -317,9 +317,9 @@ homeboy agent-task prompts list
 homeboy agent-task cook --repo homeboy --prompt prompt:issue-123
 ```
 
-Existing prompt inputs remain compatible: `--prompt @file`, `--prompt -`, inline
-prompt text, repeated `--task`, and `--tasks @tasks.json` still use the existing
-resolution behavior unless the prompt string starts with `prompt:`.
+Cook accepts one source through `--prompt`: `--prompt @file`, `--prompt -`, inline
+prompt text, and `prompt:<id>` references all use the same resolution behavior.
+Use `agent-task fanout cook-batch` for independent task waves.
 
 ### Controller
 
@@ -528,10 +528,9 @@ promotes the selected patch into the target worktree, runs deterministic gates,
 retries red gates within the configured budget, then commits, pushes, and opens or
 updates a PR.
 
-`--goal` is one-line Cook framing metadata, recorded on the durable plan and each
-provider cell. When work is supplied with `--prompt`, repeated `--task`, or
-`--tasks`, those inputs alone determine the cell count; `--goal` never creates an
-additional cell. A goal without explicit work supplies one provider task.
+`--goal` is one-line Cook framing metadata, recorded on the durable plan and its
+single provider task. Pair explicit work with `--prompt`; `--goal` never creates
+an additional task. A goal without explicit work supplies the one provider task.
 
 ```bash
 homeboy agent-task cook \

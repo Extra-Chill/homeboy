@@ -65,6 +65,9 @@ pub(crate) fn run_with_cook_progress(
     match args.command {
         AgentTaskCommand::Doctor(doctor_args) => doctor::doctor(doctor_args),
         AgentTaskCommand::Cook(cook_args) => {
+            // Reject unsupported Cook source shapes before discovering a provider
+            // or preparing the local/Lab execution route.
+            run::validate_cook_request(&cook_args)?;
             if progress.is_some() {
                 run::run_cook_with_executor_and_dispatcher_with_progress(
                     cook_args,

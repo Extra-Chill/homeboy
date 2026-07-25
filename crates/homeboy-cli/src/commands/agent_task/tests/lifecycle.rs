@@ -7,7 +7,7 @@ use homeboy::agents::agent_task_service::{
 };
 use homeboy::core::{Error, Result};
 use sha2::{Digest, Sha256};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::cli_surface::{Cli, Commands};
 
@@ -16,6 +16,164 @@ use super::super::AgentTaskCommand;
 #[derive(Debug)]
 struct RecoverableRunnerDispatcher {
     unavailable: AtomicBool,
+}
+
+#[derive(Debug, Default)]
+struct CountingCookDispatcher {
+    prepared: AtomicUsize,
+    dispatched: AtomicUsize,
+}
+
+impl AgentTaskCookAttemptDispatcher for CountingCookDispatcher {
+    fn durable_recipe(&self) -> Result<Value> {
+        Ok(json!({ "kind": "counting-cook-dispatcher" }))
+    }
+
+    fn prepare_for_cook(&self) -> Result<()> {
+        self.prepared.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn dispatch_attempt(
+        &self,
+        _plan: AgentTaskPlan,
+        _run_id: &str,
+        _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    ) -> Result<()> {
+        self.dispatched.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Default)]
+struct CountingCookExecutor {
+    executions: Arc<AtomicUsize>,
+}
+
+impl AgentTaskExecutorAdapter for CountingCookExecutor {
+    fn execute(
+        &self,
+        request: AgentTaskRequest,
+        _context: AgentTaskExecutionContext,
+    ) -> AgentTaskOutcome {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: request.task_id,
+            status: AgentTaskOutcomeStatus::Succeeded,
+            summary: Some("unexpected execution".to_string()),
+            failure_classification: None,
+            artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
+            evidence_refs: Vec::new(),
+            diagnostics: Vec::new(),
+            outputs: Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        }
+    }
+}
+
+fn cook_args_from_cli(args: Vec<String>) -> AgentTaskCookArgs {
+    let cli = Cli::parse_from(args);
+    let Commands::AgentTask(agent_task) = cli.command else {
+        panic!("agent-task command");
+    };
+    let AgentTaskCommand::Cook(cook) = agent_task.command else {
+        panic!("cook command");
+    };
+    cook
+}
+
+#[test]
+fn invalid_cook_sources_stop_before_worktree_provider_runner_executor_or_budget() {
+    with_temp_home(|| {
+        let destination = tempfile::tempdir()
+            .expect("destination parent")
+            .path()
+            .join("missing");
+        let cases = [
+            (
+                vec!["--goal", "Frame the work", "--task", "Do the work"],
+                "--goal and --task conflict",
+            ),
+            (
+                vec!["--task", "First task", "--task", "Second task"],
+                "repeated --task",
+            ),
+            (vec!["--tasks", r#"["Wave task"]"#], "--tasks JSON"),
+        ];
+
+        for (index, (source, diagnostic)) in cases.into_iter().enumerate() {
+            let run_id = format!("invalid-cook-source-{index}");
+            let mut command = vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+            ];
+            command.extend(source.into_iter().map(str::to_string));
+            command.extend([
+                "--to-worktree".to_string(),
+                destination.display().to_string(),
+                "--backend".to_string(),
+                "unconfigured-provider".to_string(),
+                "--run-id".to_string(),
+                run_id.clone(),
+                "--no-finalize".to_string(),
+            ]);
+            let executor = CountingCookExecutor::default();
+            let dispatcher = Arc::new(CountingCookDispatcher::default());
+
+            let error = run_cook_with_executor_and_dispatcher(
+                cook_args_from_cli(command),
+                executor.clone(),
+                Some(dispatcher.clone()),
+            )
+            .expect_err(diagnostic);
+
+            assert!(error.message.contains(diagnostic), "{error}");
+            assert!(
+                error.details["tried"].as_array().is_some_and(|hints| hints
+                    .iter()
+                    .any(|hint| hint
+                        .as_str()
+                        .is_some_and(|hint| hint.contains("homeboy agent-task cook")))),
+                "diagnostic must include a complete replacement command: {error}"
+            );
+            assert!(
+                !destination.exists(),
+                "invalid source must not materialize a worktree"
+            );
+            assert_eq!(dispatcher.prepared.load(Ordering::SeqCst), 0);
+            assert_eq!(dispatcher.dispatched.load(Ordering::SeqCst), 0);
+            assert_eq!(executor.executions.load(Ordering::SeqCst), 0);
+            assert!(
+                lifecycle_status(&run_id).is_err(),
+                "invalid source must not create a lifecycle record or consume budget"
+            );
+        }
+    });
+}
+
+#[test]
+fn goal_and_prompt_remain_a_valid_single_source_cook_shape() {
+    let args = cook_args_from_cli(vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--goal".to_string(),
+        "Frame the outcome".to_string(),
+        "--prompt".to_string(),
+        "Implement the outcome".to_string(),
+        "--to-worktree".to_string(),
+        "sample-plugin@fix-issue".to_string(),
+        "--backend".to_string(),
+        "fixture".to_string(),
+        "--no-finalize".to_string(),
+    ]);
+
+    validate_cook_request(&args).expect("goal plus prompt is one valid Cook source");
 }
 
 impl AgentTaskCookAttemptDispatcher for RecoverableRunnerDispatcher {

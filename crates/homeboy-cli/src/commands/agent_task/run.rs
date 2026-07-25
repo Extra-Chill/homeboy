@@ -47,6 +47,7 @@ fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregate) -> Value
 }
 
 pub(crate) fn run_cook(args: AgentTaskCookArgs) -> CmdResult<Value> {
+    validate_cook_request(&args)?;
     run_cook_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
 }
 
@@ -328,6 +329,22 @@ pub(crate) fn record_cook_provision(plan: &mut AgentTaskPlan, provision: Value) 
 }
 
 pub(crate) fn validate_cook_request(args: &AgentTaskCookArgs) -> homeboy::core::Result<()> {
+    if args.goal.is_some() && !args.dispatch.tasks.is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "task",
+            "agent-task cook uses --goal as framing metadata and --prompt as its one source; --goal and --task conflict",
+            None,
+            Some(vec![
+                "Use: homeboy agent-task cook --goal 'Describe the outcome' --prompt @task.txt --to-worktree sample-plugin@fix-issue --verify 'npm test'".to_string(),
+            ]),
+        ));
+    }
+    let dispatch = dispatch_args_for_cook(args);
+    dispatch_service::validate_single_cook_prompt_source(
+        dispatch.prompt.as_deref(),
+        &dispatch.tasks,
+        dispatch.core.tasks_json.as_deref(),
+    )?;
     if !args.gates.has_deterministic_gate() && !args.no_finalize {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "verify",
