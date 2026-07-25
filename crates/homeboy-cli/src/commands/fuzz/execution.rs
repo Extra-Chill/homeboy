@@ -128,7 +128,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         &results_path,
         &artifacts_dir,
     )?;
-    let (results, results_error) = if results_path.exists() {
+    let (mut results, results_error) = if results_path.exists() {
         match parse_fuzz_results_file(&results_path) {
             Ok(results) => (Some(results), None),
             Err(error) => (None, Some(error.to_string())),
@@ -159,6 +159,31 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
     let exit_code = outcome.exit_code;
     let success = outcome.success;
     let status = outcome.status.to_string();
+    let payloads = if let Some(campaign) = results.as_mut() {
+        // This transient root is not included in the runner's directory artifact;
+        // the content-addressed files below are persisted exactly once by the store.
+        let payload_root = run_dir.step_file("fuzz-payloads");
+        let payloads = homeboy::fuzz::externalize_fuzz_campaign_payloads(campaign, &payload_root)?;
+        let json = serde_json::to_vec_pretty(campaign).map_err(|error| {
+            homeboy::core::Error::internal_unexpected(format!(
+                "failed to encode bounded fuzz results: {error}"
+            ))
+        })?;
+        homeboy::core::io::write_output_file_atomically(
+            &results_path,
+            json,
+            homeboy::core::io::OutputWriteOptions::file(),
+        )
+        .map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(results_path.display().to_string()),
+            )
+        })?;
+        payloads
+    } else {
+        Vec::new()
+    };
     let workload_path = selected_workload.and_then(|workload| workload.manifest_path.clone());
     let persisted_evidence = persist_fuzz_run_evidence(FuzzRunEvidenceInput {
         run_id: args.run_id.as_deref(),
@@ -179,6 +204,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         results_error: combined_results_error,
         missing_artifact_refs: &artifact_ref_validation.missing_refs,
         postprocess: &postprocess,
+        payloads: &payloads,
     })?;
     let evidence_followups = fuzz_evidence_followups(
         args.run_id.as_deref(),
@@ -753,6 +779,7 @@ pub(super) struct FuzzRunEvidenceInput<'a> {
     pub(super) results_error: Option<&'a str>,
     pub(super) missing_artifact_refs: &'a [String],
     pub(super) postprocess: &'a [FuzzArtifactPostprocessOutput],
+    pub(super) payloads: &'a [homeboy::fuzz::FuzzPayload],
 }
 
 pub(super) struct FuzzRunPersistedEvidence {
@@ -867,6 +894,7 @@ pub(super) fn persist_fuzz_run_evidence(
             envelope,
             missing_artifact_refs: input.missing_artifact_refs,
             postprocess: generic_postprocess_outputs,
+            payloads: input.payloads,
         })?;
     Ok(FuzzRunPersistedEvidence {
         run: Some(run),

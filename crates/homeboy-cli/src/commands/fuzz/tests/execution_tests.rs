@@ -67,6 +67,7 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
             results_error: None,
             missing_artifact_refs: &[],
             postprocess: &[],
+            payloads: &[],
         })
         .expect("persist fuzz run")
         .run
@@ -212,6 +213,7 @@ fn fuzz_execution_request_artifact_records_runner_intent() {
             results_error: None,
             missing_artifact_refs: &[],
             postprocess: &[],
+            payloads: &[],
         })
         .expect("persist fuzz run");
         let store = ObservationStore::open_initialized().expect("store");
@@ -497,6 +499,7 @@ fn fuzz_sequence_plan_flag_records_request_env_and_artifact() {
             results_error: None,
             missing_artifact_refs: &[],
             postprocess: &[],
+            payloads: &[],
         })
         .expect("persist fuzz run");
 
@@ -597,6 +600,7 @@ fn fuzz_run_persists_coverage_reconciliation_artifact() {
             results_error: None,
             missing_artifact_refs: &[],
             postprocess: &[],
+            payloads: &[],
         })
         .expect("persist fuzz run");
 
@@ -672,6 +676,7 @@ fn fuzz_run_persistence_generates_run_id_when_omitted() {
             results_error: None,
             missing_artifact_refs: &[],
             postprocess: &[],
+            payloads: &[],
         })
         .expect("persist fuzz run")
         .run
@@ -723,6 +728,7 @@ fn fuzz_run_persists_result_envelope_artifact_for_valid_campaign() {
             results_error: None,
             missing_artifact_refs: &[],
             postprocess: &[],
+            payloads: &[],
         })
         .expect("persist fuzz run");
 
@@ -1283,6 +1289,7 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
             ),
             missing_artifact_refs: &[],
             postprocess: &[],
+            payloads: &[],
         })
         .expect("persist fuzz run")
         .run
