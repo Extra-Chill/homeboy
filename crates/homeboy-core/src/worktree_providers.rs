@@ -1037,6 +1037,10 @@ fn run_command_provider_cleanup_with_liveness(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::engine::command::isolate_process_tree(&mut process);
+    eprintln!(
+        "[cleanup.worktrees provider={provider_id} phase={}] starting",
+        mode_phase(&mode)
+    );
     match process.spawn() {
         Ok(mut child) => {
             let started = std::time::Instant::now();
