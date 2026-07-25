@@ -373,7 +373,6 @@ impl CliRuntime {
         commands::set_skip_deps_hydration(cli.skip_deps_hydration);
         normalize_runs_runner_options(&mut cli, &normalized);
         normalize_cook_runner_option(&mut cli, &normalized);
-        crate::commands::utils::execution_provenance::capture(&cli, &normalized);
 
         if matches!(&cli.command, Commands::Runs(args) if args.is_bundle_export()) {
             output_file = None;
@@ -416,6 +415,10 @@ impl CliRuntime {
             }
             return std::process::ExitCode::from(exit_code_to_u8(exit_code));
         }
+
+        // Persist the actual preflight decision with the command intent before
+        // placement routing can consume controller transport markers.
+        crate::commands::utils::execution_provenance::capture(&cli, &normalized);
 
         let route_result =
             crate::commands::route::route_after_parse(&cli, &normalized, output_file.as_deref());

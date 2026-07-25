@@ -83,7 +83,12 @@ fn build_with_execution(
 
 fn redact_execution_argv(args: &[String]) -> Vec<String> {
     let policy = homeboy::core::redaction::RedactionPolicy::default();
-    let mut redacted = homeboy::core::redaction::redact_argv(args);
+    let args = args
+        .iter()
+        .filter(|arg| arg.as_str() != crate::commands::utils::args::EXPLICIT_PASSTHROUGH_SENTINEL)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut redacted = homeboy::core::redaction::redact_argv(&args);
     for index in 0..args.len() {
         let replacement = match args[index].as_str() {
             "--runner-env" if index + 1 < args.len() => {
@@ -259,5 +264,23 @@ mod tests {
 
         assert!(command.contains("--placement local"));
         assert!(!command.contains("secret-value"));
+    }
+
+    #[test]
+    fn rerun_command_omits_internal_passthrough_marker() {
+        let value = provenance(&[
+            "homeboy",
+            "review",
+            "test",
+            "--",
+            crate::commands::utils::args::EXPLICIT_PASSTHROUGH_SENTINEL,
+            "--filter=SmokeTest",
+        ]);
+        let command = value["operator_intent"]["rerun_command"]
+            .as_str()
+            .expect("rerun command");
+
+        assert!(command.contains("-- --filter=SmokeTest"));
+        assert!(!command.contains(crate::commands::utils::args::EXPLICIT_PASSTHROUGH_SENTINEL));
     }
 }

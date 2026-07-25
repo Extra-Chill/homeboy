@@ -11,7 +11,7 @@ use clap::{Arg, ArgAction, Args, Command, CommandFactory};
 use crate::cli_surface::Cli;
 use homeboy::core::component::{self, Component};
 
-const EXPLICIT_PASSTHROUGH_SENTINEL: &str = "__homeboy_explicit_passthrough__";
+pub(crate) const EXPLICIT_PASSTHROUGH_SENTINEL: &str = "__homeboy_explicit_passthrough__";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CliFlagSpec {
