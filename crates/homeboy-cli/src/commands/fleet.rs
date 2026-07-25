@@ -481,6 +481,9 @@ fn log_fleet_dashboard(result: &FleetStatusResult) {
                 FleetComponentDrift::BehindUpstream => "⬇️  behind upstream",
                 FleetComponentDrift::NeedsRelease => "🔶 needs release",
                 FleetComponentDrift::DocsOnly => "📝 docs only",
+                FleetComponentDrift::RemoteModified => "⚠️  remote modified",
+                FleetComponentDrift::Missing => "❌ missing",
+                FleetComponentDrift::MixedDrift => "⚠️  mixed drift",
                 FleetComponentDrift::Unknown => "❓ unknown",
             };
 

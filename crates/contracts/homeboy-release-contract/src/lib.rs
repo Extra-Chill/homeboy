@@ -41,6 +41,12 @@ pub enum ComponentStatus {
     BehindUpstream,
     /// Remote matches a configured source checkout that is stale or detached
     SourceStale,
+    /// The target has the same release version but different deployed content.
+    RemoteModified,
+    /// The target does not exist.
+    Missing,
+    /// Local and remote both differ from the known release identity.
+    MixedDrift,
     /// Cannot determine status
     Unknown,
 }
@@ -48,7 +54,7 @@ pub enum ComponentStatus {
 impl ComponentStatus {
     /// Whether deploying the configured source would advance the target.
     pub fn requires_deploy(&self) -> bool {
-        matches!(self, Self::NeedsUpdate)
+        matches!(self, Self::NeedsUpdate | Self::Missing)
     }
 }
 

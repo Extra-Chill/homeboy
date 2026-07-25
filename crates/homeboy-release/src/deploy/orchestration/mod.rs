@@ -218,6 +218,7 @@ pub(super) fn deploy_components(
             &project,
             base_path,
             config,
+            &ctx.client,
         ));
     }
     if config.dry_run {
@@ -385,6 +386,38 @@ pub(super) fn deploy_components(
             });
         }
     };
+
+    // Re-probe immediately before the first destructive write. A same-version
+    // mismatch is remote-only content drift, not an ordinary local update.
+    for prepared in prepared_deployments.iter() {
+        let Some(local_path) = prepared
+            .artifact_path
+            .as_deref()
+            .filter(|path| path.is_dir())
+        else {
+            continue;
+        };
+        let manifest =
+            super::content_manifest::compare(local_path, &prepared.install_dir, &ctx.client);
+        if prepared.local_version == prepared.remote_version
+            && !config.force
+            && manifest.status != "match"
+            && manifest.status != "missing"
+        {
+            return Err(Error::validation_invalid_argument(
+                "content_drift",
+                format!(
+                    "Refusing to overwrite '{}' at {} without a matching content manifest ({})",
+                    prepared.component.id, prepared.install_dir, manifest.status
+                ),
+                None,
+                Some(vec![
+                    "Review the bounded content_manifest differences with `homeboy deploy --check` first".to_string(),
+                    "Use the existing explicit --force --apply boundary only after that review".to_string(),
+                ]),
+            ));
+        }
+    }
 
     // Execute deployments only after every component passed the local preflight.
     let mut results: Vec<ComponentDeployResult> = vec![];
