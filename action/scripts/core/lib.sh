@@ -236,6 +236,25 @@ settings_json_flags() {
   done < <(printf '%s' "${raw}" | jq -r 'to_entries[] | [.key, (.value | tojson)] | @tsv')
 }
 
+valid_command_result_output() {
+  local output_file="$1" expected_command="$2" command_exit="$3"
+  jq -e \
+    --arg command "${expected_command}" \
+    --argjson command_exit "${command_exit}" '
+      type == "object"
+      and .schema_version == 1
+      and .command == $command
+      and (.success | type == "boolean")
+      and (.status | type == "string")
+      and (.exit_code | type == "number")
+      and .exit_code == $command_exit
+      and (if .success
+           then .status == "success" and .exit_code == 0
+           else (.status == "failure" or .status == "failed") and .exit_code != 0
+           end)
+    ' "${output_file}" >/dev/null 2>&1
+}
+
 review_subcommand_run_command() {
   local cmd="$1"
   local component_id="$2"

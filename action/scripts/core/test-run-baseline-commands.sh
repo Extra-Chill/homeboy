@@ -25,7 +25,7 @@ mkdir -p "$(dirname "${output}")"
 case "${FAKE_HOMEBOY_MODE:-}" in
   missing) : ;;
   malformed) printf '%s\n' 'not json' > "${output}" ;;
-  *) printf '%s\n' '{"success":true}' > "${output}" ;;
+  *) printf '%s\n' '{"schema_version":1,"command":"review test","success":true,"status":"success","exit_code":0,"data":{}}' > "${output}" ;;
 esac
 
 case "${FAKE_HOMEBOY_MODE:-}" in
@@ -112,7 +112,7 @@ if ! grep -q 'baseline homeboy review test exceeded its 1s execution timeout' "$
   printf 'FAIL: baseline timeout did not emit actionable liveness evidence\n'
   exit 1
 fi
-if ! jq -e '."review test" | .status == "timeout" and .exit_code == 124 and .structured_output == true' "${timeout_output_dir}/baseline-status.json" >/dev/null; then
+if ! jq -e '."review test" | .status == "timeout" and .exit_code == 124 and .structured_output == false' "${timeout_output_dir}/baseline-status.json" >/dev/null; then
   printf 'FAIL: baseline timeout did not preserve differential failure semantics\n'
   exit 1
 fi

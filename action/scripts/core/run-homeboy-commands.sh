@@ -71,7 +71,7 @@ for CMD in "${CMD_ARRAY[@]}"; do
   echo "::endgroup::"
 
   STRUCTURED_OUTPUT=true
-  if [ ! -s "${OUTPUT_JSON}" ] || ! jq -e 'type == "object"' "${OUTPUT_JSON}" >/dev/null 2>&1; then
+  if [ ! -s "${OUTPUT_JSON}" ] || ! valid_command_result_output "${OUTPUT_JSON}" "${CMD}" "${CMD_EXIT}"; then
     STRUCTURED_OUTPUT=false
     echo "::error::homeboy ${CMD} did not write valid structured output to ${OUTPUT_JSON}"
   elif [ "$(printf '%s' "${CMD}" | awk '{print $1}')" = "bench" ]; then

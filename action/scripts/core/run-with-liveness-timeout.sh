@@ -13,6 +13,7 @@ shift
 timeout_seconds="${HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS:-1800}"
 cleanup_timeout_seconds="${HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS:-15}"
 require_containment_proof="${HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF:-false}"
+cgroup_root="${HOMEBOY_ACTION_CGROUP_ROOT:-/sys/fs/cgroup}"
 
 for value_name in timeout_seconds cleanup_timeout_seconds; do
   value="${!value_name}"
@@ -115,27 +116,38 @@ terminate_containment() {
   return 0
 }
 
+# Establish strict containment before command launch. Moving an already-running
+# process into a cgroup leaves a window for a double-forked child to escape.
+if [ -d "${cgroup_root}" ] && [ -w "${cgroup_root}" ]; then
+  candidate_cgroup="${cgroup_root}/homeboy-action-$$-${RANDOM}"
+  if mkdir "${candidate_cgroup}" 2>/dev/null; then
+    containment_cgroup="${candidate_cgroup}"
+  fi
+fi
+if [ "${require_containment_proof}" = true ] && [ -z "${containment_cgroup}" ]; then
+  echo "::error::${label} cannot establish pre-launch descendant containment; refusing to run this strict command."
+  exit 125
+fi
+
 # Job control gives the child command its own process group. Capturing its output
 # directly in a file prevents a descendant-held stdout pipe from wedging `tee`
 # after the command parent exits.
 set -m
-if [ -n "${log_file}" ]; then
+if [ -n "${containment_cgroup}" ]; then
+  if [ -n "${log_file}" ]; then
+    HOMEBOY_ACTION_CHILD_CGROUP="${containment_cgroup}" bash -c 'echo "$$" > "${HOMEBOY_ACTION_CHILD_CGROUP}/cgroup.procs" || exit 125; exec "$0" "$@"' "$@" >"${log_file}" 2>&1 &
+  else
+    HOMEBOY_ACTION_CHILD_CGROUP="${containment_cgroup}" bash -c 'echo "$$" > "${HOMEBOY_ACTION_CHILD_CGROUP}/cgroup.procs" || exit 125; exec "$0" "$@"' "$@" &
+  fi
+elif [ -n "${log_file}" ]; then
   "$@" >"${log_file}" 2>&1 &
 else
   "$@" &
 fi
 command_pid=$!
 set +m
-
-# A dedicated cgroup contains descendants even if they create a new session.
-if [ -d /sys/fs/cgroup ] && [ -w /sys/fs/cgroup ]; then
-  candidate_cgroup="/sys/fs/cgroup/homeboy-action-${command_pid}-$$"
-  if mkdir "${candidate_cgroup}" 2>/dev/null && echo "${command_pid}" > "${candidate_cgroup}/cgroup.procs" 2>/dev/null; then
-    containment_cgroup="${candidate_cgroup}"
-    echo "::notice::${label} is contained in cgroup ${containment_cgroup}."
-  else
-    rmdir "${candidate_cgroup}" 2>/dev/null || true
-  fi
+if [ -n "${containment_cgroup}" ]; then
+  echo "::notice::${label} is contained in cgroup ${containment_cgroup}."
 fi
 
 (

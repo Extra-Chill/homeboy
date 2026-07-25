@@ -30,7 +30,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 mkdir -p "$(dirname "${output}")"
-printf '%s\n' '{"success":true,"data":{"test_counts":{"failed":0,"passed":1,"total":1}}}' > "${output}"
+printf '%s\n' '{"schema_version":1,"command":"review test","success":true,"status":"success","exit_code":0,"data":{"test_counts":{"failed":0,"passed":1,"total":1}}}' > "${output}"
 case "${FAKE_HOMEBOY_MODE:-pass}" in
   descendant)
     sleep 30 &

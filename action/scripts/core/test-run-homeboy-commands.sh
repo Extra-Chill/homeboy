@@ -19,7 +19,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 mkdir -p "$(dirname "${output}")"
-printf '%s\n' '{"success":false,"data":{"test_counts":{"failed":2,"passed":41,"total":43}}}' > "${output}"
+printf '%s\n' '{"schema_version":1,"command":"review test","success":false,"status":"failure","exit_code":1,"data":{"test_counts":{"failed":2,"passed":41,"total":43}}}' > "${output}"
 exit 1
 SH
 chmod +x "${TMP_DIR}/bin/homeboy"
@@ -78,6 +78,36 @@ SH
   fi
 done
 printf 'PASS: zero-exit missing and malformed structured output fail closed\n'
+
+for envelope_mode in empty wrong-command inconsistent; do
+  cat > "${TMP_DIR}/bin/homeboy" <<'SH'
+#!/usr/bin/env bash
+output=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output) output="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+mkdir -p "$(dirname "${output}")"
+case "${FAKE_ENVELOPE_MODE}" in
+  empty) printf '%s\n' '{}' > "${output}" ;;
+  wrong-command) printf '%s\n' '{"schema_version":1,"command":"review audit","success":true,"status":"success","exit_code":0,"data":{}}' > "${output}" ;;
+  inconsistent) printf '%s\n' '{"schema_version":1,"command":"review test","success":true,"status":"success","exit_code":1,"data":{}}' > "${output}" ;;
+esac
+exit 0
+SH
+  chmod +x "${TMP_DIR}/bin/homeboy"
+  set +e
+  PATH="${TMP_DIR}/bin:${PATH}" GITHUB_ACTION_PATH="${ROOT_DIR}" GITHUB_WORKSPACE="${TMP_DIR}/workspace" GITHUB_OUTPUT="${TMP_DIR}/${envelope_mode}-output" GITHUB_ENV="${TMP_DIR}/${envelope_mode}-env" RESOLVED_COMMANDS='review test' COMPONENT_NAME='homeboy-action' FAKE_ENVELOPE_MODE="${envelope_mode}" bash "${ROOT_DIR}/scripts/core/run-homeboy-commands.sh" >"${TMP_DIR}/${envelope_mode}.log" 2>&1
+  exit_code=$?
+  set -e
+  if [ "${exit_code}" -ne 1 ] || ! grep -q '^results={"review test":"fail"}$' "${TMP_DIR}/${envelope_mode}-output"; then
+    printf 'FAIL: %s command-result envelope passes\n' "${envelope_mode}"
+    exit 1
+  fi
+done
+printf 'PASS: empty, wrong-command, and inconsistent envelopes fail closed\n'
 
 cat > "${TMP_DIR}/bin/homeboy" <<'SH'
 #!/usr/bin/env bash
