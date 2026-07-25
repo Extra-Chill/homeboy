@@ -415,11 +415,11 @@ fn changed_since_comparison_counts_new_findings_as_introduced() {
 }
 
 #[test]
-fn changed_since_without_persisted_baseline_reuses_the_authoritative_result() {
-    let mut finding = make_finding(AuditFinding::GodFile, "src/changed.rs");
-    finding.convention = "structural".to_string();
+fn changed_since_without_persisted_baseline_keeps_introduced_findings_blocking() {
+    let mut finding = make_finding(AuditFinding::UnreferencedExport, "src/changed.rs");
+    finding.convention = "dead_code".to_string();
     let result = make_result(vec![finding]);
-    let baseline = crate::baseline::baseline_from_result(&result);
+    let baseline = make_baseline(vec![]);
 
     let workflow = build_comparison_output(
         result,
@@ -428,21 +428,21 @@ fn changed_since_without_persisted_baseline_reuses_the_authoritative_result() {
         &make_changed_since_args(),
         make_timing(),
     )
-    .expect("comparison output builds from the one authoritative audit result");
+    .expect("comparison output builds from the base-tree baseline");
 
-    assert_eq!(workflow.exit_code, 0);
+    assert_eq!(workflow.exit_code, 1);
     match workflow.output {
         crate::report::AuditCommandOutput::Compared {
             changed_since,
             baseline_comparison,
             ..
         } => {
-            assert!(baseline_comparison.new_items.is_empty());
+            assert_eq!(baseline_comparison.new_items.len(), 1);
             assert_eq!(
                 changed_since,
                 Some(crate::report::AuditChangedSinceSummary {
-                    introduced_findings: 0,
-                    contextual_findings: 1,
+                    introduced_findings: 1,
+                    contextual_findings: 0,
                 })
             );
         }

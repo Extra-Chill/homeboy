@@ -7,6 +7,7 @@ use crate::{baseline, AuditTiming, AuditWithAnalysis, CodeAuditResult};
 use homeboy_engine_primitives::git_changes;
 use std::collections::HashSet;
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 use super::report::{self, AuditCommandOutput};
 
@@ -319,11 +320,10 @@ fn run_comparison_workflow(
             baseline::load_baseline(Path::new(&result.source_path))
                 .or_else(|| baseline::load_baseline_from_ref(&result.source_path, git_ref))
         };
-        // The candidate scan is authoritative for both diagnostics and the
-        // changed-scope decision. A persisted baseline is already a stable
-        // machine-readable projection of the base revision, so re-running the
-        // detector pipeline against a git archive adds no information.
-        let baseline = persisted.unwrap_or_else(|| baseline::baseline_from_result(&result));
+        let reference = timing.time_phase("reference_baseline", || {
+            audit_reference_result(args, git_ref, analysis)
+        })?;
+        let baseline = baseline::baseline_with_reference_findings(persisted, &reference);
         return build_comparison_output(result, analysis, baseline, args, timing);
     }
 
@@ -378,6 +378,85 @@ fn run_comparison_workflow(
             timing,
         })
     }
+}
+
+/// Audit the selected base ref without modifying the caller's checkout.
+///
+/// Candidate and base trees differ by definition, so their detector results
+/// cannot be substituted for one another. Shared dead-code reference inputs are
+/// projected onto the archive to avoid a second repository-wide reference walk.
+fn audit_reference_result(
+    args: &AuditRunWorkflowArgs,
+    git_ref: &str,
+    candidate_analysis: &crate::AuditAnalysisContext,
+) -> homeboy_error::Result<CodeAuditResult> {
+    let source = Path::new(&args.source_path);
+    let archive = Command::new("git")
+        .args(["archive", "--format=tar", git_ref])
+        .current_dir(source)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| {
+            homeboy_error::Error::git_command_failed(format!("git archive {git_ref}: {error}"))
+        })?;
+    if !archive.status.success() {
+        return Err(homeboy_error::Error::git_command_failed(format!(
+            "git archive {git_ref}: {}",
+            String::from_utf8_lossy(&archive.stderr).trim()
+        )));
+    }
+
+    let reference_root = tempfile::tempdir().map_err(|error| {
+        homeboy_error::Error::internal_io(
+            format!("create audit reference directory: {error}"),
+            Some("audit.reference_baseline".to_string()),
+        )
+    })?;
+    let extraction = Command::new("tar")
+        .args(["-x", "-C"])
+        .arg(reference_root.path())
+        .stdin(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .expect("tar stdin is piped")
+                .write_all(&archive.stdout)?;
+            child.wait()
+        })
+        .map_err(|error| {
+            homeboy_error::Error::internal_io(
+                format!("extract audit reference archive: {error}"),
+                Some("audit.reference_baseline".to_string()),
+            )
+        })?;
+    if !extraction.success() {
+        return Err(homeboy_error::Error::internal_io(
+            format!("extract audit reference archive exited with {extraction}"),
+            Some("audit.reference_baseline".to_string()),
+        ));
+    }
+
+    let changed = changed_files_for_scope(args, git_ref)?;
+    let dead_code_references = candidate_analysis
+        .dead_code_references
+        .as_ref()
+        .map(|references| references.project_reference(reference_root.path(), &changed));
+    let mut reference = crate::audit_path_scoped_with_plan_and_analysis(
+        &args.component_id,
+        &reference_root.path().to_string_lossy(),
+        &changed,
+        None,
+        &audit_plan(args),
+        &args.reference_paths,
+        &args.extension_overrides,
+        dead_code_references,
+    )?
+    .result;
+    apply_finding_filters(&mut reference, &args.only_kinds, &args.exclude_kinds);
+    Ok(reference)
 }
 
 /// Build comparison output from a result and baseline.
