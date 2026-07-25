@@ -1296,6 +1296,14 @@ pub fn reconnect_job_log_owner(runner_id: &str, job_id: &str) -> Result<RunnerSe
     })
 }
 
+/// Close the local tunnel opened exclusively for job log/cancel recovery. This
+/// never stops the remote daemon generation that owns the durable job.
+pub fn close_reconnected_job_log_owner(session: &RunnerSession) {
+    if let Some(pid) = session.tunnel_pid {
+        terminate_pid(pid);
+    }
+}
+
 /// Resolve a direct-SSH session for work admission. A readiness observation can
 /// become stale when its controller-owned tunnel exits before submission; the
 /// reconnect transaction proves the remote daemon lease before replacing the

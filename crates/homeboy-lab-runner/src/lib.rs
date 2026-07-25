@@ -115,14 +115,15 @@ pub(crate) use command_path::normalize_runner_command_env_for_homeboy_path;
 pub use command_path::preflight_remote_argv_path_translation;
 pub(crate) use connection::daemon_endpoint_identity;
 pub(crate) use connection::disconnect_with_force;
+pub use connection::{
+    close_reconnected_job_log_owner, connect, connect_reverse,
+    connect_with_leaseless_orphan_reconciliation, connect_with_live_lease_adoption,
+    connect_with_orphan_adoption, connect_with_recovery, disconnect, reconnect_job_log_owner,
+    reverse_broker_artifact, reverse_broker_artifact_content, reverse_broker_reconcile,
+    runner_artifact_content, status, statuses, submit_reverse_broker_job,
+};
 pub(crate) use connection::{
     configured_runner_homeboy_build_identity, local_live_session, status_for_admission,
-};
-pub use connection::{
-    connect, connect_reverse, connect_with_leaseless_orphan_reconciliation,
-    connect_with_live_lease_adoption, connect_with_orphan_adoption, connect_with_recovery,
-    disconnect, reconnect_job_log_owner, reverse_broker_artifact, reverse_broker_artifact_content,
-    reverse_broker_reconcile, runner_artifact_content, status, statuses, submit_reverse_broker_job,
 };
 mod upgrade_runners;
 pub use availability_provider::register as register_runner_availability_provider;

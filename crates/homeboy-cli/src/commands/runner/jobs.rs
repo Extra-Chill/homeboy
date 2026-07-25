@@ -82,7 +82,9 @@ fn job_cancel(runner_id: &str, job_id: &str) -> CmdResult<RunnerJobOutput> {
         Ok(result) => result,
         Err(_) => {
             let session = runner::reconnect_job_log_owner(runner_id, job_id)?;
-            runner::runner_job_cancel_for_session(&session, job_id)?
+            let result = runner::runner_job_cancel_for_session(&session, job_id);
+            runner::close_reconnected_job_log_owner(&session);
+            result?
         }
     };
     let next_cursor = events.iter().map(|event| event.sequence).max().unwrap_or(0);
@@ -127,7 +129,42 @@ fn job_logs(
 ) -> CmdResult<RunnerJobOutput> {
     let poll_interval = Duration::from_millis(poll_ms.max(100));
     let mut emitted_sequence = cursor.unwrap_or(0);
-    let mut snapshot = runner_job_log_snapshot(runner_id, job_id)?;
+    const MAX_RECONNECTS: u8 = 3;
+    let mut reconnects = 0;
+    let mut recovery_session = None;
+    let mut snapshot = match runner_job_log_snapshot(runner_id, job_id) {
+        Ok(snapshot) => snapshot,
+        Err(_) => {
+            reconnects += 1;
+            eprintln!("runner log transport lost; reconnecting to the authoritative job generation ({reconnects}/{MAX_RECONNECTS})");
+            let session =
+                runner::reconnect_job_log_owner(runner_id, job_id).map_err(|reconnect_error| {
+                    follow_recovery_error(
+                        runner_id,
+                        job_id,
+                        emitted_sequence,
+                        poll_ms,
+                        reconnect_error,
+                    )
+                })?;
+            match runner::runner_job_log_snapshot_for_session(&session, job_id) {
+                Ok(snapshot) => {
+                    recovery_session = Some(session);
+                    snapshot
+                }
+                Err(recovery_error) => {
+                    runner::close_reconnected_job_log_owner(&session);
+                    return Err(classify_follow_error(
+                        runner_id,
+                        job_id,
+                        emitted_sequence,
+                        poll_ms,
+                        recovery_error,
+                    ));
+                }
+            }
+        }
+    };
 
     emit_new_job_events(&snapshot.events, &mut emitted_sequence);
     let stop = Arc::new(AtomicBool::new(false));
@@ -136,8 +173,6 @@ fn job_logs(
         // remote job. The printed cursor is sufficient to resume exactly once.
         homeboy_process::install_shutdown_handler(stop.clone(), "runner job log follow")?;
     }
-    let mut reconnects = 0;
-    const MAX_RECONNECTS: u8 = 3;
     while follow && !runner_job_terminal(snapshot.job.status) {
         std::thread::sleep(poll_interval);
         if stop.load(Ordering::SeqCst) {
@@ -147,35 +182,57 @@ fn job_logs(
             );
             break;
         }
-        snapshot = match runner_job_log_snapshot(runner_id, job_id) {
+        let snapshot_result = match recovery_session.as_ref() {
+            Some(session) => runner::runner_job_log_snapshot_for_session(session, job_id),
+            None => runner_job_log_snapshot(runner_id, job_id),
+        };
+        snapshot = match snapshot_result {
             Ok(snapshot) => snapshot,
             Err(_error) if reconnects < MAX_RECONNECTS => {
                 reconnects += 1;
                 eprintln!("runner log transport lost; reconnecting to the authoritative job generation ({reconnects}/{MAX_RECONNECTS})");
+                if let Some(session) = recovery_session.take() {
+                    runner::close_reconnected_job_log_owner(&session);
+                }
                 let session = runner::reconnect_job_log_owner(runner_id, job_id).map_err(
                     |reconnect_error| {
-                        follow_recovery_error(runner_id, job_id, emitted_sequence, reconnect_error)
+                        follow_recovery_error(
+                            runner_id,
+                            job_id,
+                            emitted_sequence,
+                            poll_ms,
+                            reconnect_error,
+                        )
                     },
                 )?;
                 match runner::runner_job_log_snapshot_for_session(&session, job_id) {
-                    Ok(snapshot) => snapshot,
+                    Ok(snapshot) => {
+                        recovery_session = Some(session);
+                        snapshot
+                    }
                     Err(recovery_error) => {
+                        runner::close_reconnected_job_log_owner(&session);
                         return Err(classify_follow_error(
                             runner_id,
                             job_id,
                             emitted_sequence,
+                            poll_ms,
                             recovery_error,
-                        ))
+                        ));
                     }
                 }
             }
             Err(error) => {
+                if let Some(session) = recovery_session.take() {
+                    runner::close_reconnected_job_log_owner(&session);
+                }
                 return Err(follow_recovery_error(
                     runner_id,
                     job_id,
                     emitted_sequence,
+                    poll_ms,
                     error,
-                ))
+                ));
             }
         };
         emit_new_job_events(&snapshot.events, &mut emitted_sequence);
@@ -189,7 +246,17 @@ fn job_logs(
     );
 
     let tail_bytes = tail_kb.map(|kb| kb.saturating_mul(1024));
-    let projection = super::log_projection::project_job_log(snapshot.events, compact, tail_bytes);
+    // Follow renders each unseen event to stderr immediately. Keep the final
+    // JSON envelope event-free so its terminal response cannot replay them.
+    let events = if follow {
+        Vec::new()
+    } else {
+        job_events_after_cursor(snapshot.events, cursor.unwrap_or(0))
+    };
+    let projection = super::log_projection::project_job_log(events, compact, tail_bytes);
+    if let Some(session) = recovery_session.take() {
+        runner::close_reconnected_job_log_owner(&session);
+    }
 
     Ok((
         RunnerJobOutput {
@@ -236,6 +303,14 @@ fn new_job_events<'a>(events: &'a [JobEvent], emitted_sequence: &mut u64) -> Vec
     new_events
 }
 
+fn job_events_after_cursor(events: Vec<JobEvent>, cursor: u64) -> Vec<JobEvent> {
+    let mut cursor = cursor;
+    new_job_events(&events, &mut cursor)
+        .into_iter()
+        .cloned()
+        .collect()
+}
+
 fn resume_command(runner_id: &str, job_id: &str, cursor: u64, poll_ms: u64) -> String {
     format!("homeboy runner job logs {runner_id} {job_id} --follow --cursor {cursor} --poll-ms {poll_ms}")
 }
@@ -244,9 +319,10 @@ fn follow_recovery_error(
     runner_id: &str,
     job_id: &str,
     cursor: u64,
+    poll_ms: u64,
     error: homeboy::core::Error,
 ) -> homeboy::core::Error {
-    let resume = resume_command(runner_id, job_id, cursor, 1000);
+    let resume = resume_command(runner_id, job_id, cursor, poll_ms);
     homeboy::core::Error::validation_invalid_argument(
         "runner",
         format!(
@@ -262,6 +338,7 @@ fn classify_follow_error(
     runner_id: &str,
     job_id: &str,
     cursor: u64,
+    poll_ms: u64,
     error: homeboy::core::Error,
 ) -> homeboy::core::Error {
     let message = error.message.to_ascii_lowercase();
@@ -273,7 +350,7 @@ fn classify_follow_error(
             None,
         );
     }
-    follow_recovery_error(runner_id, job_id, cursor, error)
+    follow_recovery_error(runner_id, job_id, cursor, poll_ms, error)
 }
 
 pub(super) fn format_job_event(event: &JobEvent) -> String {
@@ -350,6 +427,33 @@ mod tests {
     }
 
     #[test]
+    fn cursor_excludes_replayed_history_from_the_result_payload() {
+        let events = vec![event(4), event(2), event(3), event(3)];
+
+        assert_eq!(
+            job_events_after_cursor(events, 2)
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+    }
+
+    #[test]
+    fn exhausted_recovery_preserves_the_requested_poll_interval() {
+        let error = homeboy::core::Error::validation_invalid_argument(
+            "runner",
+            "tunnel closed",
+            None,
+            None,
+        );
+
+        let recovered = follow_recovery_error("lab", "job-42", 9, 250, error);
+
+        assert!(recovered.message.contains("--cursor 9 --poll-ms 250"));
+    }
+
+    #[test]
     fn missing_job_after_recovery_is_classified_as_retention_or_eviction() {
         let error = homeboy::core::Error::validation_invalid_argument(
             "job_id",
@@ -357,7 +461,7 @@ mod tests {
             None,
             None,
         );
-        let classified = classify_follow_error("lab", "job-42", 9, error);
+        let classified = classify_follow_error("lab", "job-42", 9, 250, error);
 
         assert!(classified.message.contains("evicted"));
         assert!(classified.message.contains("cursor 9"));
