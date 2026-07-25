@@ -586,3 +586,35 @@ fn extension_policy_with_evidence_allows_a_neutral_no_test_scope() {
         );
     });
 }
+
+#[test]
+fn extension_no_test_policy_requires_its_evidence_in_runner_output() {
+    with_isolated_home(|_| {
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::write(
+            dir.path().join("homeboy.json"),
+            r#"{"id":"fixture","extensions":{"docs":{}}}"#,
+        )
+        .expect("homeboy.json");
+        let extension_dir = homeboy_core::paths::extensions()
+            .expect("extensions path")
+            .join("docs");
+        fs::create_dir_all(&extension_dir).expect("extension dir");
+        fs::write(extension_dir.join("docs.json"), r#"{"name":"Docs","version":"1.0.0","test":{"extension_script":"test.sh","no_tests_applicable":{"evidence_markers":["NO TESTS APPLICABLE"]}}}"#)
+            .expect("extension manifest");
+        let script = extension_dir.join("test.sh");
+        fs::write(&script, "#!/bin/sh\nprintf 'no matching evidence\\n'\n")
+            .expect("extension script");
+        let mut permissions = fs::metadata(&script)
+            .expect("script metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).expect("script executable");
+
+        let (output, exit_code) =
+            run_test(test_command_args(dir.path()), &GlobalArgs {}).expect("test run");
+        assert_eq!(exit_code, 1);
+        assert!(!output.passed);
+        assert_eq!(output.status, "failed");
+    });
+}

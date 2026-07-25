@@ -20,6 +20,7 @@ pub fn load_extension(id: &str) -> Result<ExtensionManifest> {
 
     let mut manifest = config::load::<ExtensionManifest>(id)?;
     manifest.validate_notification_transports()?;
+    manifest.validate_test_policies()?;
     let extension_dir = paths::extension(id)?;
     manifest.extension_path = Some(extension_dir.to_string_lossy().to_string());
     Ok(manifest)
@@ -30,6 +31,7 @@ pub fn load_all_extensions() -> Result<Vec<ExtensionManifest>> {
     let mut extensions_with_paths = Vec::new();
     for mut extension in extensions {
         extension.validate_notification_transports()?;
+        extension.validate_test_policies()?;
         let extension_dir = paths::extension(&extension.id)?;
         extension.extension_path = Some(extension_dir.to_string_lossy().to_string());
         extensions_with_paths.push(extension);
@@ -167,6 +169,36 @@ mod tests {
     fn test_load_all_extensions() {
         crate::test_support::with_isolated_home(|_| {
             assert!(load_all_extensions().unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn load_rejects_empty_or_whitespace_no_test_evidence_markers_without_echoing_values() {
+        crate::test_support::with_isolated_home(|_| {
+            for (id, markers) in [
+                ("empty-markers", "[]"),
+                ("whitespace-marker", r#"["   ", "super-secret-marker"]"#),
+            ] {
+                let extension_dir = paths::extensions().unwrap().join(id);
+                std::fs::create_dir_all(&extension_dir).unwrap();
+                std::fs::write(
+                    extension_dir.join(format!("{id}.json")),
+                    format!(
+                        r#"{{"name":"Fixture","version":"1.0.0","test":{{"no_tests_applicable":{{"evidence_markers":{markers}}}}}}}"#
+                    ),
+                )
+                .unwrap();
+
+                let error = load_extension(id).expect_err("invalid test policy should be rejected");
+                assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+                assert!(error.details["field"].as_str().is_some_and(
+                    |field| field.starts_with("test.no_tests_applicable.evidence_markers")
+                ));
+                assert!(
+                    !error.to_string().contains("super-secret-marker"),
+                    "manifest marker values must not appear in diagnostics: {error}"
+                );
+            }
         });
     }
 

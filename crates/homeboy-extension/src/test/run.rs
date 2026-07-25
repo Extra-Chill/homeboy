@@ -79,15 +79,19 @@ fn no_tests_applicable(
         return false;
     };
     if policy.evidence_markers.is_empty()
+        || policy
+            .evidence_markers
+            .iter()
+            .any(|marker| marker.trim().is_empty())
         || test_counts.is_some_and(|counts| counts.passed + counts.failed > 0)
     {
         return false;
     }
 
-    policy
-        .evidence_markers
-        .iter()
-        .all(|marker| stdout.contains(marker) || stderr.contains(marker))
+    policy.evidence_markers.iter().all(|marker| {
+        let marker = marker.trim();
+        stdout.contains(marker) || stderr.contains(marker)
+    })
 }
 
 pub fn run_main_test_workflow(
@@ -1365,6 +1369,16 @@ mod tests {
         assert!(!no_tests_applicable(
             Some(&policy),
             "NO TESTS APPLICABLE",
+            "",
+            None
+        ));
+
+        let whitespace_policy = crate::TestNoTestsApplicablePolicy {
+            evidence_markers: vec!["   ".to_string()],
+        };
+        assert!(!no_tests_applicable(
+            Some(&whitespace_policy),
+            "any runner output",
             "",
             None
         ));
