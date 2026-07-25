@@ -117,10 +117,9 @@ fn visit(root: &Path, path: &Path, manifest: &mut Manifest) -> Result<(), String
         }
         let metadata = fs::symlink_metadata(&child).map_err(|e| e.to_string())?;
         #[cfg(unix)]
-        let mode = format!(
-            "{:o}",
-            std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()) & 0o7777
-        );
+        let mode = executable_mode(std::os::unix::fs::PermissionsExt::mode(
+            &metadata.permissions(),
+        ));
         #[cfg(not(unix))]
         let mode = "0".to_string();
         if metadata.file_type().is_symlink() {
@@ -132,7 +131,7 @@ fn visit(root: &Path, path: &Path, manifest: &mut Manifest) -> Result<(), String
                 relative,
                 Entry {
                     kind: 'l',
-                    mode,
+                    mode: "0".to_string(),
                     value: target,
                 },
             );
@@ -171,7 +170,7 @@ fn remote_manifest(root: &str, client: &SshClient) -> Result<Option<Manifest>, S
         return local_manifest(Path::new(root)).map(Some);
     }
     // The target computes hashes and returns compact records; content never crosses SSH.
-    let command = format!("root={}; test -e \"$root\" || exit 44; hash=$(command -v sha256sum || command -v shasum) || exit 45; find \"$root\" -mindepth 1 \\( -path '*/.git/*' -o -name .git -o -name '.homeboy-*' \\) -prune -o -type f -exec sh -c 'for f do rel=${{f#\"$1\"/}}; set -- $($2 \"$f\"); mode=$(stat -c %a \"$f\" 2>/dev/null || stat -f %Lp \"$f\"); printf \"f\\t%s\\t%s\\t%s\\n\" \"$rel\" \"$mode\" \"$1\"; done' sh \"$root\" \"$hash\" {{}} + -o -type l -exec sh -c 'for f do rel=${{f#\"$1\"/}}; mode=$(stat -c %a \"$f\" 2>/dev/null || stat -f %Lp \"$f\"); printf \"l\\t%s\\t%s\\t%s\\n\" \"$rel\" \"$mode\" \"$(readlink \"$f\")\"; done' sh \"$root\" {{}} +", shell::quote_path(root));
+    let command = format!("root={}; test -e \"$root\" || exit 44; if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then exit 45; fi; find \"$root\" -mindepth 1 \\( -path '*/.git/*' -o -name .git -o -name '.homeboy-*' \\) -prune -o -type f -exec sh -c 'for f do rel=${{f#\"$1\"/}}; if command -v sha256sum >/dev/null 2>&1; then set -- $(sha256sum \"$f\"); else set -- $(shasum -a 256 \"$f\"); fi; mode=$(stat -c %a \"$f\" 2>/dev/null || stat -f %Lp \"$f\"); printf \"f\\t%s\\t%s\\t%s\\n\" \"$rel\" \"$mode\" \"$1\"; done' sh \"$root\" {{}} + -o -type l -exec sh -c 'for f do rel=${{f#\"$1\"/}}; mode=$(stat -c %a \"$f\" 2>/dev/null || stat -f %Lp \"$f\"); printf \"l\\t%s\\t%s\\t%s\\n\" \"$rel\" \"$mode\" \"$(readlink \"$f\")\"; done' sh \"$root\" {{}} +", shell::quote_path(root));
     let output = client.execute_with_timeout(&command, PROBE_TIMEOUT);
     if output.timed_out {
         return Err(format!("timed out after {}s", PROBE_TIMEOUT.as_secs()));
@@ -202,16 +201,33 @@ fn parse_remote_manifest(output: &str) -> Result<Manifest, String> {
             "l" => 'l',
             _ => return Err("unsupported remote manifest entry".to_string()),
         };
+        let mode = u32::from_str_radix(mode, 8)
+            .map_err(|_| "malformed remote manifest mode".to_string())?;
+        let mode = if kind == 'l' {
+            "0".to_string()
+        } else {
+            executable_mode(mode)
+        };
+        if kind == 'f' && (value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            return Err("malformed remote SHA-256 evidence".to_string());
+        }
         manifest.entries.insert(
             path.to_string(),
             Entry {
                 kind,
-                mode: mode.to_string(),
+                mode,
                 value: value.to_string(),
             },
         );
     }
     Ok(manifest)
+}
+
+fn executable_mode(mode: u32) -> String {
+    // Deploy normalizes ownership and group-write/setgid bits. Executability is
+    // the mode semantic that survives those target-specific adjustments.
+    format!("{:o}", mode & 0o111)
 }
 
 fn ignored(path: &str) -> bool {
@@ -277,5 +293,38 @@ mod tests {
     #[test]
     fn remote_manifest_requires_well_formed_hash_evidence() {
         assert!(parse_remote_manifest("f\tpath\t644\n").is_err());
+        assert!(parse_remote_manifest("f\tpath\t644\tnot-a-hash\n").is_err());
+    }
+    #[test]
+    #[cfg(unix)]
+    fn manifest_compares_executability_but_ignores_deploy_normalized_write_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp");
+        let local = temp.path().join("local");
+        let remote = temp.path().join("remote");
+        fs::create_dir_all(&local).expect("local");
+        fs::create_dir_all(&remote).expect("remote");
+        fs::write(local.join("script"), "same").expect("local script");
+        fs::write(remote.join("script"), "same").expect("remote script");
+        fs::set_permissions(local.join("script"), fs::Permissions::from_mode(0o644))
+            .expect("local mode");
+        fs::set_permissions(remote.join("script"), fs::Permissions::from_mode(0o664))
+            .expect("remote mode");
+        assert!(differences(
+            &local_manifest(&local).expect("local manifest"),
+            &local_manifest(&remote).expect("remote manifest")
+        )
+        .is_empty());
+
+        fs::set_permissions(remote.join("script"), fs::Permissions::from_mode(0o775))
+            .expect("remote executable mode");
+        assert_eq!(
+            differences(
+                &local_manifest(&local).expect("local manifest"),
+                &local_manifest(&remote).expect("remote manifest")
+            ),
+            vec!["script"]
+        );
     }
 }

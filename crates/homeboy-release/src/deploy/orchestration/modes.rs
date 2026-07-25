@@ -46,8 +46,7 @@ pub(super) fn run_check_mode(
             } else if manifest.status == "different" && matches!(status, ComponentStatus::UpToDate)
             {
                 status = ComponentStatus::RemoteModified;
-            } else if manifest.status == "different"
-                && matches!(status, ComponentStatus::BehindRemote)
+            } else if manifest.status == "different" && !matches!(status, ComponentStatus::UpToDate)
             {
                 status = ComponentStatus::MixedDrift;
             }

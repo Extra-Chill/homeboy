@@ -399,15 +399,16 @@ pub(super) fn deploy_components(
         };
         let manifest =
             super::content_manifest::compare(local_path, &prepared.install_dir, &ctx.client);
-        if manifest.status == "different"
-            && prepared.local_version == prepared.remote_version
+        if prepared.local_version == prepared.remote_version
             && !config.force
+            && manifest.status != "match"
+            && manifest.status != "missing"
         {
             return Err(Error::validation_invalid_argument(
                 "content_drift",
                 format!(
-                    "Refusing to overwrite remote-only content changes for '{}' at {}",
-                    prepared.component.id, prepared.install_dir
+                    "Refusing to overwrite '{}' at {} without a matching content manifest ({})",
+                    prepared.component.id, prepared.install_dir, manifest.status
                 ),
                 None,
                 Some(vec![

@@ -953,10 +953,13 @@ mod tests {
             ComponentStatus::BehindRemote,
             ComponentStatus::BehindUpstream,
             ComponentStatus::SourceStale,
+            ComponentStatus::RemoteModified,
+            ComponentStatus::MixedDrift,
             ComponentStatus::Unknown,
         ] {
             assert!(!status.requires_deploy());
         }
+        assert!(ComponentStatus::Missing.requires_deploy());
     }
 
     #[test]

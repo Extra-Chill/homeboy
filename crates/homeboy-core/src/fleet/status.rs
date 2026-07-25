@@ -35,6 +35,12 @@ pub enum FleetComponentDrift {
     BehindRemote,
     /// Local checkout is behind its upstream branch
     BehindUpstream,
+    /// Target content differs despite matching deployed version
+    RemoteModified,
+    /// Target is absent
+    Missing,
+    /// Version and content both differ
+    MixedDrift,
     /// Has releasable code commits since the current version baseline
     NeedsRelease,
     /// Only docs changes since last tag
@@ -294,7 +300,11 @@ fn collect_project_component_statuses(
                     FleetComponentDrift::Unknown => component_summary.unknown += 1,
                     // These describe remote or configured-source freshness, not a
                     // deployment required from the configured source.
-                    FleetComponentDrift::BehindRemote | FleetComponentDrift::BehindUpstream => {}
+                    FleetComponentDrift::BehindRemote
+                    | FleetComponentDrift::BehindUpstream
+                    | FleetComponentDrift::RemoteModified
+                    | FleetComponentDrift::Missing
+                    | FleetComponentDrift::MixedDrift => {}
                 }
 
                 statuses.push(FleetComponentStatus {
@@ -372,9 +382,9 @@ fn resolve_component_drift(
         Some(ComponentStatus::BehindRemote) => FleetComponentDrift::BehindRemote,
         Some(ComponentStatus::BehindUpstream) => FleetComponentDrift::BehindUpstream,
         Some(ComponentStatus::SourceStale) => FleetComponentDrift::BehindUpstream,
-        Some(ComponentStatus::RemoteModified)
-        | Some(ComponentStatus::Missing)
-        | Some(ComponentStatus::MixedDrift) => FleetComponentDrift::Unknown,
+        Some(ComponentStatus::RemoteModified) => FleetComponentDrift::RemoteModified,
+        Some(ComponentStatus::Missing) => FleetComponentDrift::Missing,
+        Some(ComponentStatus::MixedDrift) => FleetComponentDrift::MixedDrift,
         Some(ComponentStatus::Unknown) | None => FleetComponentDrift::Unknown,
     };
 

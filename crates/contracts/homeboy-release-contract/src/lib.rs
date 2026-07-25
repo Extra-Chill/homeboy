@@ -54,7 +54,7 @@ pub enum ComponentStatus {
 impl ComponentStatus {
     /// Whether deploying the configured source would advance the target.
     pub fn requires_deploy(&self) -> bool {
-        matches!(self, Self::NeedsUpdate)
+        matches!(self, Self::NeedsUpdate | Self::Missing)
     }
 }
 

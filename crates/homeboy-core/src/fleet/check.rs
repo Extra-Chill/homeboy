@@ -171,7 +171,7 @@ mod tests {
     use crate::test_support::with_isolated_home;
 
     #[test]
-    fn fleet_check_falls_back_to_cached_components_when_live_check_fails() {
+    fn fleet_check_omits_non_deployable_components_from_live_results() {
         with_isolated_home(|home| {
             let component_dir = home.path().join("tooling-component");
             std::fs::create_dir_all(&component_dir).expect("component dir");
@@ -210,12 +210,10 @@ mod tests {
             assert_eq!(exit_code, 0);
             assert_eq!(summary.projects_checked, 1);
             assert_eq!(summary.projects_failed, 0);
-            assert_eq!(summary.components_unknown, 1);
+            assert_eq!(summary.components_unknown, 0);
             assert_eq!(checks.len(), 1);
-            assert_eq!(checks[0].status, "checked_cached");
-            assert_eq!(checks[0].components.len(), 1);
-            assert_eq!(checks[0].components[0].component_id, "tooling-component");
-            assert_eq!(checks[0].components[0].status, "unknown");
+            assert_eq!(checks[0].status, "checked");
+            assert!(checks[0].components.is_empty());
 
             let (outdated_checks, outdated_summary, outdated_exit_code) =
                 collect_check("local-fleet", true).expect("outdated fleet check");
