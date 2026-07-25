@@ -26,6 +26,8 @@
 
 set -euo pipefail
 
+source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
+
 OPERATIONS_COMMANDS="${OPERATIONS_COMMANDS:-}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 GROUP_PREFIX="${RUN_GROUP_PREFIX:-homeboy}"
@@ -87,9 +89,19 @@ for CMD in "${CMD_ARRAY[@]}"; do
   # Use a short label for the results key
   RESULT_KEY="${CMD}"
 
-  if [ "${CMD_EXIT}" -eq 0 ]; then
+  STRUCTURED_OUTPUT=true
+  if [ ! -s "${OUTPUT_JSON}" ] || ! valid_command_result_output "${OUTPUT_JSON}" "${CMD}" "${CMD_EXIT}"; then
+    STRUCTURED_OUTPUT=false
+    echo "::error::homeboy ${CMD} did not write valid structured output to ${OUTPUT_JSON}"
+  fi
+
+  if [ "${CMD_EXIT}" -eq 0 ] && [ "${STRUCTURED_OUTPUT}" = true ]; then
     echo "::notice::homeboy ${CMD}: PASSED"
     RESULTS=$(echo "${RESULTS}" | jq -c --arg cmd "${RESULT_KEY}" '. + {($cmd): "pass"}')
+  elif [ "${CMD_EXIT}" -eq 0 ]; then
+    echo "::error::homeboy ${CMD}: FAILED because required structured output was missing or malformed."
+    RESULTS=$(echo "${RESULTS}" | jq -c --arg cmd "${RESULT_KEY}" '. + {($cmd): "fail"}')
+    OVERALL_EXIT=1
   elif [ "${CMD_EXIT}" -eq 124 ]; then
     echo "::error::homeboy ${CMD}: TIMED OUT (exit code 124); inspect the retained command log above."
     RESULTS=$(echo "${RESULTS}" | jq -c --arg cmd "${RESULT_KEY}" '. + {($cmd): "timeout"}')
