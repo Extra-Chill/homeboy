@@ -104,6 +104,7 @@ pub(crate) use failure::{
     runner_exec_failure_context_remediation_hint,
 };
 pub(crate) use handoff::lab_offload_handoff_hints;
+pub use handoff::runner_job_cancel_for_session;
 pub(crate) use process::{
     execute_runner_process_until_cancelled_with_progress, prepare_daemon_local_process,
 };

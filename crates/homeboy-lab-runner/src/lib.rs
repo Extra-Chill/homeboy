@@ -121,8 +121,8 @@ pub(crate) use connection::{
 pub use connection::{
     connect, connect_reverse, connect_with_leaseless_orphan_reconciliation,
     connect_with_live_lease_adoption, connect_with_orphan_adoption, connect_with_recovery,
-    disconnect, reverse_broker_artifact, reverse_broker_artifact_content, reverse_broker_reconcile,
-    runner_artifact_content, status, statuses, submit_reverse_broker_job,
+    disconnect, reconnect_job_log_owner, reverse_broker_artifact, reverse_broker_artifact_content,
+    reverse_broker_reconcile, runner_artifact_content, status, statuses, submit_reverse_broker_job,
 };
 mod upgrade_runners;
 pub use availability_provider::register as register_runner_availability_provider;
@@ -131,6 +131,7 @@ pub use daemon_exec_driver::register as register_runner_daemon_exec_driver;
 pub(crate) use evidence::artifact_store_locator_from_runner_artifact_id;
 pub use evidence::register_runner_evidence_provider;
 pub use evidence::runner_artifact_store_token;
+pub use evidence::runner_job_log_snapshot_for_session;
 pub use evidence::{
     download_remote_artifact, is_remote_runner_artifact_path, is_reportable_artifact_evidence_path,
     is_retrievable_runner_artifact, mirror_connected_runner_run, mirrored_runner_job_identity,
@@ -142,8 +143,9 @@ pub use execution::{
     promote_runner_exec_artifacts, promote_runner_exec_summaries, promoted_output,
     reconcile_runner_generation_after_evidence, reconcile_terminal_runner_exec_runs,
     runner_exec_failure_error, runner_exec_structured_summary, runner_job_cancel,
-    runner_job_cancel_projection, RunnerExecDiagnostics, RunnerExecMode, RunnerExecOptions,
-    RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecStructuredSummary,
+    runner_job_cancel_for_session, runner_job_cancel_projection, RunnerExecDiagnostics,
+    RunnerExecMode, RunnerExecOptions, RunnerExecOutput, RunnerExecPromotedOutput,
+    RunnerExecStructuredSummary,
 };
 pub(crate) use execution::{
     exec_with_status_snapshot, execute_runner_process_until_cancelled_with_progress,

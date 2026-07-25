@@ -567,6 +567,7 @@ full trust model.
 ```sh
 homeboy runner job logs <runner-id> <job-id>
 homeboy runner job logs <runner-id> <job-id> --follow --poll-ms 1000
+homeboy runner job logs <runner-id> <job-id> --follow --cursor 65028
 homeboy runner job cancel <runner-id> <job-id>
 ```
 
@@ -578,6 +579,17 @@ after dispatching runner work and you need to inspect the already-started job.
 
 `cancel` requests cancellation for a queued or running durable runner daemon job
 through the connected runner daemon.
+
+Follow tracks the highest displayed daemon event sequence. A controller tunnel
+loss opens a new ephemeral SSH tunnel to the generation recorded as the job
+owner, and verifies that generation's lease and PID through `/health` before
+reading. It never reuses or probes the recorded local tunnel port. Replayed
+events are sorted and emitted only when their sequence exceeds the cursor. The
+final JSON output includes `next_cursor` and `resume_command`; Ctrl-C prints the
+same continuation command without cancelling remote work. A job absent after a
+successful authoritative recovery is reported as retention/eviction rather than
+a transient connection failure. `cancel` uses the same owner recovery path when
+its current controller tunnel has disappeared.
 
 Minimal Homeboy Lab systemd unit:
 

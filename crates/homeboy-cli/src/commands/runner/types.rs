@@ -365,6 +365,11 @@ pub struct RunnerJobOutput {
     pub stdout: Option<RunnerJobLogStream>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stderr: Option<RunnerJobLogStream>,
+    /// Highest event sequence emitted by this invocation.
+    pub next_cursor: u64,
+    /// Copyable continuation command, including the monotonic event cursor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume_command: Option<String>,
 }
 
 /// A bounded view of a captured output stream. `tail` holds at most

@@ -588,6 +588,10 @@ pub(super) enum RunnerJobCommand {
         #[arg(long = "poll-ms", default_value_t = 1000)]
         poll_ms: u64,
 
+        /// Resume after this previously displayed event sequence
+        #[arg(long)]
+        cursor: Option<u64>,
+
         /// Return only lifecycle events, exit code, and a bounded stdout/stderr tail
         #[arg(long)]
         compact: bool,

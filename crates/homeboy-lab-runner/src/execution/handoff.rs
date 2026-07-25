@@ -243,6 +243,33 @@ pub fn runner_job_cancel(runner_id: &str, job_id: &str) -> Result<(Job, Vec<JobE
     parse_runner_job_cancel_body(body)
 }
 
+/// Cancel through a freshly authenticated direct daemon session. Used when a
+/// controller tunnel vanished but the durable job owner can still be proven.
+pub fn runner_job_cancel_for_session(
+    session: &crate::RunnerSession,
+    job_id: &str,
+) -> Result<(Job, Vec<JobEvent>)> {
+    let local_url = session.local_url.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "runner",
+            "recovered job owner does not expose a direct daemon endpoint",
+            Some(session.runner_id.clone()),
+            None,
+        )
+    })?;
+    let client = Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|err| {
+            Error::internal_unexpected(format!("build runner job cancel client: {err}"))
+        })?;
+    let data = daemon_post(&client, local_url, &format!("/jobs/{job_id}/cancel"))?;
+    parse_runner_job_cancel_body(
+        canonical_daemon_body(&data, "daemon job cancel response")?.clone(),
+    )
+}
+
 /// Cancel a controller-owned daemon job only if its durable projection still
 /// matches the controller run that requested cancellation.
 pub fn runner_job_cancel_projection(
