@@ -487,6 +487,8 @@ fn publish_restore_transaction(
     clear_path(&backup)?;
     fs::create_dir_all(&backup)
         .map_err(|error| io_error("create dependency cache rollback staging", error))?;
+    let mut backed_up = Vec::new();
+    let mut published = Vec::new();
     let result = (|| {
         for (relative, destination, _) in outputs {
             let destination = contained_path(workspace, destination)?;
@@ -499,6 +501,7 @@ fn publish_restore_transaction(
                 }
                 fs::rename(&destination, prior)
                     .map_err(|error| io_error("stage dependency cache rollback", error))?;
+                backed_up.push(destination);
             }
         }
         for (relative, destination, _) in outputs {
@@ -507,8 +510,9 @@ fn publish_restore_transaction(
                 fs::create_dir_all(parent)
                     .map_err(|error| io_error("create dependency cache output parent", error))?;
             }
-            fs::rename(staging.join(relative), destination)
+            fs::rename(staging.join(relative), &destination)
                 .map_err(|error| io_error("publish dependency cache restore", error))?;
+            published.push(destination);
             if should_fail_restore_publish() {
                 return Err(Error::internal_unexpected(
                     "injected dependency cache restore publish failure".to_string(),
@@ -518,9 +522,15 @@ fn publish_restore_transaction(
         Ok(())
     })();
     if result.is_err() {
-        for (relative, destination, _) in outputs {
-            let destination = contained_path(workspace, destination)?;
+        for destination in published {
             let _ = clear_path(&destination);
+        }
+        for destination in backed_up {
+            let relative = destination.strip_prefix(workspace).map_err(|error| {
+                Error::internal_unexpected(format!(
+                    "derive dependency cache rollback path: {error}"
+                ))
+            })?;
             let prior = backup.join(relative);
             if prior.exists() {
                 let _ = fs::rename(prior, destination);
