@@ -408,6 +408,8 @@ pub(crate) fn build_release_payload(
     let tag = state.tag.clone().unwrap_or_else(|| format!("v{}", version));
     let notes = state.notes.clone().unwrap_or_default();
 
+    let publications = crate::release::executor::github_release::github_release_publications(state)
+        .unwrap_or_default();
     let mut payload = serde_json::json!({
         "release": {
             "version": version,
@@ -416,6 +418,7 @@ pub(crate) fn build_release_payload(
             "component_id": component_id,
             "local_path": component_local_path,
             "artifacts": state.artifacts,
+            "asset_publications": publications,
         }
     });
 

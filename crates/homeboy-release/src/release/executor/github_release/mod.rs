@@ -26,7 +26,8 @@ pub(crate) use run::validate_declared_build_artifact;
 // non-test surface.
 pub(crate) use gh_cli::{
     gh_failure_detail, gh_is_authenticated, gh_is_available, gh_release_exists,
-    gh_release_metadata, github_release_upload_timeout, run_gh_command, verify_release_assets,
+    gh_release_metadata, github_release_publications, github_release_upload_timeout,
+    reconcile_release_publications, run_gh_command, verify_release_publications,
 };
 
 // Re-exports consumed by the in-crate test suites — both this module's own

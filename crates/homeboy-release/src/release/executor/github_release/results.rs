@@ -4,6 +4,7 @@ use crate::release::types::ReleaseStepResult;
 use homeboy_core::git::release_download::GitHubRepo;
 
 use super::super::{step_failed, step_success};
+use super::gh_cli::ReleaseAssetPublication;
 use super::notes::GitHubReleaseBody;
 use super::repair::{
     existing_draft_repair_hints, repair_data, repair_hints, GitHubReleaseRepairCommands,
@@ -184,6 +185,15 @@ pub(crate) fn upload_success_result(
     github: &GitHubRepo,
     artifact_count: usize,
 ) -> ReleaseStepResult {
+    upload_success_result_with_publications(tag, github, artifact_count, &[])
+}
+
+pub(crate) fn upload_success_result_with_publications(
+    tag: &str,
+    github: &GitHubRepo,
+    artifact_count: usize,
+    publications: &[ReleaseAssetPublication],
+) -> ReleaseStepResult {
     let url = published_release_url(github, tag, "", "");
     step_success(
         "github.release",
@@ -196,6 +206,7 @@ pub(crate) fn upload_success_result(
             "repo": github.repo,
             "url": url,
             "artifact_count": artifact_count,
+            "asset_publications": publications,
         })),
         Vec::new(),
     )
