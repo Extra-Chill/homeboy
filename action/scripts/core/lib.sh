@@ -238,8 +238,14 @@ settings_json_flags() {
 
 valid_command_result_output() {
   local output_file="$1" expected_command="$2" command_exit="$3"
+  # Homeboy reports the top-level command in the result envelope (`review`),
+  # never the full CI command string (`review lint`). Compare the command root
+  # so the envelope still proves ownership by this invocation without asserting
+  # a subcommand field the binary does not emit.
+  local expected_root
+  expected_root="$(printf '%s' "${expected_command}" | awk '{print $1}')"
   jq -e \
-    --arg command "${expected_command}" \
+    --arg command "${expected_root}" \
     --argjson command_exit "${command_exit}" '
       type == "object"
       and .schema == "homeboy/command-result/v3"
