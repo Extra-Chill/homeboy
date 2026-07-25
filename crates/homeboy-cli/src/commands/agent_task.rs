@@ -11,6 +11,7 @@ use super::{CmdResult, GlobalArgs};
 
 pub mod args;
 pub mod auth;
+pub(crate) mod candidate;
 pub mod contract;
 pub mod controller;
 pub mod doctor;

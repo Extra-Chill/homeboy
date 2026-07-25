@@ -1,5 +1,6 @@
 use serde_json::Value;
 
+use super::agent_task::candidate::{classify_candidates, CandidateState};
 use super::agent_task::{AgentTaskArgs, AgentTaskCommand, AgentTaskControllerCommand};
 use super::summary_json::{array_len, string_value, u64_value, usize_value, value_at};
 
@@ -88,7 +89,7 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
     if let Some(artifact) = first_artifact {
         lines.push(format!("First artifact: {artifact}"));
     }
-    if metrics.non_empty_patches > 0 {
+    if metrics.candidate_state == CandidateState::PatchAvailable {
         lines.push(format!("Next: homeboy agent-task review {run_id}"));
     } else {
         lines.push(format!("Next: homeboy agent-task logs {run_id}"));
@@ -118,8 +119,10 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         lines.push(format!("Diagnostic: {diagnostic}"));
     }
     lines.push(format!("Artifacts: {artifact_count}"));
-    if let Some(path) = aggregate_path.filter(|_| metrics.non_empty_patches > 0) {
-        lines.push(format!("Aggregate: {path}"));
+    if metrics.candidate_state == CandidateState::PatchAvailable {
+        if let Some(path) = aggregate_path {
+            lines.push(format!("Aggregate: {path}"));
+        }
         lines.push(format!("Next: homeboy agent-task review {run_id}"));
     } else if state == "queued" && !is_transport_proxy(payload) {
         lines.push(format!("Next: homeboy agent-task run {run_id}"));
@@ -280,6 +283,7 @@ struct CodeProductionMetrics {
     /// unparseable). Used to render `unknown` instead of a misleading verified
     /// zero (#9742).
     changed_files_unknown_patches: usize,
+    candidate_state: CandidateState,
 }
 
 fn code_production_lines(metrics: &CodeProductionMetrics) -> Vec<String> {
@@ -308,6 +312,7 @@ fn code_production_lines(metrics: &CodeProductionMetrics) -> Vec<String> {
     };
     vec![
         patch_candidates,
+        format!("Candidate state: {}", metrics.candidate_state.as_str()),
         changed_files,
         format!("Diff bytes: {}", metrics.diff_bytes),
     ]
@@ -315,6 +320,19 @@ fn code_production_lines(metrics: &CodeProductionMetrics) -> Vec<String> {
 
 fn code_production_metrics(payload: &Value) -> CodeProductionMetrics {
     let mut metrics = CodeProductionMetrics::default();
+    let canonical = classify_candidates(payload);
+    if canonical.state() != CandidateState::Unknown {
+        metrics.non_empty_patches = canonical.available;
+        metrics.empty_patches = canonical.empty;
+        metrics.unknown_size_patches = canonical.unknown
+            + canonical.missing
+            + canonical.unreadable
+            + canonical.conflicting
+            + canonical.retained_only;
+        metrics.diff_bytes = canonical.diff_bytes;
+        metrics.candidate_state = canonical.state();
+        return metrics;
+    }
     for patch in collect_patch_artifacts(payload) {
         match patch.size_bytes {
             Some(size) if size > 0 => {
@@ -329,6 +347,13 @@ fn code_production_metrics(payload: &Value) -> CodeProductionMetrics {
             None => metrics.unknown_size_patches += 1,
         }
     }
+    metrics.candidate_state = if metrics.non_empty_patches > 0 {
+        CandidateState::PatchAvailable
+    } else if metrics.empty_patches > 0 {
+        CandidateState::Empty
+    } else {
+        CandidateState::Unknown
+    };
     metrics
 }
 
@@ -1171,6 +1196,28 @@ mod tests {
         assert!(summary.contains("Diff bytes: 683500\n"));
         assert!(summary.contains("Artifacts: 4\n"));
         assert!(summary.contains("Next: homeboy agent-task review recovered\n"));
+    }
+
+    #[test]
+    fn lab_restart_summary_uses_the_32318_byte_canonical_mirror_not_a_stale_alias() {
+        let payload = json!({
+            "run_id": "lab-restarted",
+            "state": "succeeded",
+            "tasks": [{ "task_id": "cook-intelligence", "state": "succeeded" }],
+            "artifact_refs": [{ "task_id": "cook-intelligence", "kind": "patch", "uri": "runner-artifact://stale-alias" }],
+            "aggregate": { "outcomes": [{ "task_id": "cook-intelligence", "artifacts": [{
+                "id": "patch", "kind": "patch", "size_bytes": 32318,
+                "url": "homeboy://agent-task/run/lab-restarted/artifacts#task=cook-intelligence&artifact=patch",
+                "metadata": { "executor_artifact_finalized": true, "source_provenance": { "runner_id": "homeboy-lab" } }
+            }] }] }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
+
+        assert!(summary.contains("Status: succeeded\n"));
+        assert!(summary.contains("Patch candidates: 1 non-empty / 0 empty\n"));
+        assert!(summary.contains("Diff bytes: 32318\n"));
+        assert!(summary.contains("Next: homeboy agent-task review lab-restarted\n"));
     }
 
     #[test]
