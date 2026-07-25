@@ -561,12 +561,12 @@ fn extension_policy_with_evidence_allows_a_neutral_no_test_scope() {
             .expect("extensions path")
             .join("docs");
         fs::create_dir_all(&extension_dir).expect("extension dir");
-        fs::write(extension_dir.join("docs.json"), r#"{"name":"Docs","version":"1.0.0","test":{"extension_script":"test.sh","no_tests_applicable":{"evidence_markers":["NO TESTS APPLICABLE","scope=docs-only"]}}}"#)
+        fs::write(extension_dir.join("docs.json"), r#"{"name":"Docs","version":"1.0.0","test":{"extension_script":"test.sh","no_tests_applicable":{}}}"#)
             .expect("extension manifest");
         let script = extension_dir.join("test.sh");
         fs::write(
             &script,
-            "#!/bin/sh\nprintf 'NO TESTS APPLICABLE\\nscope=docs-only\\n'\n",
+            "#!/bin/sh\nprintf '{\"schema\":\"homeboy/no-tests-applicable/v1\",\"extension_id\":\"%s\",\"step\":\"test\",\"nonce\":\"%s\",\"reason\":\"docs only\"}' \"$HOMEBOY_NO_TESTS_APPLICABLE_EXTENSION_ID\" \"$HOMEBOY_NO_TESTS_APPLICABLE_NONCE\" > \"$HOMEBOY_NO_TESTS_APPLICABLE_FILE\"\n",
         )
         .expect("extension script");
         let mut permissions = fs::metadata(&script)
@@ -600,11 +600,14 @@ fn extension_no_test_policy_requires_its_evidence_in_runner_output() {
             .expect("extensions path")
             .join("docs");
         fs::create_dir_all(&extension_dir).expect("extension dir");
-        fs::write(extension_dir.join("docs.json"), r#"{"name":"Docs","version":"1.0.0","test":{"extension_script":"test.sh","no_tests_applicable":{"evidence_markers":["NO TESTS APPLICABLE"]}}}"#)
+        fs::write(extension_dir.join("docs.json"), r#"{"name":"Docs","version":"1.0.0","test":{"extension_script":"test.sh","no_tests_applicable":{}}}"#)
             .expect("extension manifest");
         let script = extension_dir.join("test.sh");
-        fs::write(&script, "#!/bin/sh\nprintf 'no matching evidence\\n'\n")
-            .expect("extension script");
+        fs::write(
+            &script,
+            "#!/bin/sh\nprintf 'NO TESTS APPLICABLE (spoofed stdout)\\n'\n",
+        )
+        .expect("extension script");
         let mut permissions = fs::metadata(&script)
             .expect("script metadata")
             .permissions();

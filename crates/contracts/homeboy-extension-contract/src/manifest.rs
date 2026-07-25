@@ -231,41 +231,6 @@ impl ExtensionManifest {
         Ok(())
     }
 
-    /// Validate extension-owned test policies before a runner can use them.
-    /// Marker values may be operationally sensitive, so diagnostics identify
-    /// only the invalid field rather than echoing the configured value.
-    pub fn validate_test_policies(&self) -> homeboy_error::Result<()> {
-        let Some(policy) = self
-            .test
-            .as_ref()
-            .and_then(|test| test.no_tests_applicable.as_ref())
-        else {
-            return Ok(());
-        };
-
-        if policy.evidence_markers.is_empty() {
-            return Err(homeboy_error::Error::validation_invalid_argument(
-                "test.no_tests_applicable.evidence_markers",
-                "must contain at least one non-empty evidence marker",
-                Some("empty marker list".to_string()),
-                None,
-            ));
-        }
-
-        for (index, marker) in policy.evidence_markers.iter().enumerate() {
-            if marker.trim().is_empty() {
-                return Err(homeboy_error::Error::validation_invalid_argument(
-                    format!("test.no_tests_applicable.evidence_markers[{index}]"),
-                    "must not be empty or whitespace",
-                    Some("empty marker".to_string()),
-                    None,
-                ));
-            }
-        }
-
-        Ok(())
-    }
-
     pub fn has_cli(&self) -> bool {
         self.cli.is_some()
     }

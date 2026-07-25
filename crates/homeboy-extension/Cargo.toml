@@ -33,6 +33,7 @@ sha2 = "0.10.9"
 libc = "0.2"
 shellexpand = "3.1"
 tempfile = "3.14"
+uuid = { version = "1.11", features = ["v4"] }
 
 [dev-dependencies]
 homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }

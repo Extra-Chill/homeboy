@@ -22,6 +22,7 @@ pub use homeboy_extension_contract::test_results::TestRunWorkflowResult;
 pub use homeboy_extension_contract::test_workflow::RawTestOutput;
 use homeboy_refactor_contract::AppliedRefactor;
 use regex::Regex;
+use serde::Deserialize;
 use serde::Serialize;
 use std::path::Path;
 
@@ -47,6 +48,20 @@ pub struct TestRunWorkflowArgs {
 
 const RAW_OUTPUT_TAIL_LINES: usize = 80;
 const COMPILER_FAILURE_LIMIT: usize = 20;
+const NO_TESTS_APPLICABLE_SCHEMA: &str = "homeboy/no-tests-applicable/v1";
+const NO_TESTS_APPLICABLE_FILE_ENV: &str = "HOMEBOY_NO_TESTS_APPLICABLE_FILE";
+const NO_TESTS_APPLICABLE_NONCE_ENV: &str = "HOMEBOY_NO_TESTS_APPLICABLE_NONCE";
+const NO_TESTS_APPLICABLE_EXTENSION_ENV: &str = "HOMEBOY_NO_TESTS_APPLICABLE_EXTENSION_ID";
+const NO_TESTS_APPLICABLE_STEP: &str = "test";
+
+#[derive(Deserialize)]
+struct NoTestsApplicableEvidence {
+    schema: String,
+    extension_id: String,
+    step: String,
+    nonce: String,
+    reason: String,
+}
 fn test_run_status(
     runner_success: bool,
     test_counts: Option<&TestCounts>,
@@ -70,28 +85,26 @@ fn test_run_status(
 }
 
 fn no_tests_applicable(
-    policy: Option<&crate::TestNoTestsApplicablePolicy>,
-    stdout: &str,
-    stderr: &str,
+    policy_enabled: bool,
+    evidence_file: &Path,
+    extension_id: &str,
+    nonce: &str,
     test_counts: Option<&TestCounts>,
 ) -> bool {
-    let Some(policy) = policy else {
-        return false;
-    };
-    if policy.evidence_markers.is_empty()
-        || policy
-            .evidence_markers
-            .iter()
-            .any(|marker| marker.trim().is_empty())
-        || test_counts.is_some_and(|counts| counts.passed + counts.failed > 0)
-    {
+    if !policy_enabled || test_counts.is_some_and(|counts| counts.passed + counts.failed > 0) {
         return false;
     }
-
-    policy.evidence_markers.iter().all(|marker| {
-        let marker = marker.trim();
-        stdout.contains(marker) || stderr.contains(marker)
-    })
+    let Ok(raw) = std::fs::read_to_string(evidence_file) else {
+        return false;
+    };
+    let Ok(evidence) = serde_json::from_str::<NoTestsApplicableEvidence>(&raw) else {
+        return false;
+    };
+    evidence.schema == NO_TESTS_APPLICABLE_SCHEMA
+        && evidence.extension_id == extension_id
+        && evidence.step == NO_TESTS_APPLICABLE_STEP
+        && evidence.nonce == nonce
+        && !evidence.reason.trim().is_empty()
 }
 
 pub fn run_main_test_workflow(
@@ -251,6 +264,12 @@ fn run_main_test_workflow_inner(
     let result_parse = test_config
         .as_ref()
         .and_then(|test| test.result_parse.as_ref());
+    let no_tests_policy_enabled = test_config
+        .as_ref()
+        .and_then(|test| test.no_tests_applicable.as_ref())
+        .is_some();
+    let no_tests_evidence_file = run_dir.step_file(run_dir::files::NO_TESTS_APPLICABLE);
+    let no_tests_nonce = uuid::Uuid::new_v4().to_string();
 
     let runner = build_test_runner(
         component,
@@ -267,6 +286,25 @@ fn run_main_test_workflow_inner(
         .ci_env
         .iter()
         .fold(runner, |runner, (key, value)| runner.env(key, value));
+    let runner = runner
+        .env_if(
+            no_tests_policy_enabled,
+            NO_TESTS_APPLICABLE_FILE_ENV,
+            no_tests_evidence_file.to_string_lossy().as_ref(),
+        )
+        .env_if(
+            no_tests_policy_enabled,
+            NO_TESTS_APPLICABLE_NONCE_ENV,
+            &no_tests_nonce,
+        )
+        .env_if(
+            no_tests_policy_enabled,
+            NO_TESTS_APPLICABLE_EXTENSION_ENV,
+            test_context
+                .as_ref()
+                .map(|context| context.extension_id.as_str())
+                .unwrap_or_default(),
+        );
     // In summary mode, capture the child's stdout/stderr into run evidence
     // instead of tee-ing the full compiler/test stream to the terminal. The
     // output is still persisted to artifacts below and a bounded failure tail
@@ -310,11 +348,13 @@ fn run_main_test_workflow_inner(
                 .or_else(|| parse_test_results_text(&output.stdout))
         });
     let no_tests_applicable = no_tests_applicable(
-        test_config
+        no_tests_policy_enabled,
+        &no_tests_evidence_file,
+        test_context
             .as_ref()
-            .and_then(|test| test.no_tests_applicable.as_ref()),
-        &output.stdout,
-        &output.stderr,
+            .map(|context| context.extension_id.as_str())
+            .unwrap_or_default(),
+        &no_tests_nonce,
         test_counts.as_ref(),
     );
 
@@ -1353,33 +1393,39 @@ mod tests {
     }
 
     #[test]
-    fn explicit_no_test_policy_requires_all_evidence_markers() {
-        let policy = crate::TestNoTestsApplicablePolicy {
-            evidence_markers: vec![
-                "NO TESTS APPLICABLE".to_string(),
-                "reason=docs-only".to_string(),
-            ],
-        };
+    fn no_test_policy_requires_bound_structured_evidence() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let evidence_file = temp.path().join("no-tests-applicable.json");
+        std::fs::write(&evidence_file, r#"{"schema":"homeboy/no-tests-applicable/v1","extension_id":"fixture","step":"test","nonce":"nonce","reason":"docs only"}"#).expect("write evidence");
         assert!(no_tests_applicable(
-            Some(&policy),
-            "NO TESTS APPLICABLE\nreason=docs-only",
-            "",
+            true,
+            &evidence_file,
+            "fixture",
+            "nonce",
             None
         ));
+        std::fs::write(&evidence_file, r#"{"schema":"homeboy/no-tests-applicable/v1","extension_id":"fixture","step":"test","nonce":"wrong","reason":"docs only"}"#).expect("write wrong nonce");
         assert!(!no_tests_applicable(
-            Some(&policy),
-            "NO TESTS APPLICABLE",
-            "",
+            true,
+            &evidence_file,
+            "fixture",
+            "nonce",
             None
         ));
-
-        let whitespace_policy = crate::TestNoTestsApplicablePolicy {
-            evidence_markers: vec!["   ".to_string()],
-        };
+        std::fs::write(&evidence_file, r#"{"schema":"homeboy/no-tests-applicable/v1","extension_id":"fixture","step":"lint","nonce":"nonce","reason":"docs only"}"#).expect("write wrong step");
         assert!(!no_tests_applicable(
-            Some(&whitespace_policy),
-            "any runner output",
-            "",
+            true,
+            &evidence_file,
+            "fixture",
+            "nonce",
+            None
+        ));
+        std::fs::write(&evidence_file, "not json").expect("write malformed evidence");
+        assert!(!no_tests_applicable(
+            true,
+            &evidence_file,
+            "fixture",
+            "nonce",
             None
         ));
     }
