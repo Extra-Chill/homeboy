@@ -71,7 +71,7 @@ pub fn run(args: FuzzArgs, _global: &GlobalArgs) -> CmdResult<FuzzOutput> {
         }
         Some(FuzzCommand::Inspect(inspect_args)) => {
             let output = run_inspect(inspect_args)?;
-            let exit = i32::from(output.status != "ok");
+            let exit = i32::from(output.inspection_status != "ok");
             Ok((FuzzOutput::Inspect(output), exit))
         }
         None => {

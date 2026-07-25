@@ -1327,6 +1327,7 @@ fn fuzz_output_contract_has_stable_variant_discriminators() {
         },
         evidence_refs: Vec::new(),
         evidence_followups: Vec::new(),
+        diagnostic: None,
     }))
     .unwrap();
     assert_eq!(run["variant"], "run");
