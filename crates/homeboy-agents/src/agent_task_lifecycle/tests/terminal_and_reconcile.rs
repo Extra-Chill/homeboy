@@ -3,10 +3,11 @@
 
 use super::*;
 use crate::agent_task::{
-    AgentTaskArtifact, AgentTaskArtifactDeclaration, AgentTaskExecutionHandle, AgentTaskExecutor,
-    AgentTaskLimits, AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef,
-    AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus,
-    AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA,
+    AgentTaskArtifact, AgentTaskArtifactDeclaration, AgentTaskEvidenceRef,
+    AgentTaskExecutionHandle, AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcomeStatus,
+    AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkflowEvidence,
+    AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus, AgentTaskWorkspace,
+    AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA,
 };
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
@@ -869,7 +870,15 @@ fn status_recovers_evicted_terminal_runner_job_from_durable_observation_once() {
         })
         .expect("accepted runner handoff");
 
-        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        let mut aggregate = succeeded_aggregate(&test_plan());
+        aggregate.outcomes[0]
+            .evidence_refs
+            .push(AgentTaskEvidenceRef {
+                kind: "transcript".to_string(),
+                uri: "file:///runner/private/transcript.json".to_string(),
+                label: Some("Runner transcript".to_string()),
+            });
+        let mut snapshot = terminal_child_snapshot(&aggregate);
         snapshot.events[0].data.as_mut().expect("event data")["identity"]["run_id"] = json!(run_id);
         snapshot.events[0].data.as_mut().expect("event data")["identity"]["persisted_run_id"] =
             json!(run_id);
@@ -888,6 +897,14 @@ fn status_recovers_evicted_terminal_runner_job_from_durable_observation_once() {
         assert!(store::read_aggregate(run_id).is_ok());
 
         let recovered_aggregate = store::read_aggregate(run_id).expect("recovered aggregate");
+        assert!(recovered_aggregate.outcomes[0].evidence_refs[0]
+            .uri
+            .starts_with("homeboy://agent-task/run/"));
+        let mut repeated_record = store::read_record(run_id).expect("recovered record");
+        assert!(
+            !project_persisted_terminal_runner_events(&mut repeated_record)
+                .expect("terminal projection is exactly once")
+        );
         let repeated = status(run_id).expect("idempotent recovery");
         assert_eq!(repeated.state, AgentTaskRunState::Succeeded);
         assert_eq!(
@@ -977,6 +994,35 @@ fn cancellation_race_projects_runner_success_instead_of_cancelling_controller_pr
         assert_eq!(terminal.tasks[0].state, AgentTaskState::Succeeded);
         assert!(terminal.metadata.get("cancel_reason").is_none());
         assert!(store::read_aggregate(run_id).is_ok());
+    });
+}
+
+#[test]
+fn accepted_runner_cancellation_fails_closed_when_daemon_cannot_be_reached() {
+    with_isolated_home(|_| {
+        let run_id = "cook-9969-runner-cancellation-fails-closed";
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000009971",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        })
+        .expect("accepted runner handoff");
+
+        let _cancel = super::cancellation::test_cancel_hook::install(Box::new(
+            |_runner_id, _runner_job_id, _durable_run_id| {
+                Err(Error::internal_unexpected("runner daemon is unavailable"))
+            },
+        ));
+
+        cancel_run(run_id, Some("operator cancellation"))
+            .expect_err("accepted runner cancellation must fail closed");
+        assert_eq!(
+            store::read_record(run_id).expect("durable record").state,
+            AgentTaskRunState::Running
+        );
     });
 }
 
