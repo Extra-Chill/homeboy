@@ -47,6 +47,10 @@ pub struct StatusArgs {
     #[arg(long)]
     pub timings: bool,
 
+    /// Refresh remote Git refs before calculating drift and release state.
+    #[arg(long)]
+    pub refresh: bool,
+
     /// Show only components carrying merged-but-unreleased work (commits on
     /// origin/<default-branch> that are past the latest release tag).
     #[arg(long)]

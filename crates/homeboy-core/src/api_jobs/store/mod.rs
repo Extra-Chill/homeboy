@@ -226,10 +226,22 @@ impl JobStore {
         })?;
         let durable: DurableJobStore = serde_json::from_str(&content)
             .map_err(|err| Error::config_invalid_json(path.display().to_string(), err))?;
+        let now = timestamp_ms();
         Ok(durable
             .jobs
             .into_iter()
             .filter(|stored| matches!(stored.job.status, JobStatus::Queued | JobStatus::Running))
+            // Status commands run outside the daemon and must not persist a
+            // lifecycle transition, but an expired admission is no longer an
+            // owner of daemon capacity. Startup/the daemon reconciler records
+            // the terminal transition durably.
+            .filter(|stored| {
+                stored.job.operation != "runner.admission"
+                    || stored
+                        .admission_lease
+                        .as_ref()
+                        .is_none_or(|lease| lease.expires_at_ms > now)
+            })
             .count())
     }
 

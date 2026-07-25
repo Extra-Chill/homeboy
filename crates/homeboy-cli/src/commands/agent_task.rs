@@ -43,9 +43,27 @@ pub use args::{
 pub(crate) use status::diagnostic_summary_from_aggregate;
 
 pub fn run(args: AgentTaskArgs, _global: &GlobalArgs) -> CmdResult<Value> {
+    run_with_cook_progress(args, None)
+}
+
+pub(crate) fn run_with_cook_progress(
+    args: AgentTaskArgs,
+    progress: Option<&dyn Fn(&str, Option<&str>, Option<&str>) -> homeboy::core::Result<()>>,
+) -> CmdResult<Value> {
     match args.command {
         AgentTaskCommand::Doctor(doctor_args) => doctor::doctor(doctor_args),
-        AgentTaskCommand::Cook(cook_args) => run::run_cook(cook_args),
+        AgentTaskCommand::Cook(cook_args) => {
+            if progress.is_some() {
+                run::run_cook_with_executor_and_dispatcher_with_progress(
+                    cook_args,
+                    homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor::discover(),
+                    None,
+                    progress,
+                )
+            } else {
+                run::run_cook(cook_args)
+            }
+        }
         AgentTaskCommand::Loop(loop_args) => controller::loop_command(loop_args),
         AgentTaskCommand::RunPlan(run_args) => run::run_plan(run_args),
         AgentTaskCommand::Run(status_args) => run::run_submitted(status_args),

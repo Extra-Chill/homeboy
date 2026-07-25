@@ -272,7 +272,6 @@ pub(super) fn exec_via_reverse_broker(
         &redaction_env,
         &redaction_secret_env_names,
     );
-
     let mirror = if mirror_evidence {
         mirror_reverse_broker_evidence(
             runner,

@@ -167,7 +167,8 @@ fn test_phase_report(
             phase: VerificationPhase::Test,
             status: PhaseStatus::Skipped,
             exit_code: Some(exit_code),
-            summary: "activation/install passed; PHPUnit discovery found zero tests; no PHPUnit assertions ran".to_string(),
+            summary: "extension policy verified no tests applicable; no test assertions ran"
+                .to_string(),
         };
     }
 
@@ -436,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn phpunit_no_discovery_is_structured_as_skipped() {
+    fn extension_no_test_policy_is_structured_as_skipped() {
         let (output, exit_code) = from_main_workflow(skipped_workflow_result());
 
         let json = serde_json::to_value(output).expect("serialize test command output");
@@ -447,7 +448,7 @@ mod tests {
         assert_eq!(json["phase"]["status"], "skipped");
         assert_eq!(
             json["phase"]["summary"],
-            "activation/install passed; PHPUnit discovery found zero tests; no PHPUnit assertions ran"
+            "extension policy verified no tests applicable; no test assertions ran"
         );
         assert!(json.get("failure").is_none());
     }

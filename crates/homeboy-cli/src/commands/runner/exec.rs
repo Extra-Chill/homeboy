@@ -93,6 +93,25 @@ pub(super) fn exec(
 
     let validated_run_id = validate_runner_exec_run_id(run_id)?;
     let (cwd, source_snapshot) = exec_workspace_context(runner_id, cwd, sync_workspace, false)?;
+    if let Some(run_id) = validated_run_id.as_deref() {
+        let runner_config = runner::load(runner_id)?;
+        let remote_cwd = cwd
+            .as_deref()
+            .or(runner_config.workspace_root.as_deref())
+            .unwrap_or(".");
+        homeboy_agents::agent_task_lifecycle::ensure_generic_runner_exec_run(
+            run_id,
+            runner_id,
+            remote_cwd,
+            &prepared_command,
+        )?;
+        homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_declarations(
+            run_id,
+            &artifact_outputs,
+            &artifact_dir_outputs,
+            &summary_outputs,
+        )?;
+    }
 
     let (mut output, exit_code) = runner::exec(
         runner_id,
@@ -131,18 +150,68 @@ pub(super) fn exec(
         },
     )?;
     if let Some(run_id) = validated_run_id.as_deref() {
-        let artifacts = runner::promote_runner_exec_artifacts(run_id, &output, &artifact_outputs)?;
+        if let (Some(job), Some(events)) = (output.job.as_ref(), output.job_events.as_ref()) {
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_terminal_checkpoint(
+                run_id,
+                &homeboy::core::api_jobs::RunnerJobLogSnapshot {
+                    job: job.clone(),
+                    events: events.clone(),
+                },
+            )?;
+        }
+        let mut artifacts = Vec::new();
+        for declaration in &artifact_outputs {
+            let promoted = runner::promote_runner_exec_artifacts(
+                run_id,
+                &output,
+                std::slice::from_ref(declaration),
+            )?;
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
+                run_id,
+                "artifact",
+                declaration,
+                &promoted,
+            )?;
+            artifacts.extend(promoted);
+        }
         let promoted_artifacts = artifacts
             .iter()
             .filter_map(|record| runner::promoted_output(&output, record))
             .collect::<Vec<_>>();
-        let artifact_dir_records =
-            runner::promote_runner_exec_artifact_dirs(run_id, &output, &artifact_dir_outputs)?;
+        let mut artifact_dir_records = Vec::new();
+        for declaration in &artifact_dir_outputs {
+            let promoted = runner::promote_runner_exec_artifact_dirs(
+                run_id,
+                &output,
+                std::slice::from_ref(declaration),
+            )?;
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
+                run_id,
+                "artifact_dir",
+                declaration,
+                &promoted,
+            )?;
+            artifact_dir_records.extend(promoted);
+        }
         let promoted_artifact_dir_records = artifact_dir_records
             .iter()
             .filter_map(|record| runner::promoted_output(&output, record))
             .collect::<Vec<_>>();
-        let summaries = runner::promote_runner_exec_summaries(run_id, &output, &summary_outputs)?;
+        let mut summaries = Vec::new();
+        for declaration in &summary_outputs {
+            let promoted = runner::promote_runner_exec_summaries(
+                run_id,
+                &output,
+                std::slice::from_ref(declaration),
+            )?;
+            homeboy_agents::agent_task_lifecycle::record_runner_exec_declaration_promotion(
+                run_id,
+                "summary",
+                declaration,
+                &promoted,
+            )?;
+            summaries.extend(promoted);
+        }
         let structured_summaries = summaries
             .iter()
             .filter_map(|summary| runner::runner_exec_structured_summary(&output, summary))
@@ -157,6 +226,40 @@ pub(super) fn exec(
             .extend(promoted_artifact_dir_records);
         output.structured_summaries.extend(structured_summaries);
         output.promoted_outputs.extend(promoted_summaries);
+        let retained = artifacts
+            .iter()
+            .chain(artifact_dir_records.iter())
+            .chain(summaries.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_refs(run_id, &retained)?;
+        if let (Some(job), Some(events)) = (output.job.as_ref(), output.job_events.as_ref()) {
+            homeboy_agents::agent_task_lifecycle::project_terminal_runner_result(
+                run_id,
+                &homeboy::core::api_jobs::RunnerJobLogSnapshot {
+                    job: job.clone(),
+                    events: events.clone(),
+                },
+            )?;
+        } else if matches!(
+            output.mode,
+            runner::RunnerExecMode::DiagnosticSsh | runner::RunnerExecMode::Local
+        ) {
+            homeboy_agents::agent_task_lifecycle::finish_runner_exec_direct(
+                run_id,
+                match output.mode {
+                    runner::RunnerExecMode::DiagnosticSsh => "diagnostic_ssh",
+                    _ => "local",
+                },
+                exit_code,
+            )?;
+        }
+        if matches!(
+            output.mode,
+            runner::RunnerExecMode::Daemon | runner::RunnerExecMode::ReverseBroker
+        ) {
+            homeboy_lab_runner::reconcile_runner_generation_after_evidence(&output.runner_id)?;
+        }
     }
     Ok((output, exit_code))
 }

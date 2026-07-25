@@ -134,6 +134,12 @@ pub fn project_terminal_runner_result(
         return Ok(false);
     }
 
+    // Ad hoc runner-exec runs are observation records, not agent-task records.
+    // Their daemon terminal result is complete without an inner task aggregate.
+    if project_terminal_runner_exec_result(run_id, snapshot)? {
+        return Ok(true);
+    }
+
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
     // Bind a still-pending controller handoff to this authoritative terminal
     // snapshot's daemon job before validating identity (issue #9240). An

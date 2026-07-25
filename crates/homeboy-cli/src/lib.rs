@@ -32,6 +32,7 @@ pub use homeboy_core::{is_zero, is_zero_u32, log_status};
 
 pub mod cli_runtime;
 pub mod cli_surface;
+pub mod command_capability;
 pub mod command_contract;
 #[doc(hidden)]
 pub mod commands;

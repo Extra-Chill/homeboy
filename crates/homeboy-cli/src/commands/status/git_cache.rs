@@ -16,6 +16,7 @@ use super::types::{UnreleasedMerge, UpstreamDrift};
 
 #[derive(Default)]
 pub(super) struct StatusGitCache {
+    refresh: bool,
     pub(super) upstream_drift: HashMap<String, Option<UpstreamDrift>>,
     fetched_tags: HashSet<String>,
     release_states: HashMap<String, Option<ReleaseState>>,
@@ -24,9 +25,18 @@ pub(super) struct StatusGitCache {
 }
 
 impl StatusGitCache {
+    pub(super) fn with_refresh(refresh: bool) -> Self {
+        Self {
+            refresh,
+            ..Self::default()
+        }
+    }
+}
+
+impl StatusGitCache {
     pub(super) fn fetch_origin_tags_for(&mut self, path: &str) {
         let cache_key = upstream_drift_cache_key(path);
-        if self.fetched_tags.insert(cache_key) {
+        if self.refresh && self.fetched_tags.insert(cache_key) {
             fetch_origin_tags(path);
         }
     }

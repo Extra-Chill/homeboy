@@ -695,7 +695,7 @@ dependencies = [
 
 [[package]]
 name = "homeboy"
-version = "0.314.1"
+version = "0.314.2"
 dependencies = [
  "base64",
  "chrono",
@@ -784,6 +784,7 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "fs4",
  "glob",
  "homeboy-agents",
  "homeboy-cli-contract",
@@ -982,6 +983,7 @@ dependencies = [
  "sha2",
  "shellexpand",
  "tempfile",
+ "uuid",
 ]
 
 [[package]]
@@ -1015,6 +1017,7 @@ dependencies = [
  "homeboy-core",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 

@@ -68,7 +68,7 @@ pub struct SelfCleanupRuntimeTmpArgs {
 pub fn run(args: SelfArgs, _global: &GlobalArgs) -> CmdResult<Value> {
     match args.command {
         SelfCommand::Status(_) => {
-            let status = self_status::collect_status();
+            let status = self_status::collect_status_read_only();
             let json = serde_json::to_value(status)
                 .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
             Ok((json, 0))

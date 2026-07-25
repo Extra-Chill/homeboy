@@ -14,6 +14,7 @@ mod hotspots;
 mod normalize;
 mod observations;
 mod parse;
+mod payloads;
 mod result_envelope_persistence;
 mod run_dir_writers;
 mod run_evidence_persistence;
@@ -65,6 +66,10 @@ pub use parse::{
     parse_fuzz_case_log_file, parse_fuzz_exploration_policy_file, parse_fuzz_result_envelope_file,
     parse_fuzz_results_file, parse_fuzz_sequence_plan_file, parse_fuzz_target_inventory_file,
     parse_fuzz_workload_file,
+};
+pub use payloads::{
+    externalize_fuzz_campaign_payloads, FuzzPayload, FuzzPayloadBudget, FuzzPayloadExternalization,
+    FUZZ_PAYLOAD_ARTIFACT_KIND, INLINE_FUZZ_PAYLOAD_LIMIT_BYTES,
 };
 pub use result_envelope_persistence::{
     fuzz_result_envelope_evidence_ref, fuzz_result_envelope_json, persist_fuzz_result_envelope,
