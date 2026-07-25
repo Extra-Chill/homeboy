@@ -4,6 +4,35 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.314.2] - 2026-07-25
+
+### Changed
+- relocate loop-spec/controller validation to its module
+- cover strict validation dependency flag activation
+- enforce core-agnostic-source in core-side orchestration crates
+- cover child process group reaping
+
+### Fixed
+- fail the lint gate on stale validation dependencies
+- include active batch summary counts
+- isolate private plan snapshots
+- retain active batch children
+- accept closed empty windows pipes
+- snapshot private Cook plan files
+- preserve batch terminal states
+- pin runtime through runner admission
+- support piped stdin on windows
+- unify batch aggregate state
+- secure detached Cook plan transfer
+- cancel idle stdin pumps
+- wait for stalled child reap
+- rebuild preflight after runtime convergence
+- retain detached Cook plan files
+- report failed batch outcomes
+- bound heartbeat-only runner stalls
+- forward piped stdin
+- converge runtime before Cook preflight
+
 ## [0.314.1] - 2026-07-24
 
 ### Changed
