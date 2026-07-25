@@ -799,4 +799,23 @@ mod tests {
 
         assert!(stale_validation_dependency_message("", stderr).is_none());
     }
+
+    #[test]
+    fn strict_validation_dependencies_flag_reflects_env() {
+        // A runner without the strict env proceeds (warn-and-continue); setting
+        // HOMEBOY_STRICT_VALIDATION_DEPENDENCIES=1 makes it fail closed on a
+        // behind-upstream dependency — this is what the release lint gate sets
+        // so a stale checkout cannot silently determine the outcome (#9643).
+        let lenient = ExtensionRunner::for_context(context());
+        assert!(!lenient.strict_validation_dependencies());
+
+        let strict =
+            ExtensionRunner::for_context(context()).env(STRICT_VALIDATION_DEPENDENCIES_ENV, "1");
+        assert!(strict.strict_validation_dependencies());
+
+        // Only an explicit truthy value enables strict mode.
+        let disabled =
+            ExtensionRunner::for_context(context()).env(STRICT_VALIDATION_DEPENDENCIES_ENV, "0");
+        assert!(!disabled.strict_validation_dependencies());
+    }
 }
