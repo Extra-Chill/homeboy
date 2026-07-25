@@ -524,11 +524,52 @@ fn cleanup_release_artifacts(local_path: &str, artifacts: &[ReleaseArtifact]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_deployment_from_run, plan_deployment, should_cleanup_release_artifacts};
-    use crate::release::types::{
-        ReleaseArtifact, ReleaseDeploymentResult, ReleaseDeploymentSummary, ReleaseRun,
-        ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
+    use super::{
+        extract_deployment_from_run, plan_deployment, run_deployment_step,
+        should_cleanup_release_artifacts,
     };
+    use crate::release::types::{
+        ReleaseArtifact, ReleaseCommandInput, ReleaseDeploymentResult, ReleaseDeploymentSummary,
+        ReleasePipelineOptions, ReleaseRun, ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
+    };
+    use crate::release::workflow::run_command;
+    use homeboy_core::component::{Component, VersionTarget};
+    use homeboy_core::project::{self, Project, ProjectComponentAttachment};
+    use homeboy_core::server::{self, Server};
+    use homeboy_core::test_support::with_isolated_home;
+    use std::io::Write;
+    use std::path::Path;
+
+    fn run_git(path: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn write_release_artifact(path: &Path) {
+        let file = std::fs::File::create(path).expect("create release artifact");
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file("plugin.txt", zip::write::FileOptions::default())
+            .expect("start archive entry");
+        archive
+            .write_all(b"published release\n")
+            .expect("archive bytes");
+        archive
+            .start_file("VERSION", zip::write::FileOptions::default())
+            .expect("start version entry");
+        archive.write_all(b"1.2.4\n").expect("version bytes");
+        archive.finish().expect("finish release artifact");
+    }
 
     #[test]
     fn test_plan_deployment() {
@@ -686,5 +727,186 @@ mod tests {
         };
 
         assert!(!should_cleanup_release_artifacts(&deployment));
+    }
+
+    #[test]
+    fn release_recover_resumes_only_failed_project_with_published_source_projection() {
+        with_isolated_home(|home| {
+            let source = home.path().join("source");
+            let successful_target = home.path().join("successful-target");
+            let retry_target = home.path().join("retry-target");
+            std::fs::create_dir_all(&source).expect("source directory");
+            std::fs::create_dir_all(&successful_target).expect("successful target");
+            std::fs::create_dir_all(&retry_target).expect("retry target");
+            run_git(&source, &["init", "-q", "--initial-branch", "main"]);
+            run_git(&source, &["config", "user.email", "test@example.com"]);
+            run_git(&source, &["config", "user.name", "Homeboy Test"]);
+            std::fs::write(source.join("VERSION"), "1.2.3\n").expect("source version");
+            run_git(&source, &["add", "."]);
+            run_git(&source, &["commit", "-q", "-m", "chore: initial"]);
+            std::fs::write(source.join("VERSION"), "1.2.4\n").expect("released version");
+            run_git(&source, &["commit", "-am", "release: v1.2.4", "-q"]);
+            run_git(&source, &["tag", "v1.2.4"]);
+            let release_commit = run_git(&source, &["rev-parse", "v1.2.4^{commit}"]);
+
+            let artifact_path = home.path().join("fixture.zip");
+            write_release_artifact(&artifact_path);
+            let artifact = ReleaseArtifact {
+                path: artifact_path.display().to_string(),
+                durable_path: Some(artifact_path.display().to_string()),
+                artifact_type: None,
+                platform: None,
+            };
+            let component = Component {
+                id: "fixture".to_string(),
+                local_path: source.display().to_string(),
+                remote_path: "plugins/fixture".to_string(),
+                build_artifact: Some("fixture.zip".to_string()),
+                extract_command: Some("unzip -o {{artifact}} && rm {{artifact}}".to_string()),
+                version_targets: Some(vec![VersionTarget {
+                    file: "VERSION".to_string(),
+                    pattern: Some("^([0-9]+\\.[0-9]+\\.[0-9]+)$".to_string()),
+                    artifact_path: None,
+                }]),
+                ..Default::default()
+            };
+
+            server::save(&Server {
+                id: "local".to_string(),
+                host: "localhost".to_string(),
+                user: "test".to_string(),
+                port: 22,
+                identity_file: None,
+                aliases: vec![],
+                kind: None,
+                auth: None,
+                env: Default::default(),
+                runner: None,
+            })
+            .expect("save local server");
+            for (id, base_path) in [
+                ("successful", successful_target.display().to_string()),
+                ("retry", "/dev/null".to_string()),
+            ] {
+                project::save(&Project {
+                    id: id.to_string(),
+                    server_id: Some("local".to_string()),
+                    base_path: Some(base_path),
+                    // The configured attachment is intentionally stale. Release must use
+                    // its accepted source projection rather than resolving this path.
+                    components: vec![ProjectComponentAttachment {
+                        id: component.id.clone(),
+                        local_path: home
+                            .path()
+                            .join(format!("missing-{id}-source"))
+                            .display()
+                            .to_string(),
+                        remote_path: Some(format!("plugins/{id}")),
+                    }],
+                    ..Project::default()
+                })
+                .expect("save project");
+            }
+
+            let first = run_deployment_step(&component, Some("1.2.4"), &[artifact]);
+            assert_eq!(first.status, ReleaseStepStatus::Failed);
+            let first_deployment = first
+                .data
+                .as_ref()
+                .and_then(|data| data.get("deployment"))
+                .cloned()
+                .and_then(|data| serde_json::from_value::<ReleaseDeploymentResult>(data).ok())
+                .expect("initial deployment result");
+            assert_eq!(
+                first_deployment.summary.succeeded,
+                1,
+                "initial deployment: {}",
+                serde_json::to_string(&first_deployment).expect("serialize deployment")
+            );
+            assert_eq!(first_deployment.summary.failed, 1);
+            assert!(successful_target
+                .join("plugins/successful/plugin.txt")
+                .exists());
+            assert!(super::recovery_path("fixture")
+                .expect("recovery path")
+                .exists());
+
+            // A process restart reloads the checkpoint, not an in-memory release plan.
+            // The completed target is now invalid: success proves the resumed lifecycle skips it.
+            let mut successful = project::load("successful").expect("successful project");
+            successful.base_path = Some("/dev/null".to_string());
+            project::save(&successful).expect("make completed target invalid");
+            let mut retry = project::load("retry").expect("retry project");
+            retry.base_path = Some(retry_target.display().to_string());
+            project::save(&retry).expect("repair failed target");
+
+            let (recovered, exit_code) = run_command(ReleaseCommandInput {
+                component_id: component.id.clone(),
+                recover: true,
+                pipeline: ReleasePipelineOptions {
+                    deploy: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .expect("recover deployment");
+            assert_eq!(exit_code, 0);
+            assert_eq!(recovered.status, "released");
+            assert!(
+                recovered.run.is_none(),
+                "recovery must not replay publication"
+            );
+            assert_eq!(
+                recovered
+                    .deployment
+                    .as_ref()
+                    .expect("recovered deployment")
+                    .summary
+                    .skipped,
+                1,
+                "completed target is skipped"
+            );
+            let retried = recovered
+                .deployment
+                .as_ref()
+                .expect("recovered deployment")
+                .projects
+                .iter()
+                .find(|project| project.project_id == "retry")
+                .and_then(|project| project.component_result.as_ref())
+                .expect("retried component result");
+            assert_eq!(retried.requested_ref.as_deref(), Some("v1.2.4"));
+            assert_eq!(
+                retried.resolved_sha.as_deref(),
+                Some(release_commit.as_str())
+            );
+            assert_eq!(
+                retried.source.as_deref(),
+                Some(
+                    source
+                        .canonicalize()
+                        .expect("canonical source")
+                        .to_string_lossy()
+                        .as_ref()
+                )
+            );
+            assert!(retry_target.join("plugins/retry/plugin.txt").exists());
+            assert_eq!(run_git(&source, &["tag", "--list"]), "v1.2.4");
+            assert_eq!(
+                run_git(&source, &["rev-parse", "v1.2.4^{commit}"]),
+                release_commit
+            );
+            assert!(
+                !super::recovery_path("fixture")
+                    .expect("recovery path")
+                    .exists(),
+                "terminal success clears the durable checkpoint"
+            );
+
+            assert!(super::resume_deployment(&component.id)
+                .expect("terminal recovery lookup")
+                .is_none());
+            assert_eq!(run_git(&source, &["tag", "--list"]), "v1.2.4");
+        });
     }
 }
