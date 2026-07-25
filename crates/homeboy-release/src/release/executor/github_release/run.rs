@@ -189,7 +189,7 @@ pub(crate) fn run_github_release(
             for path in &upload_specs {
                 upload_args.push(path);
             }
-            upload_args.extend_from_slice(&["--clobber", "-R", &repo_flag]);
+            upload_args.extend_from_slice(&["-R", &repo_flag]);
             Some(run_gh_command(
                 gh_command(&github, &component.github, &upload_args),
                 github_release_upload_timeout(),

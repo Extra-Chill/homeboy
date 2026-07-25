@@ -53,7 +53,7 @@ pub(crate) struct ReleaseAssetPublication {
 
 impl ReleaseAssetPublication {
     pub(crate) fn upload_spec(&self) -> String {
-        format!("{}#{}", self.source_path, self.target_name)
+        self.source_path.clone()
     }
 }
 
@@ -116,7 +116,10 @@ pub(crate) fn github_release_publications(
                 artifact.path
             ));
         }
-        let publication = publication_from_path(source_path, target_name)?;
+        let publication = publication_from_path(
+            &stage_canonical_upload_path(source_path, &target_name)?,
+            target_name,
+        )?;
         direct_sources.insert(source_path.to_string());
         match publications.get(&publication.target_name) {
             Some(existing) if existing.sha256 == publication.sha256 => {}
@@ -137,7 +140,11 @@ pub(crate) fn github_release_publications(
         if direct_sources.contains(&source_path) {
             continue;
         }
-        let publication = publication_from_path(&source_path, release_asset_name(&source_path))?;
+        let target_name = release_asset_name(&source_path);
+        let publication = publication_from_path(
+            &stage_canonical_upload_path(&source_path, &target_name)?,
+            target_name,
+        )?;
         match publications.get(&publication.target_name) {
             Some(existing) if existing.sha256 == publication.sha256 => {}
             Some(_) => {
@@ -154,6 +161,39 @@ pub(crate) fn github_release_publications(
     Ok(publications.into_values().collect())
 }
 
+/// GitHub names an upload from the local filename; `gh`'s `#label` suffix only
+/// changes the display label. Keep a canonical durable filename beside numbered
+/// durable copies so retries and repair commands upload the intended asset name.
+fn stage_canonical_upload_path(source_path: &str, target_name: &str) -> Result<String, String> {
+    let source = std::path::Path::new(source_path);
+    if source.file_name().and_then(|name| name.to_str()) == Some(target_name) {
+        return Ok(source_path.to_string());
+    }
+    let parent = source
+        .parent()
+        .ok_or_else(|| format!("release artifact '{source_path}' has no parent directory"))?;
+    let target = parent.join(target_name);
+    if target.is_file() {
+        let source_digest = file_sha256(source_path)?;
+        let target_digest = file_sha256(&target.display().to_string())?;
+        if source_digest != target_digest {
+            return Err(format!(
+                "release assets targeting '{target_name}' have conflicting bytes"
+            ));
+        }
+        return Ok(target.display().to_string());
+    }
+    std::fs::hard_link(source, &target)
+        .or_else(|_| std::fs::copy(source, &target).map(|_| ()))
+        .map_err(|error| {
+            format!(
+                "could not stage canonical release artifact '{source_path}' as '{}': {error}",
+                target.display()
+            )
+        })?;
+    Ok(target.display().to_string())
+}
+
 fn publication_from_path(
     source_path: &str,
     target_name: String,
@@ -163,25 +203,30 @@ fn publication_from_path(
     if metadata.len() == 0 {
         return Err(format!("release asset '{target_name}' is empty"));
     }
-    let mut file = std::fs::File::open(source_path)
-        .map_err(|error| format!("could not hash release artifact '{source_path}': {error}"))?;
+    let sha256 = file_sha256(source_path)?;
+    Ok(ReleaseAssetPublication {
+        target_name,
+        sha256,
+        size: metadata.len(),
+        source_path: source_path.to_string(),
+    })
+}
+
+fn file_sha256(path: &str) -> Result<String, String> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("could not hash release artifact '{path}': {error}"))?;
     let mut hasher = Sha256::new();
     let mut buffer = [0; 8192];
     loop {
         let read = file
             .read(&mut buffer)
-            .map_err(|error| format!("could not hash release artifact '{source_path}': {error}"))?;
+            .map_err(|error| format!("could not hash release artifact '{path}': {error}"))?;
         if read == 0 {
             break;
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(ReleaseAssetPublication {
-        target_name,
-        sha256: format!("{:x}", hasher.finalize()),
-        size: metadata.len(),
-        source_path: source_path.to_string(),
-    })
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// Split publications into assets that must be uploaded and assets already
@@ -781,7 +826,32 @@ mod tests {
         assert_eq!(publications[0].target_name, "component.zip");
         assert_eq!(
             publications[0].upload_spec(),
-            format!("{}#component.zip", durable.display())
+            canonical.display().to_string()
+        );
+        assert_eq!(
+            std::fs::read(&canonical).expect("staged canonical zip"),
+            b"component bytes"
+        );
+    }
+
+    #[test]
+    fn canonical_durable_name_rejects_conflicting_bytes_without_replacing_them() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = dir.path().join("component.zip");
+        let durable = dir.path().join("01-component.zip");
+        std::fs::write(&canonical, b"existing bytes").expect("write canonical zip");
+        std::fs::write(&durable, b"component bytes").expect("write durable zip");
+
+        let error = github_release_publications(&release_state_with_artifacts(vec![artifact(
+            &canonical,
+            Some(&durable),
+        )]))
+        .expect_err("conflicting durable canonical name must fail");
+
+        assert!(error.contains("targeting 'component.zip' have conflicting bytes"));
+        assert_eq!(
+            std::fs::read(&canonical).expect("canonical zip retained"),
+            b"existing bytes"
         );
     }
 
