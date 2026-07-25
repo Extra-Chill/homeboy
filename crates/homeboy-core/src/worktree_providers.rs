@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Read};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,6 +10,16 @@ use crate::defaults::{
     WorktreeProviderListResultMapping,
 };
 use crate::error::{CommandEvidence, Error, Result};
+
+#[cfg(not(test))]
+const PROVIDER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const PROVIDER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(not(test))]
+const PROVIDER_CLEANUP_HEARTBEAT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const PROVIDER_CLEANUP_HEARTBEAT: Duration = Duration::from_millis(100);
+const PROVIDER_CLEANUP_OUTPUT_LIMIT: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct WorktreeProviderCleanupOptions {
@@ -27,6 +35,22 @@ pub enum WorktreeProviderCleanupMode {
     Apply,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeProviderCleanupOutcome {
+    Completed,
+    TimedOut,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeProviderInventoryCompleteness {
+    Complete,
+    Partial,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct WorktreeProviderCleanupOutput {
     pub command: &'static str,
@@ -34,6 +58,7 @@ pub struct WorktreeProviderCleanupOutput {
     pub provider_count: usize,
     pub success_count: usize,
     pub failure_count: usize,
+    pub inventory_completeness: WorktreeProviderInventoryCompleteness,
     pub providers: Vec<WorktreeProviderCleanupResult>,
 }
 
@@ -41,6 +66,10 @@ pub struct WorktreeProviderCleanupOutput {
 pub struct WorktreeProviderCleanupResult {
     pub provider_id: String,
     pub success: bool,
+    pub outcome: WorktreeProviderCleanupOutcome,
+    pub inventory_completeness: WorktreeProviderInventoryCompleteness,
+    pub elapsed_ms: u128,
+    pub heartbeat_count: usize,
     pub mode: WorktreeProviderCleanupMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command_run: Option<Vec<String>>,
@@ -858,16 +887,24 @@ pub fn cleanup_worktree_providers_from_config(
         WorktreeProviderCleanupMode::Preview
     };
 
-    let providers = selected_providers(&options, &config)?;
-    let mut results = Vec::new();
-
-    for (provider_id, provider_config) in providers {
-        results.push(run_provider_cleanup(
-            &provider_id,
-            provider_config,
-            mode.clone(),
-        ));
-    }
+    let providers = selected_providers(&options, &config)?
+        .into_iter()
+        .map(|(id, provider)| (id, provider.clone()))
+        .collect::<Vec<_>>();
+    let mut results = std::thread::scope(|scope| {
+        let mut tasks = Vec::new();
+        for (provider_id, provider_config) in providers {
+            let mode = mode.clone();
+            tasks.push(
+                scope.spawn(move || run_provider_cleanup(&provider_id, &provider_config, mode)),
+            );
+        }
+        tasks
+            .into_iter()
+            .map(|task| task.join().expect("provider cleanup worker must not panic"))
+            .collect::<Vec<_>>()
+    });
+    results.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
 
     let success_count = results.iter().filter(|row| row.success).count();
     let failure_count = results.len().saturating_sub(success_count);
@@ -878,6 +915,13 @@ pub fn cleanup_worktree_providers_from_config(
         provider_count: results.len(),
         success_count,
         failure_count,
+        inventory_completeness: if results.iter().all(|row| {
+            row.inventory_completeness == WorktreeProviderInventoryCompleteness::Complete
+        }) {
+            WorktreeProviderInventoryCompleteness::Complete
+        } else {
+            WorktreeProviderInventoryCompleteness::Partial
+        },
         providers: results,
     })
 }
@@ -947,6 +991,22 @@ fn run_command_provider_cleanup(
     provider_config: &WorktreeProviderConfig,
     mode: WorktreeProviderCleanupMode,
 ) -> WorktreeProviderCleanupResult {
+    run_command_provider_cleanup_with_liveness(
+        provider_id,
+        provider_config,
+        mode,
+        PROVIDER_CLEANUP_TIMEOUT,
+        PROVIDER_CLEANUP_HEARTBEAT,
+    )
+}
+
+fn run_command_provider_cleanup_with_liveness(
+    provider_id: &str,
+    provider_config: &WorktreeProviderConfig,
+    mode: WorktreeProviderCleanupMode,
+    timeout: Duration,
+    heartbeat_interval: Duration,
+) -> WorktreeProviderCleanupResult {
     if mode == WorktreeProviderCleanupMode::Apply && !provider_config.apply_enabled {
         return provider_failure(provider_id, mode, "provider apply is not enabled");
     }
@@ -971,45 +1031,75 @@ fn run_command_provider_cleanup(
         );
     }
 
-    match Command::new(&command[0])
+    let mut process = Command::new(&command[0]);
+    process
         .args(&command[1..])
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+    crate::engine::command::isolate_process_tree(&mut process);
+    eprintln!(
+        "[cleanup.worktrees provider={provider_id} phase={}] starting",
+        mode_phase(&mode)
+    );
+    match process.spawn() {
         Ok(mut child) => {
-            let stdout = child.stdout.take();
-            let stderr = child.stderr.take();
-            let stdout_lines = Arc::new(Mutex::new(Vec::new()));
-            let stderr_lines = Arc::new(Mutex::new(Vec::new()));
-
-            let stdout_handle = stdout.map(|stream| {
-                collect_provider_stream(
-                    provider_id.to_string(),
-                    "stdout",
-                    stream,
-                    Arc::clone(&stdout_lines),
-                )
-            });
-            let stderr_handle = stderr.map(|stream| {
-                collect_provider_stream(
-                    provider_id.to_string(),
-                    "stderr",
-                    stream,
-                    Arc::clone(&stderr_lines),
-                )
-            });
-
-            let wait_result = child.wait();
-            if let Some(handle) = stdout_handle {
-                let _ = handle.join();
-            }
-            if let Some(handle) = stderr_handle {
-                let _ = handle.join();
-            }
-
-            let stdout = joined_lines(&stdout_lines);
-            let stderr = joined_lines(&stderr_lines);
+            let started = std::time::Instant::now();
+            let mut heartbeats = 0;
+            let wait_result = crate::engine::command::wait_with_bounded_output_supervised(
+                &mut child,
+                PROVIDER_CLEANUP_OUTPUT_LIMIT,
+                timeout,
+                heartbeat_interval,
+                || false,
+                |elapsed, tail| {
+                    heartbeats += 1;
+                    eprintln!(
+                        "[cleanup.worktrees provider={provider_id} phase={} elapsed_ms={} remaining_ms={} heartbeat={heartbeats}] {}",
+                        mode_phase(&mode),
+                        elapsed.as_millis(),
+                        timeout.saturating_sub(elapsed).as_millis(),
+                        tail.lines().last().unwrap_or("waiting for provider output"),
+                    );
+                    Ok(())
+                },
+            );
+            let elapsed_ms = started.elapsed().as_millis();
+            let (output_status, outcome, stdout, stderr) = match wait_result {
+                Ok(output) => {
+                    let outcome = match output.termination {
+                        crate::engine::command::SupervisedCommandTermination::Completed
+                            if output.output.status.success() =>
+                        {
+                            WorktreeProviderCleanupOutcome::Completed
+                        }
+                        crate::engine::command::SupervisedCommandTermination::Completed => {
+                            WorktreeProviderCleanupOutcome::Failed
+                        }
+                        crate::engine::command::SupervisedCommandTermination::TimedOut => {
+                            WorktreeProviderCleanupOutcome::TimedOut
+                        }
+                        crate::engine::command::SupervisedCommandTermination::Cancelled => {
+                            WorktreeProviderCleanupOutcome::Cancelled
+                        }
+                    };
+                    (
+                        Some(output.output.status),
+                        outcome,
+                        String::from_utf8_lossy(&output.output.stdout).to_string(),
+                        String::from_utf8_lossy(&output.output.stderr).to_string(),
+                    )
+                }
+                Err(err) => {
+                    return provider_failure_with_details(
+                        provider_id,
+                        mode,
+                        Some(command.clone()),
+                        format!("failed to supervise provider command: {err}"),
+                        elapsed_ms,
+                        heartbeats,
+                    );
+                }
+            };
             let parsed_payload = parse_json_stdout(&stdout);
             let phase = provider_phase(&parsed_payload, &mode);
             let last_progress = provider_last_progress(&parsed_payload)
@@ -1018,30 +1108,18 @@ fn run_command_provider_cleanup(
             let run_refs = provider_run_refs(&parsed_payload);
             let follow_up_command = provider_follow_up_command(&run_refs);
 
-            let output_status = match wait_result {
-                Ok(status) => status,
-                Err(err) => {
-                    return WorktreeProviderCleanupResult {
-                        provider_id: provider_id.to_string(),
-                        success: false,
-                        mode,
-                        command_run: Some(command.clone()),
-                        status: None,
-                        stdout,
-                        stderr,
-                        parsed_payload,
-                        phase,
-                        last_progress,
-                        run_refs,
-                        follow_up_command,
-                        error: Some(format!("failed to wait for provider command: {err}")),
-                    };
-                }
-            };
-            let status = output_status.code();
+            let status = output_status.and_then(|status| status.code());
             WorktreeProviderCleanupResult {
                 provider_id: provider_id.to_string(),
-                success: output_status.success(),
+                success: outcome == WorktreeProviderCleanupOutcome::Completed,
+                inventory_completeness: if outcome == WorktreeProviderCleanupOutcome::Completed {
+                    WorktreeProviderInventoryCompleteness::Complete
+                } else {
+                    WorktreeProviderInventoryCompleteness::Partial
+                },
+                outcome: outcome.clone(),
+                elapsed_ms,
+                heartbeat_count: heartbeats,
                 mode,
                 command_run: Some(command.clone()),
                 status,
@@ -1052,59 +1130,28 @@ fn run_command_provider_cleanup(
                 last_progress,
                 run_refs,
                 follow_up_command,
-                error: output_status
-                    .success()
-                    .then_some(())
-                    .is_none()
-                    .then(|| "provider command failed".to_string()),
+                error: (outcome != WorktreeProviderCleanupOutcome::Completed).then(
+                    || match outcome {
+                        WorktreeProviderCleanupOutcome::TimedOut => {
+                            format!("provider timed out after {} ms", timeout.as_millis())
+                        }
+                        WorktreeProviderCleanupOutcome::Cancelled => {
+                            "provider command was cancelled".to_string()
+                        }
+                        _ => "provider command failed".to_string(),
+                    },
+                ),
             }
         }
-        Err(err) => {
-            let phase = Some(mode_phase(&mode).to_string());
-            WorktreeProviderCleanupResult {
-                provider_id: provider_id.to_string(),
-                success: false,
-                mode,
-                command_run: Some(command.clone()),
-                status: None,
-                stdout: String::new(),
-                stderr: String::new(),
-                parsed_payload: None,
-                phase,
-                last_progress: None,
-                run_refs: Vec::new(),
-                follow_up_command: None,
-                error: Some(format!("failed to execute provider command: {err}")),
-            }
-        }
+        Err(err) => provider_failure_with_details(
+            provider_id,
+            mode,
+            Some(command.clone()),
+            format!("failed to execute provider command: {err}"),
+            0,
+            0,
+        ),
     }
-}
-
-fn collect_provider_stream<R>(
-    provider_id: String,
-    stream_name: &'static str,
-    stream: R,
-    lines: Arc<Mutex<Vec<String>>>,
-) -> thread::JoinHandle<()>
-where
-    R: Read + Send + 'static,
-{
-    thread::spawn(move || {
-        let reader = BufReader::new(stream);
-        for line in reader.lines().map_while(std::result::Result::ok) {
-            eprintln!("[cleanup.worktrees provider={provider_id} stream={stream_name}] {line}");
-            if let Ok(mut guard) = lines.lock() {
-                guard.push(line);
-            }
-        }
-    })
-}
-
-fn joined_lines(lines: &Arc<Mutex<Vec<String>>>) -> String {
-    lines
-        .lock()
-        .map(|guard| guard.join("\n"))
-        .unwrap_or_default()
 }
 
 fn last_non_empty_line(output: &str) -> Option<String> {
@@ -1121,12 +1168,27 @@ fn provider_failure(
     mode: WorktreeProviderCleanupMode,
     error: &str,
 ) -> WorktreeProviderCleanupResult {
+    provider_failure_with_details(provider_id, mode, None, error.to_string(), 0, 0)
+}
+
+fn provider_failure_with_details(
+    provider_id: &str,
+    mode: WorktreeProviderCleanupMode,
+    command_run: Option<Vec<String>>,
+    error: String,
+    elapsed_ms: u128,
+    heartbeat_count: usize,
+) -> WorktreeProviderCleanupResult {
     let phase = Some(mode_phase(&mode).to_string());
     WorktreeProviderCleanupResult {
         provider_id: provider_id.to_string(),
         success: false,
+        outcome: WorktreeProviderCleanupOutcome::Failed,
+        inventory_completeness: WorktreeProviderInventoryCompleteness::Partial,
+        elapsed_ms,
+        heartbeat_count,
         mode,
-        command_run: None,
+        command_run,
         status: None,
         stdout: String::new(),
         stderr: String::new(),
@@ -1135,7 +1197,7 @@ fn provider_failure(
         last_progress: None,
         run_refs: Vec::new(),
         follow_up_command: None,
-        error: Some(error.to_string()),
+        error: Some(error),
     }
 }
 
@@ -1681,6 +1743,73 @@ mod tests {
             output.providers[0].parsed_payload,
             Some(json!({ "mode": "preview" }))
         );
+    }
+
+    #[test]
+    fn cleanup_provider_liveness_is_bounded_and_reports_partial_inventory() {
+        let hanging = fake_provider_script_body("sleep 60\n");
+        let slow = fake_provider_script_body("sleep 0.12\nprintf '{\"mode\":\"preview\"}\\n'\n");
+        let failing = fake_provider_script_body("printf 'provider failed\\n' >&2\nexit 23\n");
+        let provider = |script: String| WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: false,
+            commands: WorktreeProviderCommands {
+                cleanup_preview: Some(vec![script]),
+                ..Default::default()
+            },
+            list_result_mapping: None,
+        };
+
+        let mut config = HomeboyConfig::default();
+        config
+            .worktree_providers
+            .insert("hanging".to_string(), provider(hanging));
+        config
+            .worktree_providers
+            .insert("slow".to_string(), provider(slow));
+        config
+            .worktree_providers
+            .insert("failing".to_string(), provider(failing));
+        let started = std::time::Instant::now();
+        let output = cleanup_worktree_providers_from_config(
+            WorktreeProviderCleanupOptions {
+                provider: Vec::new(),
+                all_providers: true,
+                apply: false,
+            },
+            config,
+        )
+        .expect("bounded cleanup completes");
+
+        assert!(started.elapsed() < Duration::from_secs(7));
+        assert_eq!(
+            output.inventory_completeness,
+            WorktreeProviderInventoryCompleteness::Partial
+        );
+        let hanging = output
+            .providers
+            .iter()
+            .find(|row| row.provider_id == "hanging")
+            .expect("hanging result");
+        assert_eq!(hanging.outcome, WorktreeProviderCleanupOutcome::TimedOut);
+        assert_eq!(
+            hanging.inventory_completeness,
+            WorktreeProviderInventoryCompleteness::Partial
+        );
+        let slow = output
+            .providers
+            .iter()
+            .find(|row| row.provider_id == "slow")
+            .expect("slow result");
+        assert_eq!(slow.outcome, WorktreeProviderCleanupOutcome::Completed);
+        assert!(slow.heartbeat_count > 0);
+        let failing = output
+            .providers
+            .iter()
+            .find(|row| row.provider_id == "failing")
+            .expect("failing result");
+        assert_eq!(failing.outcome, WorktreeProviderCleanupOutcome::Failed);
     }
 
     #[test]
@@ -2308,6 +2437,14 @@ mod tests {
         let script = dir.join("provider");
         fs::write(&script, "#!/bin/sh\nprintf '{\"mode\":\"%s\"}\n' \"$1\"\n")
             .expect("write script");
+        make_executable(&script);
+        script.to_string_lossy().to_string()
+    }
+
+    fn fake_provider_script_body(body: &str) -> String {
+        let dir = unique_fixture_script_dir();
+        let script = dir.join("provider");
+        fs::write(&script, format!("#!/bin/sh\n{body}")).expect("write script");
         make_executable(&script);
         script.to_string_lossy().to_string()
     }

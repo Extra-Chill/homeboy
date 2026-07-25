@@ -254,6 +254,7 @@ pub fn wait_with_bounded_output_supervised(
     let mut last_heartbeat = started;
     let (status, termination) = loop {
         if let Some(status) = child.try_wait()? {
+            terminate_remaining_process_group(child.id())?;
             break (status, SupervisedCommandTermination::Completed);
         }
         if is_cancelled() {
@@ -299,6 +300,32 @@ pub fn wait_with_bounded_output_supervised(
         },
         termination,
     })
+}
+
+/// A command can exit before a background descendant closes inherited output
+/// pipes. Stop that remaining process group before joining capture readers.
+#[cfg(unix)]
+fn terminate_remaining_process_group(root_pid: u32) -> io::Result<()> {
+    if !process_group_is_running(root_pid) {
+        return Ok(());
+    }
+    signal_process_group(root_pid, libc::SIGTERM)?;
+    if wait_for_process_group_exit_without_child(root_pid, PROCESS_TREE_TERM_GRACE) {
+        return Ok(());
+    }
+    signal_process_group(root_pid, libc::SIGKILL)?;
+    if wait_for_process_group_exit_without_child(root_pid, PROCESS_TREE_KILL_GRACE) {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!("process group {root_pid} remained alive after its root exited"),
+    ))
+}
+
+#[cfg(not(unix))]
+fn terminate_remaining_process_group(_root_pid: u32) -> io::Result<()> {
+    Ok(())
 }
 
 struct LiveOutputTail {
@@ -449,6 +476,18 @@ fn wait_for_process_group_exit(
         thread::sleep(PROCESS_TREE_POLL_INTERVAL);
     }
     Ok(true)
+}
+
+#[cfg(unix)]
+fn wait_for_process_group_exit_without_child(root_pid: u32, grace: Duration) -> bool {
+    let deadline = std::time::Instant::now() + grace;
+    while process_group_is_running(root_pid) {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(PROCESS_TREE_POLL_INTERVAL);
+    }
+    true
 }
 
 /// Terminate an isolated child process tree and reap its direct child process.
@@ -742,6 +781,43 @@ mod tests {
                 .expect("cancel and reap process tree");
         assert!(!status.status.success());
 
+        let descendant_pid = std::fs::read_to_string(&pid_file)
+            .expect("descendant pid")
+            .trim()
+            .parse::<libc::pid_t>()
+            .expect("numeric descendant pid");
+        assert_ne!(unsafe { libc::kill(descendant_pid, 0) }, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completed_parent_does_not_deadlock_on_a_background_output_holder() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let pid_file = temp.path().join("descendant.pid");
+        let script = format!(
+            "sleep 30 & echo $! > {}; printf done",
+            shell_quote_path(&pid_file)
+        );
+        let mut command = Command::new("sh");
+        command.args(["-c", &script]);
+        command.stdout(std::process::Stdio::piped());
+        command.stderr(std::process::Stdio::piped());
+        isolate_process_tree(&mut command);
+        let mut child = command.spawn().expect("spawn process tree");
+
+        let started = std::time::Instant::now();
+        let result = wait_with_bounded_output_supervised(
+            &mut child,
+            64,
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+            || false,
+            |_, _| Ok(()),
+        )
+        .expect("completed parent is supervised");
+
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(result.termination, SupervisedCommandTermination::Completed);
         let descendant_pid = std::fs::read_to_string(&pid_file)
             .expect("descendant pid")
             .trim()

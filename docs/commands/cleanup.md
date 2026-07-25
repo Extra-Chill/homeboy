@@ -22,6 +22,8 @@ Use `--sort size` to review the largest artifacts first, `--limit N` to bound th
 
 The JSON output includes worktree identity, candidate paths, estimated bytes, skipped reasons, applied rows, and a `summary` object. The terminal summary shows bounded candidate rows and points to the JSON output for full large reviews. `summary.invocation_reclaimed_bytes` reports bytes reclaimed by the current command, `summary.remaining_candidate_bytes` reports cleanup candidates still present after the command, and `summary.cumulative_session_reclaimed_bytes` carries the local cumulative total for repeated `--apply` runs against the same repository. Cleanup refuses unsafe path declarations and skips artifact paths that contain tracked or staged source changes.
 
+Configured worktree-provider previews run independently with a 30-second cancellation boundary. The output records each provider's typed `outcome`, `inventory_completeness`, elapsed time, and heartbeat count, so a timed-out or failed provider yields a partial inventory without blocking healthy providers. Preview commands remain the only provider operation invoked without `--apply`.
+
 Regular `homeboy cleanup` includes `repo-artifacts` inventory. After an agent-task provider exits, Homeboy also cleans declared rebuildable artifacts from that exact detached attempt worktree before applying its existing source-state and commit safety guard. Active sibling worktrees are not scanned by this lifecycle step.
 
 ## Shared Cargo Targets

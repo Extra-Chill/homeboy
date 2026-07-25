@@ -61,6 +61,7 @@ pub struct CleanupArgs {
 pub enum CleanupCategoryArg {
     RepoArtifacts,
     TaskWorktrees,
+    WorktreeProviders,
     TerminalRuns,
     PersistedRunArtifacts,
     RunnerDownloads,
@@ -597,6 +598,14 @@ const TASK_WORKTREES_METADATA: CleanupInventoryCategoryMetadata =
         apply_command: "homeboy worktree cleanup --cleanup-branches",
     };
 
+const WORKTREE_PROVIDERS_METADATA: CleanupInventoryCategoryMetadata =
+    CleanupInventoryCategoryMetadata {
+        category: "worktree_providers",
+        include_arg: "worktree-providers",
+        dry_run_command: "homeboy cleanup worktrees --all-providers",
+        apply_command: "homeboy cleanup worktrees --all-providers --apply",
+    };
+
 const PERSISTED_RUN_ARTIFACTS_METADATA: CleanupInventoryCategoryMetadata =
     CleanupInventoryCategoryMetadata {
         category: "persisted_run_artifacts",
@@ -662,7 +671,8 @@ const CONTROLLER_RUNTIMES_METADATA: CleanupInventoryCategoryMetadata =
 fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
     let selected = CleanupCategorySelection::new(args.include, args.exclude);
     let apply = args.apply;
-    let configured = defaults::load_config().retention;
+    let config = defaults::load_config();
+    let configured = &config.retention;
     let terminal_run_days = args.older_than_days.unwrap_or(configured.terminal_run_days);
     let limit = args.limit.unwrap_or(configured.limit);
     if terminal_run_days < 0 || limit < 1 {
@@ -687,6 +697,31 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
             allow_unmerged_branches: false,
         })?;
         categories.push(task_worktrees_category(output, apply)?);
+    }
+
+    if selected.includes(CleanupCategoryArg::WorktreeProviders) {
+        let output = cleanup::cleanup_resources_from_config(
+            ResourceCleanupOptions {
+                intent: cleanup_intent(apply),
+                artifacts: None,
+                worktree_providers: Some(WorktreeProviderCleanupOptions {
+                    provider: Vec::new(),
+                    all_providers: true,
+                    apply,
+                }),
+            },
+            config.clone(),
+        )?;
+        categories.push(category_from_output(
+            WORKTREE_PROVIDERS_METADATA,
+            apply,
+            0,
+            0,
+            output.failure_count,
+            0,
+            0,
+            output,
+        )?);
     }
 
     if selected.includes(CleanupCategoryArg::TerminalRuns) {
@@ -1499,6 +1534,21 @@ pub(crate) fn render_worktree_cleanup_summary(payload: &Value) -> Option<String>
             if let Some(phase) = provider.get("phase").and_then(Value::as_str) {
                 lines.push(format!("  Phase: {phase}"));
             }
+            if let Some(outcome) = provider.get("outcome").and_then(Value::as_str) {
+                lines.push(format!("  Outcome: {outcome}"));
+            }
+            if let Some(completeness) = provider
+                .get("inventory_completeness")
+                .and_then(Value::as_str)
+            {
+                lines.push(format!("  Inventory: {completeness}"));
+            }
+            if let Some(elapsed_ms) = provider.get("elapsed_ms").and_then(Value::as_u64) {
+                lines.push(format!("  Elapsed: {elapsed_ms} ms"));
+            }
+            if let Some(heartbeat_count) = provider.get("heartbeat_count").and_then(Value::as_u64) {
+                lines.push(format!("  Heartbeats: {heartbeat_count}"));
+            }
             if let Some(progress) = provider.get("last_progress").and_then(Value::as_str) {
                 lines.push(format!("  Last observed progress: {progress}"));
             }
@@ -2170,6 +2220,10 @@ mod tests {
                     {
                         "provider_id": "fixture",
                         "success": true,
+                        "outcome": "completed",
+                        "inventory_completeness": "complete",
+                        "elapsed_ms": 250,
+                        "heartbeat_count": 2,
                         "mode": "apply",
                         "command_run": ["provider-bin", "cleanup", "--apply"],
                         "phase": "running",
@@ -2193,6 +2247,10 @@ mod tests {
         assert!(summary.contains("Provider fixture: ok\n"));
         assert!(summary.contains("  Command: provider-bin cleanup --apply\n"));
         assert!(summary.contains("  Phase: running\n"));
+        assert!(summary.contains("  Outcome: completed\n"));
+        assert!(summary.contains("  Inventory: complete\n"));
+        assert!(summary.contains("  Elapsed: 250 ms\n"));
+        assert!(summary.contains("  Heartbeats: 2\n"));
         assert!(summary.contains("  Last observed progress: removed 10/20\n"));
         assert!(summary.contains("  Run: cleanup-run-1\n"));
         assert!(summary.contains("  Status command: provider status cleanup-run-1\n"));

@@ -56,6 +56,7 @@ const MIN_RUNNER_WORKSPACE_FREE_RATIO: f64 = 0.01;
 const METADATA_SSH_RECOVERY_ATTEMPTS: usize = 2;
 const WORKSPACE_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 const WORKSPACE_METADATA_OUTPUT_LIMIT: usize = 4 * 1024;
+const WORKSPACE_PRUNE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn sync_workspace(
     runner_id: &str,
@@ -1585,7 +1586,7 @@ fn ssh_runner_workspace_disk_probe(
         "p={path}; while [ ! -e \"$p\" ] && [ \"$p\" != / ]; do p=$(dirname \"$p\"); done; df -Pk \"$p\" 2>/dev/null | awk 'NR==2 {{print $2 \" \" $4}}'",
         path = shell::quote_arg(workspace_root),
     );
-    let output = client.execute(&command);
+    let output = client.execute_with_timeout(&command, WORKSPACE_PRUNE_TIMEOUT);
     if !output.success {
         return Ok(None);
     }
@@ -1789,7 +1790,7 @@ fn prune_candidates_ssh(
     client.env.extend(runner.env.clone());
     let min_age = options.min_age_hours.saturating_mul(3600);
     let command = prune_scan_command(root, min_age);
-    let output = client.execute(&command);
+    let output = client.execute_with_timeout(&command, WORKSPACE_PRUNE_TIMEOUT);
     if !output.success {
         return Err(Error::internal_unexpected(format!(
             "runner workspace prune scan failed: {}",
@@ -1906,7 +1907,7 @@ fn remove_workspace(runner: &super::super::Runner, root: &str, remote_path: &str
                 root = shell::quote_arg(root),
                 path = shell::quote_arg(remote_path),
             );
-            let output = client.execute(&command);
+            let output = client.execute_with_timeout(&command, WORKSPACE_PRUNE_TIMEOUT);
             if output.success {
                 Ok(())
             } else {
