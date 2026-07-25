@@ -261,6 +261,20 @@ pub(super) fn run_materialized_provider_command_once(
         .as_deref()
         .map(PathBuf::from)
         .or(provider_cwd);
+    let cwd_identity = cwd.as_deref().map(workspace_identity).transpose();
+    let cwd_identity = match cwd_identity {
+        Ok(identity) => identity,
+        Err(message) => {
+            return failure_outcome(
+                request,
+                AgentTaskOutcomeStatus::ProviderError,
+                AgentTaskFailureClassification::InvalidInput,
+                "agent_task.workspace_identity_invalid",
+                message,
+                json!({ "provider": provider.id }),
+            )
+        }
+    };
 
     if let Some(preflight) = provider_preflight_failure(request, provider, &program, &cwd, &command)
     {
@@ -333,6 +347,16 @@ pub(super) fn run_materialized_provider_command_once(
             .map(|(key, value)| (key.as_str(), value.as_str())),
     );
     if let Some(cwd) = cwd {
+        if workspace_identity(&cwd).as_ref().ok() != cwd_identity.as_ref() {
+            return failure_outcome(
+                request,
+                AgentTaskOutcomeStatus::ProviderError,
+                AgentTaskFailureClassification::InvalidInput,
+                "agent_task.workspace_identity_changed",
+                "provider workspace changed after validation; refusing execution".to_string(),
+                json!({ "provider": provider.id, "workspace": cwd }),
+            );
+        }
         command_builder.current_dir(cwd);
     }
 
@@ -556,6 +580,25 @@ pub(super) fn run_materialized_provider_command_once(
             ),
         ),
     }
+}
+
+#[cfg(unix)]
+fn workspace_identity(path: &std::path::Path) -> std::result::Result<(u64, u64), String> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("provider workspace must be a non-symlink directory".to_string());
+    }
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn workspace_identity(path: &std::path::Path) -> std::result::Result<(), String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("provider workspace must be a non-symlink directory".to_string());
+    }
+    Ok(())
 }
 
 fn execution_deadline_outcome(

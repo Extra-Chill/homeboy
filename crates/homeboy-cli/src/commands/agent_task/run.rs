@@ -59,11 +59,17 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
             direct_path,
             &args.to_worktree,
         )?;
+        let path = std::fs::canonicalize(direct_path).map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(direct_path.display().to_string()),
+            )
+        })?;
         return Ok(serde_json::json!({
             "action": "existing",
             "kind": "direct_task_worktree",
             "handle": args.to_worktree,
-            "path": direct_path,
+            "path": path,
         }));
     }
     if let Some(record) =
