@@ -241,7 +241,11 @@ pub(super) mod concurrency_tests {
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status, AgentTaskAggregateStatus::Succeeded);
+        assert_eq!(
+            aggregate.status,
+            AgentTaskAggregateStatus::Succeeded,
+            "{aggregate:#?}"
+        );
         assert_eq!(max_seen.load(Ordering::SeqCst), 2);
         assert!(!aggregate.events.iter().any(|event| {
             event.state == AgentTaskState::Blocked
@@ -693,6 +697,8 @@ pub(super) mod concurrency_tests {
         plan.options.execution_budget.max_same_provider_retries = 1;
         plan.options.retry.retryable_failure_classifications =
             vec![AgentTaskFailureClassification::Transient];
+        crate::agent_task_lifecycle::submit_plan(&plan, Some("retry-isolation"))
+            .expect("durable retry run");
 
         let aggregate = scheduler.run(plan);
 

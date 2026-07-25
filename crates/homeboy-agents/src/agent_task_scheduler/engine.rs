@@ -1215,15 +1215,22 @@ pub(super) fn complete_deferred_cleanup_recovery(
         .cloned()
         .collect::<Vec<_>>();
     action["completed_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
-    match cleanup {
-        Err(error) => {
+    match (cleanup, candidates.is_empty()) {
+        (Err(error), false) => {
+            // A committed or dirty attempt is deliberately retained, but its
+            // harvested patch is still a completed durable result.
+            action["status"] = serde_json::json!("candidate_recovered");
+            action["candidate_artifacts"] =
+                serde_json::to_value(candidates).unwrap_or(serde_json::Value::Null);
+            action["workspace_retention"] =
+                serde_json::json!(error.chars().take(512).collect::<String>());
+        }
+        (Err(error), true) => {
             action["status"] = serde_json::json!("failed");
             action["diagnostic"] = serde_json::json!(error.chars().take(512).collect::<String>());
         }
-        Ok(()) if candidates.is_empty() => {
-            action["status"] = serde_json::json!("completed_no_candidate")
-        }
-        Ok(()) => {
+        (Ok(()), true) => action["status"] = serde_json::json!("completed_no_candidate"),
+        (Ok(()), false) => {
             action["status"] = serde_json::json!("candidate_recovered");
             action["candidate_artifacts"] =
                 serde_json::to_value(candidates).unwrap_or(serde_json::Value::Null);
