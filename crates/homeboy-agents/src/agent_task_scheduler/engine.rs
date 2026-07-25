@@ -160,6 +160,7 @@ where
         }));
         let mut adaptive_decisions = Vec::new();
         let mut last_effective_concurrency = None;
+        let candidate_completion = plan.options.candidate_completion;
 
         for task in &queued {
             events.push(event(
@@ -261,6 +262,7 @@ where
                     &plan.options.per_executor_concurrency,
                     &plan.options.per_model_concurrency,
                     &plan.options.resource_budget,
+                    candidate_completion.is_some(),
                 ) else {
                     if running.is_empty() {
                         if let Some(task) = queued.pop_front() {
@@ -950,7 +952,47 @@ where
                         },
                         &outcome,
                     );
+                    let selected_task_id = candidate_completion
+                        .filter(|policy| *policy == AgentTaskCandidateCompletionPolicy::FirstGreen)
+                        .filter(|_| outcome.status == AgentTaskOutcomeStatus::Succeeded)
+                        .map(|_| outcome.task_id.clone());
                     record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
+                    if let Some(selected_task_id) = selected_task_id {
+                        if let Some(outcome) = outcomes
+                            .iter_mut()
+                            .find(|outcome| outcome.task_id == selected_task_id)
+                        {
+                            if !outcome.metadata.is_object() {
+                                outcome.metadata = serde_json::json!({});
+                            }
+                            outcome.metadata["candidate_selection"] = serde_json::json!({
+                                "policy": "first_green",
+                                "action": "controller_owned_promotion_required",
+                            });
+                        }
+                        AgentTaskScheduleSupport::cancel_queued(
+                            &mut queued,
+                            &mut outcomes,
+                            &mut events,
+                        );
+                        // Do not wait for unrelated candidates. Deferred cleanup
+                        // retains their isolated workspaces and harvests late
+                        // artifacts without touching the selected destination.
+                        for task in &mut running {
+                            self.executor.cancel(&task.task_id);
+                            task.timeout_cancel_requested = true;
+                            task.timeout_ms = Some(0);
+                            task.started_at = Instant::now() - timeout_with_grace(0);
+                        }
+                        AgentTaskScheduleSupport::expire_timed_out_tasks(
+                            &mut running,
+                            &mut quarantined,
+                            &mut outcomes,
+                            &mut events,
+                            self.executor.as_ref(),
+                        );
+                        break;
+                    }
                 }
                 Err(Some(mpsc::RecvTimeoutError::Timeout)) => {}
                 Err(Some(mpsc::RecvTimeoutError::Disconnected)) | Err(None) => break,
@@ -961,6 +1003,20 @@ where
             AgentTaskScheduleSupport::artifact_lineage(&outcomes, &plan.artifact_outputs);
         let child_runs = child_runs_for_outcomes(&outcomes);
         let artifact_bindings = artifact_bindings_for_outcomes(&outcomes);
+        if candidate_completion == Some(AgentTaskCandidateCompletionPolicy::WaitAll) {
+            if let Some(outcome) = outcomes
+                .iter_mut()
+                .find(|outcome| outcome.status == AgentTaskOutcomeStatus::Succeeded)
+            {
+                if !outcome.metadata.is_object() {
+                    outcome.metadata = serde_json::json!({});
+                }
+                outcome.metadata["candidate_selection"] = serde_json::json!({
+                    "policy": "wait_all",
+                    "action": "controller_owned_promotion_required",
+                });
+            }
+        }
 
         AgentTaskAggregate {
             schema: AGENT_TASK_AGGREGATE_SCHEMA.to_string(),

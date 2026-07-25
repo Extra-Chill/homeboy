@@ -163,6 +163,104 @@ pub(super) mod concurrency_tests {
         assert!(max_seen.load(Ordering::SeqCst) <= 2);
     }
 
+    #[derive(Clone)]
+    struct FirstGreenCandidateExecutor {
+        started: Arc<AtomicUsize>,
+        release_hung_sibling: Arc<AtomicBool>,
+        cancellations: Arc<AtomicUsize>,
+    }
+
+    impl AgentTaskExecutorAdapter for FirstGreenCandidateExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            if request.task_id == "task-1" {
+                let deadline = Instant::now() + Duration::from_millis(100);
+                while self.started.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                return outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded);
+            }
+            while !self.release_hung_sibling.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(1));
+            }
+            outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
+        }
+
+        fn cancel(&self, _task_id: &str) {
+            self.cancellations.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn first_green_candidates_start_concurrently_and_detach_a_hung_sibling() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        init_git_workspace(&workspace);
+        let started = Arc::new(AtomicUsize::new(0));
+        let release_hung_sibling = Arc::new(AtomicBool::new(false));
+        let cancellations = Arc::new(AtomicUsize::new(0));
+        let scheduler = AgentTaskScheduler::new(FirstGreenCandidateExecutor {
+            started: Arc::clone(&started),
+            release_hung_sibling: Arc::clone(&release_hung_sibling),
+            cancellations: Arc::clone(&cancellations),
+        });
+        let mut plan = plan_with_tasks(2);
+        plan.options.max_concurrency = 2;
+        plan.options.candidate_completion = Some(AgentTaskCandidateCompletionPolicy::FirstGreen);
+        for task in &mut plan.tasks {
+            task.workspace.root = Some(workspace.display().to_string());
+        }
+
+        let began = Instant::now();
+        let aggregate = scheduler.run(plan);
+        // Attempt-worktree materialization can take longer than provider dispatch,
+        // but the result must return while the sibling is still intentionally hung.
+        assert!(began.elapsed() < Duration::from_secs(3));
+        assert_eq!(started.load(Ordering::SeqCst), 2);
+        assert!(cancellations.load(Ordering::SeqCst) >= 1);
+        let selected = aggregate
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.metadata["candidate_selection"]["policy"] == "first_green")
+            .expect("first green selection");
+        assert_eq!(selected.task_id, "task-1");
+        assert_eq!(
+            selected.metadata["candidate_selection"]["action"],
+            "controller_owned_promotion_required"
+        );
+
+        release_hung_sibling.store(true, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn wait_all_candidates_preserve_shared_workspace_serialization() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        init_git_workspace(&workspace);
+        let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
+        let max_seen = Arc::clone(&executor.max_seen);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(2);
+        plan.options.max_concurrency = 2;
+        plan.options.candidate_completion = Some(AgentTaskCandidateCompletionPolicy::WaitAll);
+        for task in &mut plan.tasks {
+            task.workspace.root = Some(workspace.display().to_string());
+        }
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.totals.succeeded, 2);
+        assert!(max_seen.load(Ordering::SeqCst) >= 1);
+        assert!(aggregate
+            .outcomes
+            .iter()
+            .any(|outcome| { outcome.metadata["candidate_selection"]["policy"] == "wait_all" }));
+    }
+
     #[test]
     fn root_and_subdirectory_share_the_same_git_workspace_identity() {
         let temp = tempfile::tempdir().expect("tempdir");

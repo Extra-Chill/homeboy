@@ -107,6 +107,10 @@ pub struct AgentTaskScheduleOptions {
     /// `metadata.provider_rotation` object overrides both (#6978).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotation: Option<AgentTaskProviderRotationPolicy>,
+    /// Explicit candidate aggregation policy. Candidates run in isolated attempt
+    /// workspaces, so a selected result is the only one eligible for promotion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_completion: Option<AgentTaskCandidateCompletionPolicy>,
 }
 
 impl Default for AgentTaskScheduleOptions {
@@ -123,8 +127,19 @@ impl Default for AgentTaskScheduleOptions {
             retry: AgentTaskRetryPolicy::default(),
             execution_budget: AgentTaskExecutionBudget::default(),
             rotation: None,
+            candidate_completion: None,
         }
     }
+}
+
+/// Controls when a set of isolated candidate attempts is complete.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskCandidateCompletionPolicy {
+    /// Retain every candidate outcome for comparison before selecting one.
+    WaitAll,
+    /// Select the first successful candidate and detach remaining attempts.
+    FirstGreen,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
