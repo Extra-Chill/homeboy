@@ -392,6 +392,15 @@ impl CliRuntime {
             }
         }
 
+        if let Commands::AgentTask(agent_task) = &cli.command {
+            if let crate::commands::agent_task::AgentTaskCommand::Cook(cook) = &agent_task.command {
+                if let Err(err) = crate::commands::agent_task::run::validate_cook_request(cook) {
+                    output_runtime::emit_json_result(Err(err), output_file.as_deref(), 2);
+                    return std::process::ExitCode::from(2);
+                }
+            }
+        }
+
         match delegate_agent_task_cook_to_pinned_runtime(&cli, &normalized) {
             Ok(Some(exit_code)) => return std::process::ExitCode::from(exit_code_to_u8(exit_code)),
             Ok(None) => {}

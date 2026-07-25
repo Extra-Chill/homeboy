@@ -197,7 +197,7 @@ pub mod batch {
 pub mod dispatch_service {
     pub use super::super::agent_task_dispatch_plan::{
         build_dispatch_plan, build_dispatch_plan_with_provider_requirements,
-        preflight_dispatch_provider_secrets,
+        preflight_dispatch_provider_secrets, validate_single_cook_prompt_source,
     };
     pub use super::super::agent_task_dispatch_service::{
         build_controller_dispatch_plan, controller_resolved_execution_policy, dispatch,

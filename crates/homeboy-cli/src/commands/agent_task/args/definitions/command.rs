@@ -36,14 +36,15 @@ pub enum AgentTaskCommand {
     Doctor(AgentTaskDoctorArgs),
     /// Run an agent task end to end and open a pull request.
     ///
-    /// Provide the work with `--task`/`--tasks` and a `--goal`, point
+    /// Provide the work with one `--prompt` and optional `--goal` framing, point
     /// `--to-worktree` at the existing worktree to edit (that checkout is
     /// authoritative — the agent's changes, the `--verify` gates, and the PR all
     /// operate on it), and give one or more `--verify` commands that must pass in
     /// that worktree before promotion. Cook then commits, runs the deterministic
     /// gates, and finalizes a `--base`-targeted PR (use `--no-finalize` to stop
     /// before opening the PR). Repeatable `--verify` gates all run; the run
-    /// retries up to `--max-attempts` times.
+    /// retries up to `--max-attempts` times. Use `agent-task fanout cook-batch`
+    /// for independent task waves.
     Cook(AgentTaskCookArgs),
     /// Continue a detached Cook from its durable Cook ID or provider attempt ID.
     /// The persisted recipe supplies the original prompt, transport, gates,

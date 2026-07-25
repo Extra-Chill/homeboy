@@ -27,6 +27,56 @@ use prompt_spec::{
     read_text_spec, DispatchPromptSpec,
 };
 
+/// Cook owns one source prompt and one promotion lifecycle. Keep its input
+/// boundary separate from generic dispatch, which still carries wave inputs.
+pub fn validate_single_cook_prompt_source(
+    prompt: Option<&str>,
+    tasks: &[String],
+    tasks_json: Option<&str>,
+) -> Result<()> {
+    if tasks.len() > 1 {
+        return Err(Error::validation_invalid_argument(
+            "task",
+            "agent-task cook accepts one --prompt source; repeated --task creates an unsupported wave",
+            None,
+            Some(vec![
+                "Replace the repeated --task flags with one prompt: homeboy agent-task cook --prompt @task.txt --to-worktree sample-plugin@fix-issue --verify 'npm test'".to_string(),
+            ]),
+        ));
+    }
+    if !tasks.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "task",
+            "agent-task cook accepts work through --prompt; --task is reserved for future batch transport inputs",
+            None,
+            Some(vec![
+                "Replace --task with --prompt: homeboy agent-task cook --prompt @task.txt --to-worktree sample-plugin@fix-issue --verify 'npm test'".to_string(),
+            ]),
+        ));
+    }
+    if tasks_json.is_some() {
+        return Err(Error::validation_invalid_argument(
+            "tasks",
+            "agent-task cook accepts one --prompt source; --tasks JSON creates an unsupported wave",
+            None,
+            Some(vec![
+                "Run independent cooks through fanout, or use one prompt: homeboy agent-task cook --prompt @task.txt --to-worktree sample-plugin@fix-issue --verify 'npm test'".to_string(),
+            ]),
+        ));
+    }
+    if prompt.is_none() {
+        return Err(Error::validation_invalid_argument(
+            "prompt",
+            "agent-task cook requires one --prompt source",
+            None,
+            Some(vec![
+                "Example: homeboy agent-task cook --prompt @task.txt --to-worktree sample-plugin@fix-issue --verify 'npm test'".to_string(),
+            ]),
+        ));
+    }
+    Ok(())
+}
+
 mod provider_config;
 use provider_config::{
     dispatch_component_contracts, dispatch_provider_config, dispatch_request_inputs,
@@ -44,11 +94,11 @@ pub fn build_dispatch_plan_with_provider_requirements(
     if request.prompt.is_none() && request.tasks.is_empty() && request.core.tasks_json.is_none() {
         return Err(Error::validation_invalid_argument(
             "prompt",
-            "agent-task cook requires --prompt, --prompt @file, --prompt -, repeated --task inputs, or --tasks @tasks.json",
+            "agent-task dispatch requires --prompt, --prompt @file, --prompt -, repeated --task inputs, or --tasks @tasks.json",
             None,
             Some(vec![
-                "Example: homeboy agent-task cook --repo sample-plugin --cwd /path/to/worktree --to-worktree sample-plugin@fix-issue --verify 'npm test' --prompt @task.txt".to_string(),
-                "Wave input: homeboy agent-task cook --tasks @tasks.json --concurrency 8 --to-worktree sample-plugin@fix-issue --verify 'npm test'".to_string(),
+                "Example: homeboy agent-task dispatch --repo sample-plugin --cwd /path/to/worktree --prompt @task.txt".to_string(),
+                "Wave input: homeboy agent-task dispatch --tasks @tasks.json --concurrency 8".to_string(),
             ]),
         ));
     }

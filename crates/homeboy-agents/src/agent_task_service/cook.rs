@@ -10,7 +10,7 @@ use std::time::Duration;
 use crate::agent_task_cook_loop::{
     evaluate_cook_loop, AgentTaskCookLoopOptions, AgentTaskCookLoopReport, AgentTaskCookLoopStatus,
 };
-use crate::agent_task_dispatch_plan::build_dispatch_plan;
+use crate::agent_task_dispatch_plan::{build_dispatch_plan, validate_single_cook_prompt_source};
 use crate::agent_task_dispatch_service::{self, AgentTaskDispatchCommand};
 use crate::agent_task_gate::VerifyGateOptions;
 use crate::agent_task_lifecycle;
@@ -657,6 +657,11 @@ pub fn compile_cook_attempt(
     mut options: AgentTaskCookServiceOptions,
     dispatch: AgentTaskDispatchCommand,
 ) -> Result<AgentTaskCookServiceOptions> {
+    validate_single_cook_prompt_source(
+        dispatch.prompt.as_deref(),
+        &dispatch.tasks,
+        dispatch.core.tasks_json.as_deref(),
+    )?;
     let request = agent_task_dispatch_service::resolve_dispatch_request(dispatch.into())?;
     options.initial_plan = build_dispatch_plan(&request)?;
     Ok(options)
