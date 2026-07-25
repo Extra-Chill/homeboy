@@ -108,7 +108,7 @@ pub(crate) fn promote_attempt(
 
 /// Cook only promotes the candidate selected by the scheduler. A single-task
 /// aggregate has no selection projection and retains the historical behavior.
-fn selected_candidate_task_id(run_id: &str) -> Result<Option<String>> {
+pub(crate) fn selected_candidate_task_id(run_id: &str) -> Result<Option<String>> {
     let aggregate = agent_task_lifecycle::read_aggregate(run_id)?;
     Ok(aggregate
         .selected_outcome()
@@ -150,7 +150,9 @@ pub(crate) fn promote_or_load_attempt(
                     task_base_sha: options.task_base_sha.clone(),
                     candidate_ref: None,
                     to_worktree: options.to_worktree.clone(),
-                    task_id: None,
+                    // A resumed verification must retain the scheduler-selected
+                    // candidate rather than falling back to aggregate outcome order.
+                    task_id: selected_candidate_task_id(run_id)?,
                     artifact_id: None,
                     dry_run: false,
                     gates: options.gates.clone(),

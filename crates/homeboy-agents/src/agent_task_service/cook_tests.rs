@@ -12,7 +12,8 @@ use super::super::cook_promotion::{
     cook_report, finalize_cook_pr_with_backend, finalize_or_load_cook_pr_with_backend,
     moving_base_recovery_for_run, moving_base_recovery_from_promotion, moving_base_recovery_report,
     next_moving_base_recovery, persisted_promotion_for_attempt, recover_cook_pr_with_backend,
-    recover_moving_base_cook_candidate, refreshed_moving_base_recovery, MovingBaseCookRecovery,
+    recover_moving_base_cook_candidate, refreshed_moving_base_recovery, selected_candidate_task_id,
+    MovingBaseCookRecovery,
 };
 use super::super::cook_recipe::persist_initial_recipe;
 use super::*;
@@ -234,6 +235,10 @@ fn candidate_selection_uses_the_winner_for_review_form_and_status_projection() {
             review_form_from_aggregate(&agent_task_lifecycle::read_aggregate(run_id).unwrap())
                 .unwrap(),
             Some(test_review_form())
+        );
+        assert_eq!(
+            selected_candidate_task_id(run_id).unwrap(),
+            Some("winner".to_string())
         );
         let status = agent_task_lifecycle::run_status(run_id, None).unwrap();
         let candidate = status
