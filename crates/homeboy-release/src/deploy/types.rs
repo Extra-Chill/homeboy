@@ -17,6 +17,15 @@ use homeboy_core::project::Project;
 
 use super::path_roots::resolve_effective_remote_path;
 
+/// A caller-owned source resolution reused across project targets.
+///
+/// The deployer still applies each project's remote-path and override binding,
+/// but never re-resolves the source checkout after a release has accepted it.
+#[derive(Clone, Default)]
+pub struct PreparedDeployProjection {
+    pub components: BTreeMap<String, Component>,
+}
+
 /// Parse bulk component IDs from a JSON spec.
 pub fn parse_bulk_component_ids(json_spec: &str) -> Result<Vec<String>> {
     let input = config::parse_bulk_ids(json_spec)?;
@@ -97,6 +106,8 @@ pub struct DeployConfig {
     pub preflighted_source_paths: BTreeMap<String, String>,
     /// Effective component configuration identities accepted during release-set preflight.
     pub preflighted_component_identities: BTreeMap<String, String>,
+    /// Caller-prepared source components, retained while deploying each project target.
+    pub prepared_projection: Option<PreparedDeployProjection>,
     /// Force tag-based deploy, ignoring any reusable build artifacts
     pub tagged: bool,
     /// An immutable artifact prepared by an upstream workflow.
@@ -130,6 +141,7 @@ impl DeployConfig {
             resolved_refs: BTreeMap::new(),
             preflighted_source_paths: BTreeMap::new(),
             preflighted_component_identities: BTreeMap::new(),
+            prepared_projection: None,
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,

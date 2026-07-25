@@ -28,8 +28,8 @@ pub(crate) use types::sha256_file;
 pub use types::{
     compare_deployed_versions, parse_bulk_component_ids, ComponentDeployResult, ComponentStatus,
     DeployConfig, DeployOrchestrationResult, DeployReason, DeploySummary, MultiDeployResult,
-    MultiDeploySummary, PreparedDeployArtifact, ProjectDeployResult, ReleaseState,
-    ReleaseStateBuckets, ReleaseStateStatus,
+    MultiDeploySummary, PreparedDeployArtifact, PreparedDeployProjection, ProjectDeployResult,
+    ReleaseState, ReleaseStateBuckets, ReleaseStateStatus,
 };
 pub use version_overrides::fetch_remote_versions;
 pub use version_overrides::{RemoteVersionProbeFailure, RemoteVersionProbeResult};
@@ -106,7 +106,14 @@ fn preflight_prepared_payload_binding(
     let components = config
         .component_ids
         .iter()
-        .map(|component_id| project::resolve_project_component(project, component_id))
+        .map(|component_id| {
+            planning::resolve_project_component(
+                project,
+                component_id,
+                None,
+                config.prepared_projection.as_ref(),
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
     binding::bind_project_payloads(
         project,
@@ -279,6 +286,7 @@ pub fn run_multi(
             resolved_refs: config.resolved_refs.clone(),
             preflighted_source_paths: config.preflighted_source_paths.clone(),
             preflighted_component_identities: config.preflighted_component_identities.clone(),
+            prepared_projection: config.prepared_projection.clone(),
             tagged: config.tagged,
             prepared_artifact: config.prepared_artifact.clone(),
             resume_run_id: None,
@@ -547,6 +555,7 @@ mod tests {
             resolved_refs: Default::default(),
             preflighted_source_paths: Default::default(),
             preflighted_component_identities: Default::default(),
+            prepared_projection: None,
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,

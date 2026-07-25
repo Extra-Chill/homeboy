@@ -1,4 +1,4 @@
-use crate::deploy::{self, DeployConfig, PreparedDeployArtifact};
+use crate::deploy::{self, DeployConfig, PreparedDeployArtifact, PreparedDeployProjection};
 
 use super::executor::release_cleanup_paths;
 use super::types::{
@@ -29,12 +29,11 @@ pub(super) fn plan_deployment(component_id: &str) -> ReleaseDeploymentResult {
 }
 
 pub(super) fn run_deployment_step(
-    component_id: &str,
-    local_path: &str,
+    component: &homeboy_core::component::Component,
     expected_version: Option<&str>,
     artifacts: &[ReleaseArtifact],
 ) -> ReleaseStepResult {
-    let deployment = execute_deployment(component_id, local_path, expected_version, artifacts);
+    let deployment = execute_deployment(component, expected_version, artifacts);
     let deploy_failed = deployment.summary.failed > 0;
 
     ReleaseStepResult {
@@ -62,11 +61,12 @@ pub(super) fn extract_deployment_from_run(run: &ReleaseRun) -> Option<ReleaseDep
 }
 
 fn execute_deployment(
-    component_id: &str,
-    local_path: &str,
+    component: &homeboy_core::component::Component,
     expected_version: Option<&str>,
     artifacts: &[ReleaseArtifact],
 ) -> ReleaseDeploymentResult {
+    let component_id = &component.id;
+    let local_path = &component.local_path;
     let projects = release_deploy_targets(component_id);
 
     if projects.is_empty() {
@@ -89,7 +89,7 @@ fn execute_deployment(
             Ok(artifact) => artifact,
             Err(error) => return failed_deployment(&projects, error.to_string()),
         };
-    let config = release_deployment_config(component_id, expected_version, prepared_artifact);
+    let config = release_deployment_config(component, expected_version, prepared_artifact);
 
     let deployment = match deploy::run_multi(&projects, &[component_id.to_string()], &config) {
         Ok(result) => ReleaseDeploymentResult {
@@ -103,7 +103,7 @@ fn execute_deployment(
                     component_result: project
                         .results
                         .into_iter()
-                        .find(|result| result.id == component_id),
+                        .find(|result| result.id == *component_id),
                 })
                 .collect(),
             summary: ReleaseDeploymentSummary {
@@ -252,10 +252,26 @@ fn prepared_release_artifact(
 }
 
 fn release_deployment_config(
-    component_id: &str,
+    component: &homeboy_core::component::Component,
     expected_version: Option<&str>,
     prepared_artifact: PreparedDeployArtifact,
 ) -> DeployConfig {
+    let component_id = &component.id;
+    let mut requested_refs = std::collections::BTreeMap::new();
+    requested_refs.insert(component_id.to_string(), prepared_artifact.tag.clone());
+    let mut resolved_refs = std::collections::BTreeMap::new();
+    resolved_refs.insert(
+        component_id.to_string(),
+        prepared_artifact.source_commit.clone(),
+    );
+    let identity = component
+        .canonical_attachment_identity()
+        .expect("release component identity is serializable");
+    let mut preflighted_source_paths = std::collections::BTreeMap::new();
+    preflighted_source_paths.insert(component_id.to_string(), component.local_path.clone());
+    let mut preflighted_component_identities = std::collections::BTreeMap::new();
+    preflighted_component_identities.insert(component_id.to_string(), identity);
+
     DeployConfig {
         component_ids: vec![component_id.to_string()],
         all: false,
@@ -273,10 +289,16 @@ fn release_deployment_config(
         allow_downgrade: false,
         head: false,
         requested_ref: None,
-        requested_refs: Default::default(),
-        resolved_refs: Default::default(),
-        preflighted_source_paths: Default::default(),
-        preflighted_component_identities: Default::default(),
+        requested_refs,
+        resolved_refs,
+        preflighted_source_paths,
+        preflighted_component_identities,
+        prepared_projection: Some(PreparedDeployProjection {
+            components: std::collections::BTreeMap::from([(
+                component_id.to_string(),
+                component.clone(),
+            )]),
+        }),
         tagged: false,
         prepared_artifact: Some(prepared_artifact),
         resume_run_id: None,
@@ -357,8 +379,15 @@ mod tests {
 
     #[test]
     fn test_run_deployment_step() {
-        let result =
-            super::run_deployment_step("definitely-not-used-by-projects", "/tmp", None, &[]);
+        let result = super::run_deployment_step(
+            &homeboy_core::component::Component {
+                id: "definitely-not-used-by-projects".to_string(),
+                local_path: "/tmp".to_string(),
+                ..Default::default()
+            },
+            None,
+            &[],
+        );
 
         assert_eq!(result.id, "deploy");
         assert_eq!(result.status, ReleaseStepStatus::Success);
@@ -381,8 +410,11 @@ mod tests {
         }];
 
         let result = super::run_deployment_step(
-            "definitely-not-used-by-projects",
-            &temp.path().to_string_lossy(),
+            &homeboy_core::component::Component {
+                id: "definitely-not-used-by-projects".to_string(),
+                local_path: temp.path().to_string_lossy().to_string(),
+                ..Default::default()
+            },
             None,
             &artifacts,
         );
@@ -429,13 +461,23 @@ mod tests {
             tag: "v1.2.3".to_string(),
             source_commit: "commit".to_string(),
         };
-        let config = super::release_deployment_config("demo", Some("1.2.3"), artifact.clone());
+        let config = super::release_deployment_config(
+            &homeboy_core::component::Component {
+                id: "demo".to_string(),
+                local_path: "/tmp".to_string(),
+                ..Default::default()
+            },
+            Some("1.2.3"),
+            artifact.clone(),
+        );
 
         assert_eq!(config.component_ids, vec!["demo".to_string()]);
         assert_eq!(config.expected_version, Some("1.2.3".to_string()));
         assert!(!config.tagged, "--tagged is an operator rebuild mode");
         assert!(config.skip_build, "release deploy must not package again");
         assert_eq!(config.prepared_artifact, Some(artifact));
+        assert_eq!(config.requested_ref_for("demo"), Some("v1.2.3"));
+        assert_eq!(config.resolved_ref_for("demo"), Some("commit"));
         assert!(
             !config.head,
             "release deploy must not deploy the registered worktree HEAD"

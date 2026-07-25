@@ -16,7 +16,7 @@ use super::orchestration_tag_checkout::{
     restore_branches,
 };
 use super::path_roots::{project_with_detected_path_roots, resolve_effective_remote_path};
-use super::planning::{load_project_components, plan_components};
+use super::planning::{load_project_components_with_projection, plan_components};
 use super::types::{ComponentDeployResult, DeployConfig, DeployOrchestrationResult, DeploySummary};
 use super::version_overrides::fetch_remote_versions_for_project;
 use homeboy_core::git::release_download::{ReleaseArtifactLease, ReleaseArtifactStore};
@@ -45,7 +45,12 @@ pub(super) fn deploy_components(
     release_artifacts: &mut ReleaseArtifactStore,
 ) -> Result<DeployOrchestrationResult> {
     let mut effective_config = config.clone();
-    let loaded = load_project_components(project, &config.component_ids, config.check)?;
+    let loaded = load_project_components_with_projection(
+        project,
+        &config.component_ids,
+        config.check,
+        config.prepared_projection.as_ref(),
+    )?;
     validate_preflighted_component_identities(&loaded.deployable, config)?;
     validate_supported_build_configs(&loaded.deployable)?;
 
@@ -558,6 +563,24 @@ fn validate_preflighted_component_identities(
     config: &DeployConfig,
 ) -> Result<()> {
     for component in components {
+        if let Some(prepared) = config
+            .prepared_projection
+            .as_ref()
+            .and_then(|projection| projection.components.get(&component.id))
+        {
+            if component.local_path != prepared.local_path {
+                return Err(Error::validation_invalid_argument(
+                    "release_set",
+                    format!(
+                        "Project attachment for component '{}' changed after source projection; expected source '{}'.",
+                        component.id, prepared.local_path
+                    ),
+                    None,
+                    None,
+                ));
+            }
+            continue;
+        }
         let Some(expected_path) = config.preflighted_source_paths.get(&component.id) else {
             continue;
         };
@@ -689,6 +712,7 @@ mod tests {
             resolved_refs: Default::default(),
             preflighted_source_paths: Default::default(),
             preflighted_component_identities: Default::default(),
+            prepared_projection: None,
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,

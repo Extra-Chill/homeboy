@@ -627,6 +627,7 @@ mod tests {
             resolved_refs: Default::default(),
             preflighted_source_paths: Default::default(),
             preflighted_component_identities: Default::default(),
+            prepared_projection: None,
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
