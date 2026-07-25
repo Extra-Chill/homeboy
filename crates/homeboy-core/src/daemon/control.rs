@@ -1747,10 +1747,10 @@ struct StartupLeaseObservation {
 }
 
 /// A launch token is an attempt identity, never a general daemon readiness
-/// signal. In particular, another controller's daemon must not satisfy this
-/// wait merely because it happened to publish a live lease first.
+/// signal. The spawned `supervise` launcher and its `serve` child have distinct
+/// PIDs, so the live child lease is identified by its unique token.
 fn observe_startup_lease<ReadStatus, Sleep>(
-    pid: u32,
+    _launcher_pid: u32,
     startup_token: &str,
     observations: usize,
     mut read_status: ReadStatus,
@@ -1768,9 +1768,9 @@ where
     for attempt in 0..=observations {
         let status = read_status()?;
         if let Some(state) = status.state {
-            if state.pid == pid && state.startup_token == startup_token {
+            if status.running && state.startup_token == startup_token {
                 return Ok(Ok(DaemonStartResult {
-                    pid,
+                    pid: state.pid,
                     address: state.address,
                     state_path: state.state_path,
                     lease_id: state.lease_id,
@@ -1845,13 +1845,14 @@ fn startup_timeout_error(
 }
 
 fn spawn_and_wait_for_lease(addr: &str, startup_token: &str) -> Result<DaemonStartResult> {
-    spawn_and_wait_for_lease_attempt(addr, startup_token, true)
+    spawn_and_wait_for_lease_attempt(addr, startup_token, true, Vec::new())
 }
 
 fn spawn_and_wait_for_lease_attempt(
     addr: &str,
     startup_token: &str,
     allow_retry: bool,
+    mut cleanup_evidence: Vec<String>,
 ) -> Result<DaemonStartResult> {
     let exe = std::env::current_exe().map_err(|e| {
         Error::internal_io(
@@ -1889,6 +1890,7 @@ fn spawn_and_wait_for_lease_attempt(
         Ok(result) => Ok(result),
         Err(observation) => {
             let cleanup = cleanup_startup_attempt(pid, startup_token)?;
+            cleanup_evidence.extend(cleanup);
             if allow_retry {
                 // A launcher can lose the first publication race during an SSH
                 // handoff. Retry once with a new token; never adopt another
@@ -1897,13 +1899,14 @@ fn spawn_and_wait_for_lease_attempt(
                     addr,
                     &uuid::Uuid::new_v4().to_string(),
                     false,
+                    cleanup_evidence,
                 );
             }
             Err(startup_timeout_error(
                 pid,
                 startup_token,
                 observation,
-                cleanup,
+                cleanup_evidence,
             ))
         }
     }

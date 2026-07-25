@@ -1321,7 +1321,7 @@ fn ensure_running_concurrent_callers_converge_on_same_daemon() {
 }
 
 #[test]
-fn startup_observation_requires_the_attempt_pid_and_token() {
+fn startup_observation_requires_a_live_attempt_token() {
     let expected = "attempt-token";
     let wrong = fake_status(Some(fake_daemon(4242, "other-lease")), true);
     let result = observe_startup_lease(4343, expected, 0, || Ok(wrong.clone()), || {})
@@ -1330,14 +1330,20 @@ fn startup_observation_requires_the_attempt_pid_and_token() {
     assert_eq!(observed.observed_pid, Some(4242));
     assert_eq!(observed.observed_lease_id.as_deref(), Some("other-lease"));
 
-    let mut stale = fake_status(Some(fake_daemon(4343, "stale-lease")), true);
+    let mut stale = fake_status(Some(fake_daemon(4242, "stale-lease")), true);
     stale.state.as_mut().expect("state").startup_token = expected.to_string();
     let result = observe_startup_lease(4343, expected, 0, || Ok(stale.clone()), || {})
         .expect("observe startup");
     assert!(
         result.is_ok(),
-        "the matching token and pid are the only adoption proof"
+        "the matching token identifies the serve child of this launcher"
     );
+
+    let mut dead = fake_status(Some(fake_daemon(4242, "dead-lease")), false);
+    dead.state.as_mut().expect("state").startup_token = expected.to_string();
+    let result = observe_startup_lease(4343, expected, 0, || Ok(dead.clone()), || {})
+        .expect("observe startup");
+    assert!(result.is_err(), "a stale matching token is not ready");
 }
 
 #[test]
