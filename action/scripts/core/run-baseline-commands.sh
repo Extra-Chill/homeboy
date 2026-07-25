@@ -79,17 +79,17 @@ for CMD in "${BASELINE_RUN_COMMANDS[@]}"; do
   set -e
   echo "::endgroup::"
 
-  if [ ! -s "${OUTPUT_JSON}" ]; then
-    echo "::warning::baseline homeboy ${CMD} did not write structured output to ${OUTPUT_JSON}"
-  fi
-
   STRUCTURED_OUTPUT=false
-  if [ -s "${OUTPUT_JSON}" ]; then
+  if [ -s "${OUTPUT_JSON}" ] && jq -e 'type == "object"' "${OUTPUT_JSON}" >/dev/null 2>&1; then
     STRUCTURED_OUTPUT=true
+  else
+    echo "::error::baseline homeboy ${CMD} did not write valid structured output to ${OUTPUT_JSON}"
   fi
 
   STATUS="pass"
-  if [ "${CMD_EXIT}" -eq 124 ]; then
+  if [ "${CMD_EXIT}" -eq 0 ] && [ "${STRUCTURED_OUTPUT}" = false ]; then
+    STATUS="fail"
+  elif [ "${CMD_EXIT}" -eq 124 ]; then
     STATUS="timeout"
   elif [ "${CMD_EXIT}" -ne 0 ]; then
     STATUS="fail"

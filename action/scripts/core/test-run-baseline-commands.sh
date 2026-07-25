@@ -22,7 +22,11 @@ while [ "$#" -gt 0 ]; do
 done
 
 mkdir -p "$(dirname "${output}")"
-printf '%s\n' '{"success":true}' > "${output}"
+case "${FAKE_HOMEBOY_MODE:-}" in
+  missing) : ;;
+  malformed) printf '%s\n' 'not json' > "${output}" ;;
+  *) printf '%s\n' '{"success":true}' > "${output}" ;;
+esac
 
 case "${FAKE_HOMEBOY_MODE:-}" in
   descendant)
@@ -88,7 +92,7 @@ if kill -0 "${child_pid}" 2>/dev/null; then
   printf 'FAIL: baseline finalization leaves descendant process %s alive\n' "${child_pid}"
   exit 1
 fi
-if ! grep -q 'finalization terminated surviving process group' "${descendant_log}"; then
+if ! grep -q 'finalization terminated surviving command containment' "${descendant_log}"; then
   printf 'FAIL: baseline finalization did not report descendant cleanup\n'
   exit 1
 fi
@@ -113,3 +117,13 @@ if ! jq -e '."review test" | .status == "timeout" and .exit_code == 124 and .str
   exit 1
 fi
 printf 'PASS: baseline timeout records actionable failure evidence\n'
+
+for output_mode in missing malformed; do
+  output_log="${TMP_DIR}/${output_mode}.log"
+  output_dir="$(run_baseline "${output_mode}" "${output_log}")"
+  if ! jq -e '."review test" | .status == "fail" and .exit_code == 0 and .structured_output == false' "${output_dir}/baseline-status.json" >/dev/null || ! grep -q 'did not write valid structured output' "${output_log}"; then
+    printf 'FAIL: zero-exit baseline %s structured output fails closed\n' "${output_mode}"
+    exit 1
+  fi
+done
+printf 'PASS: zero-exit baseline missing and malformed structured output fail closed\n'

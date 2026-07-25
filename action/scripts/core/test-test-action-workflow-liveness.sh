@@ -7,7 +7,11 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
 if ! grep -q 'name: \${{ matrix.title }}' "${ROOT_DIR}/.github/workflows/ci.yml" \
-  || ! grep -q 'commands: \${{ matrix.command }}' "${ROOT_DIR}/.github/workflows/ci.yml"; then
+  || ! grep -q 'commands: \${{ matrix.command }}' "${ROOT_DIR}/.github/workflows/ci.yml" \
+  || ! grep -q '^      execution-timeout-seconds:' "${ROOT_DIR}/.github/workflows/ci.yml" \
+  || ! grep -q '^          execution-timeout-seconds: \${{ inputs.execution-timeout-seconds }}' "${ROOT_DIR}/.github/workflows/ci.yml" \
+  || ! grep -q '^      cleanup-timeout-seconds:' "${ROOT_DIR}/.github/workflows/ci.yml" \
+  || ! grep -q '^          cleanup-timeout-seconds: \${{ inputs.cleanup-timeout-seconds }}' "${ROOT_DIR}/.github/workflows/ci.yml"; then
   printf 'FAIL: reusable CI Test job does not pass its exact matrix command to the action\n'
   exit 1
 fi

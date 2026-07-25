@@ -51,6 +51,34 @@ fi
 
 printf 'PASS: failed review test records a current-run failure\n'
 
+for output_mode in missing malformed; do
+  cat > "${TMP_DIR}/bin/homeboy" <<'SH'
+#!/usr/bin/env bash
+output=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output) output="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+mkdir -p "$(dirname "${output}")"
+if [ "${FAKE_OUTPUT_MODE:-}" = malformed ]; then
+  printf '%s\n' 'not json' > "${output}"
+fi
+exit 0
+SH
+  chmod +x "${TMP_DIR}/bin/homeboy"
+  set +e
+  PATH="${TMP_DIR}/bin:${PATH}" GITHUB_ACTION_PATH="${ROOT_DIR}" GITHUB_WORKSPACE="${TMP_DIR}/workspace" GITHUB_OUTPUT="${TMP_DIR}/${output_mode}-output" GITHUB_ENV="${TMP_DIR}/${output_mode}-env" RESOLVED_COMMANDS='review test' COMPONENT_NAME='homeboy-action' FAKE_OUTPUT_MODE="${output_mode}" bash "${ROOT_DIR}/scripts/core/run-homeboy-commands.sh" >"${TMP_DIR}/${output_mode}.log" 2>&1
+  exit_code=$?
+  set -e
+  if [ "${exit_code}" -ne 1 ] || ! grep -q '^results={"review test":"fail"}$' "${TMP_DIR}/${output_mode}-output" || ! grep -q 'did not write valid structured output' "${TMP_DIR}/${output_mode}.log"; then
+    printf 'FAIL: zero-exit %s structured output fails closed\n' "${output_mode}"
+    exit 1
+  fi
+done
+printf 'PASS: zero-exit missing and malformed structured output fail closed\n'
+
 cat > "${TMP_DIR}/bin/homeboy" <<'SH'
 #!/usr/bin/env bash
 trap '' TERM

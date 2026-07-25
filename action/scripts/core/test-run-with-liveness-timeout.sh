@@ -65,7 +65,7 @@ for pid in "${term_ignoring_parent_pid}" "${term_ignoring_child_pid}"; do
     exit 1
   fi
 done
-if ! grep -q 'ignored SIGTERM for 1s; sending SIGKILL' "${TMP_DIR}/term-ignoring.log"; then
+if ! grep -q 'containment grace expired; sending SIGKILL' "${TMP_DIR}/term-ignoring.log"; then
   printf 'FAIL: TERM-ignoring timeout did not report SIGKILL escalation\n'
   exit 1
 fi
@@ -82,7 +82,7 @@ if kill -0 "${leaked_pid}" 2>/dev/null; then
   printf 'FAIL: finalization leaves child process %s alive\n' "${leaked_pid}"
   exit 1
 fi
-if ! grep -q 'finalization terminated surviving process group' "${TMP_DIR}/cleanup.log"; then
+if ! grep -q 'finalization terminated surviving command containment' "${TMP_DIR}/cleanup.log"; then
   printf 'FAIL: finalization does not report child-process cleanup\n'
   exit 1
 fi
@@ -91,6 +91,20 @@ if [ "$(<"${TMP_DIR}/leaked-command.log")" != "retained" ]; then
   exit 1
 fi
 printf 'PASS: finalization cleans children and reports retained output\n'
+
+escaped_pid_file="${TMP_DIR}/escaped.pid"
+set +e
+HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS=1 HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS=1 HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF=true bash "${RUNNER}" --log-file "${TMP_DIR}/escaped-command.log" "escaped-session child" bash -c 'python3 -c "import os, signal, sys, time; os.setsid(); signal.signal(signal.SIGTERM, signal.SIG_IGN); open(sys.argv[1], \"w\").write(str(os.getpid())); time.sleep(30)" "$0" & sleep 1; while :; do sleep 1; done' "${escaped_pid_file}" >"${TMP_DIR}/escaped.log" 2>&1
+exit_code=$?
+set -e
+escaped_pid="$(<"${escaped_pid_file}")"
+escaped_state="$(ps -o stat= -p "${escaped_pid}" 2>/dev/null | tr -d '[:space:]')"
+if [ "${exit_code}" -ne 125 ] || ! grep -q 'could not prove descendant containment' "${TMP_DIR}/escaped.log"; then
+  printf 'FAIL: escaped-session descendant was not contained and reaped (exit=%s state=%s tracker=%s)\n' "${exit_code}" "${escaped_state:-gone}" "$(grep 'containment tracker' "${TMP_DIR}/escaped.log" || true)"
+  exit 1
+fi
+kill -KILL "${escaped_pid}" 2>/dev/null || true
+printf 'PASS: escaped-session descendant produces explicit containment failure when cgroups are unavailable\n'
 
 set +e
 HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS=invalid bash "${RUNNER}" "invalid timeout" bash -c 'exit 0' >"${TMP_DIR}/invalid.log" 2>&1
