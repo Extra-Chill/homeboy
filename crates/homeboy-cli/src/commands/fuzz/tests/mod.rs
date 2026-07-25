@@ -29,6 +29,7 @@ use super::workloads::{
     rig_component_for_fuzz, select_workload, FuzzRigContext,
 };
 use super::{run_contract, run_discover, FuzzArgs};
+use crate::cli_surface::{Cli, Commands};
 use clap::Parser;
 use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::lifecycle::{

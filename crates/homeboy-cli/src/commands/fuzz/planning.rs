@@ -50,15 +50,22 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
         rig_context.as_ref(),
         ctx.extension_id.as_deref(),
     );
+    let campaign_workload_ids = requested_campaign_workload_ids(&args)?;
     let selected_workload_id = resolve_profile_workload_id(
         rig_context.as_ref().map(|context| &context.spec),
         args.run.rig_profile(),
         args.run.workload_id.as_deref(),
     )?;
-    let selected_workload = select_workload(&workloads, selected_workload_id.as_deref())?;
+    let selected_workload_id = selected_workload_id
+        .or_else(|| (campaign_workload_ids.len() == 1).then(|| campaign_workload_ids[0].clone()));
+    let selected_workload = if selected_workload_id.is_some() || !campaign_requested(&args) {
+        select_workload(&workloads, selected_workload_id.as_deref())?
+    } else {
+        None
+    };
     let workload_id = selected_workload
         .map(|workload| workload.id.clone())
-        .or(selected_workload_id);
+        .or(selected_workload_id.clone());
     let (required_artifacts, gates) =
         fuzz_gate_profile_contract(args.run.effective_gate_profile().as_core());
     let request_id = args
@@ -77,8 +84,10 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
     )?;
     let isolation_proof = load_or_default_isolation_proof(&args, &ctx.component_id)?;
     let sequence_plan = load_sequence_plan(args.run.sequence_plan.as_deref())?;
+    let mut planning_args = args.clone();
+    planning_args.run.workload_id = selected_workload_id.clone();
     let planning_metadata =
-        plan_inventory_selection(&args, &target_inventory, isolation_proof.as_ref())?;
+        plan_inventory_selection(&planning_args, &target_inventory, isolation_proof.as_ref())?;
     let planning_metadata = with_sequence_plan_metadata(
         planning_metadata,
         args.run.sequence_plan.as_deref(),
@@ -129,6 +138,24 @@ pub(super) fn run_plan(args: FuzzPlanArgs) -> homeboy::core::Result<FuzzPlanOutp
         campaign_plan,
         runner_contract: fuzz_runner_contract(fuzz_config.as_ref()),
     })
+}
+
+fn campaign_requested(args: &FuzzPlanArgs) -> bool {
+    args.campaign_manifest.is_some()
+        || !args.campaign_workloads.is_empty()
+        || args.lab_runner.is_some()
+}
+
+fn requested_campaign_workload_ids(args: &FuzzPlanArgs) -> homeboy::core::Result<Vec<String>> {
+    let manifest = load_campaign_manifest(args.campaign_manifest.as_deref())?;
+    let mut workload_ids = manifest_workload_ids(manifest.as_ref());
+    workload_ids.extend(args.campaign_workloads.iter().cloned());
+    if campaign_requested(args) {
+        workload_ids.extend(args.run.workload_id.iter().cloned());
+    }
+    workload_ids.sort();
+    workload_ids.dedup();
+    Ok(workload_ids)
 }
 
 pub(super) fn run_campaign(
@@ -337,15 +364,12 @@ pub(super) fn build_campaign_plan(
     rig_id: Option<&str>,
     base_request: &FuzzExecutionRequest,
 ) -> homeboy::core::Result<Option<FuzzCampaignPlanOutput>> {
-    if args.campaign_manifest.is_none() && args.campaign_workloads.is_empty() {
+    if !campaign_requested(args) {
         return Ok(None);
     }
 
     let manifest = load_campaign_manifest(args.campaign_manifest.as_deref())?;
-    let mut workload_ids = manifest_workload_ids(manifest.as_ref());
-    workload_ids.extend(args.campaign_workloads.iter().cloned());
-    workload_ids.sort();
-    workload_ids.dedup();
+    let workload_ids = requested_campaign_workload_ids(args)?;
     if workload_ids.is_empty() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "campaign-workload",
@@ -651,14 +675,15 @@ fn lab_campaign_run_command(
     lab_runner.map(|runner| {
         let mut command = vec![
             "homeboy".to_string(),
+            "fuzz".to_string(),
+            "run".to_string(),
             "--runner".to_string(),
             runner.to_string(),
-            "--lab-only".to_string(),
         ];
         command.extend(
             campaign_run_command(args, component, workload_id, run_id)
                 .into_iter()
-                .skip(1),
+                .skip(3),
         );
         command
     })

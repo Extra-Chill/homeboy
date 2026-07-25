@@ -378,6 +378,15 @@ impl CliRuntime {
         commands::set_skip_deps_hydration(cli.skip_deps_hydration);
         normalize_runs_runner_options(&mut cli, &normalized);
         normalize_cook_runner_option(&mut cli, &normalized);
+        if let Commands::Fuzz(args) = &mut cli.command {
+            match args.absorb_planning_runner(cli.runner.take()) {
+                Ok(runner) => cli.runner = runner,
+                Err(err) => {
+                    output_runtime::emit_json_result(Err(err), output_file.as_deref(), 2);
+                    return std::process::ExitCode::from(2);
+                }
+            }
+        }
 
         if matches!(&cli.command, Commands::Runs(args) if args.is_bundle_export()) {
             output_file = None;
