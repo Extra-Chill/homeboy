@@ -688,7 +688,13 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
                 // remain sufficient for later authoritative reconciliation.
                 return Ok(());
             }
-            Err(error) => {
+            Err(mut error) => {
+                // This boundary is reached only after runner preflight has
+                // accepted the Cook but before a provider command is handed
+                // off. Transport, daemon publication, and reconciliation
+                // failures here are safe to retry and must not spend provider
+                // budget by being classified as invalid input.
+                error.retryable = Some(true);
                 let recovery = format!(
                     "Resolve the Lab handoff, then retry controller-owned attempt `{run_id}`."
                 );
