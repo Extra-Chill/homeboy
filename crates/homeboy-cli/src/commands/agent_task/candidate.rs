@@ -5,6 +5,7 @@ use serde_json::Value;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CandidateState {
     PatchAvailable,
+    NoChangesProduced,
     Empty,
     Missing,
     Unreadable,
@@ -23,6 +24,7 @@ impl CandidateState {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::PatchAvailable => "patch_available",
+            Self::NoChangesProduced => "no_changes_produced",
             Self::Empty => "empty",
             Self::Missing => "missing",
             Self::Unreadable => "unreadable",
@@ -47,6 +49,7 @@ pub(crate) struct CandidateCounts {
     pub(crate) retained_only: usize,
     pub(crate) unknown: usize,
     pub(crate) diff_bytes: u64,
+    no_changes_produced: bool,
 }
 
 impl CandidateCounts {
@@ -63,6 +66,8 @@ impl CandidateCounts {
             CandidateState::RetainedOnly
         } else if self.empty > 0 {
             CandidateState::Empty
+        } else if self.no_changes_produced {
+            CandidateState::NoChangesProduced
         } else {
             CandidateState::Unknown
         }
@@ -74,6 +79,7 @@ impl CandidateCounts {
                 self.available += 1;
                 self.diff_bytes += size.unwrap_or_default();
             }
+            CandidateState::NoChangesProduced => self.no_changes_produced = true,
             CandidateState::Empty => self.empty += 1,
             CandidateState::Missing => self.missing += 1,
             CandidateState::Unreadable => self.unreadable += 1,
@@ -135,7 +141,13 @@ pub(crate) fn classify_candidates(payload: &Value) -> CandidateCounts {
         } else {
             match size {
                 Some(0) => CandidateState::Empty,
-                Some(_) if !using_canonical || readable_mirror(artifact) => {
+                // Finalization records the immutable aggregate only after Homeboy
+                // owns the artifact. Status must trust that durable fact rather
+                // than probing a possibly remote or evicted path.
+                Some(_)
+                    if !using_canonical
+                        || (is_canonical_mirror(artifact) && declared_location(artifact)) =>
+                {
                     CandidateState::PatchAvailable
                 }
                 Some(_) if declared_location(artifact) => CandidateState::Unreadable,
@@ -145,6 +157,13 @@ pub(crate) fn classify_candidates(payload: &Value) -> CandidateCounts {
         };
         counts.record(state, size);
     }
+    counts.no_changes_produced = counts.available == 0
+        && counts.empty == 0
+        && counts.missing == 0
+        && counts.unreadable == 0
+        && counts.conflicting == 0
+        && counts.retained_only == 0
+        && aggregate_outcomes_are_no_op(payload);
     counts
 }
 
@@ -162,6 +181,19 @@ fn aggregate_artifacts(payload: &Value) -> Vec<&Value> {
                 .flatten()
         })
         .collect()
+}
+
+fn aggregate_outcomes_are_no_op(payload: &Value) -> bool {
+    let Some(outcomes) = payload
+        .pointer("/aggregate/outcomes")
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    !outcomes.is_empty()
+        && outcomes
+            .iter()
+            .all(|outcome| outcome.get("status").and_then(Value::as_str) == Some("no_op"))
 }
 
 fn is_patch(artifact: &Value) -> bool {
@@ -191,17 +223,6 @@ fn declared_location(artifact: &Value) -> bool {
             .get("url")
             .and_then(Value::as_str)
             .is_some_and(|url| !url.trim().is_empty())
-}
-
-fn readable_mirror(artifact: &Value) -> bool {
-    artifact
-        .get("url")
-        .and_then(Value::as_str)
-        .is_some_and(|url| url.starts_with("homeboy://agent-task/run/"))
-        || artifact
-            .get("path")
-            .and_then(Value::as_str)
-            .is_some_and(|path| std::fs::metadata(path).is_ok())
 }
 
 #[cfg(test)]
@@ -244,7 +265,7 @@ mod tests {
             (
                 "artifact_evicted",
                 json!({ "id": "evicted", "kind": "patch", "size_bytes": 1, "path": "/definitely-evicted-lab-patch", "metadata": { "executor_artifact_finalized": true } }),
-                CandidateState::Unreadable,
+                CandidateState::PatchAvailable,
             ),
             (
                 "retained_only",

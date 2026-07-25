@@ -970,6 +970,7 @@ pub(crate) fn execution_states_from_aggregate(
     let review =
         homeboy::agents::agent_tasks::AgentTaskAggregateReport::from(aggregate.outcomes.clone());
     let canonical = classify_candidates(&json!({ "aggregate": aggregate }));
+    let candidate_state = canonical.state();
     let provider = aggregate
         .outcomes
         .iter()
@@ -1000,6 +1001,11 @@ pub(crate) fn execution_states_from_aggregate(
         .map(|task| {
             let reason_code = if task.status == AgentTaskOutcomeStatus::NoOp {
                 "no_changes_produced"
+            } else if candidate_state != CandidateState::PatchAvailable
+                && task.decision
+                    == homeboy::agents::agent_tasks::AgentTaskReconciliationDecision::ApplyCandidate
+            {
+                candidate_state.as_str()
             } else {
                 match task.decision {
                 homeboy::agents::agent_tasks::AgentTaskReconciliationDecision::NoOp => {
@@ -1058,7 +1064,7 @@ pub(crate) fn execution_states_from_aggregate(
         "schema": "homeboy/agent-task-execution-states/v1",
         "provider": provider,
         "candidate": {
-            "state": canonical.state().as_str(),
+            "state": candidate_state.as_str(),
             "tasks": candidates,
         },
         "gate": {
