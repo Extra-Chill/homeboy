@@ -2,6 +2,17 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.22] - 2026-07-25
+
+### Fixed
+- validate operation command results
+- use pidfds for strict cleanup
+- make supervisor cleanup race safe
+- supervise strict command descendants
+- verify command result containment before launch
+- fail closed on uncontained action commands
+- complete action liveness verification
+
 ## [2.8.21] - 2026-07-24
 
 ### Fixed
