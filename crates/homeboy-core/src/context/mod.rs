@@ -574,6 +574,63 @@ mod tests {
     }
 
     #[test]
+    fn context_resolves_managed_worktree_to_registered_component() {
+        // #9895: inside a managed task worktree of a registered component (the
+        // worktree checkout has no portable homeboy.json), top-level status must
+        // resolve the same registered component `git status` does — not report
+        // unregistered_context.
+        with_isolated_home(|home| {
+            let primary = home.path().join("wp-build-repo");
+            std::fs::create_dir_all(&primary).expect("primary dir");
+            init_git(&primary);
+            std::fs::write(primary.join("file.txt"), "seed\n").expect("seed file");
+            let git = |args: &[&str]| {
+                let out = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&primary)
+                    .output()
+                    .expect("git");
+                assert!(out.status.success(), "git {args:?} failed");
+            };
+            git(&["config", "user.email", "t@example.com"]);
+            git(&["config", "user.name", "T"]);
+            git(&["add", "."]);
+            git(&["commit", "-m", "seed"]);
+            write_component_registration(home.path(), "wp-build-repo", &primary);
+
+            // A managed worktree named `<component>@<branch>` beside the primary.
+            let worktree = home.path().join("wp-build-repo@audit-branch");
+            let add = std::process::Command::new("git")
+                .args([
+                    "worktree",
+                    "add",
+                    "-b",
+                    "audit-branch",
+                    worktree.to_str().unwrap(),
+                ])
+                .current_dir(&primary)
+                .output()
+                .expect("git worktree add");
+            assert!(
+                add.status.success(),
+                "worktree add failed: {}",
+                String::from_utf8_lossy(&add.stderr)
+            );
+
+            let (output, status) =
+                run(Some(worktree.to_str().expect("utf8 path"))).expect("context");
+
+            assert_eq!(status, 0);
+            assert!(
+                output.managed,
+                "managed worktree must resolve as managed, got suggestion: {:?}",
+                output.suggestion
+            );
+            assert_eq!(output.matched_components, vec!["wp-build-repo"]);
+        });
+    }
+
+    #[test]
     fn context_uses_portable_config_resolution_for_unregistered_cwd() {
         with_isolated_home(|home| {
             let repo = home.path().join("portable-component");
