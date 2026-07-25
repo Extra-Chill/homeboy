@@ -246,6 +246,7 @@ pub(crate) fn controller_job_runtime_count() -> usize {
 }
 
 pub(crate) const DAEMON_LEASE_SCHEMA: &str = "homeboy.daemon.session_lease.v1";
+const DAEMON_ENDPOINT_IDENTITY_PROTOCOL: &str = "homeboy.daemon.endpoint-identity.v1";
 pub(super) const DAEMON_STARTUP_TOKEN_ENV: &str = "HOMEBOY_DAEMON_STARTUP_TOKEN";
 const RUNTIME_PATH_FILE_LIMIT: usize = 2_000;
 const RUNTIME_PATH_SUFFIXES: &[&str] = &["_COMPONENT_PATH", "_PROVIDER_PATH", "_RUNTIME_PATH"];
@@ -1116,7 +1117,15 @@ where
     if let Err(error) = job_store.reconcile_expired_local_child_reservations() {
         return error_response(500, error);
     }
-    match (method, path) {
+    match (method, path.split('?').next().unwrap_or(path)) {
+        ("GET", "/lifecycle/identity") => match daemon_endpoint_identity(path) {
+            Ok(body) => HttpResponse {
+                status_code: 200,
+                body,
+                artifact: None,
+            },
+            Err(err) => error_response(503, err),
+        },
         ("GET", "/health") => HttpResponse {
             status_code: 200,
             body: json!({
@@ -1267,6 +1276,43 @@ where
         }
         _ => route_read_only_api(method, path, body, job_store, analysis_runner),
     }
+}
+
+/// Read-only proof that a loopback endpoint is this daemon, bound to a fresh
+/// lease. Controllers supply an unpredictable nonce so a response cannot be
+/// replayed from a retained diagnostic or another request.
+fn daemon_endpoint_identity(path: &str) -> Result<serde_json::Value> {
+    let nonce = path
+        .split_once('?')
+        .and_then(|(_, query)| {
+            query
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("nonce="))
+        })
+        .filter(|nonce| !nonce.is_empty() && nonce.len() <= 128)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "nonce",
+                "daemon endpoint identity requires a bounded nonce",
+                None,
+                None,
+            )
+        })?;
+    let validation = validate_lease_file(&state_path()?)?;
+    let state = validation
+        .state
+        .filter(|_| validation.running && validation.fresh)
+        .ok_or_else(|| Error::internal_unexpected("daemon lease is not fresh"))?;
+    Ok(json!({
+        "protocol": DAEMON_ENDPOINT_IDENTITY_PROTOCOL,
+        "nonce": nonce,
+        "daemon": {
+            "schema": state.schema,
+            "lease_id": state.lease_id,
+            "pid": state.pid,
+            "build_identity": state.build_identity,
+        },
+    }))
 }
 
 fn reserve_admission(

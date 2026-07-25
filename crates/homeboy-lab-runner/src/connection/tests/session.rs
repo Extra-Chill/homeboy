@@ -1040,20 +1040,24 @@ fn terminal_phantom_reconciliation_rejects_mismatched_count_and_ids() {
 }
 
 #[test]
-fn routine_disconnect_posts_the_exact_live_lease_to_the_daemon_tunnel() {
+fn routine_disconnect_probes_the_exact_live_daemon_tunnel_before_authoritative_stop() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
     let address = listener.local_addr().expect("address");
     let server = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("request");
+        let (mut stream, _) = listener.accept().expect("identity request");
         let mut request = [0; 4096];
-        let length = stream.read(&mut request).expect("read request");
+        let length = stream.read(&mut request).expect("read identity request");
         let request = String::from_utf8(request[..length].to_vec()).expect("request text");
-        assert!(request.starts_with("POST /lifecycle/stop HTTP/1.1"));
-        assert!(request.contains("\"lease_id\":\"lease-live\""));
-        assert!(request.contains("\"force\":false"));
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
-            .expect("response");
+        assert!(request.starts_with("GET /lifecycle/identity?nonce="));
+        let nonce = request
+            .split("nonce=")
+            .nth(1)
+            .and_then(|value| value.split_whitespace().next())
+            .expect("identity nonce");
+        let body = format!(
+            r#"{{"protocol":"homeboy.daemon.endpoint-identity.v1","nonce":"{nonce}","daemon":{{"schema":"homeboy.daemon.session_lease.v1","lease_id":"lease-live","pid":4242}}}}"#
+        );
+        stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).expect("identity response");
     });
     let mut session = direct_ssh_session("lease-live");
     session.local_url = Some(format!("http://{address}"));
@@ -1061,7 +1065,9 @@ fn routine_disconnect_posts_the_exact_live_lease_to_the_daemon_tunnel() {
     // This fixture owns only the loopback tunnel. The production disconnect
     // also requires an authoritative SSH re-probe, which remains intentionally
     // unavailable here.
-    let _ = stop_transport_recovery::disconnect_remote_daemon(&session, false);
+    let error = stop_transport_recovery::disconnect_remote_daemon(&session, false)
+        .expect_err("the fixture cannot authorize an SSH lifecycle mutation");
+    assert!(!error.contains("endpoint_identity_mismatch"));
     server.join().expect("server");
 }
 
@@ -1096,15 +1102,21 @@ fn refresh_disconnect_accepts_local_tunnel_rotation_and_uses_the_current_tunnel(
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
         let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("request through rotated tunnel");
+            let (mut stream, _) = listener
+                .accept()
+                .expect("identity request through rotated tunnel");
             let mut request = [0; 4096];
-            let length = stream.read(&mut request).expect("read request");
+            let length = stream.read(&mut request).expect("read identity request");
             let request = String::from_utf8(request[..length].to_vec()).expect("request text");
-            assert!(request.starts_with("POST /lifecycle/stop HTTP/1.1"));
-            assert!(request.contains("\"lease_id\":\"lease-stable\""));
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
-                .expect("response");
+            let nonce = request
+                .split("nonce=")
+                .nth(1)
+                .and_then(|value| value.split_whitespace().next())
+                .expect("identity nonce");
+            let body = format!(
+                r#"{{"protocol":"homeboy.daemon.endpoint-identity.v1","nonce":"{nonce}","daemon":{{"schema":"homeboy.daemon.session_lease.v1","lease_id":"lease-stable","pid":4242}}}}"#
+            );
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).expect("identity response");
         });
         let recorded = direct_ssh_session("lease-stable");
         let mut rotated = recorded.clone();
