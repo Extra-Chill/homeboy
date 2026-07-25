@@ -47,46 +47,47 @@ pub struct TestRunWorkflowArgs {
 
 const RAW_OUTPUT_TAIL_LINES: usize = 80;
 const COMPILER_FAILURE_LIMIT: usize = 20;
-const PHPUNIT_NO_DISCOVERY_MARKER: &str = "NO PHPUNIT TEST FILES DISCOVERED";
-const REQUIRE_PHPUNIT_TESTS_SETTING: &str = "require_phpunit_tests";
-
 fn test_run_status(
     runner_success: bool,
     test_counts: Option<&TestCounts>,
-    phpunit_no_discovery: bool,
-    require_phpunit_tests: bool,
+    no_tests_applicable: bool,
 ) -> &'static str {
     if !runner_success {
         return "failed";
     }
 
-    if phpunit_no_discovery {
-        return if require_phpunit_tests {
-            "failed"
-        } else {
-            "skipped"
-        };
+    if no_tests_applicable {
+        return "skipped";
     }
 
-    if test_counts.map(|counts| counts.failed == 0).unwrap_or(true) {
+    // A zero count or an all-skipped result proves only that the runner
+    // started. A passing test gate needs evidence that it executed a test.
+    if test_counts.is_some_and(|counts| counts.passed + counts.failed > 0 && counts.failed == 0) {
         "passed"
     } else {
         "failed"
     }
 }
 
-fn phpunit_no_discovery(stdout: &str, stderr: &str) -> bool {
-    stdout.contains(PHPUNIT_NO_DISCOVERY_MARKER) || stderr.contains(PHPUNIT_NO_DISCOVERY_MARKER)
-}
+fn no_tests_applicable(
+    policy: Option<&crate::TestNoTestsApplicablePolicy>,
+    stdout: &str,
+    stderr: &str,
+    test_counts: Option<&TestCounts>,
+) -> bool {
+    let Some(policy) = policy else {
+        return false;
+    };
+    if policy.evidence_markers.is_empty()
+        || test_counts.is_some_and(|counts| counts.passed + counts.failed > 0)
+    {
+        return false;
+    }
 
-fn setting_truthy(settings: &[(String, String)], key: &str) -> bool {
-    settings.iter().any(|(setting_key, value)| {
-        setting_key == key
-            && matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-    })
+    policy
+        .evidence_markers
+        .iter()
+        .all(|marker| stdout.contains(marker) || stderr.contains(marker))
 }
 
 pub fn run_main_test_workflow(
@@ -239,10 +240,13 @@ fn run_main_test_workflow_inner(
     }
 
     let test_context = crate::test::resolve_test_command(component).ok();
-    let result_parse = test_context
+    let test_config = test_context
         .as_ref()
         .and_then(|context| crate::load_extension(&context.extension_id).ok())
-        .and_then(|extension| extension.test.and_then(|test| test.result_parse));
+        .and_then(|extension| extension.test);
+    let result_parse = test_config
+        .as_ref()
+        .and_then(|test| test.result_parse.as_ref());
 
     let runner = build_test_runner(
         component,
@@ -294,28 +298,26 @@ fn run_main_test_workflow_inner(
         run_declared_result_parser(component, context, spec, &output.stdout, run_dir)?;
     }
 
-    let mut test_counts = parse_test_results_file_with_spec(&results_file, result_parse.as_ref())?
-        .or_else(|| {
+    let test_counts =
+        parse_test_results_file_with_spec(&results_file, result_parse)?.or_else(|| {
             result_parse
                 .as_ref()
                 .and_then(|spec| parse_test_results_text_with_spec(&output.stdout, spec))
                 .or_else(|| parse_test_results_text(&output.stdout))
         });
-    let phpunit_no_discovery = phpunit_no_discovery(&output.stdout, &output.stderr);
-    if phpunit_no_discovery && test_counts.is_none() {
-        test_counts = Some(TestCounts::new(0, 0, 0, 0));
-    }
-    let require_phpunit_tests = setting_truthy(&args.settings, REQUIRE_PHPUNIT_TESTS_SETTING);
+    let no_tests_applicable = no_tests_applicable(
+        test_config
+            .as_ref()
+            .and_then(|test| test.no_tests_applicable.as_ref()),
+        &output.stdout,
+        &output.stderr,
+        test_counts.as_ref(),
+    );
 
     // Autofix is owned by `refactor --from test --write`; the test command is read-only.
     let test_autofix: Option<AppliedRefactor> = None;
 
-    let status = test_run_status(
-        output.success,
-        test_counts.as_ref(),
-        phpunit_no_discovery,
-        require_phpunit_tests,
-    );
+    let status = test_run_status(output.success, test_counts.as_ref(), no_tests_applicable);
 
     let coverage = coverage_file
         .as_deref()
@@ -356,7 +358,7 @@ fn run_main_test_workflow_inner(
         None
     };
 
-    if args.baseline_flags.baseline && !phpunit_no_discovery {
+    if args.baseline_flags.baseline && !no_tests_applicable {
         if let Some(ref counts) = test_counts {
             let _ = baseline::save_baseline(source_path, &args.component_id, counts)?;
         }
@@ -365,9 +367,7 @@ fn run_main_test_workflow_inner(
     let mut baseline_comparison = None;
     let mut baseline_exit_override = None;
 
-    if !args.baseline_flags.baseline
-        && !args.baseline_flags.ignore_baseline
-        && !phpunit_no_discovery
+    if !args.baseline_flags.baseline && !args.baseline_flags.ignore_baseline && !no_tests_applicable
     {
         if let Some(ref counts) = test_counts {
             let resolved_baseline = baseline::load_baseline(source_path).or_else(|| {
@@ -407,18 +407,21 @@ fn run_main_test_workflow_inner(
         ));
     }
 
-    if phpunit_no_discovery {
-        if require_phpunit_tests {
-            hints.push(format!(
-                "PHPUnit discovery is required by {}=true, but no PHPUnit test files were found.",
-                REQUIRE_PHPUNIT_TESTS_SETTING
-            ));
-        } else {
-            hints.push(format!(
-                "Set --setting {}=true when this component is expected to contain PHPUnit tests.",
-                REQUIRE_PHPUNIT_TESTS_SETTING
-            ));
-        }
+    if status == "failed" && output.success && test_counts.is_none() {
+        hints.push(
+            "The test runner succeeded without verifiable test results. Configure its extension result parser or emit a test-results sidecar."
+                .to_string(),
+        );
+    } else if status == "failed"
+        && output.success
+        && test_counts
+            .as_ref()
+            .is_some_and(|counts| counts.passed + counts.failed == 0)
+    {
+        hints.push(
+            "The test runner reported no executed tests. Fix the selected test filter or declare an extension no_tests_applicable policy with evidence."
+                .to_string(),
+        );
     }
 
     if !args.skip_lint {
@@ -436,7 +439,7 @@ fn run_main_test_workflow_inner(
     }
 
     if test_counts.is_some()
-        && !phpunit_no_discovery
+        && !no_tests_applicable
         && !args.baseline_flags.baseline
         && baseline_comparison.is_none()
     {
@@ -1317,47 +1320,54 @@ mod tests {
     #[test]
     fn status_requires_successful_runner_even_with_zero_failures() {
         let counts = TestCounts::new(3, 3, 0, 0);
-        assert_eq!(
-            test_run_status(false, Some(&counts), false, false),
-            "failed"
-        );
+        assert_eq!(test_run_status(false, Some(&counts), false), "failed");
     }
 
     #[test]
     fn status_passes_successful_runner_with_zero_failures() {
         let counts = TestCounts::new(3, 3, 0, 0);
-        assert_eq!(test_run_status(true, Some(&counts), false, false), "passed");
+        assert_eq!(test_run_status(true, Some(&counts), false), "passed");
     }
 
     #[test]
     fn status_fails_successful_runner_with_parsed_failures() {
         let counts = TestCounts::new(3, 2, 1, 0);
-        assert_eq!(test_run_status(true, Some(&counts), false, false), "failed");
+        assert_eq!(test_run_status(true, Some(&counts), false), "failed");
     }
 
     #[test]
-    fn status_skips_successful_phpunit_no_discovery_by_default() {
-        assert_eq!(test_run_status(true, None, true, false), "skipped");
+    fn status_fails_successful_runner_without_result_evidence() {
+        assert_eq!(test_run_status(true, None, false), "failed");
     }
 
     #[test]
-    fn status_fails_successful_phpunit_no_discovery_when_required() {
-        assert_eq!(test_run_status(true, None, true, true), "failed");
+    fn status_fails_all_skipped_tests() {
+        assert_eq!(
+            test_run_status(true, Some(&TestCounts::new(1, 0, 0, 1)), false),
+            "failed"
+        );
     }
 
     #[test]
-    fn detects_phpunit_no_discovery_marker() {
-        assert!(phpunit_no_discovery(
-            "NO PHPUNIT TEST FILES DISCOVERED\nSkipping PHPUnit tests",
-            ""
+    fn explicit_no_test_policy_requires_all_evidence_markers() {
+        let policy = crate::TestNoTestsApplicablePolicy {
+            evidence_markers: vec![
+                "NO TESTS APPLICABLE".to_string(),
+                "reason=docs-only".to_string(),
+            ],
+        };
+        assert!(no_tests_applicable(
+            Some(&policy),
+            "NO TESTS APPLICABLE\nreason=docs-only",
+            "",
+            None
         ));
-        assert!(!phpunit_no_discovery("smoke scripts passed", ""));
-    }
-
-    #[test]
-    fn setting_truthy_accepts_boolean_spellings() {
-        let settings = vec![(REQUIRE_PHPUNIT_TESTS_SETTING.to_string(), "yes".to_string())];
-        assert!(setting_truthy(&settings, REQUIRE_PHPUNIT_TESTS_SETTING));
+        assert!(!no_tests_applicable(
+            Some(&policy),
+            "NO TESTS APPLICABLE",
+            "",
+            None
+        ));
     }
 
     #[test]

@@ -787,6 +787,13 @@ mod tests {
             );
 
             let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .get_run(&run_id)
+                .expect("read run")
+                .expect("run exists");
+            assert_eq!(run.status, "fail");
+            assert_eq!(run.metadata_json["observation_status"], "failed");
+            assert_eq!(run.metadata_json["exit_code"], 1);
             let findings = store
                 .list_findings(FindingListFilter {
                     run_id: Some(run_id.clone()),

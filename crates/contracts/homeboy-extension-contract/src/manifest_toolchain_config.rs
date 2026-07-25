@@ -266,6 +266,18 @@ pub struct TestConfig {
     /// hint before invoking the extension test runner.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub passthrough_filter: Option<TestPassthroughFilter>,
+
+    /// Explicit extension-owned policy for an intentional no-test scope.
+    /// Every configured marker must occur in runner output before Homeboy
+    /// accepts zero executed tests as a neutral result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_tests_applicable: Option<TestNoTestsApplicablePolicy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TestNoTestsApplicablePolicy {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_markers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

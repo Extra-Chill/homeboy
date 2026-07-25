@@ -244,21 +244,21 @@ mod tests {
         let lint = ReviewStage {
             stage: "lint".to_string(),
             ran: true,
-            passed: false,
-            exit_code: 1,
-            finding_count: 2,
+            passed: true,
+            exit_code: 0,
+            finding_count: 0,
             hint: "Deep dive: homeboy review lint homeboy --changed-since=origin/main".to_string(),
             skipped_reason: None,
             output: None::<LintCommandOutput>,
         };
         let test = ReviewStage {
             stage: "test".to_string(),
-            ran: false,
-            passed: true,
-            exit_code: 0,
+            ran: true,
+            passed: false,
+            exit_code: 1,
             finding_count: 0,
             hint: "Run individually: homeboy review test".to_string(),
-            skipped_reason: Some("no tests".to_string()),
+            skipped_reason: None,
             output: None::<TestCommandOutput>,
         };
         let artifact = build_artifact(
@@ -284,7 +284,7 @@ mod tests {
                 component: "homeboy".to_string(),
                 scope: "changed-since".to_string(),
                 changed_since: Some("origin/main".to_string()),
-                total_findings: 2,
+                total_findings: 0,
                 changed_file_count: Some(3),
                 hints: vec!["hint".to_string()],
             },
@@ -299,12 +299,12 @@ mod tests {
 
         assert_eq!(metadata["observation_status"], "failed");
         assert_eq!(metadata["exit_code"], 1);
-        assert_eq!(metadata["total_findings"], 2);
+        assert_eq!(metadata["total_findings"], 0);
         assert_eq!(metadata["artifact"]["schema"], "homeboy/review/v1");
         assert_eq!(metadata["stages"].as_array().expect("stages").len(), 3);
-        assert_eq!(metadata["stages"][1]["name"], "lint");
-        assert_eq!(metadata["stages"][1]["status"], "failed");
-        assert_eq!(metadata["stages"][1]["finding_count"], 2);
-        assert!(metadata["stages"][1].get("run_id").is_some());
+        assert_eq!(metadata["stages"][2]["name"], "test");
+        assert_eq!(metadata["stages"][2]["status"], "failed");
+        assert_eq!(metadata["stages"][2]["finding_count"], 0);
+        assert!(metadata["stages"][2].get("run_id").is_some());
     }
 }
