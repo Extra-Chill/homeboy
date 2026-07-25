@@ -68,4 +68,9 @@ FIRST_RESULTS='{"review test":"pass"}' COMMANDS='review test' GITHUB_OUTPUT="${T
   GITHUB_ACTION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)" bash "${SELECT_RESULTS}" >/dev/null
 assert_equals '{"review test":"pass"}' "$(read_multiline_output "${TMP_DIR}/output" results)" "passing current results round-trip"
 
+: > "${TMP_DIR}/output"
+FIRST_RESULTS='{"review test":"timeout"}' COMMANDS='review test' GITHUB_OUTPUT="${TMP_DIR}/output" \
+  GITHUB_ACTION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)" bash "${SELECT_RESULTS}" >/dev/null
+assert_equals '{"review test":"timeout"}' "$(read_multiline_output "${TMP_DIR}/output" results)" "timeout current results round-trip"
+
 printf 'All final-result selection checks passed.\n'

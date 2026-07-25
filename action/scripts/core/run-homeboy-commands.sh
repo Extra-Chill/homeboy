@@ -70,15 +70,25 @@ for CMD in "${CMD_ARRAY[@]}"; do
   set -e
   echo "::endgroup::"
 
-  if [ ! -s "${OUTPUT_JSON}" ]; then
-    echo "::warning::homeboy ${CMD} did not write structured output to ${OUTPUT_JSON}"
+  STRUCTURED_OUTPUT=true
+  if [ ! -s "${OUTPUT_JSON}" ] || ! valid_command_result_output "${OUTPUT_JSON}" "${CMD}" "${CMD_EXIT}"; then
+    STRUCTURED_OUTPUT=false
+    echo "::error::homeboy ${CMD} did not write valid structured output to ${OUTPUT_JSON}"
   elif [ "$(printf '%s' "${CMD}" | awk '{print $1}')" = "bench" ]; then
     cp "${OUTPUT_JSON}" "${HOMEBOY_OUTPUT_DIR}/${OUTPUT_STEM}.json"
   fi
 
-  if [ "${CMD_EXIT}" -eq 0 ]; then
+  if [ "${CMD_EXIT}" -eq 0 ] && [ "${STRUCTURED_OUTPUT}" = true ]; then
     echo "::notice::homeboy ${CMD}: PASSED"
     RESULTS=$(echo "${RESULTS}" | jq -c --arg cmd "${CMD}" '. + {($cmd): "pass"}')
+  elif [ "${CMD_EXIT}" -eq 0 ]; then
+    echo "::error::homeboy ${CMD}: FAILED because required structured output was missing or malformed."
+    RESULTS=$(echo "${RESULTS}" | jq -c --arg cmd "${CMD}" '. + {($cmd): "fail"}')
+    OVERALL_EXIT=1
+  elif [ "${CMD_EXIT}" -eq 124 ]; then
+    echo "::error::homeboy ${CMD}: TIMED OUT (exit code 124); inspect the retained command log above."
+    RESULTS=$(echo "${RESULTS}" | jq -c --arg cmd "${CMD}" '. + {($cmd): "timeout"}')
+    OVERALL_EXIT=1
   else
     echo "::error::homeboy ${CMD}: FAILED (exit code ${CMD_EXIT})"
     RESULTS=$(echo "${RESULTS}" | jq -c --arg cmd "${CMD}" '. + {($cmd): "fail"}')

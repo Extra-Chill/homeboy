@@ -21,10 +21,12 @@
 #   RUN_GROUP_PREFIX    — log group prefix (default: homeboy)
 #
 # Outputs (GITHUB_OUTPUT):
-#   results — JSON object { "fleet exec ...": "pass"|"fail", ... }
+#   results — JSON object { "fleet exec ...": "pass"|"fail"|"timeout", ... }
 #   any-failed — true|false
 
 set -euo pipefail
+
+source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
 
 OPERATIONS_COMMANDS="${OPERATIONS_COMMANDS:-}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
@@ -76,17 +78,34 @@ for CMD in "${CMD_ARRAY[@]}"; do
   echo "::group::${GROUP_PREFIX} ${CMD}"
   CMD_EXIT=0
   set +e
-  eval "${FULL_CMD}" 2>&1 | tee "${HOMEBOY_OUTPUT_DIR}/${OUTPUT_STEM}.log"
-  CMD_EXIT=${PIPESTATUS[0]}
+  bash "${GITHUB_ACTION_PATH}/scripts/core/run-with-liveness-timeout.sh" \
+    --log-file "${HOMEBOY_OUTPUT_DIR}/${OUTPUT_STEM}.log" \
+    "operations homeboy ${CMD}" bash -c "${FULL_CMD}"
+  CMD_EXIT=$?
+  cat "${HOMEBOY_OUTPUT_DIR}/${OUTPUT_STEM}.log"
   set -e
   echo "::endgroup::"
 
   # Use a short label for the results key
   RESULT_KEY="${CMD}"
 
-  if [ "${CMD_EXIT}" -eq 0 ]; then
+  STRUCTURED_OUTPUT=true
+  if [ ! -s "${OUTPUT_JSON}" ] || ! valid_command_result_output "${OUTPUT_JSON}" "${CMD}" "${CMD_EXIT}"; then
+    STRUCTURED_OUTPUT=false
+    echo "::error::homeboy ${CMD} did not write valid structured output to ${OUTPUT_JSON}"
+  fi
+
+  if [ "${CMD_EXIT}" -eq 0 ] && [ "${STRUCTURED_OUTPUT}" = true ]; then
     echo "::notice::homeboy ${CMD}: PASSED"
     RESULTS=$(echo "${RESULTS}" | jq -c --arg cmd "${RESULT_KEY}" '. + {($cmd): "pass"}')
+  elif [ "${CMD_EXIT}" -eq 0 ]; then
+    echo "::error::homeboy ${CMD}: FAILED because required structured output was missing or malformed."
+    RESULTS=$(echo "${RESULTS}" | jq -c --arg cmd "${RESULT_KEY}" '. + {($cmd): "fail"}')
+    OVERALL_EXIT=1
+  elif [ "${CMD_EXIT}" -eq 124 ]; then
+    echo "::error::homeboy ${CMD}: TIMED OUT (exit code 124); inspect the retained command log above."
+    RESULTS=$(echo "${RESULTS}" | jq -c --arg cmd "${RESULT_KEY}" '. + {($cmd): "timeout"}')
+    OVERALL_EXIT=1
   else
     echo "::error::homeboy ${CMD}: FAILED (exit code ${CMD_EXIT})"
     RESULTS=$(echo "${RESULTS}" | jq -c --arg cmd "${RESULT_KEY}" '. + {($cmd): "fail"}')

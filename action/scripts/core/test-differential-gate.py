@@ -103,17 +103,17 @@ def main() -> None:
         )
 
         assert_equal(
-            {"lint": "fail", "audit": "pass"},
+            {"lint": "inconclusive", "audit": "pass"},
             run_gate({"lint": "fail", "audit": "pass"}, current, base),
-            "non-audit-test results are left untouched",
+            "lint failure without comparable metrics is inconclusive",
         )
 
         (base / "audit.json").unlink()
         (current / "audit.json").unlink()
         assert_equal(
-            {"audit": "fail"},
+            {"audit": "inconclusive"},
             run_gate({"audit": "fail"}, current, base),
-            "missing metric files preserve failures",
+            "missing metric files are inconclusive",
         )
 
     print("All differential gate checks passed.")

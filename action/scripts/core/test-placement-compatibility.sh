@@ -68,7 +68,7 @@ while [ "$#" -gt 0 ]; do
   fi
   shift
 done
-[ -z "${output}" ] || printf '{"success":true}\n' > "${output}"
+  [ -z "${output}" ] || printf '{"schema":"homeboy/command-result/v3","command":"review audit","success":true,"status":"succeeded","exit_code":0,"data":{}}\n' > "${output}"
 SH
 chmod +x "${FAKE_BIN}/homeboy"
 

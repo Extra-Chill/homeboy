@@ -55,6 +55,10 @@ if [ "${HAS_QUALITY_COMMANDS}" = true ]; then
     echo "::error::One or more quality commands failed"
     FAILED=true
   fi
+  if printf '%s\n' "${RESULTS}" | jq -e 'to_entries | any(.value == "timeout")' > /dev/null; then
+    echo "::error::One or more quality commands timed out; inspect the retained command logs above."
+    FAILED=true
+  fi
   if printf '%s\n' "${RESULTS}" | jq -e 'to_entries | any(.value == "baseline_red")' > /dev/null; then
     echo "::warning::One or more quality commands were inconclusive because the baseline is already red"
   fi
@@ -67,6 +71,10 @@ fi
 if [ -n "${OPERATIONS_RESULTS}" ] && [ "${OPERATIONS_RESULTS}" != "{}" ]; then
   if printf '%s\n' "${OPERATIONS_RESULTS}" | jq -e 'to_entries | any(.value == "fail")' > /dev/null; then
     echo "::error::One or more operations commands (fleet/deploy) failed"
+    FAILED=true
+  fi
+  if printf '%s\n' "${OPERATIONS_RESULTS}" | jq -e 'to_entries | any(.value == "timeout")' > /dev/null; then
+    echo "::error::One or more operations commands timed out; inspect the retained command logs above."
     FAILED=true
   fi
 fi

@@ -66,7 +66,7 @@ append_review_report_section() {
 status_icon() {
   case "$1" in
     pass|passed) printf '%s\n' ':white_check_mark:' ;;
-    fail|failed) printf '%s\n' ':x:' ;;
+    fail|failed|timeout) printf '%s\n' ':x:' ;;
     baseline_red|inconclusive) printf '%s\n' ':warning:' ;;
     skipped) printf '%s\n' ':fast_forward:' ;;
     *) printf '%s\n' ':warning:' ;;
@@ -77,6 +77,7 @@ status_label() {
   case "$1" in
     pass|passed) printf '%s\n' 'passed' ;;
     fail|failed) printf '%s\n' 'failed' ;;
+    timeout) printf '%s\n' 'timed out' ;;
     baseline_red) printf '%s\n' 'baseline red' ;;
     inconclusive) printf '%s\n' 'inconclusive' ;;
     skipped) printf '%s\n' 'skipped' ;;

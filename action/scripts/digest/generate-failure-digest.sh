@@ -22,7 +22,7 @@ append_local_reproduction_commands() {
 
   failed_commands="$(jq -r '
     to_entries[]
-    | select(.value == "fail" and (.key == "review lint" or .key == "review test"))
+    | select((.value == "fail" or .value == "timeout") and (.key == "review lint" or .key == "review test"))
     | .key
   ' <<< "${RESULTS_JSON}" 2>/dev/null || true)"
 

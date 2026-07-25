@@ -34,8 +34,12 @@ action_yml="$(python3 - "${ROOT}/action.yml" <<'PY'
 import sys
 
 text = open(sys.argv[1], encoding="utf-8").read()
-start = text.index("    - name: Post PR comment")
-end = text.index("    # ── Phase 8", start)
+start = text.find("    - name: Post PR comment")
+if start < 0:
+    raise SystemExit("FAIL: action.yml is missing the Post PR comment action section")
+end = text.find("    # ── Phase 7: Auto-issue filing", start)
+if end < 0:
+    raise SystemExit("FAIL: action.yml is missing the Auto-issue filing section after Post PR comment")
 print(text[start:end])
 PY
 )"
