@@ -93,6 +93,25 @@ pub(super) fn exec(
 
     let validated_run_id = validate_runner_exec_run_id(run_id)?;
     let (cwd, source_snapshot) = exec_workspace_context(runner_id, cwd, sync_workspace, false)?;
+    if let Some(run_id) = validated_run_id.as_deref() {
+        let runner_config = runner::load(runner_id)?;
+        let remote_cwd = cwd
+            .as_deref()
+            .or(runner_config.workspace_root.as_deref())
+            .unwrap_or(".");
+        homeboy_agents::agent_task_lifecycle::ensure_generic_runner_exec_run(
+            run_id,
+            runner_id,
+            remote_cwd,
+            &prepared_command,
+        )?;
+        homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_declarations(
+            run_id,
+            &artifact_outputs,
+            &artifact_dir_outputs,
+            &summary_outputs,
+        )?;
+    }
 
     let (mut output, exit_code) = runner::exec(
         runner_id,
@@ -157,6 +176,13 @@ pub(super) fn exec(
             .extend(promoted_artifact_dir_records);
         output.structured_summaries.extend(structured_summaries);
         output.promoted_outputs.extend(promoted_summaries);
+        let retained = artifacts
+            .iter()
+            .chain(artifact_dir_records.iter())
+            .chain(summaries.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_refs(run_id, &retained)?;
     }
     Ok((output, exit_code))
 }

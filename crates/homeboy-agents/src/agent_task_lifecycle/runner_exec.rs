@@ -4,7 +4,8 @@
 
 use serde_json::{json, Value};
 
-use homeboy_core::api_jobs::RemoteRunnerJobRequest;
+use homeboy_core::api_jobs::{JobStatus, RemoteRunnerJobRequest, RunnerJobLogSnapshot};
+use homeboy_core::observation::RunStatus;
 
 use super::*;
 
@@ -163,6 +164,157 @@ pub fn ensure_generic_runner_exec_run(
     remote_command: &[String],
 ) -> Result<homeboy_core::observation::RunRecord> {
     ensure_runner_exec_observation_run(run_id, runner_id, remote_workspace, remote_command, None)
+}
+
+/// Persist the output contract before submitting a daemon job. This gives a
+/// restarted controller the exact runner-side paths it must retain, rather than
+/// relying on ephemeral CLI arguments after the daemon has completed.
+pub fn record_runner_exec_artifact_declarations(
+    run_id: &str,
+    artifacts: &[String],
+    artifact_dirs: &[String],
+    summaries: &[String],
+) -> Result<()> {
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let run_id = sanitize_run_id(run_id);
+    let Some(mut run) = store.get_run(&run_id)? else {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            format!("generic runner-exec run record not found: {run_id}"),
+            Some(run_id),
+            None,
+        ));
+    };
+    if run.metadata_json.get("kind").and_then(Value::as_str) != Some(RUNNER_EXEC_RUN_KIND) {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "runner-exec artifact declarations require a generic runner-exec run",
+            Some(run.id),
+            None,
+        ));
+    }
+    let metadata = run.metadata_json.as_object_mut().expect("metadata object");
+    metadata.insert(
+        "runner_exec_artifact_declarations".to_string(),
+        json!({
+            "artifacts": artifacts,
+            "artifact_dirs": artifact_dirs,
+            "summaries": summaries,
+        }),
+    );
+    store.upsert_imported_run_preserving_terminal(&run)
+}
+
+/// Retain controller-owned artifact IDs alongside the original declarations.
+/// These IDs remain usable after the daemon evicts its job/event retention.
+pub fn record_runner_exec_artifact_refs(
+    run_id: &str,
+    artifacts: &[homeboy_core::observation::ArtifactRecord],
+) -> Result<()> {
+    if artifacts.is_empty() {
+        return Ok(());
+    }
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let run_id = sanitize_run_id(run_id);
+    let Some(mut run) = store.get_run(&run_id)? else {
+        return Ok(());
+    };
+    if run.metadata_json.get("kind").and_then(Value::as_str) != Some(RUNNER_EXEC_RUN_KIND) {
+        return Ok(());
+    }
+    let metadata = run.metadata_json.as_object_mut().expect("metadata object");
+    let mut refs = metadata
+        .get("runner_exec_artifact_refs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for artifact in artifacts {
+        if refs.iter().any(|entry| entry["id"] == artifact.id) {
+            continue;
+        }
+        refs.push(json!({
+            "id": artifact.id.clone(),
+            "kind": artifact.kind.clone(),
+            "path": artifact.path.clone(),
+        }));
+    }
+    metadata.insert("runner_exec_artifact_refs".to_string(), Value::Array(refs));
+    store.upsert_imported_run_preserving_terminal(&run)
+}
+
+/// Finalize a generic runner-exec observation from a daemon-owned terminal
+/// snapshot. Agent-task projections intentionally remain separate: this record
+/// has no task aggregate to parse, so the daemon result itself is authoritative.
+pub fn project_terminal_runner_exec_result(
+    run_id: &str,
+    snapshot: &RunnerJobLogSnapshot,
+) -> Result<bool> {
+    if !snapshot.job.status.is_terminal() {
+        return Ok(false);
+    }
+    let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+    let Some(mut run) = store.get_run(&sanitize_run_id(run_id))? else {
+        return Ok(false);
+    };
+    if run.metadata_json.get("kind").and_then(Value::as_str) != Some(RUNNER_EXEC_RUN_KIND) {
+        return Ok(false);
+    }
+    if RunStatus::from_label(&run.status).is_some_and(RunStatus::is_terminal) {
+        return Ok(false);
+    }
+
+    let runner_id = run
+        .metadata_json
+        .get("runner_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let exit_code = if snapshot.job.status == JobStatus::Succeeded {
+        0
+    } else {
+        1
+    };
+    let metadata = run.metadata_json.as_object_mut().expect("metadata object");
+    metadata.insert("runner_job_id".to_string(), json!(snapshot.job.id));
+    metadata.insert("runner_job_status".to_string(), json!(snapshot.job.status));
+    metadata.insert("runner_job_events".to_string(), json!(snapshot.events));
+    let mut execution_record =
+        homeboy_core::runner_execution_envelope::RunnerExecutionRecord::terminal(
+            snapshot.job.id.to_string(),
+            runner_id,
+            "daemon",
+            exit_code,
+        )
+        .with_job_id(snapshot.job.id.to_string());
+    if snapshot.job.status == JobStatus::Cancelled {
+        execution_record.status = "cancelled".to_string();
+    }
+    metadata.insert(
+        "runner_execution_record".to_string(),
+        serde_json::to_value(execution_record).unwrap_or(Value::Null),
+    );
+    metadata.insert(
+        "runner_terminal_projection".to_string(),
+        json!({
+            "state": "projected",
+            "job_id": snapshot.job.id,
+            "status": snapshot.job.status,
+            "event_count": snapshot.events.len(),
+        }),
+    );
+    if snapshot.job.status != JobStatus::Succeeded {
+        metadata.insert(
+            "runner_failure_diagnostics".to_string(),
+            json!({ "job_status": snapshot.job.status, "events": snapshot.events }),
+        );
+    }
+    let status = if snapshot.job.status == JobStatus::Succeeded {
+        RunStatus::Pass
+    } else {
+        RunStatus::Fail
+    };
+    store.finish_run(&run.id, status, Some(run.metadata_json))?;
+    Ok(true)
 }
 
 /// Persist redacted submission ownership before a reverse-broker POST. The

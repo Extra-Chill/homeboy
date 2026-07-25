@@ -3,7 +3,7 @@
 #![cfg(test)]
 
 use super::*;
-use homeboy_core::api_jobs::{Job, JobStore, RemoteRunnerJobRequest};
+use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStatus, RunnerJobLogSnapshot};
 use homeboy_core::test_support::with_isolated_home;
 
 #[test]
@@ -173,4 +173,114 @@ fn generic_runner_exec_run_supports_artifact_attachment() {
             .expect("declared summary attaches to the generic run");
         assert_eq!(artifact.run_id, "adhoc-evidence-9485");
     });
+}
+
+#[test]
+fn generic_runner_exec_terminal_projection_is_authoritative_and_idempotent() {
+    with_isolated_home(|_| {
+        let command = vec!["node".to_string(), "fuzz.mjs".to_string()];
+        for (run_id, status, expected_status) in [
+            ("runner-projection-success", "succeeded", "pass"),
+            ("runner-projection-failure", "failed", "fail"),
+            ("runner-projection-cancel", "cancelled", "fail"),
+        ] {
+            record_runner_exec_job_identity(
+                run_id,
+                "homeboy-lab",
+                "00000000-0000-0000-0000-000000000123",
+                "/runner/workspace",
+                &command,
+            )
+            .expect("generic run bound to daemon job");
+            record_runner_exec_artifact_declarations(
+                run_id,
+                &["case-log.jsonl".to_string()],
+                &["artifacts".to_string()],
+                &["results.json".to_string()],
+            )
+            .expect("declared artifact contract persists before execution");
+
+            let snapshot = runner_snapshot(status);
+            assert!(project_terminal_runner_exec_result(run_id, &snapshot)
+                .expect("terminal daemon result projects"));
+            assert!(!project_terminal_runner_exec_result(run_id, &snapshot)
+                .expect("duplicate terminal projection is ignored"));
+
+            let store =
+                homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+            let run = store
+                .get_run(run_id)
+                .expect("read run")
+                .expect("projected run");
+            assert_eq!(run.status, expected_status);
+            assert!(run.finished_at.is_some());
+            assert_eq!(
+                run.metadata_json["runner_terminal_projection"]["state"],
+                "projected"
+            );
+            assert_eq!(
+                run.metadata_json["runner_execution_record"]["status"],
+                status
+            );
+            assert_eq!(
+                run.metadata_json["runner_exec_artifact_declarations"]["summaries"][0],
+                "results.json"
+            );
+            if status != "succeeded" {
+                assert_eq!(
+                    run.metadata_json["runner_failure_diagnostics"]["job_status"],
+                    status
+                );
+            }
+        }
+    });
+}
+
+fn runner_snapshot(status: &str) -> RunnerJobLogSnapshot {
+    let job_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").expect("job id");
+    let status = match status {
+        "succeeded" => JobStatus::Succeeded,
+        "failed" => JobStatus::Failed,
+        "cancelled" => JobStatus::Cancelled,
+        _ => panic!("terminal status"),
+    };
+    RunnerJobLogSnapshot {
+        job: Job {
+            id: job_id,
+            operation: "exec".to_string(),
+            status,
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            started_at_ms: Some(1),
+            finished_at_ms: Some(2),
+            event_count: 1,
+            source_snapshot: None,
+            path_materialization_plan: None,
+            stale_reason: None,
+            daemon_lease_id: None,
+            target_runner_id: Some("homeboy-lab".to_string()),
+            target_project_id: None,
+            claim_id: None,
+            claimed_by_runner_id: None,
+            claimed_at_ms: None,
+            claim_expires_at_ms: None,
+            artifacts: Vec::new(),
+            runner_job_projection: None,
+        },
+        events: vec![JobEvent {
+            sequence: 1,
+            job_id,
+            kind: if status == JobStatus::Succeeded {
+                JobEventKind::Result
+            } else {
+                JobEventKind::Error
+            },
+            timestamp_ms: 2,
+            message: Some("terminal result".to_string()),
+            data: Some(serde_json::json!({
+                "exit_code": if status == JobStatus::Succeeded { 0 } else { 1 },
+                "classification": "timeout",
+            })),
+        }],
+    }
 }
