@@ -217,7 +217,7 @@ pub struct ReviewArgs {
         long = "provider-argv",
         value_name = "ARG",
         conflicts_with = "provider_command",
-        long_help = "Promotion apply-provider invocation argument. Repeat once per exact argv element: the first is the executable and later values are its arguments; values are never shell-split. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with required `workspace_path`."
+        long_help = "Promotion-only apply-provider invocation argument. Repeat once per exact argv element: the first is the executable and later values are its arguments; values are never shell-split. This cannot select an executor. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with required `workspace_path`."
     )]
     pub provider_argv: Vec<String>,
 }
@@ -239,7 +239,7 @@ pub struct PromoteArgs {
         long = "provider-argv",
         value_name = "ARG",
         conflicts_with = "provider_command",
-        long_help = "Promotion apply-provider invocation argument. Repeat once per exact argv element: the first is the executable and later values are its arguments; values are never shell-split. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with required `workspace_path`."
+        long_help = "Promotion-only apply-provider invocation argument. Repeat once per exact argv element: the first is the executable and later values are its arguments; values are never shell-split. This cannot select an executor. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with required `workspace_path`."
     )]
     pub provider_argv: Vec<String>,
     #[arg(long, value_name = "TASK_ID")]

@@ -291,6 +291,7 @@ impl CliRuntime {
     }
 
     fn parse_matches(&self, normalized: Vec<String>) -> ArgMatches {
+        let diagnostic_args = normalized.clone();
         match Cli::command_with_scoped_lab_args().try_get_matches_from(normalized.clone()) {
             Ok(matches) => matches,
             Err(static_err) => match self
@@ -299,16 +300,20 @@ impl CliRuntime {
             {
                 Ok(matches) => matches,
                 Err(err) => {
-                    if let Some(output) =
-                        try_augment_clap_error(&err, &self.extension_discovery().health)
-                    {
+                    if let Some(output) = try_augment_clap_error(
+                        &err,
+                        &diagnostic_args,
+                        &self.extension_discovery().health,
+                    ) {
                         eprintln!("{}", output);
                         std::process::exit(2);
                     }
 
-                    if let Some(output) =
-                        try_augment_clap_error(&static_err, &self.extension_discovery().health)
-                    {
+                    if let Some(output) = try_augment_clap_error(
+                        &static_err,
+                        &diagnostic_args,
+                        &self.extension_discovery().health,
+                    ) {
                         eprintln!("{}", output);
                         std::process::exit(2);
                     }
@@ -1101,12 +1106,34 @@ fn is_runs_artifact_get_runner_option(args: &[String]) -> bool {
         })
 }
 
-/// Attempt to augment a clap error with entity suggestions.
-/// Returns Some(augmented_message) if the unrecognized string matches a known entity.
+struct ArgumentMigration {
+    command: &'static str,
+    command_path: &'static [&'static str],
+    historical_flags: &'static [&'static str],
+    diagnostic: &'static str,
+}
+
+const ARGUMENT_MIGRATIONS: &[ArgumentMigration] = &[ArgumentMigration {
+    command: "homeboy agent-task cook",
+    command_path: &["agent-task", "cook"],
+    historical_flags: &["--provider", "--provider-id", "--dispatch-selector"],
+    diagnostic: "executor selection now uses `--backend <backend>` and optional `--selector <provider-id>`.\n\
+Example: `homeboy agent-task cook --backend opencode --selector opencode.agent-task-executor --to-worktree repo@branch --goal 'Describe the task' --verify 'cargo test' --no-finalize`\n\
+List available executor providers: `homeboy agent-task providers`\n\
+`--provider-argv` is promotion-only: it configures the deprecated promotion apply-provider invocation and cannot select an executor.",
+}];
+
+/// Attempt to augment a clap error with semantic argument migrations or entity suggestions.
+/// Returns Some(augmented_message) when an actionable diagnostic is available.
 fn try_augment_clap_error(
     e: &clap::Error,
+    argv: &[String],
     extension_health: &ExtensionCliHealth,
 ) -> Option<String> {
+    if let Some(output) = semantic_argument_migration_diagnostic(e, argv) {
+        return Some(output);
+    }
+
     // Extract unrecognized subcommand and parent command from error.
     let unrecognized = extract_unrecognized_from_error(e)?;
     let parent_command = extract_parent_command_from_error(e)?;
@@ -1138,6 +1165,38 @@ fn try_augment_clap_error(
     }
 
     Some(output)
+}
+
+fn semantic_argument_migration_diagnostic(e: &clap::Error, argv: &[String]) -> Option<String> {
+    if e.kind() != clap::error::ErrorKind::UnknownArgument {
+        return None;
+    }
+
+    let migration = ARGUMENT_MIGRATIONS.iter().find(|migration| {
+        argv.windows(migration.command_path.len()).any(|command| {
+            command
+                .iter()
+                .map(String::as_str)
+                .eq(migration.command_path.iter().copied())
+        })
+    })?;
+    let argument = argv.iter().find_map(|argument| {
+        migration
+            .historical_flags
+            .iter()
+            .find(|flag| {
+                argument.as_str() == **flag
+                    || argument
+                        .strip_prefix(**flag)
+                        .is_some_and(|suffix| suffix.starts_with('='))
+            })
+            .map(|flag| (*flag).to_string())
+    })?;
+
+    Some(format!(
+        "error: historical executor selection flag '{argument}' is not supported\n\nhint: {}\n\nFor more information, try '{} --help'",
+        migration.diagnostic, migration.command
+    ))
 }
 
 fn append_extension_health_hints(hints: &mut Vec<String>, extension_health: &ExtensionCliHealth) {
@@ -1501,7 +1560,12 @@ mod tests {
             broken_link_ids: vec!["sample-runtime".to_string()],
         };
 
-        let output = try_augment_clap_error(&err, &health).expect("extension health hint");
+        let output = try_augment_clap_error(
+            &err,
+            &["homeboy".to_string(), "sample-cli".to_string()],
+            &health,
+        )
+        .expect("extension health hint");
 
         assert!(output.contains("extension-provided commands may be unavailable"));
         assert!(output.contains("broken extension link(s): sample-runtime"));
