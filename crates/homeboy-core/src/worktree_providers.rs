@@ -835,7 +835,8 @@ fn dirty_worktree_message(
     let baseline_detail = match baseline {
         BaselineVerification::Absent => String::new(),
         BaselineVerification::Diverges(_) => {
-            "; promoted candidate baseline does not match the current changes".to_string()
+            "; promoted candidate baseline could not be verified against the current changes"
+                .to_string()
         }
         BaselineVerification::NotRequired | BaselineVerification::Matches => String::new(),
     };
@@ -863,7 +864,10 @@ fn dirty_worktree_details(
     let (reason, baseline_error) = match baseline {
         BaselineVerification::Absent => ("unattributed_drift", None),
         BaselineVerification::Diverges(error) => ("divergent_user_edits", Some(error.clone())),
-        BaselineVerification::NotRequired | BaselineVerification::Matches => unreachable!(),
+        // A matching promoted candidate can still be unsafe for another reason,
+        // such as an unpushed commit or a primary checkout.
+        BaselineVerification::Matches => ("verified_promoted_candidate", None),
+        BaselineVerification::NotRequired => unreachable!(),
     };
     let mut details = serde_json::json!({
         "classification": "workspace.resolved_but_dirty",
@@ -2290,6 +2294,30 @@ mod tests {
         )
         .expect("matching promoted baseline is reusable");
 
+        let unpushed_error = validate_provider_handle(
+            "fixture",
+            &WorktreeProviderHandle {
+                safety: WorktreeProviderHandleSafety {
+                    dirty: true,
+                    unpushed: true,
+                    primary: false,
+                },
+                ..worktree.clone()
+            },
+            Some(&serde_json::json!({ "matches": true })),
+            None,
+        )
+        .expect_err("an unpushed promoted candidate must remain refused");
+        assert!(unpushed_error.message.contains("unpushed"));
+        assert_eq!(
+            unpushed_error.details["workspace"]["classification"],
+            "workspace.resolved_but_dirty"
+        );
+        assert_eq!(
+            unpushed_error.details["workspace"]["reason"],
+            "verified_promoted_candidate"
+        );
+
         let error = validate_provider_handle(
             "fixture",
             &worktree,
@@ -2300,7 +2328,7 @@ mod tests {
         assert_eq!(error.details["workspace"]["reason"], "divergent_user_edits");
         assert!(error
             .message
-            .contains("promoted candidate baseline does not match"));
+            .contains("promoted candidate baseline could not be verified"));
     }
 
     #[test]
