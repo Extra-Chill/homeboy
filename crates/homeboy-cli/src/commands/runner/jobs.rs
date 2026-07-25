@@ -380,6 +380,10 @@ fn runner_job_terminal(status: JobStatus) -> bool {
 mod tests {
     use super::*;
     use homeboy::core::api_jobs::JobEventKind;
+    use homeboy::runner::runners::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::process::Command;
     use uuid::Uuid;
 
     fn event(sequence: u64) -> JobEvent {
@@ -391,6 +395,97 @@ mod tests {
             message: None,
             data: None,
         }
+    }
+
+    fn job(status: JobStatus, event_count: usize) -> homeboy::core::api_jobs::Job {
+        serde_json::from_value(serde_json::json!({
+            "id": Uuid::nil(),
+            "operation": "runner.exec",
+            "status": status,
+            "created_at_ms": 1,
+            "updated_at_ms": event_count,
+            "event_count": event_count,
+        }))
+        .expect("test job")
+    }
+
+    fn session(url: String, tunnel_pid: Option<u32>) -> RunnerSession {
+        RunnerSession {
+            runner_id: "lab".to_string(),
+            mode: RunnerTunnelMode::DirectSsh,
+            role: RunnerSessionRole::Controller,
+            server_id: Some("lab".to_string()),
+            controller_id: None,
+            broker_url: None,
+            remote_daemon_address: Some("127.0.0.1:44000".to_string()),
+            local_port: None,
+            local_url: Some(url),
+            tunnel_pid,
+            remote_daemon_pid: Some(4242),
+            remote_daemon_lease_id: Some("lease-authoritative".to_string()),
+            homeboy_version: "test".to_string(),
+            homeboy_build_identity: Some("homeboy test+authoritative".to_string()),
+            connected_at: "2026-01-01T00:00:00Z".to_string(),
+            worker_identity: None,
+            worker_pid: None,
+            last_seen_at: None,
+            leaseless_recovery_evidence: None,
+        }
+    }
+
+    fn read_request(stream: &mut std::net::TcpStream) -> String {
+        let mut request = [0; 4096];
+        let length = stream.read(&mut request).expect("read daemon request");
+        String::from_utf8(request[..length].to_vec()).expect("daemon request text")
+    }
+
+    fn write_daemon_response(stream: &mut std::net::TcpStream, body: serde_json::Value) {
+        let body = serde_json::json!({ "success": true, "data": { "body": body } }).to_string();
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .expect("write daemon response");
+    }
+
+    fn serve_dropped_daemon_request() -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind dropped daemon");
+        let url = format!(
+            "http://{}",
+            listener.local_addr().expect("dropped daemon address")
+        );
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept dropped daemon request");
+            assert!(read_request(&mut stream).starts_with("GET /jobs/"));
+            // A tunnel loss closes the transport before the daemon response.
+        });
+        (url, handle)
+    }
+
+    fn serve_authoritative_daemon(
+        snapshots: Vec<(homeboy::core::api_jobs::Job, Vec<JobEvent>)>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind authoritative daemon");
+        let url = format!(
+            "http://{}",
+            listener.local_addr().expect("authoritative daemon address")
+        );
+        let handle = std::thread::spawn(move || {
+            for (job, events) in snapshots {
+                let (mut job_stream, _) = listener.accept().expect("accept job request");
+                assert!(read_request(&mut job_stream).starts_with("GET /jobs/"));
+                write_daemon_response(&mut job_stream, serde_json::json!({ "job": job }));
+
+                let (mut event_stream, _) = listener.accept().expect("accept event request");
+                assert!(read_request(&mut event_stream).starts_with("GET /jobs/"));
+                write_daemon_response(&mut event_stream, serde_json::json!({ "events": events }));
+            }
+        });
+        (url, handle)
     }
 
     #[test]
@@ -451,6 +546,51 @@ mod tests {
         let recovered = follow_recovery_error("lab", "job-42", 9, 250, error);
 
         assert!(recovered.message.contains("--cursor 9 --poll-ms 250"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropped_transport_reconnects_to_authoritative_generation_without_replaying_events() {
+        let (dropped_url, dropped_server) = serve_dropped_daemon_request();
+        let dropped = session(dropped_url, None);
+        assert!(runner::runner_job_log_snapshot_for_session(&dropped, "job-42").is_err());
+        dropped_server.join().expect("dropped daemon joins");
+
+        let (authoritative_url, authoritative_server) = serve_authoritative_daemon(vec![
+            (job(JobStatus::Queued, 1), vec![event(1)]),
+            (job(JobStatus::Running, 2), vec![event(1), event(2)]),
+            (
+                job(JobStatus::Succeeded, 3),
+                vec![event(1), event(2), event(3)],
+            ),
+        ]);
+        let mut tunnel = Command::new("sh")
+            .args(["-c", "sleep 60"])
+            .spawn()
+            .expect("recovery tunnel process");
+        let authoritative = session(authoritative_url, Some(tunnel.id()));
+        let mut cursor = 0;
+        let mut rendered = Vec::new();
+
+        for expected_status in [JobStatus::Queued, JobStatus::Running, JobStatus::Succeeded] {
+            let snapshot = runner::runner_job_log_snapshot_for_session(&authoritative, "job-42")
+                .expect("authoritative generation snapshot");
+            assert_eq!(snapshot.job.status, expected_status);
+            rendered.extend(
+                new_job_events(&snapshot.events, &mut cursor)
+                    .into_iter()
+                    .map(|event| event.sequence),
+            );
+        }
+
+        assert_eq!(rendered, vec![1, 2, 3]);
+        assert_eq!(cursor, 3);
+        assert!(runner_job_terminal(JobStatus::Succeeded));
+        runner::close_reconnected_job_log_owner(&authoritative);
+        assert!(!tunnel.wait().expect("recovery tunnel exits").success());
+        authoritative_server
+            .join()
+            .expect("authoritative daemon joins");
     }
 
     #[test]
