@@ -47,6 +47,7 @@ pub(super) fn remote_runner_request(
         command: vec!["homeboy".to_string(), "test".to_string()],
         cwd: Some("/srv/extrachill".to_string()),
         env: HashMap::new(),
+        extension_env_providers: Vec::new(),
         secret_env_names: Vec::new(),
         secret_env_plan: Default::default(),
         env_materialization: None,
