@@ -1983,10 +1983,24 @@ fn dispatch_workspace_identity(path: &std::path::Path) -> Result<Value> {
             None,
         ));
     }
+    let git_file = canonical.join(".git");
+    let git_metadata = std::fs::symlink_metadata(&git_file).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(git_file.display().to_string()))
+    })?;
+    let git_content = std::fs::read_to_string(&git_file).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(git_file.display().to_string()))
+    })?;
+    let gitdir_target = git_content
+        .strip_prefix("gitdir: ")
+        .map(str::trim)
+        .and_then(|target| std::fs::canonicalize(canonical.join(target)).ok());
     Ok(serde_json::json!({
         "canonical_path": canonical,
         "device": metadata.dev(),
         "inode": metadata.ino(),
+        "git_file_is_file": git_metadata.file_type().is_file(),
+        "git_file_content": git_content,
+        "gitdir_target": gitdir_target,
     }))
 }
 

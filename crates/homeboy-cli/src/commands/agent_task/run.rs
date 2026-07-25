@@ -425,8 +425,19 @@ fn workspace_identity_attestation(path: &Path) -> homeboy::core::Result<Value> {
         .ok()
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
+    let git_file = canonical.join(".git");
+    let git_metadata = std::fs::symlink_metadata(&git_file).map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(git_file.display().to_string()))
+    })?;
+    let git_content = std::fs::read_to_string(&git_file).map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(git_file.display().to_string()))
+    })?;
+    let gitdir_target = git_content
+        .strip_prefix("gitdir: ")
+        .map(str::trim)
+        .and_then(|target| std::fs::canonicalize(canonical.join(target)).ok());
     Ok(
-        serde_json::json!({ "canonical_path": canonical, "device": metadata.dev(), "inode": metadata.ino(), "git_dir": git_dir }),
+        serde_json::json!({ "canonical_path": canonical, "device": metadata.dev(), "inode": metadata.ino(), "git_dir": git_dir, "git_file_is_file": git_metadata.file_type().is_file(), "git_file_content": git_content, "gitdir_target": gitdir_target }),
     )
 }
 

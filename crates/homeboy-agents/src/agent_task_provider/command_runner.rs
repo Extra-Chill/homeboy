@@ -606,6 +606,32 @@ fn workspace_matches_attestation(path: &std::path::Path, attestation: &serde_jso
         && attestation["canonical_path"].as_str() == canonical.to_str()
         && attestation["device"].as_u64() == Some(metadata.dev())
         && attestation["inode"].as_u64() == Some(metadata.ino())
+        && linked_git_metadata_matches(&canonical, attestation)
+}
+
+#[cfg(unix)]
+fn linked_git_metadata_matches(
+    worktree: &std::path::Path,
+    attestation: &serde_json::Value,
+) -> bool {
+    let git_file = worktree.join(".git");
+    let Ok(metadata) = std::fs::symlink_metadata(&git_file) else {
+        return false;
+    };
+    if !metadata.file_type().is_file() || attestation["git_file_is_file"] != true {
+        return false;
+    }
+    let Ok(content) = std::fs::read_to_string(&git_file) else {
+        return false;
+    };
+    if attestation["git_file_content"].as_str() != Some(content.as_str()) {
+        return false;
+    }
+    let target = content
+        .strip_prefix("gitdir: ")
+        .map(str::trim)
+        .and_then(|target| std::fs::canonicalize(worktree.join(target)).ok());
+    target.as_deref().and_then(|path| path.to_str()) == attestation["gitdir_target"].as_str()
 }
 
 #[cfg(not(unix))]
