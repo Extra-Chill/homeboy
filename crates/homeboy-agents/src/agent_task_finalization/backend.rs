@@ -1,7 +1,7 @@
 use super::{
     AgentTaskPrCandidateState, AgentTaskPrDurableGateProof, AgentTaskPrFinalizationBackend,
     AgentTaskPrFinalizationOptions, AgentTaskPrRef, AgentTaskPrResolvedBase,
-    AgentTaskPublicationGitTracking,
+    AgentTaskPublicationBinding, AgentTaskPublicationGitTracking,
 };
 use crate::agent_task_promotion::{AgentTaskPromotionCandidate, AgentTaskPromotionReport};
 use homeboy_core::error::{Error, Result};
@@ -416,6 +416,98 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             url: output.url.unwrap_or_default(),
         })
     }
+
+    fn verify_publication_binding(
+        &mut self,
+        path: &str,
+        base: &str,
+        head: &str,
+        candidate_sha: &str,
+        changed_files: &[String],
+        pr: &AgentTaskPrRef,
+    ) -> Result<AgentTaskPublicationBinding> {
+        let dirty = self.changed_files(path)?;
+        if !dirty.is_empty() || git_output(path, &["rev-parse", "HEAD"])? != candidate_sha {
+            return Err(Error::validation_invalid_argument(
+                "publication_binding",
+                "candidate changed after commit; finalization requires a clean worktree still at the verified candidate SHA",
+                None,
+                None,
+            ));
+        }
+        let candidate_tree =
+            git_output(path, &["rev-parse", &format!("{candidate_sha}^{{tree}}")])?;
+        let remote_sha = remote_branch_head(path, head)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "publication_binding",
+                "pushed remote head disappeared before PR verification",
+                None,
+                None,
+            )
+        })?;
+        if remote_sha != candidate_sha {
+            return Err(Error::validation_invalid_argument(
+                "publication_binding",
+                "pushed remote ref changed before PR verification",
+                None,
+                None,
+            ));
+        }
+        let repository = gh_json(path, &["repo", "view", "--json", "nameWithOwner"])?
+            ["nameWithOwner"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let pr_value = gh_json(
+            path,
+            &[
+                "pr",
+                "view",
+                &pr.number.to_string(),
+                "--json",
+                "baseRefName,headRefName,headRefOid,headRepository",
+            ],
+        )?;
+        let pr_head_sha = pr_value["headRefOid"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let head_repository = pr_value["headRepository"]["nameWithOwner"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if pr_value["baseRefName"].as_str() != Some(base)
+            || pr_value["headRefName"].as_str() != Some(head)
+            || repository.is_empty()
+            || head_repository != repository
+            || pr_head_sha != candidate_sha
+        {
+            return Err(Error::validation_invalid_argument(
+                "publication_binding",
+                "GitHub PR does not match the requested same-repository head or verified candidate SHA",
+                None,
+                None,
+            ));
+        }
+        // Re-read after GitHub observation to reject a force-update race.
+        if remote_branch_head(path, head)?.as_deref() != Some(candidate_sha) {
+            return Err(Error::validation_invalid_argument(
+                "publication_binding",
+                "pushed remote ref changed while verifying the GitHub PR head",
+                None,
+                None,
+            ));
+        }
+        Ok(AgentTaskPublicationBinding {
+            candidate_sha: candidate_sha.to_string(),
+            candidate_tree,
+            remote_sha,
+            pr_head_sha,
+            repository,
+            head_repository,
+            changed_files: super::normalize_changed_files(changed_files),
+        })
+    }
 }
 
 fn committed_changed_files(path: &str, base: &str) -> Result<Vec<String>> {
@@ -497,6 +589,27 @@ fn git_output(path: &str, args: &[&str]) -> Result<String> {
         &format!("git {}", args.join(" ")),
     )
     .map(|stdout| stdout.trim().to_string())
+}
+
+fn gh_json(path: &str, args: &[&str]) -> Result<serde_json::Value> {
+    let output = std::process::Command::new("gh")
+        .args(args)
+        .current_dir(path)
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    if !output.status.success() {
+        return Err(Error::git_command_failed(format!(
+            "gh {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    serde_json::from_slice(&output.stdout).map_err(|error| {
+        Error::git_command_failed(format!(
+            "gh {} returned invalid JSON: {error}",
+            args.join(" ")
+        ))
+    })
 }
 
 fn is_git_object_id(value: &str) -> bool {

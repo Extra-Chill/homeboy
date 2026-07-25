@@ -110,7 +110,7 @@ fn finalize_with_operation_claim(
         // (`finalize_or_load_cook_pr` also loads the persisted result) rather
         // than opening a second PR.
         agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(result) => {
-            if result.is_null() {
+            if result.is_null() || !super::cook_promotion::publication_binding_complete(&result) {
                 finalize(options, run_id, promotion)
             } else {
                 Ok(result)

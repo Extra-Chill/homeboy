@@ -48,6 +48,8 @@ struct MockBackend {
     pushed_commit_sha: Option<String>,
     updated: bool,
     last_body: String,
+    publication_binding: Option<AgentTaskPublicationBinding>,
+    publication_binding_calls: u8,
 }
 
 impl AgentTaskPrFinalizationBackend for MockBackend {
@@ -277,6 +279,30 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
             url: format!("https://github.com/Extra-Chill/homeboy/pull/{}", number),
         })
     }
+
+    fn verify_publication_binding(
+        &mut self,
+        _path: &str,
+        _base: &str,
+        _head: &str,
+        candidate_sha: &str,
+        changed_files: &[String],
+        _pr: &AgentTaskPrRef,
+    ) -> Result<AgentTaskPublicationBinding> {
+        self.publication_binding_calls += 1;
+        Ok(self
+            .publication_binding
+            .clone()
+            .unwrap_or_else(|| AgentTaskPublicationBinding {
+                candidate_sha: candidate_sha.to_string(),
+                candidate_tree: "candidate-tree".to_string(),
+                remote_sha: candidate_sha.to_string(),
+                pr_head_sha: candidate_sha.to_string(),
+                repository: "Extra-Chill/homeboy".to_string(),
+                head_repository: "Extra-Chill/homeboy".to_string(),
+                changed_files: changed_files.to_vec(),
+            }))
+    }
 }
 
 #[test]
@@ -372,6 +398,61 @@ fn creates_new_pr_after_green_gates() {
             .and_then(|proof| proof.commit_sha.as_deref()),
         Some("candidate-sha")
     );
+    assert_eq!(backend.publication_binding_calls, 1);
+    assert_eq!(
+        report
+            .publication_proof
+            .binding
+            .as_ref()
+            .map(|binding| binding.pr_head_sha.as_str()),
+        Some("candidate-sha")
+    );
+}
+
+#[test]
+fn finalization_rejects_candidate_remote_pr_and_fork_binding_mismatches() {
+    let mismatch = |mut binding: AgentTaskPublicationBinding| {
+        let mut backend = MockBackend {
+            changed_files: vec!["src/lib.rs".to_string()],
+            publication_binding: Some(binding.clone()),
+            ..Default::default()
+        };
+        let error =
+            finalize_pr_with_backend(options(), &mut backend).expect_err("binding mismatch");
+        assert!(
+            error.message.contains("candidate SHA") || error.message.contains("same-repository")
+        );
+        assert!(
+            backend.created,
+            "PR mutation precedes the authoritative re-read"
+        );
+        binding.candidate_sha.clear();
+    };
+    let binding =
+        |remote_sha: &str, pr_head_sha: &str, head_repository: &str| AgentTaskPublicationBinding {
+            candidate_sha: "candidate-sha".to_string(),
+            candidate_tree: "candidate-tree".to_string(),
+            remote_sha: remote_sha.to_string(),
+            pr_head_sha: pr_head_sha.to_string(),
+            repository: "Extra-Chill/homeboy".to_string(),
+            head_repository: head_repository.to_string(),
+            changed_files: vec!["src/lib.rs".to_string()],
+        };
+    mismatch(binding(
+        "force-updated-sha",
+        "candidate-sha",
+        "Extra-Chill/homeboy",
+    ));
+    mismatch(binding(
+        "candidate-sha",
+        "other-pr-head",
+        "Extra-Chill/homeboy",
+    ));
+    mismatch(binding(
+        "candidate-sha",
+        "candidate-sha",
+        "contributor/homeboy",
+    ));
 }
 
 #[test]
@@ -2038,7 +2119,10 @@ fn changed_files_mismatch_error_flags_stale_base_inflated_promotion() {
 
     assert!(message.contains("expected_count=6"), "{message}");
     assert!(message.contains("actual_count=1"), "{message}");
-    assert!(message.contains("unexpected_from_caller=[]"), "{message}");
+    assert!(
+        message.contains("unexpected_from_caller=[src/a.rs]"),
+        "{message}"
+    );
     // The stale base paths are all reported as missing from the caller.
     assert!(message.contains("stale/f0.rs"), "{message}");
 }

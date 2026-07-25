@@ -200,6 +200,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             false,
             None,
             None,
+            None,
         ));
     }
 
@@ -232,6 +233,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             Some(git_identity),
             // Validation-only finalization performs no push, so there is no
             // publication git tracking to record.
+            None,
             None,
         ));
     }
@@ -294,6 +296,16 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         ),
     };
 
+    let binding = backend.verify_publication_binding(
+        &options.path,
+        &options.base,
+        &head,
+        commit_sha,
+        &changed_files,
+        &pr,
+    )?;
+    validate_publication_binding(&binding, commit_sha, &changed_files)?;
+
     Ok(report(
         &options,
         intent,
@@ -308,6 +320,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         push_required,
         Some(git_identity),
         git_tracking,
+        Some(binding),
     ))
 }
 
@@ -562,6 +575,37 @@ pub fn validate_publication_intent(intent: &AgentTaskPublicationIntent) -> Resul
     Ok(())
 }
 
+fn validate_publication_binding(
+    binding: &AgentTaskPublicationBinding,
+    candidate_sha: &str,
+    changed_files: &[String],
+) -> Result<()> {
+    if binding.candidate_sha != candidate_sha
+        || binding.remote_sha != candidate_sha
+        || binding.pr_head_sha != candidate_sha
+    {
+        return Err(Error::validation_invalid_argument(
+            "publication_binding",
+            "candidate SHA, pushed remote ref SHA, and GitHub PR head SHA must match before finalization succeeds",
+            None,
+            None,
+        ));
+    }
+    if binding.candidate_tree.is_empty()
+        || binding.repository.is_empty()
+        || binding.head_repository != binding.repository
+        || normalize_changed_files(&binding.changed_files) != normalize_changed_files(changed_files)
+    {
+        return Err(Error::validation_invalid_argument(
+            "publication_binding",
+            "publication binding must record the candidate tree, exact changed files, and a same-repository PR head",
+            None,
+            None,
+        ));
+    }
+    Ok(())
+}
+
 fn build_pr_publication_intent(
     options: &AgentTaskPrFinalizationOptions,
     head: &str,
@@ -597,6 +641,7 @@ fn publication_proof(
     adapter_ref: Option<String>,
     git_identity: Option<homeboy_core::git::GitIdentityProof>,
     git_tracking: Option<AgentTaskPublicationGitTracking>,
+    binding: Option<AgentTaskPublicationBinding>,
 ) -> AgentTaskPublicationProof {
     let mut target = intent.target.clone();
     target.url = adapter_ref.clone();
@@ -610,6 +655,7 @@ fn publication_proof(
         adapter_ref,
         git_identity,
         git_tracking,
+        binding,
         proof: intent.proof.clone(),
     }
 }
@@ -628,6 +674,7 @@ fn report(
     pushed: bool,
     git_identity: Option<homeboy_core::git::GitIdentityProof>,
     git_tracking: Option<AgentTaskPublicationGitTracking>,
+    binding: Option<AgentTaskPublicationBinding>,
 ) -> AgentTaskPrFinalizationReport {
     let normalized_gate_results = options.normalized_gate_results.clone();
     let proof =
@@ -640,6 +687,7 @@ fn report(
         pr_url.clone(),
         git_identity,
         git_tracking,
+        binding,
     );
     let finalization_outcome = finalization_outcome(
         &publication_intent,

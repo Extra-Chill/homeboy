@@ -21,7 +21,8 @@ use crate::agent_task::{
 };
 use crate::agent_task_finalization::{
     AgentTaskPrDurableGateProof, AgentTaskPrFinalizationBackend, AgentTaskPrRef,
-    AgentTaskPublicationGitTracking, RealAgentTaskPrFinalizationBackend,
+    AgentTaskPublicationBinding, AgentTaskPublicationGitTracking,
+    RealAgentTaskPrFinalizationBackend,
 };
 use crate::agent_task_scheduler::AgentTaskState;
 use homeboy_core::run_lifecycle_record::{
@@ -3705,6 +3706,25 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
     ) -> Result<AgentTaskPrRef> {
         self.body = body.to_string();
         unreachable!("test creates a PR")
+    }
+    fn verify_publication_binding(
+        &mut self,
+        _path: &str,
+        _base: &str,
+        _head: &str,
+        candidate_sha: &str,
+        changed_files: &[String],
+        _pr: &AgentTaskPrRef,
+    ) -> Result<AgentTaskPublicationBinding> {
+        Ok(AgentTaskPublicationBinding {
+            candidate_sha: candidate_sha.to_string(),
+            candidate_tree: "candidate-tree".to_string(),
+            remote_sha: candidate_sha.to_string(),
+            pr_head_sha: candidate_sha.to_string(),
+            repository: "Extra-Chill/homeboy".to_string(),
+            head_repository: "Extra-Chill/homeboy".to_string(),
+            changed_files: changed_files.to_vec(),
+        })
     }
 }
 

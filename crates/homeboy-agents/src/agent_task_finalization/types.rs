@@ -114,6 +114,8 @@ pub struct AgentTaskPublicationProof {
     pub git_identity: Option<GitIdentityProof>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_tracking: Option<AgentTaskPublicationGitTracking>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<AgentTaskPublicationBinding>,
     pub proof: HomeboyProof,
 }
 
@@ -123,6 +125,19 @@ pub struct AgentTaskPublicationGitTracking {
     pub remote: String,
     pub upstream_ref: String,
     pub verified_remote_sha: String,
+}
+
+/// Immutable identities observed from Git and GitHub after publication.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPublicationBinding {
+    pub candidate_sha: String,
+    pub candidate_tree: String,
+    pub remote_sha: String,
+    pub pr_head_sha: String,
+    pub repository: String,
+    pub head_repository: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -353,4 +368,13 @@ pub trait AgentTaskPrFinalizationBackend {
         title: &str,
         body: &str,
     ) -> Result<AgentTaskPrRef>;
+    fn verify_publication_binding(
+        &mut self,
+        path: &str,
+        base: &str,
+        head: &str,
+        candidate_sha: &str,
+        changed_files: &[String],
+        pr: &AgentTaskPrRef,
+    ) -> Result<AgentTaskPublicationBinding>;
 }
