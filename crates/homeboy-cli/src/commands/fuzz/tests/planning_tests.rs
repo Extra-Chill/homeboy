@@ -421,6 +421,7 @@ fn fuzz_campaign_plan_emits_deterministic_run_entries_from_manifest_and_cli_work
         .expect("generated Lab command must parse through the real CLI surface");
     let (cli, _) = Cli::from_registered_arg_matches(&matches)
         .expect("generated Lab command must deserialize through the real CLI surface");
+    assert_eq!(cli.runner.as_deref(), Some("lab-b"));
     assert!(cli.command.supports_lab_runner());
 }
 
@@ -439,17 +440,20 @@ fn fuzz_campaign_plan_uses_one_explicit_workload_as_one_entry() {
 
 #[test]
 fn fuzz_plan_absorbs_global_runner_as_its_campaign_runner() {
-    let mut cli = Cli::try_parse_from([
-        "homeboy",
-        "fuzz",
-        "plan",
-        "component-a",
-        "--workload",
-        "api-fuzz",
-        "--runner",
-        "lab-a",
-    ])
-    .expect("global runner alias should parse for fuzz planning");
+    let matches = Cli::command_with_scoped_lab_args()
+        .try_get_matches_from([
+            "homeboy",
+            "fuzz",
+            "plan",
+            "component-a",
+            "--workload",
+            "api-fuzz",
+            "--runner",
+            "lab-a",
+        ])
+        .expect("global runner alias should parse for fuzz planning");
+    let (mut cli, _) = Cli::from_registered_arg_matches(&matches)
+        .expect("global runner alias should deserialize for fuzz planning");
 
     let runner = cli.runner.take();
     let Commands::Fuzz(args) = &mut cli.command else {
@@ -467,6 +471,36 @@ fn fuzz_plan_absorbs_global_runner_as_its_campaign_runner() {
     assert!(error
         .to_string()
         .contains("--runner and --lab-runner select different Lab runners"));
+}
+
+#[test]
+fn fuzz_plan_dry_run_absorbs_global_runner_as_its_campaign_runner() {
+    let matches = Cli::command_with_scoped_lab_args()
+        .try_get_matches_from([
+            "homeboy",
+            "fuzz",
+            "plan",
+            "component-a",
+            "--workload",
+            "api-fuzz",
+            "--dry-run",
+            "--runner",
+            "lab-a",
+        ])
+        .expect("global runner alias should parse for a dry-run fuzz plan");
+    let (mut cli, _) = Cli::from_registered_arg_matches(&matches)
+        .expect("global runner alias should deserialize for a dry-run fuzz plan");
+
+    let runner = cli.runner.take();
+    let Commands::Fuzz(args) = &mut cli.command else {
+        panic!("expected fuzz command");
+    };
+    assert_eq!(args.absorb_planning_runner(runner).unwrap(), None);
+    let Some(FuzzCommand::Plan(plan)) = &args.command else {
+        panic!("expected fuzz plan command");
+    };
+    assert!(plan.dry_run);
+    assert_eq!(plan.lab_runner.as_deref(), Some("lab-a"));
 }
 
 #[test]

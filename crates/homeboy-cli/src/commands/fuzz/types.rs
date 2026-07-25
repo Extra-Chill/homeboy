@@ -139,7 +139,7 @@ impl FuzzArgs {
         let Some(FuzzCommand::Plan(plan)) = self.command.as_mut() else {
             return Ok(Some(runner));
         };
-        if plan.execute || plan.dry_run {
+        if plan.execute {
             return Ok(Some(runner));
         }
         if let Some(lab_runner) = plan.lab_runner.as_deref() {
