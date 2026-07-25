@@ -269,6 +269,26 @@ pub fn project_terminal_runner_exec_result(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
+    let runner_job_id = run
+        .metadata_json
+        .get("runner_job_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let snapshot_runner_id = snapshot.job.target_runner_id.as_deref().unwrap_or_default();
+    if runner_id.is_empty()
+        || runner_job_id.is_empty()
+        || runner_id != snapshot_runner_id
+        || runner_job_id != snapshot.job.id.to_string()
+    {
+        return Err(Error::validation_invalid_argument(
+            "runner_job_id",
+            format!(
+                "terminal runner snapshot does not match durable binding ({runner_id}/{runner_job_id})"
+            ),
+            Some(run.id),
+            None,
+        ));
+    }
     let exit_code = if snapshot.job.status == JobStatus::Succeeded {
         0
     } else {

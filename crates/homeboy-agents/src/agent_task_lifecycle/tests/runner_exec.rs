@@ -236,6 +236,33 @@ fn generic_runner_exec_terminal_projection_is_authoritative_and_idempotent() {
     });
 }
 
+#[test]
+fn generic_runner_exec_rejects_stale_terminal_snapshot_binding() {
+    with_isolated_home(|_| {
+        let command = vec!["true".to_string()];
+        record_runner_exec_job_identity(
+            "runner-projection-stale",
+            "homeboy-lab",
+            "00000000-0000-0000-0000-000000000123",
+            "/runner/workspace",
+            &command,
+        )
+        .expect("bound run");
+        let mut stale = runner_snapshot("succeeded");
+        stale.job.id =
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000124").expect("stale job id");
+        let error = project_terminal_runner_exec_result("runner-projection-stale", &stale)
+            .expect_err("delayed terminal snapshot is rejected");
+        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+        let run = homeboy_core::observation::ObservationStore::open_initialized()
+            .expect("store")
+            .get_run("runner-projection-stale")
+            .expect("read")
+            .expect("run");
+        assert_eq!(run.status, "running");
+    });
+}
+
 fn runner_snapshot(status: &str) -> RunnerJobLogSnapshot {
     let job_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000123").expect("job id");
     let status = match status {
