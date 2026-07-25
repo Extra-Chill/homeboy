@@ -4320,6 +4320,13 @@ fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mu
                 failure_fingerprint: "inherited failure".to_string(),
                 matches_candidate_failure: true,
             });
+        adopted.operator_notification =
+            crate::agent_task_promotion::AgentTaskPromotionNotification {
+                status: "blocked".to_string(),
+                message: "patch promoted, but deterministic gates failed".to_string(),
+                resumable_blocker: Some("stale gate failure".to_string()),
+                next_command: None,
+            };
         // This simulates a restart after adoption before a stale owning attempt
         // status can be reconciled. Recovery derives the durable gate outcome.
         agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(adopted).unwrap())
@@ -4333,6 +4340,15 @@ fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mu
         assert!(!preflight_backend.committed);
         assert!(!preflight_backend.pushed);
         assert!(!preflight_backend.created);
+        let preflight_record = agent_task_lifecycle::status(run_id).unwrap();
+        assert_eq!(
+            preflight_record.metadata["latest_promotion"]["status"],
+            "gate_failed"
+        );
+        assert_eq!(
+            preflight_record.metadata["latest_promotion"]["operator_notification"]["status"],
+            "blocked"
+        );
 
         let mut publish_backend = CaptureBackend::default();
         let report = recover_cook_pr_with_backend(
@@ -4353,6 +4369,16 @@ fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mu
         assert!(publish_backend
             .body
             .contains("Recovered from durable Cook evidence."));
+        let record = agent_task_lifecycle::status(run_id).unwrap();
+        assert_eq!(record.metadata["latest_promotion"]["status"], "applied");
+        assert_eq!(
+            record.metadata["latest_promotion"]["operator_notification"]["status"],
+            "completed"
+        );
+        assert!(
+            record.metadata["latest_promotion"]["operator_notification"]["resumable_blocker"]
+                .is_null()
+        );
     });
 }
 

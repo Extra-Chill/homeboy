@@ -670,12 +670,12 @@ pub(crate) fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
             None,
         ));
     }
+    let finalization =
+        cook_finalization_options(options, successful_run_id, &promotion, Vec::new())?;
     crate::agent_task_lifecycle::record_promotion(
         successful_run_id,
         serde_json::to_value(&promotion).unwrap_or(Value::Null),
     )?;
-    let finalization =
-        cook_finalization_options(options, successful_run_id, &promotion, Vec::new())?;
     finalize_pr_with_backend(finalization, backend)
         .map(|report| serde_json::to_value(report).unwrap_or(Value::Null))
 }
@@ -839,6 +839,12 @@ pub fn recover_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     }
     let options = super::cook_recipe::reconstruct_adoption_options(&recipe)?;
     let finalization = cook_finalization_options(&options, &run_id, &promotion, overrides)?;
+    if !preflight {
+        agent_task_lifecycle::record_promotion(
+            &run_id,
+            serde_json::to_value(&promotion).unwrap_or(Value::Null),
+        )?;
+    }
     let report = if preflight {
         preflight_pr_with_backend(finalization, backend)?
     } else {

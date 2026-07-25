@@ -108,8 +108,25 @@ impl AgentTaskPromotionReport {
     /// before a report crosses a durable boundary.
     pub fn normalize_gate_outcome(&mut self) {
         let outcome = self.gate_outcome();
+        let status_changed = self.status != outcome.status;
         self.status = outcome.status;
         self.gate_results = outcome.gate_results;
+        if status_changed && self.status == AgentTaskPromotionStatus::Applied {
+            let target_path = self
+                .target
+                .path
+                .as_deref()
+                .unwrap_or(self.target.worktree.as_str());
+            self.operator_notification = AgentTaskPromotionNotification {
+                status: "completed".to_string(),
+                message: format!(
+                    "patch promoted into {}; finalize from {} using the verified_base_sha recorded in this promotion report",
+                    self.target.worktree, target_path
+                ),
+                resumable_blocker: None,
+                next_command: None,
+            };
+        }
     }
 
     /// A reviewer-visible command needs a durable passing gate for this exact
