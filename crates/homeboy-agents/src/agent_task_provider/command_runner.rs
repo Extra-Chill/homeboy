@@ -347,6 +347,17 @@ pub(super) fn run_materialized_provider_command_once(
             .map(|(key, value)| (key.as_str(), value.as_str())),
     );
     if let Some(cwd) = cwd {
+        if let Some(attestation) = request.request.metadata.get("cook_workspace_identity") {
+            if !workspace_matches_attestation(&cwd, attestation) {
+                return failure_outcome(
+                    request, AgentTaskOutcomeStatus::ProviderError,
+                    AgentTaskFailureClassification::InvalidInput,
+                    "agent_task.workspace_identity_changed",
+                    "provider workspace no longer matches the Cook identity attestation; refusing execution".to_string(),
+                    json!({ "provider": provider.id, "workspace": cwd }),
+                );
+            }
+        }
         if workspace_identity(&cwd).as_ref().ok() != cwd_identity.as_ref() {
             return failure_outcome(
                 request,
@@ -580,6 +591,30 @@ pub(super) fn run_materialized_provider_command_once(
             ),
         ),
     }
+}
+
+#[cfg(unix)]
+fn workspace_matches_attestation(path: &std::path::Path, attestation: &serde_json::Value) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(canonical) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    let Ok(metadata) = std::fs::symlink_metadata(&canonical) else {
+        return false;
+    };
+    !metadata.file_type().is_symlink()
+        && attestation["canonical_path"].as_str() == canonical.to_str()
+        && attestation["device"].as_u64() == Some(metadata.dev())
+        && attestation["inode"].as_u64() == Some(metadata.ino())
+}
+
+#[cfg(not(unix))]
+fn workspace_matches_attestation(path: &std::path::Path, attestation: &serde_json::Value) -> bool {
+    std::fs::canonicalize(path)
+        .ok()
+        .and_then(|path| path.to_str().map(str::to_string))
+        .as_deref()
+        == attestation["canonical_path"].as_str()
 }
 
 #[cfg(unix)]

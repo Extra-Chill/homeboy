@@ -394,8 +394,48 @@ pub(crate) fn compile_cook_plan(
         Err(error) => return Err(error),
     };
     record_cook_provision(&mut plan, provision);
+    for task in &mut plan.tasks {
+        let root = task.workspace.root.as_deref().ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "workspace",
+                "Cook requires a bound task worktree",
+                None,
+                None,
+            )
+        })?;
+        task.metadata["cook_workspace_identity"] = workspace_identity_attestation(Path::new(root))?;
+    }
     record_cook_goal(&mut plan, args.goal.as_deref());
     Ok(plan)
+}
+
+#[cfg(unix)]
+fn workspace_identity_attestation(path: &Path) -> homeboy::core::Result<Value> {
+    use std::os::unix::fs::MetadataExt;
+    let canonical = std::fs::canonicalize(path).map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
+    })?;
+    let metadata = std::fs::symlink_metadata(&canonical).map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(canonical.display().to_string()))
+    })?;
+    let git_dir = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(&canonical)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
+    Ok(
+        serde_json::json!({ "canonical_path": canonical, "device": metadata.dev(), "inode": metadata.ino(), "git_dir": git_dir }),
+    )
+}
+
+#[cfg(not(unix))]
+fn workspace_identity_attestation(path: &Path) -> homeboy::core::Result<Value> {
+    let canonical = std::fs::canonicalize(path).map_err(|error| {
+        homeboy::core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
+    })?;
+    Ok(serde_json::json!({ "canonical_path": canonical }))
 }
 
 fn record_cook_goal(plan: &mut AgentTaskPlan, goal: Option<&str>) {
