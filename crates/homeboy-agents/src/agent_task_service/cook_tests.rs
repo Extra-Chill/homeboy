@@ -139,6 +139,96 @@ fn seed_missing_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
 }
 
 #[test]
+fn pre_artifact_interruption_classifies_provider_ledger_without_phantom_execution() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = batch_cook_options(
+            "cook-pre-artifact-phases",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        let run_id = options.initial_run_id.clone();
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&run_id)).unwrap();
+        agent_task_lifecycle::cancel_run(&run_id, Some("controller interrupted")).unwrap();
+
+        let before = agent_task_lifecycle::status(&run_id).unwrap();
+        assert_eq!(
+            pre_artifact_interruption_phase(&before),
+            PreArtifactInterruptionPhase::BeforeProviderStart
+        );
+        agent_task_lifecycle::rewrite_record_for_test(&run_id, |record| {
+            record.metadata["provider_executions"] = serde_json::json!([{
+                "key": "provider:1", "state": "running"
+            }]);
+            record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+        })
+        .unwrap();
+        assert_eq!(
+            pre_artifact_interruption_phase(&agent_task_lifecycle::status(&run_id).unwrap()),
+            PreArtifactInterruptionPhase::DuringProviderExecution
+        );
+        agent_task_lifecycle::rewrite_record_for_test(&run_id, |record| {
+            record.metadata["provider_executions"][0]["state"] = serde_json::json!("failed");
+            record.metadata["provider_executions"][0]["finished_at"] =
+                serde_json::json!("2026-07-24T23:42:06Z");
+        })
+        .unwrap();
+        assert_eq!(
+            pre_artifact_interruption_phase(&agent_task_lifecycle::status(&run_id).unwrap()),
+            PreArtifactInterruptionPhase::AfterProviderReturn
+        );
+        assert!(agent_task_lifecycle::read_aggregate(&run_id).is_err());
+    });
+}
+
+#[test]
+fn pre_artifact_interruption_claim_is_restart_and_concurrent_controller_idempotent() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut options = batch_cook_options(
+            "cook-pre-artifact-claim",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.max_attempts = 2;
+        let run_id = options.initial_run_id.clone();
+        persist_initial_recipe(&options).unwrap();
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&run_id)).unwrap();
+        agent_task_lifecycle::cancel_run(&run_id, Some("controller interrupted")).unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let mut controllers = Vec::new();
+        for _ in 0..2 {
+            let barrier = Arc::clone(&barrier);
+            let cook_id = options.cook_id.clone();
+            let run_id = run_id.clone();
+            let plan = options.initial_plan.clone();
+            controllers.push(std::thread::spawn(move || {
+                barrier.wait();
+                claim_pre_artifact_interruption_retry(&cook_id, 1, &run_id, &plan)
+            }));
+        }
+        let results = controllers
+            .into_iter()
+            .map(|controller| controller.join().unwrap().unwrap())
+            .collect::<Vec<_>>();
+        // A concurrent observer may see the owner's fresh lease before it has
+        // appended the immutable recipe entry. A restart converges through the
+        // completed claim without creating a second attempt.
+        let resumed = claim_pre_artifact_interruption_retry(
+            &options.cook_id,
+            1,
+            &run_id,
+            &options.initial_plan,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(results.iter().flatten().all(|result| result == &resumed));
+        assert_eq!(resumed.0, 2);
+        let recipe = super::super::load_recipe(&options.cook_id).unwrap();
+        assert_eq!(recipe.attempts.len(), 2);
+        assert_eq!(recipe.attempts[1].run_id, resumed.1);
+        assert!(agent_task_lifecycle::read_aggregate(&run_id).is_err());
+    });
+}
+
+#[test]
 fn cook_service_retry_uses_the_same_passed_context_after_ambient_mutation() {
     let _env_lock = homeboy_core::test_support::env_lock();
     let prior = std::env::var_os(homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV);
