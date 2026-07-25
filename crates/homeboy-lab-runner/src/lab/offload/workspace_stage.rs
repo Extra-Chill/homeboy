@@ -461,6 +461,7 @@ fn prepare_lab_offload_workspace_stage_inner(
     let synced_rig_dependencies = rig_component_sync.materializations;
     let dependency_cache_saves = rig_component_sync.dependency_cache_saves;
     let rig_component_path_overrides = rig_component_sync.component_path_env;
+    let selected_rig_component_path = rig_component_sync.selected_component_path;
     if !synced_rig_dependencies.is_empty() {
         for dependency in &synced_rig_dependencies {
             workspace_mapping.extend(workspace_mapping_entries_for_git_dependency(
@@ -501,8 +502,8 @@ fn prepare_lab_offload_workspace_stage_inner(
     preflight_provider_config_paths_materialized_in_args(&offload_args, &path_remaps)?;
     let remapped_args = rig_materialization::remap_rig_default_component_to_primary_snapshot(
         &offload_args,
-        &remote_cwd,
-    );
+        selected_rig_component_path.as_deref(),
+    )?;
     let remapped_args = remap_provider_config_with_materialization_plan_in_args(
         &remapped_args,
         &provider_config_materialization_plan,
