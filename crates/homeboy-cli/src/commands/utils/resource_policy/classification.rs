@@ -212,3 +212,25 @@ pub(super) fn is_bounded_agent_task_metadata_read(command: &Commands) -> bool {
 pub(super) fn is_local_registry_management(command: &Commands) -> bool {
     matches!(command, Commands::Rig(args) if args.is_runner_source_management_command())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli_surface::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn cook_continue_is_an_admitted_workload_not_a_metadata_read() {
+        let continuation = Cli::parse_from(["homeboy", "agent-task", "cook-continue", "cook-123"]);
+        assert_eq!(
+            agent_task_resource_behavior(&continuation.command),
+            Some(AgentTaskResourceBehavior::AdmittedWorkload)
+        );
+
+        let status = Cli::parse_from(["homeboy", "agent-task", "status", "run-123"]);
+        assert_eq!(
+            agent_task_resource_behavior(&status.command),
+            Some(AgentTaskResourceBehavior::BoundedMetadataRead)
+        );
+    }
+}
