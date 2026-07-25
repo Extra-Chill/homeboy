@@ -23,8 +23,8 @@ use super::outcome::{
     typed_artifact_from_outcome,
 };
 use super::resources::{
-    isolated_attempt_workspace_available, render_value_templates, resource_capacity_available,
-    resource_is_busy, select_artifact_payload, workspace_is_busy,
+    render_value_templates, resource_capacity_available, resource_is_busy, select_artifact_payload,
+    workspace_is_busy,
 };
 use super::*;
 
@@ -55,7 +55,6 @@ impl AgentTaskScheduleSupport {
         per_executor_concurrency: &HashMap<String, usize>,
         per_model_concurrency: &HashMap<String, usize>,
         resource_budget: &AgentTaskResourceBudget,
-        allow_isolated_candidate_workspace_sharing: bool,
     ) -> Option<usize> {
         queued.iter().position(|task| {
             if !Self::dependencies_satisfied(&task.request, completed_by_task, output_dependencies)
@@ -65,10 +64,7 @@ impl AgentTaskScheduleSupport {
 
             // An existing workspace is mutable executor state. Keep one task at
             // a time in that directory so a commit range belongs to one task.
-            if workspace_is_busy(task, running, quarantined)
-                && !(allow_isolated_candidate_workspace_sharing
-                    && isolated_attempt_workspace_available(&task.request))
-            {
+            if workspace_is_busy(task, running, quarantined) {
                 return false;
             }
 

@@ -26,19 +26,6 @@ pub(super) fn workspace_is_busy(
         .any(|running_workspace| workspace_keys_overlap(running_workspace, workspace))
 }
 
-/// Candidate fanout may share a source checkout only when the scheduler can
-/// create a detached Git worktree for every provider attempt.
-pub(super) fn isolated_attempt_workspace_available(request: &AgentTaskRequest) -> bool {
-    let Some(root) = request.workspace.root.as_deref() else {
-        return false;
-    };
-    Command::new("git")
-        .args(["-C", root, "rev-parse", "--verify", "HEAD"])
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
 /// Returns the first deterministic exclusive-key conflict. Resource keys are
 /// caller declarations, never inferred from provider configuration or command
 /// text, so the scheduler remains tool-agnostic.
