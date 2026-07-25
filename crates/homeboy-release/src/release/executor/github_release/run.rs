@@ -6,7 +6,8 @@ use homeboy_core::error::{Error, Result};
 
 use super::super::step_success;
 use super::gh_cli::{
-    gh_command, gh_is_authenticated, gh_is_available, gh_release_exists, github_release_asset_paths,
+    gh_command, gh_is_authenticated, gh_is_available, gh_release_exists,
+    github_release_publications,
 };
 use super::notes::{
     build_github_release_body, github_changelog_url, github_release_notes_start_tag,
@@ -15,11 +16,11 @@ use super::notes::{
 use super::repair::{gh_auth_failure_message, github_release_repair_commands, log_repair_commands};
 use super::results::{
     create_failed_result, not_created_result, published_release_url, skipped_result,
-    upload_failed_result, upload_success_result,
+    upload_failed_result, upload_success_result_with_publications,
 };
 use super::{
-    gh_failure_detail, gh_release_metadata, github_release_upload_timeout, run_gh_command,
-    verify_release_assets,
+    gh_failure_detail, gh_release_metadata, github_release_upload_timeout,
+    reconcile_release_publications, run_gh_command, verify_release_publications,
 };
 
 /// Create a GitHub Release for the just-pushed tag.
@@ -86,9 +87,13 @@ pub(crate) fn run_github_release(
     // single API call — keeping the github.release step responsible for
     // the full Release lifecycle (entry + assets) instead of requiring a
     // separate publish.<target> step.
-    let artifact_paths = github_release_asset_paths(state)
+    let publications = github_release_publications(state)
         .map_err(|error| Error::validation_invalid_argument("release assets", error, None, None))?;
-    let has_artifacts = !artifact_paths.is_empty();
+    let artifact_paths = publications
+        .iter()
+        .map(|publication| publication.upload_spec())
+        .collect::<Vec<_>>();
+    let has_artifacts = !publications.is_empty();
     // Single repair-command builder for every failure path. The persisted
     // exact-body file only exists after `persist_release_body` runs below, so
     // early paths (gh missing / unauthenticated / upload) pass `None` and
@@ -141,11 +146,8 @@ pub(crate) fn run_github_release(
 
     let repo_flag = format!("{}/{}", github.owner, github.repo);
     if gh_release_exists(&github, &component.github, &tag, &repo_flag) {
-        // Release entry already exists (idempotent retry, or release
-        // created out of band). When the release has no artifacts to
-        // attach, skip — there is nothing to update. When artifacts are
-        // present, upload them with --clobber so retries keep the latest
-        // build attached without duplicating the GitHub Release entry.
+        // A pre-existing release is a retry boundary. Reconcile its assets by
+        // canonical name and digest before uploading anything.
         if !has_artifacts {
             homeboy_core::log_status!(
                 "release",
@@ -161,26 +163,44 @@ pub(crate) fn run_github_release(
             ));
         }
 
+        let metadata = gh_release_metadata(&github, &component.github, &tag, &repo_flag)
+            .map_err(|error| Error::internal_unexpected(error))?;
+        let (uploads, existing) = reconcile_release_publications(&publications, &metadata.assets)
+            .map_err(|error| {
+            Error::validation_invalid_argument("release assets", error, None, None)
+        })?;
         homeboy_core::log_status!(
             "release",
-            "GitHub Release {} already exists for {} — uploading {} artifact(s) with --clobber",
+            "GitHub Release {} already exists for {} — uploading {} canonical artifact(s), reusing {} verified artifact(s)",
             tag,
             repo_flag,
-            artifact_paths.len()
+            uploads.len(),
+            existing.len()
         );
 
-        let mut upload_args: Vec<&str> = vec!["release", "upload", &tag];
-        for path in &artifact_paths {
-            upload_args.push(path);
-        }
-        upload_args.extend_from_slice(&["--clobber", "-R", &repo_flag]);
+        let upload_specs = uploads
+            .iter()
+            .map(|publication| publication.upload_spec())
+            .collect::<Vec<_>>();
+        let upload_output = if upload_specs.is_empty() {
+            None
+        } else {
+            let mut upload_args: Vec<&str> = vec!["release", "upload", &tag];
+            for path in &upload_specs {
+                upload_args.push(path);
+            }
+            upload_args.extend_from_slice(&["--clobber", "-R", &repo_flag]);
+            Some(run_gh_command(
+                gh_command(&github, &component.github, &upload_args),
+                github_release_upload_timeout(),
+            ))
+        };
 
-        let upload_output = run_gh_command(
-            gh_command(&github, &component.github, &upload_args),
-            github_release_upload_timeout(),
-        );
-
-        if upload_output.timed_out || upload_output.exit_code != Some(0) {
+        if upload_output
+            .as_ref()
+            .is_some_and(|output| output.timed_out || output.exit_code != Some(0))
+        {
+            let upload_output = upload_output.expect("checked upload output");
             let detail = gh_failure_detail("gh release upload", &upload_output);
             let stderr = upload_output.stderr;
             let stdout = upload_output.stdout;
@@ -214,7 +234,7 @@ pub(crate) fn run_github_release(
                 ))
             }
         };
-        if let Err(error) = verify_release_assets(&artifact_paths, &metadata.assets) {
+        if let Err(error) = verify_release_publications(&publications, &metadata.assets) {
             return Ok(upload_failed_result(
                 &tag,
                 &github,
@@ -246,7 +266,12 @@ pub(crate) fn run_github_release(
             }
         }
 
-        return Ok(upload_success_result(&tag, &github, artifact_paths.len()));
+        return Ok(upload_success_result_with_publications(
+            &tag,
+            &github,
+            publications.len(),
+            &publications,
+        ));
     }
 
     let notes_start_tag = github_release_notes_start_tag(component, &tag);
@@ -361,7 +386,7 @@ pub(crate) fn run_github_release(
             ))
         }
     };
-    if let Err(error) = verify_release_assets(&artifact_paths, &metadata.assets) {
+    if let Err(error) = verify_release_publications(&publications, &metadata.assets) {
         return Ok(upload_failed_result(
             &tag,
             &github,
@@ -404,6 +429,7 @@ pub(crate) fn run_github_release(
             "repo": github.repo,
             "url": url,
             "artifact_count": artifact_paths.len(),
+            "asset_publications": publications,
             "generated_notes": generated_notes_ok,
             "published": true,
             "changelog_url": body.changelog_url,

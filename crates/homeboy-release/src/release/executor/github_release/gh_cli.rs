@@ -4,7 +4,10 @@ use crate::release::types::ReleaseState;
 use homeboy_core::component::GithubConfig;
 use homeboy_core::engine::shell::quote_arg;
 use homeboy_core::git::release_download::GitHubRepo;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -35,6 +38,23 @@ pub(crate) struct GitHubReleaseAsset {
     pub size: u64,
     #[serde(default)]
     pub digest: Option<String>,
+}
+
+/// A content-addressed intent to publish bytes under one canonical remote name.
+/// The durable path is an implementation detail; extension and core publishers
+/// coordinate through this target-name plus digest identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ReleaseAssetPublication {
+    pub target_name: String,
+    pub sha256: String,
+    pub size: u64,
+    pub source_path: String,
+}
+
+impl ReleaseAssetPublication {
+    pub(crate) fn upload_spec(&self) -> String {
+        format!("{}#{}", self.source_path, self.target_name)
+    }
 }
 
 pub(crate) fn gh_is_available() -> bool {
@@ -72,6 +92,134 @@ pub(crate) fn github_release_artifact_paths(state: &ReleaseState) -> Vec<String>
                 .map(str::to_string)
         })
         .collect()
+}
+
+/// Resolve publication identities for all direct release artifacts.  The path
+/// declared by the producer names the remote target while a durable copy may
+/// provide the bytes after the source workspace has been cleaned up.
+pub(crate) fn github_release_publications(
+    state: &ReleaseState,
+) -> Result<Vec<ReleaseAssetPublication>, String> {
+    let mut publications: BTreeMap<String, ReleaseAssetPublication> = BTreeMap::new();
+    let mut direct_sources = HashSet::new();
+    for artifact in &state.artifacts {
+        let source_path = artifact
+            .durable_path
+            .as_deref()
+            .filter(|path| path_is_file(path))
+            .or_else(|| path_is_file(&artifact.path).then_some(artifact.path.as_str()))
+            .ok_or_else(|| format!("release artifact '{}' is missing", artifact.path))?;
+        let target_name = release_asset_name(&artifact.path);
+        if target_name.is_empty() {
+            return Err(format!(
+                "release artifact '{}' has no valid filename",
+                artifact.path
+            ));
+        }
+        let publication = publication_from_path(source_path, target_name)?;
+        direct_sources.insert(source_path.to_string());
+        match publications.get(&publication.target_name) {
+            Some(existing) if existing.sha256 == publication.sha256 => {}
+            Some(_) => {
+                return Err(format!(
+                    "release assets targeting '{}' have conflicting bytes",
+                    publication.target_name
+                ))
+            }
+            None => {
+                publications.insert(publication.target_name.clone(), publication);
+            }
+        }
+    }
+    // Distribution manifests can declare archives that were not explicit
+    // extension outputs. They retain their own filenames as canonical targets.
+    for source_path in github_release_asset_paths(state)? {
+        if direct_sources.contains(&source_path) {
+            continue;
+        }
+        let publication = publication_from_path(&source_path, release_asset_name(&source_path))?;
+        match publications.get(&publication.target_name) {
+            Some(existing) if existing.sha256 == publication.sha256 => {}
+            Some(_) => {
+                return Err(format!(
+                    "release assets targeting '{}' have conflicting bytes",
+                    publication.target_name
+                ))
+            }
+            None => {
+                publications.insert(publication.target_name.clone(), publication);
+            }
+        }
+    }
+    Ok(publications.into_values().collect())
+}
+
+fn publication_from_path(
+    source_path: &str,
+    target_name: String,
+) -> Result<ReleaseAssetPublication, String> {
+    let metadata = std::fs::metadata(source_path)
+        .map_err(|error| format!("could not read release artifact '{source_path}': {error}"))?;
+    if metadata.len() == 0 {
+        return Err(format!("release asset '{target_name}' is empty"));
+    }
+    let mut file = std::fs::File::open(source_path)
+        .map_err(|error| format!("could not hash release artifact '{source_path}': {error}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 8192];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("could not hash release artifact '{source_path}': {error}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(ReleaseAssetPublication {
+        target_name,
+        sha256: format!("{:x}", hasher.finalize()),
+        size: metadata.len(),
+        source_path: source_path.to_string(),
+    })
+}
+
+/// Split publications into assets that must be uploaded and assets already
+/// proven present remotely. A remote digest is required to make idempotence
+/// safe: matching only a name or size could silently accept different bytes.
+pub(crate) fn reconcile_release_publications(
+    publications: &[ReleaseAssetPublication],
+    remote_assets: &[GitHubReleaseAsset],
+) -> Result<(Vec<ReleaseAssetPublication>, Vec<ReleaseAssetPublication>), String> {
+    let mut upload = Vec::new();
+    let mut existing = Vec::new();
+    for publication in publications {
+        let Some(remote) = remote_assets
+            .iter()
+            .find(|asset| asset.name == publication.target_name)
+        else {
+            upload.push(publication.clone());
+            continue;
+        };
+        let digest = remote
+            .digest
+            .as_deref()
+            .and_then(|value| value.strip_prefix("sha256:"));
+        match digest {
+            Some(digest) if digest == publication.sha256 && remote.size == publication.size => {
+                existing.push(publication.clone());
+            }
+            Some(_) => return Err(format!(
+                "GitHub Release asset '{}' conflicts with the canonical publication bytes",
+                publication.target_name
+            )),
+            None => return Err(format!(
+                "GitHub Release asset '{}' has no digest; cannot safely verify canonical publication ownership",
+                publication.target_name
+            )),
+        }
+    }
+    Ok((upload, existing))
 }
 
 /// Resolve every local asset required to publish a release. A cargo-dist
@@ -258,6 +406,32 @@ pub(crate) fn verify_release_assets(
                     "GitHub Release asset '{name}' digest does not match uploaded artifact"
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_release_publications(
+    publications: &[ReleaseAssetPublication],
+    assets: &[GitHubReleaseAsset],
+) -> Result<(), String> {
+    for publication in publications {
+        let asset = assets
+            .iter()
+            .find(|asset| asset.name == publication.target_name)
+            .ok_or_else(|| {
+                format!(
+                    "GitHub Release is missing uploaded asset '{}'",
+                    publication.target_name
+                )
+            })?;
+        if asset.size != publication.size
+            || asset.digest.as_deref() != Some(&format!("sha256:{}", publication.sha256))
+        {
+            return Err(format!(
+                "GitHub Release asset '{}' does not match the canonical publication bytes",
+                publication.target_name
+            ));
         }
     }
     Ok(())
@@ -565,6 +739,139 @@ mod tests {
         assert_eq!(
             error,
             "GitHub Release is missing uploaded asset 'homeboy-x86_64-unknown-linux-gnu.tar.xz'"
+        );
+    }
+
+    fn release_state_with_artifacts(
+        artifacts: Vec<crate::release::types::ReleaseArtifact>,
+    ) -> ReleaseState {
+        ReleaseState {
+            artifacts,
+            ..ReleaseState::default()
+        }
+    }
+
+    fn artifact(
+        path: &std::path::Path,
+        durable_path: Option<&std::path::Path>,
+    ) -> crate::release::types::ReleaseArtifact {
+        crate::release::types::ReleaseArtifact {
+            path: path.display().to_string(),
+            durable_path: durable_path.map(|path| path.display().to_string()),
+            artifact_type: None,
+            platform: None,
+        }
+    }
+
+    #[test]
+    fn numbered_durable_zip_publishes_to_the_declared_canonical_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = dir.path().join("component.zip");
+        let durable = dir.path().join("01-component.zip");
+        std::fs::write(&durable, b"component bytes").expect("write durable zip");
+
+        let publications =
+            github_release_publications(&release_state_with_artifacts(vec![artifact(
+                &canonical,
+                Some(&durable),
+            )]))
+            .expect("publication identity");
+
+        assert_eq!(publications.len(), 1);
+        assert_eq!(publications[0].target_name, "component.zip");
+        assert_eq!(
+            publications[0].upload_spec(),
+            format!("{}#component.zip", durable.display())
+        );
+    }
+
+    #[test]
+    fn exact_remote_asset_is_reused_on_retry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("component.zip");
+        std::fs::write(&path, b"component bytes").expect("write zip");
+        let publications =
+            github_release_publications(&release_state_with_artifacts(vec![artifact(&path, None)]))
+                .expect("publication identity");
+        let remote = GitHubReleaseAsset {
+            name: "component.zip".to_string(),
+            size: publications[0].size,
+            digest: Some(format!("sha256:{}", publications[0].sha256)),
+        };
+
+        let (upload, existing) = reconcile_release_publications(&publications, &[remote])
+            .expect("reconcile exact asset");
+        assert!(upload.is_empty());
+        assert_eq!(existing, publications);
+    }
+
+    #[test]
+    fn conflicting_preexisting_canonical_asset_is_rejected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("component.zip");
+        std::fs::write(&path, b"component bytes").expect("write zip");
+        let publications =
+            github_release_publications(&release_state_with_artifacts(vec![artifact(&path, None)]))
+                .expect("publication identity");
+
+        let error = reconcile_release_publications(
+            &publications,
+            &[GitHubReleaseAsset {
+                name: "component.zip".to_string(),
+                size: publications[0].size,
+                digest: Some("sha256:conflicting".to_string()),
+            }],
+        )
+        .expect_err("conflicting bytes must fail");
+        assert!(error.contains("conflicts with the canonical publication bytes"));
+    }
+
+    #[test]
+    fn distinct_component_assets_are_preserved() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("first.zip");
+        let second = dir.path().join("second.zip");
+        std::fs::write(&first, b"same bytes").expect("write first zip");
+        std::fs::write(&second, b"same bytes").expect("write second zip");
+
+        let publications = github_release_publications(&release_state_with_artifacts(vec![
+            artifact(&first, None),
+            artifact(&second, None),
+        ]))
+        .expect("publication identities");
+
+        assert_eq!(publications.len(), 2);
+        assert_eq!(
+            publications
+                .iter()
+                .map(|asset| &asset.target_name)
+                .collect::<Vec<_>>(),
+            vec!["first.zip", "second.zip"]
+        );
+    }
+
+    #[test]
+    fn mixed_extension_versions_keep_legacy_artifacts_and_add_publication_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = dir.path().join("component.zip");
+        let durable = dir.path().join("01-component.zip");
+        std::fs::write(&durable, b"component bytes").expect("write durable zip");
+        let state = release_state_with_artifacts(vec![artifact(&canonical, Some(&durable))]);
+        let payload = crate::release::executor::package::build_release_payload(
+            &state,
+            "component",
+            ".",
+            None,
+            None,
+        );
+
+        assert_eq!(
+            payload["release"]["artifacts"][0]["path"],
+            canonical.display().to_string()
+        );
+        assert_eq!(
+            payload["release"]["asset_publications"][0]["target_name"],
+            "component.zip"
         );
     }
 }
