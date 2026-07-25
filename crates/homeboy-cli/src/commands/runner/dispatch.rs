@@ -228,6 +228,7 @@ pub fn run(
             secret_env,
             secret_env_plan,
             secret_env_plan_file,
+            extension_env_providers,
             dry_run,
             run_id,
             artifact_outputs,
@@ -258,6 +259,7 @@ pub fn run(
             read_only_artifact,
             raw,
             command,
+            extension_env_providers,
         )),
         RunnerCommand::Env { id } => map_env(env_mod::env(&id)),
         RunnerCommand::Lifecycle {
@@ -336,6 +338,7 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) 
             json: true,
             raw: false,
             command,
+            extension_env_providers,
         } => run_json_exec(
             id,
             cwd,
@@ -356,6 +359,7 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) 
             summary_outputs,
             read_only_artifact,
             command,
+            extension_env_providers,
         ),
         RunnerCommand::Exec {
             id,
@@ -379,6 +383,7 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) 
             raw: true,
             json: false,
             command,
+            extension_env_providers,
         } => run_raw_exec(
             id,
             cwd,
@@ -399,6 +404,7 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) 
             summary_outputs,
             read_only_artifact,
             command,
+            extension_env_providers,
         ),
         RunnerCommand::Exec {
             id,
@@ -422,6 +428,7 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) 
             raw: false,
             json: false,
             command,
+            extension_env_providers,
         } => run_compact_exec_json(
             id,
             cwd,
@@ -442,6 +449,7 @@ pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) 
             summary_outputs,
             read_only_artifact,
             command,
+            extension_env_providers,
         ),
         command => {
             let (stdout_result, exit_code) =
@@ -475,6 +483,7 @@ fn run_json_exec(
     summary_outputs: Vec<String>,
     read_only_artifact: bool,
     command: Vec<String>,
+    extension_env_providers: Vec<String>,
 ) -> CommandRun {
     let (stdout_result, exit_code) = crate::commands::utils::response::map_cmd_result_to_json(
         exec(
@@ -498,6 +507,7 @@ fn run_json_exec(
             read_only_artifact,
             false,
             command,
+            extension_env_providers,
         )
         .map(|(output, exit_code)| {
             (
@@ -530,6 +540,7 @@ fn run_raw_exec(
     summary_outputs: Vec<String>,
     read_only_artifact: bool,
     command: Vec<String>,
+    extension_env_providers: Vec<String>,
 ) -> CommandRun {
     match exec(
         &id,
@@ -552,6 +563,7 @@ fn run_raw_exec(
         read_only_artifact,
         true,
         command,
+        extension_env_providers,
     ) {
         Ok((output, exit_code)) => raw_exec_command_run(output, exit_code),
         Err(err) => {
@@ -585,6 +597,7 @@ fn run_compact_exec_json(
     summary_outputs: Vec<String>,
     read_only_artifact: bool,
     command: Vec<String>,
+    extension_env_providers: Vec<String>,
 ) -> CommandRun {
     let raw_run = run_compact_exec(
         id,
@@ -606,6 +619,7 @@ fn run_compact_exec_json(
         summary_outputs,
         read_only_artifact,
         command,
+        extension_env_providers,
     );
     let presentation_stdout = raw_run
         .raw_stdout
@@ -640,6 +654,7 @@ pub(super) fn run_compact_exec(
     summary_outputs: Vec<String>,
     read_only_artifact: bool,
     command: Vec<String>,
+    extension_env_providers: Vec<String>,
 ) -> CommandRun {
     match exec(
         &id,
@@ -662,6 +677,7 @@ pub(super) fn run_compact_exec(
         read_only_artifact,
         false,
         command,
+        extension_env_providers,
     ) {
         Ok((output, exit_code)) => compact_exec_command_run(output, exit_code),
         Err(err) => {

@@ -456,6 +456,7 @@ fn lab_runner_exec_options(
         path_materialization_plan: context.path_materialization_plan.clone(),
         capability_preflight: context.capability_preflight.clone(),
         required_extensions: context.contract.required_extensions.clone(),
+        extension_env_providers: Vec::new(),
         accepted_extension_settings: context.accepted_extension_settings.clone(),
         require_paths: Vec::new(),
         lab_runner_workload: context.lab_runner_workload.clone(),

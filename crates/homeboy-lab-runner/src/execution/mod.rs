@@ -64,7 +64,7 @@ mod paths;
 mod policy;
 mod process;
 mod recovery;
-mod redaction;
+pub(crate) mod redaction;
 mod secrets;
 mod worker;
 
@@ -150,6 +150,9 @@ pub struct RunnerExecOptions {
     pub path_materialization_plan: Option<PathMaterializationPlan>,
     pub capability_preflight: Option<RunnerCapabilityPreflight>,
     pub required_extensions: Vec<String>,
+    /// Installed extensions explicitly requested to contribute runtime env.
+    /// They are resolved by the selected runner generation, never the controller.
+    pub extension_env_providers: Vec<String>,
     pub accepted_extension_settings: Vec<String>,
     pub require_paths: Vec<String>,
     pub lab_runner_workload: Option<LabRunnerWorkload>,
@@ -191,6 +194,7 @@ impl Default for RunnerExecOptions {
             path_materialization_plan: None,
             capability_preflight: None,
             required_extensions: Vec::new(),
+            extension_env_providers: Vec::new(),
             accepted_extension_settings: Vec::new(),
             require_paths: Vec::new(),
             lab_runner_workload: None,
@@ -811,6 +815,54 @@ pub(crate) fn exec_with_status_snapshot(
     );
     let requested_setting_keys = requested_setting_keys_for_command(&options.command);
     let accepted_extension_settings = options.accepted_extension_settings.clone();
+    if runner.kind == RunnerKind::Local {
+        let provider_secret_names = options
+            .extension_env_providers
+            .iter()
+            .map(|id| homeboy_extension::env_provider_secret_names(id))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let secret_env_plan = runner_exec_secret_env_plan(
+            &options.command,
+            options.capability_preflight.as_ref(),
+            &[options.secret_env_names.clone(), provider_secret_names].concat(),
+            &options.env,
+            options.secret_env_plan.clone(),
+        );
+        let secret_env_names = secret_env_plan.secret_env_names();
+        plan = prepare_runner_process(RunnerProcessRequest {
+            runner_id: runner_id.to_string(),
+            runner: None,
+            cwd: options.cwd.clone(),
+            project_id: options.project_id.clone(),
+            command: options.command.clone(),
+            env: options.env.clone(),
+            secret_env_names,
+            secret_env_plan: Some(secret_env_plan),
+            capture_patch: options.capture_patch,
+            raw_exec: options.raw_exec,
+            source_snapshot: options.source_snapshot.clone(),
+            require_paths: options.require_paths.clone(),
+            validate_require_paths_on_host: false,
+        })?;
+        let contributions = homeboy_extension::resolve_installed_env_providers(
+            &options.extension_env_providers,
+            std::path::Path::new(&plan.cwd),
+            &plan
+                .env
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect::<Vec<_>>(),
+        )?;
+        for contribution in contributions {
+            for (key, value) in contribution.public_env {
+                plan.env.insert(key, value);
+            }
+        }
+        return exec_local(plan);
+    }
     // Extension parity uses daemon-backed runner commands. Recover the direct
     // session before that preparation so admission cannot fail before `/exec`.
     let connected = if should_force_diagnostic_ssh(&runner, &options) {
@@ -943,6 +995,7 @@ pub(crate) fn exec_with_status_snapshot(
                 Some(plan.source_snapshot),
                 options.path_materialization_plan,
                 options.require_paths,
+                options.extension_env_providers,
                 options.lab_runner_workload,
                 options.run_id,
                 options.run_id_owns_generic_exec,
@@ -969,6 +1022,7 @@ pub(crate) fn exec_with_status_snapshot(
                 Some(plan.source_snapshot),
                 options.path_materialization_plan,
                 options.require_paths,
+                options.extension_env_providers,
                 options.lab_runner_workload,
                 options.run_id,
                 options.run_id_owns_generic_exec,

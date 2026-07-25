@@ -405,6 +405,10 @@ pub(super) enum RunnerCommand {
         #[arg(long = "secret-env-plan-file", value_name = "PATH")]
         secret_env_plan_file: Option<String>,
 
+        /// Installed extension that contributes runtime environment on the selected runner. Repeat in contribution order.
+        #[arg(long = "extension-env", value_name = "ID")]
+        extension_env_providers: Vec<String>,
+
         /// Build the runner exec plan without executing it.
         #[arg(long)]
         dry_run: bool,

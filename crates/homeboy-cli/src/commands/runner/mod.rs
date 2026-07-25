@@ -51,6 +51,7 @@ pub fn run_plain_text_raw(
             secret_env,
             secret_env_plan,
             secret_env_plan_file,
+            extension_env_providers,
             dry_run,
             run_id,
             artifact_outputs,
@@ -80,6 +81,7 @@ pub fn run_plain_text_raw(
             summary_outputs,
             read_only_artifact,
             command,
+            extension_env_providers,
         ),
         _ => super::output_runtime::CommandRun::from_raw_stdout(
             "runner",

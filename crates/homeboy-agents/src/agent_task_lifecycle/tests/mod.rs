@@ -131,6 +131,7 @@ pub(super) fn replay_request(run_id: &str, command: &[String]) -> RemoteRunnerJo
         command: command.to_vec(),
         cwd: Some("/runner/workspace/homeboy".to_string()),
         env: Default::default(),
+        extension_env_providers: Vec::new(),
         secret_env_names: Vec::new(),
         secret_env_plan: Default::default(),
         env_materialization: None,

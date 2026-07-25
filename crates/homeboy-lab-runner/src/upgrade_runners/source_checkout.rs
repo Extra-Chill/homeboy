@@ -122,6 +122,7 @@ pub fn runner_source_checkout_prepare_options(
             timeout: None,
         }),
         required_extensions: Vec::new(),
+        extension_env_providers: Vec::new(),
         accepted_extension_settings: Vec::new(),
         require_paths: Vec::new(),
         lab_runner_workload: None,

@@ -580,6 +580,7 @@ fn runs_list_includes_active_runner_jobs() {
                 ],
                 cwd: Some("/workspace/homeboy".to_string()),
                 env: Default::default(),
+                extension_env_providers: Vec::new(),
                 secret_env_names: Vec::new(),
                 secret_env_plan: Default::default(),
                 env_materialization: None,

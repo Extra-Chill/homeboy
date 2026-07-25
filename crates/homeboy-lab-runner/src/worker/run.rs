@@ -980,6 +980,7 @@ fn runner_exec_options_from_envelope(
         required_extensions,
         accepted_extension_settings: Vec::new(),
         require_paths: dispatch.require_paths,
+        extension_env_providers: dispatch.extension_env_providers,
         lab_runner_workload: envelope.lab_runner_workload,
         run_id,
         run_id_owns_generic_exec: false,
