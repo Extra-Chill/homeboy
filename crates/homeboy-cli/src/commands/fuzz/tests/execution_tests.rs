@@ -1,4 +1,46 @@
 use super::*;
+use crate::commands::fuzz::execution::effective_fuzz_run_id;
+
+#[test]
+fn auto_run_ids_scope_identical_payloads_while_explicit_ids_remain_stable() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let body = "x".repeat(homeboy::fuzz::INLINE_FUZZ_PAYLOAD_LIMIT_BYTES);
+    let campaign = || -> homeboy::fuzz::FuzzCampaign {
+        serde_json::from_value(serde_json::json!({
+            "schema":"homeboy/fuzz-campaign/v1", "version":1, "id":"campaign",
+            "safety_class":"read_only", "metadata":{"stdout":body}
+        }))
+        .expect("campaign")
+    };
+    let first_id = effective_fuzz_run_id(None);
+    let second_id = effective_fuzz_run_id(None);
+    assert_ne!(first_id, second_id);
+    let mut first = campaign();
+    let mut second = campaign();
+    let first_payload = homeboy::fuzz::externalize_fuzz_campaign_payloads(
+        &mut first,
+        &dir.path().join("first"),
+        &first_id,
+        homeboy::fuzz::FuzzPayloadBudget::default(),
+    )
+    .expect("first payload");
+    let second_payload = homeboy::fuzz::externalize_fuzz_campaign_payloads(
+        &mut second,
+        &dir.path().join("second"),
+        &second_id,
+        homeboy::fuzz::FuzzPayloadBudget::default(),
+    )
+    .expect("second payload");
+    assert_ne!(first_payload.payloads[0].id, second_payload.payloads[0].id);
+    assert_eq!(
+        first_payload.payloads[0].sha256,
+        second_payload.payloads[0].sha256
+    );
+    assert_eq!(
+        effective_fuzz_run_id(Some(" explicit-run ")),
+        "explicit-run"
+    );
+}
 
 #[test]
 fn fuzz_run_persists_requested_run_id_and_results_artifact() {
@@ -67,6 +109,7 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
             results_error: None,
             missing_artifact_refs: &[],
             postprocess: &[],
+            payloads: &[],
         })
         .expect("persist fuzz run")
         .run
@@ -212,6 +255,7 @@ fn fuzz_execution_request_artifact_records_runner_intent() {
             results_error: None,
             missing_artifact_refs: &[],
             postprocess: &[],
+            payloads: &[],
         })
         .expect("persist fuzz run");
         let store = ObservationStore::open_initialized().expect("store");
@@ -497,6 +541,7 @@ fn fuzz_sequence_plan_flag_records_request_env_and_artifact() {
             results_error: None,
             missing_artifact_refs: &[],
             postprocess: &[],
+            payloads: &[],
         })
         .expect("persist fuzz run");
 
@@ -597,6 +642,7 @@ fn fuzz_run_persists_coverage_reconciliation_artifact() {
             results_error: None,
             missing_artifact_refs: &[],
             postprocess: &[],
+            payloads: &[],
         })
         .expect("persist fuzz run");
 
@@ -672,6 +718,7 @@ fn fuzz_run_persistence_generates_run_id_when_omitted() {
             results_error: None,
             missing_artifact_refs: &[],
             postprocess: &[],
+            payloads: &[],
         })
         .expect("persist fuzz run")
         .run
@@ -723,6 +770,7 @@ fn fuzz_run_persists_result_envelope_artifact_for_valid_campaign() {
             results_error: None,
             missing_artifact_refs: &[],
             postprocess: &[],
+            payloads: &[],
         })
         .expect("persist fuzz run");
 
@@ -1283,6 +1331,7 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
             ),
             missing_artifact_refs: &[],
             postprocess: &[],
+            payloads: &[],
         })
         .expect("persist fuzz run")
         .run

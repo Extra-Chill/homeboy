@@ -30,7 +30,12 @@ pub fn report_fuzz_result_envelope(
 ) -> homeboy_core::Result<Vec<EvidenceRef>> {
     if let Some(path) = envelope_path {
         let json = fuzz_result_envelope_json(envelope)?;
-        std::fs::write(path, json).map_err(|error| {
+        homeboy_core::io::write_output_file_atomically(
+            path,
+            json,
+            homeboy_core::io::OutputWriteOptions::file(),
+        )
+        .map_err(|error| {
             homeboy_core::Error::internal_io(error.to_string(), Some(path.display().to_string()))
         })?;
     }
@@ -77,21 +82,25 @@ fn persist_fuzz_result_envelope_with_source(
         return record_fuzz_result_envelope_artifact(&store, run_id, path, envelope, source);
     }
 
-    let mut artifact_file = tempfile::Builder::new()
-        .suffix(".json")
-        .tempfile()
-        .map_err(|error| {
-            homeboy_core::Error::internal_io(
-                error.to_string(),
-                Some("create temporary fuzz result envelope artifact".to_string()),
-            )
-        })?;
-    serde_json::to_writer_pretty(&mut artifact_file, envelope).map_err(|error| {
+    let artifact_dir = tempfile::tempdir().map_err(|error| {
+        homeboy_core::Error::internal_io(
+            error.to_string(),
+            Some("create temporary fuzz result envelope artifact".to_string()),
+        )
+    })?;
+    let artifact_path = artifact_dir.path().join("fuzz-result-envelope.json");
+    let json = fuzz_result_envelope_json(envelope)?;
+    homeboy_core::io::write_output_file_atomically(
+        &artifact_path,
+        json,
+        homeboy_core::io::OutputWriteOptions::file(),
+    )
+    .map_err(|error| {
         homeboy_core::Error::internal_unexpected(format!(
-            "failed to encode fuzz result envelope: {error}"
+            "failed to write fuzz result envelope: {error}"
         ))
     })?;
-    record_fuzz_result_envelope_artifact(&store, run_id, artifact_file.path(), envelope, source)
+    record_fuzz_result_envelope_artifact(&store, run_id, &artifact_path, envelope, source)
 }
 
 fn record_fuzz_result_envelope_artifact(

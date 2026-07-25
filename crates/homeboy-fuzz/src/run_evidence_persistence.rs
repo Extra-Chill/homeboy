@@ -42,6 +42,8 @@ pub struct FuzzRunEvidence<'a> {
     pub missing_artifact_refs: &'a [String],
     /// Generic artifact post-process outputs to record.
     pub postprocess: Vec<ArtifactPostprocessOutput>,
+    /// Content-addressed bodies externalized from the campaign before projection.
+    pub payloads: &'a [crate::FuzzPayload],
 }
 
 /// Persist fuzz run evidence to the observation store, returning the run id and
@@ -56,6 +58,20 @@ pub fn persist_fuzz_run_evidence(
     let mut evidence_refs = Vec::new();
     if evidence.results_path.is_file() {
         store.record_artifact(&run_id, "fuzz_results", evidence.results_path)?;
+    }
+    for payload in evidence.payloads {
+        store.record_artifact_with_id(
+            &run_id,
+            crate::FUZZ_PAYLOAD_ARTIFACT_KIND,
+            &payload.path,
+            &payload.id,
+            serde_json::json!({
+                "schema": "homeboy/fuzz-payload/v1",
+                "sha256": payload.sha256,
+                "size_bytes": payload.size_bytes,
+                "redaction": "inherited",
+            }),
+        )?;
     }
     if let Some(execution_request_path) = evidence.execution_request_path {
         if execution_request_path.is_file() {
