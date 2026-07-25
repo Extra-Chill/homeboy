@@ -323,15 +323,22 @@ pub(crate) fn project_persisted_terminal_runner_events(
     else {
         return Ok(false);
     };
-    let Some(event) = crate::agent_task_lifecycle::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_persisted_job_events(
+    let event = crate::agent_task_lifecycle::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_persisted_job_events(
         &events,
         record.runner_id().unwrap_or_default(),
         runner_job_id,
         &record.run_id,
-    )? else {
+    )?
+    .or_else(|| {
+        crate::agent_task_lifecycle::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events(Some(&events))
+    });
+    let Some(event) = event else {
         return Ok(false);
     };
     validate_terminal_child_event_identity(record, &event)?;
+    if store::read_aggregate(&record.run_id).ok().as_ref() == Some(&event.aggregate) {
+        return Ok(false);
+    }
     let mut aggregate = event.aggregate.clone();
     crate::agent_task_lifecycle::project_runner_evidence_refs(record, &mut aggregate);
     let projection_plan = aggregate_projection_plan_from_outcomes(&aggregate);

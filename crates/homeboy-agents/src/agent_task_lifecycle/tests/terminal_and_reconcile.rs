@@ -856,6 +856,48 @@ fn stale_reconcile_imports_terminal_runner_aggregate_before_cancelling_controlle
 }
 
 #[test]
+fn status_recovers_evicted_terminal_runner_job_from_durable_observation_once() {
+    with_isolated_home(|_| {
+        let run_id = "cook-9969-evicted-terminal-observation";
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        })
+        .expect("accepted runner handoff");
+
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        snapshot.events[0].data.as_mut().expect("event data")["identity"]["run_id"] = json!(run_id);
+        snapshot.events[0].data.as_mut().expect("event data")["identity"]["persisted_run_id"] =
+            json!(run_id);
+        rewrite_record_for_test(run_id, |record| {
+            record.metadata["runner_job_status"] = json!(snapshot.job.status);
+            record.metadata["runner_job_events"] = json!(snapshot.events);
+        })
+        .expect("persist terminal daemon observation before controller restart");
+
+        // The active daemon store no longer has this job. Recovery must use the
+        // terminal observation persisted before eviction rather than terminalizing
+        // the controller projection as a missing live job.
+        let _provider = RunnerContinuationTestGuard::install(Box::new(ConnectedRunnerProvider));
+        let recovered = status(run_id).expect("recover terminal observation");
+        assert_eq!(recovered.state, AgentTaskRunState::Succeeded);
+        assert!(store::read_aggregate(run_id).is_ok());
+
+        let recovered_aggregate = store::read_aggregate(run_id).expect("recovered aggregate");
+        let repeated = status(run_id).expect("idempotent recovery");
+        assert_eq!(repeated.state, AgentTaskRunState::Succeeded);
+        assert_eq!(
+            store::read_aggregate(run_id).expect("recovered aggregate remains stable"),
+            recovered_aggregate
+        );
+    });
+}
+
+#[test]
 fn stale_reconcile_keeps_an_accepted_runner_job_active_after_controller_owner_exit() {
     with_isolated_home(|_| {
         let run_id = "cook-9969-active-runner-after-owner-exit";
