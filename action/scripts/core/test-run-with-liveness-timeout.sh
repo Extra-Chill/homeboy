@@ -104,7 +104,7 @@ if [ "$(uname -s)" = Linux ]; then
     exit 1
   fi
   printf 'PASS: cgroup-denied Linux supervisor contains immediate double-fork escape\n'
-elif [ "${exit_code}" -ne 125 ] || [ -e "${strict_pid_file}" ] || ! grep -q 'requires Linux subreaper containment' "${TMP_DIR}/strict.log"; then
+elif [ "${exit_code}" -ne 125 ] || [ -e "${strict_pid_file}" ] || ! grep -q 'requires Linux pidfd containment' "${TMP_DIR}/strict.log"; then
   printf 'FAIL: unsupported strict platform launched before containment policy\n'
   exit 1
 else
@@ -121,23 +121,24 @@ spec = importlib.util.spec_from_file_location("supervisor", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
-module.identity = lambda pid: 7
-original_kill = module.os.kill
-module.os.kill = lambda pid, sig: (_ for _ in ()).throw(ProcessLookupError())
-assert module.signal_identity(101, 7, signal.SIGTERM)
+original_send = getattr(module.signal, "pidfd_send_signal", None)
+module.signal.pidfd_send_signal = lambda pidfd, sig: (_ for _ in ()).throw(ProcessLookupError())
+assert module.signal_pidfd(11, signal.SIGTERM)
 
 calls = []
 module.identity = lambda pid: 8
-module.os.kill = lambda pid, sig: calls.append((pid, sig))
-assert module.signal_identity(101, 7, signal.SIGKILL)
+module.signal.pidfd_send_signal = lambda pidfd, sig: calls.append((pidfd, sig))
+assert module.known_live({(101, 7): 11}) is False
 assert calls == []
 
-module.identity = lambda pid: 7
-module.os.kill = lambda pid, sig: (_ for _ in ()).throw(PermissionError())
-assert not module.signal_identity(101, 7, signal.SIGTERM)
-module.os.kill = original_kill
+module.signal.pidfd_send_signal = lambda pidfd, sig: (_ for _ in ()).throw(PermissionError())
+assert not module.signal_pidfd(11, signal.SIGTERM)
+if original_send is None:
+    del module.signal.pidfd_send_signal
+else:
+    module.signal.pidfd_send_signal = original_send
 PY
-printf 'PASS: supervisor treats ESRCH as exited, avoids PID reuse, and fails permission denial\n'
+printf 'PASS: supervisor treats pidfd ESRCH as exited, avoids PID reuse, and fails permission denial\n'
 
 if [ "$(uname -s)" = Linux ]; then
   HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF=true HOMEBOY_ACTION_CGROUP_ROOT="${TMP_DIR}/denied-cgroup" HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS=5 bash "${RUNNER}" "rapid child exits" bash -c 'for _ in $(seq 1 200); do (exit 0) & done; wait' >"${TMP_DIR}/rapid.log" 2>&1

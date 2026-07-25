@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Linux subreaper supervisor for commands that need descendant containment."""
+"""Linux subreaper supervisor with pidfd-based descendant containment."""
 
 import argparse
 import ctypes
@@ -9,11 +9,10 @@ import subprocess
 import sys
 import time
 
-
 PR_SET_CHILD_SUBREAPER = 36
 
 
-def identity(pid: int):
+def identity(pid):
     try:
         fields = open(f"/proc/{pid}/stat", encoding="utf-8").read().split()
         return None if fields[2] == "Z" else int(fields[21])
@@ -21,7 +20,7 @@ def identity(pid: int):
         return None
 
 
-def descendants(root: int):
+def descendants(root):
     children = {}
     for entry in os.scandir("/proc"):
         if not entry.name.isdigit():
@@ -33,20 +32,23 @@ def descendants(root: int):
             continue
     result, pending = set(), [root]
     while pending:
-        parent = pending.pop()
-        for child in children.get(parent, []):
+        for child in children.get(pending.pop(), []):
             if child not in result:
                 result.add(child)
                 pending.append(child)
     return result
 
 
-def signal_identity(pid, start, signal_number):
-    """Signal only the observed process generation; ESRCH means it already exited."""
+def open_pidfd(pid):
     try:
-        if identity(pid) != start:
-            return True
-        os.kill(pid, signal_number)
+        return os.pidfd_open(pid, 0)
+    except ProcessLookupError:
+        return None
+
+
+def signal_pidfd(pidfd, signal_number):
+    try:
+        signal.pidfd_send_signal(pidfd, signal_number)
         return True
     except ProcessLookupError:
         return True
@@ -54,15 +56,14 @@ def signal_identity(pid, start, signal_number):
         return False
 
 
-def identities_live(known):
+def known_live(known):
     try:
-        return any(identity(pid) == start for pid, start in known.items())
+        return any(identity(pid) == start for pid, start in known)
     except PermissionError:
         return None
 
 
 def reap_children():
-    """Reap all adopted descendants after the direct command has been reaped."""
     while True:
         try:
             pid, _ = os.waitpid(-1, os.WNOHANG)
@@ -70,6 +71,14 @@ def reap_children():
             return
         if pid == 0:
             return
+
+
+def close_pidfds(known):
+    for pidfd in known.values():
+        try:
+            os.close(pidfd)
+        except OSError:
+            pass
 
 
 def main():
@@ -83,7 +92,18 @@ def main():
     if not args.command:
         return 2
     if sys.platform != "linux":
-        print(f"::error::{args.label} requires Linux subreaper containment; refusing to run this strict command.")
+        print(f"::error::{args.label} requires Linux pidfd containment; refusing to run this strict command.")
+        return 125
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        print(f"::error::{args.label} requires Linux pidfd containment; refusing to run this strict command.")
+        return 125
+    try:
+        probe = open_pidfd(os.getpid())
+        if probe is None:
+            return 125
+        os.close(probe)
+    except PermissionError:
+        print(f"::error::{args.label} lacks permission for Linux pidfd containment; refusing to run this strict command.")
         return 125
     if ctypes.CDLL(None).prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
         print(f"::error::{args.label} cannot establish a Linux child subreaper; refusing to run this strict command.")
@@ -91,107 +111,85 @@ def main():
 
     output = open(args.log_file, "wb") if args.log_file else None
     process = subprocess.Popen(args.command, stdout=output, stderr=subprocess.STDOUT if output else None, preexec_fn=os.setsid)
-    root_start = identity(process.pid)
     known = {}
-    started = time.monotonic()
-    timed_out = False
+    root_start = identity(process.pid)
+    try:
+        root_pidfd = open_pidfd(process.pid) if root_start is not None else None
+    except PermissionError:
+        process.kill()
+        process.wait()
+        return 125
+    if root_pidfd is not None:
+        known[(process.pid, root_start)] = root_pidfd
+    started, timed_out = time.monotonic(), False
 
     def observe():
         try:
             observed = descendants(os.getpid())
+            for pid in observed:
+                start = identity(pid)
+                key = (pid, start)
+                if start is not None and key not in known:
+                    pidfd = open_pidfd(pid)
+                    if pidfd is not None:
+                        known[key] = pidfd
+            return True
         except PermissionError:
             return False
-        for pid in observed:
-            try:
-                start = identity(pid)
-            except PermissionError:
-                return False
-            if start is not None:
-                known[pid] = start
-        return True
 
     def terminate(reason):
-        print(f"::warning::{args.label} {reason}; terminating supervised descendants.")
+        print(f"::warning::{args.label} {reason}; terminating supervised descendants by pidfd.")
         if not observe():
             return False
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        except PermissionError:
-            return False
-        for pid, start in known.items():
-            if not signal_identity(pid, start, signal.SIGTERM):
+        for pidfd in known.values():
+            if not signal_pidfd(pidfd, signal.SIGTERM):
                 return False
-        deadline = time.monotonic() + args.cleanup_timeout
-        while time.monotonic() < deadline:
-            if not observe():
-                return False
-            live = identities_live(known)
-            if live is False:
-                return True
-            if live is None:
-                return False
-            time.sleep(0.05)
-        print(f"::warning::{args.label} containment grace expired; sending SIGKILL to supervised descendants.")
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        except PermissionError:
-            return False
-        for pid, start in known.items():
-            if not signal_identity(pid, start, signal.SIGKILL):
-                return False
-        deadline = time.monotonic() + args.cleanup_timeout
-        while time.monotonic() < deadline:
-            if not observe():
-                return False
-            live = identities_live(known)
-            if live is False:
-                return True
-            if live is None:
-                return False
-            time.sleep(0.05)
+        for signal_number, name in ((signal.SIGTERM, "TERM"), (signal.SIGKILL, "KILL")):
+            deadline = time.monotonic() + args.cleanup_timeout
+            while time.monotonic() < deadline:
+                if not observe():
+                    return False
+                live = known_live(known)
+                if live is False:
+                    return True
+                if live is None:
+                    return False
+                time.sleep(0.05)
+            if signal_number == signal.SIGTERM:
+                print(f"::warning::{args.label} containment grace expired; sending SIGKILL by pidfd.")
+                for pidfd in known.values():
+                    if not signal_pidfd(pidfd, signal.SIGKILL):
+                        return False
         return False
 
     while process.poll() is None:
         if not observe():
-            print(f"::error::{args.label} cannot observe supervised descendants.")
+            close_pidfds(known)
             return 125
         elapsed = int(time.monotonic() - started)
         if elapsed >= args.timeout:
             timed_out = True
             print(f"::error::{args.label} exceeded its {args.timeout}s execution timeout.")
             if not terminate("timed out"):
-                print(f"::error::{args.label} containment could not prove cleanup. Retained command output: {args.log_file or 'standard output'}.")
+                close_pidfds(known)
                 return 125
             break
-        if elapsed and elapsed % 60 == 0:
-            print(f"::notice::{args.label} is still running after {elapsed}s (timeout: {args.timeout}s).")
         time.sleep(0.05)
 
     exit_code = process.wait()
     reap_children()
-    if not observe():
-        print(f"::error::{args.label} cannot observe supervised descendants.")
+    if not observe() or known_live(known) is None:
+        close_pidfds(known)
         return 125
-    live = identities_live(known)
-    if live is None:
-        print(f"::error::{args.label} cannot verify supervised descendant identities.")
-        return 125
-    if live:
+    if known_live(known):
         if not terminate("finalization found live command containment"):
-            print(f"::error::{args.label} containment could not prove cleanup. Retained command output: {args.log_file or 'standard output'}.")
+            close_pidfds(known)
             return 125
-        print(f"::notice::{args.label} finalization terminated surviving command containment; retained command output: {args.log_file or 'standard output'}.")
     reap_children()
+    close_pidfds(known)
     if output:
         output.close()
-    if timed_out:
-        print(f"::error::{args.label} exceeded its {args.timeout}s execution timeout and was terminated. Inspect this step's logs and rerun after resolving the blocked command; the caller can continue when this action is advisory.")
-        return 124
-    return exit_code
+    return 124 if timed_out else exit_code
 
 
 if __name__ == "__main__":
