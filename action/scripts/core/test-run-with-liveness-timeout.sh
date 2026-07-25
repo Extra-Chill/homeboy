@@ -137,8 +137,28 @@ if original_send is None:
     del module.signal.pidfd_send_signal
 else:
     module.signal.pidfd_send_signal = original_send
+
+# A process that exits mid-scan makes /proc/<pid>/stat raise ESRCH, not ENOENT.
+# Letting that escape killed the supervisor and orphaned the descendants it
+# exists to contain, so descendants() must skip the racing entry and still
+# report the ones it can read.
+real_open = open
+
+
+def racing_open(path, *args, **kwargs):
+    if path == f"/proc/{os.getpid()}/stat":
+        raise ProcessLookupError()
+    return real_open(path, *args, **kwargs)
+
+
+module.open = racing_open
+observed = module.descendants(1)
+del module.open
+assert isinstance(observed, set)
+assert os.getpid() not in observed
 PY
 printf 'PASS: supervisor treats pidfd ESRCH as exited, avoids PID reuse, and fails permission denial\n'
+printf 'PASS: supervisor scan survives processes exiting mid-scan\n'
 
 if [ "$(uname -s)" = Linux ]; then
   HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF=true HOMEBOY_ACTION_CGROUP_ROOT="${TMP_DIR}/denied-cgroup" HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS=5 bash "${RUNNER}" "rapid child exits" bash -c 'for _ in $(seq 1 200); do (exit 0) & done; wait' >"${TMP_DIR}/rapid.log" 2>&1

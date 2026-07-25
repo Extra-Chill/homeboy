@@ -28,7 +28,11 @@ def descendants(root):
         try:
             fields = open(f"/proc/{entry.name}/stat", encoding="utf-8").read().split()
             children.setdefault(int(fields[3]), []).append(int(entry.name))
-        except (FileNotFoundError, IndexError, ValueError):
+        except (FileNotFoundError, ProcessLookupError, PermissionError, IndexError, ValueError):
+            # A process that exits between scandir and read surfaces as ESRCH
+            # (ProcessLookupError), not just ENOENT. Scanning all of /proc means
+            # this race is routine; letting it escape kills the supervisor and
+            # orphans the very descendants it exists to contain.
             continue
     result, pending = set(), [root]
     while pending:
