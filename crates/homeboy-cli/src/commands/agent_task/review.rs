@@ -845,9 +845,9 @@ fn scope_providers(
     }
 }
 
-const DEFAULT_PROVIDER_LIMIT: usize = 20;
+const DEFAULT_PROVIDER_LIMIT: usize = 10;
 const DEFAULT_DIAGNOSTIC_LIMIT: usize = 10;
-const DEFAULT_TEXT_LIMIT: usize = 500;
+const DEFAULT_TEXT_LIMIT: usize = 256;
 
 pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     let catalog = if args.refresh {
@@ -940,8 +940,12 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
             },
             "scope": {
                 "backend": scoped_backend,
-                "filtered": scoped_backend.is_some(),
+                "filtered": scoped_backend.is_some()
+                    || args.selector.is_some()
+                    || args.runtime.is_some()
+                    || args.status.is_some(),
                 "shown": shown_providers.len(),
+                "matched": providers.len(),
                 "total": all_providers.len(),
                 "catalog_command": "homeboy agent-task providers --catalog",
             },
@@ -988,7 +992,7 @@ fn compact_provider(provider: &AgentTaskExecutorProvider) -> Value {
         "extension_id": provider.extension_id.as_deref().map(|value| bounded_text(value, 160)),
         "status": provider_status(provider),
         "default_backend": provider.default_backend,
-        "capabilities": provider.capabilities.iter().take(12).map(|value| bounded_text(value, 120)).collect::<Vec<_>>(),
+        "capabilities": provider.capabilities.iter().take(8).map(|value| bounded_text(value, 96)).collect::<Vec<_>>(),
     })
 }
 
@@ -1033,10 +1037,20 @@ fn provider_full_command(args: &ProvidersArgs) -> String {
         ("status", args.status.as_deref()),
     ] {
         if let Some(value) = value {
-            command.push_str(&format!(" --{flag} {value}"));
+            command.push_str(&format!(" --{flag} {}", shell_arg(value)));
         }
     }
     command
+}
+
+fn shell_arg(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':' | '='))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn provider_identity_catalog(providers: &[AgentTaskExecutorProvider]) -> Vec<Value> {
@@ -1496,9 +1510,29 @@ mod tests {
         }));
 
         assert_eq!(providers.len(), DEFAULT_PROVIDER_LIMIT);
-        assert!(serde_json::to_vec(&providers).expect("provider JSON").len() < 100_000);
+        assert!(serde_json::to_vec(&providers).expect("provider JSON").len() < 20_000);
         assert!(diagnostic["message"].as_str().expect("message").len() <= DEFAULT_TEXT_LIMIT + 3);
         assert_eq!(diagnostic["response_body"]["omitted_bytes"], 100_000);
+    }
+
+    #[test]
+    fn provider_full_command_quotes_filter_values() {
+        let command = provider_full_command(&ProvidersArgs {
+            backend: Some("backend; touch /tmp/unwanted".to_string()),
+            selector: Some("provider id".to_string()),
+            runtime: None,
+            status: None,
+            secret_env: Vec::new(),
+            validate_readiness: false,
+            refresh: false,
+            catalog: false,
+            full: false,
+        });
+
+        assert_eq!(
+            command,
+            "homeboy agent-task providers --full --backend 'backend; touch /tmp/unwanted' --selector 'provider id'"
+        );
     }
 
     fn recoverable_review_aggregate(
