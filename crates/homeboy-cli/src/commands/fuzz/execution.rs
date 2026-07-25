@@ -34,13 +34,8 @@ use super::workloads::{
 };
 
 pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOutput, i32)> {
-    if args
-        .run_id
-        .as_deref()
-        .is_none_or(|run_id| run_id.trim().is_empty())
-    {
-        args.run_id = Some(format!("fuzz-{}", Uuid::new_v4()));
-    }
+    let effective_run_id = effective_fuzz_run_id(args.run_id.as_deref());
+    args.run_id = Some(effective_run_id.clone());
     let rig_context = load_rig(args.rig.as_deref(), &args.setting_args)?;
     if let Some(context) = rig_context.as_ref() {
         let prepare_settings = fuzz_prepare_settings(&args);
@@ -166,7 +161,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         let payloads = homeboy::fuzz::externalize_fuzz_campaign_payloads(
             campaign,
             &payload_root,
-            args.run_id.as_deref().unwrap_or("fuzz"),
+            &effective_run_id,
             homeboy::fuzz::FuzzPayloadBudget::default(),
         )?
         .payloads;
@@ -192,7 +187,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
     };
     let workload_path = selected_workload.and_then(|workload| workload.manifest_path.clone());
     let persisted_evidence = persist_fuzz_run_evidence(FuzzRunEvidenceInput {
-        run_id: args.run_id.as_deref(),
+        run_id: Some(&effective_run_id),
         component_id: &ctx.component_id,
         rig_id: rig_id.as_deref(),
         workload_id: workload_id.as_deref(),
@@ -267,6 +262,14 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         },
         exit_code,
     ))
+}
+
+pub(super) fn effective_fuzz_run_id(requested: Option<&str>) -> String {
+    requested
+        .map(str::trim)
+        .filter(|run_id| !run_id.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("fuzz-{}", Uuid::new_v4()))
 }
 
 pub(super) fn fuzz_run_artifact_validation_error(
