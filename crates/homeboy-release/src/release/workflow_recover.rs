@@ -38,6 +38,9 @@ fn publication_continuation_command(input: &ReleaseCommandInput) -> String {
     if input.pipeline.skip_publish {
         command.push_str(" --skip-publish");
     }
+    if input.pipeline.deploy {
+        command.push_str(" --deploy");
+    }
     if let Some(identity) = &input.git_identity {
         command.push_str(&format!(" --git-identity {}", shell_quote(identity)));
     }
@@ -50,6 +53,28 @@ fn shell_quote(value: &str) -> String {
 }
 
 pub(super) fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32)> {
+    if let Some(deployment) = super::deployment::resume_deployment(&input.component_id)? {
+        let failed = deployment.summary.failed > 0;
+        return Ok((
+            ReleaseCommandResult {
+                component_id: input.component_id.clone(),
+                status: if failed { "deploy_recovery_failed" } else { "released" }.to_string(),
+                phase: release_execution_plan(input).phase,
+                bump_type: "recover".to_string(),
+                dry_run: false,
+                releasable_commits: 0,
+                new_version: None,
+                tag: None,
+                skipped_reason: None,
+                plan: None,
+                run: None,
+                deployment: Some(deployment),
+                continuation_command: None,
+                release_summary: vec!["Resumed only incomplete release deployment targets; publication steps were not replayed.".to_string()],
+            },
+            if failed { 1 } else { 0 },
+        ));
+    }
     let component = load_component(
         &input.component_id,
         &ReleaseOptions {
@@ -861,6 +886,7 @@ mod tests {
             skip_build_validation: true,
             pipeline: super::super::types::ReleasePipelineOptions {
                 skip_publish: true,
+                deploy: true,
                 ..Default::default()
             },
             git_identity: Some("Chris Huber <chris@example.com>".to_string()),
@@ -869,7 +895,7 @@ mod tests {
 
         assert_eq!(
             publication_continuation_command(&input),
-            "homeboy release sample-plugin --head --path '/tmp/plugin path' --skip-checks --skip-build-validation --skip-publish --git-identity 'Chris Huber <chris@example.com>' --apply"
+            "homeboy release sample-plugin --head --path '/tmp/plugin path' --skip-checks --skip-build-validation --skip-publish --deploy --git-identity 'Chris Huber <chris@example.com>' --apply"
         );
     }
 

@@ -121,7 +121,9 @@ fn restore_checkout_after_failed_run(
     checkout_guard: Option<&super::checkout_guard::ReleaseCheckoutGuard>,
     run: &mut ReleaseRun,
 ) -> Result<()> {
-    if matches!(run.result.status, ReleaseStepStatus::Success) {
+    if matches!(run.result.status, ReleaseStepStatus::Success)
+        || release_was_pushed(&run.result.steps)
+    {
         return Ok(());
     }
 
@@ -141,4 +143,34 @@ fn restore_checkout_after_failed_run(
     }
 
     Ok(())
+}
+
+fn release_was_pushed(steps: &[ReleaseStepResult]) -> bool {
+    steps.iter().any(|step| {
+        step.step_type == "git.push" && matches!(step.status, ReleaseStepStatus::Success)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::release_was_pushed;
+    use crate::release::types::{ReleaseStepResult, ReleaseStepStatus};
+
+    #[test]
+    fn published_push_prevents_checkout_rollback_after_deploy_failure() {
+        assert!(release_was_pushed(&[
+            ReleaseStepResult {
+                id: "git.push".to_string(),
+                step_type: "git.push".to_string(),
+                status: ReleaseStepStatus::Success,
+                ..Default::default()
+            },
+            ReleaseStepResult {
+                id: "deploy".to_string(),
+                step_type: "deploy".to_string(),
+                status: ReleaseStepStatus::Failed,
+                ..Default::default()
+            },
+        ]));
+    }
 }

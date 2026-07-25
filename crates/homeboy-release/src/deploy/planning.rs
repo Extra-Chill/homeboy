@@ -731,6 +731,15 @@ pub(super) fn load_project_components(
     requested_ids: &[String],
     check: bool,
 ) -> Result<LoadedComponents> {
+    load_project_components_with_projection(project, requested_ids, check, None)
+}
+
+pub(super) fn load_project_components_with_projection(
+    project: &Project,
+    requested_ids: &[String],
+    check: bool,
+    projection: Option<&super::types::PreparedDeployProjection>,
+) -> Result<LoadedComponents> {
     let mut deployable = Vec::new();
     let mut skipped = Vec::new();
     let mut extension_skipped = Vec::new();
@@ -746,10 +755,11 @@ pub(super) fn load_project_components(
         // should not block deploying the ones you asked for.
         let is_requested = requested_ids.is_empty() || requested_ids.contains(&attachment.id);
 
-        let mut loaded = project::resolve_project_component_with_standalone_snapshot(
+        let mut loaded = resolve_project_component(
             project,
             &attachment.id,
             Some(&standalone_snapshot),
+            projection,
         )?;
 
         // Bundled/retired components are no longer standalone deploy targets.
@@ -842,6 +852,55 @@ pub(super) fn load_project_components(
     })
 }
 
+pub(super) fn resolve_project_component(
+    project: &Project,
+    component_id: &str,
+    standalone_snapshot: Option<&project::StandaloneComponentConfigSnapshot>,
+    projection: Option<&super::types::PreparedDeployProjection>,
+) -> Result<Component> {
+    let snapshot_key = format!("{}:{component_id}", project.id);
+    let Some(source) = projection.and_then(|projection| {
+        projection
+            .components
+            .get(&snapshot_key)
+            .or_else(|| projection.components.get(component_id))
+    }) else {
+        return project::resolve_project_component_with_standalone_snapshot(
+            project,
+            component_id,
+            standalone_snapshot,
+        );
+    };
+    let attachment = project
+        .components
+        .iter()
+        .find(|attachment| attachment.id == component_id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "components",
+                format!(
+                    "Project '{}' has no attached component '{}'",
+                    project.id, component_id
+                ),
+                Some(project.id.clone()),
+                None,
+            )
+        })?;
+
+    if projection.is_some_and(|projection| projection.components.contains_key(&snapshot_key)) {
+        return Ok(source.clone());
+    }
+    let mut component = source.clone();
+    if let Some(remote_path) = attachment
+        .remote_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+    {
+        component.remote_path = remote_path.to_string();
+    }
+    Ok(project::apply_component_overrides(&component, project))
+}
+
 /// Build a concise, operator-facing reason string from a missing-extension error.
 ///
 /// Prefers the list of missing extension IDs from the error details
@@ -871,7 +930,7 @@ fn missing_extension_reason(err: &homeboy_core::error::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::deploy::types::DeployConfig;
+    use crate::deploy::types::{DeployConfig, PreparedDeployProjection};
     use homeboy_core::component::VersionTarget;
     use homeboy_core::project::Project;
     use homeboy_core::server::SshClient;
@@ -932,6 +991,53 @@ mod tests {
         )
     }
 
+    #[test]
+    fn prepared_projection_preserves_source_paths_for_multiple_components_and_rebinds_targets() {
+        let source_a = Component {
+            id: "a".to_string(),
+            local_path: "/release/a".to_string(),
+            remote_path: "source/a".to_string(),
+            ..Default::default()
+        };
+        let source_b = Component {
+            id: "b".to_string(),
+            local_path: "/release/b".to_string(),
+            remote_path: "source/b".to_string(),
+            ..Default::default()
+        };
+        let projection = PreparedDeployProjection {
+            components: [("a".to_string(), source_a), ("b".to_string(), source_b)]
+                .into_iter()
+                .collect(),
+        };
+        let project = Project {
+            id: "target".to_string(),
+            components: vec![
+                homeboy_core::project::ProjectComponentAttachment {
+                    id: "a".to_string(),
+                    local_path: "/stale/a".to_string(),
+                    remote_path: Some("plugins/a".to_string()),
+                },
+                homeboy_core::project::ProjectComponentAttachment {
+                    id: "b".to_string(),
+                    local_path: "/stale/b".to_string(),
+                    remote_path: Some("plugins/b".to_string()),
+                },
+            ],
+            ..Default::default()
+        };
+
+        for (id, local_path, remote_path) in [
+            ("a", "/release/a", "plugins/a"),
+            ("b", "/release/b", "plugins/b"),
+        ] {
+            let resolved = resolve_project_component(&project, id, None, Some(&projection))
+                .expect("prepared source resolves");
+            assert_eq!(resolved.local_path, local_path);
+            assert_eq!(resolved.remote_path, remote_path);
+        }
+    }
+
     fn coupled_component(id: &str, path: &Path, deploy_together: &[&str]) -> Component {
         let mut component = component(id, path);
         component.deploy_together = deploy_together
@@ -982,6 +1088,7 @@ mod tests {
             resolved_refs: Default::default(),
             preflighted_source_paths: Default::default(),
             preflighted_component_identities: Default::default(),
+            prepared_projection: None,
             tagged: false,
             prepared_artifact: None,
             resume_run_id: None,
