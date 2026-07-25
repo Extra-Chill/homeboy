@@ -23,8 +23,8 @@ use homeboy::core::worktree_providers::{
 use super::super::agent_task_dispatch::DispatchArgs;
 use super::super::CmdResult;
 use super::args::{
-    AgentTaskCookArgs, PromotionProviderArgs, RetryArgs, RunArgs, RunPlanArgs, StatusArgs,
-    SubmitArgs,
+    AgentTaskCookArgs, CookContinueArgs, PromotionProviderArgs, RetryArgs, RunArgs, RunPlanArgs,
+    StatusArgs, SubmitArgs,
 };
 
 const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
@@ -48,6 +48,119 @@ fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregate) -> Value
 
 pub(crate) fn run_cook(args: AgentTaskCookArgs) -> CmdResult<Value> {
     run_cook_with_executor(args, ExtensionProviderAgentTaskExecutor::discover())
+}
+
+/// Resume a Cook from its immutable recipe rather than asking the operator to
+/// replay prompt, provider, gate, workspace, or disclosure arguments.
+pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
+    let recipe =
+        agent_task_service::load_recipe(&args.cook_or_attempt_id).or_else(|cook_error| {
+            agent_task_service::load_recipe_for_attempt(&args.cook_or_attempt_id)?.ok_or(cook_error)
+        })?;
+    let run_id = if recipe
+        .attempts
+        .iter()
+        .any(|attempt| attempt.run_id == args.cook_or_attempt_id)
+    {
+        args.cook_or_attempt_id.clone()
+    } else {
+        agent_task_lifecycle::cook_index(&recipe.cook_id)
+            .ok()
+            .map(|index| index.latest_run_id)
+            .unwrap_or_else(|| recipe.attempts[0].run_id.clone())
+    };
+    let record = agent_task_lifecycle::status(&run_id)?;
+    if !matches!(
+        record.state,
+        agent_task_lifecycle::AgentTaskRunState::Succeeded
+            | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+            | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
+            | agent_task_lifecycle::AgentTaskRunState::PartialFailure
+            | agent_task_lifecycle::AgentTaskRunState::Failed
+            | agent_task_lifecycle::AgentTaskRunState::Cancelled
+    ) {
+        return Ok((
+            cook_continuation_status(&recipe.cook_id, &run_id, &format!("{:?}", record.state)),
+            0,
+        ));
+    }
+
+    let dispatcher = crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(
+        &recipe.promotion_transport["attempt_dispatch"],
+    )?;
+    let mut options = agent_task_service::reconstruct_options_with_dispatcher(&recipe, dispatcher)?;
+    let attempt = recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == run_id)
+        .ok_or_else(|| {
+            homeboy::core::Error::validation_invalid_argument(
+                "cook_or_attempt_id",
+                "selected attempt is absent from its durable Cook recipe",
+                Some(run_id.clone()),
+                None,
+            )
+        })?;
+    options.initial_run_id = attempt.run_id.clone();
+    options.initial_plan = attempt.plan.clone();
+    let result =
+        agent_task_service::run_cook(options, ExtensionProviderAgentTaskExecutor::discover())?;
+    let value =
+        cook_report_with_continuation(serde_json::to_value(result.value).unwrap_or(Value::Null));
+    Ok((
+        super::status::compact_cook_report(value, args.full),
+        result.exit_code,
+    ))
+}
+
+fn cook_continuation_status(cook_id: &str, run_id: &str, provider_state: &str) -> Value {
+    serde_json::json!({
+        "schema": "homeboy/agent-task-cook/v1",
+        "cook_id": cook_id,
+        "latest_run_id": run_id,
+        "status": "in_flight",
+        "provider": { "state": provider_state, "run_id": run_id },
+        "remaining_phases": ["harvest", "review", "gates", "promotion", "finalization"],
+        "continuation_command": format!("homeboy agent-task cook-continue {cook_id}"),
+    })
+}
+
+fn cook_report_with_continuation(mut value: Value) -> Value {
+    if value.get("status").and_then(Value::as_str) != Some("in_flight") {
+        return value;
+    }
+    let cook_id = value
+        .get("cook_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let run_id = value
+        .get("latest_run_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let provider_state = value
+        .get("attempts")
+        .and_then(Value::as_array)
+        .and_then(|attempts| attempts.last())
+        .and_then(|attempt| attempt.get("run_state"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    if let Value::Object(report) = &mut value {
+        report.insert(
+            "provider".to_string(),
+            serde_json::json!({ "state": provider_state, "run_id": run_id }),
+        );
+        report.insert(
+            "remaining_phases".to_string(),
+            serde_json::json!(["harvest", "review", "gates", "promotion", "finalization"]),
+        );
+        report.insert(
+            "continuation_command".to_string(),
+            serde_json::json!(format!("homeboy agent-task cook-continue {cook_id}")),
+        );
+    }
+    value
 }
 
 /// Converge a Cook promotion destination before compiling a task plan. This is
@@ -365,7 +478,9 @@ where
     )?;
     Ok((
         super::status::compact_cook_report(
-            serde_json::to_value(result.value).unwrap_or(Value::Null),
+            cook_report_with_continuation(
+                serde_json::to_value(result.value).unwrap_or(Value::Null),
+            ),
             args.full,
         ),
         result.exit_code,
@@ -690,4 +805,29 @@ pub(super) fn retry(args: RetryArgs) -> CmdResult<Value> {
         serde_json::to_value(result.record).unwrap_or(Value::Null),
         0,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cook_report_with_continuation;
+
+    #[test]
+    fn in_flight_cook_report_keeps_provider_state_and_managed_continuation_separate() {
+        let report = cook_report_with_continuation(serde_json::json!({
+            "cook_id": "cook-1",
+            "latest_run_id": "cook-1-attempt-1",
+            "status": "in_flight",
+            "attempts": [{ "run_state": "Running" }],
+        }));
+
+        assert_eq!(report["provider"]["state"], "Running");
+        assert_eq!(
+            report["remaining_phases"],
+            serde_json::json!(["harvest", "review", "gates", "promotion", "finalization"])
+        );
+        assert_eq!(
+            report["continuation_command"],
+            "homeboy agent-task cook-continue cook-1"
+        );
+    }
 }

@@ -35,10 +35,11 @@ pub use args::{
     AgentTaskFanoutPlanArgs, AgentTaskFanoutRunPlanArgs, AgentTaskFanoutSubmitArgs,
     AgentTaskFanoutSubmitBatchArgs, AgentTaskLoopArgs, AgentTaskLoopCommand,
     AgentTaskLoopDefineArgs, AgentTaskLoopResumeArgs, AgentTaskLoopStatusArgs, CancelArgs,
-    CompileLoopArgs, ContractArgs, ContractFormat, DiagnoseArgs, EvidenceArgs, FinalizePrArgs,
-    GateFeedbackArgs, LatestArgs, ListArgs, LogsArgs, PromoteArgs, PromotionProviderArgs,
-    ProvidersArgs, ReconcileRecordsArgs, ReplayProviderBoundaryArgs, RetryArgs, ReviewArgs,
-    RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
+    CompileLoopArgs, ContractArgs, ContractFormat, CookContinueArgs, DiagnoseArgs, EvidenceArgs,
+    FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, LogsArgs, PromoteArgs,
+    PromotionProviderArgs, ProvidersArgs, ReconcileRecordsArgs, ReplayProviderBoundaryArgs,
+    RetryArgs, ReviewArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
+    SubmitArgs, VerifyGateArgs,
 };
 pub(crate) use status::diagnostic_summary_from_aggregate;
 
@@ -75,6 +76,7 @@ pub(crate) fn run_with_cook_progress(
                 run::run_cook(cook_args)
             }
         }
+        AgentTaskCommand::CookContinue(args) => run::continue_cook(args),
         AgentTaskCommand::Loop(loop_args) => controller::loop_command(loop_args),
         AgentTaskCommand::RunPlan(run_args) => run::run_plan(run_args),
         AgentTaskCommand::Run(status_args) => run::run_submitted(status_args),

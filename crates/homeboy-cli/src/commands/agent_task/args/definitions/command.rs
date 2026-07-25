@@ -45,6 +45,10 @@ pub enum AgentTaskCommand {
     /// before opening the PR). Repeatable `--verify` gates all run; the run
     /// retries up to `--max-attempts` times.
     Cook(AgentTaskCookArgs),
+    /// Continue a detached Cook from its durable Cook ID or provider attempt ID.
+    /// The persisted recipe supplies the original prompt, transport, gates,
+    /// worktree, and disclosure policy.
+    CookContinue(CookContinueArgs),
     Loop(AgentTaskLoopArgs),
     RunPlan(RunPlanArgs),
     Run(RunArgs),
@@ -86,6 +90,15 @@ pub enum AgentTaskCommand {
     Controller(AgentTaskControllerArgs),
     #[command(hide = true)]
     Tool(AgentTaskToolArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct CookContinueArgs {
+    /// Durable Cook ID or one of its provider attempt IDs.
+    pub cook_or_attempt_id: String,
+    /// Include the complete Cook report rather than the compact lifecycle view.
+    #[arg(long)]
+    pub full: bool,
 }
 
 #[derive(Args, Debug)]

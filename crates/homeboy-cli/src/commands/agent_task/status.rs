@@ -1398,6 +1398,11 @@ pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
         summary["full_command"] = json!(format!("homeboy agent-task status {run_id} --full"));
         summary["evidence_command"] = json!(format!("homeboy agent-task evidence {run_id}"));
     }
+    for field in ["provider", "remaining_phases", "continuation_command"] {
+        if let Some(value) = value.get(field) {
+            summary[field] = bounded_value(value);
+        }
+    }
     summary
 }
 
