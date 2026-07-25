@@ -73,7 +73,7 @@ fn item_from_agent_task(record: AgentTaskRunRecord) -> ActivityItem {
         command: None,
         cwd: None,
         runner: ActivityRunnerRefs {
-            runner_id,
+            runner_id: runner_id.clone(),
             job_id: job_id.clone(),
             transport: remote_run_id,
         },
@@ -106,31 +106,35 @@ fn item_from_agent_task(record: AgentTaskRunRecord) -> ActivityItem {
             .collect(),
         source_projections: Vec::new(),
         state_conflicts: Vec::new(),
-        next_actions: actions_for_agent_task(&record.run_id, state),
+        next_actions: actions_for_agent_task(&record.run_id, runner_id.as_deref(), state),
     }
 }
 
-fn actions_for_agent_task(run_id: &str, state: ActivityState) -> Vec<ActivityNextAction> {
+fn actions_for_agent_task(
+    run_id: &str,
+    runner_id: Option<&str>,
+    state: ActivityState,
+) -> Vec<ActivityNextAction> {
+    let command_prefix = runner_id
+        .map(|runner_id| format!("homeboy runner exec {runner_id} -- homeboy agent-task"))
+        .unwrap_or_else(|| "homeboy agent-task".to_string());
     let mut actions = vec![
-        action("status", format!("homeboy agent-task status {run_id}")),
-        action("logs", format!("homeboy agent-task logs {run_id}")),
-        action(
-            "artifacts",
-            format!("homeboy agent-task artifacts {run_id}"),
-        ),
+        action("status", format!("{command_prefix} status {run_id}")),
+        action("logs", format!("{command_prefix} logs {run_id}")),
+        action("artifacts", format!("{command_prefix} artifacts {run_id}")),
     ];
     if is_active(state) {
         actions.push(action("watch", format!("homeboy activity watch {run_id}")));
     } else if is_failure(state) {
         actions.push(action(
             "retry",
-            format!("homeboy agent-task retry --run {run_id}"),
+            format!("{command_prefix} retry --run {run_id}"),
         ));
     }
     if matches!(state, ActivityState::Stale) {
         actions.push(action(
             "reconcile",
-            format!("homeboy agent-task reconcile {run_id} --dry-run"),
+            format!("{command_prefix} reconcile {run_id} --dry-run"),
         ));
     }
     actions
@@ -141,4 +145,19 @@ fn actions_for_agent_task(run_id: &str, state: ActivityState) -> Vec<ActivityNex
 /// agent-task subsystem.
 pub fn register() {
     register_activity_agent_task_provider(Box::new(AgentTaskActivityProvider));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runner_backed_actions_execute_on_the_owning_runner() {
+        let actions = actions_for_agent_task("run-1", Some("lab-a"), ActivityState::Stale);
+
+        assert!(actions.iter().any(|action| {
+            action.command
+                == "homeboy runner exec lab-a -- homeboy agent-task reconcile run-1 --dry-run"
+        }));
+    }
 }

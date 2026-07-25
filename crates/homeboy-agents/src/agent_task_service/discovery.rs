@@ -408,7 +408,9 @@ fn discovery_run(
         "homeboy agent-task".to_string()
     } else {
         match runner_id.as_deref() {
-            Some(runner_id) => format!("homeboy --runner {runner_id} agent-task"),
+            // Lifecycle records resident on a runner must execute there. The
+            // global `--runner` flag is only for portable Lab offload commands.
+            Some(runner_id) => format!("homeboy runner exec {runner_id} -- homeboy agent-task"),
             None => "homeboy agent-task".to_string(),
         }
     };

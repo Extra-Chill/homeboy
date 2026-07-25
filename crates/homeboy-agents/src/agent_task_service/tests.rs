@@ -1128,19 +1128,19 @@ fn discovery_runner_backed_run_emits_runner_scoped_commands() {
         // Commands must be valid for the run's location: runner-scoped.
         assert_eq!(
             run.commands.status,
-            "homeboy --runner homeboy-lab agent-task status run-runner-commands"
+            "homeboy runner exec homeboy-lab -- homeboy agent-task status run-runner-commands"
         );
         assert_eq!(
             run.commands.logs,
-            "homeboy --runner homeboy-lab agent-task logs run-runner-commands"
+            "homeboy runner exec homeboy-lab -- homeboy agent-task logs run-runner-commands"
         );
         assert_eq!(
             run.commands.review,
-            "homeboy --runner homeboy-lab agent-task review run-runner-commands"
+            "homeboy runner exec homeboy-lab -- homeboy agent-task review run-runner-commands"
         );
         assert_eq!(
             run.commands.reconcile,
-            "homeboy --runner homeboy-lab agent-task reconcile run-runner-commands --dry-run"
+            "homeboy runner exec homeboy-lab -- homeboy agent-task reconcile run-runner-commands --dry-run"
         );
     });
 }
