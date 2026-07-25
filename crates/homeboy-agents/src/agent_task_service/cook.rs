@@ -1191,6 +1191,7 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
+    validate_cook_workspace(&options)?;
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are
     // caller-owned overrides and retain their existing behavior. A typed
@@ -1930,6 +1931,58 @@ where
         1,
         Some(&run_id),
     ))
+}
+
+/// Re-resolve the declared Cook target before a provider can run. Durable
+/// recipes may outlive provider metadata, so the filesystem identity is checked
+/// again on local, Lab, retry, and resume paths rather than trusting the plan.
+fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> {
+    let target = if let Some(record) =
+        homeboy_core::worktree::resolve_workspace_ref_if_present(&options.to_worktree)?
+    {
+        if record.state() != &homeboy_core::worktree::TaskWorktreeState::Active {
+            return Err(Error::validation_invalid_argument(
+                "to_worktree",
+                "declared Cook task worktree is no longer active",
+                Some(options.to_worktree.clone()),
+                None,
+            ));
+        }
+        PathBuf::from(record.path())
+    } else {
+        homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
+            &options.to_worktree,
+            &homeboy_core::defaults::load_config(),
+            None,
+        )?
+        .worktree
+        .path
+        .into()
+    };
+    homeboy_core::worktree_providers::validate_task_worktree_root(&target, &options.to_worktree)?;
+    let source = options.source_worktree_path.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace",
+            "Cook requires the provider workspace to be the declared task worktree",
+            Some(options.to_worktree.clone()),
+            Some(vec!["Create or select the task worktree through the configured workspace provider, then retry Cook.".to_string()]),
+        )
+    })?;
+    let target = std::fs::canonicalize(&target).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(target.display().to_string()))
+    })?;
+    let source = std::fs::canonicalize(source).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(source.display().to_string()))
+    })?;
+    if source != target {
+        return Err(Error::validation_invalid_argument(
+            "workspace",
+            "Cook provider workspace differs from its declared task worktree; refusing provider execution",
+            Some(options.to_worktree.clone()),
+            Some(vec!["Re-run Cook without a source CWD override so Homeboy binds the declared task worktree.".to_string()]),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@
 
 use serde_json::Value;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
@@ -53,12 +53,40 @@ pub(crate) fn run_cook(args: AgentTaskCookArgs) -> CmdResult<Value> {
 /// Converge a Cook promotion destination before compiling a task plan. This is
 /// controller-owned so local and Lab dispatch use the same managed checkout.
 pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::core::Result<Value> {
-    let destination = std::path::Path::new(&args.to_worktree);
-    if destination.is_dir()
-        || homeboy::core::worktree::resolve_workspace_ref_if_present(&args.to_worktree)?.is_some()
+    if let Some(record) =
+        homeboy::core::worktree::resolve_workspace_ref_if_present(&args.to_worktree)?
     {
+        if record.state() != &homeboy::core::worktree::TaskWorktreeState::Active {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "to_worktree",
+                format!(
+                    "Homeboy workspace `{}` is no longer active",
+                    record.handle()
+                ),
+                Some(args.to_worktree.clone()),
+                None,
+            ));
+        }
+        let path = PathBuf::from(record.path());
+        homeboy::core::worktree_providers::validate_task_worktree_root(&path, &args.to_worktree)?;
         return Ok(
-            serde_json::json!({ "action": "existing", "kind": "path_or_homeboy", "handle": args.to_worktree }),
+            serde_json::json!({ "action": "existing", "kind": record.source_kind(), "handle": args.to_worktree, "path": path }),
+        );
+    }
+
+    if let Ok(resolution) =
+        homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
+            &args.to_worktree,
+            &defaults::load_config(),
+            None,
+        )
+    {
+        homeboy::core::worktree_providers::validate_task_worktree_root(
+            Path::new(&resolution.worktree.path),
+            &args.to_worktree,
+        )?;
+        return Ok(
+            serde_json::json!({ "action": "existing", "kind": "provider", "provider": resolution.provider_id, "handle": resolution.worktree.handle, "path": resolution.worktree.path, "branch": resolution.worktree.branch }),
         );
     }
 
@@ -315,10 +343,20 @@ pub(crate) fn compile_cook_plan(
     args: &AgentTaskCookArgs,
     provision: Value,
 ) -> homeboy::core::Result<AgentTaskPlan> {
+    let workspace = provision
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            homeboy::core::Error::internal_unexpected(
+                "Cook destination provisioning did not return a task worktree path".to_string(),
+            )
+        })?
+        .to_string();
     let mut dispatch = dispatch_args_for_cook(args);
-    if dispatch.cwd.is_none() && dispatch.workspace.is_none() {
-        dispatch.workspace = Some(args.to_worktree.clone());
-    }
+    // Cook providers always receive the declared task checkout. `--cwd` is a
+    // dispatch input, never authority to replace the writable Cook workspace.
+    dispatch.cwd = None;
+    dispatch.workspace = Some(workspace);
     let mut request = dispatch_service::resolve_dispatch_request(dispatch.into())?;
     let mut plan = match dispatch_service::build_controller_dispatch_plan(&mut request) {
         Ok(plan) => plan,
