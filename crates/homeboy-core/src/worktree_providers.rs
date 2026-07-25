@@ -105,7 +105,7 @@ pub struct WorktreeProviderRunRef {
 ///
 /// The configured result mapping must project every field below so Homeboy
 /// never guesses safety state for an externally managed destination.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct WorktreeProviderHandle {
     pub handle: String,
     pub path: String,
@@ -138,7 +138,7 @@ pub struct WorktreeProviderProvision {
     pub idempotency_key: String,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct WorktreeProviderHandleSafety {
     pub dirty: bool,
     pub unpushed: bool,
@@ -293,7 +293,8 @@ pub fn provision_apply_enabled_worktree_provider_from_config(
     }
     run_provider_ensure_command(provider_id, &command)?;
     let resolution =
-        resolve_apply_enabled_worktree_provider_from_config(&intent.handle, config, None)?;
+        resolve_apply_enabled_worktree_provider_from_config(&intent.handle, config, None)
+            .map_err(mark_bootstrap_postcondition_failure)?;
     Ok(WorktreeProviderProvision {
         resolution,
         action: "ensured",
@@ -755,15 +756,22 @@ fn validate_provider_handle(
             None,
         ));
     }
-    let verified_gate_feedback_baseline = worktree.safety.dirty
-        && gate_feedback_baseline
-            .map(|baseline| {
-                crate::gate_feedback_baseline::validate_gate_feedback_candidate_baseline(
+    let baseline_verification = if worktree.safety.dirty {
+        match gate_feedback_baseline {
+            Some(baseline) => {
+                match crate::gate_feedback_baseline::validate_gate_feedback_candidate_baseline(
                     &path, baseline,
-                )
-            })
-            .transpose()?
-            .is_some();
+                ) {
+                    Ok(_) => BaselineVerification::Matches,
+                    Err(error) => BaselineVerification::Diverges(error.message),
+                }
+            }
+            None => BaselineVerification::Absent,
+        }
+    } else {
+        BaselineVerification::NotRequired
+    };
+    let verified_gate_feedback_baseline = baseline_verification == BaselineVerification::Matches;
     let blocked = [
         (
             worktree.safety.dirty && !verified_gate_feedback_baseline,
@@ -780,21 +788,23 @@ fn validate_provider_handle(
     .filter_map(|(blocked, name)| blocked.then_some(name))
     .collect::<Vec<_>>();
     if !blocked.is_empty() {
-        let baseline_state = if worktree.safety.dirty {
-            if gate_feedback_baseline.is_some() {
-                "gate_feedback_baseline=present"
-            } else {
-                "gate_feedback_baseline=missing"
-            }
-        } else {
-            "gate_feedback_baseline=not_required"
-        };
-        return Err(Error::validation_invalid_argument(
+        let mut error = Error::validation_invalid_argument(
             "to_worktree",
-            format!("worktree provider `{provider_id}` marked `{}` as {}; {baseline_state}; refusing to cook into an unsafe destination", worktree.handle, blocked.join(", ")),
+            dirty_worktree_message(
+                provider_id,
+                worktree,
+                &blocked,
+                &baseline_verification,
+                &path,
+            ),
             Some(worktree.handle.clone()),
-            Some(vec!["Use a clean, pushed, non-primary provider-managed worktree on the intended branch.".to_string()]),
-        ));
+            Some(vec![dirty_worktree_recovery(&path)]),
+        );
+        if worktree.safety.dirty {
+            error.details["workspace"] =
+                dirty_worktree_details(provider_id, worktree, &baseline_verification, &path);
+        }
+        return Err(error);
     }
     if crate::git::current_branch(&path).as_deref() != Some(worktree.branch.as_str()) {
         return Err(Error::validation_invalid_argument(
@@ -805,6 +815,135 @@ fn validate_provider_handle(
         ));
     }
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BaselineVerification {
+    NotRequired,
+    Absent,
+    Matches,
+    Diverges(String),
+}
+
+fn dirty_worktree_message(
+    provider_id: &str,
+    worktree: &WorktreeProviderHandle,
+    blocked: &[&str],
+    baseline: &BaselineVerification,
+    path: &std::path::Path,
+) -> String {
+    let baseline_detail = match baseline {
+        BaselineVerification::Absent => String::new(),
+        BaselineVerification::Diverges(_) => {
+            "; promoted candidate baseline does not match the current changes".to_string()
+        }
+        BaselineVerification::NotRequired | BaselineVerification::Matches => String::new(),
+    };
+    let changed_paths = changed_paths(path);
+    let evidence = if changed_paths.is_empty() {
+        format!("; inspect with {}", git_status_command(path))
+    } else {
+        format!("; changed paths: {}", changed_paths.join(", "))
+    };
+    format!(
+        "worktree provider `{provider_id}` resolved `{}` at {} on branch `{}` but marked it {}; workspace.resolved_but_dirty{baseline_detail}{evidence}; refusing to cook into an unsafe destination",
+        worktree.handle,
+        path.display(),
+        worktree.branch,
+        blocked.join(", "),
+    )
+}
+
+fn dirty_worktree_details(
+    provider_id: &str,
+    worktree: &WorktreeProviderHandle,
+    baseline: &BaselineVerification,
+    path: &std::path::Path,
+) -> Value {
+    let (reason, baseline_error) = match baseline {
+        BaselineVerification::Absent => ("unattributed_drift", None),
+        BaselineVerification::Diverges(error) => ("divergent_user_edits", Some(error.clone())),
+        BaselineVerification::NotRequired | BaselineVerification::Matches => unreachable!(),
+    };
+    let mut details = serde_json::json!({
+        "classification": "workspace.resolved_but_dirty",
+        "reason": reason,
+        "owning_layer": "worktree_provider",
+        "provider_id": provider_id,
+        "resolution": {
+            "handle": worktree.handle,
+            "path": worktree.path,
+            "branch": worktree.branch,
+            "primary": worktree.safety.primary,
+            "safety": worktree.safety,
+        },
+        "changed_paths": changed_paths(path),
+        "inspect_command": git_status_command(path),
+        "recovery_action": dirty_worktree_recovery(path),
+    });
+    if let Some(error) = baseline_error {
+        details["baseline_verification_error"] = Value::String(error);
+    }
+    details
+}
+
+fn changed_paths(path: &std::path::Path) -> Vec<String> {
+    let Ok(output) = Command::new("git")
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .current_dir(path)
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.get(3..))
+        .map(str::to_string)
+        .take(20)
+        .collect()
+}
+
+fn git_status_command(path: &std::path::Path) -> String {
+    render_provider_command(&[
+        "git".to_string(),
+        "-C".to_string(),
+        path.display().to_string(),
+        "status".to_string(),
+        "--short".to_string(),
+        "--untracked-files=all".to_string(),
+    ])
+}
+
+fn dirty_worktree_recovery(path: &std::path::Path) -> String {
+    format!(
+        "Inspect the provider-owned checkout with {}; restore or commit only changes authorized by its owning workflow, then retry Cook.",
+        git_status_command(path)
+    )
+}
+
+fn mark_bootstrap_postcondition_failure(mut error: Error) -> Error {
+    let Some(workspace) = error.details.get_mut("workspace") else {
+        return error;
+    };
+    if workspace["classification"] != "workspace.resolved_but_dirty" {
+        return error;
+    }
+    workspace["reason"] = Value::String("fresh_bootstrap_drift".to_string());
+    workspace["owning_layer"] = Value::String("worktree_provider_bootstrap".to_string());
+    let recovery = workspace["recovery_action"].as_str().map(|action| {
+        format!("Provider bootstrap reported success with tracked changes. {action}")
+    });
+    if let Some(recovery) = recovery {
+        workspace["recovery_action"] = Value::String(recovery);
+    }
+    error.message = format!(
+        "{}; provider bootstrap postcondition failed: ensure must leave a clean tracked checkout",
+        error.message
+    );
+    error
 }
 
 /// Verify that a provider target is a linked Git worktree rooted at the exact
@@ -1484,7 +1623,7 @@ mod tests {
         fs::write(
             &script,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -f '{}' ]; then\n    printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-9908\",\"path\":\"{}\",\"branch\":\"fix/9908\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n  else\n    printf '%s\\n' '{{\"worktrees\":[]}}'\n  fi\nelse\n  git init -b fix/9908 '{}' >/dev/null\n  printf '%s|%s|%s|%s|%s' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" > '{}'\nfi\n",
+                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -f '{}' ]; then\n    printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-9908\",\"path\":\"{}\",\"branch\":\"fix/9908\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n  else\n    printf '%s\\n' '{{\"worktrees\":[]}}'\n  fi\nelse\n  git init -b fix/9908 '{}' >/dev/null\n  printf '%s|%s|%s|%s|%s|%s' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" > '{}'\nfi\n",
                 state.display(),
                 workspace.display(),
                 workspace.display(),
@@ -2053,6 +2192,7 @@ mod tests {
     fn rejects_provider_handles_with_unsafe_safety_metadata() {
         let workspace = tempfile::tempdir().expect("workspace");
         git_init(workspace.path(), "cook-target");
+        fs::write(workspace.path().join("bootstrap.txt"), "drift\n").expect("write drift");
         let script = fake_list_provider_script(serde_json::json!({
             "worktrees": [{
                 "handle": "fixture@cook-target",
@@ -2078,6 +2218,170 @@ mod tests {
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains("dirty"));
+        assert!(err.message.contains("workspace.resolved_but_dirty"));
+        assert_eq!(
+            err.details["workspace"]["classification"],
+            "workspace.resolved_but_dirty"
+        );
+        assert_eq!(err.details["workspace"]["provider_id"], "fixture");
+        assert_eq!(
+            err.details["workspace"]["resolution"]["handle"],
+            "fixture@cook-target"
+        );
+        assert_eq!(
+            err.details["workspace"]["resolution"]["branch"],
+            "cook-target"
+        );
+        assert_eq!(err.details["workspace"]["reason"], "unattributed_drift");
+        assert_eq!(
+            err.details["workspace"]["changed_paths"],
+            serde_json::json!(["bootstrap.txt"])
+        );
+        assert!(err.details["workspace"]["inspect_command"]
+            .as_str()
+            .is_some_and(|command| command.contains("git") && command.contains("status")));
+    }
+
+    #[test]
+    fn matching_promoted_baseline_is_allowed_and_divergent_edits_remain_refused() {
+        struct FixtureBaselineProvider;
+
+        impl crate::gate_feedback_baseline::GateFeedbackBaselineProvider for FixtureBaselineProvider {
+            fn validate_gate_feedback_candidate_baseline(
+                &self,
+                _root: &std::path::Path,
+                baseline: &Value,
+            ) -> Result<String> {
+                if baseline["matches"] == true {
+                    Ok("matching fixture candidate".to_string())
+                } else {
+                    Err(Error::validation_invalid_argument(
+                        "gate_feedback_candidate_baseline",
+                        "fixture baseline differs from the current worktree",
+                        None,
+                        None,
+                    ))
+                }
+            }
+        }
+
+        crate::gate_feedback_baseline::register_gate_feedback_baseline_provider(Box::new(
+            FixtureBaselineProvider,
+        ));
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "cook-target");
+        fs::write(workspace.path().join("candidate.txt"), "candidate\n").expect("write candidate");
+        let worktree = WorktreeProviderHandle {
+            handle: "fixture@cook-target".to_string(),
+            path: workspace.path().display().to_string(),
+            branch: "cook-target".to_string(),
+            safety: WorktreeProviderHandleSafety {
+                dirty: true,
+                unpushed: false,
+                primary: false,
+            },
+        };
+
+        validate_provider_handle(
+            "fixture",
+            &worktree,
+            Some(&serde_json::json!({ "matches": true })),
+            None,
+        )
+        .expect("matching promoted baseline is reusable");
+
+        let error = validate_provider_handle(
+            "fixture",
+            &worktree,
+            Some(&serde_json::json!({ "matches": false })),
+            None,
+        )
+        .expect_err("divergent edits must remain fail-closed");
+        assert_eq!(error.details["workspace"]["reason"], "divergent_user_edits");
+        assert!(error
+            .message
+            .contains("promoted candidate baseline does not match"));
+    }
+
+    #[test]
+    fn bootstrap_success_with_tracked_drift_is_a_typed_postcondition_failure() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("destination");
+        let state = temp.path().join("state");
+        let script = temp.path().join("provider");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -f '{}' ]; then\n    printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-9908\",\"path\":\"{}\",\"branch\":\"fix/9908\",\"safety\":{{\"dirty\":true,\"unpushed\":false,\"primary\":false}}}}]}}'\n  else\n    printf '%s\\n' '{{\"worktrees\":[]}}'\n  fi\nelse\n  git init -b fix/9908 '{}' >/dev/null && git -C '{}' config user.email test@example.com && git -C '{}' config user.name Test && printf base > '{}/tracked.txt' && git -C '{}' add tracked.txt && git -C '{}' commit -m base >/dev/null && printf drift >> '{}/tracked.txt' && touch '{}'\nfi\n",
+                state.display(),
+                workspace.display(),
+                workspace.display(),
+                workspace.display(),
+                workspace.display(),
+                workspace.display(),
+                workspace.display(),
+                workspace.display(),
+                workspace.display(),
+                state.display(),
+            ),
+        )
+        .expect("write provider");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&script).expect("metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script, permissions).expect("executable");
+        }
+        let mut config = HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: true,
+                commands: WorktreeProviderCommands {
+                    resolve: Some(vec![
+                        script.display().to_string(),
+                        "resolve".to_string(),
+                        "{handle}".to_string(),
+                    ]),
+                    ensure: Some(vec![script.display().to_string(), "ensure".to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(worktrees_mapping()),
+            },
+        );
+
+        let error = provision_apply_enabled_worktree_provider_from_config(
+            &WorktreeProviderCreateIntent {
+                handle: "homeboy@fix-9908".to_string(),
+                repo: "homeboy".to_string(),
+                base: "main".to_string(),
+                head: "fix/9908".to_string(),
+                task_url: "https://example.test/9908".to_string(),
+            },
+            &config,
+        )
+        .expect_err("ensure cannot report success with tracked drift");
+
+        assert!(error.message.contains("bootstrap postcondition failed"));
+        assert_eq!(
+            error.details["workspace"]["classification"],
+            "workspace.resolved_but_dirty"
+        );
+        assert_eq!(
+            error.details["workspace"]["reason"],
+            "fresh_bootstrap_drift"
+        );
+        assert_eq!(
+            error.details["workspace"]["owning_layer"],
+            "worktree_provider_bootstrap"
+        );
+        assert_eq!(
+            error.details["workspace"]["changed_paths"],
+            serde_json::json!(["tracked.txt"])
+        );
     }
 
     #[test]
