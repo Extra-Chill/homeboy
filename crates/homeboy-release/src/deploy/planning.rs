@@ -858,8 +858,13 @@ pub(super) fn resolve_project_component(
     standalone_snapshot: Option<&project::StandaloneComponentConfigSnapshot>,
     projection: Option<&super::types::PreparedDeployProjection>,
 ) -> Result<Component> {
-    let Some(source) = projection.and_then(|projection| projection.components.get(component_id))
-    else {
+    let snapshot_key = format!("{}:{component_id}", project.id);
+    let Some(source) = projection.and_then(|projection| {
+        projection
+            .components
+            .get(&snapshot_key)
+            .or_else(|| projection.components.get(component_id))
+    }) else {
         return project::resolve_project_component_with_standalone_snapshot(
             project,
             component_id,
@@ -882,6 +887,9 @@ pub(super) fn resolve_project_component(
             )
         })?;
 
+    if projection.is_some_and(|projection| projection.components.contains_key(&snapshot_key)) {
+        return Ok(source.clone());
+    }
     let mut component = source.clone();
     if let Some(remote_path) = attachment
         .remote_path

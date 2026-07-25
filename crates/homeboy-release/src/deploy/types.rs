@@ -21,7 +21,7 @@ use super::path_roots::resolve_effective_remote_path;
 ///
 /// The deployer still applies each project's remote-path and override binding,
 /// but never re-resolves the source checkout after a release has accepted it.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct PreparedDeployProjection {
     pub components: BTreeMap<String, Component>,
 }

@@ -1,4 +1,7 @@
 use crate::deploy::{self, DeployConfig, PreparedDeployArtifact, PreparedDeployProjection};
+use homeboy_core::error::{Error, Result};
+use std::collections::BTreeMap;
+use std::fs;
 
 use super::executor::release_cleanup_paths;
 use super::types::{
@@ -89,31 +92,62 @@ fn execute_deployment(
             Ok(artifact) => artifact,
             Err(error) => return failed_deployment(&projects, error.to_string()),
         };
-    let config = release_deployment_config(component, expected_version, prepared_artifact);
+    let config = match release_deployment_config(
+        component,
+        expected_version,
+        prepared_artifact,
+        &projects,
+    ) {
+        Ok(config) => config,
+        Err(error) => return failed_deployment(&projects, error.to_string()),
+    };
 
     let deployment = match deploy::run_multi(&projects, &[component_id.to_string()], &config) {
-        Ok(result) => ReleaseDeploymentResult {
-            projects: result
-                .projects
-                .into_iter()
-                .map(|project| ReleaseProjectDeployResult {
-                    project_id: project.project_id,
-                    status: project.status,
-                    error: project.error,
-                    component_result: project
-                        .results
-                        .into_iter()
-                        .find(|result| result.id == *component_id),
-                })
-                .collect(),
-            summary: ReleaseDeploymentSummary {
-                total_projects: result.summary.total_projects,
-                succeeded: result.summary.succeeded,
-                failed: result.summary.failed,
-                skipped: result.summary.skipped,
-                planned: result.summary.planned,
-            },
-        },
+        Ok(result) => {
+            if result.summary.failed > 0 {
+                if let Some(run_id) = result.deploy_run_id.as_deref() {
+                    if let Err(error) =
+                        save_recovery(component, expected_version, &projects, &config, run_id)
+                    {
+                        return failed_deployment(
+                            &projects,
+                            format!(
+                                "Deployment failed and its durable recovery checkpoint could not be saved: {error}"
+                            ),
+                        );
+                    }
+                }
+            } else {
+                if let Err(error) = remove_recovery(&component.id) {
+                    return failed_deployment(
+                        &projects,
+                        format!("Deployment succeeded but its recovery checkpoint could not be cleared: {error}"),
+                    );
+                }
+            }
+            ReleaseDeploymentResult {
+                projects: result
+                    .projects
+                    .into_iter()
+                    .map(|project| ReleaseProjectDeployResult {
+                        project_id: project.project_id,
+                        status: project.status,
+                        error: project.error,
+                        component_result: project
+                            .results
+                            .into_iter()
+                            .find(|result| result.id == *component_id),
+                    })
+                    .collect(),
+                summary: ReleaseDeploymentSummary {
+                    total_projects: result.summary.total_projects,
+                    succeeded: result.summary.succeeded,
+                    failed: result.summary.failed,
+                    skipped: result.summary.skipped,
+                    planned: result.summary.planned,
+                },
+            }
+        }
         Err(error) => ReleaseDeploymentResult {
             projects: projects
                 .iter()
@@ -255,7 +289,8 @@ fn release_deployment_config(
     component: &homeboy_core::component::Component,
     expected_version: Option<&str>,
     prepared_artifact: PreparedDeployArtifact,
-) -> DeployConfig {
+    projects: &[String],
+) -> Result<DeployConfig> {
     let component_id = &component.id;
     let mut requested_refs = std::collections::BTreeMap::new();
     requested_refs.insert(component_id.to_string(), prepared_artifact.tag.clone());
@@ -272,7 +307,40 @@ fn release_deployment_config(
     let mut preflighted_component_identities = std::collections::BTreeMap::new();
     preflighted_component_identities.insert(component_id.to_string(), identity);
 
-    DeployConfig {
+    let mut projection = PreparedDeployProjection {
+        components: BTreeMap::from([(component_id.to_string(), component.clone())]),
+    };
+    for project_id in projects {
+        let project = homeboy_core::project::load(project_id)?;
+        let attachment = project
+            .components
+            .iter()
+            .find(|entry| entry.id == *component_id)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "components",
+                    format!(
+                        "Project '{}' has no attached component '{}'",
+                        project.id, component_id
+                    ),
+                    Some(project.id.clone()),
+                    None,
+                )
+            })?;
+        let mut target = component.clone();
+        if let Some(remote_path) = attachment
+            .remote_path
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+        {
+            target.remote_path = remote_path.to_string();
+        }
+        target = homeboy_core::project::apply_component_overrides(&target, &project);
+        projection
+            .components
+            .insert(format!("{}:{component_id}", project.id), target);
+    }
+    Ok(DeployConfig {
         component_ids: vec![component_id.to_string()],
         all: false,
         outdated: false,
@@ -293,16 +361,132 @@ fn release_deployment_config(
         resolved_refs,
         preflighted_source_paths,
         preflighted_component_identities,
-        prepared_projection: Some(PreparedDeployProjection {
-            components: std::collections::BTreeMap::from([(
-                component_id.to_string(),
-                component.clone(),
-            )]),
-        }),
+        prepared_projection: Some(projection),
         tagged: false,
         prepared_artifact: Some(prepared_artifact),
         resume_run_id: None,
+    })
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DeploymentRecovery {
+    component_id: String,
+    expected_version: Option<String>,
+    projects: Vec<String>,
+    artifact: PreparedDeployArtifact,
+    projection: PreparedDeployProjection,
+    deploy_run_id: String,
+}
+
+fn recovery_path(component_id: &str) -> Result<std::path::PathBuf> {
+    Ok(homeboy_core::paths::homeboy_data()?
+        .join("release-deploy-runs")
+        .join(format!("{}.json", component_id.replace('/', "_"))))
+}
+
+fn save_recovery(
+    component: &homeboy_core::component::Component,
+    expected_version: Option<&str>,
+    projects: &[String],
+    config: &DeployConfig,
+    deploy_run_id: &str,
+) -> Result<()> {
+    let record = DeploymentRecovery {
+        component_id: component.id.clone(),
+        expected_version: expected_version.map(str::to_string),
+        projects: projects.to_vec(),
+        artifact: config
+            .prepared_artifact
+            .clone()
+            .expect("release deploy has prepared artifact"),
+        projection: config
+            .prepared_projection
+            .clone()
+            .expect("release deploy has projection"),
+        deploy_run_id: deploy_run_id.to_string(),
+    };
+    let path = recovery_path(&component.id)?;
+    fs::create_dir_all(path.parent().expect("recovery path parent"))
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    let temporary = path.with_extension("json.tmp");
+    fs::write(
+        &temporary,
+        serde_json::to_vec(&record)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+    )
+    .map_err(|error| {
+        Error::internal_io(error.to_string(), Some(temporary.display().to_string()))
+    })?;
+    fs::rename(&temporary, &path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
+}
+
+fn remove_recovery(component_id: &str) -> Result<()> {
+    let path = recovery_path(component_id)?;
+    if path.exists() {
+        fs::remove_file(path).map_err(|error| Error::internal_io(error.to_string(), None))?;
     }
+    Ok(())
+}
+
+pub(super) fn resume_deployment(component_id: &str) -> Result<Option<ReleaseDeploymentResult>> {
+    let path = recovery_path(component_id)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let record: DeploymentRecovery = serde_json::from_slice(&fs::read(&path).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(path.display().to_string()))
+    })?)
+    .map_err(|error| Error::internal_json(error.to_string(), Some(path.display().to_string())))?;
+    if record.component_id != component_id {
+        return Err(Error::validation_invalid_argument(
+            "recover",
+            "Release deployment recovery component identity does not match",
+            None,
+            None,
+        ));
+    }
+    let config = release_deployment_config_from_record(&record);
+    let result = deploy::run_multi(&record.projects, &[component_id.to_string()], &config)?;
+    let deployment = ReleaseDeploymentResult {
+        projects: result
+            .projects
+            .into_iter()
+            .map(|project| ReleaseProjectDeployResult {
+                project_id: project.project_id,
+                status: project.status,
+                error: project.error,
+                component_result: project
+                    .results
+                    .into_iter()
+                    .find(|entry| entry.id == component_id),
+            })
+            .collect(),
+        summary: ReleaseDeploymentSummary {
+            total_projects: result.summary.total_projects,
+            succeeded: result.summary.succeeded,
+            failed: result.summary.failed,
+            skipped: result.summary.skipped,
+            planned: result.summary.planned,
+        },
+    };
+    if deployment.summary.failed == 0 {
+        remove_recovery(component_id)?;
+    }
+    Ok(Some(deployment))
+}
+
+fn release_deployment_config_from_record(record: &DeploymentRecovery) -> DeployConfig {
+    let mut config = release_deployment_config(
+        &record.projection.components[&record.component_id],
+        record.expected_version.as_deref(),
+        record.artifact.clone(),
+        &[],
+    )
+    .expect("stored release deployment config is valid");
+    config.prepared_projection = Some(record.projection.clone());
+    config.resume_run_id = Some(record.deploy_run_id.clone());
+    config
 }
 
 fn release_deploy_targets(component_id: &str) -> Vec<String> {
@@ -469,7 +653,9 @@ mod tests {
             },
             Some("1.2.3"),
             artifact.clone(),
-        );
+            &[],
+        )
+        .expect("release deploy config");
 
         assert_eq!(config.component_ids, vec!["demo".to_string()]);
         assert_eq!(config.expected_version, Some("1.2.3".to_string()));

@@ -53,6 +53,28 @@ fn shell_quote(value: &str) -> String {
 }
 
 pub(super) fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32)> {
+    if let Some(deployment) = super::deployment::resume_deployment(&input.component_id)? {
+        let failed = deployment.summary.failed > 0;
+        return Ok((
+            ReleaseCommandResult {
+                component_id: input.component_id.clone(),
+                status: if failed { "deploy_recovery_failed" } else { "released" }.to_string(),
+                phase: release_execution_plan(input).phase,
+                bump_type: "recover".to_string(),
+                dry_run: false,
+                releasable_commits: 0,
+                new_version: None,
+                tag: None,
+                skipped_reason: None,
+                plan: None,
+                run: None,
+                deployment: Some(deployment),
+                continuation_command: None,
+                release_summary: vec!["Resumed only incomplete release deployment targets; publication steps were not replayed.".to_string()],
+            },
+            if failed { 1 } else { 0 },
+        ));
+    }
     let component = load_component(
         &input.component_id,
         &ReleaseOptions {
