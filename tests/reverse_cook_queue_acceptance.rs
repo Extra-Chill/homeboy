@@ -68,6 +68,17 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
         &checkout,
         &["commit", "-m", "ignore runner workspace"],
     );
+    let task_worktree = context.root().join("cook-task");
+    homeboy_core::test_support::run_git_fixture_command(
+        &checkout,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "cook-task",
+            task_worktree.to_str().expect("task worktree path"),
+        ],
+    );
     let provider = context.root().join("provider.sh");
     std::fs::write(
         &provider,
@@ -191,7 +202,7 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
             "--cwd",
             checkout.to_str().expect("checkout path"),
             "--to-worktree",
-            checkout.to_str().expect("checkout path"),
+            task_worktree.to_str().expect("task worktree path"),
             "--provider-command",
             provider.to_str().expect("provider path"),
             "--verify",

@@ -842,6 +842,67 @@ pub fn claim_continuation() -> Result<Option<ClaimedCookContinuation>> {
     Ok(None)
 }
 
+/// Claim one specific continuation without consuming another Cook's pending
+/// lifecycle work. Interactive continuation uses this exact key while workers
+/// continue to claim the next available entry.
+pub fn claim_continuation_for(
+    cook_id: &str,
+    run_id: &str,
+) -> Result<Option<ClaimedCookContinuation>> {
+    let key = format!("{cook_id}:{run_id}");
+    let hash = format!("{:x}", sha2::Sha256::digest(key.as_bytes()));
+    let root = queue_root()?;
+    fs::create_dir_all(&root)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?;
+    reclaim_dead_claims(&root)?;
+    let path = root.join(format!("{hash}.pending"));
+    let claimed = path.with_extension(format!("claimed.{}", std::process::id()));
+    match fs::rename(&path, &claimed) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(path.display().to_string()),
+            ))
+        }
+    }
+    let raw = fs::read_to_string(&claimed).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(claimed.display().to_string()))
+    })?;
+    let continuation: AgentTaskCookContinuation = match serde_json::from_str(&raw) {
+        Ok(continuation) => continuation,
+        Err(error) => {
+            let error = Error::validation_invalid_argument(
+                "cook_continuation",
+                format!("malformed durable continuation: {error}"),
+                Some(claimed.display().to_string()),
+                None,
+            );
+            fail_claimed_path(&claimed, &error.message)?;
+            return Err(error);
+        }
+    };
+    if let Err(error) = validate_continuation(&continuation) {
+        fail_claimed_path(&claimed, &error.message)?;
+        return Err(error);
+    }
+    if continuation.key != key {
+        let error = Error::validation_invalid_argument(
+            "cook_continuation",
+            "durable continuation key does not match its claimed Cook attempt",
+            Some(continuation.key.clone()),
+            None,
+        );
+        fail_claimed_path(&claimed, &error.message)?;
+        return Err(error);
+    }
+    Ok(Some(ClaimedCookContinuation {
+        continuation,
+        path: claimed,
+    }))
+}
+
 pub fn reconstruct_options(recipe: &AgentTaskCookRecipe) -> Result<AgentTaskCookServiceOptions> {
     reconstruct_options_with_dispatcher(recipe, None)
 }
@@ -1541,6 +1602,33 @@ mod tests {
                 .expect("durable queued continuation");
             assert_eq!(first.continuation().key, "cook:run");
             assert!(claim_continuation().unwrap().is_none());
+        });
+    }
+
+    #[test]
+    fn targeted_claim_does_not_consume_another_cooks_continuation() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut other = recipe();
+            other.cook_id = "other".to_string();
+            other.attempts[0].run_id = "other-run".to_string();
+            write_recipe(&recipe()).unwrap();
+            write_recipe(&other).unwrap();
+            enqueue_terminal_continuation("cook", "run").unwrap();
+            enqueue_terminal_continuation("other", "other-run").unwrap();
+
+            let claim = claim_continuation_for("cook", "run")
+                .unwrap()
+                .expect("targeted continuation");
+            assert_eq!(claim.continuation().key, "cook:run");
+            claim.complete().unwrap();
+            assert_eq!(
+                claim_continuation()
+                    .unwrap()
+                    .expect("other continuation remains pending")
+                    .continuation()
+                    .key,
+                "other:other-run"
+            );
         });
     }
 

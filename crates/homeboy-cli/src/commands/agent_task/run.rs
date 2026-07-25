@@ -85,6 +85,52 @@ pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
         ));
     }
 
+    if matches!(
+        record.state,
+        agent_task_lifecycle::AgentTaskRunState::Succeeded
+            | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+            | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
+    ) {
+        // Claim the same durable queue entry used by daemon workers. This keeps
+        // an interactive continuation from racing a restarted controller.
+        agent_task_service::enqueue_terminal_continuation(&recipe.cook_id, &run_id)?;
+        let Some(claim) = agent_task_service::claim_continuation_for(&recipe.cook_id, &run_id)?
+        else {
+            return Ok((
+                cook_continuation_pending(&recipe.cook_id, &run_id, &format!("{:?}", record.state)),
+                0,
+            ));
+        };
+        let mut result = None;
+        let exit_code = agent_task_service::consume_claimed_with_dispatcher(
+            claim,
+            |dispatch_recipe| {
+                crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(dispatch_recipe)
+            },
+            |options| {
+                let cook = agent_task_service::run_cook(
+                    options,
+                    ExtensionProviderAgentTaskExecutor::discover(),
+                )?;
+                let exit_code = cook.exit_code;
+                result = Some(cook.value);
+                Ok(exit_code)
+            },
+        )?;
+        let value = cook_report_with_continuation(
+            serde_json::to_value(result.ok_or_else(|| {
+                homeboy::core::Error::internal_unexpected(
+                    "claimed Cook continuation returned no result",
+                )
+            })?)
+            .unwrap_or(Value::Null),
+        );
+        return Ok((
+            super::status::compact_cook_report(value, args.full),
+            exit_code,
+        ));
+    }
+
     let dispatcher = crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(
         &recipe.promotion_transport["attempt_dispatch"],
     )?;
@@ -111,6 +157,18 @@ pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
         super::status::compact_cook_report(value, args.full),
         result.exit_code,
     ))
+}
+
+fn cook_continuation_pending(cook_id: &str, run_id: &str, provider_state: &str) -> Value {
+    serde_json::json!({
+        "schema": "homeboy/agent-task-cook/v1",
+        "cook_id": cook_id,
+        "latest_run_id": run_id,
+        "status": "continuation_pending",
+        "provider": { "state": provider_state, "run_id": run_id },
+        "remaining_phases": ["harvest", "review", "gates", "promotion", "finalization"],
+        "continuation_command": format!("homeboy agent-task cook-continue {cook_id}"),
+    })
 }
 
 fn cook_continuation_status(cook_id: &str, run_id: &str, provider_state: &str) -> Value {
