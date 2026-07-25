@@ -587,6 +587,19 @@ pub(super) fn prepare_attempt_workspace(
     let Some(base) = base else {
         return Ok(None);
     };
+    if let Some(attestation) = request.metadata.get("cook_workspace_identity").cloned() {
+        if !crate::agent_task_provider::command_runner::workspace_matches_attestation(
+            &root,
+            &attestation,
+        ) {
+            return Err(HarvestError::WorkspaceIdentityChanged { path: root });
+        }
+        request
+            .metadata
+            .as_object_mut()
+            .expect("Cook workspace identity belongs to object metadata")
+            .remove("cook_workspace_identity");
+    }
     let identity = format!("attempt-{}", uuid::Uuid::new_v4());
     // The attempt checkout is a child of the scheduler's durably registered
     // scratch lease, never an untracked system-temporary worktree.
@@ -759,6 +772,123 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::fs;
     use std::process::Command;
+
+    #[cfg(unix)]
+    fn workspace_attestation(path: &Path) -> serde_json::Value {
+        use std::os::unix::fs::MetadataExt;
+
+        let canonical = fs::canonicalize(path).expect("canonical workspace");
+        let metadata = fs::symlink_metadata(&canonical).expect("workspace metadata");
+        let git_file = canonical.join(".git");
+        let git_content = fs::read_to_string(&git_file).expect("linked git file");
+        let gitdir_target = git_content
+            .strip_prefix("gitdir: ")
+            .map(str::trim)
+            .and_then(|target| fs::canonicalize(canonical.join(target)).ok())
+            .expect("canonical gitdir target");
+        serde_json::json!({
+            "canonical_path": canonical,
+            "device": metadata.dev(),
+            "inode": metadata.ino(),
+            "git_file_is_file": true,
+            "git_file_content": git_content,
+            "gitdir_target": gitdir_target,
+        })
+    }
+
+    #[cfg(unix)]
+    fn cook_request(workspace: &Path) -> AgentTaskRequest {
+        serde_json::from_value(serde_json::json!({
+            "schema": crate::agent_task::AGENT_TASK_REQUEST_SCHEMA,
+            "task_id": "cook-workspace-identity",
+            "executor": { "backend": "test" },
+            "instructions": "test",
+            "workspace": { "root": workspace },
+            "metadata": {
+                "cook_workspace_identity": workspace_attestation(workspace),
+            },
+        }))
+        .expect("Cook request")
+    }
+
+    #[cfg(unix)]
+    fn linked_source_workspace(temp: &tempfile::TempDir) -> (PathBuf, String) {
+        let repository = temp.path().join("repository");
+        fs::create_dir(&repository).expect("repository");
+        git(&repository, &["init", "-b", "main"]);
+        fs::write(repository.join("tracked.txt"), "base").expect("tracked file");
+        git(&repository, &["add", "tracked.txt"]);
+        git(
+            &repository,
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        let source = temp.path().join("source");
+        git(
+            &repository,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "test-source",
+                source.to_str().expect("source path"),
+                "HEAD",
+            ],
+        );
+        let head = git_output(&source, &["rev-parse", "HEAD"]).expect("source head");
+        (source, head)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn isolated_attempt_validates_then_removes_source_cook_identity() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (source, head) = linked_source_workspace(&temp);
+        let mut request = cook_request(&source);
+        let scratch = temp.path().join("scratch");
+        fs::create_dir(&scratch).expect("scratch");
+
+        let attempt = prepare_attempt_workspace(&mut request, Some(&head), None, &scratch)
+            .expect("attempt workspace")
+            .expect("isolated attempt");
+
+        assert_ne!(request.workspace.root.as_deref(), source.to_str());
+        assert!(request.metadata.get("cook_workspace_identity").is_none());
+        attempt.cleanup().expect("clean attempt workspace");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn isolated_attempt_refuses_changed_source_cook_identity() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (source, head) = linked_source_workspace(&temp);
+        let mut request = cook_request(&source);
+        let replacement = temp.path().join("replacement-gitdir");
+        fs::create_dir(&replacement).expect("replacement gitdir");
+        fs::write(
+            source.join(".git"),
+            format!("gitdir: {}\n", replacement.display()),
+        )
+        .expect("replace linked git target");
+        let scratch = temp.path().join("scratch");
+        fs::create_dir(&scratch).expect("scratch");
+
+        let error = prepare_attempt_workspace(&mut request, Some(&head), None, &scratch)
+            .expect_err("changed source identity must fail closed");
+
+        assert!(matches!(
+            error,
+            HarvestError::WorkspaceIdentityChanged { .. }
+        ));
+        assert!(!scratch.join("workspace").exists());
+    }
 
     #[test]
     fn harvest_context_resolves_direct_lab_transport_references() {

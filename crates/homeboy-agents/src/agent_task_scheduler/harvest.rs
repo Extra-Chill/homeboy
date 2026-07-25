@@ -552,6 +552,9 @@ pub(crate) enum HarvestError {
     CandidateBaselineMismatch {
         message: String,
     },
+    WorkspaceIdentityChanged {
+        path: PathBuf,
+    },
 }
 
 pub(super) fn committed_harvest_preflight_outcome(task_id: String) -> AgentTaskOutcome {
@@ -621,6 +624,12 @@ pub(super) fn committed_harvest_failure(
             "agent_task.gate_feedback_candidate_baseline_mismatch",
             format!("refusing gate-feedback retry candidate baseline: {message}"),
             serde_json::json!({ "error": message }),
+        ),
+        HarvestError::WorkspaceIdentityChanged { path } => (
+            "agent_task.workspace_identity_changed",
+            "Cook source workspace identity changed before attempt materialization; refusing execution"
+                .to_string(),
+            serde_json::json!({ "workspace": path }),
         ),
     };
     outcome.status = AgentTaskOutcomeStatus::Failed;

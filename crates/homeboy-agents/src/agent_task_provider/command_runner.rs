@@ -594,7 +594,10 @@ pub(super) fn run_materialized_provider_command_once(
 }
 
 #[cfg(unix)]
-fn workspace_matches_attestation(path: &std::path::Path, attestation: &serde_json::Value) -> bool {
+pub(crate) fn workspace_matches_attestation(
+    path: &std::path::Path,
+    attestation: &serde_json::Value,
+) -> bool {
     use std::os::unix::fs::MetadataExt;
     let Ok(canonical) = std::fs::canonicalize(path) else {
         return false;
@@ -635,7 +638,10 @@ fn linked_git_metadata_matches(
 }
 
 #[cfg(not(unix))]
-fn workspace_matches_attestation(path: &std::path::Path, attestation: &serde_json::Value) -> bool {
+pub(crate) fn workspace_matches_attestation(
+    path: &std::path::Path,
+    attestation: &serde_json::Value,
+) -> bool {
     std::fs::canonicalize(path)
         .ok()
         .and_then(|path| path.to_str().map(str::to_string))
