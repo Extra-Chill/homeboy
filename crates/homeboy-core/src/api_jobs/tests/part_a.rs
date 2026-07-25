@@ -135,6 +135,22 @@ fn admission_leases_create_renew_expire_and_release_capacity_with_an_injected_cl
 }
 
 #[test]
+fn status_excludes_an_expired_admission_before_daemon_restart_reconciles_it() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open_without_reconciliation(&path).expect("open store");
+    store
+        .create_admission_at(json!({ "admission": { "state": "reserved" } }), 0)
+        .expect("create already-expired admission");
+
+    assert_eq!(
+        JobStore::active_count_at_path(&path).expect("status capacity"),
+        0,
+        "a caller that died before release cannot make an idle daemon report work"
+    );
+}
+
+#[test]
 fn admission_lease_rejects_wrong_tokens_and_terminal_idempotency_replays() {
     let store = JobStore::default();
     let now = 10_000;

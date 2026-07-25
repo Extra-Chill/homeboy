@@ -5,6 +5,7 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -22,7 +23,9 @@ const PIN_DIR: &str = "pins";
 const DEFAULT_TTL: Duration = Duration::from_secs(30 * 60);
 const PIN_DRAIN_POLL: Duration = Duration::from_millis(100);
 const SUBPROCESS_LEASE_ENV: &str = "HOMEBOY_RUNTIME_PROMOTION_LEASE";
-const ACQUIRE_DISAPPEARED_LEASE_RETRIES: usize = 1;
+// Directory creation publishes the lock before its atomically-renamed record.
+// Give concurrent readers a bounded window to observe that publication.
+const ACQUIRE_DISAPPEARED_LEASE_RETRIES: usize = 20;
 const COMPATIBLE_WAIT_POLL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +36,16 @@ pub struct RuntimePromotionLeaseRecord {
     pub target: String,
     pub generation: String,
     pub started_at: String,
+    /// Linux start ticks fence PID reuse. Platforms that cannot supply this
+    /// evidence retain a live PID as a fail-closed owner.
+    #[serde(default)]
+    pub linux_starttime_ticks: Option<u64>,
+    /// Written at transaction boundaries. Expiry is diagnostic only: it never
+    /// authorizes stealing from a process still proven live.
+    #[serde(default)]
+    pub heartbeat_at: String,
+    #[serde(default)]
+    pub expires_at: String,
     /// A random capability is required when the transaction crosses a process
     /// boundary. The promotion directory is already local-user state.
     #[serde(default)]
@@ -42,9 +55,16 @@ pub struct RuntimePromotionLeaseRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SubprocessLeaseCapability {
     owner_pid: u32,
+    owner_linux_starttime_ticks: u64,
     target: String,
     generation: String,
     capability: String,
+}
+
+thread_local! {
+    // Direct reentrancy is deliberately capability-based. A matching PID alone
+    // is not ownership evidence because PIDs are reusable after a restart.
+    static LOCAL_LEASE_CAPABILITIES: RefCell<Vec<SubprocessLeaseCapability>> = const { RefCell::new(Vec::new()) };
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +110,12 @@ enum LeaseRecordReadError {
 impl Drop for RuntimePromotionLease {
     fn drop(&mut self) {
         if self.primary {
+            forget_local_capability(
+                self.owner_pid,
+                &self.target,
+                &self.generation,
+                &self.capability,
+            );
             // Never remove a lease that an explicit takeover or another owner
             // has replaced since this guard was acquired.
             if read_record(&self.path).is_ok_and(|record| {
@@ -194,18 +220,30 @@ fn acquire_with_pin_policy(
     )? {
         None => {
             let capability = uuid::Uuid::new_v4().to_string();
-            write_record(
-                &path,
-                &RuntimePromotionLeaseRecord {
-                    schema: "homeboy/runtime-promotion-lease/v2".to_string(),
-                    pid,
-                    operation: operation.to_string(),
-                    target: target.clone(),
-                    generation: generation.clone(),
-                    started_at: now(),
-                    capability: capability.clone(),
-                },
-            )?;
+            let record = RuntimePromotionLeaseRecord {
+                schema: "homeboy/runtime-promotion-lease/v2".to_string(),
+                pid,
+                operation: operation.to_string(),
+                target: target.clone(),
+                generation: generation.clone(),
+                started_at: now(),
+                linux_starttime_ticks: crate::process::linux_process_starttime_ticks(pid)
+                    .ok()
+                    .flatten(),
+                heartbeat_at: now(),
+                expires_at: expiry(),
+                capability: capability.clone(),
+            };
+            if let Err(error) = write_record(&path, &record) {
+                // A concurrent stale-owner recovery can remove the directory
+                // after mkdir and before publication. Retry from acquisition;
+                // never return an unpublished guard.
+                if !path.exists() {
+                    return acquire_with_pin_policy(operation, target, foreign_pin_policy);
+                }
+                return Err(error);
+            }
+            remember_local_capability(&record)?;
             RuntimePromotionLease {
                 path,
                 primary: true,
@@ -217,8 +255,7 @@ fn acquire_with_pin_policy(
             }
         }
         Some(held) => {
-            let same_transaction = held.target == target && held.generation == generation;
-            if held.pid == pid && same_transaction {
+            if authorizes_local_reentrancy(&held, &target, &generation) {
                 return Ok(RuntimePromotionLease {
                     path,
                     primary: false,
@@ -243,7 +280,15 @@ fn acquire_with_pin_policy(
                 });
             }
             if reclaimable(&held) {
-                return Err(blocked_error(&held, true));
+                // Rename is the ownership CAS: one recovery moves the stale
+                // directory while former owners cannot remove its replacement.
+                match archive_stale_lease(&root, &path, &held) {
+                    Ok(_) => return acquire_with_pin_policy(operation, target, foreign_pin_policy),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return acquire_with_pin_policy(operation, target, foreign_pin_policy)
+                    }
+                    Err(error) => return Err(io("archive stale runtime promotion lease")(error)),
+                }
             }
             return Err(blocked_error(&held, false));
         }
@@ -261,8 +306,9 @@ fn acquire_with_pin_policy(
 }
 
 /// Create the lease directory or return its existing record. A previous owner
-/// can remove its directory after our create attempt observes it, so retry the
-/// create exactly once when the record is gone before it can be read.
+/// can remove its directory after our create attempt observes it. Publication
+/// also has a brief mkdir-to-record window, so readers retry within a bounded
+/// interval when the record is not yet visible.
 fn acquire_lease_dir_with_retry<Create, Read>(
     mut create: Create,
     mut read: Read,
@@ -279,6 +325,7 @@ where
                 Err(LeaseRecordReadError::Disappeared(_))
                     if attempt < ACQUIRE_DISAPPEARED_LEASE_RETRIES =>
                 {
+                    std::thread::sleep(Duration::from_millis(2));
                     continue;
                 }
                 Err(LeaseRecordReadError::Disappeared(error)) => {
@@ -305,6 +352,12 @@ impl RuntimePromotionLease {
     pub fn authorize_subprocess(&self, command: &mut Command) {
         let capability = SubprocessLeaseCapability {
             owner_pid: self.owner_pid,
+            owner_linux_starttime_ticks: crate::process::linux_process_starttime_ticks(
+                self.owner_pid,
+            )
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
             target: self.target.clone(),
             generation: self.generation.clone(),
             capability: self.capability.clone(),
@@ -317,6 +370,7 @@ impl RuntimePromotionLease {
     /// Refuse to continue a multi-step mutation after another runtime generation
     /// became visible. This prevents parser/behavior contract mixing.
     pub fn assert_generation(&self) -> Result<()> {
+        self.heartbeat()?;
         let current = current_generation();
         if current == self.generation {
             return Ok(());
@@ -333,6 +387,26 @@ impl RuntimePromotionLease {
                     .to_string(),
             ]),
         ))
+    }
+
+    /// Refresh the durable record without granting authority to a replacement.
+    pub fn heartbeat(&self) -> Result<()> {
+        if !self.primary {
+            return Ok(());
+        }
+        let mut record = read_record(&self.path)?;
+        if record.pid != self.owner_pid
+            || record.target != self.target
+            || record.generation != self.generation
+            || record.capability != self.capability
+        {
+            return Err(Error::internal_unexpected(
+                "runtime promotion lease ownership changed while heartbeating",
+            ));
+        }
+        record.heartbeat_at = now();
+        record.expires_at = expiry();
+        write_record(&self.path, &record)
     }
 }
 
@@ -378,9 +452,8 @@ fn open_admission_lock(root: &Path) -> Result<fs::File> {
         .map_err(io("open runtime promotion admission"))
 }
 
-/// Archive, rather than delete, a proven dead or expired promotion lease. This
-/// is intentionally a separate operator action: automatic acquisition never
-/// steals a writer merely because its record looks old.
+/// Archive, rather than delete, a proven dead promotion lease. Normal
+/// acquisition performs the same idempotent recovery automatically.
 pub fn takeover_stale_lease() -> Result<RuntimePromotionTakeover> {
     let root = paths::runtime_promotion_dir()?;
     let path = root.join(LEASE_DIR);
@@ -388,21 +461,46 @@ pub fn takeover_stale_lease() -> Result<RuntimePromotionTakeover> {
     if !reclaimable(&previous) {
         return Err(blocked_error(&previous, false));
     }
-    let archived = root.join(format!(
-        "promotion.stale.{}.lock",
-        chrono::Utc::now().timestamp_millis()
-    ));
-    fs::rename(&path, &archived).map_err(io("archive stale runtime promotion lease"))?;
+    let archived = archive_stale_lease(&root, &path, &previous)
+        .map_err(io("archive stale runtime promotion lease"))?;
     Ok(RuntimePromotionTakeover {
         previous,
         archived_path: archived.display().to_string(),
     })
 }
 
+fn archive_stale_lease(
+    root: &Path,
+    path: &Path,
+    expected: &RuntimePromotionLeaseRecord,
+) -> std::io::Result<PathBuf> {
+    // Re-check immediately before rename so a replacement cannot be archived
+    // based on an old contender snapshot.
+    if !path.exists() {
+        return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+    }
+    let current = read_record(path).map_err(|error| std::io::Error::other(error.to_string()))?;
+    if current.pid != expected.pid
+        || current.capability != expected.capability
+        || current.target != expected.target
+        || !reclaimable(&current)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "runtime promotion lease is no longer reclaimable",
+        ));
+    }
+    let archived = root.join(format!("promotion.stale.{}.lock", uuid::Uuid::new_v4()));
+    fs::rename(path, &archived)?;
+    Ok(archived)
+}
+
 fn write_record(path: &Path, record: &RuntimePromotionLeaseRecord) -> Result<()> {
     let payload =
         serde_json::to_vec_pretty(record).map_err(|e| Error::internal_json(e.to_string(), None))?;
-    fs::write(path.join(LEASE_FILE), payload).map_err(io("write runtime promotion lease"))
+    let temporary = path.join(format!(".{LEASE_FILE}.{}.tmp", uuid::Uuid::new_v4()));
+    fs::write(&temporary, payload).map_err(io("write runtime promotion lease"))?;
+    fs::rename(&temporary, path.join(LEASE_FILE)).map_err(io("publish runtime promotion lease"))
 }
 
 fn create_lease_dir(path: &Path) -> std::io::Result<()> {
@@ -458,19 +556,82 @@ fn authorizes_subprocess(
     generation: &str,
     capability: &SubprocessLeaseCapability,
 ) -> bool {
+    authorizes_subprocess_with(
+        held,
+        target,
+        generation,
+        capability,
+        crate::process::process_identity_state,
+    )
+}
+
+fn authorizes_subprocess_with(
+    held: &RuntimePromotionLeaseRecord,
+    target: &str,
+    generation: &str,
+    capability: &SubprocessLeaseCapability,
+    inspect: impl FnOnce(u32, Option<u64>) -> crate::process::ProcessIdentityState,
+) -> bool {
     !held.capability.is_empty()
         && capability.owner_pid == held.pid
+        && held.linux_starttime_ticks == Some(capability.owner_linux_starttime_ticks)
         && capability.target == held.target
         && capability.generation == held.generation
         && capability.capability == held.capability
         && target == held.target
         && generation == held.generation
+        && matches!(
+            inspect(held.pid, held.linux_starttime_ticks),
+            crate::process::ProcessIdentityState::Live
+        )
+}
+
+fn remember_local_capability(record: &RuntimePromotionLeaseRecord) -> Result<()> {
+    let Some(owner_linux_starttime_ticks) = record.linux_starttime_ticks else {
+        return Ok(());
+    };
+    let capability = SubprocessLeaseCapability {
+        owner_pid: record.pid,
+        owner_linux_starttime_ticks,
+        target: record.target.clone(),
+        generation: record.generation.clone(),
+        capability: record.capability.clone(),
+    };
+    LOCAL_LEASE_CAPABILITIES.with(|capabilities| capabilities.borrow_mut().push(capability));
+    Ok(())
+}
+
+fn forget_local_capability(pid: u32, target: &str, generation: &str, token: &str) {
+    LOCAL_LEASE_CAPABILITIES.with(|capabilities| {
+        let mut capabilities = capabilities.borrow_mut();
+        if let Some(index) = capabilities.iter().rposition(|capability| {
+            capability.owner_pid == pid
+                && capability.target == target
+                && capability.generation == generation
+                && capability.capability == token
+        }) {
+            capabilities.remove(index);
+        }
+    });
+}
+
+fn authorizes_local_reentrancy(
+    held: &RuntimePromotionLeaseRecord,
+    target: &str,
+    generation: &str,
+) -> bool {
+    LOCAL_LEASE_CAPABILITIES.with(|capabilities| {
+        capabilities
+            .borrow()
+            .iter()
+            .any(|capability| authorizes_subprocess(held, target, generation, capability))
+    })
 }
 
 fn blocked_error(held: &RuntimePromotionLeaseRecord, reclaimable: bool) -> Error {
     let age = age_seconds(&held.started_at).unwrap_or(-1);
     let action = if reclaimable {
-        "The holder is dead or expired; run `homeboy runtime promotion-takeover` to record an explicit takeover."
+        "The holder is proven dead; retry the command to reclaim the lease automatically."
     } else {
         "Wait for the owner to finish, then follow with `homeboy self status`."
     };
@@ -508,6 +669,9 @@ fn contention_owner(error: &Error) -> Result<RuntimePromotionLeaseRecord> {
         target: string("target")?,
         generation: string("holder_generation")?,
         started_at: String::new(),
+        linux_starttime_ticks: None,
+        heartbeat_at: String::new(),
+        expires_at: String::new(),
         capability: String::new(),
     })
 }
@@ -547,8 +711,18 @@ pub fn is_contention_error(error: &Error) -> bool {
 }
 
 fn reclaimable(record: &RuntimePromotionLeaseRecord) -> bool {
-    !crate::process::pid_is_running(record.pid)
-        || age_seconds(&record.started_at).is_some_and(|age| age >= DEFAULT_TTL.as_secs() as i64)
+    reclaimable_with(record, crate::process::process_identity_state)
+}
+
+fn reclaimable_with(
+    record: &RuntimePromotionLeaseRecord,
+    inspect: impl FnOnce(u32, Option<u64>) -> crate::process::ProcessIdentityState,
+) -> bool {
+    matches!(
+        inspect(record.pid, record.linux_starttime_ticks),
+        crate::process::ProcessIdentityState::Dead
+            | crate::process::ProcessIdentityState::IdentityMismatch
+    )
 }
 
 fn prune_pins(root: &Path) -> Result<()> {
@@ -608,6 +782,10 @@ fn current_generation() -> String {
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
+fn expiry() -> String {
+    (chrono::Utc::now() + chrono::Duration::from_std(DEFAULT_TTL).expect("lease TTL fits chrono"))
+        .to_rfc3339()
+}
 fn age_seconds(started: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(started)
         .ok()
@@ -629,9 +807,49 @@ mod tests {
             target: "main".to_string(),
             generation: "old".to_string(),
             started_at: now(),
+            linux_starttime_ticks: None,
+            heartbeat_at: now(),
+            expires_at: expiry(),
             capability: "capability".to_string(),
         };
-        assert!(reclaimable(&dead));
+        assert!(reclaimable_with(&dead, |_, _| {
+            crate::process::ProcessIdentityState::Dead
+        }));
+    }
+
+    #[test]
+    fn reused_pid_is_reclaimable_but_live_or_unverifiable_owner_remains_protected() {
+        let record = lease_record();
+        assert!(reclaimable_with(&record, |_, _| {
+            crate::process::ProcessIdentityState::IdentityMismatch
+        }));
+        assert!(!reclaimable_with(&record, |_, _| {
+            crate::process::ProcessIdentityState::Live
+        }));
+        assert!(!reclaimable_with(&record, |_, _| {
+            crate::process::ProcessIdentityState::Unverifiable
+        }));
+    }
+
+    #[test]
+    fn panic_unwinds_the_primary_lease() {
+        crate::test_support::with_isolated_home(|_| {
+            let _ = std::panic::catch_unwind(|| {
+                let _lease = acquire("panic owner", "lab").expect("acquire lease");
+                panic!("interrupted mutation");
+            });
+            acquire("recovery", "lab").expect("drop releases a panicking owner lease");
+        });
+    }
+
+    #[test]
+    fn killed_owner_is_reclaimed_automatically() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut owner = compatible_wait_owner();
+            owner.kill().expect("kill owner");
+            owner.wait().expect("reap owner");
+            acquire("recovery", "lab").expect("dead owner is reclaimed without a manual takeover");
+        });
     }
     #[test]
     fn blocked_diagnostic_names_owner_operation_target_and_followup() {
@@ -642,6 +860,9 @@ mod tests {
             target: "lab".to_string(),
             generation: "old".to_string(),
             started_at: now(),
+            linux_starttime_ticks: None,
+            heartbeat_at: now(),
+            expires_at: expiry(),
             capability: "capability".to_string(),
         };
         let error = blocked_error(&held, false);
@@ -775,6 +996,9 @@ mod tests {
             target: "lab".to_string(),
             generation: "generation-a".to_string(),
             started_at: now(),
+            linux_starttime_ticks: Some(42),
+            heartbeat_at: now(),
+            expires_at: expiry(),
             capability: "unforgeable-capability".to_string(),
         }
     }
@@ -782,6 +1006,7 @@ mod tests {
     fn capability(record: &RuntimePromotionLeaseRecord) -> SubprocessLeaseCapability {
         SubprocessLeaseCapability {
             owner_pid: record.pid,
+            owner_linux_starttime_ticks: record.linux_starttime_ticks.expect("test identity"),
             target: record.target.clone(),
             generation: record.generation.clone(),
             capability: record.capability.clone(),
@@ -1053,6 +1278,9 @@ mod tests {
 
     #[test]
     fn authorized_child_reenters_only_its_parent_transaction() {
+        if !cfg!(target_os = "linux") {
+            return;
+        }
         crate::test_support::with_isolated_home(|_| {
             let lease = acquire("parent", "lab").expect("parent acquires lease");
             let executable = std::env::current_exe().expect("resolve test executable");
@@ -1082,6 +1310,7 @@ mod tests {
             "generation-a",
             &SubprocessLeaseCapability {
                 owner_pid: 99,
+                owner_linux_starttime_ticks: 42,
                 target: "lab".to_string(),
                 generation: "generation-a".to_string(),
                 capability: "unforgeable-capability".to_string(),
@@ -1132,6 +1361,70 @@ mod tests {
             "generation-b",
             &capability(&held)
         ));
+    }
+
+    #[test]
+    fn exact_capability_and_process_identity_are_required_for_reentrancy() {
+        let held = lease_record();
+        let capability = capability(&held);
+        assert!(authorizes_subprocess_with(
+            &held,
+            "lab",
+            "generation-a",
+            &capability,
+            |_, _| crate::process::ProcessIdentityState::Live,
+        ));
+
+        let mut forged = capability.clone();
+        forged.capability = "forged".to_string();
+        assert!(!authorizes_subprocess_with(
+            &held,
+            "lab",
+            "generation-a",
+            &forged,
+            |_, _| crate::process::ProcessIdentityState::Live,
+        ));
+        assert!(!authorizes_subprocess_with(
+            &held,
+            "lab",
+            "generation-a",
+            &capability,
+            |_, _| crate::process::ProcessIdentityState::IdentityMismatch,
+        ));
+    }
+
+    #[test]
+    fn legacy_lease_without_start_identity_cannot_grant_nested_ownership() {
+        let mut held = lease_record();
+        held.linux_starttime_ticks = None;
+        let capability = SubprocessLeaseCapability {
+            owner_pid: held.pid,
+            owner_linux_starttime_ticks: 42,
+            target: held.target.clone(),
+            generation: held.generation.clone(),
+            capability: held.capability.clone(),
+        };
+        assert!(!authorizes_subprocess_with(
+            &held,
+            "lab",
+            "generation-a",
+            &capability,
+            |_, _| crate::process::ProcessIdentityState::Live,
+        ));
+    }
+
+    #[test]
+    fn nested_lease_requires_local_capability_on_platforms_with_process_identity() {
+        if !cfg!(target_os = "linux") {
+            return;
+        }
+        crate::test_support::with_isolated_home(|_| {
+            let outer = acquire("outer", "lab").expect("outer acquires");
+            let inner = acquire("inner", "lab").expect("exact local capability reenters");
+            assert!(!inner.primary, "nested lease must not own cleanup");
+            drop(inner);
+            drop(outer);
+        });
     }
 
     #[test]
