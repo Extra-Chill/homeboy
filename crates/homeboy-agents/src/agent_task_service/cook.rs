@@ -1459,6 +1459,7 @@ where
                         });
                     }
                 }
+                bind_dispatch_workspace_attestations(&mut dispatch_plan)?;
                 if let Some(dispatcher) = &options.attempt_dispatcher {
                     validate_cook_workspace(&options)?;
                     dispatcher.dispatch_attempt(
@@ -1937,6 +1938,59 @@ where
         1,
         Some(&run_id),
     ))
+}
+
+/// Only Cook's authenticated baseline transition may replace a durable task
+/// workspace identity. Preserve the predecessor as provenance; callers cannot
+/// mint this attestation through an arbitrary provider request.
+fn bind_dispatch_workspace_attestations(plan: &mut AgentTaskPlan) -> Result<()> {
+    for task in &mut plan.tasks {
+        let root = task.workspace.root.as_deref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "workspace",
+                "Cook dispatch requires a workspace root",
+                Some(task.task_id.clone()),
+                None,
+            )
+        })?;
+        let prior = task.metadata.get("cook_workspace_identity").cloned();
+        let identity = dispatch_workspace_identity(std::path::Path::new(root))?;
+        task.metadata["cook_workspace_identity"] = identity;
+        if let Some(prior) = prior {
+            task.metadata["cook_workspace_identity_predecessor"] = prior;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn dispatch_workspace_identity(path: &std::path::Path) -> Result<Value> {
+    use std::os::unix::fs::MetadataExt;
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    let metadata = std::fs::symlink_metadata(&canonical).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(canonical.display().to_string()))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(Error::validation_invalid_argument(
+            "workspace",
+            "Cook baseline workspace must be a non-symlink directory",
+            Some(canonical.display().to_string()),
+            None,
+        ));
+    }
+    Ok(serde_json::json!({
+        "canonical_path": canonical,
+        "device": metadata.dev(),
+        "inode": metadata.ino(),
+    }))
+}
+
+#[cfg(not(unix))]
+fn dispatch_workspace_identity(path: &std::path::Path) -> Result<Value> {
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    Ok(serde_json::json!({ "canonical_path": canonical }))
 }
 
 /// Re-resolve the declared Cook target before a provider can run. Durable
