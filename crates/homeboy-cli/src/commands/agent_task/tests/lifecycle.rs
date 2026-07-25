@@ -87,6 +87,47 @@ fn cook_args_from_cli(args: Vec<String>) -> AgentTaskCookArgs {
 }
 
 #[test]
+fn cook_cli_accepts_candidate_completion_and_defaults_to_wait_all() {
+    use homeboy::agents::agent_task_scheduler::AgentTaskCandidateCompletionPolicy;
+
+    let default = cook_args_from_cli(vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--prompt".to_string(),
+        "candidate fixture".to_string(),
+        "--to-worktree".to_string(),
+        "fixture@candidate".to_string(),
+        "--backend".to_string(),
+        "fixture".to_string(),
+        "--no-finalize".to_string(),
+    ]);
+    assert_eq!(
+        default.candidate_completion,
+        AgentTaskCandidateCompletionPolicy::WaitAll
+    );
+
+    let first_green = cook_args_from_cli(vec![
+        "homeboy".to_string(),
+        "agent-task".to_string(),
+        "cook".to_string(),
+        "--prompt".to_string(),
+        "candidate fixture".to_string(),
+        "--to-worktree".to_string(),
+        "fixture@candidate".to_string(),
+        "--backend".to_string(),
+        "fixture".to_string(),
+        "--candidate-completion".to_string(),
+        "first-green".to_string(),
+        "--no-finalize".to_string(),
+    ]);
+    assert_eq!(
+        first_green.candidate_completion,
+        AgentTaskCandidateCompletionPolicy::FirstGreen
+    );
+}
+
+#[test]
 fn invalid_cook_sources_stop_before_worktree_provider_runner_executor_or_budget() {
     with_temp_home(|| {
         let destination = tempfile::tempdir()

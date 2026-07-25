@@ -139,6 +139,152 @@ fn seed_missing_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
 }
 
 #[test]
+fn candidate_selection_uses_the_winner_for_review_form_and_status_projection() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut plan = AgentTaskPlan::new(
+            "selected-candidate",
+            vec![
+                AgentTaskRequest {
+                    task_id: "winner".to_string(),
+                    group_key: Some("candidate-group".to_string()),
+                    ..batch_cook_options(
+                        "selected-candidate-template",
+                        Arc::new(AcceptedDetachedAttemptDispatcher),
+                    )
+                    .initial_plan
+                    .tasks[0]
+                        .clone()
+                },
+                AgentTaskRequest {
+                    task_id: "late-sibling".to_string(),
+                    group_key: Some("candidate-group".to_string()),
+                    ..batch_cook_options(
+                        "selected-candidate-template-two",
+                        Arc::new(AcceptedDetachedAttemptDispatcher),
+                    )
+                    .initial_plan
+                    .tasks[0]
+                        .clone()
+                },
+            ],
+        );
+        plan.group_key = Some("candidate-group".to_string());
+        plan.options.candidate_completion =
+            crate::agent_task_scheduler::AgentTaskCandidateCompletionPolicy::FirstGreen;
+        let run_id = "selected-candidate-run";
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+        agent_task_lifecycle::record_run_aggregate(
+            run_id,
+            &plan,
+            &crate::agent_task_scheduler::AgentTaskAggregate {
+                schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                plan_id: plan.plan_id.clone(),
+                status: crate::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable,
+                totals: crate::agent_task_scheduler::AgentTaskAggregateTotals {
+                    succeeded: 1,
+                    cancelled: 1,
+                    ..Default::default()
+                },
+                outcomes: vec![
+                    crate::agent_task::AgentTaskOutcome {
+                        schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                        task_id: "winner".to_string(),
+                        status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
+                        summary: None,
+                        failure_classification: None,
+                        artifacts: Vec::new(),
+                        typed_artifacts: Vec::new(),
+                        evidence_refs: Vec::new(),
+                        diagnostics: Vec::new(),
+                        outputs: test_review_form_outputs(),
+                        workflow: None,
+                        follow_up: None,
+                        metadata: serde_json::json!({ "candidate_selection": {
+                            "policy": "first_green",
+                            "selected_task_id": "winner",
+                            "promotion_action": "promote_selected_candidate_only"
+                        }}),
+                    },
+                    crate::agent_task::AgentTaskOutcome {
+                        schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+                        task_id: "late-sibling".to_string(),
+                        status: crate::agent_task::AgentTaskOutcomeStatus::Cancelled,
+                        summary: None,
+                        failure_classification: None,
+                        artifacts: Vec::new(),
+                        typed_artifacts: Vec::new(),
+                        evidence_refs: Vec::new(),
+                        diagnostics: Vec::new(),
+                        outputs: Value::Null,
+                        workflow: None,
+                        follow_up: None,
+                        metadata: Value::Null,
+                    },
+                ],
+                events: Vec::new(),
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: Default::default(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            review_form_from_aggregate(&agent_task_lifecycle::read_aggregate(run_id).unwrap())
+                .unwrap(),
+            Some(test_review_form())
+        );
+        let status = agent_task_lifecycle::run_status(run_id, None).unwrap();
+        let candidate = status
+            .candidate
+            .as_ref()
+            .expect("candidate status projection");
+        assert_eq!(candidate.policy, plan.options.candidate_completion);
+        assert_eq!(candidate.selected_task_id.as_deref(), Some("winner"));
+        assert_eq!(candidate.candidates.len(), 2);
+        assert_eq!(
+            candidate.cancellation_supervision,
+            "scheduler_deferred_cleanup"
+        );
+        assert_eq!(
+            candidate.promotion_action.as_deref(),
+            Some("promote_selected_candidate_only")
+        );
+        let serialized = serde_json::to_value(&status).unwrap();
+        assert_eq!(serialized["candidate"]["policy"], "first_green");
+        assert_eq!(serialized["candidate"]["deadline_timeout_ms"], Value::Null);
+        let mut legacy_json = serialized;
+        legacy_json
+            .as_object_mut()
+            .expect("status object")
+            .remove("candidate");
+        let legacy: crate::agent_task_lifecycle::AgentTaskRunStatus =
+            serde_json::from_value(legacy_json).unwrap();
+        assert!(legacy.candidate.is_none());
+    });
+}
+
+#[test]
+fn candidate_group_preflight_rejects_ambiguous_plan_before_execution() {
+    let mut plan = batch_cook_options(
+        "ambiguous-candidates",
+        Arc::new(AcceptedDetachedAttemptDispatcher),
+    )
+    .initial_plan;
+    let mut sibling = plan.tasks[0].clone();
+    sibling.task_id = "sibling".to_string();
+    plan.tasks.push(sibling);
+    plan.options.candidate_completion =
+        crate::agent_task_scheduler::AgentTaskCandidateCompletionPolicy::FirstGreen;
+
+    let error = validate_cook_candidate_group(&plan).expect_err("shared group is required");
+
+    assert_eq!(error.details["field"], "group_key");
+    assert!(error.message.contains("explicit shared group"));
+}
+
+#[test]
 fn pre_artifact_interruption_classifies_provider_ledger_without_phantom_execution() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let options = batch_cook_options(

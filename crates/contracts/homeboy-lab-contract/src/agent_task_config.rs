@@ -148,9 +148,9 @@ impl std::str::FromStr for AgentTaskCandidateCompletionPolicy {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "wait_all" => Ok(Self::WaitAll),
-            "first_green" => Ok(Self::FirstGreen),
-            _ => Err("expected wait_all or first_green".to_string()),
+            "wait_all" | "wait-all" => Ok(Self::WaitAll),
+            "first_green" | "first-green" => Ok(Self::FirstGreen),
+            _ => Err("expected wait-all or first-green".to_string()),
         }
     }
 }

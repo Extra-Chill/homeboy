@@ -58,6 +58,103 @@ pub(super) mod concurrency_tests {
             .any(|event| event.state == AgentTaskState::Running));
     }
 
+    #[derive(Clone)]
+    struct FirstGreenExecutor {
+        entered: Arc<std::sync::Barrier>,
+        cancelled: Arc<AtomicBool>,
+    }
+
+    impl AgentTaskExecutorAdapter for FirstGreenExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            _context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            self.entered.wait();
+            if request.task_id == "task-2" {
+                std::thread::sleep(Duration::from_millis(300));
+            }
+            outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
+        }
+
+        fn cancel(&self, _task_id: &str) {
+            self.cancelled.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn first_green_returns_after_concurrent_winner_and_supervises_sibling() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let scheduler = AgentTaskScheduler::new(FirstGreenExecutor {
+            entered: Arc::new(std::sync::Barrier::new(2)),
+            cancelled: Arc::clone(&cancelled),
+        });
+        let mut plan = plan_with_tasks(2);
+        plan.group_key = Some("candidate-group".to_string());
+        for task in &mut plan.tasks {
+            task.group_key = Some("candidate-group".to_string());
+        }
+        plan.options.max_concurrency = 2;
+        plan.options.candidate_completion = AgentTaskCandidateCompletionPolicy::FirstGreen;
+
+        let started = Instant::now();
+        let aggregate = scheduler.run(plan);
+
+        assert!(started.elapsed() < Duration::from_millis(250));
+        assert!(cancelled.load(Ordering::SeqCst));
+        let selected = aggregate
+            .selected_outcome()
+            .expect("selected first-green outcome");
+        assert_eq!(selected.task_id, "task-1");
+        assert_eq!(selected.status, AgentTaskOutcomeStatus::Succeeded);
+        assert_eq!(
+            selected.metadata["candidate_selection"]["promotion_action"],
+            "promote_selected_candidate_only"
+        );
+    }
+
+    #[test]
+    fn wait_all_remains_the_default_candidate_completion_policy() {
+        let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(20));
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(2);
+        plan.group_key = Some("candidate-group".to_string());
+        for task in &mut plan.tasks {
+            task.group_key = Some("candidate-group".to_string());
+        }
+        plan.options.max_concurrency = 2;
+        assert_eq!(
+            plan.options.candidate_completion,
+            AgentTaskCandidateCompletionPolicy::WaitAll
+        );
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.totals.succeeded, 2);
+        assert_eq!(
+            aggregate.selected_outcome().map(|outcome| outcome.status),
+            Some(AgentTaskOutcomeStatus::Succeeded)
+        );
+    }
+
+    #[test]
+    fn candidate_resource_budget_can_intentionally_serialize_execution() {
+        let executor = RecordingExecutor::new(HashMap::new(), Duration::from_millis(25));
+        let max_seen = Arc::clone(&executor.max_seen);
+        let scheduler = AgentTaskScheduler::new(executor);
+        let mut plan = plan_with_tasks(2);
+        plan.group_key = Some("candidate-group".to_string());
+        for task in &mut plan.tasks {
+            task.group_key = Some("candidate-group".to_string());
+        }
+        plan.options.max_concurrency = 1;
+
+        let aggregate = scheduler.run(plan);
+
+        assert_eq!(aggregate.totals.succeeded, 2);
+        assert_eq!(max_seen.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn blocks_tasks_over_queue_depth_and_reports_backpressure() {
         let scheduler = AgentTaskScheduler::new(RecordingExecutor::new(

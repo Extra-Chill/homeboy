@@ -1520,8 +1520,10 @@ where
         options.ai_model = Some(model);
     }
     // A persisted recipe can replace the just-validated inputs. Re-check its
-    // workspace before it reaches transport preparation or a resumed attempt.
+    // workspace and candidate topology before it reaches transport preparation
+    // or a resumed attempt.
     validate_cook_workspace(&options)?;
+    validate_cook_candidate_group(&options.initial_plan)?;
     materialize_initial_cook_attempt(&options)?;
     // The recipe alone is resumable input, not a status-addressable run. Publish
     // the run identity only after initial materialization and a lifecycle read
@@ -2336,10 +2338,7 @@ where
 /// A multi-candidate Cook has one controller-owned destination. Reject ambiguous
 /// plans before any provider preflight or scheduler execution can spend work.
 fn validate_cook_candidate_group(plan: &AgentTaskPlan) -> Result<()> {
-    if plan.tasks.len() <= 1
-        || plan.options.candidate_completion
-            == crate::agent_task_scheduler::AgentTaskCandidateCompletionPolicy::WaitAll
-    {
+    if plan.tasks.len() <= 1 {
         return Ok(());
     }
     let group_key = plan.group_key.as_deref().or_else(|| {
@@ -2350,7 +2349,7 @@ fn validate_cook_candidate_group(plan: &AgentTaskPlan) -> Result<()> {
     let Some(group_key) = group_key else {
         return Err(Error::validation_invalid_argument(
             "group_key",
-            "Cook first-green candidates require one explicit shared group",
+            "Cook candidates require one explicit shared group",
             None,
             None,
         ));
