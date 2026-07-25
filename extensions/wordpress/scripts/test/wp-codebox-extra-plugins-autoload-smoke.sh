@@ -4,9 +4,9 @@ set -euo pipefail
 # WP Codebox raw extra_plugins Composer autoload smoke (homeboy-extensions#1398).
 #
 # This intentionally does not run Composer in Homeboy Extensions. It sends a raw
-# plugin source with composer.json and no vendor/autoload.php through the normal
-# WordPress/WP Codebox recipe flow, then asserts WP Codebox prepared the plugin
-# before activation/workload execution.
+# plugin source with composer.json, no vendor/autoload.php, and the explicit
+# composer preparation contract through the normal WordPress/WP Codebox recipe
+# flow, then asserts WP Codebox prepared the plugin before execution.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_PATH="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -119,7 +119,8 @@ SETTINGS_JSON=$(jq -nc \
             source: $extraSource,
             slug: "hbex-extra-plugin-autoload",
             pluginFile: "hbex-extra-plugin-autoload/hbex-extra-plugin-autoload.php",
-            activate: true
+            activate: true,
+            composer: "install"
         }]
     }')
 
@@ -152,8 +153,8 @@ printf '%s\n' "$output"
 if [ "$status" -ne 0 ]; then
     echo "" >&2
     echo "ERROR: WP Codebox could not run a raw extra_plugins source that requires Composer autoload preparation." >&2
-    echo "  This smoke expects WP Codebox recipe-run to prepare composer.json before activating extra_plugins." >&2
-    echo "  Do not add Composer preparation in Homeboy Extensions; update WP Codebox if vendor/autoload.php is missing." >&2
+    echo "  This smoke explicitly requests WP Codebox staged Composer preparation before extra_plugins activation." >&2
+    echo "  Do not run Composer against the source checkout; WP Codebox owns preparation in its temporary copy." >&2
     echo "  Extra plugin source: $EXTRA_PLUGIN_ROOT" >&2
     echo "  Artifacts: $ARTIFACTS_DIR" >&2
     exit "$status"

@@ -1287,6 +1287,13 @@
       "description": "Explicitly enable multisite for plugin PHPUnit, including plugins that are not network-only. False forces single-site; HOMEBOY_WORDPRESS_MULTISITE remains the higher-precedence runtime override."
     },
     {
+      "id": "wp_codebox_database_service",
+      "label": "WP Codebox database service provider",
+      "type": "object",
+      "default": {},
+      "description": "Optional external host-managed WP Codebox MySQL service shaped as {provider:'external',engine?,allowed_hosts,secret_env:{host,port?,username,password}}. engine may be mysql or mariadb; allowed_hosts declares the non-secret external-service network boundary; secret_env maps administrative connection fields to host environment variable names. Administrative names must not collide with bench_env. Credential values are resolved by WP Codebox and never serialized into component settings or recipes. Omit this setting to preserve WP Codebox's default Docker provider and engine; provider:'docker' is not accepted here."
+    },
+    {
       "id": "wp_codebox_phpunit_project_bootstrap",
       "label": "WP Codebox PHPUnit project bootstrap",
       "type": "string",
