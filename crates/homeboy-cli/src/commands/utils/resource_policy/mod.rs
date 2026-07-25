@@ -9,8 +9,8 @@ use crate::runner::runners::LabRunnerReadiness;
 use crate::commands::resources::{DoctorOutput, ResourceRecommendation};
 
 use classification::{
-    is_controller_owned_fanout_coordination, is_lab_offloadable_fanout_coordinator,
-    is_local_registry_management, is_plan_only_command, is_read_only_agent_task,
+    is_bounded_agent_task_metadata_read, is_controller_owned_fanout_coordination,
+    is_lab_offloadable_fanout_coordinator, is_local_registry_management, is_plan_only_command,
 };
 use messages::{append_local_placement, primary_action, severity_str, warning_message};
 
@@ -194,7 +194,7 @@ fn runner_selection_context(
 pub fn hot_command(command: &Commands) -> Option<HotCommand> {
     if is_plan_only_command(command)
         || is_controller_owned_fanout_coordination(command)
-        || is_read_only_agent_task(command)
+        || is_bounded_agent_task_metadata_read(command)
         || is_local_registry_management(command)
     {
         return None;
@@ -653,15 +653,94 @@ mod tests {
     }
 
     #[test]
-    fn agent_task_inspection_commands_do_not_start_hot_workloads() {
+    fn bounded_agent_task_metadata_reads_bypass_hot_admission_for_all_runner_states() {
+        // These commands read bounded controller metadata. In particular, they
+        // must stay available when the selected runner is disconnected, stale,
+        // or has conflicting readiness observations, so preflight must not ask
+        // Lab for guidance before they run.
+        let runner_states = [
+            LabRunnerReadiness {
+                state: crate::runner::runners::LabRunnerReadinessState::Disconnected,
+                selected_runner_id: Some("homeboy-lab".to_string()),
+                available_runner_ids: Vec::new(),
+                reasons: vec!["runner is disconnected".to_string()],
+                remediation_commands: vec!["homeboy runner reconnect homeboy-lab".to_string()],
+            },
+            LabRunnerReadiness {
+                state: crate::runner::runners::LabRunnerReadinessState::Stale,
+                selected_runner_id: Some("homeboy-lab".to_string()),
+                available_runner_ids: Vec::new(),
+                reasons: vec!["runner daemon is stale".to_string()],
+                remediation_commands: vec!["homeboy runner refresh homeboy-lab".to_string()],
+            },
+            LabRunnerReadiness {
+                state: crate::runner::runners::LabRunnerReadinessState::ConnectedIneligible,
+                selected_runner_id: None,
+                available_runner_ids: vec!["homeboy-lab".to_string()],
+                reasons: vec!["conflicting runner readiness observations".to_string()],
+                remediation_commands: vec!["homeboy runner status homeboy-lab".to_string()],
+            },
+        ];
         for args in [
             ["homeboy", "agent-task", "status", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "logs", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "artifacts", "agent-task-123"].as_slice(),
+            ["homeboy", "agent-task", "list"].as_slice(),
+            ["homeboy", "agent-task", "active"].as_slice(),
+            ["homeboy", "agent-task", "latest"].as_slice(),
+            ["homeboy", "agent-task", "fanout", "status", "batch-123"].as_slice(),
+            ["homeboy", "agent-task", "fanout", "artifacts", "batch-123"].as_slice(),
+            ["homeboy", "agent-task", "loop", "status", "loop-123"].as_slice(),
+            ["homeboy", "agent-task", "controller", "status", "loop-123"].as_slice(),
+            [
+                "homeboy",
+                "agent-task",
+                "controller",
+                "diagnose",
+                "loop-123",
+            ]
+            .as_slice(),
+            ["homeboy", "agent-task", "controller", "list"].as_slice(),
+        ] {
+            let cli = Cli::parse_from(args);
+            for readiness in &runner_states {
+                let warning = hot_command(&cli.command).and_then(|command| {
+                    evaluate_with_runner_hint(
+                        command,
+                        &resources(ResourceRecommendation::Hot),
+                        Some(readiness),
+                    )
+                });
+                assert!(
+                    warning.is_none(),
+                    "{args:?} must not emit hot-machine or Lab guidance while runner is {}",
+                    readiness.state.as_str(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn agent_task_hydration_and_review_remain_resource_managed() {
+        // Hydration and review can load full evidence or run promotion work, so
+        // unlike metadata inspection they retain their portability admission.
+        for args in [
+            ["homeboy", "agent-task", "evidence", "agent-task-123"].as_slice(),
+            ["homeboy", "agent-task", "diagnose", "agent-task-123"].as_slice(),
+            [
+                "homeboy",
+                "agent-task",
+                "replay-provider-boundary",
+                "agent-task-123",
+            ]
+            .as_slice(),
             ["homeboy", "agent-task", "review", "agent-task-123"].as_slice(),
         ] {
             let cli = Cli::parse_from(args);
-            assert!(hot_command(&cli.command).is_none());
+            assert!(
+                hot_command(&cli.command).is_some(),
+                "{args:?} must retain resource admission"
+            );
         }
     }
 

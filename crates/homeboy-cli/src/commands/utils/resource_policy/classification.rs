@@ -10,6 +10,132 @@
 use crate::cli_surface::Commands;
 use crate::commands::agent_task;
 
+/// Resource behavior is independent from a command's Lab portability contract.
+/// Bounded local record reads remain available for runner recovery; provider
+/// execution, gates, and artifact hydration retain their existing admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AgentTaskResourceBehavior {
+    BoundedMetadataRead,
+    AdmittedWorkload,
+    LocalControl,
+}
+
+/// Classify every `agent-task` subcommand before consulting its portability
+/// contract. `None` means this is not an agent-task command.
+pub(super) fn agent_task_resource_behavior(
+    command: &Commands,
+) -> Option<AgentTaskResourceBehavior> {
+    let Commands::AgentTask(args) = command else {
+        return None;
+    };
+
+    Some(match &args.command {
+        agent_task::AgentTaskCommand::Doctor(_)
+        | agent_task::AgentTaskCommand::Submit(_)
+        | agent_task::AgentTaskCommand::RuntimeRecover(_)
+        | agent_task::AgentTaskCommand::RuntimeValidate(_)
+        | agent_task::AgentTaskCommand::Cancel(_)
+        | agent_task::AgentTaskCommand::Prompts(_)
+        | agent_task::AgentTaskCommand::Contract(_)
+        | agent_task::AgentTaskCommand::CompileLoop(_)
+        | agent_task::AgentTaskCommand::Auth(_) => AgentTaskResourceBehavior::LocalControl,
+        agent_task::AgentTaskCommand::Cook(cook) if cook.dispatch.core.queue_only => {
+            AgentTaskResourceBehavior::LocalControl
+        }
+        agent_task::AgentTaskCommand::Cook(_)
+        | agent_task::AgentTaskCommand::RunPlan(_)
+        | agent_task::AgentTaskCommand::Run(_)
+        | agent_task::AgentTaskCommand::RunNext
+        | agent_task::AgentTaskCommand::Evidence(_)
+        | agent_task::AgentTaskCommand::Diagnose(_)
+        | agent_task::AgentTaskCommand::ReplayProviderBoundary(_)
+        | agent_task::AgentTaskCommand::Resume(_)
+        | agent_task::AgentTaskCommand::Review(_)
+        | agent_task::AgentTaskCommand::Promote(_)
+        | agent_task::AgentTaskCommand::Adopt(_)
+        | agent_task::AgentTaskCommand::PromotionProvider(_)
+        | agent_task::AgentTaskCommand::FinalizePr(_)
+        | agent_task::AgentTaskCommand::GateFeedback(_)
+        | agent_task::AgentTaskCommand::Providers(_)
+        | agent_task::AgentTaskCommand::Tool(_) => AgentTaskResourceBehavior::AdmittedWorkload,
+        agent_task::AgentTaskCommand::Retry(retry) if retry.run => {
+            AgentTaskResourceBehavior::AdmittedWorkload
+        }
+        agent_task::AgentTaskCommand::Retry(_) => AgentTaskResourceBehavior::LocalControl,
+        agent_task::AgentTaskCommand::Status(_)
+        | agent_task::AgentTaskCommand::List(_)
+        | agent_task::AgentTaskCommand::Latest(_)
+        | agent_task::AgentTaskCommand::Logs(_)
+        | agent_task::AgentTaskCommand::Artifacts(_) => {
+            AgentTaskResourceBehavior::BoundedMetadataRead
+        }
+        agent_task::AgentTaskCommand::Active(active) if !active.reconcile => {
+            AgentTaskResourceBehavior::BoundedMetadataRead
+        }
+        agent_task::AgentTaskCommand::Active(_)
+        | agent_task::AgentTaskCommand::Reconcile(_)
+        | agent_task::AgentTaskCommand::ReconcileRecords(_) => {
+            AgentTaskResourceBehavior::AdmittedWorkload
+        }
+        agent_task::AgentTaskCommand::Fanout(fanout) => match &fanout.command {
+            agent_task::AgentTaskFanoutCommand::Status(_)
+            | agent_task::AgentTaskFanoutCommand::Artifacts(_) => {
+                AgentTaskResourceBehavior::BoundedMetadataRead
+            }
+            agent_task::AgentTaskFanoutCommand::Resume(_)
+            | agent_task::AgentTaskFanoutCommand::RunPlan(_) => {
+                AgentTaskResourceBehavior::AdmittedWorkload
+            }
+            agent_task::AgentTaskFanoutCommand::CookBatch(_)
+            | agent_task::AgentTaskFanoutCommand::Plan(_)
+            | agent_task::AgentTaskFanoutCommand::Submit(_)
+            | agent_task::AgentTaskFanoutCommand::SubmitBatch(_) => {
+                AgentTaskResourceBehavior::LocalControl
+            }
+        },
+        agent_task::AgentTaskCommand::Loop(loop_args) => match &loop_args.command {
+            agent_task::AgentTaskLoopCommand::Status(_) => {
+                AgentTaskResourceBehavior::BoundedMetadataRead
+            }
+            agent_task::AgentTaskLoopCommand::Define(args) if args.resume => {
+                AgentTaskResourceBehavior::AdmittedWorkload
+            }
+            agent_task::AgentTaskLoopCommand::Resume(_) => {
+                AgentTaskResourceBehavior::AdmittedWorkload
+            }
+            agent_task::AgentTaskLoopCommand::Define(_)
+            | agent_task::AgentTaskLoopCommand::Stop(_) => AgentTaskResourceBehavior::LocalControl,
+        },
+        agent_task::AgentTaskCommand::Controller(controller) => match &controller.command {
+            agent_task::AgentTaskControllerCommand::Status(_)
+            | agent_task::AgentTaskControllerCommand::Diagnose(_)
+            | agent_task::AgentTaskControllerCommand::List => {
+                AgentTaskResourceBehavior::BoundedMetadataRead
+            }
+            agent_task::AgentTaskControllerCommand::FromSpec(args) if args.resume => {
+                AgentTaskResourceBehavior::AdmittedWorkload
+            }
+            agent_task::AgentTaskControllerCommand::RunFromSpec(_)
+            | agent_task::AgentTaskControllerCommand::Materialize(_)
+            | agent_task::AgentTaskControllerCommand::RunNext(_)
+            | agent_task::AgentTaskControllerCommand::Run(_)
+            | agent_task::AgentTaskControllerCommand::Resume(_)
+            | agent_task::AgentTaskControllerCommand::Proof(_) => {
+                AgentTaskResourceBehavior::AdmittedWorkload
+            }
+            agent_task::AgentTaskControllerCommand::Init(_)
+            | agent_task::AgentTaskControllerCommand::FromSpec(_)
+            | agent_task::AgentTaskControllerCommand::ValidateProof(_)
+            | agent_task::AgentTaskControllerCommand::Plan(_)
+            | agent_task::AgentTaskControllerCommand::Events(_)
+            | agent_task::AgentTaskControllerCommand::ApplyEvent(_)
+            | agent_task::AgentTaskControllerCommand::MarkHumanReady(_) => {
+                AgentTaskResourceBehavior::LocalControl
+            }
+        },
+    })
+}
+
 /// The `cook-batch` fanout coordinator is controller-owned in every mode: it
 /// compiles the plan (default), previews it (`--dry-run`), or runs the batch
 /// coordinator locally (`--run-plan`). In none of these modes may the
@@ -67,16 +193,8 @@ pub(super) fn is_plan_only_command(command: &Commands) -> bool {
     )
 }
 
-pub(super) fn is_read_only_agent_task(command: &Commands) -> bool {
-    matches!(
-        command,
-        Commands::AgentTask(agent_task::AgentTaskArgs {
-            command: agent_task::AgentTaskCommand::Status(_)
-                | agent_task::AgentTaskCommand::Logs(_)
-                | agent_task::AgentTaskCommand::Artifacts(_)
-                | agent_task::AgentTaskCommand::Review(_),
-        })
-    )
+pub(super) fn is_bounded_agent_task_metadata_read(command: &Commands) -> bool {
+    agent_task_resource_behavior(command) == Some(AgentTaskResourceBehavior::BoundedMetadataRead)
 }
 
 /// Local registry/source-state management (`rig install|update|sync|sources`)
