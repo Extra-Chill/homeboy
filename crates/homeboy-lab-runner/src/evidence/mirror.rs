@@ -236,7 +236,7 @@ pub fn runner_job_log_snapshot(runner_id: &str, job_id: &str) -> Result<RunnerJo
     })
 }
 
-pub(crate) fn runner_job_log_snapshot_for_session(
+pub fn runner_job_log_snapshot_for_session(
     session: &crate::RunnerSession,
     job_id: &str,
 ) -> Result<RunnerJobLogSnapshot> {

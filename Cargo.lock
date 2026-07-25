@@ -795,6 +795,7 @@ dependencies = [
  "homeboy-issues",
  "homeboy-lab-contract",
  "homeboy-lab-runner",
+ "homeboy-process",
  "homeboy-product-identity",
  "homeboy-refactor",
  "homeboy-refactor-contract",

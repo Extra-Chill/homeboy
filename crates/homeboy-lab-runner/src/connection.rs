@@ -1215,6 +1215,95 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     })
 }
 
+/// Reopen a tunnel to the durable generation which owns `job_id`.
+///
+/// This deliberately never tests the recorded local port: a dead controller
+/// tunnel can have its port reused by an unrelated process. Instead it opens a
+/// fresh ephemeral tunnel and accepts it only when `/health` proves the exact
+/// persisted daemon lease and PID for the job-owning generation.
+pub fn reconnect_job_log_owner(runner_id: &str, job_id: &str) -> Result<RunnerSession> {
+    let runner = load(runner_id)?;
+    let legacy = read_session_or_live_peer(runner_id)?;
+    let owner = super::generation_store::endpoint_session(
+        runner_id,
+        Some(job_id),
+        None,
+        None,
+        legacy.as_ref(),
+    )?
+    .or(legacy)
+    .ok_or_else(|| Error::validation_invalid_argument(
+        "runner",
+        "runner has no durable daemon generation binding for this job; run `homeboy runner connect <runner-id>` first",
+        Some(runner_id.to_string()),
+        None,
+    ))?;
+    if owner.mode != RunnerTunnelMode::DirectSsh {
+        return Err(Error::validation_invalid_argument(
+            "runner",
+            "job log recovery requires a direct SSH daemon generation",
+            Some(runner_id.to_string()),
+            None,
+        ));
+    }
+    let Some((_server_id, server, client)) = resolve_ssh_runner(&runner)? else {
+        return Err(Error::validation_invalid_argument(
+            "runner",
+            "job log recovery requires an SSH-backed runner",
+            Some(runner_id.to_string()),
+            None,
+        ));
+    };
+    let daemon = RemoteDaemon {
+        address: owner.remote_daemon_address.clone().ok_or_else(|| {
+            Error::internal_unexpected("job-owning daemon generation has no remote address")
+        })?,
+        pid: owner.remote_daemon_pid,
+        lease_id: owner.remote_daemon_lease_id.clone(),
+        version: Some(owner.homeboy_version.clone()),
+        build_identity: owner.homeboy_build_identity.clone(),
+        inspected_freshness: None,
+    };
+    let session_path = session_path(runner_id)?;
+    let (local_port, tunnel_pid, local_url, daemon) = connect_remote_daemon(
+        &server,
+        &client,
+        "",
+        daemon,
+        &owner.homeboy_version,
+        owner.homeboy_build_identity.as_deref().unwrap_or(""),
+        runner_id,
+        &session_path,
+    )
+    .map_err(|(report, _)| {
+        Error::validation_invalid_argument(
+            "runner",
+            report.failure_message.unwrap_or_else(|| {
+                "unable to reattach the job-owning daemon generation".to_string()
+            }),
+            Some(runner_id.to_string()),
+            None,
+        )
+    })?;
+    Ok(RunnerSession {
+        local_port: Some(local_port),
+        local_url: Some(local_url),
+        tunnel_pid,
+        remote_daemon_address: Some(daemon.address),
+        remote_daemon_pid: daemon.pid,
+        remote_daemon_lease_id: daemon.lease_id,
+        ..owner
+    })
+}
+
+/// Close the local tunnel opened exclusively for job log/cancel recovery. This
+/// never stops the remote daemon generation that owns the durable job.
+pub fn close_reconnected_job_log_owner(session: &RunnerSession) {
+    if let Some(pid) = session.tunnel_pid {
+        terminate_pid(pid);
+    }
+}
+
 /// Resolve a direct-SSH session for work admission. A readiness observation can
 /// become stale when its controller-owned tunnel exits before submission; the
 /// reconnect transaction proves the remote daemon lease before replacing the

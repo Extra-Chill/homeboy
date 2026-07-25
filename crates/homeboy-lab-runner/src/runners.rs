@@ -26,12 +26,12 @@
 
 pub use crate::{
     apply_change_artifact, apply_workspace_patch, broker_auth_store_path,
-    broker_submit_token_for_runner, broker_token_from_env, connect,
-    connect_with_leaseless_orphan_reconciliation, connect_with_live_lease_adoption,
-    connect_with_orphan_adoption, connect_with_recovery, reverse_broker_artifact,
-    reverse_broker_artifact_content, reverse_broker_reconcile, runner_artifact_content,
-    BrokerAuthGrant, BrokerAuthStore, BrokerCredential, BrokerScope, MintedCredential,
-    BROKER_TOKEN_ENV, BROKER_TOKEN_HEADER,
+    broker_submit_token_for_runner, broker_token_from_env, close_reconnected_job_log_owner,
+    connect, connect_with_leaseless_orphan_reconciliation, connect_with_live_lease_adoption,
+    connect_with_orphan_adoption, connect_with_recovery, reconnect_job_log_owner,
+    reverse_broker_artifact, reverse_broker_artifact_content, reverse_broker_reconcile,
+    runner_artifact_content, BrokerAuthGrant, BrokerAuthStore, BrokerCredential, BrokerScope,
+    MintedCredential, BROKER_TOKEN_ENV, BROKER_TOKEN_HEADER,
 };
 pub use crate::{
     connect_reverse, disconnect, download_remote_artifact,
@@ -50,7 +50,8 @@ pub use crate::{
     reportable_artifact_evidence_path, resolve_default_lab_runner, run_reverse_worker,
     runner_artifact_store_token, runner_dev_sync, runner_exec_failure_error,
     runner_exec_structured_summary, runner_generation_inventory, runner_homeboy_path_for_command,
-    runner_job_cancel, runner_job_log_snapshot, status, statuses, sync_workspace, update_workspace,
+    runner_job_cancel, runner_job_cancel_for_session, runner_job_log_snapshot,
+    runner_job_log_snapshot_for_session, status, statuses, sync_workspace, update_workspace,
     workspace_snapshots, HomeboyBinaryRefreshMode, HomeboyBinaryRefreshOptions,
     HomeboyBinaryRefreshOutput, HomeboyBinaryRefreshPlan, LabJobOverrides, LabOffloadCommand,
     LabOffloadOutcome, LabOffloadRequest, LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy,
