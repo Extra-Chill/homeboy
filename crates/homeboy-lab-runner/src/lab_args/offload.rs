@@ -155,20 +155,20 @@ pub(crate) fn rewrite_lab_offload_args(
             let value = iter.next();
             stripped.push(
                 value
-                    .and_then(|value| remap_local_path(value, &ordered))
+                    .and_then(|value| remap_local_or_materialized_remote_path(value, &ordered))
                     .unwrap_or_else(|| remote_path.to_string()),
             );
             continue;
         }
         if let Some(value) = arg.strip_prefix("--path=") {
-            let rewritten =
-                remap_local_path(value, &ordered).unwrap_or_else(|| remote_path.to_string());
+            let rewritten = remap_local_or_materialized_remote_path(value, &ordered)
+                .unwrap_or_else(|| remote_path.to_string());
             stripped.push(format!("--path={rewritten}"));
             continue;
         }
         if let Some(value) = arg.strip_prefix("--cwd=") {
-            let rewritten =
-                remap_local_path(value, &ordered).unwrap_or_else(|| remote_path.to_string());
+            let rewritten = remap_local_or_materialized_remote_path(value, &ordered)
+                .unwrap_or_else(|| remote_path.to_string());
             stripped.push(format!("--cwd={rewritten}"));
             continue;
         }
@@ -301,6 +301,23 @@ fn remap_lab_offload_arg(arg: &str, mappings: &[&LabPathRemap]) -> String {
     }
 
     remap_local_path(arg, mappings).unwrap_or_else(|| arg.to_string())
+}
+
+fn remap_local_or_materialized_remote_path(
+    value: &str,
+    mappings: &[&LabPathRemap],
+) -> Option<String> {
+    remap_local_path(value, mappings).or_else(|| {
+        mappings
+            .iter()
+            .any(|mapping| {
+                value == mapping.remote
+                    || value
+                        .strip_prefix(mapping.remote.trim_end_matches('/'))
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            })
+            .then(|| value.to_string())
+    })
 }
 
 /// Changed-file payloads are repo-relative because lint scopes reconstruct
