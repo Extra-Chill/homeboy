@@ -94,14 +94,22 @@ printf 'PASS: finalization cleans children and reports retained output\n'
 
 strict_pid_file="${TMP_DIR}/strict-double-fork.pid"
 set +e
-HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF=true HOMEBOY_ACTION_CGROUP_ROOT="${TMP_DIR}/missing-cgroup-root" bash "${RUNNER}" "strict double-fork" bash -c 'python3 -c "import os, sys; os.fork() and sys.exit(0); os.setsid(); os.fork() and sys.exit(0); open(sys.argv[1], \"w\").write(str(os.getpid()))" "$0"' "${strict_pid_file}" >"${TMP_DIR}/strict.log" 2>&1
+HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF=true HOMEBOY_ACTION_CGROUP_ROOT="${TMP_DIR}/missing-cgroup-root" HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS=1 HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS=1 bash "${RUNNER}" "strict double-fork" bash -c 'python3 -c "import os, signal, sys, time; os.fork() and sys.exit(0); os.setsid(); os.fork() and sys.exit(0); signal.signal(signal.SIGTERM, signal.SIG_IGN); open(sys.argv[1], \"w\").write(str(os.getpid())); time.sleep(30)" "$0"' "${strict_pid_file}" >"${TMP_DIR}/strict.log" 2>&1
 exit_code=$?
 set -e
-if [ "${exit_code}" -ne 125 ] || [ -e "${strict_pid_file}" ] || ! grep -q 'refusing to run this strict command' "${TMP_DIR}/strict.log"; then
-  printf 'FAIL: strict command can launch before cgroup containment is established\n'
+if [ "$(uname -s)" = Linux ]; then
+  strict_pid="$(<"${strict_pid_file}")"
+  if [ "${exit_code}" -ne 124 ] || kill -0 "${strict_pid}" 2>/dev/null; then
+    printf 'FAIL: cgroup-denied Linux supervisor did not contain immediate double-fork escape\n'
+    exit 1
+  fi
+  printf 'PASS: cgroup-denied Linux supervisor contains immediate double-fork escape\n'
+elif [ "${exit_code}" -ne 125 ] || [ -e "${strict_pid_file}" ] || ! grep -q 'requires Linux subreaper containment' "${TMP_DIR}/strict.log"; then
+  printf 'FAIL: unsupported strict platform launched before containment policy\n'
   exit 1
+else
+  printf 'PASS: unsupported strict platform refuses launch before double-fork escape\n'
 fi
-printf 'PASS: cgroup-unavailable strict command refuses launch before double-fork escape\n'
 
 set +e
 HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS=invalid bash "${RUNNER}" "invalid timeout" bash -c 'exit 0' >"${TMP_DIR}/invalid.log" 2>&1

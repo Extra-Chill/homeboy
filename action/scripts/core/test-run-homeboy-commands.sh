@@ -19,7 +19,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 mkdir -p "$(dirname "${output}")"
-printf '%s\n' '{"schema_version":1,"command":"review test","success":false,"status":"failure","exit_code":1,"data":{"test_counts":{"failed":2,"passed":41,"total":43}}}' > "${output}"
+printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"review test","success":false,"status":"failed","exit_code":1,"data":{"test_counts":{"failed":2,"passed":41,"total":43}}}' > "${output}"
 exit 1
 SH
 chmod +x "${TMP_DIR}/bin/homeboy"
@@ -92,8 +92,8 @@ done
 mkdir -p "$(dirname "${output}")"
 case "${FAKE_ENVELOPE_MODE}" in
   empty) printf '%s\n' '{}' > "${output}" ;;
-  wrong-command) printf '%s\n' '{"schema_version":1,"command":"review audit","success":true,"status":"success","exit_code":0,"data":{}}' > "${output}" ;;
-  inconsistent) printf '%s\n' '{"schema_version":1,"command":"review test","success":true,"status":"success","exit_code":1,"data":{}}' > "${output}" ;;
+  wrong-command) printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"review audit","success":true,"status":"succeeded","exit_code":0,"data":{}}' > "${output}" ;;
+  inconsistent) printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"review test","success":true,"status":"succeeded","exit_code":1,"data":{}}' > "${output}" ;;
 esac
 exit 0
 SH

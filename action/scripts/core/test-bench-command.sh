@@ -37,7 +37,7 @@ if [ -z "${output}" ]; then
   exit 2
 fi
 mkdir -p "$(dirname "${output}")"
-  printf '%s\n' '{"schema_version":1,"command":"bench","success":true,"status":"success","exit_code":0,"data":{"scenarios":[{"scenario":"noop","metrics":{"elapsed_ms":{"p50":1,"p95":2}}}]}}' > "${output}"
+  printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"bench","success":true,"status":"succeeded","exit_code":0,"data":{"scenarios":[{"scenario":"noop","metrics":{"elapsed_ms":{"p50":1,"p95":2}}}]}}' > "${output}"
 SH
 chmod +x "${TMP_DIR}/bin/homeboy"
 

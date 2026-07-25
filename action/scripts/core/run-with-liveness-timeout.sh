@@ -23,6 +23,14 @@ for value_name in timeout_seconds cleanup_timeout_seconds; do
   fi
 done
 
+if [ "${require_containment_proof}" = true ]; then
+  supervisor="$(dirname "${BASH_SOURCE[0]}")/run-with-liveness-timeout-supervisor.py"
+  if [ -n "${log_file}" ]; then
+    exec python3 "${supervisor}" --log-file "${log_file}" "${label}" "${timeout_seconds}" "${cleanup_timeout_seconds}" "$@"
+  fi
+  exec python3 "${supervisor}" "${label}" "${timeout_seconds}" "${cleanup_timeout_seconds}" "$@"
+fi
+
 start_seconds="$(date +%s)"
 timeout_marker="$(mktemp)"
 containment_failure_marker="$(mktemp)"

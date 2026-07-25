@@ -242,15 +242,15 @@ valid_command_result_output() {
     --arg command "${expected_command}" \
     --argjson command_exit "${command_exit}" '
       type == "object"
-      and .schema_version == 1
+      and .schema == "homeboy/command-result/v3"
       and .command == $command
       and (.success | type == "boolean")
       and (.status | type == "string")
       and (.exit_code | type == "number")
       and .exit_code == $command_exit
       and (if .success
-           then .status == "success" and .exit_code == 0
-           else (.status == "failure" or .status == "failed") and .exit_code != 0
+           then .status == "succeeded" and .exit_code == 0
+           else .status == "failed" and .exit_code != 0
            end)
     ' "${output_file}" >/dev/null 2>&1
 }

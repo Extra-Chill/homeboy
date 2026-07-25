@@ -25,7 +25,7 @@ mkdir -p "$(dirname "${output}")"
 case "${FAKE_HOMEBOY_MODE:-}" in
   missing) : ;;
   malformed) printf '%s\n' 'not json' > "${output}" ;;
-  *) printf '%s\n' '{"schema_version":1,"command":"review test","success":true,"status":"success","exit_code":0,"data":{}}' > "${output}" ;;
+  *) printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"review test","success":true,"status":"succeeded","exit_code":0,"data":{}}' > "${output}" ;;
 esac
 
 case "${FAKE_HOMEBOY_MODE:-}" in
