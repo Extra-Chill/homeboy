@@ -38,6 +38,9 @@ fn publication_continuation_command(input: &ReleaseCommandInput) -> String {
     if input.pipeline.skip_publish {
         command.push_str(" --skip-publish");
     }
+    if input.pipeline.deploy {
+        command.push_str(" --deploy");
+    }
     if let Some(identity) = &input.git_identity {
         command.push_str(&format!(" --git-identity {}", shell_quote(identity)));
     }
@@ -861,6 +864,7 @@ mod tests {
             skip_build_validation: true,
             pipeline: super::super::types::ReleasePipelineOptions {
                 skip_publish: true,
+                deploy: true,
                 ..Default::default()
             },
             git_identity: Some("Chris Huber <chris@example.com>".to_string()),
@@ -869,7 +873,7 @@ mod tests {
 
         assert_eq!(
             publication_continuation_command(&input),
-            "homeboy release sample-plugin --head --path '/tmp/plugin path' --skip-checks --skip-build-validation --skip-publish --git-identity 'Chris Huber <chris@example.com>' --apply"
+            "homeboy release sample-plugin --head --path '/tmp/plugin path' --skip-checks --skip-build-validation --skip-publish --deploy --git-identity 'Chris Huber <chris@example.com>' --apply"
         );
     }
 
