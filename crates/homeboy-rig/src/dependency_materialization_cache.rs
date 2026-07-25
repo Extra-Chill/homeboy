@@ -55,12 +55,14 @@ struct Output {
 pub(crate) enum CacheResult {
     Hit { bytes: u64 },
     Miss { reason: String },
+    Saved { bytes: u64 },
 }
 
 pub(crate) struct DependencyMaterializationCache {
     root: PathBuf,
     entry: PathBuf,
     key: String,
+    workspace: PathBuf,
     outputs: Vec<(String, PathBuf, DependencyMaterializationOutputKind)>,
     provenance: Provenance,
 }
@@ -183,6 +185,7 @@ impl DependencyMaterializationCache {
             entry: root.join(&key),
             root,
             key,
+            workspace,
             outputs,
             provenance,
         }))
@@ -210,14 +213,14 @@ impl DependencyMaterializationCache {
                 })
             }
         };
-        if manifest.outputs.len() != self.outputs.len() {
+        if !self.manifest_outputs_match(&manifest.outputs) {
             return self.evidence(CacheResult::Miss {
-                reason: "partial_entry".to_string(),
+                reason: "manifest_outputs_mismatch".to_string(),
             });
         }
         for output in &manifest.outputs {
             let source = self.entry.join("outputs").join(&output.path);
-            if !output_matches(&source, &output.kind, &output.sha256)? {
+            if !output_matches(&source, &output.kind, &output.sha256) {
                 return self.evidence(CacheResult::Miss {
                     reason: "corrupt_entry".to_string(),
                 });
@@ -235,8 +238,9 @@ impl DependencyMaterializationCache {
                     )
                 })?;
             let source = self.entry.join("outputs").join(&output.path);
-            copy_replace(&source, destination)?;
-            if !kind_matches(destination, *kind) || hash_path(destination)? != output.sha256 {
+            let destination = contained_path(&self.workspace, destination)?;
+            copy_replace(&source, &destination)?;
+            if !kind_matches(&destination, *kind) || hash_path(&destination)? != output.sha256 {
                 return self.evidence(CacheResult::Miss {
                     reason: "restore_verification_failed".to_string(),
                 });
@@ -256,7 +260,8 @@ impl DependencyMaterializationCache {
             .map_err(|error| io_error("create dependency cache staging", error))?;
         let mut outputs = Vec::new();
         for (relative, source, kind) in &self.outputs {
-            if !kind_matches(source, *kind) {
+            let source = contained_path(&self.workspace, source)?;
+            if !kind_matches(&source, *kind) {
                 return Err(Error::validation_invalid_argument(
                     "dependency_materialization",
                     "declared cache output is missing or has the wrong kind",
@@ -265,12 +270,12 @@ impl DependencyMaterializationCache {
                 ));
             }
             let destination = staging.join("outputs").join(relative);
-            copy_replace(source, &destination)?;
+            copy_replace(&source, &destination)?;
             outputs.push(Output {
                 path: relative.clone(),
                 kind: kind_name(*kind).to_string(),
-                sha256: hash_path(source)?,
-                bytes: path_bytes(source)?,
+                sha256: hash_path(&source)?,
+                bytes: path_bytes(&source)?,
             });
         }
         let manifest = Manifest {
@@ -287,8 +292,23 @@ impl DependencyMaterializationCache {
         fs::rename(&staging, &self.entry)
             .map_err(|error| io_error("publish dependency cache entry", error))?;
         let bytes = manifest.outputs.iter().map(|output| output.bytes).sum();
-        let _ = self.evidence(CacheResult::Hit { bytes });
+        self.evidence(CacheResult::Saved { bytes })?;
         Ok(())
+    }
+
+    fn manifest_outputs_match(&self, manifest_outputs: &[Output]) -> bool {
+        let mut expected = self
+            .outputs
+            .iter()
+            .map(|(path, _, kind)| (path.as_str(), kind_name(*kind)))
+            .collect::<Vec<_>>();
+        let mut actual = manifest_outputs
+            .iter()
+            .map(|output| (output.path.as_str(), output.kind.as_str()))
+            .collect::<Vec<_>>();
+        expected.sort_unstable();
+        actual.sort_unstable();
+        expected == actual
     }
 
     fn lock(&self) -> Result<File> {
@@ -309,11 +329,19 @@ impl DependencyMaterializationCache {
         let (status, reason, bytes) = match &result {
             CacheResult::Hit { bytes } => ("hit", None, *bytes),
             CacheResult::Miss { reason } => ("miss", Some(reason.as_str()), 0),
+            CacheResult::Saved { bytes } => ("saved", None, *bytes),
         };
         let evidence = serde_json::json!({ "schema": SCHEMA, "key": self.key, "status": status, "reason": reason, "bytes": bytes, "provenance": self.provenance, "cache_root": self.root });
-        let path = self
-            .root
-            .join(format!("evidence-{}-{}.json", self.key, std::process::id()));
+        let event_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let path = self.root.join(format!(
+            "evidence-{}-{}-{}.json",
+            self.key,
+            std::process::id(),
+            event_id
+        ));
         if fs::write(&path, serde_json::to_vec(&evidence).unwrap_or_default()).is_ok() {
             let _ = crate::local_artifact::register_current_run_artifact(
                 "dependency_materialization_cache",
@@ -325,8 +353,38 @@ impl DependencyMaterializationCache {
 }
 
 fn contained_path(root: &Path, path: impl AsRef<Path>) -> Result<PathBuf> {
-    homeboy_paths::resolve_contained_local_path(root, path, "dependency_materialization")
-        .map_err(Into::into)
+    let path =
+        homeboy_paths::resolve_contained_local_path(root, path, "dependency_materialization")
+            .map_err(Into::into)?;
+    let root =
+        fs::canonicalize(root).map_err(|error| io_error("resolve dependency workspace", error))?;
+    let mut ancestor = path.as_path();
+    loop {
+        match fs::canonicalize(ancestor) {
+            Ok(resolved) => {
+                if resolved.starts_with(&root) {
+                    return Ok(path);
+                }
+                return Err(Error::validation_invalid_argument(
+                    "dependency_materialization",
+                    "cache path resolves outside the dependency workspace",
+                    Some(path.display().to_string()),
+                    None,
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                ancestor = ancestor.parent().ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "dependency_materialization",
+                        "cache path has no existing ancestor in the dependency workspace",
+                        Some(path.display().to_string()),
+                        None,
+                    )
+                })?;
+            }
+            Err(error) => return Err(io_error("resolve dependency cache path", error)),
+        }
+    }
 }
 fn read_json<T: for<'a> Deserialize<'a>>(path: &Path) -> Result<T> {
     serde_json::from_slice(
@@ -448,15 +506,28 @@ fn kind_matches(path: &Path, kind: DependencyMaterializationOutputKind) -> bool 
         DependencyMaterializationOutputKind::Path => path.exists(),
     }
 }
-fn output_matches(path: &Path, kind: &str, sha256: &str) -> Result<bool> {
+fn output_matches(path: &Path, kind: &str, sha256: &str) -> bool {
     let kind = match kind {
         "file" => DependencyMaterializationOutputKind::File,
         "dir" => DependencyMaterializationOutputKind::Dir,
-        _ => DependencyMaterializationOutputKind::Path,
+        "path" => DependencyMaterializationOutputKind::Path,
+        _ => return false,
     };
-    Ok(kind_matches(path, kind) && hash_path(path)? == sha256)
+    kind_matches(path, kind) && hash_path(path).is_ok_and(|hash| hash == sha256)
 }
 fn copy_replace(source: &Path, destination: &Path) -> Result<()> {
+    if fs::symlink_metadata(source)
+        .map_err(|error| io_error("inspect dependency cache output", error))?
+        .file_type()
+        .is_symlink()
+    {
+        return Err(Error::validation_invalid_argument(
+            "dependency_materialization",
+            "cache outputs must not contain symbolic links",
+            Some(source.display().to_string()),
+            None,
+        ));
+    }
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| io_error("create dependency cache output parent", error))?;
@@ -492,12 +563,29 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
         fs::read_dir(source).map_err(|error| io_error("read dependency cache directory", error))?
     {
         let entry = entry.map_err(|error| io_error("read dependency cache entry", error))?;
+        let metadata = fs::symlink_metadata(entry.path())
+            .map_err(|error| io_error("inspect dependency cache entry", error))?;
+        if metadata.file_type().is_symlink() {
+            return Err(Error::validation_invalid_argument(
+                "dependency_materialization",
+                "cache outputs must not contain symbolic links",
+                Some(entry.path().display().to_string()),
+                None,
+            ));
+        }
         let target = destination.join(entry.file_name());
-        if entry.path().is_dir() {
+        if metadata.is_dir() {
             copy_directory(&entry.path(), &target)?;
-        } else {
+        } else if metadata.is_file() {
             fs::copy(entry.path(), target)
                 .map_err(|error| io_error("copy dependency cache file", error))?;
+        } else {
+            return Err(Error::validation_invalid_argument(
+                "dependency_materialization",
+                "cache outputs must be regular files or directories",
+                Some(entry.path().display().to_string()),
+                None,
+            ));
         }
     }
     Ok(())

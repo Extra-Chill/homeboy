@@ -1061,5 +1061,77 @@ fn dependency_materialization_cache_restores_verified_outputs_in_a_fresh_workspa
             std::fs::read_to_string(third.join("output/value")).expect("rematerialized output"),
             "same input\n"
         );
+
+        let evidence = std::fs::read_dir(&cache_root)
+            .expect("cache evidence")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("evidence-"))
+            .map(|entry| {
+                serde_json::from_slice::<serde_json::Value>(
+                    &std::fs::read(entry.path()).expect("read cache evidence"),
+                )
+                .expect("parse cache evidence")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            evidence.iter().any(|event| event["status"] == "miss"),
+            "cache miss must be retained as structured evidence: {evidence:?}"
+        );
+        assert!(
+            evidence.iter().any(|event| event["status"] == "hit"),
+            "cache hit must be retained as structured evidence: {evidence:?}"
+        );
+        assert!(
+            evidence.iter().any(|event| event["status"] == "saved"),
+            "cache save must be retained as structured evidence: {evidence:?}"
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn dependency_materialization_cache_rejects_output_symlink_escapes() {
+    with_isolated_home(|root| {
+        let workspace = root.path().join("workspace");
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(&outside).expect("outside");
+        std::fs::write(workspace.join("lock"), "input\n").expect("lock input");
+        unix_symlink(&outside, &workspace.join("output"));
+
+        let rig = RigSpec {
+            id: "dependency-cache-symlink-escape".to_string(),
+            requirements: RigRequirementsSpec {
+                dependency_materialization: vec![DependencyMaterializationStepSpec {
+                    id: "install".to_string(),
+                    command: Some("touch output/value".to_string()),
+                    cwd: Some(workspace.display().to_string()),
+                    cache_key_inputs: vec!["lock".to_string()],
+                    expected_outputs: vec![DependencyMaterializationOutputSpec {
+                        path: "output/value".to_string(),
+                        kind: DependencyMaterializationOutputKind::File,
+                        required: true,
+                    }],
+                    safety: DependencyMaterializationSafety::WritesCache,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..minimal_spec("dependency-cache-symlink-escape")
+        };
+
+        let report = run_fuzz_prepare(&rig, &[])
+            .expect("symlink escape is reported as a failed prepare")
+            .expect("prepare report");
+        assert!(!report.success);
+        assert!(report.pipeline.steps[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("resolves outside the dependency workspace"));
+        assert!(
+            !outside.join("value").exists(),
+            "the materializer must not run through an output symlink"
+        );
     });
 }
