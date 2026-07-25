@@ -17,14 +17,15 @@ use std::collections::HashMap;
 
 use crate::pipeline::PipelineOutcome;
 use crate::runner::{
-    head_sha_and_branch, run_check, run_check_groups, run_down, run_down_with_settings, run_repair,
-    run_status, run_up, snapshot_state, CheckReport, RigStatusReport, ServiceStatusReport,
-    SymlinkStatusState, UpReport,
+    head_sha_and_branch, run_check, run_check_groups, run_down, run_down_with_settings,
+    run_fuzz_prepare, run_repair, run_status, run_up, snapshot_state, CheckReport, RigStatusReport,
+    ServiceStatusReport, SymlinkStatusState, UpReport,
 };
 use crate::spec::{
-    ComponentSpec, ExecutableRequirementSpec, FilesystemAssertionKind, FilesystemAssertionSpec,
-    PipelineStep, RigRequirementsSpec, RigResourcesSpec, RigSpec, ServiceKind, ServiceSpec,
-    SharedPathOp, SharedPathSpec, SymlinkSpec,
+    ComponentSpec, DependencyMaterializationOutputKind, DependencyMaterializationOutputSpec,
+    DependencyMaterializationSafety, DependencyMaterializationStepSpec, ExecutableRequirementSpec,
+    FilesystemAssertionKind, FilesystemAssertionSpec, PipelineStep, RigRequirementsSpec,
+    RigResourcesSpec, RigSpec, ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec, SymlinkSpec,
 };
 use crate::state::RigState;
 use homeboy_core::test_support::with_isolated_home;
@@ -977,4 +978,88 @@ fn test_head_sha_and_branch_returns_sha_and_branch_for_git_repo() {
         "HEAD SHA is hex: {sha}"
     );
     assert_eq!(branch.as_deref(), Some("fixture-main"));
+}
+
+#[test]
+fn dependency_materialization_cache_restores_verified_outputs_in_a_fresh_workspace() {
+    with_isolated_home(|root| {
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        let third = root.path().join("third");
+        let count = root.path().join("materializations");
+        for workspace in [&first, &second, &third] {
+            std::fs::create_dir_all(workspace).expect("workspace");
+            std::fs::write(workspace.join("lock"), "same input\n").expect("lock input");
+        }
+        let command = format!(
+            "printf materialized >> '{}'; mkdir -p output; cp lock output/value",
+            count.display()
+        );
+        let rig_for = |workspace: &std::path::Path| RigSpec {
+            id: "dependency-cache-fixture".to_string(),
+            requirements: RigRequirementsSpec {
+                dependency_materialization: vec![DependencyMaterializationStepSpec {
+                    id: "install".to_string(),
+                    command: Some(command.clone()),
+                    cwd: Some(workspace.display().to_string()),
+                    cache_key_inputs: vec!["lock".to_string()],
+                    expected_outputs: vec![DependencyMaterializationOutputSpec {
+                        path: "output/value".to_string(),
+                        kind: DependencyMaterializationOutputKind::File,
+                        required: true,
+                    }],
+                    safety: DependencyMaterializationSafety::WritesCache,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..minimal_spec("dependency-cache-fixture")
+        };
+
+        let first_report = run_fuzz_prepare(&rig_for(&first), &[])
+            .expect("first materialization")
+            .expect("prepare report");
+        assert!(first_report.success, "{:?}", first_report.pipeline.steps);
+        assert_eq!(
+            std::fs::read_to_string(&count).expect("first command"),
+            "materialized"
+        );
+
+        let second_report = run_fuzz_prepare(&rig_for(&second), &[])
+            .expect("cache restore")
+            .expect("prepare report");
+        assert!(second_report.success);
+        assert_eq!(
+            std::fs::read_to_string(&count).expect("cache skipped command"),
+            "materialized"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second.join("output/value")).expect("restored output"),
+            "same input\n"
+        );
+
+        let cache_root = homeboy_paths::homeboy_data()
+            .expect("data root")
+            .join("cache/dependency-materialization/v1");
+        let entry = std::fs::read_dir(&cache_root)
+            .expect("cache entries")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .find(|path| path.is_dir())
+            .expect("published cache entry");
+        std::fs::write(entry.join("outputs/output/value"), "corrupt")
+            .expect("corrupt cache output");
+
+        let third_report = run_fuzz_prepare(&rig_for(&third), &[])
+            .expect("corrupt entry is a safe miss")
+            .expect("prepare report");
+        assert!(third_report.success);
+        assert_eq!(
+            std::fs::read_to_string(&count).expect("materializer reran"),
+            "materializedmaterialized"
+        );
+        assert_eq!(
+            std::fs::read_to_string(third.join("output/value")).expect("rematerialized output"),
+            "same input\n"
+        );
+    });
 }

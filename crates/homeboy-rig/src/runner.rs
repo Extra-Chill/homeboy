@@ -13,6 +13,7 @@ use serde::Serialize;
 use super::artifact_index::{self, RigRunArtifactIndex};
 
 use super::capabilities::evaluate_requirements;
+use super::dependency_materialization_cache::{CacheResult, DependencyMaterializationCache};
 use super::expand::{expand_resources, expand_vars};
 use super::lease::acquire_active_run_lease;
 use super::lint::run_package_lint;
@@ -447,6 +448,13 @@ fn materialize_dependency_step(
         return Ok(());
     }
 
+    let cache = DependencyMaterializationCache::new(rig, step, settings)?;
+    if let Some(cache) = cache.as_ref() {
+        if matches!(cache.restore()?, CacheResult::Hit { .. }) {
+            return Ok(());
+        }
+    }
+
     if let Some(command) = step.command.as_deref() {
         let env: HashMap<String, String> = step
             .env
@@ -502,6 +510,10 @@ fn materialize_dependency_step(
         ));
     }
 
+    if let Some(cache) = cache.as_ref() {
+        cache.save()?;
+    }
+
     Ok(())
 }
 
@@ -537,7 +549,7 @@ fn missing_dependency_outputs(
         .collect()
 }
 
-fn resolve_dependency_output_path(
+pub(crate) fn resolve_dependency_output_path(
     rig: &RigSpec,
     step: &super::DependencyMaterializationStepSpec,
     path: &str,
@@ -553,7 +565,7 @@ fn resolve_dependency_output_path(
     output_path
 }
 
-fn dependency_step_cwd(
+pub(crate) fn dependency_step_cwd(
     rig: &RigSpec,
     step: &super::DependencyMaterializationStepSpec,
 ) -> Option<String> {

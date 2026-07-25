@@ -22,6 +22,7 @@ pub mod artifact_index;
 pub mod capabilities;
 pub mod check;
 pub mod component_resolution;
+mod dependency_materialization_cache;
 mod discovery;
 pub mod expand;
 pub mod install;
