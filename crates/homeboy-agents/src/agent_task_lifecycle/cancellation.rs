@@ -198,79 +198,109 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
     let runner_id = record.runner_id().map(str::to_string);
     let runner_job_id = record.runner_job_id().map(str::to_string);
 
-    let cancelled_at = now_timestamp();
-    let was_stale_running = record.state == AgentTaskRunState::Running;
-    record.updated_at = Some(cancelled_at.clone());
-    set_run_state(&mut record, AgentTaskRunState::Cancelled);
-    for task in &mut record.tasks {
-        if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
-            task.state = AgentTaskState::Cancelled;
+    // The provider can publish its terminal reservation after the initial read
+    // above. Make the final decision under the record mutation lock so a late
+    // success is either observed here or cancellation wins before it can be
+    // imported; never overwrite an already durable success.
+    let record = store::mutate_record(&record.run_id, |record| {
+        // An aggregate or runner projection may have finished after the live
+        // cancellation transport returned. Its terminal state is authoritative.
+        if record.state.is_terminal() {
+            return false;
         }
-    }
+        if record.state == AgentTaskRunState::Running
+            && !record.is_runner_backed()
+            && record.metadata["provider_executions"]
+                .as_array()
+                .is_some_and(|executions| {
+                    executions
+                        .iter()
+                        .any(|execution| execution["state"] == json!("succeeded"))
+                })
+        {
+            record.ensure_metadata_object().insert(
+                "cancellation_deferred_for_terminal_provider".to_string(),
+                json!({ "requested_at": now_timestamp(), "reason": reason.unwrap_or("cancel requested") }),
+            );
+            return true;
+        }
 
-    let metadata = record.ensure_metadata_object();
-    terminalize_running_provider_executions(metadata, &cancelled_at);
-    metadata.insert("cancelled_at".to_string(), json!(cancelled_at));
-    metadata.insert("cancelled_by_pid".to_string(), json!(std::process::id()));
-    metadata.insert(
-        "cancel_reason".to_string(),
-        json!(reason.unwrap_or("cancel requested")),
-    );
-    metadata.remove("live_cancellation");
-    metadata.remove("live_cancellation_unsupported");
-    match cancellation {
-        LiveCancellationOutcome::Terminated(termination) => {
-            metadata.insert(
-                "live_cancellation".to_string(),
-                json!({
-                    "owner_pid": termination.owner_pid,
-                    "descendant_pids": termination.descendant_pids,
-                    "signalled_pids": termination.signalled_pids,
-                    "signal": termination.signal,
-                    "killed_pids": termination.killed_pids,
-                    "surviving_pids": termination.surviving_pids,
-                    "recovery_commands": termination.recovery_commands,
-                }),
-            );
+        let cancelled_at = now_timestamp();
+        let was_stale_running = record.state == AgentTaskRunState::Running;
+        record.updated_at = Some(cancelled_at.clone());
+        set_run_state(record, AgentTaskRunState::Cancelled);
+        for task in &mut record.tasks {
+            if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
+                task.state = AgentTaskState::Cancelled;
+            }
         }
-        LiveCancellationOutcome::RunnerJobCancelled { job, events } => {
-            metadata.insert(
-                "live_cancellation".to_string(),
-                json!({
-                    "runner_id": runner_id,
-                    "runner_job_id": runner_job_id,
-                    "runner_job_status": job.status,
-                    "runner_job_events": events,
-                    "cancellation": "runner_job_cancel",
-                }),
-            );
-        }
-        LiveCancellationOutcome::Unsupported(unsupported) => {
-            metadata.insert(
-                "live_cancellation_unsupported".to_string(),
-                json!({
-                    "reason": unsupported.reason,
-                    "owner_pid": unsupported.owner_pid,
-                    "runner_id": unsupported.runner_id,
-                    "runner_job_id": unsupported.runner_job_id,
-                    "recovery_commands": unsupported.recovery_commands,
-                }),
-            );
-        }
-        LiveCancellationOutcome::NotRunning => {}
-    }
-    if was_stale_running {
+
+        let metadata = record.ensure_metadata_object();
+        terminalize_running_provider_executions(metadata, &cancelled_at);
+        metadata.insert("cancelled_at".to_string(), json!(cancelled_at));
+        metadata.insert("cancelled_by_pid".to_string(), json!(std::process::id()));
         metadata.insert(
-            METADATA_KEY_CANCELLED_STALE_RUNNING.to_string(),
-            json!(true),
+            "cancel_reason".to_string(),
+            json!(reason.unwrap_or("cancel requested")),
         );
+        metadata.remove("live_cancellation");
+        metadata.remove("live_cancellation_unsupported");
+        match &cancellation {
+            LiveCancellationOutcome::Terminated(termination) => {
+                metadata.insert(
+                    "live_cancellation".to_string(),
+                    json!({
+                        "owner_pid": termination.owner_pid,
+                        "descendant_pids": termination.descendant_pids,
+                        "signalled_pids": termination.signalled_pids,
+                        "signal": termination.signal,
+                        "killed_pids": termination.killed_pids,
+                        "surviving_pids": termination.surviving_pids,
+                        "recovery_commands": termination.recovery_commands,
+                    }),
+                );
+            }
+            LiveCancellationOutcome::RunnerJobCancelled { job, events } => {
+                metadata.insert(
+                    "live_cancellation".to_string(),
+                    json!({
+                        "runner_id": runner_id,
+                        "runner_job_id": runner_job_id,
+                        "runner_job_status": job.status,
+                        "runner_job_events": events,
+                        "cancellation": "runner_job_cancel",
+                    }),
+                );
+            }
+            LiveCancellationOutcome::Unsupported(unsupported) => {
+                metadata.insert(
+                    "live_cancellation_unsupported".to_string(),
+                    json!({
+                        "reason": unsupported.reason,
+                        "owner_pid": unsupported.owner_pid,
+                        "runner_id": unsupported.runner_id,
+                        "runner_job_id": unsupported.runner_job_id,
+                        "recovery_commands": unsupported.recovery_commands,
+                    }),
+                );
+            }
+            LiveCancellationOutcome::NotRunning => {}
+        }
+        if was_stale_running {
+            metadata.insert(
+                METADATA_KEY_CANCELLED_STALE_RUNNING.to_string(),
+                json!(true),
+            );
+        }
+        metadata.remove(METADATA_KEY_STALE_RUNNING);
+        metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
+        true
+    })?
+    .unwrap_or(store::read_record(&record.run_id)?);
+    if record.state == AgentTaskRunState::Cancelled {
+        crate::controller_scratch::finalize_run(&record.run_id)?;
+        homeboy_core::controller_runtime::cancel_admission(&record.run_id)?;
     }
-    metadata.remove(METADATA_KEY_STALE_RUNNING);
-    metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
-
-    store::write_record(&record)?;
-    crate::controller_scratch::finalize_run(&record.run_id)?;
-    homeboy_core::controller_runtime::cancel_admission(&record.run_id)?;
     Ok(record)
 }
 
