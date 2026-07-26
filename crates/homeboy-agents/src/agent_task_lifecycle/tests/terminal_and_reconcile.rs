@@ -2045,6 +2045,12 @@ fn replaying_cancel_recovers_stale_released_and_orphaned_scratch_before_bounded_
         .expect("orphaned scratch");
         prepare_dirty_scheduler_workspace(&released.path);
         prepare_dirty_scheduler_workspace(&orphaned.path);
+        // Model the reported retained-byte incident without allocating physical
+        // disk. `path_size` reports this logical sparse-file size.
+        std::fs::File::create(released.path.join("retained-scratch.bin"))
+            .expect("retained scratch")
+            .set_len(178_650_000_000)
+            .expect("sparse retained scratch");
         crate::controller_scratch::abandon_attempt_for_test(&released)
             .expect("dead released owner");
         crate::controller_scratch::abandon_attempt_for_test(&orphaned).expect("dead orphan owner");
@@ -2089,7 +2095,7 @@ fn replaying_cancel_recovers_stale_released_and_orphaned_scratch_before_bounded_
         assert_eq!(preview.candidate_count, 2);
         assert_eq!(preview.candidates.len(), 1);
         assert_eq!(preview.remaining_candidate_count, 1);
-        assert!(preview.estimated_bytes > 0);
+        assert!(preview.estimated_bytes >= 178_650_000_000);
 
         let first = crate::controller_scratch::cleanup(
             crate::controller_scratch::ControllerScratchCleanupOptions {
