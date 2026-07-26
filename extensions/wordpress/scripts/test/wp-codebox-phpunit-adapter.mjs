@@ -22,7 +22,7 @@ const root = settings.wp_codebox_source_root || componentPath;
 const subpath = settings.wp_codebox_source_subpath || undefined;
 const pluginSourceDirectory = subpath ? path.join(root, subpath) : root;
 const phpunitProfile = await resolvePhpunitProfile(settings, pluginSourceDirectory, slug);
-const multisite = await resolveMultisite(settings, pluginSourceDirectory);
+const topology = await resolveWordPressTopology(settings, pluginSourceDirectory);
 const databaseService = resolveDatabaseService(settings, process.env);
 requireDatabaseServiceCapability(databaseService);
 runPrepareSteps(settings.wp_codebox_prepare_steps, pluginSourceDirectory);
@@ -55,7 +55,7 @@ const options = clean({
   wpConfigDefines: settings.wp_config_defines,
   bootstrapMode: settings.wp_codebox_phpunit_bootstrap_mode,
   projectBootstrap: settings.wp_codebox_phpunit_project_bootstrap,
-  multisite,
+  multisite: topology.multisite,
   preloadFiles: settings.wp_codebox_phpunit_preload_files,
   mounts: [...canonicalMounts(settings.wp_codebox_phpunit_mounts), { source: harnessSource, target: '/wp-codebox-vendor', mode: 'readonly' }],
 });
@@ -176,15 +176,15 @@ function run(args) {
   }
 }
 function required(value, name) { if (!value) { throw new Error(`${name} is required`); } return value; }
-async function resolveMultisite(configuration, pluginDirectory) {
+async function resolveWordPressTopology(configuration, pluginDirectory) {
   const fromEnv = process.env.HOMEBOY_WORDPRESS_MULTISITE;
   if (fromEnv !== undefined && fromEnv !== '') {
-    return truthy(fromEnv);
+    return { multisite: truthy(fromEnv), source: 'environment' };
   }
   if (configuration.wp_codebox_multisite !== undefined) {
-    return truthy(configuration.wp_codebox_multisite);
+    return { multisite: truthy(configuration.wp_codebox_multisite), source: 'setting' };
   }
-  return pluginRequiresNetwork(pluginDirectory);
+  return { multisite: await pluginRequiresNetwork(pluginDirectory), source: 'plugin-header' };
 }
 async function pluginRequiresNetwork(pluginDirectory) {
   if (typeof pluginDirectory !== 'string' || pluginDirectory === '') {
@@ -210,7 +210,9 @@ async function pluginRequiresNetwork(pluginDirectory) {
     if (!/^[\s*#\/]*Plugin Name\s*:/im.test(block)) {
       continue;
     }
-    return /^[\s*#\/]*Network\s*:\s*(true|1|yes|on)\b/im.test(block);
+    if (/^[\s*#\/]*Network\s*:\s*(true|1|yes|on)\b/im.test(block)) {
+      return true;
+    }
   }
   return false;
 }
@@ -620,7 +622,7 @@ async function persistRecipeEvidence(artifactDirectory, recipeOptions, generated
   await Promise.all([
     copyFile(generatedRecipePath, path.join(artifactDirectory, 'wp-codebox-phpunit-recipe.json')),
     writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-recipe-options.json'), `${JSON.stringify(recipeOptions, null, 2)}\n`),
-    writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-profile.json'), `${JSON.stringify({ phpunit: { config: profile.config, cwd: profile.cwd, test_root: profile.testRoot, environment: profile.environment, bootstrap_mode: recipeOptions.bootstrapMode, passthrough_args: recipeOptions.phpunitArgs, extra_mounts: recipeOptions.mounts } }, null, 2)}\n`),
+    writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-profile.json'), `${JSON.stringify({ wordpress: { topology }, phpunit: { config: profile.config, cwd: profile.cwd, test_root: profile.testRoot, environment: profile.environment, bootstrap_mode: recipeOptions.bootstrapMode, passthrough_args: recipeOptions.phpunitArgs, extra_mounts: recipeOptions.mounts } }, null, 2)}\n`),
     writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-provenance.json'), `${JSON.stringify({ source_refs: sourceRefs, wp_codebox: { cli_bin: process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox', resolved_cli_path: process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox', command: [process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox'] } }, null, 2)}\n`),
   ]);
 }

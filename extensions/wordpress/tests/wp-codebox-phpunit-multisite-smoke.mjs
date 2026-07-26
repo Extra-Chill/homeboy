@@ -1,14 +1,14 @@
+/**
+ * External dependencies
+ */
 import { strict as assert } from 'node:assert';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-// Exercises the plugin PHPUnit adapter's multisite resolution so that
-// network-only plugins (Network: true) boot a multisite runtime instead of
-// crashing in wp_die(). Covers the three supported sources, in precedence
-// order: HOMEBOY_WORDPRESS_MULTISITE env, wp_codebox_multisite setting, and
-// the plugin's own `Network: true` header.
+// Exercises the plugin PHPUnit topology handoff. WP Codebox owns Playground's
+// multisite preinstall, network activation, and PHPUnit bootstrap lifecycle.
 
 const extension = path.resolve(import.meta.dirname, '..');
 const runner = path.join(extension, 'scripts/test/test-runner-wp-codebox.sh');
@@ -36,14 +36,10 @@ if (args[0] === 'recipe-run') {
 await chmod(cli, 0o755);
 
 let scenario = 0;
-async function resolvedOptions({ pluginPhp, settings = {}, env = {} }) {
+async function resolvedOptions({ fixture, settings = {}, env = {} }) {
   scenario += 1;
-  const component = path.join(root, `plugin-${scenario}`);
+  const component = path.join(extension, 'tests', 'fixtures', 'wp-codebox-phpunit-topology', fixture);
   const observed = path.join(root, `observed-${scenario}.jsonl`);
-  await mkdir(component, { recursive: true });
-  if (pluginPhp !== undefined) {
-    await writeFile(path.join(component, 'plugin.php'), pluginPhp);
-  }
   const result = spawnSync(runner, [], {
     env: {
       ...process.env,
@@ -62,33 +58,32 @@ async function resolvedOptions({ pluginPhp, settings = {}, env = {} }) {
 }
 
 try {
-  const singleSitePlugin = '<?php\n/**\n * Plugin Name: Single Site\n */\n';
-  const networkPlugin = '<?php\n/**\n * Plugin Name: Network Only\n * Network: true\n */\n';
-
   // Default: no signal anywhere -> single-site.
+  const singleSite = await resolvedOptions({ fixture: 'single-site' });
   assert.equal(
-    (await resolvedOptions({ pluginPhp: singleSitePlugin })).multisite,
+    singleSite.multisite,
     false,
     'no signal defaults to single-site',
   );
 
-  // Plugin header Network: true auto-enables multisite with zero config.
+  // A non-network plugin header precedes the network entrypoint in this fixture.
+  // Detection must inspect every supported plugin header before selecting topology.
   assert.equal(
-    (await resolvedOptions({ pluginPhp: networkPlugin })).multisite,
+    (await resolvedOptions({ fixture: 'network-plugin' })).multisite,
     true,
     'Network: true plugin header auto-enables multisite',
   );
 
   // wp_codebox_multisite setting enables multisite for a single-site plugin.
   assert.equal(
-    (await resolvedOptions({ pluginPhp: singleSitePlugin, settings: { wp_codebox_multisite: true } })).multisite,
+    (await resolvedOptions({ fixture: 'explicit-multisite', settings: { wp_codebox_multisite: true } })).multisite,
     true,
     'wp_codebox_multisite setting enables multisite',
   );
 
   // Setting can also explicitly force single-site even for a Network plugin.
   assert.equal(
-    (await resolvedOptions({ pluginPhp: networkPlugin, settings: { wp_codebox_multisite: false } })).multisite,
+    (await resolvedOptions({ fixture: 'network-plugin', settings: { wp_codebox_multisite: false } })).multisite,
     false,
     'explicit wp_codebox_multisite=false overrides Network header',
   );
@@ -96,7 +91,7 @@ try {
   // Env var takes precedence over everything.
   assert.equal(
     (await resolvedOptions({
-      pluginPhp: singleSitePlugin,
+      fixture: 'single-site',
       settings: { wp_codebox_multisite: false },
       env: { HOMEBOY_WORDPRESS_MULTISITE: '1' },
     })).multisite,
@@ -104,18 +99,18 @@ try {
     'HOMEBOY_WORDPRESS_MULTISITE env overrides settings',
   );
 
-  const defaultDatabase = await resolvedOptions({ pluginPhp: singleSitePlugin });
+  const defaultDatabase = singleSite;
   assert.equal('databaseType' in defaultDatabase, false, 'omitted database_type preserves WP Codebox defaults');
   assert.equal(defaultDatabase.extra_plugins.length, 1, 'no dependencies only emits the primary plugin');
   assert.equal(defaultDatabase.extra_plugins[0].activate, false, 'primary plugin remains inactive for the managed PHPUnit bootstrap');
 
-  const mysqlDatabase = await resolvedOptions({ pluginPhp: singleSitePlugin, settings: { database_type: 'mysql' } });
+  const mysqlDatabase = await resolvedOptions({ fixture: 'single-site', settings: { database_type: 'mysql' } });
   assert.equal(mysqlDatabase.databaseType, 'mysql', 'database_type maps to the WP Codebox databaseType contract');
 
-  const defaultPhp = await resolvedOptions({ pluginPhp: singleSitePlugin });
+  const defaultPhp = singleSite;
   assert.equal('phpVersion' in defaultPhp, false, 'omitted runtime PHP version preserves WP Codebox defaults');
 
-  const configuredPhp = await resolvedOptions({ pluginPhp: singleSitePlugin, settings: { wordpress_runtime_php_version: '8.4' } });
+  const configuredPhp = await resolvedOptions({ fixture: 'single-site', settings: { wordpress_runtime_php_version: '8.4' } });
   assert.equal(configuredPhp.phpVersion, '8.4', 'configured runtime PHP version maps to the WP Codebox phpVersion contract');
 } finally {
   await rm(root, { recursive: true, force: true });
