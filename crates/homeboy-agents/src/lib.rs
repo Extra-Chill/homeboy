@@ -39,6 +39,7 @@ pub mod agent_task_secrets;
 pub mod agent_task_service;
 pub mod agent_task_timeout;
 pub mod agent_task_timeout_artifacts;
+pub(crate) mod agent_task_workspace_identity;
 pub mod agent_tasks;
 pub mod agent_tool_control_plane;
 pub mod api_jobs_terminal_recovery;
