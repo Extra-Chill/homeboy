@@ -18,12 +18,15 @@ homeboy-rig-contract = { version = "0.1.0", path = "../contracts/homeboy-rig-con
 homeboy-lab-runner-contract = { version = "0.1.0", path = "../contracts/homeboy-lab-runner-contract" }
 homeboy-lifecycle-contract = { version = "0.1.0", path = "../contracts/homeboy-lifecycle-contract" }
 homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
+homeboy-paths = { version = "0.1.0", path = "../homeboy-paths" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = "0.4"
 shellexpand = "3.1"
 libc = "0.2"
 tempfile = "3.14"
+sha2 = "0.10.9"
+fs4 = "0.13"
 
 [dev-dependencies]
 homeboy-core = { version = "0.1.0", path = "../homeboy-core", features = ["test-support"] }

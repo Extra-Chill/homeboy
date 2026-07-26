@@ -3,8 +3,12 @@
 use std::collections::HashMap;
 use std::process::Command;
 
-use crate::runner::{run_check, run_up};
-use crate::spec::{ComponentSpec, PipelineStep, RigResourcesSpec, RigSpec};
+use crate::runner::{run_check, run_fuzz_prepare, run_up};
+use crate::spec::{
+    ComponentSpec, DependencyMaterializationOutputKind, DependencyMaterializationOutputSpec,
+    DependencyMaterializationSafety, DependencyMaterializationStepSpec, PipelineStep,
+    RigRequirementsSpec, RigResourcesSpec, RigSpec,
+};
 use crate::{RigSourceMetadata, RigState};
 use homeboy_core::observation::{ObservationStore, RunListFilter};
 use homeboy_core::paths;
@@ -398,6 +402,52 @@ fn test_observation_store_failure_does_not_fail_rig_check() {
                 .as_deref(),
             Some("pass")
         );
+    });
+}
+
+#[test]
+fn fuzz_prepare_registers_dependency_cache_evidence_and_lifecycle_index() {
+    with_isolated_home(|home| {
+        let _xdg = XdgDataHomeGuard::unset();
+        let workspace = home.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::write(workspace.join("lock"), "input").expect("lock");
+        let mut rig = observation_spec("observed-fuzz-cache");
+        rig.requirements = RigRequirementsSpec {
+            dependency_materialization: vec![DependencyMaterializationStepSpec {
+                id: "install".to_string(),
+                command: Some("printf output > output".to_string()),
+                cwd: Some(workspace.display().to_string()),
+                cache_key_inputs: vec!["lock".to_string()],
+                expected_outputs: vec![DependencyMaterializationOutputSpec {
+                    path: "output".to_string(),
+                    kind: DependencyMaterializationOutputKind::File,
+                    required: true,
+                }],
+                safety: DependencyMaterializationSafety::WritesCache,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let report = run_fuzz_prepare(&rig, &[])
+            .expect("prepare")
+            .expect("declared prepare");
+        assert!(report.success);
+        let run_id = report.run_id.expect("fuzz prepare observation id");
+        let artifacts = ObservationStore::open_initialized()
+            .expect("store")
+            .list_artifacts(&run_id)
+            .expect("artifacts");
+        assert!(artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "dependency_materialization_cache"));
+        let index = resource_lifecycle_index_from_artifacts(&artifacts)
+            .expect("lifecycle index")
+            .expect("cache lifecycle index");
+        assert!(index.resources.iter().any(|record| {
+            record.kind == "dependency_materialization_cache" && record.cleanup_intent.is_apply()
+        }));
     });
 }
 

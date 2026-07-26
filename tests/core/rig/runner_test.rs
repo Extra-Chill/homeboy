@@ -15,16 +15,20 @@
 
 use std::collections::HashMap;
 
+use crate::dependency_materialization_cache::{
+    inject_restore_publish_failure_after, CacheResult, DependencyMaterializationCache,
+};
 use crate::pipeline::PipelineOutcome;
 use crate::runner::{
-    head_sha_and_branch, run_check, run_check_groups, run_down, run_down_with_settings, run_repair,
-    run_status, run_up, snapshot_state, CheckReport, RigStatusReport, ServiceStatusReport,
-    SymlinkStatusState, UpReport,
+    head_sha_and_branch, run_check, run_check_groups, run_down, run_down_with_settings,
+    run_fuzz_prepare, run_repair, run_status, run_up, snapshot_state, CheckReport, RigStatusReport,
+    ServiceStatusReport, SymlinkStatusState, UpReport,
 };
 use crate::spec::{
-    ComponentSpec, ExecutableRequirementSpec, FilesystemAssertionKind, FilesystemAssertionSpec,
-    PipelineStep, RigRequirementsSpec, RigResourcesSpec, RigSpec, ServiceKind, ServiceSpec,
-    SharedPathOp, SharedPathSpec, SymlinkSpec,
+    ComponentSpec, DependencyMaterializationOutputKind, DependencyMaterializationOutputSpec,
+    DependencyMaterializationSafety, DependencyMaterializationStepSpec, ExecutableRequirementSpec,
+    FilesystemAssertionKind, FilesystemAssertionSpec, PipelineStep, RigRequirementsSpec,
+    RigResourcesSpec, RigSpec, ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec, SymlinkSpec,
 };
 use crate::state::RigState;
 use homeboy_core::test_support::with_isolated_home;
@@ -977,4 +981,376 @@ fn test_head_sha_and_branch_returns_sha_and_branch_for_git_repo() {
         "HEAD SHA is hex: {sha}"
     );
     assert_eq!(branch.as_deref(), Some("fixture-main"));
+}
+
+#[test]
+fn dependency_materialization_cache_restores_verified_outputs_in_a_fresh_workspace() {
+    with_isolated_home(|root| {
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        let third = root.path().join("third");
+        let count = root.path().join("materializations");
+        for workspace in [&first, &second, &third] {
+            std::fs::create_dir_all(workspace).expect("workspace");
+            std::fs::write(workspace.join("lock"), "same input\n").expect("lock input");
+        }
+        let command = format!(
+            "printf materialized >> '{}'; mkdir -p output; cp lock output/value",
+            count.display()
+        );
+        let rig_for = |workspace: &std::path::Path| RigSpec {
+            id: "dependency-cache-fixture".to_string(),
+            requirements: RigRequirementsSpec {
+                dependency_materialization: vec![DependencyMaterializationStepSpec {
+                    id: "install".to_string(),
+                    command: Some(command.clone()),
+                    cwd: Some(workspace.display().to_string()),
+                    cache_key_inputs: vec!["lock".to_string()],
+                    expected_outputs: vec![DependencyMaterializationOutputSpec {
+                        path: "output/value".to_string(),
+                        kind: DependencyMaterializationOutputKind::File,
+                        required: true,
+                    }],
+                    safety: DependencyMaterializationSafety::WritesCache,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..minimal_spec("dependency-cache-fixture")
+        };
+
+        let first_report = run_fuzz_prepare(&rig_for(&first), &[])
+            .expect("first materialization")
+            .expect("prepare report");
+        assert!(first_report.success, "{:?}", first_report.pipeline.steps);
+        assert_eq!(
+            std::fs::read_to_string(&count).expect("first command"),
+            "materialized"
+        );
+
+        let second_report = run_fuzz_prepare(&rig_for(&second), &[])
+            .expect("cache restore")
+            .expect("prepare report");
+        assert!(second_report.success);
+        assert_eq!(
+            std::fs::read_to_string(&count).expect("cache skipped command"),
+            "materialized"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second.join("output/value")).expect("restored output"),
+            "same input\n"
+        );
+
+        let cache_root = homeboy_paths::homeboy_data()
+            .expect("data root")
+            .join("cache/dependency-materialization/v1");
+        let entry = std::fs::read_dir(&cache_root)
+            .expect("cache entries")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .find(|path| path.is_dir())
+            .expect("published cache entry");
+        std::fs::write(entry.join("outputs/output/value"), "corrupt")
+            .expect("corrupt cache output");
+
+        let third_report = run_fuzz_prepare(&rig_for(&third), &[])
+            .expect("corrupt entry is a safe miss")
+            .expect("prepare report");
+        assert!(third_report.success);
+        assert_eq!(
+            std::fs::read_to_string(&count).expect("materializer reran"),
+            "materializedmaterialized"
+        );
+        assert_eq!(
+            std::fs::read_to_string(third.join("output/value")).expect("rematerialized output"),
+            "same input\n"
+        );
+
+        let evidence = std::fs::read_dir(&cache_root)
+            .expect("cache evidence")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("evidence-"))
+            .map(|entry| {
+                serde_json::from_slice::<serde_json::Value>(
+                    &std::fs::read(entry.path()).expect("read cache evidence"),
+                )
+                .expect("parse cache evidence")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            evidence.iter().any(|event| event["status"] == "miss"),
+            "cache miss must be retained as structured evidence: {evidence:?}"
+        );
+        assert!(
+            evidence.iter().any(|event| event["status"] == "hit"),
+            "cache hit must be retained as structured evidence: {evidence:?}"
+        );
+        assert!(
+            evidence.iter().any(|event| event["status"] == "saved"),
+            "cache save must be retained as structured evidence: {evidence:?}"
+        );
+    });
+}
+
+#[test]
+fn dependency_materialization_cache_rolls_back_all_outputs_when_a_restore_is_invalid() {
+    with_isolated_home(|root| {
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        for workspace in [&first, &second] {
+            std::fs::create_dir_all(workspace.join("output")).expect("workspace");
+            std::fs::write(workspace.join("lock"), "same input\n").expect("lock");
+        }
+        std::fs::write(first.join("output/one"), "new one").expect("first one");
+        std::fs::write(first.join("output/two"), "new two").expect("first two");
+        std::fs::write(second.join("output/one"), "old one").expect("second one");
+        std::fs::write(second.join("output/two"), "old two").expect("second two");
+        let rig_for = |workspace: &std::path::Path| RigSpec {
+            id: "dependency-cache-rollback".to_string(),
+            requirements: RigRequirementsSpec {
+                dependency_materialization: vec![DependencyMaterializationStepSpec {
+                    id: "install".to_string(),
+                    command: Some("printf ignored".to_string()),
+                    cwd: Some(workspace.display().to_string()),
+                    cache_key_inputs: vec!["lock".to_string()],
+                    expected_outputs: vec![
+                        DependencyMaterializationOutputSpec {
+                            path: "output/one".to_string(),
+                            kind: DependencyMaterializationOutputKind::File,
+                            required: true,
+                        },
+                        DependencyMaterializationOutputSpec {
+                            path: "output/two".to_string(),
+                            kind: DependencyMaterializationOutputKind::File,
+                            required: true,
+                        },
+                    ],
+                    safety: DependencyMaterializationSafety::WritesCache,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..minimal_spec("dependency-cache-rollback")
+        };
+        let first_rig = rig_for(&first);
+        let first_step = &first_rig.requirements.dependency_materialization[0];
+        let cache = DependencyMaterializationCache::new(&first_rig, first_step, &[])
+            .expect("cache")
+            .expect("enabled cache");
+        cache.save().expect("save cache");
+        let cache_root = homeboy_paths::homeboy_data()
+            .expect("data root")
+            .join("cache/dependency-materialization/v1");
+        let entry = std::fs::read_dir(cache_root)
+            .expect("entries")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.is_dir())
+            .expect("entry");
+        std::fs::write(entry.join("outputs/output/two"), "corrupt").expect("corrupt second output");
+
+        let second_rig = rig_for(&second);
+        let second_step = &second_rig.requirements.dependency_materialization[0];
+        let restore = DependencyMaterializationCache::new(&second_rig, second_step, &[])
+            .expect("cache")
+            .expect("enabled cache")
+            .restore()
+            .expect("safe miss");
+        assert!(matches!(restore, CacheResult::Miss { .. }));
+        assert_eq!(
+            std::fs::read_to_string(second.join("output/one")).unwrap(),
+            "old one"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second.join("output/two")).unwrap(),
+            "old two"
+        );
+    });
+}
+
+#[test]
+fn dependency_materialization_cache_rolls_back_published_and_absent_outputs_on_publish_failure() {
+    with_isolated_home(|root| {
+        let source = root.path().join("source");
+        let destination = root.path().join("destination");
+        for workspace in [&source, &destination] {
+            std::fs::create_dir_all(workspace.join("output")).expect("workspace");
+            std::fs::write(workspace.join("lock"), "same input\n").expect("lock");
+        }
+        let rig_for = |workspace: &std::path::Path| RigSpec {
+            id: "dependency-cache-publish-rollback".to_string(),
+            requirements: RigRequirementsSpec {
+                dependency_materialization: vec![DependencyMaterializationStepSpec {
+                    id: "install".to_string(),
+                    command: Some("printf ignored".to_string()),
+                    cwd: Some(workspace.display().to_string()),
+                    cache_key_inputs: vec!["lock".to_string()],
+                    expected_outputs: vec![
+                        DependencyMaterializationOutputSpec {
+                            path: "output/one".to_string(),
+                            kind: DependencyMaterializationOutputKind::File,
+                            required: true,
+                        },
+                        DependencyMaterializationOutputSpec {
+                            path: "output/two".to_string(),
+                            kind: DependencyMaterializationOutputKind::File,
+                            required: true,
+                        },
+                    ],
+                    safety: DependencyMaterializationSafety::WritesCache,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..minimal_spec("dependency-cache-publish-rollback")
+        };
+        let source_rig = rig_for(&source);
+        let cache = DependencyMaterializationCache::new(
+            &source_rig,
+            &source_rig.requirements.dependency_materialization[0],
+            &[],
+        )
+        .expect("cache")
+        .expect("enabled cache");
+        let destination_rig = rig_for(&destination);
+        let restore_cache = DependencyMaterializationCache::new(
+            &destination_rig,
+            &destination_rig.requirements.dependency_materialization[0],
+            &[],
+        )
+        .expect("cache")
+        .expect("enabled cache");
+        std::fs::write(source.join("output/one"), "new one").expect("source one");
+        std::fs::write(source.join("output/two"), "new two").expect("source two");
+        std::fs::write(destination.join("output/one"), "old one").expect("destination one");
+        cache.save().expect("save cache");
+
+        inject_restore_publish_failure_after(1);
+        let restore = restore_cache.restore();
+        inject_restore_publish_failure_after(usize::MAX);
+
+        assert!(restore.is_err(), "injected failure must abort restore");
+        assert_eq!(
+            std::fs::read_to_string(destination.join("output/one")).unwrap(),
+            "old one"
+        );
+        assert!(
+            !destination.join("output/two").exists(),
+            "an output absent before restore remains absent after rollback"
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn dependency_materialization_cache_key_includes_resolved_tool_version() {
+    with_isolated_home(|root| {
+        let bin = root.path().join(".local/bin");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&bin).expect("bin");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::write(workspace.join("lock"), "same input\n").expect("lock");
+        let tool = bin.join("cache-tool");
+        std::fs::write(
+            &tool,
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo tool-v1; fi\n",
+        )
+        .expect("tool");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).expect("tool mode");
+        let rig = RigSpec {
+            id: "dependency-cache-tool-version".to_string(),
+            requirements: RigRequirementsSpec {
+                dependency_materialization: vec![DependencyMaterializationStepSpec {
+                    id: "install".to_string(),
+                    command: Some("cache-tool install".to_string()),
+                    cwd: Some(workspace.display().to_string()),
+                    cache_key_inputs: vec!["lock".to_string()],
+                    expected_outputs: vec![DependencyMaterializationOutputSpec {
+                        path: "output".to_string(),
+                        kind: DependencyMaterializationOutputKind::File,
+                        required: true,
+                    }],
+                    safety: DependencyMaterializationSafety::WritesCache,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..minimal_spec("dependency-cache-tool-version")
+        };
+        let key_v1 = DependencyMaterializationCache::new(
+            &rig,
+            &rig.requirements.dependency_materialization[0],
+            &[],
+        )
+        .expect("cache")
+        .expect("enabled")
+        .key()
+        .to_string();
+        std::fs::write(
+            &tool,
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo tool-v2; fi\n",
+        )
+        .expect("replace tool");
+        let key_v2 = DependencyMaterializationCache::new(
+            &rig,
+            &rig.requirements.dependency_materialization[0],
+            &[],
+        )
+        .expect("cache")
+        .expect("enabled")
+        .key()
+        .to_string();
+        assert_ne!(
+            key_v1, key_v2,
+            "a resolved tool version change invalidates the cache"
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn dependency_materialization_cache_rejects_output_symlink_escapes() {
+    with_isolated_home(|root| {
+        let workspace = root.path().join("workspace");
+        let outside = root.path().join("outside");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(&outside).expect("outside");
+        std::fs::write(workspace.join("lock"), "input\n").expect("lock input");
+        unix_symlink(&outside, &workspace.join("output"));
+
+        let rig = RigSpec {
+            id: "dependency-cache-symlink-escape".to_string(),
+            requirements: RigRequirementsSpec {
+                dependency_materialization: vec![DependencyMaterializationStepSpec {
+                    id: "install".to_string(),
+                    command: Some("touch output/value".to_string()),
+                    cwd: Some(workspace.display().to_string()),
+                    cache_key_inputs: vec!["lock".to_string()],
+                    expected_outputs: vec![DependencyMaterializationOutputSpec {
+                        path: "output/value".to_string(),
+                        kind: DependencyMaterializationOutputKind::File,
+                        required: true,
+                    }],
+                    safety: DependencyMaterializationSafety::WritesCache,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..minimal_spec("dependency-cache-symlink-escape")
+        };
+
+        let report = run_fuzz_prepare(&rig, &[])
+            .expect("symlink escape is reported as a failed prepare")
+            .expect("prepare report");
+        assert!(!report.success);
+        assert!(report.pipeline.steps[0]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("resolves outside the dependency workspace"));
+        assert!(
+            !outside.join("value").exists(),
+            "the materializer must not run through an output symlink"
+        );
+    });
 }

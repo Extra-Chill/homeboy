@@ -73,6 +73,36 @@ pub fn rig_resource_lifecycle_records(
     records
 }
 
+/// Add durable dependency-cache storage to the same lifecycle index as rig
+/// resources. Entries are content addressed and independent of a run workspace,
+/// so retention is TTL based rather than terminal-run cleanup.
+pub fn dependency_materialization_cache_lifecycle_record(
+    options: &RigResourceLifecycleOptions,
+    root: &std::path::Path,
+) -> ResourceLifecycleRecord {
+    ResourceLifecycleRecord {
+        owner: "homeboy.rig.dependency_materialization_cache".to_string(),
+        run_id: options.run_id.clone(),
+        runner_id: options.runner_id.clone(),
+        path: root.display().to_string(),
+        // The cache root itself is the removable owned resource; bind cleanup
+        // to its parent so lifecycle cleanup cannot escape Homeboy cache space.
+        root_bound: root.parent().map(|parent| parent.display().to_string()),
+        kind: "dependency_materialization_cache".to_string(),
+        ttl: Some("P30D".to_string()),
+        cleanup_policy: ResourceCleanupPolicy::DeleteAfterTtl,
+        evidence_retention: ResourceEvidenceRetention::Manifest,
+        // Cache ownership is explicit: dry-run commands still only plan, while
+        // an operator's --apply may reclaim expired content-addressed entries.
+        cleanup_intent: ResourceCleanupIntent::Apply,
+        cleanup_command: Some(format!(
+            "homeboy runs resources --run-id {} --cleanup-plan",
+            options.run_id
+        )),
+        status: options.status,
+    }
+}
+
 fn record(
     options: &RigResourceLifecycleOptions,
     kind: &str,
@@ -169,6 +199,23 @@ mod tests {
         assert_eq!(
             index.resources[0].cleanup_intent,
             ResourceCleanupIntent::Apply
+        );
+    }
+
+    #[test]
+    fn dependency_cache_is_retained_through_the_lifecycle_contract() {
+        let root = tempfile::tempdir().expect("cache root");
+        let record = dependency_materialization_cache_lifecycle_record(
+            &RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active),
+            root.path(),
+        );
+
+        record.validate(0).expect("valid cache lifecycle record");
+        assert_eq!(record.cleanup_policy, ResourceCleanupPolicy::DeleteAfterTtl);
+        assert_eq!(record.ttl.as_deref(), Some("P30D"));
+        assert_eq!(
+            record.evidence_retention,
+            ResourceEvidenceRetention::Manifest
         );
     }
 }

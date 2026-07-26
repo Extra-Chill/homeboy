@@ -1211,16 +1211,19 @@ name = "homeboy-rig"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "fs4",
  "homeboy-core",
  "homeboy-extension",
  "homeboy-lab-runner-contract",
  "homeboy-lifecycle-contract",
+ "homeboy-paths",
  "homeboy-product-identity",
  "homeboy-rig-contract",
  "homeboy-stack",
  "libc",
  "serde",
  "serde_json",
+ "sha2",
  "shellexpand",
  "tempfile",
 ]
