@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.319.3] - 2026-07-26
+
+### Fixed
+- hydrate destination gate workspace
+- prevent printable secret env persistence
+- resolve cook targets before creation intent
+- recover Cook promotion failures
+- recover direct SSH tunnel readers
+- read asset digests from REST
+
 ## [0.319.2] - 2026-07-26
 
 ### Fixed
