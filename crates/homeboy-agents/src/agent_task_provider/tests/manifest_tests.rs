@@ -323,12 +323,12 @@ process.stdin.on('end', () => {
   const outputs = mode === 'valid'
     ? { review_form: request.executor.config.review_form }
     : mode === 'malformed'
-      ? { review_form: { summary: 42 } }
+      ? { review_form: { summary: '' } }
       : {};
   process.stdout.write(JSON.stringify({
     schema: 'homeboy/agent-task-outcome/v1',
     task_id: request.task_id,
-    status: 'succeeded',
+    status: mode === 'malformed' ? 'no_op' : 'succeeded',
     summary: 'OpenCode completed successfully.',
     outputs,
     evidence_refs: [{ kind: 'transcript', uri: 'file:///provider-transcript.log' }]
@@ -375,6 +375,7 @@ process.stdin.on('end', () => {
     }));
 
     request.inputs = Value::Null;
+    request.executor.config["mode"] = json!("valid");
     let optional = run_provider_command_once(&request, &provider);
     assert_eq!(optional.status, AgentTaskOutcomeStatus::Succeeded);
 }

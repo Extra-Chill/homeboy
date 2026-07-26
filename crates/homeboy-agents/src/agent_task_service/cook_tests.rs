@@ -1532,6 +1532,14 @@ fn cook_injects_canonical_review_form_requirement_once() {
     let task = &plan.tasks[0];
     assert_eq!(task.inputs["cook_loop"]["review_form_required"], true);
     assert_eq!(
+        task.inputs["required_outputs"][0]["schema"],
+        crate::agent_task_review_dossier::AI_REVIEW_FORM_OUTPUT_SCHEMA
+    );
+    assert_eq!(
+        task.inputs["required_outputs"][0]["json_schema"]["required"],
+        serde_json::json!(["summary", "what_changed", "compatibility", "used_for"])
+    );
+    assert_eq!(
         task.instructions
             .matches("Emit a `review_form` object")
             .count(),

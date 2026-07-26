@@ -2358,6 +2358,22 @@ fn inject_cook_structured_outcome_requirements(plan: &mut AgentTaskPlan) {
             .as_object_mut()
             .expect("cook loop input was normalized to an object");
         cook_loop.insert("review_form_required".to_string(), Value::Bool(true));
+        let required_outputs = inputs
+            .entry("required_outputs")
+            .or_insert_with(|| serde_json::json!([]));
+        if !required_outputs.is_array() {
+            *required_outputs = serde_json::json!([]);
+        }
+        let required_outputs = required_outputs
+            .as_array_mut()
+            .expect("required outputs were normalized to an array");
+        if !required_outputs.iter().any(|output| {
+            output["name"] == crate::agent_task_review_dossier::AI_REVIEW_FORM_OUTPUT_KEY
+        }) {
+            required_outputs.push(
+                crate::agent_task_review_dossier::AiFilledReviewForm::required_output_contract(),
+            );
+        }
         if !task.instructions.contains("Emit a `review_form` object") {
             task.instructions.push_str("\n\n");
             task.instructions.push_str(

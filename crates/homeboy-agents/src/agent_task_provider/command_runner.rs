@@ -610,7 +610,14 @@ fn classify_missing_required_structured_outputs(
 
     let review_form = crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(
         &outcome.outputs,
-    );
+    )
+    .and_then(|form| match form {
+        Some(form) => {
+            form.validate()?;
+            Ok(Some(form))
+        }
+        None => Ok(None),
+    });
     let (class, message, data) = match review_form {
         Ok(Some(_)) => return,
         Ok(None) => (

@@ -139,6 +139,7 @@ pub struct AgentTaskReviewOverride {
 
 /// Schema key the agent emits its review form under inside `AgentTaskOutcome.outputs`.
 pub const AI_REVIEW_FORM_OUTPUT_KEY: &str = "review_form";
+pub const AI_REVIEW_FORM_OUTPUT_SCHEMA: &str = "homeboy/agent-task-review-form/v1";
 
 /// The single AI-authored "form" — every non-deterministic slot of the review
 /// dossier. The orchestrator owns everything else (AI-assistance tool/model,
@@ -161,6 +162,30 @@ pub struct AiFilledReviewForm {
 }
 
 impl AiFilledReviewForm {
+    /// Machine-readable output contract passed to provider adapters. The prompt
+    /// explains the request to the model; this contract lets adapters capture
+    /// and validate the resulting value without relying on prompt text.
+    pub fn required_output_contract() -> serde_json::Value {
+        serde_json::json!({
+            "name": AI_REVIEW_FORM_OUTPUT_KEY,
+            "required": true,
+            "schema": AI_REVIEW_FORM_OUTPUT_SCHEMA,
+            "json_schema": {
+                "type": "object",
+                "required": ["summary", "what_changed", "compatibility", "used_for"],
+                "properties": {
+                    "summary": { "type": "string" },
+                    "what_changed": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    },
+                    "compatibility": { "type": "string" },
+                    "used_for": { "type": "string" }
+                }
+            }
+        })
+    }
+
     /// Parse the form the agent emitted under `outputs["review_form"]`.
     ///
     /// Returns `Ok(None)` when the key is absent (the agent did not emit a
