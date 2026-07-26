@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.318.0] - 2026-07-26
+
+### Added
+- run external programs, not just homeboy commands
+- consume extension-owned artifact declarations in canonical cleanup
+
+### Changed
+- Preserve continuation across runtime mismatch
+
+### Fixed
+- Fix explicit Cook continuation recovery
+- recover cancelled scratch source state
+- Fix stranded Cook retry recovery
+- never remove artifact paths that Git tracks
+- Fix adopted Cook finalization lineage
+
 ## [0.317.0] - 2026-07-26
 
 ### Added
