@@ -30,9 +30,9 @@ use super::cook_budget::{
     budget_remaining, execution_budget_usage, reserve_remediation_budget, ExecutionBudgetUsage,
 };
 use super::cook_pre_execution::{
-    materialize_initial_cook_attempt, pre_execution_failure_details, pre_execution_failure_phase,
-    pre_execution_failure_report, record_pre_execution_failure, retryable_pre_execution_failure,
-    terminal_executor_matches, with_pre_execution_phase,
+    materialize_cook_attempt, materialize_initial_cook_attempt, pre_execution_failure_details,
+    pre_execution_failure_phase, pre_execution_failure_report, record_pre_execution_failure,
+    retryable_pre_execution_failure, terminal_executor_matches, with_pre_execution_phase,
 };
 use super::cook_promotion::{
     attempt_needs_execution, cook_report, finalize_or_load_cook_pr,
@@ -1600,6 +1600,13 @@ where
     validate_cook_workspace(&options)?;
     validate_cook_candidate_group(&options.initial_plan)?;
     materialize_initial_cook_attempt(&options)?;
+    if let Some(latest_attempt) = recipe.attempts.last() {
+        materialize_cook_attempt(
+            &recipe.cook_id,
+            &latest_attempt.run_id,
+            &latest_attempt.plan,
+        )?;
+    }
     // The recipe alone is resumable input, not a status-addressable run. Publish
     // the run identity only after initial materialization and a lifecycle read
     // prove status/log recovery resolves for this exact attempt.
@@ -1920,6 +1927,7 @@ where
                 let next_attempt = attempt + 1;
                 let next_run_id = agent_task_lifecycle::cook_attempt_run_id(&cook_id, next_attempt);
                 super::record_recipe_attempt(&cook_id, next_attempt, &next_run_id, &plan)?;
+                materialize_cook_attempt(&cook_id, &next_run_id, &plan)?;
                 run_id = next_run_id;
                 next_plan = Some(plan);
                 continue;
