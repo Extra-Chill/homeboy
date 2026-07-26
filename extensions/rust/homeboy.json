@@ -6,5 +6,12 @@
       "file": "rust.json",
       "pattern": "\"version\":\\s*\"([0-9.]+)\""
     }
-  ]
+  ],
+  "self_checks": {
+    "test": [
+      "bash tests/env-provider-smoke.sh",
+      "bash tests/fingerprint-policy-flow-smoke.sh",
+      "bash tests/zero-test-scope-fallback-smoke.sh"
+    ]
+  }
 }

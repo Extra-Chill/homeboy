@@ -348,38 +348,82 @@ fi
 
 rust_append_scope_args "$SCOPE_JSON"
 
-COMMAND_LABEL="cargo test"
-COMMAND_BINARY=(cargo "${TEST_ARGS[@]}")
+# Builds COMMAND_LABEL/COMMAND_BINARY from the current TEST_ARGS. Shared so a
+# widened re-run reuses the exact runner selection the first attempt used.
+rust_build_test_command() {
+    COMMAND_LABEL="cargo test"
+    COMMAND_BINARY=(cargo "${TEST_ARGS[@]}")
 
-if [ "$SELECTED_RUNNER" = "cargo" ]; then
-    CARGO_TEST_THREADS="$(rust_cargo_test_threads || true)"
-    if [ -n "$CARGO_TEST_THREADS" ]; then
-        COMMAND_BINARY+=(-- --test-threads="$CARGO_TEST_THREADS")
+    if [ "$SELECTED_RUNNER" = "cargo" ]; then
+        CARGO_TEST_THREADS="$(rust_cargo_test_threads || true)"
+        if [ -n "$CARGO_TEST_THREADS" ]; then
+            COMMAND_BINARY+=(-- --test-threads="$CARGO_TEST_THREADS")
+        fi
     fi
-fi
 
-if [ "$SELECTED_RUNNER" = "nextest" ]; then
-    NEXTEST_ARGS=(
-        run
-        --manifest-path "${PROJECT_PATH}/Cargo.toml"
-    )
-    rust_nextest_args_from_cargo_args
-    COMMAND_LABEL="cargo nextest run"
-    COMMAND_BINARY=(cargo nextest "${NEXTEST_ARGS[@]}")
-fi
+    if [ "$SELECTED_RUNNER" = "nextest" ]; then
+        NEXTEST_ARGS=(
+            run
+            --manifest-path "${PROJECT_PATH}/Cargo.toml"
+        )
+        rust_nextest_args_from_cargo_args
+        COMMAND_LABEL="cargo nextest run"
+        COMMAND_BINARY=(cargo nextest "${NEXTEST_ARGS[@]}")
+    fi
+}
 
-if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
-    echo "DEBUG: ${COMMAND_BINARY[*]} $*"
-fi
-
-rust_emit_test_plan "$SELECTED_RUNNER" "$COMMAND_LABEL" "$SCOPE_JSON" "started" 0
-homeboy_run_step_capture TEST_TMPFILE TEST_EXIT "$COMMAND_LABEL" -- "${COMMAND_BINARY[@]}" "$@" || true
-rust_emit_test_plan "$SELECTED_RUNNER" "$COMMAND_LABEL" "$SCOPE_JSON" "completed" "$TEST_EXIT"
-
-# Parse test results for homeboy core (best-effort, non-blocking)
 PARSE_RESULTS="${EXTENSION_PATH}/scripts/parse-test-results.sh"
-if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ] && [ -f "$PARSE_RESULTS" ]; then
-    bash "$PARSE_RESULTS" "$TEST_TMPFILE" || true
+
+rust_execute_test_run() {
+    if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+        echo "DEBUG: ${COMMAND_BINARY[*]} $*"
+    fi
+
+    rust_emit_test_plan "$SELECTED_RUNNER" "$COMMAND_LABEL" "$SCOPE_JSON" "started" 0
+    homeboy_run_step_capture TEST_TMPFILE TEST_EXIT "$COMMAND_LABEL" -- "${COMMAND_BINARY[@]}" "$@" || true
+    rust_emit_test_plan "$SELECTED_RUNNER" "$COMMAND_LABEL" "$SCOPE_JSON" "completed" "$TEST_EXIT"
+
+    # Parse test results for homeboy core (best-effort, non-blocking)
+    if [ -n "${HOMEBOY_TEST_RESULTS_FILE:-}" ] && [ -f "$PARSE_RESULTS" ]; then
+        bash "$PARSE_RESULTS" "$TEST_TMPFILE" || true
+    fi
+}
+
+# Reports whether the captured run executed no tests at all. Cargo runs several
+# test binaries (unit, integration, doc-tests) and some legitimately have zero
+# tests, so only a zero total across every summary line counts.
+rust_run_executed_no_tests() {
+    local total
+    total=$( { grep -Eo '[0-9]+ passed' "$TEST_TMPFILE" || true; } | awk '{s+=$1} END {print s+0}' )
+    [ "$total" -eq 0 ]
+}
+
+rust_build_test_command
+rust_execute_test_run "$@"
+
+# A derived scope that selects zero tests is a scope-derivation gap, not a
+# failing test suite: the filter is built from changed file paths, so a module
+# mounted with `#[path]` (or any future derivation gap) compiles a filter that
+# matches nothing. Failing there reports a red build for code that was never
+# executed. Widen to the full suite once instead, so the worst case is a slow
+# pass rather than a false failure.
+if [ "$TEST_EXIT" -eq 0 ] \
+    && [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ] \
+    && [ "$SCOPE_KIND" != "workspace" ] && [ "$SCOPE_KIND" != "full" ] \
+    && rust_run_executed_no_tests; then
+    echo ""
+    echo "Derived test scope executed no tests; re-running the full test command."
+    rm -f "$TEST_TMPFILE"
+
+    TEST_ARGS=(
+        test
+        --manifest-path "${PROJECT_PATH}/Cargo.toml"
+        --workspace
+    )
+    SCOPE_KIND="full"
+    SCOPE_JSON="$(printf '%s' "$SCOPE_JSON" | jq -c '.kind = "full" | .args = [] | .reason = "Derived scope executed no tests; widened to the full test command."')"
+    rust_build_test_command
+    rust_execute_test_run "$@"
 fi
 
 TEST_OUTPUT=$(cat "$TEST_TMPFILE")
@@ -420,6 +464,10 @@ fi
 # Detect zero-test runs — only warn if NO test result line shows passed tests.
 # Cargo runs multiple test binaries (unit, integration, doc-tests); some may
 # legitimately have 0 tests while others have hundreds.
+#
+# A derived scope has already been widened to the full command by this point,
+# so reaching here on a changed-files run means the whole suite executed
+# nothing — a real configuration problem rather than a scoping gap.
 TOTAL_PASSED=$( { echo "$TEST_OUTPUT" | grep -Eo '[0-9]+ passed' || true; } | awk '{s+=$1} END {print s+0}' )
 if [ "$TOTAL_PASSED" -eq 0 ]; then
     TEST_FILE_COUNT=$(find "$PROJECT_PATH" -name "*test*" -name "*.rs" -not -path "*/target/*" 2>/dev/null | wc -l | tr -d ' ')
