@@ -66,6 +66,7 @@ pub fn package_existing_tag(
             "release.package completed without producing any artifacts",
         ));
     }
+    super::executor::artifacts::establish_publication_authority(&mut state)?;
 
     let artifact_dir = release_package_dir(component_id, tag)?;
     fs::create_dir_all(&artifact_dir).map_err(|error| {
@@ -123,6 +124,25 @@ pub fn package_existing_tag(
         "release",
         "Release package manifest written to {}",
         manifest_path.display()
+    );
+    for artifact in result
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.publication_authority)
+    {
+        homeboy_core::log_status!(
+            "release",
+            "Authoritative release asset: {} sha256 {} ({})",
+            artifact.path,
+            artifact.sha256.as_deref().unwrap_or("unavailable"),
+            artifact.producer
+        );
+    }
+    homeboy_core::log_status!(
+        "release",
+        "Resume publication: homeboy release {} --head --from-artifacts {}",
+        component_id,
+        artifact_dir.display()
     );
 
     Ok(result)
@@ -183,7 +203,13 @@ fn copy_release_artifacts(
     artifacts: &[ReleaseArtifact],
 ) -> Result<Vec<ReleaseArtifact>> {
     let mut copied = Vec::new();
-    for artifact in artifacts {
+    // The recovery manifest is a publication contract, so retain only the
+    // selected asset for each target name. Copying superseded duplicates would
+    // overwrite the same destination and make the manifest unverifiable.
+    for artifact in artifacts
+        .iter()
+        .filter(|artifact| artifact.publication_authority)
+    {
         let source = resolve_artifact_path(component_local_path, &artifact.path);
         let file_name = source.file_name().ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -210,6 +236,10 @@ fn copy_release_artifacts(
             durable_path: Some(destination.display().to_string()),
             artifact_type: artifact.artifact_type.clone(),
             platform: artifact.platform.clone(),
+            phase: artifact.phase.clone(),
+            producer: artifact.producer.clone(),
+            sha256: artifact.sha256.clone(),
+            publication_authority: artifact.publication_authority,
         });
     }
     Ok(copied)
@@ -250,6 +280,10 @@ mod tests {
                 durable_path: None,
                 artifact_type: Some("archive".to_string()),
                 platform: None,
+                phase: "final".to_string(),
+                producer: "test".to_string(),
+                sha256: None,
+                publication_authority: true,
             }],
         )
         .expect("copy artifacts");
@@ -258,5 +292,52 @@ mod tests {
         assert_eq!(fs::read_to_string(&copied_path).expect("copied"), "zip");
         assert_eq!(copied[0].path, copied_path.display().to_string());
         assert_eq!(copied[0].artifact_type.as_deref(), Some("archive"));
+    }
+
+    #[test]
+    fn copy_release_artifacts_omits_superseded_duplicate_targets() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let component = temp.path().join("component");
+        let build = component.join("build");
+        let artifact_dir = temp.path().join("artifact-root");
+        fs::create_dir_all(&build).expect("build dir");
+        fs::create_dir_all(&artifact_dir).expect("artifact dir");
+        fs::write(build.join("plugin.zip"), "final").expect("artifact");
+
+        let copied = copy_release_artifacts(
+            &component.display().to_string(),
+            &artifact_dir,
+            &[
+                ReleaseArtifact {
+                    path: "build/plugin.zip".to_string(),
+                    durable_path: None,
+                    artifact_type: None,
+                    platform: Some("preflight".to_string()),
+                    phase: "preflight".to_string(),
+                    producer: "preflight".to_string(),
+                    sha256: Some("superseded".to_string()),
+                    publication_authority: false,
+                },
+                ReleaseArtifact {
+                    path: "build/plugin.zip".to_string(),
+                    durable_path: None,
+                    artifact_type: None,
+                    platform: Some("universal".to_string()),
+                    phase: "final".to_string(),
+                    producer: "package".to_string(),
+                    sha256: Some("authoritative".to_string()),
+                    publication_authority: true,
+                },
+            ],
+        )
+        .expect("copy authoritative artifact");
+
+        assert_eq!(copied.len(), 1);
+        assert_eq!(
+            fs::read_to_string(artifact_dir.join("plugin.zip")).unwrap(),
+            "final"
+        );
+        assert_eq!(copied[0].platform.as_deref(), Some("universal"));
+        assert!(copied[0].publication_authority);
     }
 }

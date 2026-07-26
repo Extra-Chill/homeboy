@@ -94,6 +94,7 @@ fn release_artifacts_from_step(run_id: &str, step: &ReleaseStepResult) -> Vec<Ch
                 durable_path: _,
                 artifact_type,
                 platform,
+                ..
             } = artifact;
             let id = format!("{}.artifact.{}", step.id, index + 1);
             let artifact_type = artifact_type.unwrap_or_else(|| "release_artifact".to_string());

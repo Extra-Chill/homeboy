@@ -1,5 +1,7 @@
 use homeboy_core::error::{Error, Result};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 use super::{step_success, ReleaseArtifact, ReleaseState, ReleaseStepResult};
 
@@ -61,7 +63,8 @@ pub(crate) fn run_artifact_inventory(
     }
 
     let artifact_count = artifacts.len();
-    state.artifacts.extend(artifacts.clone());
+    state.artifacts.extend(artifacts);
+    let artifacts = state.artifacts.clone();
     let data = serde_json::json!({
         "dir": artifact_dir,
         "artifact_count": artifact_count,
@@ -74,6 +77,99 @@ pub(crate) fn run_artifact_inventory(
         Some(data),
         Vec::new(),
     ))
+}
+
+/// Select one generic publication authority for every remote target filename.
+/// Final package output supersedes preflight output, while a disagreement
+/// between equally authoritative final producers fails before tag/push.
+pub(crate) fn establish_publication_authority(state: &mut ReleaseState) -> Result<Vec<String>> {
+    let mut selected: BTreeMap<String, usize> = BTreeMap::new();
+    let mut diagnostics = Vec::new();
+    for artifact in &mut state.artifacts {
+        let path = artifact
+            .durable_path
+            .as_deref()
+            .filter(|path| std::path::Path::new(path).is_file())
+            .unwrap_or(&artifact.path);
+        artifact.sha256 = Some(sha256_file(path)?);
+        artifact.publication_authority = false;
+    }
+    for index in 0..state.artifacts.len() {
+        let target = artifact_target_name(&state.artifacts[index])?;
+        let Some(existing_index) = selected.get(&target).copied() else {
+            selected.insert(target, index);
+            continue;
+        };
+        let existing = &state.artifacts[existing_index];
+        let candidate = &state.artifacts[index];
+        let same_bytes = existing.sha256 == candidate.sha256;
+        let existing_final = existing.phase == "final";
+        let candidate_final = candidate.phase == "final";
+        if same_bytes {
+            if !existing_final && candidate_final {
+                selected.insert(target, index);
+            }
+            continue;
+        }
+        if !existing_final && candidate_final {
+            diagnostics.push(format!(
+                "Release asset '{}' from {} ({}) is non-authoritative; final package output from {} ({}) supersedes its sha256 {} with {}",
+                target, existing.producer, existing.phase, candidate.producer, candidate.phase,
+                existing.sha256.as_deref().unwrap_or_default(), candidate.sha256.as_deref().unwrap_or_default()
+            ));
+            selected.insert(target, index);
+        } else if existing_final && !candidate_final {
+            diagnostics.push(format!(
+                "Release asset '{}' from {} ({}) is non-authoritative; final package output from {} ({}) supersedes its sha256 {} with {}",
+                target, candidate.producer, candidate.phase, existing.producer, existing.phase,
+                candidate.sha256.as_deref().unwrap_or_default(), existing.sha256.as_deref().unwrap_or_default()
+            ));
+        } else {
+            return Err(Error::validation_invalid_argument(
+                "release assets",
+                format!("release assets targeting '{}' have conflicting authoritative bytes from {} and {}", target, existing.producer, candidate.producer),
+                None,
+                None,
+            ));
+        }
+    }
+    for index in selected.into_values() {
+        state.artifacts[index].publication_authority = true;
+    }
+    Ok(diagnostics)
+}
+
+fn artifact_target_name(artifact: &ReleaseArtifact) -> Result<String> {
+    std::path::Path::new(&artifact.path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "release assets",
+                format!("release artifact '{}' has no valid filename", artifact.path),
+                None,
+                None,
+            )
+        })
+}
+
+fn sha256_file(path: &str) -> Result<String> {
+    let mut file = std::fs::File::open(path).map_err(|error| {
+        Error::internal_io(
+            format!("Failed to hash release artifact '{}': {}", path, error),
+            Some(path.to_string()),
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher).map_err(|error| {
+        Error::internal_io(
+            format!("Failed to hash release artifact '{}': {}", path, error),
+            Some(path.to_string()),
+        )
+    })?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn is_package_recovery_manifest(manifest_path: &std::path::Path) -> bool {
@@ -126,6 +222,10 @@ fn inventory_directory_files(
             durable_path: None,
             artifact_type: None,
             platform: None,
+            phase: "recovery".to_string(),
+            producer: "from-artifacts".to_string(),
+            sha256: None,
+            publication_authority: false,
         });
     }
     Ok(artifacts)
@@ -303,9 +403,12 @@ fn validate_recovery_artifact(
 #[cfg(test)]
 mod tests {
     use super::{
-        run_artifact_inventory, PackageRecoveryContext, PACKAGE_RECOVERY_MANIFEST,
-        PACKAGE_RECOVERY_MANIFEST_SCHEMA, PACKAGE_RECOVERY_MANIFEST_SCHEMA_VERSION,
+        establish_publication_authority, run_artifact_inventory, PackageRecoveryContext,
+        PACKAGE_RECOVERY_MANIFEST, PACKAGE_RECOVERY_MANIFEST_SCHEMA,
+        PACKAGE_RECOVERY_MANIFEST_SCHEMA_VERSION,
     };
+    use crate::release::executor::github_release::github_release_publications;
+    use crate::release::types::ReleaseArtifact;
     use crate::release::types::ReleaseState;
     use crate::release::ReleaseStepStatus;
 
@@ -498,5 +601,135 @@ mod tests {
             "commit": "abc123",
             "artifacts": [{ "path": artifact }]
         })
+    }
+
+    #[test]
+    fn final_package_authority_supersedes_different_preflight_bytes_and_publishes_once() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let preflight_dir = temp.path().join("preflight");
+        let final_dir = temp.path().join("final");
+        std::fs::create_dir_all(&preflight_dir).expect("preflight dir");
+        std::fs::create_dir_all(&final_dir).expect("final dir");
+        let preflight = preflight_dir.join("component.asset");
+        let final_package = final_dir.join("component.asset");
+        std::fs::write(&preflight, b"validation bytes").expect("preflight bytes");
+        std::fs::write(&final_package, b"production bytes").expect("final bytes");
+        let mut state = ReleaseState {
+            artifacts: vec![
+                artifact(&preflight, "preflight", "validation"),
+                artifact(&final_package, "final", "package"),
+            ],
+            ..ReleaseState::default()
+        };
+
+        let diagnostics = establish_publication_authority(&mut state).expect("authority");
+        let publications = github_release_publications(&state).expect("publications");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            state
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact.publication_authority)
+                .count(),
+            1
+        );
+        assert!(state.artifacts[1].publication_authority);
+        assert_eq!(publications.len(), 1);
+        assert_eq!(
+            std::fs::read(&publications[0].source_path).expect("published bytes"),
+            b"production bytes"
+        );
+    }
+
+    #[test]
+    fn authority_rejects_conflicting_final_bytes_before_tagging() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let first_dir = temp.path().join("first");
+        let second_dir = temp.path().join("second");
+        std::fs::create_dir_all(&first_dir).expect("first dir");
+        std::fs::create_dir_all(&second_dir).expect("second dir");
+        let first = first_dir.join("asset.bin");
+        let second = second_dir.join("asset.bin");
+        std::fs::write(&first, b"first").expect("first bytes");
+        std::fs::write(&second, b"second").expect("second bytes");
+        let mut state = ReleaseState {
+            artifacts: vec![
+                artifact(&first, "final", "one"),
+                artifact(&second, "final", "two"),
+            ],
+            ..ReleaseState::default()
+        };
+
+        let error =
+            establish_publication_authority(&mut state).expect_err("conflicting final assets");
+        assert!(error.message.contains("conflicting authoritative bytes"));
+    }
+
+    #[test]
+    fn authority_collapses_identical_duplicate_bytes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let first_dir = temp.path().join("first");
+        let second_dir = temp.path().join("second");
+        std::fs::create_dir_all(&first_dir).expect("first dir");
+        std::fs::create_dir_all(&second_dir).expect("second dir");
+        let first = first_dir.join("asset.bin");
+        let second = second_dir.join("asset.bin");
+        std::fs::write(&first, b"same").expect("first bytes");
+        std::fs::write(&second, b"same").expect("second bytes");
+        let mut state = ReleaseState {
+            artifacts: vec![
+                artifact(&first, "preflight", "one"),
+                artifact(&second, "final", "two"),
+            ],
+            ..ReleaseState::default()
+        };
+
+        establish_publication_authority(&mut state).expect("identical assets");
+        assert_eq!(
+            github_release_publications(&state)
+                .expect("publications")
+                .len(),
+            1
+        );
+        assert!(state.artifacts[1].publication_authority);
+    }
+
+    #[test]
+    fn authority_preserves_distinct_platform_assets() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let macos = temp.path().join("component-macos.zip");
+        let linux = temp.path().join("component-linux.zip");
+        std::fs::write(&macos, b"macos").expect("macos bytes");
+        std::fs::write(&linux, b"linux").expect("linux bytes");
+        let mut state = ReleaseState {
+            artifacts: vec![
+                artifact(&macos, "final", "package"),
+                artifact(&linux, "final", "package"),
+            ],
+            ..ReleaseState::default()
+        };
+
+        establish_publication_authority(&mut state).expect("authority");
+        let publications = github_release_publications(&state).expect("publications");
+
+        assert_eq!(publications.len(), 2);
+        assert!(state
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.publication_authority));
+    }
+
+    fn artifact(path: &std::path::Path, phase: &str, producer: &str) -> ReleaseArtifact {
+        ReleaseArtifact {
+            path: path.display().to_string(),
+            durable_path: Some(path.display().to_string()),
+            artifact_type: None,
+            platform: None,
+            phase: phase.to_string(),
+            producer: producer.to_string(),
+            sha256: None,
+            publication_authority: false,
+        }
     }
 }

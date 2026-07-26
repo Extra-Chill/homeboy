@@ -615,12 +615,20 @@ mod tests {
                     durable_path: Some(durable.display().to_string()),
                     artifact_type: None,
                     platform: None,
+                    phase: "final".to_string(),
+                    producer: "test".to_string(),
+                    sha256: None,
+                    publication_authority: false,
                 },
                 ReleaseArtifact {
                     path: temp.path().join("missing.zip").display().to_string(),
                     durable_path: None,
                     artifact_type: None,
                     platform: None,
+                    phase: "final".to_string(),
+                    producer: "test".to_string(),
+                    sha256: None,
+                    publication_authority: false,
                 },
             ],
             ..ReleaseState::default()
@@ -670,6 +678,10 @@ mod tests {
                 durable_path: None,
                 artifact_type: None,
                 platform: None,
+                phase: "final".to_string(),
+                producer: "test".to_string(),
+                sha256: None,
+                publication_authority: false,
             }],
             package_owned_paths: vec!["build".to_string(), "fixture-1.2.3.tgz".to_string()],
             ..ReleaseState::default()
@@ -1042,6 +1054,10 @@ mod tests {
                 durable_path: Some(".homeboy/artifacts/missing-plugin.zip".to_string()),
                 artifact_type: None,
                 platform: None,
+                phase: "final".to_string(),
+                producer: "test".to_string(),
+                sha256: None,
+                publication_authority: false,
             }],
             ..ReleaseState::default()
         };
@@ -1103,6 +1119,10 @@ mod tests {
                 durable_path: None,
                 artifact_type: Some("npm".to_string()),
                 platform: None,
+                phase: "final".to_string(),
+                producer: "test".to_string(),
+                sha256: None,
+                publication_authority: false,
             }],
             ..ReleaseState::default()
         };

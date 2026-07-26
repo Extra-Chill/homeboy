@@ -170,6 +170,23 @@ pub(super) fn execute_release_plan_step(
                 }),
             ))
         }
+        "artifacts.authority" => Ok(Some(
+            executor::artifacts::establish_publication_authority(&mut context.state)
+                .map(|diagnostics| {
+                    executor::step_success(
+                        "artifacts.authority",
+                        "artifacts.authority",
+                        Some(serde_json::json!({ "artifacts": context.state.artifacts })),
+                        diagnostics
+                            .into_iter()
+                            .map(|message| homeboy_core::error::Hint { message })
+                            .collect(),
+                    )
+                })
+                .unwrap_or_else(|err| {
+                    failed_result("artifacts.authority", "artifacts.authority", err)
+                }),
+        )),
         "git.tag" => {
             let tag_name = step
                 .inputs
@@ -649,6 +666,7 @@ pub(super) fn release_step_is_show_stopper(result: &ReleaseStepResult) -> bool {
             | "release.prepare"
             | "git.commit"
             | "package"
+            | "artifacts.authority"
             | "git.tag"
             | "git.push"
             // A failed github.release means the GitHub Release object was not

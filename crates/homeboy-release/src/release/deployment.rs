@@ -671,6 +671,10 @@ mod tests {
             durable_path: Some(artifact_path.display().to_string()),
             artifact_type: None,
             platform: None,
+            phase: "final".to_string(),
+            producer: "test".to_string(),
+            sha256: None,
+            publication_authority: false,
         }];
 
         let component = Component {
@@ -709,6 +713,10 @@ mod tests {
             durable_path: Some(artifact_path.display().to_string()),
             artifact_type: None,
             platform: None,
+            phase: "final".to_string(),
+            producer: "test".to_string(),
+            sha256: None,
+            publication_authority: false,
         }];
 
         let component = Component {
@@ -756,6 +764,10 @@ mod tests {
             durable_path: None,
             artifact_type: None,
             platform: None,
+            phase: "final".to_string(),
+            producer: "test".to_string(),
+            sha256: None,
+            publication_authority: false,
         }];
 
         let result = super::run_deployment_step(
@@ -882,6 +894,10 @@ mod tests {
                 durable_path: Some(artifact_path.display().to_string()),
                 artifact_type: None,
                 platform: None,
+                phase: "final".to_string(),
+                producer: "test".to_string(),
+                sha256: None,
+                publication_authority: false,
             };
             std::fs::create_dir_all(source.join("build")).expect("package build directory");
             std::fs::write(source.join("build/intermediate"), "build").expect("build output");
