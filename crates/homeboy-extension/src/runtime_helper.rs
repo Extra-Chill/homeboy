@@ -200,7 +200,8 @@ pub fn provision_declared_helpers(
             }
         }
         let path = runtime_dir.join(id).join(&revision).join(helper.filename);
-        if !path.is_file() {
+        let current = fs::read_to_string(&path).ok();
+        if current.as_deref() != Some(helper.content) {
             let parent = path.parent().expect("helper path has a parent");
             fs::create_dir_all(parent).map_err(|error| {
                 Error::internal_io(

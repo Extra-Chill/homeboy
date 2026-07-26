@@ -90,6 +90,18 @@ fn declared_helper_is_content_addressed_and_reports_provenance() {
             std::fs::read_to_string(&provision[0].path).expect("helper contents"),
             assets::SETTINGS_SH
         );
+
+        std::fs::write(&provision[0].path, "tampered helper").expect("tamper helper");
+        let repaired = provision_declared_helpers(&[RuntimeHelperRequirement {
+            id: RUNTIME_SETTINGS_HELPER_ID.to_string(),
+            revision: Some(provision[0].revision.clone()),
+        }])
+        .expect("core replaces tampered content-addressed helper");
+        assert_eq!(repaired[0].path, provision[0].path);
+        assert_eq!(
+            std::fs::read_to_string(&repaired[0].path).expect("repaired helper contents"),
+            assets::SETTINGS_SH
+        );
     });
 }
 
