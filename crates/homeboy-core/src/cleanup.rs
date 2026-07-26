@@ -857,7 +857,10 @@ fn extension_artifact_declarations(
     worktree: &Path,
     portable: &serde_json::Value,
 ) -> Result<Vec<ArtifactDeclaration>> {
-    let Some(extensions) = portable.get("extensions").and_then(|value| value.as_object()) else {
+    let Some(extensions) = portable
+        .get("extensions")
+        .and_then(|value| value.as_object())
+    else {
         return Ok(Vec::new());
     };
     let mut declarations = Vec::new();
@@ -920,7 +923,10 @@ fn manifest_scopes(
         .filter_map(|name| {
             let path = Path::new(name);
             (path.components().count() == 1
-                && matches!(path.components().next(), Some(std::path::Component::Normal(_))))
+                && matches!(
+                    path.components().next(),
+                    Some(std::path::Component::Normal(_))
+                ))
             .then_some(name.as_str())
         })
         .collect();
@@ -965,7 +971,9 @@ fn collect_manifest_scopes(
             scopes.push(directory.to_path_buf());
         } else if file_type.is_dir()
             && name != ".git"
-            && !artifact_paths.iter().any(|artifact| path.ends_with(artifact))
+            && !artifact_paths
+                .iter()
+                .any(|artifact| path.ends_with(artifact))
         {
             collect_manifest_scopes(&path, manifest_names, artifact_paths, scopes)?;
         }
@@ -1460,7 +1468,10 @@ mod tests {
             write_file(&repo.path().join("project.manifest"), "root");
             write_file(&repo.path().join("packages/one/project.manifest"), "nested");
             write_file(&repo.path().join("deps/project.manifest"), "artifact-owned");
-            write_file(&repo.path().join("packages/two/other.manifest"), "unsupported");
+            write_file(
+                &repo.path().join("packages/two/other.manifest"),
+                "unsupported",
+            );
 
             let declarations = artifact_declarations(repo.path()).expect("declarations");
 
@@ -1520,8 +1531,8 @@ mod tests {
             write_file(&repo.path().join("src/feature.rs"), "feature");
             git(repo.path(), &["add", "src/feature.rs"]);
             git_commit(repo.path(), "unmerged feature");
-            let unmerged = collect_worktree_candidates(&worktree, &options, None)
-                .expect("unmerged scan");
+            let unmerged =
+                collect_worktree_candidates(&worktree, &options, None).expect("unmerged scan");
             assert!(unmerged
                 .skipped
                 .iter()

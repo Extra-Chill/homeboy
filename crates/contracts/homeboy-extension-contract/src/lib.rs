@@ -17,8 +17,8 @@ pub use manifest_capability_config::AgentRuntimeManifestConfig;
 pub use manifest_capability_config::{DiscoveryMarkerConfig, ScriptsConfig};
 pub use manifest_toolchain_config::{
     ArtifactCleanupRetention, ArtifactCleanupRule, CliAutoFlag, CliAutoFlagCondition,
-    CliHelpConfig, DatabaseCliConfig, DeployVerification, LintChangedFileRoute,
-    RemotePathRootRule, RequirementsConfig,
+    CliHelpConfig, DatabaseCliConfig, DeployVerification, LintChangedFileRoute, RemotePathRootRule,
+    RequirementsConfig,
 };
 pub use manifest_toolchain_config::{CliConfig, RemotePathInferenceRule};
 pub mod action_types;
