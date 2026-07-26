@@ -322,6 +322,11 @@ pub fn sync_workspace(
                 &git.head,
                 options.run_isolation_token.as_deref(),
             );
+            reject_existing_job_workspace(
+                &runner,
+                &remote_path,
+                options.run_isolation_token.as_deref(),
+            )?;
             let workspace_cleanliness = if options.allow_dirty_lab_workspace {
                 "dirty_remote_overwrite_allowed"
             } else {
@@ -1221,6 +1226,46 @@ fn workspace_metadata(
 
 fn new_workspace_lease() -> String {
     format!("workspace:{}", uuid::Uuid::new_v4())
+}
+
+/// A job-owned Git workspace has a stable path so retries can be correlated.
+/// Seeing that path before materialization means another execution could still
+/// be using it; reject rather than letting Git reset/clean a live cwd.
+fn reject_existing_job_workspace(
+    runner: &super::super::Runner,
+    remote_path: &str,
+    owner_run_id: Option<&str>,
+) -> Result<()> {
+    let Some(owner_run_id) = owner_run_id.filter(|id| !id.trim().is_empty()) else {
+        return Ok(());
+    };
+    let exists = match runner.kind {
+        RunnerKind::Local => Path::new(remote_path).exists(),
+        RunnerKind::Ssh => {
+            let (_, client) = ssh_client_for_runner(runner)?;
+            client
+                .execute_with_timeout(
+                    &format!("test -e {}", shell::quote_arg(remote_path)),
+                    WORKSPACE_METADATA_TIMEOUT,
+                )
+                .success
+        }
+    };
+    if !exists {
+        return Ok(());
+    }
+
+    Err(Error::new(
+        ErrorCode::RunnerWorkspaceOwnershipConflict,
+        format!("Lab workspace `{remote_path}` is already owned by active job `{owner_run_id}`"),
+        serde_json::json!({
+            "runner_id": runner.id,
+            "remote_path": remote_path,
+            "owner_run_id": owner_run_id,
+            "collision_stage": "pre_materialization",
+        }),
+    )
+    .with_hint("Wait for the existing job to terminalize, or dispatch a new job identity."))
 }
 
 pub(crate) fn workspace_resource_lifecycle(
@@ -2151,6 +2196,40 @@ fn current_workspace_summary(
             .as_ref()
             .map(|identity| identity.synthetic_ref.clone()),
         synthetic_checkout_tree: synthetic_checkout.map(|identity| identity.synthetic_tree),
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    #[test]
+    fn existing_job_owned_workspace_is_rejected_before_git_materialization() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("runner root");
+            crate::create(
+                &format!(
+                    r#"{{"id":"workspace-ownership-conflict","kind":"local","workspace_root":"{}"}}"#,
+                    root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+            let remote_path = root.path().join("_lab_workspaces/existing-job");
+            fs::create_dir_all(&remote_path).expect("existing workspace");
+            let runner = load("workspace-ownership-conflict").expect("load runner");
+
+            let error = reject_existing_job_workspace(
+                &runner,
+                &remote_path.display().to_string(),
+                Some("job-1"),
+            )
+            .expect_err("active job path must not be overwritten");
+
+            assert_eq!(error.code, ErrorCode::RunnerWorkspaceOwnershipConflict);
+            assert_eq!(error.details["collision_stage"], "pre_materialization");
+            assert!(remote_path.exists());
+        });
     }
 }
 

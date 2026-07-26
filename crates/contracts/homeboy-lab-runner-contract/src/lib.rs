@@ -139,15 +139,15 @@ pub struct RunnerWorkspaceSyncOptions {
     pub git_fetch_refs: Vec<String>,
     pub snapshot_includes: Vec<String>,
     pub allow_dirty_lab_workspace: bool,
-    /// Opaque per-run token (e.g. an agent-task run id) folded into the
-    /// deterministic remote workspace path so two distinct cook/dispatch runs
-    /// at the same source HEAD never share a long-lived remote checkout.
+    /// Opaque job-owned token folded into the deterministic remote workspace
+    /// path so two distinct executions at the same source HEAD never share a
+    /// mutable remote checkout.
     ///
     /// Without this, the git-mode remote path is keyed only on
-    /// `(source path, HEAD)`, so a later unrelated run reuses the earlier run's
-    /// workspace directory and can observe leftover untracked artifacts from it
-    /// (cross-run contamination, see #4393). When set, each run gets an
-    /// isolated `_lab_workspaces/<name>-<digest>` directory.
+    /// `(source path, HEAD)`, so a later unrelated job reuses the earlier job's
+    /// workspace directory and can observe or delete its state. Every Lab
+    /// execution supplies this token; callers that explicitly opt into a stable
+    /// identity must reject an already-owned path before materialization.
     pub run_isolation_token: Option<String>,
 }
 

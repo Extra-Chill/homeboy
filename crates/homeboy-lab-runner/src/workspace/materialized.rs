@@ -164,6 +164,8 @@ impl MaterializedWorkspace {
             } else {
                 "runner.workspace".to_string()
             },
+            cleanup_trigger: (!retained && !self.relinquished)
+                .then(|| "terminal_job_owner".to_string()),
             retained_location: retained.then(|| self.remote_path.clone()),
             reclaim_command: (retained && !self.relinquished).then(|| self.reclaim_command()),
         };
