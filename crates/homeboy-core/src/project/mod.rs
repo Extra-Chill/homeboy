@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub mod component;
+mod effective_remote_path;
 pub mod files;
 pub mod logs;
 mod path_resolution;
@@ -26,6 +27,9 @@ pub use component::{
     resolve_project_component, resolve_project_component_with_standalone_snapshot,
     resolve_project_components, set_component_attachments, set_components, ProjectComponentsOutput,
     StandaloneComponentConfigSnapshot,
+};
+pub use effective_remote_path::{
+    component_remote_path, project_with_detected_path_roots, resolve_effective_remote_path,
 };
 pub use files::{FileEntry, GrepMatch, LineChange};
 pub use logs::{LogContent, LogEntry, LogSearchResult, PinnedLogsContent};

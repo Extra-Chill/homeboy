@@ -1415,6 +1415,12 @@ fn controller_leaves_runner_artifact_projection_pending_when_it_cannot_mirror_by
         assert!(record.metadata["artifact_projection"]["error"]
             .as_str()
             .is_some_and(|error| !error.is_empty()));
+        assert_eq!(
+            record.metadata["artifact_projection"]["recovery_action"]["command"],
+            format!("homeboy agent-task status {}", submitted.run_id)
+        );
+        assert!(run_owes_candidate_follow_up(&submitted.run_id)
+            .expect("pending import retains the runner workspace"));
         let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
         let remote_alias = homeboy_core::observation::runs_service::resolve_artifact_for_run(
             &store,
@@ -1434,6 +1440,56 @@ fn controller_leaves_runner_artifact_projection_pending_when_it_cannot_mirror_by
             )
             .expect("verify controller projection"),
             None,
+        );
+    });
+}
+
+#[test]
+fn duplicate_runner_artifact_ids_fail_closed_before_projection() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        let mut aggregate = succeeded_aggregate(&plan);
+        let bytes = b"runner patch";
+        let artifact = AgentTaskArtifact {
+            schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
+            id: "patch".to_string(),
+            kind: "patch".to_string(),
+            name: None,
+            label: None,
+            role: None,
+            semantic_key: None,
+            path: Some("/runner/private/patch.diff".to_string()),
+            url: None,
+            mime: Some("text/x-patch".to_string()),
+            size_bytes: Some(bytes.len() as u64),
+            sha256: Some(format!("{:x}", Sha256::digest(bytes))),
+            metadata: json!({ "executor_artifact_finalized": true }),
+        };
+        aggregate.outcomes[0].artifacts.push(artifact.clone());
+        let mut duplicate_outcome = aggregate.outcomes[0].clone();
+        duplicate_outcome.task_id = "task-b".to_string();
+        duplicate_outcome.artifacts = vec![artifact];
+        aggregate.outcomes.push(duplicate_outcome);
+
+        let submitted = submit_plan(&plan, Some("duplicate-runner-artifact")).expect("submit");
+        record_runner_job_identity(&submitted.run_id, "homeboy-lab", "job-1")
+            .expect("runner identity");
+        record_run_aggregate(&submitted.run_id, &plan, &aggregate).expect("record aggregate");
+
+        let record = status(&submitted.run_id).expect("terminal record");
+        assert_eq!(record.metadata["artifact_projection"]["status"], "pending");
+        assert!(record.metadata["artifact_projection"]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("reuses artifact id 'patch'")));
+        assert!(run_owes_candidate_follow_up(&submitted.run_id)
+            .expect("duplicate identity retains the runner workspace"));
+        let artifacts = homeboy_core::observation::ObservationStore::open_initialized()
+            .expect("store")
+            .list_artifacts(&submitted.run_id)
+            .expect("artifact records");
+        assert!(
+            artifacts.is_empty(),
+            "no ambiguous artifact may be imported"
         );
     });
 }
