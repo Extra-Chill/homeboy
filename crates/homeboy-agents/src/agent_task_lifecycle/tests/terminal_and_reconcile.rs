@@ -1976,10 +1976,12 @@ fn cancel_run_reclaims_stale_running_record() {
     with_isolated_home(|_| {
         let plan = test_plan();
         submit_plan(&plan, Some("run-cancel-stale")).expect("submitted");
+        reserve_provider_execution("run-cancel-stale", &plan.tasks[0], 1)
+            .expect("provider execution reserved");
         let mut record = store::read_record("run-cancel-stale").expect("record");
         record.state = AgentTaskRunState::Running;
         record.tasks[0].state = AgentTaskState::Running;
-        record.metadata = json!({ "runner_pid": u32::MAX });
+        record.metadata["runner_pid"] = json!(u32::MAX);
         store::write_record(&record).expect("stored stale record");
 
         let cancelled = cancel_run("run-cancel-stale", None).expect("stale run cancelled");
@@ -1987,7 +1989,35 @@ fn cancel_run_reclaims_stale_running_record() {
         assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
         assert_eq!(cancelled.tasks[0].state, AgentTaskState::Cancelled);
         assert_eq!(cancelled.metadata["cancelled_stale_running"], json!(true));
+        assert_eq!(
+            cancelled.metadata["provider_executions"][0]["state"],
+            json!("cancelled")
+        );
+        assert!(cancelled.metadata["provider_executions"][0]["finished_at"].is_string());
         assert!(cancelled.metadata.get("stale_running").is_none());
+    });
+}
+
+#[test]
+fn replaying_cancel_repairs_stale_provider_execution() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("run-cancel-replay")).expect("submitted");
+        reserve_provider_execution("run-cancel-replay", &plan.tasks[0], 1)
+            .expect("provider execution reserved");
+        let mut record = store::read_record("run-cancel-replay").expect("record");
+        record.state = AgentTaskRunState::Cancelled;
+        record.tasks[0].state = AgentTaskState::Cancelled;
+        store::write_record(&record).expect("legacy cancelled record");
+
+        let repaired = cancel_run("run-cancel-replay", None).expect("replayed cancellation");
+
+        assert_eq!(repaired.state, AgentTaskRunState::Cancelled);
+        assert_eq!(
+            repaired.metadata["provider_executions"][0]["state"],
+            "cancelled"
+        );
+        assert!(repaired.metadata["provider_executions"][0]["finished_at"].is_string());
     });
 }
 

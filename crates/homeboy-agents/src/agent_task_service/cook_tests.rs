@@ -1854,6 +1854,144 @@ fn cook_repairs_initial_alias_after_submit_before_index_interruption() {
 }
 
 #[test]
+fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("temporary destination");
+        let repository = temp.path().join("repository");
+        let destination = temp.path().join("destination");
+        std::fs::create_dir(&repository).expect("create repository");
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .status()
+                .expect("run git")
+                .success());
+        };
+        git(&repository, &["init", "-b", "main"]);
+        std::fs::write(repository.join("fixture.txt"), "base\n").expect("write base");
+        git(&repository, &["add", "fixture.txt"]);
+        git(
+            &repository,
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "base",
+            ],
+        );
+        git(
+            &repository,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "fixture-candidate",
+                destination.to_str().expect("destination path"),
+                "HEAD",
+            ],
+        );
+        let cook_id = "cook-repair-recipe-only-retry";
+        let first_run_id = "cook-repair-recipe-only-retry-attempt-1";
+        let stranded_run_id = "cook-repair-recipe-only-retry-attempt-2-stranded";
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let mut options = batch_cook_options(
+            cook_id,
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: Arc::clone(&dispatches),
+            }),
+        );
+        options.initial_run_id = first_run_id.to_string();
+        options.max_attempts = 2;
+        options.source_worktree_path = Some(destination.clone());
+        options.initial_plan.tasks[0].workspace.root = Some(destination.display().to_string());
+        options.initial_plan.tasks[0].workspace.kind = Some("homeboy-worktree".to_string());
+        options.initial_plan.tasks[0].workspace.materialization = serde_json::json!({
+            "kind": "homeboy-worktree",
+            "id": options.to_worktree.clone(),
+            "root": destination,
+            "branch": "fixture-candidate",
+        });
+        homeboy_core::worktree::adopt(homeboy_core::worktree::WorktreeAdoptOptions {
+            handle: options.to_worktree.clone(),
+            path: destination.display().to_string(),
+            kind: Some("test-fixture".to_string()),
+            provenance: None,
+        })
+        .expect("register destination workspace");
+        super::super::persist_initial_recipe(&options).expect("persist durable recipe");
+        super::super::materialize_initial_cook_attempt(&options)
+            .expect("materialize initial attempt");
+        agent_task_lifecycle::record_pre_execution_failure(
+            first_run_id,
+            &options.initial_plan,
+            "lab_handoff_preacceptance",
+            &Error::new(
+                homeboy_core::error::ErrorCode::RunnerLabTransportFailure,
+                "fixture runner identity mismatch",
+                serde_json::json!({ "phase": "lab_handoff_preacceptance" }),
+            )
+            .with_retryable(true),
+        )
+        .expect("record retryable pre-acceptance failure");
+        super::super::record_recipe_attempt(cook_id, 2, stranded_run_id, &options.initial_plan)
+            .expect("persist recipe-only retry");
+
+        assert!(!agent_task_lifecycle::run_record_exists(stranded_run_id).unwrap());
+        assert_eq!(
+            agent_task_lifecycle::cook_index(cook_id)
+                .expect("initial Cook index")
+                .latest_run_id,
+            first_run_id
+        );
+
+        let result = run_cook_with_boundaries_observed_inner(
+            options.clone(),
+            UnusedExecutor,
+            DefaultCookSideEffects::new(|_, _, _| Ok(serde_json::json!({}))),
+            None,
+        )
+        .expect("continuation repairs and dispatches recipe-bound retry");
+        let repeated = run_cook_with_boundaries_observed_inner(
+            options,
+            UnusedExecutor,
+            DefaultCookSideEffects::new(|_, _, _| Ok(serde_json::json!({}))),
+            None,
+        )
+        .expect("repeated continuation remains idempotent");
+
+        assert_eq!(result.value.status, "in_flight", "{result:#?}");
+        assert_eq!(result.value.latest_run_id.as_deref(), Some(stranded_run_id));
+        assert_eq!(
+            repeated.value.latest_run_id.as_deref(),
+            Some(stranded_run_id)
+        );
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+        let index = agent_task_lifecycle::cook_index(cook_id).expect("repaired Cook index");
+        assert_eq!(index.attempts.len(), 2);
+        assert_eq!(index.latest_run_id, stranded_run_id);
+        assert_eq!(
+            agent_task_lifecycle::status(stranded_run_id)
+                .expect("repaired retry record")
+                .runner_job_id(),
+            Some("recording-daemon-job")
+        );
+        assert_eq!(
+            super::super::load_recipe(cook_id)
+                .expect("stable recipe")
+                .attempts
+                .iter()
+                .filter(|attempt| attempt.attempt == 2)
+                .count(),
+            1
+        );
+    });
+}
+
+#[test]
 fn retry_after_admission_failure_restores_managed_workspace_after_baseline_cleanup() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("temp source root");
