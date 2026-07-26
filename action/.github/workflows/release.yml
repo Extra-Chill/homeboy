@@ -93,10 +93,22 @@ jobs:
             echo "::notice::Release dry-run predicts v${RELEASE_VERSION} (${BUMP_TYPE})"
           fi
 
-  # ── Step 2: Release ──
+  # ── Step 2: Shell tests ──
+  # Release-blocking. Publishing moves the floating v2 tag, so a regression
+  # here breaks every consumer at once — gate the tag move on the action's
+  # own tests passing.
+  self-test:
+    name: Self test
+    needs: check
+    if: needs.check.outputs.should-release == 'true'
+    uses: ./.github/workflows/self-test.yml
+
+  # ── Step 3: Release ──
   release:
     name: Release
-    needs: check
+    needs:
+      - check
+      - self-test
     if: needs.check.outputs.should-release == 'true'
     runs-on: ubuntu-latest
     steps:
