@@ -52,6 +52,7 @@ git -C "$worktree" remote add origin git@github.com:Extra-Chill/homeboy.git
 
 primary_target="$(target_dir_for "$primary")"
 worktree_target="$(target_dir_for "$worktree")"
+toolchain_env="$(env_for "$primary")"
 
 if [ -z "$primary_target" ] || [ "$primary_target" != "$worktree_target" ]; then
     printf 'Expected matching shared target dirs, got primary=%s worktree=%s\n' "$primary_target" "$worktree_target" >&2
@@ -65,6 +66,13 @@ case "$primary_target" in
         exit 1
         ;;
 esac
+
+cargo_home="$(printf '%s' "$toolchain_env" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("CARGO_HOME", ""))')"
+rustup_home="$(printf '%s' "$toolchain_env" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("RUSTUP_HOME", ""))')"
+if [ "$cargo_home" != "$HOME/.cargo" ] || [ "$rustup_home" != "$HOME/.rustup" ]; then
+    printf 'Expected Rust toolchain homes from the runtime environment, got CARGO_HOME=%s RUSTUP_HOME=%s\n' "$cargo_home" "$rustup_home" >&2
+    exit 1
+fi
 
 explicit_output="$(
     CARGO_TARGET_DIR="$explicit" \

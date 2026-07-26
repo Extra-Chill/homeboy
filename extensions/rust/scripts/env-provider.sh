@@ -48,15 +48,19 @@ data_dir="${HOMEBOY_DATA_DIR:-${XDG_DATA_HOME:-${HOME}/.local/share}/homeboy}"
 target_dir="${data_dir}/cargo-targets/${label}-${hash:0:12}"
 toolchain_env_json="$(homeboy_rust_toolchain_env_json)"
 
-python3 - "$target_dir" "$toolchain_env_json" <<'PY'
+python3 - "$target_dir" "$toolchain_env_json" "${CARGO_HOME:-${HOME}/.cargo}" "${RUSTUP_HOME:-${HOME}/.rustup}" <<'PY'
 import json
 import sys
 
-target_dir = sys.argv[1]
-toolchain_env = json.loads(sys.argv[2])
+target_dir, toolchain_env_json, cargo_home, rustup_home = sys.argv[1:]
+toolchain_env = json.loads(toolchain_env_json)
 env = {
     "CARGO_TARGET_DIR": target_dir,
     "HOMEBOY_CARGO_TARGET_DIR": target_dir,
+    # Isolated gate HOME values must not redirect Cargo/Rustup away from the
+    # runtime-owned toolchain installation.
+    "CARGO_HOME": cargo_home,
+    "RUSTUP_HOME": rustup_home,
 }
 env.update(toolchain_env)
 print(json.dumps(env))
