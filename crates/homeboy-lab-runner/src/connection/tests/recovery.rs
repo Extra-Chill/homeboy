@@ -243,6 +243,28 @@ fn stale_generation_reconciliation_refuses_a_lease_change_after_stop() {
 }
 
 #[test]
+fn authoritative_dead_lease_allows_stale_generation_tombstoning() {
+    let dead = remote_daemon_status_for_test_with_reason(
+        false,
+        false,
+        0,
+        "lease-dead",
+        4444,
+        Some(DaemonStaleReasonCode::PidDead),
+    );
+    let live = remote_daemon_status_for_test(true, true, 0, "lease-live", 5555);
+
+    assert!(authoritative_stale_generations_are_dead(
+        &dead,
+        &["lease-old".to_string(), "lease-dead".to_string()],
+    ));
+    assert!(!authoritative_stale_generations_are_dead(
+        &live,
+        &["lease-old".to_string(), "lease-dead".to_string()],
+    ));
+}
+
+#[test]
 fn idle_stale_replacement_fails_closed_for_active_or_inconsistent_typed_jobs() {
     let configured = "homeboy 0.289.0+configured";
     let mut freshness_active = idle_stale_status(RemoteDaemonWorkEvidence::AuthoritativelyIdle);

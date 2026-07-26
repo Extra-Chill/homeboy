@@ -484,6 +484,10 @@ fn status_expires_an_unaccepted_handoff_but_late_runner_acceptance_wins() {
         assert_eq!(expired.state, AgentTaskRunState::Cancelled);
         assert_eq!(expired.metadata["handoff_acceptance"]["state"], "expired");
         assert_eq!(expired.metadata["retryable"], true);
+        assert_eq!(
+            expired.metadata["managed_recovery"]["command"],
+            "homeboy agent-task retry expired-handoff-late-acceptance --run"
+        );
 
         let accepted = record_detached_lab_run(DetachedLabRunRecord {
             run_id: "expired-handoff-late-acceptance",

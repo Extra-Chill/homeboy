@@ -383,6 +383,14 @@ pub(crate) fn expire_unaccepted_lab_handoff(run_id: &str) -> Result<bool> {
     );
     metadata.insert(METADATA_KEY_RETRYABLE.to_string(), json!(true));
     metadata.insert(
+        "managed_recovery".to_string(),
+        json!({
+            "action": "agent_task_retry",
+            "command": format!("homeboy agent-task retry {record_run_id} --run"),
+            "reason": EXPIRED_LAB_HANDOFF_REASON,
+        }),
+    );
+    metadata.insert(
         "runner_execution_record".to_string(),
         serde_json::to_value(
             homeboy_core::runner_execution_envelope::RunnerExecutionRecord::terminal(

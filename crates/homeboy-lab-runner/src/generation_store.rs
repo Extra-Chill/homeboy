@@ -519,6 +519,58 @@ pub(crate) fn clear(runner_id: &str) -> Result<()> {
     })
 }
 
+/// Remove a registry only after its caller has obtained authoritative remote
+/// proof that every recorded direct daemon generation is dead and idle. Check
+/// the exact lease set again under the registry lock so a concurrent reconnect
+/// cannot lose a newly admitted generation.
+pub(crate) fn tombstone_dead_direct_generations(
+    runner_id: &str,
+    expected_leases: &[String],
+) -> Result<Vec<u32>> {
+    let expected_leases = expected_leases
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    with_registry_lock(runner_id, || {
+        let Some(generations) = read_locked(runner_id, None)? else {
+            return Ok(Vec::new());
+        };
+        let current_leases = generations
+            .generations
+            .values()
+            .map(|entry| {
+                (entry.endpoint.mode == crate::RunnerTunnelMode::DirectSsh)
+                    .then_some(entry.endpoint.remote_daemon_lease_id.as_deref())
+                    .flatten()
+                    .filter(|lease| !lease.is_empty())
+            })
+            .collect::<Option<std::collections::BTreeSet<_>>>();
+        if current_leases.as_ref() != Some(&expected_leases) {
+            return Err(Error::validation_invalid_argument(
+                "runner",
+                "runner generation registry changed while dead-daemon evidence was being reconciled; retained all generations",
+                Some(runner_id.to_string()),
+                None,
+            ));
+        }
+        let tunnel_pids = generations
+            .generations
+            .values()
+            .filter_map(|entry| entry.endpoint.tunnel_pid)
+            .collect::<Vec<_>>();
+        let path = path(runner_id)?;
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("delete {}", path.display())),
+                )
+            })?;
+        }
+        Ok(tunnel_pids)
+    })
+}
+
 trait GenerationEndpointOperations {
     /// Terminal linked handoffs can survive a controller restart in a daemon's
     /// job store. Settle them before treating its active count as ownership.
@@ -1051,6 +1103,33 @@ mod tests {
         let raw = std::fs::read_to_string(path(runner_id).expect("registry path"))
             .expect("read registry");
         serde_json::from_str(&raw).expect("parse registry")
+    }
+
+    #[test]
+    fn tombstones_a_large_dead_direct_generation_inventory_without_accepting_new_work() {
+        test_support::with_isolated_home(|_| {
+            let mut generations =
+                RollingGenerations::new("lease-0", session("lease-0", "daemon-0", Some(1000)));
+            for index in 1..58 {
+                let lease = format!("lease-{index}");
+                generations.begin(
+                    lease.clone(),
+                    session(&lease, &format!("daemon-{index}"), Some(1000 + index)),
+                );
+            }
+            write("runner-a", &generations).expect("persist stale inventory");
+
+            let leases = (0..58)
+                .map(|index| format!("lease-{index}"))
+                .collect::<Vec<_>>();
+            let pids = tombstone_dead_direct_generations("runner-a", &leases)
+                .expect("dead authoritative daemon tombstones stale inventory");
+
+            assert_eq!(pids.len(), 58);
+            assert!(read("runner-a", None)
+                .expect("read tombstoned registry")
+                .is_none());
+        });
     }
 
     const PROCESS_SYNC_DIR_ENV: &str = "HOMEBOY_GENERATION_STORE_PROCESS_SYNC_DIR";
