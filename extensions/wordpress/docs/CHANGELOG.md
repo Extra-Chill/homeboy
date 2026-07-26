@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.33.0] - 2026-07-26
+
+### Added
+- select native database services
+
 ## [3.32.0] - 2026-07-25
 
 ### Added
