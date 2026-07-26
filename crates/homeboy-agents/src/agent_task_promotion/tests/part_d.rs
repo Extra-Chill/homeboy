@@ -247,7 +247,7 @@ fn normalize_promotion_patch_strips_lab_sandbox_workspace_prefix() {
 }
 
 #[test]
-fn empty_patch_runs_public_and_private_gates_against_pinned_candidate() {
+fn empty_patch_runs_public_and_private_gates_against_destination() {
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     std::fs::create_dir(&repo).expect("create repo");
@@ -295,7 +295,7 @@ fn empty_patch_runs_public_and_private_gates_against_pinned_candidate() {
     assert_eq!(report.provenance["verified_revision"], revision);
     assert_eq!(provider.apply_calls.len(), 0);
     assert_eq!(provider.verify_calls.len(), 2);
-    assert_ne!(provider.verify_calls[0].0, repo);
+    assert_eq!(provider.verify_calls[0].0, repo);
     assert_eq!(provider.verify_calls[1].2, AgentTaskGateVisibility::Private);
     assert_eq!(
         provider.verify_calls[1].3,
@@ -369,7 +369,7 @@ fn promote_exports_committed_changes_when_patch_artifact_is_empty() {
     );
     assert_eq!(provider.apply_calls.len(), 1);
     assert_eq!(provider.verify_calls.len(), 1);
-    assert_ne!(provider.verify_calls[0].0, repo);
+    assert_eq!(provider.verify_calls[0].0, repo);
 }
 
 #[test]

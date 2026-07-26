@@ -366,7 +366,7 @@ fn normalize_promotion_patch_leaves_unrelated_workspace_paths() {
 }
 
 #[test]
-fn empty_patch_failing_gate_is_reported_against_pinned_candidate() {
+fn empty_patch_failing_gate_is_reported_against_destination() {
     let temp = tempfile::tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     std::fs::create_dir(&repo).expect("create repo");
@@ -419,7 +419,7 @@ fn empty_patch_failing_gate_is_reported_against_pinned_candidate() {
         homeboy_core::gate::HomeboyGateStatus::Failed
     );
     assert_eq!(provider.apply_calls.len(), 0);
-    assert_ne!(provider.verify_calls[0].0, repo);
+    assert_eq!(provider.verify_calls[0].0, repo);
 }
 
 #[test]

@@ -193,7 +193,8 @@ pub fn resume_promoted_patch(
             "artifact_metadata": artifact.metadata,
             "worktree_path": target_path,
             "dependencies_materialized": gates.dependencies_materialized,
-            "gate_setup": gates.setup,
+            "candidate_checkout_setup": gates.candidate_setup,
+            "destination_gate_setup": gates.destination_gate_setup,
             "candidate_checkout": gates.candidate_checkout,
             "candidate": candidate,
             "resumed_post_apply_promotion": true,
@@ -622,7 +623,8 @@ pub(super) fn promote_with_provider_and_checkpoint(
                 "worktree_path": worktree_path,
                 "verified_revision": verified_revision,
                 "dependencies_materialized": gates.dependencies_materialized,
-                "gate_setup": gates.setup,
+                "candidate_checkout_setup": gates.candidate_setup,
+                "destination_gate_setup": gates.destination_gate_setup,
                 "candidate_checkout": gates.candidate_checkout,
                 "candidate": candidate,
             }),
@@ -779,7 +781,8 @@ pub(super) fn promote_with_provider_and_checkpoint(
             "artifact_metadata": artifact.metadata,
             "worktree_path": applied_worktree_path,
             "dependencies_materialized": gates.dependencies_materialized,
-            "gate_setup": gates.setup,
+            "candidate_checkout_setup": gates.candidate_setup,
+            "destination_gate_setup": gates.destination_gate_setup,
             "candidate_checkout": gates.candidate_checkout,
             "candidate": candidate,
             "destination_baseline": candidate,
@@ -1351,7 +1354,8 @@ fn promote_committed_changes(
             "artifact_metadata": artifact.map(|artifact| artifact.metadata.clone()).unwrap_or(Value::Null),
             "worktree_path": applied_worktree_path,
             "dependencies_materialized": gates.dependencies_materialized,
-            "gate_setup": gates.setup,
+            "candidate_checkout_setup": gates.candidate_setup,
+            "destination_gate_setup": gates.destination_gate_setup,
             "candidate_checkout": gates.candidate_checkout,
             "change_source": "local_commits",
             "base_ref": committed_patch.base_ref,
@@ -1386,39 +1390,29 @@ fn run_promotion_gates(
             .unwrap_or("unrecorded-promotion"),
         expected_candidate,
     )?;
-    let gate_path = candidate_checkout
-        .as_ref()
-        .map(ImmutableCandidateCheckout::path)
-        .unwrap_or(worktree_path);
-    // Materialize dependencies in the immutable checkout so repository-owned
-    // verification sees the candidate as committed content, never the dirty
-    // promotion target that finalization still owns.
-    let setup = crate::agent_task_gate::hydrate_gate_dependency_roots(
-        gate_path,
-        options.gates.hydrate_dependencies,
-    )
-    .map_err(|error| {
-        let mut cause = serde_json::json!({
-            "classification": "candidate_setup",
-            "code": error.code.as_str(),
-            "message": bounded_setup_error_text(&error.message),
-        });
-        if let Some(details) = cause.as_object_mut() {
-            details.insert(
-                "details".to_string(),
-                serde_json::Value::String(bounded_setup_error_text(&error.details.to_string())),
-            );
-        }
-        Error::dependency_step_failed(
-            "promotion.gate_setup",
-            "candidate_checkout".to_string(),
-            None,
-            Vec::new(),
-            Vec::new(),
-            None,
-            Some(cause),
+    // The immutable candidate establishes source identity only. Dependency
+    // setup is intentionally destination-only: gates must consume the exact
+    // executable projection this report describes.
+    let candidate_setup = Vec::new();
+    let destination_gate_setup = if worktree_path.is_dir() {
+        crate::agent_task_gate::hydrate_gate_dependency_roots(
+            worktree_path,
+            options.gates.hydrate_dependencies,
+            "destination_gate_workspace",
         )
-    })?;
+        .map_err(|error| {
+            gate_setup_failure(
+                "destination_gate_setup",
+                "destination_gate_workspace",
+                error,
+            )
+        })?
+    } else {
+        // An opaque provider destination cannot be hydrated locally. Its gate
+        // provider remains the authority, and the report makes no local
+        // materialization claim.
+        Vec::new()
+    };
     let declared_gates = options
         .gates
         .verify
@@ -1452,7 +1446,7 @@ fn run_promotion_gates(
             run_promotion_gate(
                 options,
                 provider,
-                gate_path,
+                worktree_path,
                 index + 1,
                 command,
                 visibility,
@@ -1486,8 +1480,9 @@ fn run_promotion_gates(
         status: status_for_report(options.dry_run, has_gate_failure),
         deterministic_gates,
         gate_results,
-        dependencies_materialized: !setup.is_empty(),
-        setup,
+        dependencies_materialized: !destination_gate_setup.is_empty(),
+        candidate_setup,
+        destination_gate_setup,
         candidate_checkout,
     })
 }
@@ -1502,6 +1497,24 @@ fn bounded_setup_error_text(value: &str) -> String {
         result.push(character);
     }
     result
+}
+
+fn gate_setup_failure(classification: &str, component: &str, error: Error) -> Error {
+    Error::dependency_step_failed(
+        "promotion.gate_setup",
+        component.to_string(),
+        None,
+        Vec::new(),
+        Vec::new(),
+        None,
+        Some(serde_json::json!({
+            "classification": classification,
+            "code": error.code.as_str(),
+            "message": bounded_setup_error_text(&error.message),
+            "details": bounded_setup_error_text(&error.details.to_string()),
+            "retry_action": "retry_dependency_hydration",
+        })),
+    )
 }
 
 /// A run-scoped detached worktree whose commit tree is exactly the promoted
@@ -1610,10 +1623,6 @@ impl ImmutableCandidateCheckout {
         Ok(Some(checkout))
     }
 
-    fn path(&self) -> &Path {
-        &self.path
-    }
-
     fn identity(&self) -> AgentTaskGateCandidateCheckout {
         self.identity.clone()
     }
@@ -1706,7 +1715,13 @@ fn run_promotion_gate(
         &options.gates.required_toolchains(),
         Some(&runtime_tmpdir.context().tmp_dir),
     ) {
-        Err(error)
+        // This runs before provider verification. A missing destination tool is
+        // setup evidence, not candidate blame or provider-budget consumption.
+        Err(gate_setup_failure(
+            "destination_gate_toolchain",
+            "destination_gate_workspace",
+            error,
+        ))
     } else if let Some(supervision) = supervision.as_deref() {
         crate::agent_task_gate::run_gate_command_with_supervision(
             worktree_path,
