@@ -131,7 +131,8 @@ pub fn execute_lab_offload(request: LabOffloadRequest<'_>) -> Result<LabOffloadO
     )?;
 
     // Begin runner-agnostic overhead accounting (#3001). Each setup phase
-    // (selection, preflight, workspace sync, output parse, artifact import) is
+    // (selection, preflight, source materialization, dependency hydration,
+    // admission, artifact import) is
     // timed independently so reports can separate `lab_overhead_ms` from the
     // workload command duration, regardless of runner transport.
     let mut overhead = LabOffloadOverhead::start();
