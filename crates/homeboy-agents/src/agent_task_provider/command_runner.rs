@@ -347,13 +347,23 @@ pub(super) fn run_materialized_provider_command_once(
             .map(|(key, value)| (key.as_str(), value.as_str())),
     );
     if let Some(cwd) = cwd {
-        if let Some(attestation) = request.request.metadata.get("cook_workspace_identity") {
-            if !workspace_matches_attestation(&cwd, attestation) {
+        // Old persisted Cook plans bind the source workspace. Newly materialized
+        // plans replace that with an attempt-specific binding before execution.
+        if let Some(attestation) = request
+            .request
+            .metadata
+            .get("cook_attempt_workspace_identity")
+            .or_else(|| request.request.metadata.get("cook_workspace_identity"))
+        {
+            if !crate::agent_task_workspace_identity::workspace_matches_attestation(
+                &cwd,
+                attestation,
+            ) {
                 return failure_outcome(
                     request, AgentTaskOutcomeStatus::ProviderError,
                     AgentTaskFailureClassification::InvalidInput,
                     "agent_task.workspace_identity_changed",
-                    "provider workspace no longer matches the Cook identity attestation; refusing execution".to_string(),
+                    "provider workspace no longer matches its Cook attempt identity attestation; refusing execution".to_string(),
                     json!({ "provider": provider.id, "workspace": cwd }),
                 );
             }
@@ -591,56 +601,6 @@ pub(super) fn run_materialized_provider_command_once(
             ),
         ),
     }
-}
-
-#[cfg(unix)]
-fn workspace_matches_attestation(path: &std::path::Path, attestation: &serde_json::Value) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    let Ok(canonical) = std::fs::canonicalize(path) else {
-        return false;
-    };
-    let Ok(metadata) = std::fs::symlink_metadata(&canonical) else {
-        return false;
-    };
-    !metadata.file_type().is_symlink()
-        && attestation["canonical_path"].as_str() == canonical.to_str()
-        && attestation["device"].as_u64() == Some(metadata.dev())
-        && attestation["inode"].as_u64() == Some(metadata.ino())
-        && linked_git_metadata_matches(&canonical, attestation)
-}
-
-#[cfg(unix)]
-fn linked_git_metadata_matches(
-    worktree: &std::path::Path,
-    attestation: &serde_json::Value,
-) -> bool {
-    let git_file = worktree.join(".git");
-    let Ok(metadata) = std::fs::symlink_metadata(&git_file) else {
-        return false;
-    };
-    if !metadata.file_type().is_file() || attestation["git_file_is_file"] != true {
-        return false;
-    }
-    let Ok(content) = std::fs::read_to_string(&git_file) else {
-        return false;
-    };
-    if attestation["git_file_content"].as_str() != Some(content.as_str()) {
-        return false;
-    }
-    let target = content
-        .strip_prefix("gitdir: ")
-        .map(str::trim)
-        .and_then(|target| std::fs::canonicalize(worktree.join(target)).ok());
-    target.as_deref().and_then(|path| path.to_str()) == attestation["gitdir_target"].as_str()
-}
-
-#[cfg(not(unix))]
-fn workspace_matches_attestation(path: &std::path::Path, attestation: &serde_json::Value) -> bool {
-    std::fs::canonicalize(path)
-        .ok()
-        .and_then(|path| path.to_str().map(str::to_string))
-        .as_deref()
-        == attestation["canonical_path"].as_str()
 }
 
 #[cfg(unix)]

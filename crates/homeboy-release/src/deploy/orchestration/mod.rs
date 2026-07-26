@@ -95,8 +95,13 @@ pub(super) fn deploy_components(
         ));
     }
 
-    let project =
-        project_with_detected_path_roots(project, &loaded.deployable, base_path, &ctx.client);
+    let project = project_with_detected_path_roots(
+        project,
+        &loaded.deployable,
+        base_path,
+        &ctx.client,
+        "deploy",
+    );
 
     let components = plan_components(
         config,

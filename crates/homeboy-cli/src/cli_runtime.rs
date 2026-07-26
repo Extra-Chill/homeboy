@@ -105,6 +105,7 @@ impl CliRuntime {
 
     pub fn run_from_args(&self, args: Vec<String>) -> std::process::ExitCode {
         let normalized = args::normalize(args);
+        let command_capability = classify_command_capability(&normalized);
         if let Some(message) = args::runner_exec_option_boundary_error(&normalized) {
             eprintln!("error: {message}");
             return std::process::ExitCode::from(2);
@@ -176,9 +177,12 @@ impl CliRuntime {
         // can reconcile and resume runs dispatched to a remote runner without
         // core depending on runner behavior.
         crate::runner::register_runner_continuation_provider();
-        // Recover completed generic runner-exec jobs before this invocation can
-        // open a daemon store whose retention policy might evict their evidence.
-        let _ = crate::runner::reconcile_terminal_runner_exec_runs();
+        // Recover completed generic runner-exec jobs before a mutating invocation
+        // can evict their evidence. Read-only commands must not mutate durable
+        // state during startup.
+        if command_capability == CommandCapability::Mutation {
+            let _ = crate::runner::reconcile_terminal_runner_exec_runs();
+        }
         // Register the runner daemon-exec driver so the daemon's /exec endpoint
         // can prepare and run a runner job as a local child without core
         // depending on runner process-execution behavior.
@@ -186,6 +190,7 @@ impl CliRuntime {
         // Lab owns its durable staging/dispatch controller-job interpretation;
         // core only owns the generic daemon lifecycle.
         crate::runner::register_lab_staging_controller_driver();
+        crate::agents::agent_task_service::register_promotion_job_driver();
         crate::runner::enable_production_lab_staging();
         // Register the runner workspace-root provider so the daemon file API can
         // resolve a runner's configured workspace_root without core depending on
