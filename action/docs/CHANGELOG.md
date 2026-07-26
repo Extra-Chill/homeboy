@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.24] - 2026-07-26
+
+### Fixed
+- fail closed when a strict command leaks force-killed descendants
+
 ## [2.8.23] - 2026-07-26
 
 ### Fixed
