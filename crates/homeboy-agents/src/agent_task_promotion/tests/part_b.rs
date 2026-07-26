@@ -1304,7 +1304,7 @@ fn continue_all_gate_policy_runs_downstream_command_after_failure() {
 }
 
 #[test]
-fn promotion_runs_clean_checkout_gate_against_immutable_candidate() {
+fn promotion_runs_gates_in_the_destination_workspace() {
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
@@ -1337,10 +1337,7 @@ fn promotion_runs_clean_checkout_gate_against_immutable_candidate() {
             artifact_id: None,
             dry_run: false,
             gates: VerifyGateOptions {
-                verify: vec![
-                    "test -z \"$(git status --porcelain)\" && test \"$(cat src/lib.rs)\" = new"
-                        .to_string(),
-                ],
+                verify: vec!["test \"$(cat src/lib.rs)\" = new".to_string()],
                 ..Default::default()
             },
             provider_command: None,
@@ -1348,11 +1345,11 @@ fn promotion_runs_clean_checkout_gate_against_immutable_candidate() {
         },
         &mut provider,
     )
-    .expect("clean-checkout gate accepts the dirty promoted candidate");
+    .expect("destination gate accepts the promoted candidate");
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(provider.verify_worktrees_clean, vec![true]);
-    assert_ne!(provider.verify_calls[0].0, workspace);
+    assert_eq!(provider.verify_worktrees_clean, vec![false]);
+    assert_eq!(provider.verify_calls[0].0, workspace);
     assert!(Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(&workspace)
@@ -1375,7 +1372,7 @@ fn promotion_runs_clean_checkout_gate_against_immutable_candidate() {
 }
 
 #[test]
-fn promotion_hydrates_a_bounded_nested_dependency_root_before_its_gate() {
+fn promotion_hydrates_destination_package_execution_projections_before_gates() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
@@ -1384,21 +1381,17 @@ fn promotion_hydrates_a_bounded_nested_dependency_root_before_its_gate() {
         git(&workspace, &["config", "user.email", "test@example.com"]);
         git(&workspace, &["config", "user.name", "Homeboy Test"]);
         std::fs::create_dir_all(workspace.join("src")).expect("source directory");
-        std::fs::create_dir_all(workspace.join("transformer")).expect("nested package");
         std::fs::write(workspace.join("src/lib.rs"), "old\n").expect("base file");
         std::fs::write(
-            workspace.join("transformer/homeboy.json"),
-            r#"{"id":"nested-transformer"}"#,
+            workspace.join("homeboy.json"),
+            r#"{"id":"projection-fixture"}"#,
         )
         .expect("component manifest");
+        std::fs::write(workspace.join("dependency.lock"), "fixture-lock\n")
+            .expect("dependency lock fixture");
         std::fs::write(
-            workspace.join("transformer/dependency.lock"),
-            "fixture-lock\n",
-        )
-        .expect("dependency lock fixture");
-        std::fs::write(
-            workspace.join("transformer/homeboy-deps.json"),
-            r#"{"provider":"fixture-provider","commands":{"install":{"argv":["sh","-c","printf fixture > installed.marker"]}}}"#,
+            workspace.join("homeboy-deps.json"),
+            r##"{"provider":"fixture-provider","commands":{"install":{"argv":["sh","-c","mkdir -p node_modules/fixture node_modules/.bin && printf 'console.log(\"explicit module path\")\n' > node_modules/fixture/explicit.js && printf '#!/bin/sh\nexit 0\n' > node_modules/.bin/fixture-bin && chmod +x node_modules/.bin/fixture-bin"]}}}"##,
         )
         .expect("provider declaration");
         git(&workspace, &["add", "."]);
@@ -1425,7 +1418,12 @@ fn promotion_hydrates_a_bounded_nested_dependency_root_before_its_gate() {
                 artifact_id: None,
                 dry_run: false,
                 gates: VerifyGateOptions {
-                    verify: vec!["test -f transformer/installed.marker".to_string()],
+                    // The first gate addresses a module directly; the second
+                    // consumes the executable projection the provider created.
+                    verify: vec![
+                        "node ./node_modules/fixture/explicit.js".to_string(),
+                        "./node_modules/.bin/fixture-bin".to_string(),
+                    ],
                     ..Default::default()
                 },
                 provider_command: None,
@@ -1433,20 +1431,28 @@ fn promotion_hydrates_a_bounded_nested_dependency_root_before_its_gate() {
             },
             &mut provider,
         )
-        .expect("nested dependency setup makes the gate runnable");
+        .expect("destination dependency setup makes both gate forms runnable");
 
         assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
         assert_eq!(
-            report.provenance["gate_setup"][0]["package_root"],
-            "transformer"
+            report.provenance["candidate_checkout_setup"],
+            serde_json::json!([])
         );
         assert_eq!(
-            report.provenance["gate_setup"][0]["setup_capability"],
+            report.provenance["destination_gate_setup"][0]["workspace"],
+            "destination_gate_workspace"
+        );
+        assert_eq!(
+            report.provenance["destination_gate_setup"][0]["setup_capability"],
             "dependency.install"
         );
         assert!(
-            !workspace.join("transformer/installed.marker").exists(),
-            "setup writes only to the candidate checkout"
+            workspace.join("node_modules/fixture/explicit.js").exists(),
+            "destination hydration creates the explicit module path"
+        );
+        assert!(
+            workspace.join("node_modules/.bin/fixture-bin").exists(),
+            "destination hydration creates the executable projection"
         );
     });
 }
@@ -1493,7 +1499,14 @@ fn promotion_can_disable_candidate_dependency_hydration() {
         &mut provider,
     )
     .expect("disabled setup still runs gates");
-    assert_eq!(report.provenance["gate_setup"], serde_json::json!([]));
+    assert_eq!(
+        report.provenance["candidate_checkout_setup"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        report.provenance["destination_gate_setup"],
+        serde_json::json!([])
+    );
 }
 
 #[test]
@@ -1547,7 +1560,10 @@ fn promotion_setup_failure_is_bounded_and_never_dispatches_a_gate() {
         .expect_err("failed setup stops before a gate can spend repair capacity");
 
         assert_eq!(error.code.as_str(), "dependency_step_failed");
-        assert_eq!(error.details["cause"]["classification"], "candidate_setup");
+        assert_eq!(
+            error.details["cause"]["classification"],
+            "destination_gate_setup"
+        );
         assert!(
             error.details["cause"]["details"]
                 .as_str()
@@ -1560,6 +1576,69 @@ fn promotion_setup_failure_is_bounded_and_never_dispatches_a_gate() {
             "no gate/provider dispatch occurs"
         );
     });
+}
+
+#[test]
+fn missing_destination_tool_is_a_typed_setup_failure_before_provider_verification() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    git(&workspace, &["init", "-b", "main"]);
+    git(&workspace, &["config", "user.email", "test@example.com"]);
+    git(&workspace, &["config", "user.name", "Homeboy Test"]);
+    std::fs::create_dir_all(workspace.join("src")).expect("source directory");
+    std::fs::write(workspace.join("src/lib.rs"), "old\n").expect("base file");
+    git(&workspace, &["add", "."]);
+    git(&workspace, &["commit", "-m", "base"]);
+    let (source_path, source) = write_patch_source(&temp);
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(workspace),
+        apply_to_git: true,
+        ..Default::default()
+    };
+
+    let error = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("missing-destination-tool".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "fixture@target".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec!["homeboy-fixture-missing-tool".to_string()],
+                hydrate_dependencies: false,
+                gate_toolchains: vec![crate::agent_task_gate::AgentTaskGateToolchainRequirement {
+                    command: "homeboy-fixture-missing-tool".to_string(),
+                    probe_arguments: vec!["--version".to_string()],
+                }],
+                ..Default::default()
+            },
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect_err("missing tool is setup evidence, not a candidate gate failure");
+
+    assert_eq!(error.code.as_str(), "dependency_step_failed");
+    assert_eq!(
+        error.details["cause"]["classification"],
+        "destination_gate_toolchain"
+    );
+    assert_eq!(
+        error.details["cause"]["retry_action"],
+        "retry_dependency_hydration"
+    );
+    assert!(
+        provider.verify_calls.is_empty(),
+        "provider budget was not spent"
+    );
 }
 
 #[test]
@@ -1616,7 +1695,7 @@ fn promotion_rejects_mutation_after_checkpoint_before_gate_materialization() {
 }
 
 #[test]
-fn resumed_verification_runs_clean_checkout_gate_for_exact_dirty_candidate() {
+fn resumed_verification_runs_destination_gate_for_exact_dirty_candidate() {
     let temp = tempfile::tempdir().expect("tempdir");
     let target = temp.path().join("target");
     std::fs::create_dir(&target).expect("target");
@@ -1645,10 +1724,7 @@ fn resumed_verification_runs_clean_checkout_gate_for_exact_dirty_candidate() {
         artifact_id: None,
         dry_run: false,
         gates: VerifyGateOptions {
-            verify: vec![
-                "test -z \"$(git status --porcelain)\" && test \"$(cat src/lib.rs)\" = new"
-                    .to_string(),
-            ],
+            verify: vec!["test \"$(cat src/lib.rs)\" = new".to_string()],
             rerun_completed_gates: true,
             ..Default::default()
         },

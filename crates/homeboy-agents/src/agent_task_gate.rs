@@ -177,25 +177,11 @@ impl VerifyGateOptions {
         Duration::from_secs(self.gate_heartbeat_interval_seconds.max(1))
     }
 
-    /// Commands already declared as gates are toolchain requirements too. This
-    /// protects existing Cook invocations without duplicate CLI ceremony.
+    /// Toolchain preflight is opt-in. Gate commands are shell programs and may
+    /// be shell builtins, provider-owned aliases, or compound expressions, so
+    /// treating their first token as an executable changes their semantics.
     pub(crate) fn required_toolchains(&self) -> Vec<AgentTaskGateToolchainRequirement> {
-        let mut requirements = self.gate_toolchains.clone();
-        for gate in self.verify.iter().chain(&self.private_verify) {
-            let Some(command) = gate.split_whitespace().next() else {
-                continue;
-            };
-            if !requirements
-                .iter()
-                .any(|requirement| requirement.command == command)
-            {
-                requirements.push(AgentTaskGateToolchainRequirement {
-                    command: command.to_string(),
-                    probe_arguments: default_toolchain_probe_arguments(),
-                });
-            }
-        }
-        requirements
+        self.gate_toolchains.clone()
     }
 }
 
@@ -220,6 +206,8 @@ impl Default for VerifyGateOptions {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskGateSetupEvidence {
     pub schema: String,
+    /// The workspace whose dependency state this setup evidence describes.
+    pub workspace: String,
     pub package_root: String,
     pub lock_identity: String,
     pub setup_capability: String,
@@ -235,6 +223,7 @@ const MAX_GATE_DEPENDENCY_ROOTS: usize = 64;
 pub(crate) fn hydrate_gate_dependency_roots(
     checkout: &Path,
     enabled: bool,
+    workspace: &str,
 ) -> Result<Vec<AgentTaskGateSetupEvidence>> {
     if !enabled {
         return Ok(Vec::new());
@@ -300,6 +289,7 @@ pub(crate) fn hydrate_gate_dependency_roots(
             .to_string();
         evidence.push(AgentTaskGateSetupEvidence {
             schema: "homeboy/agent-task-gate-setup/v1".to_string(),
+            workspace: workspace.to_string(),
             package_root: if relative.is_empty() {
                 ".".to_string()
             } else {
