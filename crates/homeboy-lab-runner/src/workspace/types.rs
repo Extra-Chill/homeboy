@@ -341,6 +341,13 @@ pub struct RunnerWorkspacePruneOutput {
     pub candidates: Vec<RunnerWorkspacePruneEntry>,
     pub removed: Vec<RunnerWorkspacePruneEntry>,
     pub skipped: Vec<RunnerWorkspacePruneSkippedEntry>,
+    /// Candidates withheld because a runner job, lifecycle lease, or process owns them.
+    pub skipped_live_count: usize,
+    /// Candidates withheld because Homeboy could not prove their liveness state.
+    pub skipped_unknown_count: usize,
+    pub inspect_command: String,
+    pub stop_command: String,
+    pub reconcile_command: String,
     /// Number of workspace directories inspected during this invocation.
     pub scanned_workspace_count: usize,
     /// Whether the inspected window reached the end of the workspace root.
@@ -373,6 +380,15 @@ pub struct RunnerWorkspacePruneEntry {
     pub age_seconds: u64,
     pub bytes: u64,
     pub reason: String,
+    pub liveness: RunnerWorkspaceLivenessEvidence,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerWorkspaceLivenessEvidence {
+    /// `inactive` is the only state eligible for bulk deletion.
+    pub state: String,
+    /// Bounded, exact ownership observations; never an unbounded process dump.
+    pub observations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
