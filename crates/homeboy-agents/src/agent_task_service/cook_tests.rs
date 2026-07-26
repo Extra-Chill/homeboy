@@ -847,9 +847,18 @@ fn moving_base_recovery_rebases_real_authenticated_candidate_and_refuses_diverge
         );
         git(&advance, &["config", "user.name", "Test"]);
         git(&advance, &["config", "user.email", "test@example.com"]);
-        std::fs::write(advance.join("base-advanced.txt"), "advanced\n").unwrap();
-        git(&advance, &["add", "."]);
-        git(&advance, &["commit", "-m", "advance base"]);
+        for revision in 1..=4 {
+            std::fs::write(
+                advance.join(format!("base-advanced-{revision}.txt")),
+                format!("advanced {revision}\n"),
+            )
+            .unwrap();
+            git(&advance, &["add", "."]);
+            git(
+                &advance,
+                &["commit", "-m", &format!("advance base {revision}")],
+            );
+        }
         git(&advance, &["push", "origin", "main"]);
         let advanced_base = git_output(&advance, &["rev-parse", "HEAD"]).unwrap();
 
@@ -864,7 +873,7 @@ fn moving_base_recovery_rebases_real_authenticated_candidate_and_refuses_diverge
         options.no_finalize = false;
         options.gates = VerifyGateOptions {
             verify: vec![
-                "test -f base-advanced.txt && test \"$(cat src/lib.rs)\" = new".to_string(),
+                "test -f base-advanced-4.txt && test \"$(cat src/lib.rs)\" = new".to_string(),
             ],
             ..Default::default()
         };
@@ -957,6 +966,16 @@ fn moving_base_recovery_rebases_real_authenticated_candidate_and_refuses_diverge
         assert_eq!(second.value.status, "review_ready");
         claim.complete().unwrap();
         assert_eq!(finalization_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            git_output(&destination, &["diff", "--name-only", &advanced_base]).unwrap(),
+            "src/lib.rs",
+            "only the original candidate file may remain after rebasing across four base commits"
+        );
+        assert_eq!(
+            git_output(&destination, &["status", "--porcelain"]).unwrap(),
+            "M src/lib.rs",
+            "base-only files must not be projected into the candidate worktree"
+        );
         assert_eq!(
             git_output(
                 &destination,

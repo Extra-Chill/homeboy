@@ -519,49 +519,7 @@ pub(crate) fn recover_moving_base_cook_candidate(
         return Err(Error::validation_invalid_argument("path", "moving-base recovery destination differs from the exact promoted candidate; refusing to rebase divergent content", Some(path.to_string()), None));
     }
     let fresh_base = observe_and_fetch_base(path, &options.base)?;
-    let dirty = std::process::Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(path)
-        .output()
-        .map_err(|error| Error::git_command_failed(error.to_string()))?;
-    if !dirty.status.success() {
-        return Err(Error::git_command_failed(
-            "could not inspect moving-base recovery destination".to_string(),
-        ));
-    }
-    if !dirty.stdout.is_empty() {
-        let add = std::process::Command::new("git")
-            .args(["add", "-A"])
-            .current_dir(path)
-            .output()
-            .map_err(|error| Error::git_command_failed(error.to_string()))?;
-        if !add.status.success() {
-            return Err(Error::git_command_failed(
-                String::from_utf8_lossy(&add.stderr).trim().to_string(),
-            ));
-        }
-        let commit = homeboy_core::git::commit_at(
-            None,
-            Some(&options.commit_message),
-            homeboy_core::git::CommitOptions::default(),
-            Some(path),
-        )?;
-        if !commit.success {
-            return Err(Error::git_command_failed(commit.stderr));
-        }
-    }
-    let rebase = std::process::Command::new("git")
-        .args(["rebase", &fresh_base])
-        .current_dir(path)
-        .output()
-        .map_err(|error| Error::git_command_failed(error.to_string()))?;
-    if !rebase.status.success() {
-        let _ = std::process::Command::new("git")
-            .args(["rebase", "--abort"])
-            .current_dir(path)
-            .output();
-        return Err(Error::validation_invalid_argument("base", format!("moving-base recovery rebase onto `{fresh_base}` failed; destination was left unchanged: {}", String::from_utf8_lossy(&rebase.stderr).trim()), None, None));
-    }
+    apply_immutable_candidate_to_base(path, &expected, &fresh_base)?;
     let mut checkpoint = serde_json::to_value(&recovery.promotion)
         .map_err(|error| Error::internal_json(error.to_string(), None))?;
     checkpoint["status"] = serde_json::json!("verification_pending");
@@ -569,6 +527,13 @@ pub(crate) fn recover_moving_base_cook_candidate(
     checkpoint["provenance"]["candidate"] = serde_json::to_value(candidate_fingerprint(path)?)
         .map_err(|error| Error::internal_json(error.to_string(), None))?;
     checkpoint["provenance"]["resume_inputs"] = serde_json::json!({ "base_ref": options.base, "task_base_sha": options.task_base_sha, "candidate_ref": null });
+    checkpoint["provenance"]["resume_contract"] = serde_json::json!({
+        "kind": "moving_base_recovery",
+        "source_candidate": expected,
+        "source_verified_base": recovery.prior_verified_base,
+        "resolved_base": fresh_base,
+        "previous": recovery.promotion.provenance.get("resume_contract"),
+    });
     let (source, source_path) = promotion_source(&recovery.run_id)?;
     let refreshed = resume_promoted_patch(
         AgentTaskPromotionOptions {
@@ -591,6 +556,169 @@ pub(crate) fn recover_moving_base_cook_candidate(
         &checkpoint,
     )?;
     Ok(refreshed)
+}
+
+/// Re-materialize an authenticated dirty candidate on a newer base. The
+/// temporary index proves both applicability and candidate-owned file scope
+/// before the destination is reset, so intervening base changes never become a
+/// candidate commit or dirty worktree content.
+fn apply_immutable_candidate_to_base(
+    path: &str,
+    candidate: &crate::agent_task_promotion::AgentTaskPromotionCandidate,
+    fresh_base: &str,
+) -> Result<()> {
+    let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } = candidate
+    else {
+        return Err(Error::validation_invalid_argument(
+            "promotion.provenance.candidate",
+            "moving-base recovery requires a Git candidate fingerprint",
+            None,
+            None,
+        ));
+    };
+    let patch = tempfile::NamedTempFile::new()
+        .map_err(|error| Error::internal_io(error.to_string(), None))?;
+    let diff = git_output(
+        path,
+        &[
+            "diff",
+            "--binary",
+            "--full-index",
+            "--find-renames",
+            &fingerprint.head,
+            &fingerprint.tree,
+        ],
+    )?;
+    if diff.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "promotion.provenance.candidate",
+            "moving-base recovery candidate has no immutable delta from its recorded HEAD",
+            None,
+            None,
+        ));
+    }
+    std::fs::write(patch.path(), diff)
+        .map_err(|error| Error::internal_io(error.to_string(), None))?;
+
+    let index = tempfile::NamedTempFile::new()
+        .map_err(|error| Error::internal_io(error.to_string(), None))?;
+    git_with_index(path, &["read-tree", fresh_base], index.path())?;
+    git_with_index(
+        path,
+        &[
+            "apply",
+            "--cached",
+            "--check",
+            "--binary",
+            patch.path().to_str().unwrap_or_default(),
+        ],
+        index.path(),
+    )?;
+    git_with_index(
+        path,
+        &[
+            "apply",
+            "--cached",
+            "--binary",
+            patch.path().to_str().unwrap_or_default(),
+        ],
+        index.path(),
+    )?;
+    let projected_tree = git_with_index(path, &["write-tree"], index.path())?;
+    let projected_files = git_output(
+        path,
+        &[
+            "diff",
+            "--name-only",
+            "--no-renames",
+            fresh_base,
+            &projected_tree,
+        ],
+    )?
+    .lines()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    if projected_files != fingerprint.changed_files {
+        return Err(Error::validation_invalid_argument(
+            "promotion.provenance.candidate",
+            "moving-base recovery projection changes files outside the authenticated candidate scope",
+            None,
+            None,
+        ));
+    }
+
+    git(path, &["reset", "--hard", fresh_base])?;
+    git(
+        path,
+        &[
+            "apply",
+            "--whitespace=nowarn",
+            "--binary",
+            patch.path().to_str().unwrap_or_default(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn git(path: &str, args: &[&str]) -> Result<()> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "base",
+        format!(
+            "moving-base recovery Git operation failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+        None,
+        None,
+    ))
+}
+
+fn git_output(path: &str, args: &[&str]) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+    Err(Error::validation_invalid_argument(
+        "base",
+        format!(
+            "moving-base recovery Git operation failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+        None,
+        None,
+    ))
+}
+
+fn git_with_index(path: &str, args: &[&str], index: &std::path::Path) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .env("GIT_INDEX_FILE", index)
+        .current_dir(path)
+        .output()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+    Err(Error::validation_invalid_argument(
+        "base",
+        format!(
+            "moving-base recovery candidate conflicts with resolved base: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+        None,
+        None,
+    ))
 }
 
 fn observe_and_fetch_base(path: &str, base: &str) -> Result<String> {
@@ -637,6 +765,92 @@ fn observe_and_fetch_base(path: &str, base: &str) -> Result<String> {
         ));
     }
     Ok(sha)
+}
+
+#[cfg(test)]
+mod moving_base_tests {
+    use super::*;
+
+    fn git(path: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn moving_base_overlap_is_rejected_before_destination_mutation() {
+        let temp = tempfile::tempdir().expect("temporary repositories");
+        let remote = temp.path().join("origin.git");
+        let seed = temp.path().join("seed");
+        let destination = temp.path().join("destination");
+        let upstream = temp.path().join("upstream");
+        std::fs::create_dir(&remote).unwrap();
+        git(&remote, &["init", "--bare", "--initial-branch=main"]);
+        std::fs::create_dir(&seed).unwrap();
+        git(&seed, &["init", "--initial-branch=main"]);
+        git(&seed, &["config", "user.name", "Test"]);
+        git(&seed, &["config", "user.email", "test@example.com"]);
+        std::fs::write(seed.join("candidate.txt"), "base\n").unwrap();
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-m", "base"]);
+        git(
+            &seed,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&seed, &["push", "-u", "origin", "main"]);
+        git(
+            temp.path(),
+            &[
+                "clone",
+                remote.to_str().unwrap(),
+                destination.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(destination.join("candidate.txt"), "candidate\n").unwrap();
+        let expected = candidate_fingerprint(destination.to_str().unwrap()).unwrap();
+
+        git(
+            temp.path(),
+            &[
+                "clone",
+                remote.to_str().unwrap(),
+                upstream.to_str().unwrap(),
+            ],
+        );
+        git(&upstream, &["config", "user.name", "Test"]);
+        git(&upstream, &["config", "user.email", "test@example.com"]);
+        std::fs::write(upstream.join("candidate.txt"), "upstream\n").unwrap();
+        git(&upstream, &["add", "."]);
+        git(&upstream, &["commit", "-m", "overlapping base change"]);
+        git(&upstream, &["push", "origin", "main"]);
+        let fresh_base = git(&upstream, &["rev-parse", "HEAD"]);
+        git(&destination, &["fetch", "origin", &fresh_base]);
+
+        let error = apply_immutable_candidate_to_base(
+            destination.to_str().unwrap(),
+            &expected,
+            &fresh_base,
+        )
+        .expect_err("overlapping candidate must fail before mutation");
+        assert!(error.message.contains("conflicts with resolved base"));
+        assert_eq!(
+            candidate_fingerprint(destination.to_str().unwrap()).unwrap(),
+            expected
+        );
+        assert_eq!(
+            git(&destination, &["status", "--porcelain"]),
+            "M candidate.txt"
+        );
+    }
 }
 
 /// Finalization publishes controller-owned state. Persist its completed report
