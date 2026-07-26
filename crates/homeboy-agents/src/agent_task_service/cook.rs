@@ -513,7 +513,11 @@ pub(crate) fn gate_feedback_current_diff(promotion: &AgentTaskPromotionReport) -
 fn review_form_from_aggregate(
     aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
 ) -> Result<Option<crate::agent_task_review_dossier::AiFilledReviewForm>> {
-    let Some(outcome) = aggregate.outcomes.last() else {
+    let Some(outcome) = aggregate.selected_outcome().or_else(|| {
+        (aggregate.outcomes.len() == 1)
+            .then(|| aggregate.outcomes.first())
+            .flatten()
+    }) else {
         return Ok(None);
     };
     crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(&outcome.outputs)
@@ -1441,6 +1445,7 @@ where
     S: CookSideEffectService,
 {
     validate_cook_workspace(&options)?;
+    validate_cook_candidate_group(&options.initial_plan)?;
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are
     // caller-owned overrides and retain their existing behavior. A typed
@@ -1515,8 +1520,10 @@ where
         options.ai_model = Some(model);
     }
     // A persisted recipe can replace the just-validated inputs. Re-check its
-    // workspace before it reaches transport preparation or a resumed attempt.
+    // workspace and candidate topology before it reaches transport preparation
+    // or a resumed attempt.
     validate_cook_workspace(&options)?;
+    validate_cook_candidate_group(&options.initial_plan)?;
     materialize_initial_cook_attempt(&options)?;
     // The recipe alone is resumable input, not a status-addressable run. Publish
     // the run identity only after initial materialization and a lifecycle read
@@ -1982,17 +1989,7 @@ where
                 Some(&run_id),
             ));
         };
-        if plan.tasks.len() != 1 {
-            return Ok(cook_report(
-                cook_id,
-                "policy_failure",
-                attempts,
-                None,
-                Some("agent-task cook currently supports one task per cook attempt".to_string()),
-                1,
-                Some(&run_id),
-            ));
-        }
+        validate_cook_candidate_group(&plan)?;
 
         let adopted_continuation = adopted_attempt_is_ready_for_cook_continuation(&record)?;
         if !matches!(
@@ -2336,6 +2333,40 @@ where
         1,
         Some(&run_id),
     ))
+}
+
+/// A multi-candidate Cook has one controller-owned destination. Reject ambiguous
+/// plans before any provider preflight or scheduler execution can spend work.
+fn validate_cook_candidate_group(plan: &AgentTaskPlan) -> Result<()> {
+    if plan.tasks.len() <= 1 {
+        return Ok(());
+    }
+    let group_key = plan.group_key.as_deref().or_else(|| {
+        plan.tasks
+            .first()
+            .and_then(|task| task.group_key.as_deref())
+    });
+    let Some(group_key) = group_key else {
+        return Err(Error::validation_invalid_argument(
+            "group_key",
+            "Cook candidates require one explicit shared group",
+            None,
+            None,
+        ));
+    };
+    if plan
+        .tasks
+        .iter()
+        .any(|task| task.group_key.as_deref() != Some(group_key))
+    {
+        return Err(Error::validation_invalid_argument(
+            "group_key",
+            "every Cook candidate must use the plan shared group",
+            Some(group_key.to_string()),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 /// Only Cook's authenticated baseline transition may replace a durable task

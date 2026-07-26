@@ -609,6 +609,7 @@ pub(crate) fn compile_cook_plan(
         }
         Err(error) => return Err(error),
     };
+    plan.options.candidate_completion = args.candidate_completion;
     record_cook_provision(&mut plan, provision);
     for task in &mut plan.tasks {
         let root = task.workspace.root.as_deref().ok_or_else(|| {

@@ -1098,12 +1098,13 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
 
 pub fn run_status(run_id: &str, since_cursor: Option<u64>) -> Result<AgentTaskRunStatus> {
     let record = status(run_id)?;
-    let (events, artifact_refs) = match store::read_aggregate(&record.run_id) {
-        Ok(aggregate) => {
+    let aggregate = store::read_aggregate(&record.run_id).ok();
+    let (events, artifact_refs) = match aggregate.as_ref() {
+        Some(aggregate) => {
             let refs = artifact_refs_for_outcomes(&aggregate.outcomes);
-            (aggregate.events, refs)
+            (aggregate.events.clone(), refs)
         }
-        Err(_) => {
+        None => {
             // Surface a local cook's durable running provider execution so the
             // live bridge status advances past "task submitted" too (#8396).
             let mut events = queued_events(&record.tasks);
@@ -1111,6 +1112,34 @@ pub fn run_status(run_id: &str, since_cursor: Option<u64>) -> Result<AgentTaskRu
             (events, record.artifact_refs.clone())
         }
     };
+    let candidate = load_plan_for_execution(&record.run_id)
+        .ok()
+        .and_then(|plan| {
+            (plan.tasks.len() > 1).then(|| {
+                let selected = aggregate
+                    .as_ref()
+                    .and_then(|value| value.selected_outcome());
+                AgentTaskCandidateStatus {
+                    policy: plan.options.candidate_completion,
+                    selected_task_id: selected.map(|outcome| outcome.task_id.clone()),
+                    candidates: aggregate
+                        .as_ref()
+                        .map(|value| tasks_for_aggregate(&plan, value))
+                        .unwrap_or_else(|| record.tasks.clone()),
+                    deadline_timeout_ms: plan.options.timeout_ms,
+                    cancellation_supervision: if selected.is_some() {
+                        "scheduler_deferred_cleanup".to_string()
+                    } else {
+                        "controller_owned".to_string()
+                    },
+                    promotion_action: selected.and_then(|outcome| {
+                        outcome.metadata["candidate_selection"]["promotion_action"]
+                            .as_str()
+                            .map(str::to_string)
+                    }),
+                }
+            })
+        });
     let normalized_events = normalize_progress_events(&record.run_id, &events, &artifact_refs);
     let latest_event_cursor = normalized_events
         .last()
@@ -1135,6 +1164,7 @@ pub fn run_status(run_id: &str, since_cursor: Option<u64>) -> Result<AgentTaskRu
         latest_event_cursor,
         artifact_refs: record.artifact_refs,
         normalized_events,
+        candidate,
     })
 }
 

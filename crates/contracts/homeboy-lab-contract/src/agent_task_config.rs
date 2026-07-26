@@ -107,6 +107,10 @@ pub struct AgentTaskScheduleOptions {
     /// `metadata.provider_rotation` object overrides both (#6978).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotation: Option<AgentTaskProviderRotationPolicy>,
+    /// Completion rule for tasks sharing a candidate group. The default retains
+    /// every result for comparison before the controller selects one.
+    #[serde(default)]
+    pub candidate_completion: AgentTaskCandidateCompletionPolicy,
 }
 
 impl Default for AgentTaskScheduleOptions {
@@ -123,7 +127,40 @@ impl Default for AgentTaskScheduleOptions {
             retry: AgentTaskRetryPolicy::default(),
             execution_budget: AgentTaskExecutionBudget::default(),
             rotation: None,
+            candidate_completion: AgentTaskCandidateCompletionPolicy::WaitAll,
         }
+    }
+}
+
+/// Controls when an explicitly grouped set of isolated candidates is selected.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskCandidateCompletionPolicy {
+    /// Preserve the established comparison workflow.
+    #[default]
+    WaitAll,
+    /// Select the first successful candidate and durably cancel siblings.
+    FirstGreen,
+}
+
+impl std::str::FromStr for AgentTaskCandidateCompletionPolicy {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "wait_all" | "wait-all" => Ok(Self::WaitAll),
+            "first_green" | "first-green" => Ok(Self::FirstGreen),
+            _ => Err("expected wait-all or first-green".to_string()),
+        }
+    }
+}
+
+impl std::fmt::Display for AgentTaskCandidateCompletionPolicy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::WaitAll => "wait_all",
+            Self::FirstGreen => "first_green",
+        })
     }
 }
 
