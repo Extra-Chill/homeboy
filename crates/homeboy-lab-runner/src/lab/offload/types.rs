@@ -45,11 +45,14 @@ pub struct LabOffloadRequest<'a> {
     pub job_overrides: LabJobOverrides,
 }
 
-impl<'a> Default for LabOffloadRequest<'a> {
-    fn default() -> Self {
+impl<'a> LabOffloadRequest<'a> {
+    #[cfg(test)]
+    /// Creates a request with the neutral offload policy used by focused tests.
+    /// This remains test-only so production callers must set every policy field.
+    pub(crate) fn for_test(normalized_args: &'a [String]) -> Self {
         Self {
             command: None,
-            normalized_args: &[],
+            normalized_args,
             explicit_runner: None,
             placement: homeboy_cli_contract::Placement::Auto,
             allow_local_fallback: false,
@@ -72,14 +75,60 @@ impl<'a> Default for LabOffloadRequest<'a> {
     }
 }
 
-impl<'a> LabOffloadRequest<'a> {
-    /// Creates a request with the neutral offload policy used by focused tests.
-    /// New request fields belong in `Default`, so those fixtures stay valid.
-    pub fn new(normalized_args: &'a [String]) -> Self {
-        Self {
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_request_has_neutral_policy() {
+        let args = vec!["homeboy".to_string(), "status".to_string()];
+        let request = LabOffloadRequest::for_test(&args);
+
+        let LabOffloadRequest {
+            command,
             normalized_args,
-            ..Self::default()
-        }
+            explicit_runner,
+            placement,
+            allow_local_fallback,
+            allow_dirty_lab_workspace,
+            skip_deps_hydration,
+            preserve_workspace_on_failure,
+            capture_patch,
+            mutation_flag,
+            detach_after_handoff,
+            output_file_requested,
+            read_only_polling,
+            local_output_file,
+            durable_agent_task_plan,
+            source_path,
+            verified_cook_baseline,
+            require_controller_git_bundle,
+            reuse_compatible_snapshot,
+            job_overrides,
+        } = request;
+
+        assert!(command.is_none());
+        assert_eq!(normalized_args, args);
+        assert!(explicit_runner.is_none());
+        assert_eq!(placement, homeboy_cli_contract::Placement::Auto);
+        assert!(!allow_local_fallback);
+        assert!(!allow_dirty_lab_workspace);
+        assert!(!skip_deps_hydration);
+        assert!(!preserve_workspace_on_failure);
+        assert!(!capture_patch);
+        assert!(mutation_flag.is_none());
+        assert!(!detach_after_handoff);
+        assert!(!output_file_requested);
+        assert!(!read_only_polling);
+        assert!(local_output_file.is_none());
+        assert!(durable_agent_task_plan.is_none());
+        assert!(source_path.is_none());
+        assert!(verified_cook_baseline.is_none());
+        assert!(!require_controller_git_bundle);
+        assert!(!reuse_compatible_snapshot);
+        assert!(job_overrides.env.is_empty());
+        assert!(job_overrides.secret_env_names.is_empty());
+        assert!(job_overrides.workspace_root.is_none());
     }
 }
 

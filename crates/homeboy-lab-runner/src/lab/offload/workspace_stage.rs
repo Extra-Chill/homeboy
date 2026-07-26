@@ -1238,7 +1238,7 @@ mod tests {
             let request = LabOffloadRequest {
                 normalized_args: &args,
                 explicit_runner: Some("lab-rig-component-stage"),
-                ..LabOffloadRequest::new(&args)
+                ..LabOffloadRequest::for_test(&args)
             };
             let contract = LabOffloadCommand {
                 command: homeboy_core::lab_contract::LabCommandContract::portable(
@@ -2453,7 +2453,7 @@ mod tests {
                 normalized_args: &args,
                 explicit_runner: Some("lab-controller-bundle-stage"),
                 require_controller_git_bundle: true,
-                ..LabOffloadRequest::new(&args)
+                ..LabOffloadRequest::for_test(&args)
             };
             let contract = LabOffloadCommand {
                 command: homeboy_core::lab_contract::LabCommandContract {
@@ -2588,7 +2588,7 @@ mod tests {
                 normalized_args: &args,
                 explicit_runner: Some("lab-review-test-snapshot"),
                 require_controller_git_bundle: true,
-                ..LabOffloadRequest::new(&args)
+                ..LabOffloadRequest::for_test(&args)
             };
             let contract = LabOffloadCommand {
                 command: homeboy_core::lab_contract::LabCommandContract::portable(
@@ -2761,7 +2761,7 @@ mod tests {
                 placement: homeboy_cli_contract::Placement::Lab,
                 detach_after_handoff: true,
                 source_path: Some(source.as_path()),
-                ..LabOffloadRequest::new(&args)
+                ..LabOffloadRequest::for_test(&args)
             };
             let mut contract = LabOffloadCommand {
                 command: homeboy_core::lab_contract::LabCommandContract::portable(

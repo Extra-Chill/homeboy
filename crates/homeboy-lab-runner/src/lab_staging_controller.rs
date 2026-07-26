@@ -3430,7 +3430,7 @@ mod tests {
                 secret_env_names: vec!["AGENT_TOKEN".to_string()],
                 workspace_root: Some("/runner/workspaces".to_string()),
             },
-            ..LabOffloadRequest::new(args)
+            ..LabOffloadRequest::for_test(args)
         }
     }
 

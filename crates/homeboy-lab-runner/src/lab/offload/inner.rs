@@ -2515,7 +2515,7 @@ mod tests {
                 ]),
                 ..Default::default()
             },
-            ..LabOffloadRequest::new(&args)
+            ..LabOffloadRequest::for_test(&args)
         };
         let selection = LabRunnerSelection {
             runner_id: "homeboy-lab".to_string(),
