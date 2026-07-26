@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 use crate::agent_task::{
@@ -19,6 +18,8 @@ pub const AGENT_TASK_COOK_FEEDBACK_REPORT_SCHEMA: &str =
 const RISKY_CHANGED_FILE_THRESHOLD: usize = 20;
 const MAX_FAILURE_DIAGNOSTICS: usize = 8;
 const MAX_FAILURE_DELTA_IDENTITIES: usize = 8;
+const MAX_RUST_DIAGNOSTIC_OUTPUT_BYTES: usize = 64 * 1024;
+const MAX_RUST_DIAGNOSTIC_FIELD_BYTES: usize = 512;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskCookLoopOptions {
@@ -159,7 +160,7 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         .deterministic_gates
         .iter()
         .filter(|gate| gate.status == AgentTaskGateStatus::Failed)
-        .map(gate_failure)
+        .map(|gate| gate_failure(gate, options.source_run_id.as_deref()))
         .collect();
     let failed_gate_results: Vec<HomeboyGateResult> = options
         .promotion_report
@@ -325,6 +326,7 @@ fn build_follow_up_request(
             "failed_gates": agent_visible_failed_gates,
             "failure_set": failure_set(failed_gates),
             "failure_progression": failure_progression,
+            "retry_policy": retry_policy(failure_progression),
             "current_diff": options.current_diff,
         }
     });
@@ -367,6 +369,7 @@ fn build_follow_up_request(
             "failed_gate_count": failed_gates.len(),
             "private_failed_gate_count": failed_gates.iter().filter(|gate| gate.visibility == AgentTaskGateVisibility::Private).count(),
             "failure_progression": failure_progression,
+            "retry_policy": retry_policy(failure_progression),
         }
     });
     request
@@ -452,7 +455,10 @@ fn build_review_form_follow_up_request(
     request
 }
 
-fn gate_failure(gate: &AgentTaskGateReport) -> AgentTaskCookLoopGateFailure {
+fn gate_failure(
+    gate: &AgentTaskGateReport,
+    source_run_id: Option<&str>,
+) -> AgentTaskCookLoopGateFailure {
     let command = gate
         .failure_evidence
         .as_ref()
@@ -489,9 +495,7 @@ fn gate_failure(gate: &AgentTaskGateReport) -> AgentTaskCookLoopGateFailure {
         });
 
     let diagnostics = rust_failure_diagnostics(&command, &gate.stdout, &gate.stderr);
-    let full_evidence_ref = diagnostics
-        .is_empty()
-        .then(|| full_evidence_ref(&gate.stdout, &gate.stderr));
+    let full_evidence_ref = source_run_id.map(|run_id| gate_evidence_ref(run_id, &gate.id));
     AgentTaskCookLoopGateFailure {
         gate_id: gate.id.clone(),
         visibility: gate.visibility,
@@ -624,6 +628,15 @@ fn report_metadata(metadata: Value, progression: &AgentTaskCookLoopFailureProgre
     Value::Object(metadata)
 }
 
+fn retry_policy(progression: &AgentTaskCookLoopFailureProgression) -> &'static str {
+    match progression.status {
+        AgentTaskCookLoopFailureProgressionStatus::Regressing => "new_failures_first",
+        AgentTaskCookLoopFailureProgressionStatus::Stagnating => "shared_root_cause",
+        AgentTaskCookLoopFailureProgressionStatus::Improving => "preserve_resolved_failures",
+        AgentTaskCookLoopFailureProgressionStatus::Initial => "distilled_diagnostics",
+    }
+}
+
 fn failure_set(failed_gates: &[AgentTaskCookLoopGateFailure]) -> Vec<String> {
     failed_gates
         .iter()
@@ -734,43 +747,94 @@ fn rust_failure_diagnostics(
     if !command.contains("cargo test") {
         return Vec::new();
     }
-    let output = format!("{stdout}\n{stderr}");
-    let lines: Vec<_> = output.lines().collect();
     let mut diagnostics = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
-        let Some(identity) = line
-            .trim()
-            .strip_prefix("thread '")
-            .and_then(|value| value.split_once("' panicked at "))
-        else {
-            continue;
-        };
-        let location = identity.1.trim_end_matches(':').to_string();
-        let message = lines
-            .iter()
-            .skip(index + 1)
-            .map(|line| line.trim())
-            .find(|line| !line.is_empty() && !line.starts_with("note:"))
-            .unwrap_or("Rust test panicked")
-            .to_string();
-        diagnostics.push(AgentTaskCookLoopFailureDiagnostic {
-            test_identity: identity.0.to_string(),
-            location: (!location.is_empty()).then_some(location),
-            message,
-            rerun_command: format!("cargo test {}", identity.0),
-        });
-        if diagnostics.len() == MAX_FAILURE_DIAGNOSTICS {
-            break;
+    let mut seen = BTreeSet::new();
+    for output in [stdout, stderr] {
+        let bounded = bounded_text(output, MAX_RUST_DIAGNOSTIC_OUTPUT_BYTES);
+        let mut lines = bounded.lines();
+        while let Some(line) = lines.next() {
+            let line = line.trim();
+            let Some(identity) = line
+                .trim()
+                .strip_prefix("thread '")
+                .and_then(|value| value.split_once("' panicked at "))
+            else {
+                if let Some(test_identity) = line
+                    .strip_prefix("test ")
+                    .and_then(|value| value.strip_suffix(" ... FAILED"))
+                {
+                    push_rust_failure_diagnostic(
+                        &mut diagnostics,
+                        &mut seen,
+                        test_identity,
+                        None,
+                        "Rust test failed; inspect the persisted full gate output.",
+                    );
+                }
+                continue;
+            };
+            let message = lines
+                .by_ref()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && !line.starts_with("note:"))
+                .unwrap_or("Rust test panicked");
+            push_rust_failure_diagnostic(
+                &mut diagnostics,
+                &mut seen,
+                identity.0,
+                (!identity.1.trim_end_matches(':').is_empty())
+                    .then(|| identity.1.trim_end_matches(':')),
+                message,
+            );
         }
     }
     diagnostics
 }
 
-fn full_evidence_ref(stdout: &str, stderr: &str) -> String {
-    format!(
-        "sha256:{:x}",
-        Sha256::digest(format!("stdout\0{stdout}\0stderr\0{stderr}").as_bytes())
-    )
+fn push_rust_failure_diagnostic(
+    diagnostics: &mut Vec<AgentTaskCookLoopFailureDiagnostic>,
+    seen: &mut BTreeSet<String>,
+    identity: &str,
+    location: Option<&str>,
+    message: &str,
+) {
+    let identity = bounded_text(identity, MAX_RUST_DIAGNOSTIC_FIELD_BYTES);
+    let location = location.map(|value| bounded_text(value, MAX_RUST_DIAGNOSTIC_FIELD_BYTES));
+    let message = bounded_text(message, MAX_RUST_DIAGNOSTIC_FIELD_BYTES);
+    if !seen.insert(identity.clone()) {
+        if let Some(diagnostic) = diagnostics
+            .iter_mut()
+            .find(|diagnostic| diagnostic.test_identity == identity)
+        {
+            diagnostic.location = location;
+            diagnostic.message = message;
+        }
+        return;
+    }
+    if diagnostics.len() == MAX_FAILURE_DIAGNOSTICS {
+        return;
+    }
+    diagnostics.push(AgentTaskCookLoopFailureDiagnostic {
+        rerun_command: format!("cargo test {identity}"),
+        test_identity: identity,
+        location,
+        message,
+    });
+}
+
+fn bounded_text(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
+fn gate_evidence_ref(run_id: &str, gate_id: &str) -> String {
+    format!("homeboy://agent-task/run/{run_id}/gates#gate={gate_id}")
 }
 
 fn worktree_root_hint(report: &AgentTaskPromotionReport) -> Option<String> {
@@ -1068,7 +1132,7 @@ mod tests {
             AgentTaskGateEnvironment::default(),
         );
 
-        let failure = gate_failure(&gate);
+        let failure = gate_failure(&gate, Some("run-1"));
 
         assert_eq!(failure.diagnostics.len(), 1);
         assert_eq!(
@@ -1086,11 +1150,14 @@ mod tests {
             failure.diagnostics[0].rerun_command,
             "cargo test agent_task::tests::keeps_context"
         );
-        assert!(failure.full_evidence_ref.is_none());
+        assert_eq!(
+            failure.full_evidence_ref.as_deref(),
+            Some("homeboy://agent-task/run/run-1/gates#gate=gate-1")
+        );
     }
 
     #[test]
-    fn unparsed_output_keeps_a_content_addressed_full_evidence_ref() {
+    fn unparsed_output_keeps_a_persisted_full_evidence_ref() {
         let gate = AgentTaskGateReport::new(
             "gate-1",
             vec!["sh".to_string(), "-lc".to_string(), "npm test".to_string()],
@@ -1103,13 +1170,12 @@ mod tests {
             AgentTaskGateEnvironment::default(),
         );
 
-        let failure = gate_failure(&gate);
+        let failure = gate_failure(&gate, Some("run-1"));
 
         assert!(failure.diagnostics.is_empty());
-        assert!(failure
-            .full_evidence_ref
-            .as_deref()
-            .is_some_and(|reference| reference.starts_with("sha256:")));
+        assert!(failure.full_evidence_ref.as_deref().is_some_and(
+            |reference| reference == "homeboy://agent-task/run/run-1/gates#gate=gate-1"
+        ));
     }
 
     #[test]
@@ -1183,6 +1249,48 @@ mod tests {
         assert_eq!(
             improvement.removed,
             improving["previous_failure_set"].as_array().unwrap()[0..1]
+        );
+
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::GateFailed,
+                vec![failed_gate()],
+            ),
+            attempt: 2,
+            max_attempts: 3,
+            source_run_id: Some("run-regression".to_string()),
+            current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
+            metadata: json!({"previous_failure_set": ["gate-previous"]}),
+        });
+        let request = report.follow_up_request.expect("regression retries");
+        assert_eq!(
+            request.inputs["cook_loop"]["retry_policy"],
+            "new_failures_first"
+        );
+        assert_eq!(
+            request.metadata["cook_loop"]["retry_policy"],
+            "new_failures_first"
+        );
+    }
+
+    #[test]
+    fn rust_failure_diagnostics_accepts_failed_test_variants_and_bounds_fields() {
+        let output = format!(
+            "test crate::tests::failed_only ... FAILED\nthread 'crate::tests::panic' panicked at src/lib.rs:7:3:\n{}",
+            "x".repeat(MAX_RUST_DIAGNOSTIC_FIELD_BYTES * 2)
+        );
+        let diagnostics = rust_failure_diagnostics("cargo test", &output, "");
+
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0].test_identity, "crate::tests::failed_only");
+        assert_eq!(diagnostics[1].test_identity, "crate::tests::panic");
+        assert_eq!(diagnostics[1].location.as_deref(), Some("src/lib.rs:7:3"));
+        assert_eq!(
+            diagnostics[1].message.len(),
+            MAX_RUST_DIAGNOSTIC_FIELD_BYTES
         );
     }
 

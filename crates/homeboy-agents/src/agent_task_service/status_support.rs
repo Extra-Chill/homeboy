@@ -307,6 +307,30 @@ fn hydrate_homeboy_evidence_ref(
             .unwrap_or_else(|_| json!({ "summary": "logs could not be serialized" })),
         "status" => serde_json::to_value(super::status(run_id)?)
             .unwrap_or_else(|_| json!({ "summary": "status could not be serialized" })),
+        "gates" => {
+            let gate_id = parsed.gate.as_deref().ok_or_else(|| {
+                homeboy_core::Error::validation_invalid_argument(
+                    "evidence_ref",
+                    "gate evidence refs require a gate fragment",
+                    Some(uri.to_string()),
+                    None,
+                )
+            })?;
+            let record = super::status(run_id)?;
+            let promotion = record
+                .metadata
+                .get("latest_promotion")
+                .cloned()
+                .ok_or_else(|| {
+                    homeboy_core::Error::validation_invalid_argument(
+                        "evidence_ref",
+                        "gate evidence has no persisted promotion report",
+                        Some(uri.to_string()),
+                        None,
+                    )
+                })?;
+            persisted_gate_evidence(promotion, gate_id, uri)?
+        }
         section => json!({
             "summary": format!("homeboy agent-task evidence does not hydrate section '{section}' yet"),
         }),
@@ -325,6 +349,31 @@ fn hydrate_homeboy_evidence_ref(
         omitted_bytes: None,
         content,
     })
+}
+
+fn persisted_gate_evidence(promotion: Value, gate_id: &str, uri: &str) -> Result<Value> {
+    let promotion: crate::agent_task_promotion::AgentTaskPromotionReport =
+        serde_json::from_value(promotion).map_err(|error| {
+            homeboy_core::Error::validation_invalid_argument(
+                "evidence_ref",
+                format!("persisted promotion report is invalid: {error}"),
+                Some(uri.to_string()),
+                None,
+            )
+        })?;
+    let gate = promotion
+        .deterministic_gates
+        .into_iter()
+        .find(|gate| gate.id == gate_id)
+        .ok_or_else(|| {
+            homeboy_core::Error::validation_invalid_argument(
+                "evidence_ref",
+                "gate evidence ref did not resolve a persisted gate",
+                Some(uri.to_string()),
+                None,
+            )
+        })?;
+    Ok(json!(gate))
 }
 
 /// Provider failures emit typed `homeboy://agent-task/<diagnostic-class>` refs.
@@ -459,6 +508,7 @@ struct ParsedAgentTaskUri {
     task: Option<String>,
     outcome: Option<String>,
     artifact: Option<String>,
+    gate: Option<String>,
 }
 
 fn parse_agent_task_homeboy_uri(uri: &str) -> Result<ParsedAgentTaskUri> {
@@ -500,6 +550,7 @@ fn parse_agent_task_homeboy_uri(uri: &str) -> Result<ParsedAgentTaskUri> {
         task: fragment_value(fragment, "task", uri)?,
         outcome: fragment_value(fragment, "outcome", uri)?,
         artifact: fragment_value(fragment, "artifact", uri)?,
+        gate: fragment_value(fragment, "gate", uri)?,
     })
 }
 
@@ -733,6 +784,36 @@ mod tests {
             hydrated.content["diagnostic"]["message"],
             "opencode is unavailable"
         );
+    }
+
+    #[test]
+    fn gate_evidence_ref_resolves_the_persisted_full_output() {
+        let evidence = persisted_gate_evidence(
+            json!({
+                "schema": "homeboy/agent-task-promotion-report/v1",
+                "status": "gate_failed",
+                "source": {"kind": "aggregate", "task_id": "cook"},
+                "to_worktree": "fixture",
+                "target": {"worktree": "fixture"},
+                "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch.diff"},
+                "deterministic_gates": [{
+                    "schema": "homeboy/agent-task-gate-report/v1",
+                    "id": "gate-1",
+                    "status": "failed",
+                    "command": ["sh", "-lc", "cargo test"],
+                    "exit_code": 101,
+                    "stdout": "complete stdout, not a tail",
+                    "stderr": "complete stderr, not a tail"
+                }],
+                "operator_notification": {"status": "blocked", "message": "red"}
+            }),
+            "gate-1",
+            "homeboy://agent-task/run/run-1/gates#gate=gate-1",
+        )
+        .expect("persisted gate evidence resolves");
+
+        assert_eq!(evidence["stdout"], "complete stdout, not a tail");
+        assert_eq!(evidence["stderr"], "complete stderr, not a tail");
     }
 
     #[test]
