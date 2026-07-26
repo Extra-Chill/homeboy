@@ -874,9 +874,34 @@ fn cook_review_dossier(
     promotion: &AgentTaskPromotionReport,
     successful_run_id: &str,
 ) -> Result<AgentTaskReviewDossier> {
+    // A form-only run owns reviewer metadata but carries forward the durable
+    // gate proof while its authenticated source owns candidate scope.
+    let terminal_promotion = promotion;
+    let source_run_id = terminal_promotion
+        .provenance
+        .pointer("/cook_follow_up/source_run_id")
+        .and_then(Value::as_str);
+    let implementation_promotion = source_run_id
+        .map(|run_id| {
+            persisted_promotion_for_attempt(run_id)?.ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "promotion.provenance.cook_follow_up.source_run_id",
+                    "form-only finalization requires its source attempt's persisted promotion",
+                    Some(run_id.to_string()),
+                    None,
+                )
+            })
+        })
+        .transpose()?;
+    let promotion = implementation_promotion
+        .as_ref()
+        .unwrap_or(terminal_promotion);
+    // A form-only continuation carries its source's normalized gate proof.
+    // The terminal record is therefore the durable reviewer-proof boundary.
+    let verification_promotion = terminal_promotion;
     let changed_files = promotion.changed_files.join(", ");
     let changed_file_count = promotion.changed_files.len();
-    let gate_count = promotion.gate_results.len();
+    let gate_count = verification_promotion.gate_results.len();
     let task_summary = options
         .initial_plan
         .tasks
@@ -894,7 +919,7 @@ fn cook_review_dossier(
         .verify
         .iter()
         .map(|command| {
-            let matched = promotion.has_visible_passed_gate_for_command(command);
+            let matched = verification_promotion.has_visible_passed_gate_for_command(command);
             if !matched {
                 return Err(Error::validation_invalid_argument(
                     "verification",
@@ -918,20 +943,22 @@ fn cook_review_dossier(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    // The AI-authored form is the sole source of the non-deterministic prose
-    // (summary / what changed / compatibility / used_for). Finalization is only
-    // reached after the cook loop's form gate accepted a valid form, so its
-    // absence here is a hard invariant violation, not a soft fallback. Read it
-    // after the deterministic gate-evidence validations so those failure modes
-    // still surface first.
-    let form = review_form_for_finalization(successful_run_id)?;
+    // A form-only follow-up owns reviewer metadata, not the candidate it carries
+    // forward. Resolve the persisted Cook lineage so that follow-up prose cannot
+    // erase the implementation attempt that produced the delivered patch.
+    let terminal_form = review_form_for_finalization(successful_run_id)?;
+    let lineage = cook_ai_lineage(
+        options,
+        terminal_promotion,
+        successful_run_id,
+        &terminal_form,
+    )?;
     Ok(AgentTaskReviewDossier {
         schema: "homeboy/agent-task-review-dossier/v1".to_string(),
-        // Non-deterministic prose: authored by the AI form.
-        summary: form.summary.clone(),
-        what_changed: form.what_changed.clone(),
+        summary: lineage.summary,
+        what_changed: lineage.what_changed,
         how_to_test,
-        compatibility: form.compatibility.clone(),
+        compatibility: lineage.compatibility,
         // Deterministic evidence: orchestrator-owned. The task objective, scope,
         // gate count, and adoption provenance are factual records, not prose the
         // AI restates.
@@ -967,16 +994,227 @@ fn cook_review_dossier(
             // Deterministic: the orchestrator knows whether/what tool+model ran,
             // and attributes Homeboy as the harness that drove the change.
             used: true,
-            tool: crate::agent_task_review_dossier::homeboy_tool_disclosure(&options.ai_tool),
-            model: options
-                .ai_model
-                .clone()
-                .unwrap_or_else(|| "not recorded".to_string()),
-            // Non-deterministic: the AI's self-reflective process description.
-            used_for: form.used_for.clone(),
+            tool: lineage.tool,
+            model: lineage.model,
+            used_for: lineage.used_for,
         },
         source_relationships: Vec::new(),
         overrides: Vec::new(),
+    })
+}
+
+struct CookAiLineage {
+    summary: String,
+    what_changed: Vec<String>,
+    compatibility: String,
+    tool: String,
+    model: String,
+    used_for: String,
+}
+
+struct CookAttemptExecution {
+    task_summary: String,
+    form: Option<crate::agent_task_review_dossier::AiFilledReviewForm>,
+    tool: String,
+    model: String,
+    review_form_only: bool,
+}
+
+fn selected_outcome_for_attempt(run_id: &str) -> Result<crate::agent_task::AgentTaskOutcome> {
+    let aggregate = agent_task_lifecycle::read_aggregate(run_id)?;
+    aggregate
+        .selected_outcome()
+        .cloned()
+        .or_else(|| {
+            (aggregate.outcomes.len() == 1)
+                .then(|| aggregate.outcomes.first())
+                .flatten()
+                .cloned()
+        })
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "Cook lineage attempt has no selected provider outcome",
+                Some(run_id.to_string()),
+                None,
+            )
+        })
+}
+
+/// Read provider identity from the durable execution record rather than the
+/// recipe or finalization flags. The plan records the dispatched tool while the
+/// selected outcome records the model the provider actually ran.
+fn cook_attempt_execution(run_id: &str) -> Result<CookAttemptExecution> {
+    let plan = agent_task_lifecycle::load_plan(run_id)?;
+    let outcome = selected_outcome_for_attempt(run_id)?;
+    let task = plan
+        .tasks
+        .iter()
+        .find(|task| task.task_id == outcome.task_id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "Cook lineage outcome does not match a task in its durable execution plan",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    let model = outcome.selected_model().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "provider_model",
+            "Cook lineage attempt has no concrete executed model",
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    if let Some(planned_model) = task.executor.model() {
+        if planned_model != model {
+            return Err(Error::validation_invalid_argument(
+                "provider_model",
+                "Cook lineage plan model conflicts with the concrete executed model",
+                Some(run_id.to_string()),
+                None,
+            ));
+        }
+    }
+    if task.executor.backend.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "provider_tool",
+            "Cook lineage attempt has no dispatched provider tool",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    Ok(CookAttemptExecution {
+        task_summary: task
+            .instructions
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("Delivered the authenticated Cook candidate.")
+            .to_string(),
+        form: crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(
+            &outcome.outputs,
+        )?
+        .filter(|form| form.validate().is_ok()),
+        tool: task.executor.backend.clone(),
+        model: model.to_string(),
+        review_form_only: task.inputs["cook_loop"]["review_form_required"] == true,
+    })
+}
+
+fn cook_ai_lineage(
+    options: &AgentTaskCookServiceOptions,
+    promotion: &AgentTaskPromotionReport,
+    successful_run_id: &str,
+    terminal_form: &crate::agent_task_review_dossier::AiFilledReviewForm,
+) -> Result<CookAiLineage> {
+    let recipe = super::load_recipe(&options.cook_id)?;
+    let mut attempts = recipe.attempts;
+    attempts.sort_by_key(|attempt| attempt.attempt);
+    let Some(terminal_index) = attempts
+        .iter()
+        .position(|attempt| attempt.run_id == successful_run_id)
+    else {
+        return Err(Error::validation_invalid_argument(
+            "successful_run_id",
+            "finalizing Cook run is absent from its persisted recipe lineage",
+            Some(successful_run_id.to_string()),
+            None,
+        ));
+    };
+    attempts.truncate(terminal_index + 1);
+    // Preserve the byte-for-byte single-attempt output. Multi-attempt form-only
+    // recovery instead makes each authenticated role visible to reviewers.
+    if terminal_index == 0 {
+        let execution = cook_attempt_execution(successful_run_id)?;
+        return Ok(CookAiLineage {
+            summary: terminal_form.summary.clone(),
+            what_changed: terminal_form.what_changed.clone(),
+            compatibility: terminal_form.compatibility.clone(),
+            tool: crate::agent_task_review_dossier::homeboy_tool_disclosure(&execution.tool),
+            model: execution.model,
+            used_for: terminal_form.used_for.clone(),
+        });
+    }
+    let terminal = cook_attempt_execution(successful_run_id)?;
+    if !terminal.review_form_only {
+        return Err(Error::validation_invalid_argument(
+            "cook_recipe.attempts",
+            "multi-attempt Cook finalization only composes role disclosures for a metadata-only review-form follow-up",
+            Some(successful_run_id.to_string()),
+            None,
+        ));
+    }
+    let source_run_id = promotion
+        .provenance
+        .pointer("/cook_follow_up/source_run_id")
+        .and_then(Value::as_str)
+        .filter(|source_run_id| *source_run_id != successful_run_id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "promotion.provenance.cook_follow_up.source_run_id",
+                "multi-attempt Cook finalization requires an authenticated form-only source run",
+                Some(successful_run_id.to_string()),
+                None,
+            )
+        })?;
+    let implementation = attempts
+        .iter()
+        .find(|attempt| attempt.run_id == source_run_id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "form-only follow-up source run is absent from the finalized Cook lineage",
+                Some(source_run_id.to_string()),
+                None,
+            )
+        })?;
+    if implementation.attempt == attempts[terminal_index].attempt {
+        return Err(Error::validation_invalid_argument(
+            "cook_recipe.attempts",
+            "form-only follow-up cannot attribute its own run as the implementation attempt",
+            Some(source_run_id.to_string()),
+            None,
+        ));
+    }
+    let implementation = cook_attempt_execution(&implementation.run_id)?;
+    let changed = promotion
+        .changed_files
+        .iter()
+        .map(|path| format!("Updated `{path}` in the delivered candidate."))
+        .collect::<Vec<_>>();
+    let (summary, what_changed, compatibility) = implementation
+        .form
+        .map(|form| (form.summary, form.what_changed, form.compatibility))
+        .unwrap_or_else(|| {
+            (
+                implementation.task_summary.clone(),
+                changed,
+                format!(
+                    "Delivered candidate verified with {} deterministic Cook gate(s); no separate compatibility assessment was recorded by the implementation attempt.",
+                    promotion.gate_results.len()
+                ),
+            )
+        });
+    Ok(CookAiLineage {
+        summary,
+        what_changed,
+        compatibility,
+        tool: format!(
+            "Implementation: {}; review form: {}",
+            crate::agent_task_review_dossier::homeboy_tool_disclosure(&implementation.tool),
+            crate::agent_task_review_dossier::homeboy_tool_disclosure(&terminal.tool),
+        ),
+        model: format!(
+            "Implementation: {}; review form: {}",
+            implementation.model, terminal.model
+        ),
+        used_for: format!(
+            "Implementation: {} authored the delivered candidate changes and deterministic verification evidence. Review form: {} reviewed the validated candidate and supplied the reviewer metadata.",
+            crate::agent_task_review_dossier::homeboy_tool_disclosure(&implementation.tool),
+            crate::agent_task_review_dossier::homeboy_tool_disclosure(&terminal.tool),
+        ),
     })
 }
 
@@ -990,17 +1228,10 @@ fn cook_review_dossier(
 fn review_form_for_finalization(
     run_id: &str,
 ) -> Result<crate::agent_task_review_dossier::AiFilledReviewForm> {
-    let aggregate = crate::agent_task_lifecycle::read_aggregate(run_id)?;
-    let form = aggregate
-        .outcomes
-        .last()
-        .map(|outcome| {
-            crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(
-                &outcome.outputs,
-            )
-        })
-        .transpose()?
-        .flatten()
+    let outcome = selected_outcome_for_attempt(run_id)?;
+    let form = crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(
+        &outcome.outputs,
+    )?
         .ok_or_else(|| {
             Error::validation_invalid_argument(
                 "review_form",
