@@ -2,6 +2,12 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.29.4] - 2026-07-26
+
+### Fixed
+- preserve toolchain homes for isolated gates
+- widen to the full suite when a derived scope runs no tests
+
 ## [1.29.3] - 2026-07-26
 
 ### Fixed
