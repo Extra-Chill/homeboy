@@ -881,7 +881,18 @@ fn persist_lab_staging_recipe_for_transport(
 fn ensure_current_controller_daemon() -> Result<homeboy_core::daemon::DaemonStartResult> {
     let expected = homeboy_core::build_identity::current().display;
     for _ in 0..2 {
-        let daemon = homeboy_core::daemon::ensure_running(homeboy_core::daemon::DEFAULT_ADDR)?;
+        let daemon = homeboy_core::daemon::ensure_running(homeboy_core::daemon::DEFAULT_ADDR)
+            .map_err(|mut error| {
+                // Daemon admission happens before the controller job or any
+                // provider dispatch. Preserve the source invocation as the
+                // only safe replay after its one managed startup recovery.
+                error.details["lab_daemon_admission"] = json!({
+                    "phase": "pre_provider",
+                    "provider_budget_consumed": false,
+                    "preserved_invocation": preserved_invocation(),
+                });
+                error
+            })?;
         let status = homeboy_core::daemon::read_status()?;
         let Some(state) = status.state else {
             return Err(Error::internal_unexpected(

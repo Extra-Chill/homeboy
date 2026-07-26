@@ -108,6 +108,9 @@ enum DaemonCommand {
         /// Local bind address. Defaults to an OS-selected loopback port.
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
+        /// Exact startup admission identity, forwarded by the supervisor.
+        #[arg(long, hide = true)]
+        startup_token: Option<String>,
     },
     /// Supervise one daemon child and persist its termination evidence.
     #[command(hide = true)]
@@ -242,7 +245,12 @@ pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult
             DaemonOutput::RecoverMissingLeaseState(daemon::recover_missing_lease_state(&lease_id, recorded_pid, &recorded_endpoint, confirm_pid_dead, confirm_control_plane_lost, &addr)?),
             0,
         )),
-        DaemonCommand::Serve { addr } => serve(&addr),
+        DaemonCommand::Serve { addr, startup_token } => {
+            // Supervision supplies the token through the environment; the
+            // hidden argument is retained as the portable ownership proof.
+            let _ = startup_token;
+            serve(&addr)
+        }
         DaemonCommand::Supervise { addr, startup_token } => {
             daemon::supervise(&addr, &startup_token)?;
             Ok((DaemonOutput::Serve(DaemonStartResult { pid: std::process::id(), address: addr, state_path: String::new(), lease_id: String::new() }), 0))

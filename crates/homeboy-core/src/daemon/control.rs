@@ -66,7 +66,17 @@ pub fn supervise(addr: &str, startup_token: &str) -> Result<()> {
         )
     })?;
     let child = Command::new(exe)
-        .args(["daemon", "serve", "--addr", addr])
+        // The argument is the portable, exact ownership proof used when a
+        // platform cannot inspect a process environment. Keep it aligned with
+        // the persisted admission token for the lifetime of this daemon.
+        .args([
+            "daemon",
+            "serve",
+            "--addr",
+            addr,
+            "--startup-token",
+            startup_token,
+        ])
         .env(DAEMON_STARTUP_TOKEN_ENV, startup_token)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1829,9 +1839,8 @@ fn startup_timeout_error(
         "daemon process {pid} did not publish its isolated startup token before timeout"
     ))
     .with_hint("The daemon startup was not accepted because the expected token and PID did not match. Retry the Lab Cook; provider budget was not consumed.".to_string());
-    error.retryable = Some(true);
     error.details = serde_json::json!({
-        "classification": "retryable_pre_provider_startup",
+        "classification": "terminal_pre_provider_startup",
         "expected": { "pid": pid, "startup_token": startup_token },
         "observed": {
             "pid": observation.observed_pid,
@@ -1839,9 +1848,27 @@ fn startup_timeout_error(
             "startup_token": observation.observed_token,
         },
         "cleanup": cleanup,
+        "managed_recovery_actions": 1,
+        "provider_budget_consumed": false,
         "safe_next_action": "Retry the same Lab Cook. Inspect `homeboy daemon status` if the failure repeats.",
     });
     error
+}
+
+fn can_recover_startup_attempt(
+    allow_retry: bool,
+    startup_token: &str,
+    observation: &StartupLeaseObservation,
+    cleanup_evidence: &[String],
+) -> bool {
+    allow_retry
+        && observation
+            .observed_token
+            .as_deref()
+            .is_none_or(|token| token == startup_token)
+        && !cleanup_evidence
+            .iter()
+            .any(|entry| entry.contains("could not be proven"))
 }
 
 fn spawn_and_wait_for_lease(addr: &str, startup_token: &str) -> Result<DaemonStartResult> {
@@ -1891,13 +1918,19 @@ fn spawn_and_wait_for_lease_attempt(
         Err(observation) => {
             let cleanup = cleanup_startup_attempt(pid, startup_token)?;
             cleanup_evidence.extend(cleanup);
-            if allow_retry {
-                // A launcher can lose the first publication race during an SSH
-                // handoff. Retry once with a new token; never adopt another
-                // controller's lease as this attempt's daemon.
+            if can_recover_startup_attempt(
+                allow_retry,
+                startup_token,
+                &observation,
+                &cleanup_evidence,
+            ) {
+                // The token is the durable admission identity for this
+                // startup. A bounded recovery restarts only the same proven
+                // attempt, so receipt replay and concurrent callers can never
+                // mistake a replacement for a second daemon.
                 return spawn_and_wait_for_lease_attempt(
                     addr,
-                    &uuid::Uuid::new_v4().to_string(),
+                    startup_token,
                     false,
                     cleanup_evidence,
                 );

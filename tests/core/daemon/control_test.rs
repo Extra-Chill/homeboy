@@ -6,8 +6,9 @@ use std::time::Duration;
 use std::{os::unix::process::CommandExt, process::Command};
 
 use super::{
-    artifact_content_url, ensure_running_with_operations, fetch_artifact_to_path,
-    observe_startup_lease, reconcile_dead_lease_and_ensure_running_with_operations,
+    artifact_content_url, can_recover_startup_attempt, ensure_running_with_operations,
+    fetch_artifact_to_path, observe_startup_lease,
+    reconcile_dead_lease_and_ensure_running_with_operations,
     reconcile_leaseless_orphan_store_with_operations,
 };
 use crate::api_jobs::{JobEventKind, JobStatus, JobStore};
@@ -1364,6 +1365,45 @@ fn startup_observation_waits_for_delayed_token_without_provider_work() {
     .expect("observe delayed startup")
     .expect("matching delayed token is ready");
     assert_eq!(result.lease_id, "lease-new");
+}
+
+#[test]
+fn startup_recovery_reuses_only_the_authoritative_attempt_identity() {
+    let expected = "attempt-token";
+    let absent = super::StartupLeaseObservation {
+        observed_pid: None,
+        observed_lease_id: None,
+        observed_token: None,
+    };
+    assert!(can_recover_startup_attempt(true, expected, &absent, &[]));
+
+    let stale = super::StartupLeaseObservation {
+        observed_pid: Some(4242),
+        observed_lease_id: Some("stale-lease".to_string()),
+        observed_token: Some(expected.to_string()),
+    };
+    assert!(can_recover_startup_attempt(true, expected, &stale, &[]));
+
+    let competing = super::StartupLeaseObservation {
+        observed_pid: Some(4343),
+        observed_lease_id: Some("other-lease".to_string()),
+        observed_token: Some("other-token".to_string()),
+    };
+    assert!(!can_recover_startup_attempt(
+        true,
+        expected,
+        &competing,
+        &[]
+    ));
+    assert!(!can_recover_startup_attempt(
+        true,
+        expected,
+        &stale,
+        &[
+            "retained lease for pid 4242 because its token ownership could not be proven"
+                .to_string()
+        ],
+    ));
 }
 
 #[test]
