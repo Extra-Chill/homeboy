@@ -503,6 +503,43 @@ fn test_finish_run() {
 }
 
 #[test]
+fn finish_running_run_preserves_an_existing_terminal_outcome() {
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("init store");
+        let started = store
+            .start_run(sample_run("review", "homeboy"))
+            .expect("start run");
+
+        let cancelled = store
+            .finish_running_run(
+                &started.id,
+                RunStatus::Skipped,
+                Some(serde_json::json!({ "cancellation": { "requested": true } })),
+            )
+            .expect("cancel running run")
+            .expect("running run was cancelled");
+        let late_completion = store
+            .finish_running_run(
+                &started.id,
+                RunStatus::Pass,
+                Some(serde_json::json!({ "passed": true })),
+            )
+            .expect("late completion query");
+
+        assert_eq!(cancelled.status, "skipped");
+        assert!(late_completion.is_none());
+        let persisted = store
+            .get_run(&started.id)
+            .expect("get run")
+            .expect("run exists");
+        assert_eq!(persisted.status, "skipped");
+        assert_eq!(persisted.metadata_json["cancellation"]["requested"], true);
+        assert!(persisted.metadata_json.get("passed").is_none());
+    });
+}
+
+#[test]
 fn test_list_runs() {
     with_isolated_home(|_home| {
         let _xdg = XdgGuard::unset();

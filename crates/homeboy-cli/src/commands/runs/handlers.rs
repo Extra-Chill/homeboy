@@ -124,7 +124,16 @@ pub fn cancel_run(run_id: &str) -> CmdResult<RunsOutput> {
             "cancellation": { "requested": true, "requested_at": chrono::Utc::now().to_rfc3339() }
         }),
     );
-    let cancelled = store.finish_run(run_id, RunStatus::Skipped, Some(metadata))?;
+    let cancelled = store
+        .finish_running_run(run_id, RunStatus::Skipped, Some(metadata))?
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run-id",
+                "run completed before cancellation could be recorded",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
     let actionable =
         super::types::actionable_for_run_summary(&super::run_summary(cancelled.clone()));
     Ok((
@@ -1130,5 +1139,35 @@ mod pull_tests {
             panic!("--pull with --runner should fail");
         };
         assert!(err.to_string().contains("local mirrored observation store"));
+    }
+
+    #[test]
+    fn cancel_marks_a_running_run_skipped_without_changing_its_identity() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(
+                    NewRunRecord::builder("review")
+                        .component_id("homeboy")
+                        .build(),
+                )
+                .expect("run");
+
+            let (output, exit_code) = cancel_run(&run.id).expect("cancel run");
+
+            assert_eq!(exit_code, 0);
+            let RunsOutput::Cancel(output) = output else {
+                panic!("expected cancel output");
+            };
+            assert_eq!(output.command, "runs.cancel");
+            assert_eq!(output.run_id, run.id);
+            assert_eq!(output.status, "skipped");
+            let persisted = store
+                .get_run(&run.id)
+                .expect("get run")
+                .expect("run exists");
+            assert_eq!(persisted.status, "skipped");
+            assert_eq!(persisted.metadata_json["cancellation"]["requested"], true);
+        });
     }
 }

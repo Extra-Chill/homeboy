@@ -381,14 +381,14 @@ pub fn run_umbrella(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCo
         let message = format!("No files changed {} — skipping review", scope_label);
         println!("{}", message);
 
-        let review_observation = observation::start(observation::ReviewObservationStart {
+        let review_observation = Some(observation::start(observation::ReviewObservationStart {
             component_id: &component.id,
             component_label: &component_label,
             source_path: Path::new(&source_path),
             args: &args,
             scope: &scope,
             changed_file_count: Some(0),
-        });
+        })?);
         let observation_metadata = review_observation.as_ref().map(|o| o.output_metadata());
 
         let mut output = ReviewService::skipped_output(
@@ -413,14 +413,14 @@ pub fn run_umbrella(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCo
         return Ok((output, 0));
     }
 
-    let review_observation = observation::start(observation::ReviewObservationStart {
+    let review_observation = Some(observation::start(observation::ReviewObservationStart {
         component_id: &component.id,
         component_label: &component_label,
         source_path: Path::new(&source_path),
         args: &args,
         scope: &scope,
         changed_file_count,
-    });
+    })?);
     observation::emit_early_lifecycle(&review_observation);
 
     let mut top_hints: Vec<String> = Vec::new();
@@ -485,51 +485,68 @@ pub fn run_umbrella(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCo
     let audit_stage = audit_stage.expect("review quality plan must include audit stage");
     let lint_stage = lint_stage.expect("review quality plan must include lint stage");
     let test_stage = test_stage.expect("review quality plan must include test stage");
-    let ci_profile_stage = match args.ci_profile.as_ref() {
-        Some(profile) => {
-            let ctx = execution_context::resolve(&ResolveOptions {
-                component_id: args.comp.component.clone(),
-                path_override: args.comp.path.clone(),
-                capability: None,
-                settings_overrides: Vec::new(),
-                settings_profile_json_overrides: Vec::new(),
-                settings_json_overrides: Vec::new(),
-                extension_overrides: args.extension_override.extensions.clone(),
-            })?;
-            let extension_ids = ctx
-                .component
-                .extensions
-                .as_ref()
-                .map(|extensions| {
-                    let mut ids: Vec<String> = extensions.keys().cloned().collect();
-                    ids.sort();
-                    ids
-                })
-                .unwrap_or_default();
-            let extension_id = ci_profile::select_extension_id(&extension_ids)?;
-            let output = ci_profile::run_for_extension(
-                &ctx.source_path,
-                &extension_id,
-                CiRunSelection::Profile(profile.clone()),
-            )?;
-            let exit_code = output.exit_code;
-            let finding_count = output.jobs.iter().filter(|job| !job.success).count();
-            let stage = ReviewStage {
-                stage: "ci".to_string(),
-                ran: true,
-                passed: exit_code == 0,
-                exit_code,
-                finding_count,
-                hint: format!(
-                    "Deep dive: homeboy review ci run {} --profile {}",
-                    component_label, profile
-                ),
-                skipped_reason: None,
-                output: Some(output),
-            };
-            Some(stage)
+    let ci_profile_stage = match (|| -> homeboy::core::Result<Option<ReviewStage<_>>> {
+        let Some(profile) = args.ci_profile.as_ref() else {
+            return Ok(None);
+        };
+        if review_run_id
+            .as_deref()
+            .is_some_and(observation::is_cancelled)
+        {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "run-id",
+                "review was cancelled before the CI stage started",
+                review_run_id.clone(),
+                None,
+            ));
         }
-        None => None,
+        let ctx = execution_context::resolve(&ResolveOptions {
+            component_id: args.comp.component.clone(),
+            path_override: args.comp.path.clone(),
+            capability: None,
+            settings_overrides: Vec::new(),
+            settings_profile_json_overrides: Vec::new(),
+            settings_json_overrides: Vec::new(),
+            extension_overrides: args.extension_override.extensions.clone(),
+        })?;
+        let extension_ids = ctx
+            .component
+            .extensions
+            .as_ref()
+            .map(|extensions| {
+                let mut ids: Vec<String> = extensions.keys().cloned().collect();
+                ids.sort();
+                ids
+            })
+            .unwrap_or_default();
+        let extension_id = ci_profile::select_extension_id(&extension_ids)?;
+        let output = ci_profile::run_for_extension(
+            &ctx.source_path,
+            &extension_id,
+            CiRunSelection::Profile(profile.clone()),
+        )?;
+        let exit_code = output.exit_code;
+        let finding_count = output.jobs.iter().filter(|job| !job.success).count();
+        let stage = ReviewStage {
+            stage: "ci".to_string(),
+            ran: true,
+            passed: exit_code == 0,
+            exit_code,
+            finding_count,
+            hint: format!(
+                "Deep dive: homeboy review ci run {} --profile {}",
+                component_label, profile
+            ),
+            skipped_reason: None,
+            output: Some(output),
+        };
+        Ok(Some(stage))
+    })() {
+        Ok(stage) => stage,
+        Err(error) => {
+            observation::finish_error(review_observation, &error);
+            return Err(error);
+        }
     };
 
     if args.changed_only {

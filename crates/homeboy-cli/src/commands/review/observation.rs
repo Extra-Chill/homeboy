@@ -44,14 +44,14 @@ pub(super) struct ReviewObservationStart<'a> {
     pub changed_file_count: Option<usize>,
 }
 
-pub(super) fn start(start: ReviewObservationStart<'_>) -> Option<ReviewObservation> {
+pub(super) fn start(start: ReviewObservationStart<'_>) -> homeboy::core::Result<ReviewObservation> {
     let metadata = review_observation_initial_metadata(
         start.component_label,
         start.args,
         start.scope,
         start.changed_file_count,
     );
-    ActiveObservation::start_best_effort(
+    ActiveObservation::start(
         NewRunRecord::builder("review")
             .component_id(start.component_id)
             .command(review_observation_command(start.component_id, start.args))
@@ -136,13 +136,9 @@ fn finish_if_running(
     status: RunStatus,
     metadata: Option<serde_json::Value>,
 ) {
-    let still_running = ObservationStore::open_initialized()
-        .ok()
-        .and_then(|store| store.get_run(observation.run_id()).ok().flatten())
-        .is_some_and(|run| run.status == RunStatus::Running.as_str());
-    if still_running {
-        observation.finish(status, metadata);
-    }
+    let _ = observation
+        .store()
+        .finish_running_run(observation.run_id(), status, metadata);
 }
 
 fn review_observation_command(component_id: &str, args: &ReviewArgs) -> String {
@@ -291,11 +287,9 @@ mod tests {
                 args: &args,
                 scope: "changed-since",
                 changed_file_count: Some(3),
-            });
-            let run_id = observation
-                .expect("persisted observation")
-                .run_id()
-                .to_string();
+            })
+            .expect("persisted observation");
+            let run_id = observation.run_id().to_string();
 
             // No terminal cleanup runs after this point, as if the caller timed out.
             let run = ObservationStore::open_initialized()
