@@ -965,7 +965,8 @@ fn reconstruct_recipe_options(
             ),
             Some(recipe.cook_id.clone()),
             None,
-        ));
+        )
+        .with_retryable(true));
     }
     let initial = recipe
         .attempts
@@ -1122,6 +1123,10 @@ pub fn consume_claimed_with_dispatcher(
     };
     let options = match reconstruct_options_with_dispatcher(&recipe, attempt_dispatcher) {
         Ok(options) => options,
+        Err(error) if error.retryable == Some(true) => {
+            claim.retry()?;
+            return Err(error);
+        }
         Err(error) => {
             claim.fail(&error.message)?;
             return Err(error);
@@ -1745,6 +1750,28 @@ mod tests {
             claim.complete().unwrap();
 
             assert!(!rearm_failed_terminal_continuation("cook", "run").unwrap());
+        });
+    }
+
+    #[test]
+    fn runtime_mismatch_keeps_explicitly_rearmed_continuation_pending() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut historical = recipe();
+            historical.runtime_generation = "homeboy 0.291.2+96820fe8cc53".to_string();
+            write_recipe(&historical).unwrap();
+            enqueue_terminal_continuation("cook", "run").unwrap();
+            claim_continuation()
+                .unwrap()
+                .unwrap()
+                .fail("wrong controller runtime")
+                .unwrap();
+
+            rearm_failed_terminal_continuation("cook", "run").unwrap();
+            let claim = claim_continuation_for("cook", "run").unwrap().unwrap();
+            let error = consume_claimed_with(claim, |_| Ok(0)).unwrap_err();
+
+            assert_eq!(error.retryable, Some(true));
+            assert!(claim_continuation_for("cook", "run").unwrap().is_some());
         });
     }
 
