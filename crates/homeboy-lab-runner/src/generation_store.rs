@@ -526,14 +526,14 @@ pub(crate) fn clear(runner_id: &str) -> Result<()> {
 pub(crate) fn tombstone_dead_direct_generations(
     runner_id: &str,
     expected_leases: &[String],
-) -> Result<Vec<u32>> {
+) -> Result<()> {
     let expected_leases = expected_leases
         .iter()
         .map(String::as_str)
         .collect::<std::collections::BTreeSet<_>>();
     with_registry_lock(runner_id, || {
         let Some(generations) = read_locked(runner_id, None)? else {
-            return Ok(Vec::new());
+            return Ok(());
         };
         let current_leases = generations
             .generations
@@ -553,11 +553,6 @@ pub(crate) fn tombstone_dead_direct_generations(
                 None,
             ));
         }
-        let tunnel_pids = generations
-            .generations
-            .values()
-            .filter_map(|entry| entry.endpoint.tunnel_pid)
-            .collect::<Vec<_>>();
         let path = path(runner_id)?;
         if path.exists() {
             std::fs::remove_file(&path).map_err(|error| {
@@ -567,7 +562,10 @@ pub(crate) fn tombstone_dead_direct_generations(
                 )
             })?;
         }
-        Ok(tunnel_pids)
+        // The registry only persists a numeric local tunnel PID, not a process
+        // identity. It may have been reused since this stale generation was
+        // recorded, so convergence must not signal it.
+        Ok(())
     })
 }
 
@@ -1122,10 +1120,9 @@ mod tests {
             let leases = (0..58)
                 .map(|index| format!("lease-{index}"))
                 .collect::<Vec<_>>();
-            let pids = tombstone_dead_direct_generations("runner-a", &leases)
+            tombstone_dead_direct_generations("runner-a", &leases)
                 .expect("dead authoritative daemon tombstones stale inventory");
 
-            assert_eq!(pids.len(), 58);
             assert!(read("runner-a", None)
                 .expect("read tombstoned registry")
                 .is_none());

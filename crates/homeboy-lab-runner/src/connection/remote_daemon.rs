@@ -273,7 +273,9 @@ pub(super) fn authoritative_idle_lease_for_stale_generations(
 
 /// A stale generation registry may be retired only after the remote authority
 /// proves there is no process left that could own its recorded work. A missing
-/// lease is sufficient only when the authoritative jobs view is also zero.
+/// lease is sufficient only when the authoritative jobs view is also zero. A
+/// PID-dead result is specific to one lease, so it cannot retire an inventory
+/// containing any other lease.
 pub(super) fn authoritative_stale_generations_are_dead(
     status: &RemoteDaemonStatus,
     persisted_leases: &[String],
@@ -285,7 +287,7 @@ pub(super) fn authoritative_stale_generations_are_dead(
         Some(daemon) => {
             status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
                 && daemon.lease_id.as_deref().is_some_and(|lease| {
-                    persisted_leases.iter().any(|persisted| persisted == lease)
+                    persisted_leases.iter().all(|persisted| persisted == lease)
                 })
                 && daemon.pid.is_some()
         }

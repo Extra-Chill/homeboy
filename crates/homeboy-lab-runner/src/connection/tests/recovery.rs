@@ -254,9 +254,13 @@ fn authoritative_dead_lease_allows_stale_generation_tombstoning() {
     );
     let live = remote_daemon_status_for_test(true, true, 0, "lease-live", 5555);
 
-    assert!(authoritative_stale_generations_are_dead(
+    assert!(!authoritative_stale_generations_are_dead(
         &dead,
         &["lease-old".to_string(), "lease-dead".to_string()],
+    ));
+    assert!(authoritative_stale_generations_are_dead(
+        &dead,
+        &["lease-dead".to_string()],
     ));
     assert!(!authoritative_stale_generations_are_dead(
         &live,

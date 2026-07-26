@@ -72,11 +72,7 @@ pub(crate) fn disconnect_with_session(
         ) {
             let leases =
                 eligible_stale_generation_leases(&retained_generations).unwrap_or_default();
-            for pid in super::super::generation_store::tombstone_dead_direct_generations(
-                runner_id, &leases,
-            )? {
-                terminate_pid(pid);
-            }
+            super::super::generation_store::tombstone_dead_direct_generations(runner_id, &leases)?;
             remove_session(runner_id)?;
             remove_ownership(runner_id)?;
             return Ok(RunnerDisconnectReport {
@@ -146,11 +142,7 @@ pub(crate) fn disconnect_with_session(
                 &leases,
             )
         {
-            for pid in super::super::generation_store::tombstone_dead_direct_generations(
-                runner_id, &leases,
-            )? {
-                terminate_pid(pid);
-            }
+            super::super::generation_store::tombstone_dead_direct_generations(runner_id, &leases)?;
             remove_ownership(runner_id)?;
         }
     }
