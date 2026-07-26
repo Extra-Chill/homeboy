@@ -61,12 +61,18 @@ pub struct EvidenceArgs {
     /// Only include evidence attached to failed/provider-error/timed-out task outcomes.
     #[arg(long = "failure-only")]
     pub failure_only: bool,
+    /// Return every matching evidence record rather than the bounded preview.
+    #[arg(long)]
+    pub full: bool,
 }
 
 #[derive(Args, Debug)]
 pub struct DiagnoseArgs {
     /// Durable run id returned by `agent-task submit` or `agent-task run-plan --record-run-id`.
     pub run_id: String,
+    /// Hydrate every available evidence summary rather than the bounded preview.
+    #[arg(long)]
+    pub full: bool,
 }
 
 #[derive(Args, Debug)]

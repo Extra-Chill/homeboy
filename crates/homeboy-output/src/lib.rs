@@ -57,15 +57,24 @@ pub struct OutputTruncation {
     pub total_bytes: usize,
     pub returned_bytes: usize,
     pub omitted_bytes: usize,
+    /// Whether byte totals cover the complete source collection. A reader can
+    /// determine item totals without serializing an unbounded source, so byte
+    /// totals become partial when iteration stops at the output budget.
+    #[serde(default = "default_total_bytes_known")]
+    pub total_bytes_known: bool,
     pub truncated: bool,
     pub continue_command: String,
     pub export_command: String,
 }
 
+fn default_total_bytes_known() -> bool {
+    true
+}
+
 /// Apply an aggregate item and serialized-byte budget without changing the item
-/// schema. Callers can obtain `total_items` from indexed sources without
-/// hydrating every record, and use the exact continuation/export commands in the
-/// returned metadata.
+/// schema. Iteration stops at the first omitted item: callers must supply an
+/// indexed `total_items` rather than hydrating or serializing the remainder just
+/// to calculate byte metadata.
 pub fn budget_json_values(
     values: impl IntoIterator<Item = serde_json::Value>,
     total_items: usize,
@@ -76,22 +85,24 @@ pub fn budget_json_values(
     let mut returned = Vec::new();
     let mut returned_bytes: usize = 0;
     let mut observed_bytes: usize = 0;
+    let mut total_bytes_known = true;
     for value in values {
         let bytes = serde_json::to_vec(&value)
             .map(|value| value.len())
             .unwrap_or(0);
-        observed_bytes += bytes;
         if returned.len() >= budget.max_items
             || returned_bytes.saturating_add(bytes) > budget.max_bytes
         {
-            continue;
+            total_bytes_known = false;
+            break;
         }
+        observed_bytes += bytes;
         returned_bytes += bytes;
         returned.push(value);
     }
     let returned_items = returned.len();
     let omitted_items = total_items.saturating_sub(returned_items);
-    let total_bytes = observed_bytes.max(returned_bytes);
+    let total_bytes = observed_bytes;
     (
         returned,
         OutputTruncation {
@@ -101,8 +112,9 @@ pub fn budget_json_values(
             omitted_items,
             total_bytes,
             returned_bytes,
-            omitted_bytes: total_bytes.saturating_sub(returned_bytes),
-            truncated: omitted_items > 0 || total_bytes > returned_bytes,
+            omitted_bytes: 0,
+            total_bytes_known,
+            truncated: omitted_items > 0 || !total_bytes_known,
             continue_command: continue_command.into(),
             export_command: export_command.into(),
         },
@@ -509,11 +521,52 @@ mod tests {
         assert_eq!(metadata.returned_items, returned.len());
         assert_eq!(metadata.omitted_items, 100 - returned.len());
         assert!(metadata.truncated);
+        assert!(!metadata.total_bytes_known);
         assert_eq!(metadata.continue_command, "homeboy example list --limit 20");
         assert_eq!(
             metadata.export_command,
             "homeboy example list --output <path>"
         );
+    }
+
+    #[test]
+    fn collection_budget_stops_before_serializing_an_unbounded_remainder() {
+        let mut consumed = 0;
+        let values = std::iter::from_fn(|| {
+            consumed += 1;
+            Some(json!({ "id": consumed, "payload": "x".repeat(8 * 1024) }))
+        });
+
+        let (returned, metadata) = budget_json_values(
+            values,
+            usize::MAX,
+            OutputBudget::COLLECTION,
+            "homeboy example list --full",
+            "homeboy example list --full --output <path>",
+        );
+
+        assert_eq!(returned.len(), 7);
+        assert_eq!(consumed, 8);
+        assert!(!metadata.total_bytes_known);
+    }
+
+    #[test]
+    fn output_truncation_accepts_metadata_written_before_byte_totals_were_optional() {
+        let metadata: OutputTruncation = serde_json::from_value(json!({
+            "presentation": "bounded_collection",
+            "total_items": 20,
+            "returned_items": 20,
+            "omitted_items": 0,
+            "total_bytes": 1024,
+            "returned_bytes": 1024,
+            "omitted_bytes": 0,
+            "truncated": false,
+            "continue_command": "homeboy example list --limit 20",
+            "export_command": "homeboy example list --output <path>"
+        }))
+        .expect("metadata written before total_bytes_known remains readable");
+
+        assert!(metadata.total_bytes_known);
     }
 
     #[test]

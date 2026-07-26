@@ -218,9 +218,10 @@ fn show_pinned(project_id: &str, lines: u32, follow: bool, local: bool) -> CmdRe
         total_bytes: content.returned_bytes + content.omitted_bytes,
         returned_bytes: content.returned_bytes,
         omitted_bytes: content.omitted_bytes,
+        total_bytes_known: true,
         truncated: content.omitted_logs > 0 || content.omitted_bytes > 0,
         continue_command: format!("homeboy logs list {project_id}"),
-        export_command: format!("homeboy logs show {project_id} --output <path>"),
+        export_command: format!("homeboy logs show {project_id} <path> --output <path>"),
     };
     Ok((
         LogsOutput {

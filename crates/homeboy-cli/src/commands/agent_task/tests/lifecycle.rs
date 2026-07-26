@@ -712,6 +712,7 @@ fn evidence_command_hydrates_homeboy_and_file_refs_with_filters_and_redaction() 
             kind: None,
             task: Some("task-a".to_string()),
             failure_only: true,
+            full: false,
         })
         .expect("evidence loaded");
 
@@ -774,6 +775,7 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
 
         let (value, exit_code) = diagnose(DiagnoseArgs {
             run_id: "run-cli-diagnose-evidence".to_string(),
+            full: false,
         })
         .expect("diagnose loaded");
 
@@ -977,6 +979,7 @@ fn generic_contract_fixtures_surface_runtime_import_before_missing_artifact() {
 
         let (diagnose_value, diagnose_exit_code) = diagnose(DiagnoseArgs {
             run_id: run_id.to_string(),
+            full: false,
         })
         .expect("diagnose loaded");
         assert_eq!(diagnose_exit_code, 0);
@@ -1239,6 +1242,7 @@ fn generic_contract_fixtures_hydrate_local_file_and_path_evidence() {
             kind: None,
             task: Some("task-a".to_string()),
             failure_only: true,
+            full: false,
         })
         .expect("evidence loaded");
         assert_eq!(exit_code, 0);
@@ -1328,6 +1332,7 @@ fn evidence_command_hydrates_plain_local_path_refs_and_summarizes_unsupported_re
             kind: None,
             task: Some("task-a".to_string()),
             failure_only: true,
+            full: false,
         })
         .expect("evidence loaded");
 
@@ -1415,6 +1420,7 @@ fn evidence_command_truncates_large_file_evidence() {
             kind: Some("executor-result".to_string()),
             task: Some("task-a".to_string()),
             failure_only: false,
+            full: false,
         })
         .expect("evidence loaded");
 

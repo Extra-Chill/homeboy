@@ -55,10 +55,16 @@ pub struct EvidenceArgs {
     pub task: Option<String>,
     #[arg(long = "failure-only")]
     pub failure_only: bool,
+    /// Return every matching evidence record rather than the bounded preview.
+    #[arg(long)]
+    pub full: bool,
 }
 #[derive(Args, Debug)]
 pub struct DiagnoseArgs {
     pub run_id: String,
+    /// Hydrate every available evidence summary rather than the bounded preview.
+    #[arg(long)]
+    pub full: bool,
 }
 #[derive(Args, Debug)]
 pub struct RuntimeRecoverArgs {
