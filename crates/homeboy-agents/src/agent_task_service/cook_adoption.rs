@@ -764,6 +764,19 @@ fn reusable_applied_adoption_promotion(
             None,
         )));
     };
+    if baseline
+        .get("current_diff")
+        .and_then(Value::as_str)
+        .is_some_and(|diff| diff.trim().is_empty())
+    {
+        return Some(
+            crate::agent_task_candidate_baseline::validate_immutable_candidate_tree(
+                std::path::Path::new(worktree_path),
+                candidate_sha,
+            )
+            .map(|_| promotion),
+        );
+    }
     // The checkpoint records the complete candidate diff; bind it to the exact
     // promoted artifact before handing it to the shared dirty-destination check.
     baseline["patch_artifact"] = match serde_json::to_value(&promotion.patch_artifact) {
