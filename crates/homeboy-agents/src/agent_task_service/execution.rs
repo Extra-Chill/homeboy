@@ -96,7 +96,6 @@ where
             )?;
             return Err(error);
         }
-        agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
         let harvest_context = match supplied_harvest_context.clone().map(Ok).unwrap_or_else(
             crate::agent_task_scheduler::HarvestExecutionContext::from_current_process,
         ) {
@@ -111,6 +110,10 @@ where
                 return Err(error);
             }
         };
+        if harvest_context.snapshot_signaled() {
+            bind_runner_snapshot_workspace_attestations(&mut plan)?;
+        }
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
         agent_task_lifecycle::mark_running(run_id)?;
         let aggregate = run_plan_with_scheduler(
             plan.clone(),
@@ -130,6 +133,9 @@ where
 
     let harvest_context = supplied_harvest_context
         .unwrap_or(crate::agent_task_scheduler::HarvestExecutionContext::from_current_process()?);
+    if harvest_context.snapshot_signaled() {
+        bind_runner_snapshot_workspace_attestations(&mut plan)?;
+    }
     let aggregate = run_plan_with_scheduler(
         plan.clone(),
         record_run_id,
@@ -141,6 +147,31 @@ where
         exit_code: aggregate_exit_code(&aggregate),
         value: crate::agent_task_artifacts::reviewer_facing_aggregate(&aggregate),
     })
+}
+
+/// A Lab plan carries its controller admission identity until its paths are
+/// materialized on the runner. Bind that concrete runner snapshot before the
+/// plan is persisted or executed; the predecessor remains audit provenance.
+pub fn bind_runner_snapshot_workspace_attestations(plan: &mut AgentTaskPlan) -> Result<()> {
+    for task in &mut plan.tasks {
+        let Some(controller_identity) = task.metadata.get("cook_workspace_identity").cloned()
+        else {
+            continue;
+        };
+        let root = task.workspace.root.as_deref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "workspace",
+                "Cook runner snapshot identity requires a workspace root",
+                Some(task.task_id.clone()),
+                None,
+            )
+        })?;
+        let runner_identity =
+            crate::agent_task_workspace_identity::attest_workspace(std::path::Path::new(root))?;
+        task.metadata["cook_workspace_identity"] = runner_identity;
+        task.metadata["cook_workspace_identity_predecessor"] = controller_identity;
+    }
+    Ok(())
 }
 
 pub fn submit_plan_spec(spec: &str, run_id: Option<&str>) -> Result<AgentTaskRunRecord> {

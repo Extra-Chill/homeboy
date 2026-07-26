@@ -1,6 +1,7 @@
 //! Workspace sync / remap staging for the standard (non-resident) offload path.
 
 use super::*;
+use crate::lab_args::verify_cook_workspace_attestations_in_args;
 use crate::lab_workspaces::workspace_mapping_entry_for_materialized_file;
 use crate::offload_changed_since::{
     degrade_changed_since_to_full_scope, remove_controller_changed_since_args,
@@ -233,6 +234,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         request.allow_dirty_lab_workspace,
     )?;
     let mut offload_args = materialization_planner.args;
+    verify_cook_workspace_attestations_in_args(&offload_args, source_path)?;
     let extra_workspaces = materialization_planner.extra_workspaces;
     // Isolate the primary workspace per cook/dispatch run. Without a per-run
     // token the git-mode remote path is keyed only on (source path, HEAD), so a

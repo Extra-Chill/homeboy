@@ -75,7 +75,7 @@ impl HarvestExecutionContext {
         }
     }
 
-    fn snapshot_signaled(&self) -> bool {
+    pub fn snapshot_signaled(&self) -> bool {
         self.source_snapshot.is_some() || self.lab_offload.is_some()
     }
 

@@ -58,6 +58,66 @@ pub(crate) fn materialize_agent_task_specs_in_args<T>(
     })
 }
 
+/// Verify controller-authored Cook workspace attestations before the primary
+/// workspace is snapshotted for Lab. The runner cannot re-check this local
+/// identity after path materialization, so rejecting drift here is mandatory.
+pub(crate) fn verify_cook_workspace_attestations_in_args(
+    args: &[String],
+    source_path: &Path,
+) -> Result<()> {
+    let mut specs = Vec::new();
+    let mut iter = args.iter().peekable();
+    while let Some(arg) = iter.next() {
+        for flag in ["--plan", "--attempt-plan"] {
+            if arg == flag {
+                if let Some(spec) = iter.next() {
+                    specs.push(spec.as_str());
+                }
+                break;
+            }
+            if let Some(spec) = arg.strip_prefix(&format!("{flag}=")) {
+                specs.push(spec);
+                break;
+            }
+        }
+    }
+    for spec in specs {
+        let raw = read_agent_task_plan_spec_to_string(spec, source_path)?;
+        let plan: homeboy_agents::agent_task_scheduler::AgentTaskPlan = serde_json::from_str(&raw)
+            .map_err(|error| {
+                Error::validation_invalid_json(error, Some(format!("parse Cook plan {spec}")), None)
+            })?;
+        for task in plan.tasks {
+            let Some(attestation) = task.metadata.get("cook_workspace_identity") else {
+                continue;
+            };
+            let root = task.workspace.root.as_deref().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "workspace",
+                    "Cook source identity attestation requires a workspace root",
+                    Some(task.task_id.clone()),
+                    None,
+                )
+            })?;
+            if !homeboy_agents::agent_task_workspace_identity::workspace_matches_attestation(
+                Path::new(root),
+                attestation,
+            ) {
+                return Err(Error::validation_invalid_argument(
+                    "workspace",
+                    "Cook source workspace no longer matches its admission identity attestation before Lab snapshotting",
+                    Some(root.to_string()),
+                    Some(vec![
+                        "Restore the admitted worktree or start a new Cook so Lab can snapshot the verified source."
+                            .to_string(),
+                    ]),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn remap_agent_task_fanout_input_in_args(
     args: &[String],
     mappings: &[LabPathRemap],
