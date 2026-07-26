@@ -3420,21 +3420,9 @@ mod tests {
         LabOffloadRequest {
             command,
             normalized_args: args,
-            explicit_runner: None,
             placement: homeboy_cli_contract::Placement::Lab,
-            allow_local_fallback: false,
-            allow_dirty_lab_workspace: false,
-            skip_deps_hydration: false,
-            preserve_workspace_on_failure: false,
-            capture_patch: false,
-            mutation_flag: None,
             detach_after_handoff: true,
-            output_file_requested: false,
-            read_only_polling: false,
-            local_output_file: None,
-            durable_agent_task_plan: None,
             source_path: Some(std::path::Path::new("/work/source")),
-            verified_cook_baseline: None,
             require_controller_git_bundle: true,
             reuse_compatible_snapshot: true,
             job_overrides: homeboy_core::lab_offload::LabJobOverrides {
@@ -3442,6 +3430,7 @@ mod tests {
                 secret_env_names: vec!["AGENT_TOKEN".to_string()],
                 workspace_root: Some("/runner/workspaces".to_string()),
             },
+            ..LabOffloadRequest::new(args)
         }
     }
 

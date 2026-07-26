@@ -1236,25 +1236,9 @@ mod tests {
                 "jetpack-api-route-inventory".to_string(),
             ];
             let request = LabOffloadRequest {
-                command: None,
                 normalized_args: &args,
                 explicit_runner: Some("lab-rig-component-stage"),
-                placement: homeboy_cli_contract::Placement::Auto,
-                allow_local_fallback: false,
-                allow_dirty_lab_workspace: false,
-                skip_deps_hydration: false,
-                capture_patch: false,
-                mutation_flag: None,
-                detach_after_handoff: false,
-                output_file_requested: false,
-                read_only_polling: false,
-                local_output_file: None,
-                durable_agent_task_plan: None,
-                source_path: None,
-                verified_cook_baseline: None,
-                require_controller_git_bundle: false,
-                reuse_compatible_snapshot: false,
-                job_overrides: LabJobOverrides::default(),
+                ..LabOffloadRequest::new(&args)
             };
             let contract = LabOffloadCommand {
                 command: homeboy_core::lab_contract::LabCommandContract::portable(
@@ -2466,26 +2450,10 @@ mod tests {
                 "base".to_string(),
             ];
             let request = LabOffloadRequest {
-                command: None,
                 normalized_args: &args,
                 explicit_runner: Some("lab-controller-bundle-stage"),
-                placement: homeboy_cli_contract::Placement::Auto,
-                allow_local_fallback: false,
-                allow_dirty_lab_workspace: false,
-                skip_deps_hydration: false,
-                preserve_workspace_on_failure: false,
-                capture_patch: false,
-                mutation_flag: None,
-                detach_after_handoff: false,
-                output_file_requested: false,
-                read_only_polling: false,
-                local_output_file: None,
-                durable_agent_task_plan: None,
-                source_path: None,
-                verified_cook_baseline: None,
                 require_controller_git_bundle: true,
-                reuse_compatible_snapshot: false,
-                job_overrides: LabJobOverrides::default(),
+                ..LabOffloadRequest::new(&args)
             };
             let contract = LabOffloadCommand {
                 command: homeboy_core::lab_contract::LabCommandContract {
@@ -2617,26 +2585,10 @@ mod tests {
                 "provider-value".to_string(),
             ];
             let request = LabOffloadRequest {
-                command: None,
                 normalized_args: &args,
                 explicit_runner: Some("lab-review-test-snapshot"),
-                placement: homeboy_cli_contract::Placement::Auto,
-                allow_local_fallback: false,
-                allow_dirty_lab_workspace: false,
-                skip_deps_hydration: false,
-                preserve_workspace_on_failure: false,
-                capture_patch: false,
-                mutation_flag: None,
-                detach_after_handoff: false,
-                output_file_requested: false,
-                read_only_polling: false,
-                local_output_file: None,
-                durable_agent_task_plan: None,
-                source_path: None,
-                verified_cook_baseline: None,
                 require_controller_git_bundle: true,
-                reuse_compatible_snapshot: false,
-                job_overrides: LabJobOverrides::default(),
+                ..LabOffloadRequest::new(&args)
             };
             let contract = LabOffloadCommand {
                 command: homeboy_core::lab_contract::LabCommandContract::portable(
@@ -2804,26 +2756,12 @@ mod tests {
                 ensure_agent_task_lifecycle_identity_with(&args, Some("cook-8009"), None)
                     .expect("canonical cook attempt id");
             let request = LabOffloadRequest {
-                command: None,
                 normalized_args: &args,
                 explicit_runner: Some("lab-managed-worktree-stage"),
                 placement: homeboy_cli_contract::Placement::Lab,
-                allow_local_fallback: false,
-                allow_dirty_lab_workspace: false,
-                skip_deps_hydration: false,
-                preserve_workspace_on_failure: false,
-                capture_patch: false,
-                mutation_flag: None,
                 detach_after_handoff: true,
-                output_file_requested: false,
-                read_only_polling: false,
-                local_output_file: None,
-                durable_agent_task_plan: None,
                 source_path: Some(source.as_path()),
-                verified_cook_baseline: None,
-                require_controller_git_bundle: false,
-                reuse_compatible_snapshot: false,
-                job_overrides: LabJobOverrides::default(),
+                ..LabOffloadRequest::new(&args)
             };
             let mut contract = LabOffloadCommand {
                 command: homeboy_core::lab_contract::LabCommandContract::portable(

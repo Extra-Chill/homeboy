@@ -45,6 +45,44 @@ pub struct LabOffloadRequest<'a> {
     pub job_overrides: LabJobOverrides,
 }
 
+impl<'a> Default for LabOffloadRequest<'a> {
+    fn default() -> Self {
+        Self {
+            command: None,
+            normalized_args: &[],
+            explicit_runner: None,
+            placement: homeboy_cli_contract::Placement::Auto,
+            allow_local_fallback: false,
+            allow_dirty_lab_workspace: false,
+            skip_deps_hydration: false,
+            preserve_workspace_on_failure: false,
+            capture_patch: false,
+            mutation_flag: None,
+            detach_after_handoff: false,
+            output_file_requested: false,
+            read_only_polling: false,
+            local_output_file: None,
+            durable_agent_task_plan: None,
+            source_path: None,
+            verified_cook_baseline: None,
+            require_controller_git_bundle: false,
+            reuse_compatible_snapshot: false,
+            job_overrides: LabJobOverrides::default(),
+        }
+    }
+}
+
+impl<'a> LabOffloadRequest<'a> {
+    /// Creates a request with the neutral offload policy used by focused tests.
+    /// New request fields belong in `Default`, so those fixtures stay valid.
+    pub fn new(normalized_args: &'a [String]) -> Self {
+        Self {
+            normalized_args,
+            ..Self::default()
+        }
+    }
+}
+
 // LabOffloadCommand, LabJobOverrides, LabOffloadOutcome, and the source/workspace
 // mode aliases moved to core's lab_offload module (they are core-plan-based
 // types the core lab_routing service names). Re-exported so runner-internal
