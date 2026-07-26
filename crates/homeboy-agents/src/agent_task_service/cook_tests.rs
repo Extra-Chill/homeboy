@@ -3024,7 +3024,9 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
         options.max_attempts = 2;
         options.no_finalize = false;
         options.head = Some("fix/8058".to_string());
-        options.ai_model = Some("openai/gpt-5.6-terra".to_string());
+        options.ai_tool = "OpenCode".to_string();
+        options.ai_model = Some("openai/gpt-5.6-sol".to_string());
+        options.initial_plan.tasks[0].executor.model = Some("openai/gpt-5.6-sol".to_string());
         super::super::persist_initial_recipe(&options).unwrap();
         agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).unwrap();
         seed_missing_review_form_aggregate(run_id, &options.initial_plan);
@@ -3097,6 +3099,25 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
             std::fs::read_to_string(target.join("lib.rs")).unwrap(),
             "candidate\n"
         );
+        // Attempt A authored the candidate with Sol. Attempt B is the
+        // metadata-only review-form recovery with Terra. Both authenticated
+        // roles must remain visible in the reviewer body.
+        assert!(backend.body.contains("## Summary\ncomplete the task"));
+        assert!(backend
+            .body
+            .contains("Updated `lib.rs` in the delivered candidate."));
+        assert!(backend.body.contains(
+            "**Tool(s):** Implementation: Homeboy (OpenCode); review form: Homeboy (OpenCode)"
+        ));
+        assert!(backend.body.contains(
+            "**Model:** Implementation: openai/gpt-5.6-sol; review form: openai/gpt-5.6-terra"
+        ));
+        assert!(backend.body.contains(
+            "**Used for:** Implementation: Homeboy (OpenCode) authored the delivered candidate changes"
+        ));
+        assert!(backend.body.contains(
+            "Review form: Homeboy (OpenCode) reviewed the validated candidate and supplied the reviewer metadata."
+        ));
         assert!(backend.committed && backend.pushed && backend.created);
     });
 }
