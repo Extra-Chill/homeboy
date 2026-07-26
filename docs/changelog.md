@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.319.0] - 2026-07-26
+
+### Added
+- run an ordered sequence of steps
+
+### Changed
+- Recover committed adoption candidate baselines
+
+### Fixed
+- register harvest in the command spec registry
+- preserve runtime handoff compatibility
+- resolve #[path] mounts when scoping changed Rust tests
+
 ## [0.318.0] - 2026-07-26
 
 ### Added
