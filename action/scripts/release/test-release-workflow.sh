@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKFLOW="${ROOT_DIR}/.github/workflows/release.yml"
 CI_WORKFLOW="${ROOT_DIR}/.github/workflows/ci.yml"
+SELF_TEST_WORKFLOW="${ROOT_DIR}/.github/workflows/self-test.yml"
 RUN_RELEASE="${ROOT_DIR}/scripts/release/run-release.sh"
 README="${ROOT_DIR}/README.md"
 COMMENT_SECTIONS="${ROOT_DIR}/scripts/pr/comment/sections.sh"
@@ -66,6 +67,13 @@ assert_count 'actions/checkout@v4' '3' "${WORKFLOW}" "release workflow uses chec
 assert_count 'actions/create-github-app-token@v2' '1' "${WORKFLOW}" "release workflow uses app-token v2"
 assert_not_contains 'actions/checkout@v6' "${WORKFLOW}" "release workflow does not use unavailable checkout v6"
 assert_not_contains 'actions/create-github-app-token@v3' "${WORKFLOW}" "release workflow does not use unavailable app-token v3"
+
+# Releasing moves the floating v2 tag, so the action's own shell tests must
+# gate publication rather than running advisory-only (or not at all).
+assert_contains 'uses: ./.github/workflows/self-test.yml' "${WORKFLOW}" "release workflow runs the action self-test suite"
+assert_contains '      - self-test' "${WORKFLOW}" "release job is gated on the self-test suite"
+assert_contains 'bash scripts/run-tests.sh' "${SELF_TEST_WORKFLOW}" "self-test workflow runs every action shell test"
+assert_contains 'pull_request' "${SELF_TEST_WORKFLOW}" "self-test workflow also guards pull requests"
 
 assert_contains 'uses: ./' "${WORKFLOW}" "release workflow uses checked-out action code for self-release"
 assert_not_contains 'Extra-Chill/homeboy-action@v2' "${WORKFLOW}" "release workflow is not bootstrapped from the stale floating v2 channel"

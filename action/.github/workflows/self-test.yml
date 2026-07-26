@@ -1,0 +1,37 @@
+# Validation for Homeboy Action's own shell implementation.
+#
+# Distinct from ci.yml, which is the reusable quality workflow this repo
+# publishes for consumers. This one tests the action itself.
+#
+# A release here re-points the floating `v2` tag, so a regression breaks every
+# consumer at once with zero commits in their repositories. These tests are
+# pure bash — no cargo, no network, no homeboy binary (each script stubs its
+# own fake) — so they are cheap enough to gate both pull requests and release.
+
+name: Self Test
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+  workflow_call:
+
+concurrency:
+  group: self-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shell-tests:
+    name: Shell tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # Full history: the scope tests resolve real revisions (`HEAD~1`) against
+      # this checkout, which a shallow clone cannot provide.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run action shell tests
+        run: bash scripts/run-tests.sh
