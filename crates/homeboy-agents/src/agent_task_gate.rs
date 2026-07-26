@@ -15,7 +15,9 @@ use homeboy_core::gate::{
 use homeboy_core::plan::{PlanStep, PlanStepStatus, PlanValues};
 use homeboy_core::{Error, Result};
 
-pub const AGENT_TASK_GATE_REPORT_SCHEMA: &str = "homeboy/agent-task-gate-report/v1";
+// `Skipped` is a new durable terminal state with a structured blocker. Keep it
+// out of v1 so typed consumers can distinguish the expanded state machine.
+pub const AGENT_TASK_GATE_REPORT_SCHEMA: &str = "homeboy/agent-task-gate-report/v2";
 const XDG_ENV_VARS: &[&str] = &[
     "XDG_CONFIG_HOME",
     "XDG_CACHE_HOME",
@@ -1306,6 +1308,10 @@ mod tests {
             HomeboyGateStatus::from(AgentTaskGateStatus::Failed),
             HomeboyGateStatus::Failed
         );
+        assert_eq!(
+            HomeboyGateStatus::from(AgentTaskGateStatus::Skipped),
+            HomeboyGateStatus::Skipped
+        );
     }
 
     #[test]
@@ -1513,6 +1519,39 @@ mod tests {
         assert_eq!(result.evidence.get("stdout"), None);
         assert_eq!(result.evidence.get("stderr"), None);
         assert_eq!(result.provenance["source_type"], "AgentTaskGateReport");
+    }
+
+    #[test]
+    fn skipped_private_gate_preserves_blocker_evidence_without_command_disclosure() {
+        let report = AgentTaskGateReport::skipped(
+            "gate-2",
+            vec![
+                "sh".to_string(),
+                "-lc".to_string(),
+                "private-command --secret".to_string(),
+            ],
+            AgentTaskGateVisibility::Private,
+            AgentTaskGateRevealPolicy::Redacted,
+            "gate-1",
+        );
+
+        assert_eq!(report.schema, AGENT_TASK_GATE_REPORT_SCHEMA);
+        assert_eq!(report.step.status, PlanStepStatus::Skipped);
+        assert_eq!(
+            report
+                .skip_reason
+                .as_ref()
+                .map(|reason| reason.blocking_gate_id.as_str()),
+            Some("gate-1")
+        );
+
+        let result: HomeboyGateResult = report.into();
+        assert_eq!(result.status, HomeboyGateStatus::Skipped);
+        assert_eq!(result.visibility, HomeboyGateVisibility::Private);
+        assert_eq!(result.evidence["skip_reason"]["blocking_gate_id"], "gate-1");
+        assert_eq!(result.evidence.get("command"), None);
+        assert!(!result.summary.contains("private-command"));
+        assert!(result.agent_feedback.is_empty());
     }
 
     #[test]
