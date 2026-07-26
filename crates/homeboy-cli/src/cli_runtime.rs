@@ -180,7 +180,11 @@ impl CliRuntime {
         // Recover completed generic runner-exec jobs before a mutating invocation
         // can evict their evidence. Read-only commands must not mutate durable
         // state during startup.
-        if command_capability == CommandCapability::Mutation {
+        if command_capability == CommandCapability::Mutation
+            && !normalized
+                .windows(2)
+                .any(|args| args == ["agent-task", "promotion-provider"])
+        {
             let _ = crate::runner::reconcile_terminal_runner_exec_runs();
         }
         // Register the runner daemon-exec driver so the daemon's /exec endpoint
@@ -464,6 +468,14 @@ impl CliRuntime {
             }
         }
 
+        // This internal provider's request is carried on process stdin. Execute
+        // it before generic routing or startup work can consume that stream.
+        if let Some(exit_code) =
+            run_promotion_provider_dispatch(&cli.command, output_file.as_deref(), &command_identity)
+        {
+            return std::process::ExitCode::from(exit_code_to_u8(exit_code));
+        }
+
         // Capture controller pressure once before placement routing. The route
         // and persisted evidence reuse this preflight decision rather than
         // probing the host a second time.
@@ -661,6 +673,28 @@ fn run_raw_agent_tool_dispatch(command: &Commands) -> Option<i32> {
             ))
         }
     }
+}
+
+fn run_promotion_provider_dispatch(
+    command: &Commands,
+    output_file: Option<&str>,
+    identity: &output::CommandIdentity,
+) -> Option<i32> {
+    let Commands::AgentTask(args) = command else {
+        return None;
+    };
+    let crate::commands::agent_task::AgentTaskCommand::PromotionProvider(args) = &args.command
+    else {
+        return None;
+    };
+
+    let (result, exit_code) =
+        match crate::commands::agent_task::run::promotion_provider(args.clone()) {
+            Ok((value, exit_code)) => (Ok(value), exit_code),
+            Err(error) => (Err(error), 2),
+        };
+    output_runtime::emit_json_result_for_identity(result, output_file, exit_code, identity);
+    Some(exit_code)
 }
 
 #[cfg(test)]
