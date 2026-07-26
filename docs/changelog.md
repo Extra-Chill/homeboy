@@ -4,6 +4,34 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.316.0] - 2026-07-26
+
+### Added
+- declare homeboy commands that run on a cadence
+
+### Changed
+- isolate release package plan fixture
+- use generic unsupported command
+- bind adoption proof to disclosure fixture
+- defer unproven adoption fixture
+- confine offload request fixtures
+- authenticate Cook disclosure lineage
+
+### Fixed
+- attest Lab runner source snapshots
+- clean release-owned package artifacts
+- ingest declared gate diagnostic sidecars
+- bind disclosure retention to provenance
+- project declared outputs
+- validate form-only gate lineage
+- validate declared outputs
+- consume producer gate diagnostics
+- define required output contract
+- resolve bounded gate diagnostics
+- require structured provider outputs
+- distill gate failure diagnostics
+- preserve AI lineage disclosure
+
 ## [0.315.0] - 2026-07-26
 
 ### Added
