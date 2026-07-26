@@ -185,7 +185,9 @@ def main():
     if not observe() or known_live(known) is None:
         close_pidfds(known)
         return 125
+    leaked_containment = False
     if known_live(known):
+        leaked_containment = True
         if not terminate("finalization found live command containment"):
             close_pidfds(known)
             return 125
@@ -193,7 +195,16 @@ def main():
     close_pidfds(known)
     if output:
         output.close()
-    return 124 if timed_out else exit_code
+    if timed_out:
+        return 124
+    # A command that outlived its own exit by leaking descendants we had to
+    # force-terminate did not finish cleanly, whatever it reported. Strict mode
+    # exists to prove containment, so refuse to launder that into a pass. A real
+    # non-zero exit still wins: it is more actionable than a synthetic timeout.
+    if leaked_containment and exit_code == 0:
+        print(f"::error::{args.label} leaked descendants that outlived the command; reporting containment failure.")
+        return 124
+    return exit_code
 
 
 if __name__ == "__main__":
