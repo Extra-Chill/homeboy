@@ -4,6 +4,26 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.319.2] - 2026-07-26
+
+### Fixed
+- run gate preflight in the invocation temp dir
+- preserve promotion hydration policy
+- atomically revalidate ssh workspace prune
+- harden workspace prune probes
+- harden terminal scratch recovery
+- validate scoped Cook continuation
+- bound promotion dependency setup
+- gracefully clean interrupted children
+- gate recovery publication on asset authority
+- persist interrupted child evidence
+- fail closed workspace prune liveness
+- establish authoritative publication assets
+- scope adopted candidates to parent base
+- Fix scoped Cook continuation recovery
+- recover stale terminal scratch
+- hydrate nested promotion dependencies
+
 ## [0.319.1] - 2026-07-26
 
 ### Changed
