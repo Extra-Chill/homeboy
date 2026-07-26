@@ -1356,7 +1356,9 @@ fn cleanup_actionable(
         }
         actionable.next_actions.push(CommandNextAction::new(
             format!("{} cleanup", category.category.replace('_', " ")),
-            if apply || category.category == TASK_WORKTREES_METADATA.category {
+            if category.category == REPO_ARTIFACTS_METADATA.category {
+                apply_command(&category.canonical_cleanup_command)
+            } else if apply || category.category == TASK_WORKTREES_METADATA.category {
                 category.specialist_command.clone()
             } else {
                 apply_command(&category.specialist_command)
