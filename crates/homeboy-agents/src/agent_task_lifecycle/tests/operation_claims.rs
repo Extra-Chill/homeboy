@@ -11,8 +11,8 @@ use serde_json::json;
 
 use super::*;
 use crate::agent_task_lifecycle::{
-    claim_cook_operation, complete_cook_operation, operation_claim, operation_lease_is_active,
-    ClaimOutcome, ClaimState,
+    claim_cook_operation, complete_cook_operation, fail_cook_operation, operation_claim,
+    operation_lease_is_active, ClaimOutcome, ClaimState,
 };
 use homeboy_core::test_support::with_isolated_home;
 
@@ -129,6 +129,64 @@ fn active_lease_is_reported_until_completion() {
             !operation_lease_is_active("op-claim-7", "promote:live").expect("inactive"),
             "a completed operation no longer holds an active lease"
         );
+    });
+}
+
+#[test]
+fn failed_claim_preserves_diagnostic_and_is_reclaimable_by_explicit_continuation() {
+    with_isolated_home(|_| {
+        seed_run("op-claim-failed");
+        let key = "promote:failed";
+        claim_cook_operation("op-claim-failed", key, LEASE).expect("claim");
+        fail_cook_operation(
+            "op-claim-failed",
+            key,
+            json!({"status":"failed","code":"ValidationInvalidArgument","message":"malformed response"}),
+        )
+        .expect("terminalize failure");
+        let failed = operation_claim("op-claim-failed", key)
+            .expect("read")
+            .expect("claim");
+        assert_eq!(failed.state, ClaimState::Failed);
+        assert_eq!(failed.result.unwrap()["message"], "malformed response");
+        assert_eq!(
+            claim_cook_operation("op-claim-failed", key, LEASE).expect("explicit retry"),
+            ClaimOutcome::Acquired
+        );
+    });
+}
+
+#[test]
+fn dead_owner_claim_is_reclaimed_without_waiting_for_lease_expiry() {
+    with_isolated_home(|_| {
+        seed_run("op-claim-dead-owner");
+        let key = "promote:dead";
+        claim_cook_operation("op-claim-dead-owner", key, LEASE).expect("claim");
+        rewrite_record_for_test("op-claim-dead-owner", |record| {
+            record.metadata["cook_operation_claims"][0]["owner_pid"] = json!(u32::MAX);
+        })
+        .expect("write dead owner");
+        assert_eq!(
+            claim_cook_operation("op-claim-dead-owner", key, LEASE).expect("reclaim dead owner"),
+            ClaimOutcome::Acquired
+        );
+    });
+}
+
+#[test]
+fn live_owner_claim_remains_held_without_side_effect_reentry() {
+    with_isolated_home(|_| {
+        seed_run("op-claim-live-owner");
+        let key = "promote:live-owner";
+        claim_cook_operation("op-claim-live-owner", key, LEASE).expect("claim");
+        assert_eq!(
+            claim_cook_operation("op-claim-live-owner", key, LEASE).expect("observe live owner"),
+            ClaimOutcome::LeaseHeld
+        );
+        let claim = operation_claim("op-claim-live-owner", key)
+            .expect("read")
+            .expect("claim");
+        assert_eq!(claim.owner_pid, Some(std::process::id()));
     });
 }
 

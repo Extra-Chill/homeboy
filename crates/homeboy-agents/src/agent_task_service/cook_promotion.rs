@@ -1786,7 +1786,32 @@ fn cook_failure_context(
         .map(|record| format!("{:?}", record.state))
         .unwrap_or_else(|| "recipe_persisted_without_lifecycle_record".to_string());
     let recovery_legal = record.is_some();
-    let legal_actions = recovery_legal
+    let promotion_claim =
+        agent_task_lifecycle::operation_claim(&latest_run_id, &format!("promote:{latest_run_id}"))
+            .ok()
+            .flatten();
+    let blocking_claim = promotion_claim.as_ref().and_then(|claim| {
+        (claim.state == agent_task_lifecycle::ClaimState::Running)
+            .then(|| serde_json::to_value(claim).unwrap_or(Value::Null))
+    });
+    let diagnostic = promotion_claim
+        .as_ref()
+        .filter(|claim| claim.state == agent_task_lifecycle::ClaimState::Failed)
+        .and_then(|claim| claim.result.clone());
+    let (phase, reason_code) = if blocking_claim.is_some() {
+        ("promotion".to_string(), "operation_in_progress".to_string())
+    } else if let Some(diagnostic) = diagnostic.as_ref() {
+        (
+            "promotion".to_string(),
+            diagnostic["code"]
+                .as_str()
+                .unwrap_or("promotion_rejected")
+                .to_string(),
+        )
+    } else {
+        ("provider".to_string(), lifecycle_state.to_ascii_lowercase())
+    };
+    let mut legal_actions = recovery_legal
         .then(|| {
             vec![
                 super::AgentTaskCookRecoveryAction {
@@ -1804,11 +1829,24 @@ fn cook_failure_context(
             ]
         })
         .unwrap_or_default();
+    if blocking_claim.is_some() {
+        legal_actions.insert(
+            2,
+            super::AgentTaskCookRecoveryAction {
+                action: "reconcile".to_string(),
+                command: format!("homeboy agent-task reconcile {latest_run_id} --dry-run"),
+            },
+        );
+    }
     Some(super::AgentTaskCookFailureContext {
         cook_id: cook_id.to_string(),
         latest_run_id,
         durable_recipe_ref: format!("homeboy://agent-task/cooks/{cook_id}/recipe"),
         lifecycle_state,
+        phase,
+        reason_code,
+        diagnostic,
+        blocking_claim,
         provider_budget_consumed: provider_executions_consumed > 0,
         provider_executions_consumed,
         recovery_legal,
@@ -1817,6 +1855,7 @@ fn cook_failure_context(
         } else {
             "No recovery command is legal because the durable recipe has no lifecycle record. Start a fresh Cook after preserving the recipe reference for investigation.".to_string()
         },
+        next_actions: legal_actions.clone(),
         legal_actions,
     })
 }

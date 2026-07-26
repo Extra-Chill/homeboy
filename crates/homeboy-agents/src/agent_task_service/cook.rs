@@ -335,11 +335,31 @@ fn promote_with_operation_claim(
         // `promote_or_load_attempt` still resolves an already-produced promotion;
         // if none exists yet, promotion proceeds (content-addressed and idempotent
         // on disk). Do not mark the claim completed from here — its owner does.
-        agent_task_lifecycle::ClaimOutcome::LeaseHeld => promote_or_load_attempt(options, run_id),
+        agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
+            let claim = agent_task_lifecycle::operation_claim(run_id, &operation_key)?;
+            let mut error = Error::validation_invalid_argument(
+                "promotion_operation",
+                "operation_in_progress",
+                Some(operation_key),
+                Some(vec![format!("homeboy agent-task cook-continue {run_id}")]),
+            );
+            error.details["claim"] = serde_json::to_value(claim).unwrap_or(Value::Null);
+            Err(error)
+        }
         // This pass owns the operation. Promote, then record the result as the
         // claim's immutable completion.
         agent_task_lifecycle::ClaimOutcome::Acquired => {
-            let promotion = promote_or_load_attempt(options, run_id)?;
+            let promotion = match promote_or_load_attempt(options, run_id) {
+                Ok(promotion) => promotion,
+                Err(error) => {
+                    agent_task_lifecycle::fail_cook_operation(
+                        run_id,
+                        &operation_key,
+                        bounded_error_diagnostic(&error),
+                    )?;
+                    return Err(error);
+                }
+            };
             agent_task_lifecycle::complete_cook_operation(
                 run_id,
                 &operation_key,
@@ -348,6 +368,49 @@ fn promote_with_operation_claim(
             )?;
             Ok(promotion)
         }
+    }
+}
+
+fn bounded_error_diagnostic(error: &Error) -> Value {
+    let mut details = homeboy_core::redaction::redact_json(&error.details);
+    bound_diagnostic_value(&mut details, 0);
+    serde_json::json!({
+        "status": "failed",
+        "code": format!("{:?}", error.code),
+        "message": truncate_diagnostic_text(&homeboy_core::redaction::redact_string(&error.message)),
+        "details": details,
+    })
+}
+
+fn bound_diagnostic_value(value: &mut Value, depth: usize) {
+    if depth >= 4 {
+        *value = Value::String("[omitted: diagnostic depth limit]".to_string());
+        return;
+    }
+    match value {
+        Value::String(text) => *text = truncate_diagnostic_text(text),
+        Value::Array(items) => {
+            items.truncate(8);
+            for item in items {
+                bound_diagnostic_value(item, depth + 1);
+            }
+        }
+        Value::Object(entries) => {
+            for item in entries.values_mut() {
+                bound_diagnostic_value(item, depth + 1);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn truncate_diagnostic_text(text: &str) -> String {
+    const LIMIT: usize = 2048;
+    if text.len() <= LIMIT {
+        text.to_string()
+    } else {
+        let prefix: String = text.chars().take(LIMIT).collect();
+        format!("{prefix}...[truncated]")
     }
 }
 
@@ -630,12 +693,20 @@ pub struct AgentTaskCookFailureContext {
     pub latest_run_id: String,
     pub durable_recipe_ref: String,
     pub lifecycle_state: String,
+    pub phase: String,
+    pub reason_code: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocking_claim: Option<Value>,
     pub provider_budget_consumed: bool,
     pub provider_executions_consumed: u64,
     pub recovery_legal: bool,
     pub recovery_reason: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub legal_actions: Vec<AgentTaskCookRecoveryAction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<AgentTaskCookRecoveryAction>,
 }
 
 /// An exact command that is legal for the durable Cook state.

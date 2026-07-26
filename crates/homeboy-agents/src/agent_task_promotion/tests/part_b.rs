@@ -1922,5 +1922,7 @@ fn provider_response_validation_distinguishes_json_schema_and_required_field_err
         .expect_err("invalid provider response");
 
         assert!(error.message.contains(expected), "{}", error.message);
+        assert_eq!(error.details["command_evidence"]["exit_code"], 0);
+        assert_eq!(error.details["command_evidence"]["stdout"], response);
     }
 }
