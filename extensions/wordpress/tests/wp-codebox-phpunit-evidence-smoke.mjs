@@ -1,3 +1,6 @@
+/**
+ * External dependencies
+ */
 import { strict as assert } from 'node:assert';
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';

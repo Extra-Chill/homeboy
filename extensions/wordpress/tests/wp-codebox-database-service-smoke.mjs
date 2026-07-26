@@ -1,3 +1,6 @@
+/**
+ * External dependencies
+ */
 import { strict as assert } from 'node:assert';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -17,6 +20,19 @@ await writeFile(path.join(dependency, 'composer.json'), '{}\n');
 await writeFile(cli, `#!/usr/bin/env node
 import { appendFile, readFile, writeFile } from 'node:fs/promises';
 const args = process.argv.slice(2);
+if (args[0] === 'runtime' && args[1] === 'descriptor') {
+  const capabilities = process.env.OMIT_NATIVE_DATABASE_CAPABILITY === '1' ? [] : ['runtime-service:mysql:native:mariadb'];
+  process.stdout.write(JSON.stringify({
+    schema: 'wp-codebox/runtime-descriptor/v1',
+    capabilities,
+    contractManifest: {
+      capabilities: {
+        runtimeServices: { schema: 'wp-codebox/runtime-service-capabilities/v1', capabilities },
+      },
+    },
+  }));
+  process.exit(0);
+}
 if (args[0] === 'recipe' && args[1] === 'build') {
   const options = JSON.parse(await readFile(args[args.indexOf('--options') + 1], 'utf8'));
   const configuration = options.services?.[0]?.configuration || {};
@@ -95,6 +111,58 @@ try {
   assert.equal('secretEnv' in defaultBuild, false, 'omitted provider adds no secret declarations');
   assert.equal(defaultBuild.databaseType, 'mysql');
   assert.equal(defaultBuild.multisite, true);
+
+  const inheritedSecret = 'must-not-enter-native-recipe';
+  const nativeInvocation = invoke({
+    database_type: 'mysql',
+    wp_codebox_multisite: true,
+    wp_codebox_database_service: { provider: 'native', engine: 'mariadb' },
+  }, { PROVIDER_ADMIN_PASSWORD: inheritedSecret });
+  assert.equal(nativeInvocation.result.status, 0, nativeInvocation.result.stderr);
+  const nativeObservations = await observations(nativeInvocation.observed);
+  assert.deepEqual(nativeObservations[0].options.services, [{
+    id: 'wordpress-database',
+    kind: 'mysql',
+    configuration: { provider: 'native', engine: 'mariadb' },
+    outputs: { host: 'DB_HOST', port: 'DB_PORT', username: 'DB_USER', password: 'DB_PASSWORD', database: 'DB_NAME' },
+  }]);
+  assert.equal('secretEnv' in nativeObservations[0].options, false, 'native mode inherits no caller secret declaration');
+  assert.equal(JSON.stringify(nativeObservations).includes(inheritedSecret), false, 'native recipe translation contains no ambient secret values');
+  assert.equal(nativeObservations[1].args.includes('--approve-external-service-writes'), false, 'native mode requires no external-write approval');
+  assert.equal(nativeObservations[1].args.includes('--policy'), false, 'native mode preserves the WP Codebox default network policy');
+  assert.equal('externalServices' in nativeObservations[1].recipe.inputs, false, 'native mode adds no external-service boundary');
+
+  const missingNativeCapability = expectPreflightFailure({
+    database_type: 'mysql',
+    wp_codebox_database_service: { provider: 'native', engine: 'mariadb' },
+  }, /does not advertise the required native MariaDB service capability/, { OMIT_NATIVE_DATABASE_CAPABILITY: '1' });
+  assert.deepEqual(await observations(missingNativeCapability.observed), [], 'missing upstream capability fails before recipe build');
+
+  for (const engine of [undefined, 'mysql', 'unsupported', 42]) {
+    const rejectedEngine = expectPreflightFailure({
+      database_type: 'mysql',
+      wp_codebox_database_service: { provider: 'native', ...(engine === undefined ? {} : { engine }) },
+    }, /native provider requires engine=mariadb/);
+    assert.deepEqual(await observations(rejectedEngine.observed), [], 'unsupported native engines fail before recipe build');
+    if (engine !== undefined) {
+      assert.equal(rejectedEngine.result.stderr.includes(String(engine)), false, 'native engine diagnostics omit rejected values');
+    }
+  }
+
+  for (const field of ['secret_env', 'allowed_hosts', 'host', 'port', 'username', 'password', 'socket', 'config', 'defaults', 'datadir', 'pid_path', 'log_path', 'externalService', 'args']) {
+    const forbiddenField = expectPreflightFailure({
+      database_type: 'mysql',
+      wp_codebox_database_service: { provider: 'native', engine: 'mariadb', [field]: 'forbidden-native-value' },
+    }, /contains unsupported fields/);
+    assert.deepEqual(await observations(forbiddenField.observed), [], 'native connection, administration, path, and process fields fail before recipe build');
+    assert.equal(forbiddenField.result.stderr.includes('forbidden-native-value'), false, 'native field diagnostics omit rejected values');
+  }
+
+  const nativeDatabaseMismatch = expectPreflightFailure({
+    database_type: 'sqlite',
+    wp_codebox_database_service: { provider: 'native', engine: 'mariadb' },
+  }, /requires database_type=mysql/);
+  assert.deepEqual(await observations(nativeDatabaseMismatch.observed), [], 'native database type mismatch fails before recipe build');
 
   const secretValues = {
     PROVIDER_ADMIN_HOST: 'database.internal.example',
@@ -205,15 +273,15 @@ try {
   const missingProvider = expectPreflightFailure({
     database_type: 'mysql',
     wp_codebox_database_service: { secret_env: { host: 'PROVIDER_ADMIN_HOST', username: 'PROVIDER_ADMIN_USER', password: 'PROVIDER_ADMIN_PASSWORD' } },
-  }, /provider must be external/, secretValues);
+  }, /provider must be external or native/, secretValues);
   assert.deepEqual(await observations(missingProvider.observed), [], 'missing provider fails before WP Codebox execution');
 
   for (const provider of ['docker', 'unregistered', 42]) {
     const rejectedProvider = expectPreflightFailure({
       ...configured,
       wp_codebox_database_service: { ...configured.wp_codebox_database_service, provider },
-    }, /provider must be external/, secretValues);
-    assert.deepEqual(await observations(rejectedProvider.observed), [], 'non-external providers fail before recipe build');
+    }, /provider must be external or native/, secretValues);
+    assert.deepEqual(await observations(rejectedProvider.observed), [], 'unsupported providers fail before recipe build');
     assert.equal(rejectedProvider.result.stderr.includes(String(provider)), false, 'provider diagnostics omit rejected values');
   }
 
