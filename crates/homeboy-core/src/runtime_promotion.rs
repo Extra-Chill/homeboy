@@ -5,10 +5,12 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fs;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::rc::Rc;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -22,7 +24,7 @@ const ADMISSION_LOCK_FILE: &str = "admission.lock";
 const PIN_DIR: &str = "pins";
 const DEFAULT_TTL: Duration = Duration::from_secs(30 * 60);
 const PIN_DRAIN_POLL: Duration = Duration::from_millis(100);
-const SUBPROCESS_LEASE_ENV: &str = "HOMEBOY_RUNTIME_PROMOTION_LEASE";
+pub const SUBPROCESS_LEASE_ENV: &str = "HOMEBOY_RUNTIME_PROMOTION_LEASE";
 // Directory creation publishes the lock before its atomically-renamed record.
 // Give concurrent readers a bounded window to observe that publication.
 const ACQUIRE_DISAPPEARED_LEASE_RETRIES: usize = 20;
@@ -65,6 +67,33 @@ thread_local! {
     // Direct reentrancy is deliberately capability-based. A matching PID alone
     // is not ownership evidence because PIDs are reusable after a restart.
     static LOCAL_LEASE_CAPABILITIES: RefCell<Vec<SubprocessLeaseCapability>> = const { RefCell::new(Vec::new()) };
+    static SUBPROCESS_CAPABILITY_SUPPRESSION_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Suppresses inherited subprocess promotion authority on the current thread.
+/// The guard is deliberately not transferable to another thread.
+pub struct SubprocessCapabilitySuppressionGuard {
+    _not_send: PhantomData<Rc<()>>,
+}
+
+impl Drop for SubprocessCapabilitySuppressionGuard {
+    fn drop(&mut self) {
+        SUBPROCESS_CAPABILITY_SUPPRESSION_DEPTH.with(|depth| {
+            depth.set(
+                depth
+                    .get()
+                    .checked_sub(1)
+                    .expect("runtime promotion suppression guard depth"),
+            );
+        });
+    }
+}
+
+pub fn suppress_subprocess_capability_from_env() -> SubprocessCapabilitySuppressionGuard {
+    SUBPROCESS_CAPABILITY_SUPPRESSION_DEPTH.with(|depth| depth.set(depth.get() + 1));
+    SubprocessCapabilitySuppressionGuard {
+        _not_send: PhantomData,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -469,6 +498,18 @@ pub fn takeover_stale_lease() -> Result<RuntimePromotionTakeover> {
     })
 }
 
+/// Conservatively report whether optional state mutation must avoid promotion
+/// state. Inspection failures cannot prove that the lease is absent.
+pub fn lease_may_be_present() -> bool {
+    paths::runtime_promotion_dir()
+        .map(|root| lease_may_be_present_at(&root.join(LEASE_DIR)))
+        .unwrap_or(true)
+}
+
+fn lease_may_be_present_at(path: &Path) -> bool {
+    path.try_exists().unwrap_or(true)
+}
+
 fn archive_stale_lease(
     root: &Path,
     path: &Path,
@@ -545,7 +586,16 @@ fn read_record_for_acquisition(
 }
 
 fn subprocess_capability_from_env() -> Option<SubprocessLeaseCapability> {
-    let encoded = std::env::var(SUBPROCESS_LEASE_ENV).ok()?;
+    subprocess_capability_from(|| std::env::var(SUBPROCESS_LEASE_ENV).ok())
+}
+
+fn subprocess_capability_from(
+    read: impl FnOnce() -> Option<String>,
+) -> Option<SubprocessLeaseCapability> {
+    if SUBPROCESS_CAPABILITY_SUPPRESSION_DEPTH.with(|depth| depth.get() > 0) {
+        return None;
+    }
+    let encoded = read()?;
     let payload = URL_SAFE_NO_PAD.decode(encoded).ok()?;
     serde_json::from_slice(&payload).ok()
 }
@@ -1011,6 +1061,43 @@ mod tests {
             generation: record.generation.clone(),
             capability: record.capability.clone(),
         }
+    }
+
+    fn encoded_capability(record: &RuntimePromotionLeaseRecord) -> String {
+        URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&capability(record)).expect("serialize test capability"))
+    }
+
+    #[test]
+    fn subprocess_capability_suppression_is_scoped_to_the_current_thread() {
+        let encoded = encoded_capability(&lease_record());
+        assert!(subprocess_capability_from(|| Some(encoded.clone())).is_some());
+
+        let outer = suppress_subprocess_capability_from_env();
+        assert!(subprocess_capability_from(|| Some(encoded.clone())).is_none());
+        let nested = suppress_subprocess_capability_from_env();
+        assert!(subprocess_capability_from(|| Some(encoded.clone())).is_none());
+
+        let other_thread = std::thread::spawn({
+            let encoded = encoded.clone();
+            move || subprocess_capability_from(|| Some(encoded)).is_some()
+        });
+        assert!(other_thread.join().expect("other thread exits"));
+
+        drop(nested);
+        assert!(subprocess_capability_from(|| Some(encoded.clone())).is_none());
+        drop(outer);
+        assert!(subprocess_capability_from(|| Some(encoded)).is_some());
+    }
+
+    #[test]
+    fn lease_presence_inspection_fails_closed() {
+        let root = tempfile::tempdir().expect("temporary promotion root");
+        let lease = root.path().join("promotion.lock");
+        assert!(!lease_may_be_present_at(&lease));
+        fs::create_dir(&lease).expect("create promotion lease");
+        assert!(lease_may_be_present_at(&lease));
+        assert!(lease_may_be_present_at(Path::new("\0")));
     }
 
     #[test]

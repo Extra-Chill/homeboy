@@ -29,14 +29,18 @@ fn hermetic_fixture_command_cannot_use_operator_paths_or_installed_homeboy() {
     let command = context.command(TestBinary::HomeboyFixture);
     let configured_env = command
         .get_envs()
-        .map(|(key, value)| {
-            (
+        .filter_map(|(key, value)| match value {
+            Some(value) => Some((
                 key.to_string_lossy().into_owned(),
-                value
-                    .expect("hermetic context only sets values")
-                    .to_string_lossy()
-                    .into_owned(),
-            )
+                value.to_string_lossy().into_owned(),
+            )),
+            None if key == homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV
+                || key == homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV
+                || key == homeboy_core::runtime_promotion::SUBPROCESS_LEASE_ENV =>
+            {
+                None
+            }
+            None => panic!("unexpected removed hermetic environment entry: {key:?}"),
         })
         .collect::<std::collections::BTreeMap<_, _>>();
 

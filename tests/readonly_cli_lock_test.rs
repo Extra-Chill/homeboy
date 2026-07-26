@@ -96,6 +96,16 @@ fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
             "mutation exclusion must report typed promotion contention: {}",
             String::from_utf8_lossy(&output.stdout)
         );
+        assert_eq!(
+            git_metadata_snapshot(&repository),
+            git_before,
+            "blocked upgrade changed Git metadata"
+        );
+        assert_eq!(
+            filesystem_snapshot(home),
+            home_before,
+            "blocked upgrade changed config, HOME, or held promotion lease state"
+        );
     });
 }
 
@@ -104,6 +114,7 @@ fn run_with_timeout(args: &[&str], home: &std::path::Path, timeout: Duration) ->
         .args(args)
         .env("HOME", home)
         .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+        .env_remove(homeboy::core::runtime_promotion::SUBPROCESS_LEASE_ENV)
         .current_dir(home)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -145,6 +156,7 @@ fn create_repository(home: &std::path::Path) -> PathBuf {
     ] {
         let status = Command::new("git")
             .args(args)
+            .env_remove(homeboy::core::runtime_promotion::SUBPROCESS_LEASE_ENV)
             .current_dir(&repository)
             .status()
             .expect("configure test repository");
