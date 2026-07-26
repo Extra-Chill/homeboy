@@ -1243,6 +1243,7 @@ mod tests {
                 allow_local_fallback: false,
                 allow_dirty_lab_workspace: false,
                 skip_deps_hydration: false,
+                preserve_workspace_on_failure: false,
                 capture_patch: false,
                 mutation_flag: None,
                 detach_after_handoff: false,

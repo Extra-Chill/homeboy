@@ -935,8 +935,6 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
-
     #[cfg(unix)]
     #[test]
     fn failed_durable_spawn_registration_reaps_the_isolated_gate_group() {
@@ -1250,7 +1248,7 @@ mod tests {
 
     #[test]
     fn isolated_gate_does_not_observe_ambient_durable_recipes_runs_or_runtime_liveness() {
-        let _guard = ENV_MUTEX.lock().expect("env lock");
+        let mut environment = homeboy_core::test_support::TestEnvironmentGuard::new();
         let worktree = tempfile::tempdir().expect("worktree");
         let ambient = tempfile::tempdir().expect("ambient state");
         let home = ambient.path().join("home");
@@ -1259,9 +1257,9 @@ mod tests {
         fs::create_dir_all(home.join(".homeboy/recipes")).expect("ambient recipe directory");
         fs::create_dir_all(xdg_state.join("runs/active")).expect("ambient run directory");
         fs::create_dir_all(xdg_runtime.join("homeboy-live")).expect("ambient runtime directory");
-        std::env::set_var("HOME", &home);
-        std::env::set_var("XDG_STATE_HOME", &xdg_state);
-        std::env::set_var("XDG_RUNTIME_DIR", &xdg_runtime);
+        environment.set("HOME", &home);
+        environment.set("XDG_STATE_HOME", &xdg_state);
+        environment.set("XDG_RUNTIME_DIR", &xdg_runtime);
 
         let report = run_gate_command(
             worktree.path(),
@@ -1269,10 +1267,6 @@ mod tests {
             "test ! -e \"$HOME/.homeboy/recipes\" && test ! -e \"$XDG_STATE_HOME/runs/active\" && test ! -e \"$XDG_RUNTIME_DIR/homeboy-live\"",
         )
         .expect("isolated gate report");
-
-        std::env::remove_var("HOME");
-        std::env::remove_var("XDG_STATE_HOME");
-        std::env::remove_var("XDG_RUNTIME_DIR");
 
         assert_eq!(report.status, AgentTaskGateStatus::Succeeded);
         assert!(report

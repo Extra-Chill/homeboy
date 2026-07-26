@@ -2535,6 +2535,35 @@ fn cook_batch_aggregate_outcome_matrix_distinguishes_success_partial_and_failure
 #[test]
 fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_completion() {
     homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("temporary detached cook repository");
+        let primary = temp.path().join("primary");
+        let task_worktree = temp.path().join("detached");
+        std::fs::create_dir(&primary).expect("create primary repository");
+        for args in [
+            ["init", "-q"].as_slice(),
+            ["config", "user.email", "agent@example.test"].as_slice(),
+            ["config", "user.name", "Agent"].as_slice(),
+        ] {
+            homeboy_core::test_support::run_git_fixture_command(&primary, args);
+        }
+        std::fs::write(primary.join("README.md"), "detached cook\n").expect("write fixture");
+        homeboy_core::test_support::run_git_fixture_command(&primary, &["add", "README.md"]);
+        homeboy_core::test_support::run_git_fixture_command(
+            &primary,
+            &["commit", "-q", "-m", "initial"],
+        );
+        homeboy_core::test_support::run_git_fixture_command(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "detached-cook",
+                task_worktree.to_str().expect("UTF-8 fixture path"),
+            ],
+        );
+
         let run_id = "cook-detached-attempt-1";
         let plan = AgentTaskPlan::new(
             "cook-detached",
@@ -2555,7 +2584,10 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
                 instructions: "complete the task".to_string(),
                 inputs: Value::Null,
                 source_refs: Vec::new(),
-                workspace: AgentTaskWorkspace::default(),
+                workspace: AgentTaskWorkspace {
+                    root: Some(task_worktree.display().to_string()),
+                    ..Default::default()
+                },
                 component_contracts: Vec::new(),
                 policy: AgentTaskPolicy::default(),
                 limits: AgentTaskLimits::default(),
@@ -2569,8 +2601,8 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
                 cook_id: "cook-detached".to_string(),
                 initial_run_id: run_id.to_string(),
                 initial_plan: plan,
-                to_worktree: "fixture@detached".to_string(),
-                source_worktree_path: None,
+                to_worktree: task_worktree.display().to_string(),
+                source_worktree_path: Some(task_worktree),
                 // This test covers handoff only; an explicit transport
                 // intentionally bypasses configured-provider preflight.
                 provider_command: Some("fixture-promotion-provider".to_string()),
@@ -2595,7 +2627,7 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
         )
         .expect("accepted detached cook returns");
 
-        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.exit_code, 0, "{:#?}", result.value);
         assert_eq!(result.value.status, "in_flight");
         assert_eq!(result.value.attempts.len(), 1);
         assert_eq!(result.value.attempts[0].run_id, run_id);

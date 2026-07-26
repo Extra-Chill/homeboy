@@ -1562,8 +1562,12 @@ mod tests {
             // A finalized, clean, terminal resource WITHIN its P7D window is
             // skipped by default but becomes eligible with `Some(0)` override.
             let root = tempfile::tempdir().expect("root");
-            let scratch = root.path().join("scratch");
-            fs::create_dir(&scratch).expect("scratch");
+            let remote = root.path().join("remote.git");
+            run_git(
+                root.path(),
+                &["init", "--bare", remote.to_str().expect("remote")],
+            );
+            let scratch = clean_checkout(root.path(), &remote, "scratch");
             let mut resource = resource(&scratch, root.path());
             resource.lifecycle_state = "released".to_string();
             resource.retention = "P7D".to_string();

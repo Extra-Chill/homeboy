@@ -1,3 +1,4 @@
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -156,7 +157,11 @@ impl Default for HermeticTestContext {
 
 pub struct HomeGuard {
     prior: Option<String>,
+    prior_xdg_config_home: Option<String>,
+    prior_xdg_cache_home: Option<String>,
     prior_xdg_data_home: Option<String>,
+    prior_xdg_state_home: Option<String>,
+    prior_xdg_runtime_dir: Option<String>,
     prior_artifact_root: Option<String>,
     prior_runtime_tmpdir: Option<String>,
     prior_invocation_runtime: Option<String>,
@@ -187,6 +192,59 @@ pub struct AuditHomeGuard {
 }
 
 pub struct ArtifactRootOverrideGuard;
+
+/// Owns process-environment mutations under the same lock as [`HomeGuard`].
+///
+/// Tests that need specific ambient values, rather than an isolated home, must
+/// use this guard so they cannot rewrite another test's Homeboy state.
+pub struct TestEnvironmentGuard {
+    prior: Vec<(OsString, Option<OsString>)>,
+    _guard: MutexGuard<'static, ()>,
+}
+
+impl TestEnvironmentGuard {
+    pub fn new() -> Self {
+        Self {
+            prior: Vec::new(),
+            _guard: env_lock(),
+        }
+    }
+
+    pub fn set(&mut self, name: impl AsRef<OsStr>, value: impl AsRef<OsStr>) {
+        self.remember(name.as_ref());
+        std::env::set_var(name, value);
+    }
+
+    pub fn remove(&mut self, name: impl AsRef<OsStr>) {
+        self.remember(name.as_ref());
+        std::env::remove_var(name);
+    }
+
+    fn remember(&mut self, name: &OsStr) {
+        if self.prior.iter().any(|(existing, _)| existing == name) {
+            return;
+        }
+        self.prior
+            .push((name.to_os_string(), std::env::var_os(name)));
+    }
+}
+
+impl Default for TestEnvironmentGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for TestEnvironmentGuard {
+    fn drop(&mut self) {
+        for (name, value) in self.prior.iter().rev() {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+}
 
 impl ArtifactRootOverrideGuard {
     pub fn new(path: PathBuf) -> Self {
@@ -228,7 +286,11 @@ impl HomeGuard {
         let guard = home_lock().lock().unwrap_or_else(|e| e.into_inner());
         reset_cached_test_state();
         let prior = std::env::var("HOME").ok();
+        let prior_xdg_config_home = std::env::var("XDG_CONFIG_HOME").ok();
+        let prior_xdg_cache_home = std::env::var("XDG_CACHE_HOME").ok();
         let prior_xdg_data_home = std::env::var("XDG_DATA_HOME").ok();
+        let prior_xdg_state_home = std::env::var("XDG_STATE_HOME").ok();
+        let prior_xdg_runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok();
         let prior_artifact_root = std::env::var("HOMEBOY_ARTIFACT_ROOT").ok();
         let prior_runtime_tmpdir = std::env::var("HOMEBOY_RUNTIME_TMPDIR").ok();
         let prior_invocation_runtime =
@@ -248,9 +310,13 @@ impl HomeGuard {
         // exec-capable root.
         let context = HermeticTestContext::new();
         std::env::set_var("HOME", context.home());
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CACHE_HOME");
         // Preserve the legacy in-process defaults while the subprocess context
         // uses explicit paths. These tests exercise fallback path resolution.
         std::env::set_var("XDG_DATA_HOME", context.home().join(".local").join("share"));
+        std::env::remove_var("XDG_STATE_HOME");
+        std::env::remove_var("XDG_RUNTIME_DIR");
         std::env::remove_var("HOMEBOY_ARTIFACT_ROOT");
         std::env::set_var("HOMEBOY_NO_UPDATE_CHECK", "1");
         std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", context.runtime_dir());
@@ -279,7 +345,11 @@ impl HomeGuard {
         );
         Self {
             prior,
+            prior_xdg_config_home,
+            prior_xdg_cache_home,
             prior_xdg_data_home,
+            prior_xdg_state_home,
+            prior_xdg_runtime_dir,
             prior_artifact_root,
             prior_runtime_tmpdir,
             prior_invocation_runtime,
@@ -545,9 +615,25 @@ impl Drop for HomeGuard {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
         }
+        match &self.prior_xdg_config_home {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match &self.prior_xdg_cache_home {
+            Some(value) => std::env::set_var("XDG_CACHE_HOME", value),
+            None => std::env::remove_var("XDG_CACHE_HOME"),
+        }
         match &self.prior_xdg_data_home {
             Some(value) => std::env::set_var("XDG_DATA_HOME", value),
             None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+        match &self.prior_xdg_state_home {
+            Some(value) => std::env::set_var("XDG_STATE_HOME", value),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
+        match &self.prior_xdg_runtime_dir {
+            Some(value) => std::env::set_var("XDG_RUNTIME_DIR", value),
+            None => std::env::remove_var("XDG_RUNTIME_DIR"),
         }
         match &self.prior_artifact_root {
             Some(value) => std::env::set_var("HOMEBOY_ARTIFACT_ROOT", value),

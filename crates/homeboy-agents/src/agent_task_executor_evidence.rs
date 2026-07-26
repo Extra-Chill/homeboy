@@ -187,9 +187,6 @@ mod tests {
         AGENT_TASK_REQUEST_SCHEMA,
     };
     use serde_json::Map;
-    use std::sync::Mutex;
-
-    static ARTIFACT_ROOT_LOCK: Mutex<()> = Mutex::new(());
 
     fn test_request() -> AgentTaskRequest {
         AgentTaskRequest {
@@ -245,12 +242,12 @@ mod tests {
     }
 
     fn with_artifact_root<R>(test: impl FnOnce(&Path) -> R) -> R {
-        let _lock = ARTIFACT_ROOT_LOCK.lock().expect("artifact root lock");
-        let guard = tempfile::tempdir().expect("artifact root");
-        homeboy_core::set_artifact_root_override(Some(guard.path().to_path_buf()));
-        let result = test(guard.path());
-        homeboy_core::set_artifact_root_override(None);
-        result
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let root = home.path().join("executor-evidence");
+            let _artifact_root =
+                homeboy_core::test_support::ArtifactRootOverrideGuard::new(root.clone());
+            test(&root)
+        })
     }
 
     #[test]
