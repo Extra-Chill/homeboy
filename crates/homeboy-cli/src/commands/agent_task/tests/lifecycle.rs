@@ -597,6 +597,7 @@ fn submit_run_status_reports_terminal_state() {
                 limits: AgentTaskLimits::default(),
                 expected_artifacts: Vec::new(),
                 artifact_declarations: Vec::new(),
+                output_declarations: Vec::new(),
                 metadata: Value::Null,
             }],
         );

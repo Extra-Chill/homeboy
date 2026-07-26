@@ -298,6 +298,16 @@ pub(super) fn run_materialized_provider_command_once(
     let mut provider_request = request.clone();
     provider_request.request.limits.timeout_ms = Some(requested_timeout_ms);
     provider_request.request.normalize_artifact_declarations();
+    if let Err(error) = project_output_declarations_for_provider(&mut provider_request.request) {
+        return failure_outcome(
+            request,
+            AgentTaskOutcomeStatus::Failed,
+            AgentTaskFailureClassification::InvalidInput,
+            "agent_task.output_declaration_invalid",
+            error,
+            json!({ "provider": provider.id }),
+        );
+    }
     let input = match serde_json::to_vec(&provider_request) {
         Ok(input) => input,
         Err(error) => {
@@ -592,6 +602,43 @@ pub(super) fn run_materialized_provider_command_once(
             ),
         ),
     }
+}
+
+// Provider adapters that predate the top-level declaration field consume the
+// generic input representation. Project only missing names so caller-provided
+// input declarations remain authoritative during the additive migration.
+fn project_output_declarations_for_provider(request: &mut AgentTaskRequest) -> Result<(), String> {
+    if request.output_declarations.is_empty() {
+        return Ok(());
+    }
+    let output_declarations = request.output_declarations.clone();
+
+    let inputs = request.inputs.as_object_mut().ok_or_else(|| {
+        "output declarations require object task inputs for provider projection".to_string()
+    })?;
+    let declarations = inputs
+        .entry("required_outputs")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| "inputs.required_outputs must be an array".to_string())?;
+
+    for declaration in &output_declarations {
+        if declarations.iter().any(|value| {
+            value.get("name").and_then(serde_json::Value::as_str) == Some(&declaration.name)
+        }) {
+            continue;
+        }
+        declarations.push(json!({
+            "name": declaration.name,
+            "required": declaration.required,
+            "schema": declaration.schema,
+            "json_schema": declaration.structural_schema,
+            "max_bytes": declaration.max_bytes,
+            "evidence_relationship": declaration.evidence_relationship,
+        }));
+    }
+
+    Ok(())
 }
 
 /// A clean provider process is not sufficient when its declared result contract

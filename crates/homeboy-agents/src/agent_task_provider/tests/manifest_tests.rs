@@ -314,6 +314,10 @@ let input = '';
 process.stdin.on('data', (chunk) => input += chunk);
 process.stdin.on('end', () => {
   const request = JSON.parse(input);
+  if (!Array.isArray(request.inputs.required_outputs)
+      || request.inputs.required_outputs[0].name !== 'inspection') {
+    throw new Error('provider did not receive declared outputs');
+  }
   const mode = request.executor.config.mode;
   const outputs = mode === 'valid' || mode === 'missing_evidence'
     ? { inspection: { verdict: 'pass' } }
@@ -354,6 +358,7 @@ process.stdin.on('end', () => {
             },
         }),
     }];
+    request.inputs = json!({});
     request.executor.config = json!({ "mode": "valid" });
 
     let valid = run_provider_command_once(&request, &provider);
