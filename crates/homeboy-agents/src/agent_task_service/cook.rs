@@ -1487,7 +1487,24 @@ where
         .transpose()?
         .flatten();
     let existing_recipe = super::recipe_exists(&options.cook_id)?;
-    let recipe = super::persist_initial_recipe(&options)?;
+    // A form-only continuation has already appended and persisted its exact
+    // attempt. Re-persisting it as a fresh initial recipe would falsely look
+    // like an unsafe post-gate correction because the durable lineage now has
+    // more attempts than the caller's one-attempt input.
+    let recipe = if existing_recipe {
+        let recipe = super::load_recipe(&options.cook_id)?;
+        if recipe
+            .attempts
+            .iter()
+            .any(|attempt| attempt.run_id == options.initial_run_id)
+        {
+            recipe
+        } else {
+            super::persist_initial_recipe(&options)?
+        }
+    } else {
+        super::persist_initial_recipe(&options)?
+    };
     // A recipe can survive an interruption before its first lifecycle record.
     // Resume from the validated durable inputs so ambient transport state cannot
     // turn replay into a conflicting new cook.
@@ -2466,6 +2483,16 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
         .into()
     };
     homeboy_core::worktree_providers::validate_task_worktree_root(&target, &options.to_worktree)?;
+    if options
+        .initial_plan
+        .tasks
+        .iter()
+        .all(|task| task.inputs["cook_loop"]["review_form_required"] == true)
+    {
+        // A form-only continuation executes against its authenticated materialized
+        // candidate baseline, not the implementation attempt's source checkout.
+        return Ok(());
+    }
     let source = options.source_worktree_path.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "workspace",

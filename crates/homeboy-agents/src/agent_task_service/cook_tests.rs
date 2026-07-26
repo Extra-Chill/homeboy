@@ -103,6 +103,7 @@ fn seed_missing_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
     };
 
+    let task = plan.tasks.first().expect("candidate plan has one task");
     agent_task_lifecycle::record_run_aggregate(
         run_id,
         plan,
@@ -116,7 +117,7 @@ fn seed_missing_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
             },
             outcomes: vec![AgentTaskOutcome {
                 schema: crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA.to_string(),
-                task_id: "provider".to_string(),
+                task_id: task.task_id.clone(),
                 status: AgentTaskOutcomeStatus::Succeeded,
                 summary: Some("candidate prepared without review form".to_string()),
                 failure_classification: None,
@@ -127,7 +128,7 @@ fn seed_missing_review_form_aggregate(run_id: &str, plan: &AgentTaskPlan) {
                 outputs: Value::Null,
                 workflow: None,
                 follow_up: None,
-                metadata: Value::Null,
+                metadata: serde_json::json!({ "model": task.executor.model() }),
             }],
             events: Vec::new(),
             artifact_lineage: Vec::new(),
@@ -1131,7 +1132,7 @@ impl AgentTaskExecutorAdapter for ReviewFormOnlyExecutor {
             outputs: test_review_form_outputs(),
             workflow: None,
             follow_up: None,
-            metadata: Value::Null,
+            metadata: serde_json::json!({ "model": request.executor.model() }),
         }
     }
 }
@@ -2987,11 +2988,22 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
         git(&source, &["add", "lib.rs"]);
         git(&source, &["commit", "-m", "base"]);
         let base = git_output(&source, &["rev-parse", "HEAD"]);
-        assert!(Command::new("git")
-            .args(["clone", source.to_str().unwrap(), target.to_str().unwrap()])
-            .status()
-            .unwrap()
-            .success());
+        git(
+            &source,
+            &["remote", "add", "origin", source.to_str().unwrap()],
+        );
+        git(&source, &["fetch", "origin", "main"]);
+        git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "fixture-target",
+                target.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
         std::fs::write(source.join("lib.rs"), "candidate\n").unwrap();
         git(&source, &["commit", "-am", "candidate"]);
         let candidate = git_output(&source, &["rev-parse", "HEAD"]);
@@ -2999,7 +3011,7 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
         std::fs::write(
             &provider,
             format!(
-                "#!/bin/sh\ncat >/dev/null\ngit -C {target} fetch origin {candidate}\ngit -C {target} diff HEAD FETCH_HEAD | git -C {target} apply\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{target}\",\"command_evidence\":[]}}'\n",
+                "#!/bin/sh\ncat >/dev/null\ngit -C {target} diff HEAD {candidate} | git -C {target} apply\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{target}\",\"command_evidence\":[]}}'\n",
                 target = target.display(),
             ),
         )
@@ -3026,7 +3038,17 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
         options.head = Some("fix/8058".to_string());
         options.ai_tool = "OpenCode".to_string();
         options.ai_model = Some("openai/gpt-5.6-sol".to_string());
+        options.initial_plan.tasks[0].executor.backend = "OpenCode".to_string();
         options.initial_plan.tasks[0].executor.model = Some("openai/gpt-5.6-sol".to_string());
+        let workspace_handle = format!("fixture@{cook_id}");
+        homeboy_core::worktree::adopt(homeboy_core::worktree::WorktreeAdoptOptions {
+            handle: workspace_handle.clone(),
+            path: target.display().to_string(),
+            kind: Some("test-fixture".to_string()),
+            provenance: None,
+        })
+        .expect("register fixture destination workspace");
+        options.to_worktree = workspace_handle;
         super::super::persist_initial_recipe(&options).unwrap();
         agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).unwrap();
         seed_missing_review_form_aggregate(run_id, &options.initial_plan);
