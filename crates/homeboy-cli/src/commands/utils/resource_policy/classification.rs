@@ -47,11 +47,8 @@ pub(super) fn agent_task_resource_behavior(
         | agent_task::AgentTaskCommand::RunPlan(_)
         | agent_task::AgentTaskCommand::Run(_)
         | agent_task::AgentTaskCommand::RunNext
-        | agent_task::AgentTaskCommand::Evidence(_)
-        | agent_task::AgentTaskCommand::Diagnose(_)
         | agent_task::AgentTaskCommand::ReplayProviderBoundary(_)
         | agent_task::AgentTaskCommand::Resume(_)
-        | agent_task::AgentTaskCommand::Review(_)
         | agent_task::AgentTaskCommand::Promote(_)
         | agent_task::AgentTaskCommand::Adopt(_)
         | agent_task::AgentTaskCommand::PromotionProvider(_)
@@ -67,10 +64,14 @@ pub(super) fn agent_task_resource_behavior(
         | agent_task::AgentTaskCommand::List(_)
         | agent_task::AgentTaskCommand::Latest(_)
         | agent_task::AgentTaskCommand::Logs(_)
-        | agent_task::AgentTaskCommand::Artifacts(_) => {
+        | agent_task::AgentTaskCommand::Artifacts(_)
+        | agent_task::AgentTaskCommand::Evidence(_)
+        | agent_task::AgentTaskCommand::Diagnose(_)
+        | agent_task::AgentTaskCommand::Review(_) => AgentTaskResourceBehavior::BoundedMetadataRead,
+        agent_task::AgentTaskCommand::Active(active) if !active.reconcile => {
             AgentTaskResourceBehavior::BoundedMetadataRead
         }
-        agent_task::AgentTaskCommand::Active(active) if !active.reconcile => {
+        agent_task::AgentTaskCommand::Reconcile(reconcile) if !reconcile.apply => {
             AgentTaskResourceBehavior::BoundedMetadataRead
         }
         agent_task::AgentTaskCommand::Active(_)

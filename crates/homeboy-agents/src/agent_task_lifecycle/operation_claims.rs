@@ -52,21 +52,26 @@ pub enum ClaimOutcome {
 }
 
 /// State of a single durable operation claim.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum ClaimState {
     /// Leased and in flight (no result recorded yet).
     Running,
     /// Completed with an immutable recorded result.
     Completed,
+    /// The owner reached a terminal error before it could publish a successful
+    /// side effect. The diagnostic is durable and a later explicit continuation
+    /// may acquire a new lease for the same idempotent operation.
+    Failed,
 }
 
 /// A durable operation claim projected for reconciliation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct OperationClaim {
     pub operation_key: String,
     pub state: ClaimState,
     pub leased_at: String,
     pub lease_deadline: Option<String>,
+    pub owner_pid: Option<u32>,
     pub result: Option<Value>,
 }
 
@@ -109,12 +114,17 @@ pub fn claim_cook_operation(
                 );
                 return false;
             }
-            // A still-fresh lease is owned by another pass.
-            if !lease_is_expired(existing, &now) {
+            // A fresh lease with a live local owner is never adopted. A dead
+            // controller cannot complete the effect, so its claim is safe to
+            // reconcile immediately instead of waiting for its wall-clock TTL.
+            if existing["state"] != json!("failed")
+                && !lease_is_expired(existing, &now)
+                && claim_owner_is_live(existing)
+            {
                 outcome = ClaimOutcome::LeaseHeld;
                 return false;
             }
-            // Expired lease: reclaim it for this pass.
+            // Expired or dead-owner lease: reclaim it for this pass.
         }
 
         let claim = json!({
@@ -122,6 +132,7 @@ pub fn claim_cook_operation(
             "state": "running",
             "leased_at": now,
             "lease_deadline": lease_deadline,
+            "owner_pid": std::process::id(),
         });
         // Replace an expired lease in place, or append a new one.
         if let Some(slot) = claims
@@ -183,6 +194,53 @@ pub fn complete_cook_operation(run_id: &str, operation_key: &str, result: Value)
     Ok(())
 }
 
+/// Terminalize a claimed operation that did not produce its external result.
+/// Failed claims retain their exact bounded diagnostic but are intentionally
+/// reclaimable by a later explicit continuation.
+pub fn fail_cook_operation(run_id: &str, operation_key: &str, result: Value) -> Result<()> {
+    transition_cook_operation(run_id, operation_key, "failed", result)
+}
+
+fn transition_cook_operation(
+    run_id: &str,
+    operation_key: &str,
+    state: &str,
+    result: Value,
+) -> Result<()> {
+    let run_id = sanitize_run_id(run_id);
+    let now = now_timestamp();
+    let mut found = false;
+    store::mutate_record(&run_id, |record| {
+        let Some(claim) = record
+            .ensure_metadata_object()
+            .get_mut(OPERATION_CLAIMS_KEY)
+            .and_then(Value::as_array_mut)
+            .and_then(|claims| {
+                claims
+                    .iter_mut()
+                    .find(|claim| claim["operation_key"] == json!(operation_key))
+            })
+        else {
+            return false;
+        };
+        found = true;
+        if claim["state"] == json!("completed") {
+            return false;
+        }
+        claim["state"] = json!(state);
+        claim["completed_at"] = json!(now);
+        claim["result"] = result.clone();
+        record.updated_at = Some(now.clone());
+        true
+    })?;
+    if !found {
+        return Err(Error::internal_unexpected(
+            "cook operation terminalized without its durable claim; reserve the operation before performing its side effect",
+        ));
+    }
+    Ok(())
+}
+
 /// Read a single operation claim for reconciliation, if present.
 pub fn operation_claim(run_id: &str, operation_key: &str) -> Result<Option<OperationClaim>> {
     let run_id = sanitize_run_id(run_id);
@@ -219,6 +277,7 @@ fn project_claim(claim: &Value) -> Option<OperationClaim> {
     let operation_key = claim.get("operation_key")?.as_str()?.to_string();
     let state = match claim.get("state").and_then(Value::as_str)? {
         "completed" => ClaimState::Completed,
+        "failed" => ClaimState::Failed,
         _ => ClaimState::Running,
     };
     Some(OperationClaim {
@@ -233,6 +292,10 @@ fn project_claim(claim: &Value) -> Option<OperationClaim> {
             .get("lease_deadline")
             .and_then(Value::as_str)
             .map(str::to_string),
+        owner_pid: claim
+            .get("owner_pid")
+            .and_then(Value::as_u64)
+            .and_then(|pid| pid.try_into().ok()),
         result: claim.get("result").cloned(),
     })
 }
@@ -245,6 +308,21 @@ fn lease_is_expired(claim: &Value, now: &str) -> bool {
         .get("lease_deadline")
         .and_then(Value::as_str)
         .is_some_and(|deadline| deadline <= now)
+}
+
+fn claim_owner_is_live(claim: &Value) -> bool {
+    let Some(pid) = claim.get("owner_pid").and_then(Value::as_u64) else {
+        // Historical claims have no owner identity. Their lease remains the
+        // conservative compatibility boundary until it expires.
+        return true;
+    };
+    if pid == 0 || pid > i32::MAX as u64 {
+        return false;
+    }
+    // kill(pid, 0) checks process existence without signalling it. EPERM is
+    // still proof of a live process that this controller may not inspect.
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// RFC3339 timestamp `lease` after `base`. Falls back to `base` when the base is

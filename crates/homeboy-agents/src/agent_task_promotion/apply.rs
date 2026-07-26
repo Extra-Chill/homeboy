@@ -785,12 +785,23 @@ pub(crate) fn run_provider_command(
             }),
         ));
     }
+    let provider_evidence = || homeboy_core::error::CommandEvidence {
+        command: display.clone(),
+        cwd: invocation.cwd.clone(),
+        location: Some("local".to_string()),
+        exit_code,
+        stdout: report.stdout.clone(),
+        stderr: report.stderr.clone(),
+        truncated: report.capture.stdout.truncated || report.capture.stderr.truncated,
+    };
     let response_value: serde_json::Value =
         serde_json::from_str(&full_stdout).map_err(|error| {
-            Error::validation_invalid_json(
-                error,
-                Some("agent-task promotion provider response".to_string()),
-                Some(report.stdout.clone()),
+            Error::validation_invalid_argument_with_evidence(
+                "promotion_provider.response",
+                format!("Invalid JSON: {error}"),
+                None,
+                None,
+                Some(provider_evidence()),
             )
         })?;
     // Homeboy commands emit the standard result envelope. Accept its data
@@ -805,7 +816,7 @@ pub(crate) fn run_provider_command(
     let schema = match response_value.get("schema") {
         Some(serde_json::Value::String(schema)) => schema,
         Some(actual) => {
-            return Err(Error::validation_invalid_argument(
+            return Err(Error::validation_invalid_argument_with_evidence(
                 "promotion_provider.response.schema",
                 format!(
                     "expected {}, got {}",
@@ -813,10 +824,11 @@ pub(crate) fn run_provider_command(
                 ),
                 None,
                 None,
+                Some(provider_evidence()),
             ));
         }
         None => {
-            return Err(Error::validation_invalid_argument(
+            return Err(Error::validation_invalid_argument_with_evidence(
                 "promotion_provider.response.schema",
                 format!(
                     "expected {}, got missing schema",
@@ -824,11 +836,12 @@ pub(crate) fn run_provider_command(
                 ),
                 None,
                 None,
+                Some(provider_evidence()),
             ));
         }
     };
     if schema != AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA {
-        return Err(Error::validation_invalid_argument(
+        return Err(Error::validation_invalid_argument_with_evidence(
             "promotion_provider.response.schema",
             format!(
                 "expected {}, got {}",
@@ -836,27 +849,39 @@ pub(crate) fn run_provider_command(
             ),
             None,
             None,
+            Some(provider_evidence()),
         ));
     }
     let response: AgentTaskPromotionApplyResponse = serde_json::from_value(response_value)
         .map_err(|error| {
-            Error::validation_invalid_json(
-                error,
-                Some("agent-task promotion provider response".to_string()),
-                Some(report.stdout.clone()),
+            Error::validation_invalid_argument_with_evidence(
+                "promotion_provider.response",
+                format!("invalid response: {error}"),
+                None,
+                None,
+                Some(provider_evidence()),
             )
         })?;
     if response.workspace_path.trim().is_empty() {
-        return Err(Error::validation_invalid_argument(
+        return Err(Error::validation_invalid_argument_with_evidence(
             "promotion_provider.response.workspace_path",
             "promotion provider response must include a workspace_path",
             None,
             None,
+            Some(provider_evidence()),
         ));
     }
 
     let workspace_path = PathBuf::from(response.workspace_path);
-    validate_provider_workspace_path(&workspace_path)?;
+    validate_provider_workspace_path(&workspace_path).map_err(|error| {
+        Error::validation_invalid_argument_with_evidence(
+            "promotion_provider.response.workspace_path",
+            error.message,
+            None,
+            None,
+            Some(provider_evidence()),
+        )
+    })?;
 
     let mut command_evidence = response.command_evidence;
     if command_evidence.is_empty() {
