@@ -3,9 +3,6 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Duration;
 
 #[cfg(unix)]
-static ACTIVE_CLEANUP_PGID: AtomicI32 = AtomicI32::new(0);
-
-#[cfg(unix)]
 static ACTIVE_CLEANUP_SIGNAL: AtomicI32 = AtomicI32::new(0);
 
 #[cfg(unix)]
@@ -39,9 +36,7 @@ impl ProcessGroupCleanupGuard {
         #[cfg(unix)]
         {
             let pgid = Some(root_pid as libc::pid_t);
-            if let Some(pgid) = pgid {
-                ACTIVE_CLEANUP_PGID.store(pgid, Ordering::SeqCst);
-            }
+            ACTIVE_CLEANUP_SIGNAL.store(0, Ordering::SeqCst);
             Self { pgid }
         }
 
@@ -56,9 +51,6 @@ impl ProcessGroupCleanupGuard {
         #[cfg(unix)]
         if let Some(pgid) = self.pgid {
             cleanup_process_group(pgid);
-            ACTIVE_CLEANUP_PGID
-                .compare_exchange(pgid, 0, Ordering::SeqCst, Ordering::SeqCst)
-                .ok();
             self.pgid = None;
         }
     }
@@ -79,9 +71,6 @@ impl Drop for ProcessGroupCleanupGuard {
         #[cfg(unix)]
         if let Some(pgid) = self.pgid.take() {
             cleanup_process_group(pgid);
-            ACTIVE_CLEANUP_PGID
-                .compare_exchange(pgid, 0, Ordering::SeqCst, Ordering::SeqCst)
-                .ok();
         }
     }
 }
@@ -102,14 +91,7 @@ fn install_process_cleanup_signal_handlers() {
 
 #[cfg(unix)]
 extern "C" fn cleanup_signal_handler(signal: libc::c_int) {
-    let pgid = ACTIVE_CLEANUP_PGID.load(Ordering::SeqCst);
     ACTIVE_CLEANUP_SIGNAL.store(signal, Ordering::SeqCst);
-    if pgid > 0 {
-        unsafe {
-            libc::kill(-pgid, libc::SIGTERM);
-            libc::kill(-pgid, libc::SIGKILL);
-        }
-    }
 }
 
 #[cfg(unix)]

@@ -1,3 +1,4 @@
+use std::fs::OpenOptions;
 use std::io::{Cursor, Read, Write};
 use std::path::PathBuf;
 use std::process::{ChildStdin, Command, Stdio};
@@ -195,14 +196,20 @@ fn run_local_command(
         })
     });
 
-    let (status, delegated_failure, timed_out) = wait_for_child_or_delegated_failure(
-        &mut child,
-        env,
-        &mut cleanup_guard,
-        timeout,
-        supervision.as_mut(),
-    );
-    let interrupted_signal = active_cleanup_signal();
+    let (status, delegated_failure, timed_out, interrupted_signal) =
+        wait_for_child_or_delegated_failure(
+            &mut child,
+            env,
+            &mut cleanup_guard,
+            timeout,
+            supervision.as_mut(),
+        );
+    // Descendants can inherit these pipes after the shell exits. Tear down the
+    // process group before joining readers so they cannot hold this command open.
+    if let Some(cleanup_guard) = cleanup_guard.take() {
+        cleanup_guard.cleanup();
+    }
+    let interrupted_signal = interrupted_signal.or_else(active_cleanup_signal);
 
     let stdin_failed = stdin_handle
         .and_then(StdinPump::finish_after_child)
@@ -267,9 +274,6 @@ fn run_local_command(
     };
     if let Some(supervision) = supervision.as_mut() {
         supervision.finish(&output, interrupted_signal, timed_out, timeout);
-    }
-    if let Some(cleanup_guard) = cleanup_guard.take() {
-        cleanup_guard.cleanup();
     }
     output
 }
@@ -693,6 +697,7 @@ fn wait_for_child_or_delegated_failure(
     std::io::Result<std::process::ExitStatus>,
     Option<DelegatedRunTerminalFailure>,
     bool,
+    Option<i32>,
 ) {
     let monitor = DelegatedRunFailureMonitor::from_env(env);
     let deadline = timeout.map(|timeout| Instant::now() + timeout);
@@ -701,10 +706,18 @@ fn wait_for_child_or_delegated_failure(
         if let Some(supervision) = supervision.as_deref_mut() {
             supervision.heartbeat();
         }
+        if let Some(signal) = active_cleanup_signal() {
+            if let Some(cleanup_guard) = cleanup_guard.take() {
+                cleanup_guard.cleanup();
+            } else {
+                let _ = child.kill();
+            }
+            return (child.wait(), None, false, Some(signal));
+        }
         match child.try_wait() {
-            Ok(Some(status)) => return (Ok(status), None, false),
+            Ok(Some(status)) => return (Ok(status), None, false, None),
             Ok(None) => {}
-            Err(error) => return (Err(error), None, false),
+            Err(error) => return (Err(error), None, false, None),
         }
 
         if let Some(failure) = monitor
@@ -714,7 +727,7 @@ fn wait_for_child_or_delegated_failure(
             if let Some(cleanup_guard) = cleanup_guard.take() {
                 cleanup_guard.cleanup();
             }
-            return (child.wait(), Some(failure), false);
+            return (child.wait(), Some(failure), false, None);
         }
 
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -723,7 +736,7 @@ fn wait_for_child_or_delegated_failure(
             } else {
                 let _ = child.kill();
             }
-            return (child.wait(), None, true);
+            return (child.wait(), None, true, None);
         }
 
         let poll_interval = monitor
@@ -736,6 +749,8 @@ fn wait_for_child_or_delegated_failure(
 
 const CHILD_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const CHILD_OUTPUT_TAIL_BYTES: usize = 16 * 1024;
+static CHILD_SUPERVISION_TEMP_SEQUENCE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Serialize)]
 struct ChildSupervisionRecord {
@@ -835,11 +850,22 @@ impl ChildSupervision {
         let Ok(payload) = serde_json::to_vec_pretty(&self.record) else {
             return;
         };
-        let temporary = self
-            .path
-            .with_extension(format!("tmp-{}", std::process::id()));
-        if std::fs::write(&temporary, payload).is_ok() {
-            let _ = std::fs::rename(temporary, &self.path);
+        let temporary = self.path.with_extension(format!(
+            "tmp-{}-{}",
+            std::process::id(),
+            CHILD_SUPERVISION_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        ));
+        let Ok(mut file) = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        else {
+            return;
+        };
+        if file.write_all(&payload).is_ok() && file.sync_all().is_ok() {
+            let _ = std::fs::rename(&temporary, &self.path);
+        } else {
+            let _ = std::fs::remove_file(temporary);
         }
     }
 }
@@ -905,26 +931,58 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn sigterm_persists_terminal_supervision_and_reaps_silent_child() {
+    fn sigterm_allows_child_process_group_to_exit_gracefully() {
         let run_dir = tempfile::tempdir().expect("run dir");
         let key = crate::engine::run_dir::run_dir_env();
         let value = run_dir.path().to_string_lossy().to_string();
-        let env = [(key.as_str(), value.as_str())];
+        let marker = run_dir.path().join("graceful-termination");
+        let marker_value = marker.to_string_lossy().to_string();
+        let env = [
+            (key.as_str(), value.as_str()),
+            ("MARKER", marker_value.as_str()),
+        ];
         let foreground_pid = unsafe { libc::getpid() };
         let interrupter = thread::spawn(move || {
             thread::sleep(Duration::from_millis(25));
             unsafe { libc::kill(foreground_pid, libc::SIGTERM) };
         });
 
-        let output = execute_local_command_in_dir("sleep 30", None, Some(&env));
+        let output = execute_local_command_in_dir(
+            "trap 'printf graceful > \"$MARKER\"; exit 0' TERM; while :; do sleep 1; done",
+            None,
+            Some(&env),
+        );
         interrupter.join().expect("interrupter");
 
         assert_eq!(output.exit_code, 143);
+        assert_eq!(
+            std::fs::read_to_string(marker).expect("graceful marker"),
+            "graceful"
+        );
         let supervision = supervision_output(&run_dir);
         assert_eq!(supervision["status"], "interrupted");
         assert_eq!(supervision["cancellation_reason"], "signal:15");
         let pid = supervision["child_pid"].as_i64().expect("child pid") as libc::pid_t;
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "child was reaped");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normal_completion_reaps_descendants_before_collecting_output() {
+        let started = Instant::now();
+        let output = execute_local_command("sleep 30 & printf '%s' \"$!\"");
+
+        assert!(output.success, "{}", output.stderr);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let pid = output
+            .stdout
+            .parse::<libc::pid_t>()
+            .expect("descendant pid");
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "descendant was reaped");
         assert_eq!(
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::ESRCH)
