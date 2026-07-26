@@ -48,7 +48,8 @@ pub(crate) struct LabWorkspaceHydrationStep {
 pub(crate) struct LabWorkspaceHydrationOutput {
     pub(crate) schema: &'static str,
     /// `hydrated` when at least one provider install ran, `skipped_no_provider`
-    /// when the workspace exposed no detected dependency provider.
+    /// when the workspace exposed no detected dependency provider, or
+    /// `reused_prepared_cache` when dependencies arrived in a private cached view.
     pub(crate) status: &'static str,
     pub(crate) workspace: String,
     pub(crate) steps: Vec<LabWorkspaceHydrationStep>,
@@ -59,6 +60,15 @@ impl LabWorkspaceHydrationOutput {
         Self {
             schema: HYDRATION_SCHEMA,
             status: "skipped_no_provider",
+            workspace: workspace.to_string(),
+            steps: Vec::new(),
+        }
+    }
+
+    fn reused_prepared_cache(workspace: &str) -> Self {
+        Self {
+            schema: HYDRATION_SCHEMA,
+            status: "reused_prepared_cache",
             workspace: workspace.to_string(),
             steps: Vec::new(),
         }
@@ -122,6 +132,11 @@ fn hydrate_lab_workspace_dependencies_for_run(
     remote_path: &str,
     parent_run_id: Option<&str>,
 ) -> Result<LabWorkspaceHydrationOutput> {
+    if prepared_source_view_is_ready(runner_id, remote_path)? {
+        return Ok(LabWorkspaceHydrationOutput::reused_prepared_cache(
+            remote_path,
+        ));
+    }
     let plan = deps::dependency_install_plan(std::path::Path::new(local_path))?;
     if plan.is_empty() {
         return Ok(LabWorkspaceHydrationOutput::skipped_no_provider(
@@ -165,6 +180,24 @@ fn hydrate_lab_workspace_dependencies_for_run(
         workspace: remote_path.to_string(),
         steps,
     })
+}
+
+fn prepared_source_view_is_ready(runner_id: &str, remote_path: &str) -> Result<bool> {
+    let (output, exit_code) = exec(
+        runner_id,
+        RunnerExecOptions::raw_command(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "test -f {}/.homeboy/prepared-source-ready",
+                shell::quote_arg(remote_path)
+            ),
+        ])
+        .with_cwd(remote_path)
+        .without_evidence_mirror(),
+    )?;
+    let _ = output;
+    Ok(exit_code == 0)
 }
 
 /// Convert the controller-created declaration into runner-owned argv. Extension
@@ -377,6 +410,12 @@ fn hydrate_for_lab_workspace_exec_internal(
             agent_task_run_id,
         )?)
     };
+
+    // Persist a source/dependency preparation only after hydration has completed.
+    // The next same-commit job receives a private view of this immutable cache.
+    if matches!(&record, LabWorkspaceHydrationRecord::Applied(_)) {
+        crate::workspace::save_prepared_source_cache(runner_id, local_path, remote_path)?;
+    }
 
     let plan = match &record {
         LabWorkspaceHydrationRecord::Applied(output) if !output.is_empty() => with_step(

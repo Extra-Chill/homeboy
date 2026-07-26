@@ -653,7 +653,7 @@ pub(crate) fn exec_lab_context(
     );
     context
         .overhead
-        .record(LabOffloadPhase::RemoteExec, remote_exec_started.elapsed());
+        .record(LabOffloadPhase::Command, remote_exec_started.elapsed());
     let (exec_output, exit_code) = match exec_result {
         Ok(output) => output,
         Err(err) => {
@@ -849,7 +849,6 @@ pub(crate) fn exec_lab_context(
         });
     }
 
-    let output_parse_started = std::time::Instant::now();
     let mut applied_mutation_files = Vec::new();
     let promotion_intent = promotion_handoff_intent(request.normalized_args, &exec_output.stdout)?;
     if request.capture_patch && (exit_code == 0 || promotion_intent.is_some()) {
@@ -867,10 +866,6 @@ pub(crate) fn exec_lab_context(
         applied_mutation_files = apply_output.result.modified_files.clone();
         context.plan = with_lab_apply_patch_step(context.plan, Some(apply_output));
     }
-    context
-        .overhead
-        .record(LabOffloadPhase::OutputParse, output_parse_started.elapsed());
-
     let artifact_import_started = std::time::Instant::now();
     let mut output_file_content = match context.remote_output_file.as_deref() {
         Some(path) => Some(download_lab_output_file(runner_id, path)?),
@@ -1591,7 +1586,7 @@ pub(crate) fn run_lab_offload_inner(
             output_file_content: Some(format!("{stdout}\n")),
         });
     }
-    let workspace_sync_timer = overhead.phase(LabOffloadPhase::WorkspaceSync);
+    let workspace_sync_timer = overhead.phase(LabOffloadPhase::SourceMaterialization);
     let workspace_stage = match prepare_lab_offload_workspace_stage(
         &request,
         crate::lab::offload::workspace_stage::LabWorkspaceStageCommand::from(&contract),
@@ -1738,6 +1733,7 @@ pub(crate) fn run_lab_offload_inner(
         )?;
     }
 
+    let dependency_hydration_timer = overhead.phase(LabOffloadPhase::DependencyHydration);
     let recorded_dependency_hydration = hydrate_for_lab_workspace_exec_with_lifecycle(
         request.skip_deps_hydration,
         runner_id,
@@ -1746,6 +1742,7 @@ pub(crate) fn run_lab_offload_inner(
         plan,
         agent_task_run_id.as_deref(),
     )?;
+    dependency_hydration_timer.finish();
     let dependency_hydration = recorded_dependency_hydration.hydration;
     plan = dependency_hydration.plan;
     if let Some(run_id) = agent_task_run_id.as_deref() {
@@ -1953,6 +1950,7 @@ pub(crate) fn run_lab_offload_inner(
     // retry to repeat the entire prep sequence with new identities (#9469).
     // Preserve the prepared workspace so a retry can resume against the current
     // healthy daemon instead; a genuine terminal outcome still reaps as before.
+    let admission_started = std::time::Instant::now();
     let admission = match direct_daemon_admission_coordinates(
         runner_id,
         &selection.mode,
@@ -1988,6 +1986,7 @@ pub(crate) fn run_lab_offload_inner(
             return Err(error);
         }
     };
+    overhead.record(LabOffloadPhase::QueueAdmission, admission_started.elapsed());
     lab_metadata["execution_bundle"] = serde_json::json!({
         "schema": crate::execution_bundle::LAB_EXECUTION_BUNDLE_SCHEMA,
         "binary": crate::execution_bundle::binary(

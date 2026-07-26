@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 /// The distinct phases of a Lab offload run that we time independently.
 ///
-/// All variants except [`LabOffloadPhase::RemoteExec`] are *overhead* (runner
-/// setup). `RemoteExec` is the *workload* and is tracked separately so reports
+/// All variants except [`LabOffloadPhase::Command`] are *overhead* (runner
+/// setup). `Command` is the *workload* and is tracked separately so reports
 /// can separate `lab_overhead_ms` from workload command duration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum LabOffloadPhase {
@@ -27,15 +27,19 @@ pub(crate) enum LabOffloadPhase {
     /// Connecting to / preflighting the chosen runner (capability, daemon
     /// health, version-skew checks).
     Preflight,
-    /// Synchronizing the workspace/source checkout to the runner.
-    WorkspaceSync,
+    /// Waiting for a daemon admission reservation after the runner is ready.
+    QueueAdmission,
+    /// Creating the job-owned source view, or reusing an immutable preparation.
+    SourceMaterialization,
+    /// Installing or restoring dependencies into the job-owned source view.
+    DependencyHydration,
     /// Executing the workload command on the runner. This is the WORKLOAD, not
     /// overhead; tracked separately so it stays subtractable from the total.
-    RemoteExec,
-    /// Parsing the remote command output/streams.
-    OutputParse,
+    Command,
     /// Importing artifacts / structured-output files back from the runner.
     ArtifactImport,
+    /// Reaping the job-owned view. Immutable preparation is never reaped here.
+    Cleanup,
 }
 
 impl LabOffloadPhase {
@@ -44,22 +48,26 @@ impl LabOffloadPhase {
         match self {
             LabOffloadPhase::Selection => "selection",
             LabOffloadPhase::Preflight => "preflight",
-            LabOffloadPhase::WorkspaceSync => "workspace_sync",
-            LabOffloadPhase::RemoteExec => "remote_exec",
-            LabOffloadPhase::OutputParse => "output_parse",
+            LabOffloadPhase::QueueAdmission => "queue_admission",
+            LabOffloadPhase::SourceMaterialization => "source_materialization",
+            LabOffloadPhase::DependencyHydration => "dependency_hydration",
+            LabOffloadPhase::Command => "command",
             LabOffloadPhase::ArtifactImport => "artifact_import",
+            LabOffloadPhase::Cleanup => "cleanup",
         }
     }
 
     /// The setup phases in canonical order, used to render a stable per-phase
     /// duration map even when some phases were never reached.
-    pub(crate) const fn overhead_phases() -> [LabOffloadPhase; 5] {
+    pub(crate) const fn overhead_phases() -> [LabOffloadPhase; 7] {
         [
             LabOffloadPhase::Selection,
             LabOffloadPhase::Preflight,
-            LabOffloadPhase::WorkspaceSync,
-            LabOffloadPhase::OutputParse,
+            LabOffloadPhase::QueueAdmission,
+            LabOffloadPhase::SourceMaterialization,
+            LabOffloadPhase::DependencyHydration,
             LabOffloadPhase::ArtifactImport,
+            LabOffloadPhase::Cleanup,
         ]
     }
 }
@@ -106,10 +114,12 @@ impl AttemptedSelection {
 pub(crate) struct LabOffloadOverhead {
     selection: Option<Duration>,
     preflight: Option<Duration>,
-    workspace_sync: Option<Duration>,
-    remote_exec: Option<Duration>,
-    output_parse: Option<Duration>,
+    queue_admission: Option<Duration>,
+    source_materialization: Option<Duration>,
+    dependency_hydration: Option<Duration>,
+    command: Option<Duration>,
     artifact_import: Option<Duration>,
+    cleanup: Option<Duration>,
     attempted: AttemptedSelection,
     fallback_reason: Option<String>,
 }
@@ -124,10 +134,12 @@ impl LabOffloadOverhead {
         match phase {
             LabOffloadPhase::Selection => &mut self.selection,
             LabOffloadPhase::Preflight => &mut self.preflight,
-            LabOffloadPhase::WorkspaceSync => &mut self.workspace_sync,
-            LabOffloadPhase::RemoteExec => &mut self.remote_exec,
-            LabOffloadPhase::OutputParse => &mut self.output_parse,
+            LabOffloadPhase::QueueAdmission => &mut self.queue_admission,
+            LabOffloadPhase::SourceMaterialization => &mut self.source_materialization,
+            LabOffloadPhase::DependencyHydration => &mut self.dependency_hydration,
+            LabOffloadPhase::Command => &mut self.command,
             LabOffloadPhase::ArtifactImport => &mut self.artifact_import,
+            LabOffloadPhase::Cleanup => &mut self.cleanup,
         }
     }
 
@@ -177,10 +189,12 @@ impl LabOffloadOverhead {
         match phase {
             LabOffloadPhase::Selection => &self.selection,
             LabOffloadPhase::Preflight => &self.preflight,
-            LabOffloadPhase::WorkspaceSync => &self.workspace_sync,
-            LabOffloadPhase::RemoteExec => &self.remote_exec,
-            LabOffloadPhase::OutputParse => &self.output_parse,
+            LabOffloadPhase::QueueAdmission => &self.queue_admission,
+            LabOffloadPhase::SourceMaterialization => &self.source_materialization,
+            LabOffloadPhase::DependencyHydration => &self.dependency_hydration,
+            LabOffloadPhase::Command => &self.command,
             LabOffloadPhase::ArtifactImport => &self.artifact_import,
+            LabOffloadPhase::Cleanup => &self.cleanup,
         }
     }
 
@@ -210,7 +224,7 @@ impl LabOffloadOverhead {
                 );
             }
         }
-        let workload_ms = self.remote_exec.map(Self::millis);
+        let workload_ms = self.command.map(Self::millis);
         serde_json::json!({
             "schema": "homeboy/lab-offload-overhead/v1",
             "phase_durations_ms": phase_durations,
@@ -275,16 +289,23 @@ mod tests {
         let mut overhead = LabOffloadOverhead::start();
         overhead.record(LabOffloadPhase::Selection, Duration::from_millis(5));
         overhead.record(LabOffloadPhase::Preflight, Duration::from_millis(10));
-        overhead.record(LabOffloadPhase::WorkspaceSync, Duration::from_millis(20));
-        overhead.record(LabOffloadPhase::OutputParse, Duration::from_millis(3));
+        overhead.record(LabOffloadPhase::QueueAdmission, Duration::from_millis(3));
+        overhead.record(
+            LabOffloadPhase::SourceMaterialization,
+            Duration::from_millis(20),
+        );
+        overhead.record(
+            LabOffloadPhase::DependencyHydration,
+            Duration::from_millis(3),
+        );
         overhead.record(LabOffloadPhase::ArtifactImport, Duration::from_millis(2));
         // Workload is NOT overhead and must not inflate the total.
-        overhead.record(LabOffloadPhase::RemoteExec, Duration::from_millis(1000));
+        overhead.record(LabOffloadPhase::Command, Duration::from_millis(1000));
 
-        assert_eq!(overhead.overhead_total(), Duration::from_millis(40));
+        assert_eq!(overhead.overhead_total(), Duration::from_millis(43));
 
         let metadata = overhead.to_metadata();
-        assert_eq!(metadata["lab_overhead_ms"], serde_json::json!(40));
+        assert_eq!(metadata["lab_overhead_ms"], serde_json::json!(43));
         assert_eq!(metadata["workload_ms"], serde_json::json!(1000));
         assert_eq!(
             metadata["schema"],
@@ -293,11 +314,11 @@ mod tests {
         let durations = metadata["phase_durations_ms"].as_object().unwrap();
         assert_eq!(durations["selection"], serde_json::json!(5));
         assert_eq!(durations["preflight"], serde_json::json!(10));
-        assert_eq!(durations["workspace_sync"], serde_json::json!(20));
-        assert_eq!(durations["output_parse"], serde_json::json!(3));
+        assert_eq!(durations["source_materialization"], serde_json::json!(20));
+        assert_eq!(durations["dependency_hydration"], serde_json::json!(3));
         assert_eq!(durations["artifact_import"], serde_json::json!(2));
         // The workload phase is not part of the overhead duration map.
-        assert!(!durations.contains_key("remote_exec"));
+        assert!(!durations.contains_key("command"));
     }
 
     #[test]
@@ -308,17 +329,18 @@ mod tests {
             let _selection = overhead.phase(LabOffloadPhase::Selection);
         }
         overhead.record(LabOffloadPhase::Preflight, Duration::from_millis(7));
-        overhead.record(LabOffloadPhase::WorkspaceSync, Duration::from_millis(11));
-        overhead.record(LabOffloadPhase::RemoteExec, Duration::from_millis(500));
-        overhead.record(LabOffloadPhase::OutputParse, Duration::from_millis(1));
+        overhead.record(
+            LabOffloadPhase::SourceMaterialization,
+            Duration::from_millis(11),
+        );
+        overhead.record(LabOffloadPhase::Command, Duration::from_millis(500));
 
         let metadata = overhead.to_metadata();
         // Per-phase map present for the setup phases that ran.
         let durations = metadata["phase_durations_ms"].as_object().unwrap();
         assert!(durations.contains_key("selection"));
         assert!(durations.contains_key("preflight"));
-        assert!(durations.contains_key("workspace_sync"));
-        assert!(durations.contains_key("output_parse"));
+        assert!(durations.contains_key("source_materialization"));
         // Total overhead present and workload separable.
         assert!(metadata["lab_overhead_ms"].as_u64().is_some());
         assert_eq!(metadata["workload_ms"], serde_json::json!(500));

@@ -21,7 +21,7 @@ pub(crate) fn run_runner_resident_lab_offload(
 ) -> Result<LabOffloadOutcome> {
     let runner_id = &selection.runner_id;
     let runner_homeboy = lab_runner_homeboy_metadata(runner_id, homeboy_path, runner_status);
-    let managed_sources_timer = overhead.phase(LabOffloadPhase::WorkspaceSync);
+    let managed_sources_timer = overhead.phase(LabOffloadPhase::SourceMaterialization);
     let source_syncs = refresh_managed_runner_sources(runner_id, runner_workspace_root)?;
     managed_sources_timer.finish();
     if source_syncs.is_empty() {
