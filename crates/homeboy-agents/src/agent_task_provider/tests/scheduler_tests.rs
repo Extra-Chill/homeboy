@@ -52,7 +52,7 @@ fn isolated_cook_attempt_spawns_a_real_provider_against_its_own_attestation() {
     let command = format!(
         "node {}",
         script(&format!(
-            "let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); fs.writeFileSync({:?}, process.cwd()); process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'provider spawned'}}));",
+            "let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); fs.writeFileSync({:?}, JSON.stringify({{cwd:process.cwd(),workspace:req.workspace.root,attestation:req.metadata.cook_attempt_workspace_identity}})); process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'provider spawned'}}));",
             marker.display().to_string()
         ))
     );
@@ -70,7 +70,10 @@ fn isolated_cook_attempt_spawns_a_real_provider_against_its_own_attestation() {
         .run(AgentTaskPlan::new("isolated-cook-provider", vec![request]));
 
     assert_eq!(aggregate.totals.succeeded, 1, "{aggregate:?}");
-    let provider_cwd = std::fs::read_to_string(&marker).expect("provider marker");
+    let provider_observation: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&marker).expect("provider marker"))
+            .expect("provider observation");
+    let provider_cwd = provider_observation["cwd"].as_str().expect("provider cwd");
     assert_ne!(
         provider_cwd,
         std::fs::canonicalize(&source)
@@ -78,6 +81,11 @@ fn isolated_cook_attempt_spawns_a_real_provider_against_its_own_attestation() {
             .display()
             .to_string(),
         "provider must run in the isolated attempt workspace"
+    );
+    assert_eq!(provider_observation["workspace"], provider_cwd);
+    assert_eq!(
+        provider_observation["attestation"]["canonical_path"], provider_cwd,
+        "the spawned provider must receive the attestation for its isolated cwd"
     );
 }
 

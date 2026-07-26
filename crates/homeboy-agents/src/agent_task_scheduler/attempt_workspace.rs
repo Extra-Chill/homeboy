@@ -592,6 +592,18 @@ pub(super) fn prepare_attempt_workspace(
     // scratch lease, never an untracked system-temporary worktree.
     let attempt_root = scratch_root.join("workspace");
     let attempt_root_string = attempt_root.display().to_string();
+    if let Some(attestation) = request.metadata.get("cook_workspace_identity") {
+        if !crate::agent_task_workspace_identity::workspace_matches_attestation(&root, attestation)
+        {
+            return Err(HarvestError::Git {
+                command: "verify Cook source workspace identity before snapshot".to_string(),
+                cwd: root,
+                message:
+                    "source workspace no longer matches its Cook admission identity attestation"
+                        .to_string(),
+            });
+        }
+    }
     git_output(
         &root,
         &["worktree", "add", "--detach", &attempt_root_string, base],

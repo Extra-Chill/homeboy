@@ -340,7 +340,7 @@ fn linked_workspace(temp: &tempfile::TempDir) -> (std::path::PathBuf, std::path:
 
 #[cfg(unix)]
 #[test]
-fn provider_refuses_git_file_replaced_by_directory_before_spawn() {
+fn provider_refuses_legacy_source_attestation_git_file_replaced_before_spawn() {
     let temp = tempfile::tempdir().expect("tempdir");
     let (workspace, _) = linked_workspace(&temp);
     let attestation = workspace_attestation(&workspace);
@@ -351,7 +351,7 @@ fn provider_refuses_git_file_replaced_by_directory_before_spawn() {
     ));
     let (mut request, provider) = request("attested-workspace", format!("node {script}"));
     request.workspace.root = Some(workspace.display().to_string());
-    request.metadata = serde_json::json!({ "cook_attempt_workspace_identity": attestation });
+    request.metadata = serde_json::json!({ "cook_workspace_identity": attestation });
 
     std::fs::remove_file(workspace.join(".git")).expect("remove linked git file");
     std::fs::create_dir(workspace.join(".git")).expect("replace with git directory");

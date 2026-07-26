@@ -7,6 +7,16 @@ use serde_json::Value;
 pub(crate) fn attest_workspace(path: &Path) -> Result<Value> {
     use std::os::unix::fs::MetadataExt;
 
+    let supplied_metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    if supplied_metadata.file_type().is_symlink() || !supplied_metadata.is_dir() {
+        return Err(Error::validation_invalid_argument(
+            "workspace",
+            "Cook workspace must be a non-symlink directory",
+            Some(path.display().to_string()),
+            None,
+        ));
+    }
     let canonical = std::fs::canonicalize(path)
         .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
     let metadata = std::fs::symlink_metadata(&canonical).map_err(|error| {
@@ -52,6 +62,12 @@ pub(crate) fn attest_workspace(path: &Path) -> Result<Value> {
 pub(crate) fn workspace_matches_attestation(path: &Path, attestation: &Value) -> bool {
     use std::os::unix::fs::MetadataExt;
 
+    let Ok(supplied_metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if supplied_metadata.file_type().is_symlink() || !supplied_metadata.is_dir() {
+        return false;
+    }
     let Ok(canonical) = std::fs::canonicalize(path) else {
         return false;
     };
@@ -94,4 +110,26 @@ pub(crate) fn workspace_matches_attestation(path: &Path, attestation: &Value) ->
         .and_then(|path| path.to_str().map(str::to_string))
         .as_deref()
         == attestation["canonical_path"].as_str()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn rejects_a_symlink_even_when_it_resolves_to_a_valid_workspace() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let gitdir = temp.path().join("gitdir");
+        let alias = temp.path().join("workspace-alias");
+        std::fs::create_dir(&workspace).expect("workspace");
+        std::fs::create_dir(&gitdir).expect("gitdir");
+        std::fs::write(workspace.join(".git"), "gitdir: ../gitdir\n").expect("git file");
+        let attestation = attest_workspace(&workspace).expect("attest workspace");
+        symlink(&workspace, &alias).expect("workspace symlink");
+
+        assert!(attest_workspace(&alias).is_err());
+        assert!(!workspace_matches_attestation(&alias, &attestation));
+    }
 }

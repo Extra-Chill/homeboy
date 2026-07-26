@@ -347,10 +347,13 @@ pub(super) fn run_materialized_provider_command_once(
             .map(|(key, value)| (key.as_str(), value.as_str())),
     );
     if let Some(cwd) = cwd {
+        // Old persisted Cook plans bind the source workspace. Newly materialized
+        // plans replace that with an attempt-specific binding before execution.
         if let Some(attestation) = request
             .request
             .metadata
             .get("cook_attempt_workspace_identity")
+            .or_else(|| request.request.metadata.get("cook_workspace_identity"))
         {
             if !crate::agent_task_workspace_identity::workspace_matches_attestation(
                 &cwd,
