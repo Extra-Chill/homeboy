@@ -170,23 +170,17 @@ impl VerifyGateOptions {
 
     /// Commands already declared as gates are toolchain requirements too. This
     /// protects existing Cook invocations without duplicate CLI ceremony.
+    /// Only explicitly declared toolchains are probed.
+    ///
+    /// Gates run through `sh -lc`, so the first token of a gate command is not
+    /// reliably a probeable executable: it may be a shell builtin (`exit`,
+    /// `true`, `false`), an environment assignment, a shell function, or a
+    /// script that does not accept `--version`. Deriving a `--version` probe
+    /// from that token made preflight refuse legitimate gates before they ever
+    /// ran. Declaring a toolchain is the operator's assertion that the command
+    /// exists and answers the probe. (#10247)
     pub(crate) fn required_toolchains(&self) -> Vec<AgentTaskGateToolchainRequirement> {
-        let mut requirements = self.gate_toolchains.clone();
-        for gate in self.verify.iter().chain(&self.private_verify) {
-            let Some(command) = gate.split_whitespace().next() else {
-                continue;
-            };
-            if !requirements
-                .iter()
-                .any(|requirement| requirement.command == command)
-            {
-                requirements.push(AgentTaskGateToolchainRequirement {
-                    command: command.to_string(),
-                    probe_arguments: default_toolchain_probe_arguments(),
-                });
-            }
-        }
-        requirements
+        self.gate_toolchains.clone()
     }
 }
 
@@ -1794,10 +1788,12 @@ mod tests {
     }
 
     #[test]
-    fn existing_gate_commands_are_automatic_toolchain_requirements() {
+    fn only_declared_toolchains_are_probed_by_preflight() {
         let options = VerifyGateOptions {
-            verify: vec!["cargo test --lib".to_string()],
-            private_verify: vec!["npm test".to_string()],
+            // Shell builtins and scripts without `--version` are valid gates.
+            // Probing them as executables refuses work that would have run.
+            verify: vec!["cargo test --lib".to_string(), "exit 1".to_string()],
+            private_verify: vec!["npm test".to_string(), "false".to_string()],
             gate_toolchains: vec![AgentTaskGateToolchainRequirement {
                 command: "cargo".to_string(),
                 probe_arguments: vec!["metadata".to_string()],
@@ -1807,16 +1803,11 @@ mod tests {
 
         assert_eq!(
             options.required_toolchains(),
-            vec![
-                AgentTaskGateToolchainRequirement {
-                    command: "cargo".to_string(),
-                    probe_arguments: vec!["metadata".to_string()],
-                },
-                AgentTaskGateToolchainRequirement {
-                    command: "npm".to_string(),
-                    probe_arguments: vec!["--version".to_string()],
-                },
-            ]
+            vec![AgentTaskGateToolchainRequirement {
+                command: "cargo".to_string(),
+                probe_arguments: vec!["metadata".to_string()],
+            }],
+            "gate command strings must not synthesize toolchain probes"
         );
     }
 
