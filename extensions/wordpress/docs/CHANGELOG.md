@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.3] - 2026-07-26
+
+### Fixed
+- compose Codebox PHPUnit tests
+
 ## [3.34.1] - 2026-07-26
 
 ### Fixed
