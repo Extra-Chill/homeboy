@@ -474,18 +474,21 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
             None,
         ));
     }
-    let task_base_sha = options.task_base_sha.as_deref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "task_base_sha",
-            "candidate adoption requires the recorded immutable task base for baseline-aware verification",
-            None,
-            None,
-        )
-    })?;
+    let candidate_base_sha = promotion.provenance["base_ref"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "promotion.provenance.base_ref",
+                "candidate adoption requires the resolved immutable candidate base for baseline-aware verification",
+                None,
+                None,
+            )
+        })?;
     compare_adoption_gate_failures_to_base(
         &mut promotion,
         &source_worktree,
-        task_base_sha,
+        &candidate_base_sha,
         &record.run_id,
     )?;
     if agent_task_lifecycle::candidate_adoption_cancel_requested(&record.run_id)? {
@@ -505,6 +508,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
         "candidate_ref": candidate_sha,
         "source_worktree_path": options.source_worktree_path,
         "recorded_task_base": options.task_base_sha,
+        "candidate_base": candidate_base_sha,
         "recovery": recovery,
         "ai_model": adoption_ai_model,
         "ai_model_source": ai_model_source,

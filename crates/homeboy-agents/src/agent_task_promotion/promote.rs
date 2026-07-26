@@ -1353,6 +1353,7 @@ fn promote_committed_changes(
             "base_ref": committed_patch.base_ref,
             "commit_range": committed_patch.commit_range,
             "commits": committed_patch.commits,
+            "historical_task_base": committed_patch.historical_task_base,
             "candidate": candidate,
             "destination_baseline": candidate,
             "gate_feedback_baseline": gate_feedback_baseline,
