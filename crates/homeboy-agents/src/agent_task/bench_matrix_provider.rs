@@ -91,6 +91,7 @@ fn build_agent_task_matrix_summary(
             limits: AgentTaskLimits::default(),
             expected_artifacts: vec!["bench-results".to_string()],
             artifact_declarations: Vec::new(),
+            output_declarations: Vec::new(),
             metadata: json!({ "source": "bench.comparison" }),
         },
     )

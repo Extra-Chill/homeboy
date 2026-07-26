@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use super::schema::request_schema;
 use super::{
-    AgentTaskArtifactDeclaration, AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcome,
-    AgentTaskPolicy, AgentTaskSourceRef, AgentTaskWorkspace,
+    AgentTaskArtifactDeclaration, AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskLimits,
+    AgentTaskOutcome, AgentTaskPolicy, AgentTaskSourceRef, AgentTaskWorkspace,
 };
 
 /// Provider capability payload used by extension discovery and durable run metadata.
@@ -111,6 +111,30 @@ pub struct AgentTaskProgressEvent {
     pub data: Value,
 }
 
+/// A named value the provider returns in `AgentTaskOutcome.outputs`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskOutputDeclaration {
+    pub name: String,
+    #[serde(default)]
+    pub required: bool,
+    /// Versioned identifier for the output's semantic schema.
+    pub schema: String,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub structural_schema: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_relationship: Option<AgentTaskOutputEvidenceRelationship>,
+}
+
+/// Describes how a declared output relates to durable evidence without imposing
+/// caller-specific evidence semantics.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentTaskOutputEvidenceRelationship {
+    pub relationship: String,
+    pub evidence: AgentTaskEvidenceRef,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskRequest {
     #[serde(default = "request_schema")]
@@ -138,6 +162,8 @@ pub struct AgentTaskRequest {
     pub expected_artifacts: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_declarations: Vec<AgentTaskArtifactDeclaration>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_declarations: Vec<AgentTaskOutputDeclaration>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub metadata: Value,
 }
@@ -344,6 +370,7 @@ mod runner_execution_envelope_tests {
                 description: None,
                 metadata: Value::Null,
             }],
+            output_declarations: Vec::new(),
             metadata: Value::Null,
         };
 

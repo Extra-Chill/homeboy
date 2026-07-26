@@ -64,6 +64,14 @@ fn request_round_trips_generic_agent_task_shape() {
             description: Some("Structured analysis output".to_string()),
             metadata: json!({ "audience": "reviewer" }),
         }],
+        output_declarations: vec![AgentTaskOutputDeclaration {
+            name: "result".to_string(),
+            required: true,
+            schema: "example/result/v1".to_string(),
+            structural_schema: json!({ "type": "object" }),
+            max_bytes: Some(1_024),
+            evidence_relationship: None,
+        }],
         metadata: json!({ "batch": 1 }),
     };
 
@@ -468,6 +476,7 @@ fn redacted_request_removes_sensitive_fields() {
         limits: AgentTaskLimits::default(),
         expected_artifacts: Vec::new(),
         artifact_declarations: Vec::new(),
+        output_declarations: Vec::new(),
         metadata: json!({ "refresh_token": "secret-refresh" }),
     };
 

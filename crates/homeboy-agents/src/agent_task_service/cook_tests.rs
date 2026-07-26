@@ -1470,6 +1470,7 @@ fn batch_cook_options(
                 limits: AgentTaskLimits::default(),
                 expected_artifacts: Vec::new(),
                 artifact_declarations: Vec::new(),
+                output_declarations: Vec::new(),
                 metadata: Value::Null,
             }],
         ),
@@ -1493,58 +1494,6 @@ fn batch_cook_options(
         attempt_dispatcher: Some(dispatcher),
         harvest_context: Default::default(),
     }
-}
-
-#[test]
-fn cook_injects_canonical_review_form_requirement_once() {
-    let mut plan = AgentTaskPlan::new(
-        "structured-output",
-        vec![AgentTaskRequest {
-            schema: crate::agent_task::AGENT_TASK_REQUEST_SCHEMA.to_string(),
-            task_id: "provider".to_string(),
-            group_key: None,
-            parent_plan_id: None,
-            executor: AgentTaskExecutor {
-                backend: "opencode".to_string(),
-                selector: None,
-                runtime_selection: None,
-                required_capabilities: Vec::new(),
-                secret_env: Vec::new(),
-                model: None,
-                config: Value::Null,
-            },
-            instructions: "complete the task".to_string(),
-            inputs: serde_json::json!({ "cook_loop": "legacy-value" }),
-            source_refs: Vec::new(),
-            workspace: AgentTaskWorkspace::default(),
-            component_contracts: Vec::new(),
-            policy: AgentTaskPolicy::default(),
-            limits: AgentTaskLimits::default(),
-            expected_artifacts: Vec::new(),
-            artifact_declarations: Vec::new(),
-            metadata: Value::Null,
-        }],
-    );
-
-    inject_cook_structured_outcome_requirements(&mut plan);
-    inject_cook_structured_outcome_requirements(&mut plan);
-
-    let task = &plan.tasks[0];
-    assert_eq!(task.inputs["cook_loop"]["review_form_required"], true);
-    assert_eq!(
-        task.inputs["required_outputs"][0]["schema"],
-        crate::agent_task_review_dossier::AI_REVIEW_FORM_OUTPUT_SCHEMA
-    );
-    assert_eq!(
-        task.inputs["required_outputs"][0]["json_schema"]["required"],
-        serde_json::json!(["summary", "what_changed", "compatibility", "used_for"])
-    );
-    assert_eq!(
-        task.instructions
-            .matches("Emit a `review_form` object")
-            .count(),
-        1
-    );
 }
 
 /// A complete externally-prepared candidate: the original cook failed before a
@@ -2613,6 +2562,7 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
                 limits: AgentTaskLimits::default(),
                 expected_artifacts: Vec::new(),
                 artifact_declarations: Vec::new(),
+                output_declarations: Vec::new(),
                 metadata: Value::Null,
             }],
         );

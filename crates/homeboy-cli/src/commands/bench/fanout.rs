@@ -343,6 +343,7 @@ fn matrix_template_request(
         limits: Default::default(),
         expected_artifacts: run_args.expected_artifact.clone(),
         artifact_declarations: Vec::new(),
+        output_declarations: Vec::new(),
         metadata: serde_json::json!({ "product_command": "bench.matrix" }),
     };
     request.normalize_artifact_declarations();

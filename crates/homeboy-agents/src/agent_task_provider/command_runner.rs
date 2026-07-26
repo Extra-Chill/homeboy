@@ -560,7 +560,7 @@ pub(super) fn run_materialized_provider_command_once(
                 &request.artifacts_path,
                 &request.artifacts_path_provenance,
             );
-            classify_missing_required_structured_outputs(&mut outcome, request);
+            validate_declared_outputs(&mut outcome, request);
             surface_provider_process_failure(
                 &mut outcome,
                 request,
@@ -594,57 +594,160 @@ pub(super) fn run_materialized_provider_command_once(
     }
 }
 
-/// A successful process only proves that the provider process exited cleanly.
-/// Cook's reviewer-facing output is a separate, durable result contract.
-fn classify_missing_required_structured_outputs(
-    outcome: &mut AgentTaskOutcome,
-    request: &AgentTaskRequest,
-) {
+/// A clean provider process is not sufficient when its declared result contract
+/// is absent, invalid, oversized, or unsupported by its required evidence.
+fn validate_declared_outputs(outcome: &mut AgentTaskOutcome, request: &AgentTaskRequest) {
     if !matches!(
         outcome.status,
         AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp
-    ) || request.inputs["cook_loop"]["review_form_required"] != true
-    {
+    ) {
         return;
     }
 
-    let review_form = crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(
-        &outcome.outputs,
-    )
-    .and_then(|form| match form {
-        Some(form) => {
-            form.validate()?;
-            Ok(Some(form))
-        }
-        None => Ok(None),
-    });
-    let (class, message, data) = match review_form {
-        Ok(Some(_)) => return,
-        Ok(None) => (
-            "agent_task.required_structured_output_missing",
-            "provider completed successfully but required structured output 'review_form' was absent",
-            json!({ "required_output": "review_form", "provider_completed": true }),
-        ),
-        Err(error) => (
-            "agent_task.required_structured_output_malformed",
-            "provider completed successfully but required structured output 'review_form' was malformed",
-            json!({
-                "required_output": "review_form",
-                "provider_completed": true,
-                "validation_error": error.message,
-            }),
-        ),
-    };
+    for declaration in &request.output_declarations {
+        let Some(value) = outcome.outputs.get(&declaration.name).cloned() else {
+            if declaration.required {
+                declared_output_failure(
+                    outcome,
+                    "agent_task.output_missing",
+                    format!("required output '{}' was absent", declaration.name),
+                    json!({ "output": declaration.name, "required": true }),
+                );
+            }
+            continue;
+        };
 
+        if !declaration.structural_schema.is_null() {
+            if let Err(error) = validate_output_value(&value, &declaration.structural_schema) {
+                declared_output_failure(
+                    outcome,
+                    "agent_task.output_malformed",
+                    format!(
+                        "output '{}' did not satisfy its declared schema",
+                        declaration.name
+                    ),
+                    json!({ "output": declaration.name, "validation_error": error }),
+                );
+            }
+        }
+
+        if let Some(max_bytes) = declaration.max_bytes {
+            match serde_json::to_vec(&value) {
+                Ok(encoded) if encoded.len() as u64 > max_bytes => declared_output_failure(
+                    outcome,
+                    "agent_task.output_oversized",
+                    format!(
+                        "output '{}' exceeded its declared size limit",
+                        declaration.name
+                    ),
+                    json!({ "output": declaration.name, "max_bytes": max_bytes, "actual_bytes": encoded.len() }),
+                ),
+                Err(error) => declared_output_failure(
+                    outcome,
+                    "agent_task.output_malformed",
+                    format!("output '{}' could not be encoded", declaration.name),
+                    json!({ "output": declaration.name, "validation_error": error.to_string() }),
+                ),
+                _ => {}
+            }
+        }
+
+        if let Some(requirement) = &declaration.evidence_relationship {
+            let evidence_present = outcome.evidence_refs.iter().any(|evidence| {
+                evidence.kind == requirement.evidence.kind
+                    && evidence.uri == requirement.evidence.uri
+                    && evidence.label == requirement.evidence.label
+            });
+            if !evidence_present {
+                declared_output_failure(
+                    outcome,
+                    "agent_task.output_evidence_missing",
+                    format!(
+                        "output '{}' is missing declared supporting evidence",
+                        declaration.name
+                    ),
+                    json!({
+                        "output": declaration.name,
+                        "relationship": requirement.relationship,
+                        "evidence": requirement.evidence,
+                    }),
+                );
+            }
+        }
+    }
+}
+
+fn declared_output_failure(
+    outcome: &mut AgentTaskOutcome,
+    class: &str,
+    message: String,
+    data: serde_json::Value,
+) {
     outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
     outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
-    outcome.summary = Some(message.to_string());
-    push_unique_diagnostic(
-        &mut outcome.diagnostics,
-        class.to_string(),
-        message.to_string(),
-        data,
-    );
+    outcome.summary = Some(message.clone());
+    push_unique_diagnostic(&mut outcome.diagnostics, class.to_string(), message, data);
+}
+
+fn validate_output_value(
+    value: &serde_json::Value,
+    schema: &serde_json::Value,
+) -> Result<(), String> {
+    if let Some(expected) = schema.get("type").and_then(serde_json::Value::as_str) {
+        let matches = match expected {
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            "string" => value.is_string(),
+            "number" => value.is_number(),
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+            "boolean" => value.is_boolean(),
+            "null" => value.is_null(),
+            _ => return Err(format!("unsupported schema type '{expected}'")),
+        };
+        if !matches {
+            return Err(format!("expected {expected}"));
+        }
+    }
+
+    if let Some(required) = schema.get("required").and_then(serde_json::Value::as_array) {
+        let Some(object) = value.as_object() else {
+            return Err("required properties need an object value".to_string());
+        };
+        for name in required {
+            let Some(name) = name.as_str() else {
+                return Err("required property names must be strings".to_string());
+            };
+            if !object.contains_key(name) {
+                return Err(format!("missing required property '{name}'"));
+            }
+        }
+    }
+
+    if let Some(properties) = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    {
+        let Some(object) = value.as_object() else {
+            return Err("properties need an object value".to_string());
+        };
+        for (name, property_schema) in properties {
+            if let Some(property) = object.get(name) {
+                validate_output_value(property, property_schema)
+                    .map_err(|error| format!("property '{name}': {error}"))?;
+            }
+        }
+    }
+
+    if let Some(items) = schema.get("items") {
+        let Some(values) = value.as_array() else {
+            return Err("items need an array value".to_string());
+        };
+        for (index, item) in values.iter().enumerate() {
+            validate_output_value(item, items).map_err(|error| format!("item {index}: {error}"))?;
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(unix)]

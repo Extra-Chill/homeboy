@@ -1011,6 +1011,7 @@ mod tests {
             limits: AgentTaskLimits::default(),
             expected_artifacts: vec!["patch".to_string()],
             artifact_declarations: Vec::new(),
+            output_declarations: Vec::new(),
             metadata: Value::Null,
         }
     }

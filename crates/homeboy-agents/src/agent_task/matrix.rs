@@ -848,6 +848,7 @@ mod tests {
             limits: AgentTaskLimits::default(),
             expected_artifacts: vec!["bench-results".to_string()],
             artifact_declarations: Vec::new(),
+            output_declarations: Vec::new(),
             metadata: json!({ "report": "side-by-side" }),
         }
     }

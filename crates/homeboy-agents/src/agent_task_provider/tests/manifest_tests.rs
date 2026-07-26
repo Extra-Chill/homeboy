@@ -1,5 +1,6 @@
 use super::common::{request, script};
 use super::*;
+use crate::agent_task::{AgentTaskOutputDeclaration, AgentTaskOutputEvidenceRelationship};
 
 #[test]
 fn provider_capability_contract_exports_core_owned_schema_ids() {
@@ -306,13 +307,7 @@ process.stdin.on('end', () => {
 }
 
 #[test]
-fn opencode_adapter_preserves_required_review_form_and_recovers_missing_or_malformed_output() {
-    let review_form = json!({
-        "summary": "Capture the provider-authored review form.",
-        "what_changed": ["Normalized the final structured output."],
-        "compatibility": "No compatibility impact.",
-        "used_for": "Reviewer-facing pull request context."
-    });
+fn provider_validates_declared_outputs() {
     let script = script(
         r#"const fs = require('fs');
 let input = '';
@@ -320,36 +315,62 @@ process.stdin.on('data', (chunk) => input += chunk);
 process.stdin.on('end', () => {
   const request = JSON.parse(input);
   const mode = request.executor.config.mode;
-  const outputs = mode === 'valid'
-    ? { review_form: request.executor.config.review_form }
-    : mode === 'malformed'
-      ? { review_form: { summary: '' } }
-      : {};
+  const outputs = mode === 'valid' || mode === 'missing_evidence'
+    ? { inspection: { verdict: 'pass' } }
+    : mode === 'oversized'
+      ? { inspection: { verdict: 'pass', detail: 'x'.repeat(100) } }
+      : mode === 'malformed'
+        ? { inspection: { verdict: 42 } }
+        : {};
   process.stdout.write(JSON.stringify({
     schema: 'homeboy/agent-task-outcome/v1',
     task_id: request.task_id,
-    status: mode === 'malformed' ? 'no_op' : 'succeeded',
-    summary: 'OpenCode completed successfully.',
+    status: 'succeeded',
+    summary: 'provider completed successfully.',
     outputs,
-    evidence_refs: [{ kind: 'transcript', uri: 'file:///provider-transcript.log' }]
+    evidence_refs: mode === 'missing_evidence'
+      ? []
+      : [{ kind: 'transcript', uri: 'file:///provider-transcript.log' }]
   }));
 });"#,
     );
-    let (mut request, mut provider) =
-        request("opencode-structured-output", format!("node {script}"));
-    provider.id = "opencode.agent-task-executor".to_string();
-    provider.backend = "opencode".to_string();
-    request.executor.backend = "opencode".to_string();
-    request.inputs = json!({ "cook_loop": { "review_form_required": true } });
-    request.executor.config = json!({ "mode": "valid", "review_form": review_form });
+    let (mut request, provider) = request("declared-output", format!("node {script}"));
+    request.output_declarations = vec![AgentTaskOutputDeclaration {
+        name: "inspection".to_string(),
+        required: true,
+        schema: "example/inspection/v1".to_string(),
+        structural_schema: json!({
+            "type": "object",
+            "required": ["verdict"],
+            "properties": { "verdict": { "type": "string" } }
+        }),
+        max_bytes: Some(64),
+        evidence_relationship: Some(AgentTaskOutputEvidenceRelationship {
+            relationship: "supported_by".to_string(),
+            evidence: AgentTaskEvidenceRef {
+                kind: "transcript".to_string(),
+                uri: "file:///provider-transcript.log".to_string(),
+                label: None,
+            },
+        }),
+    }];
+    request.executor.config = json!({ "mode": "valid" });
 
     let valid = run_provider_command_once(&request, &provider);
     assert_eq!(valid.status, AgentTaskOutcomeStatus::Succeeded);
-    assert_eq!(
-        valid.outputs["review_form"]["summary"],
-        "Capture the provider-authored review form."
-    );
+    assert_eq!(valid.outputs["inspection"]["verdict"], "pass");
     assert_eq!(valid.evidence_refs[0].kind, "transcript");
+
+    request.executor.config["mode"] = json!("missing_evidence");
+    let missing_evidence = run_provider_command_once(&request, &provider);
+    assert_eq!(
+        missing_evidence.status,
+        AgentTaskOutcomeStatus::CandidateRecoverable
+    );
+    assert!(missing_evidence
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.class == "agent_task.output_evidence_missing"));
 
     request.executor.config["mode"] = json!("missing");
     let missing = run_provider_command_once(&request, &provider);
@@ -361,7 +382,7 @@ process.stdin.on('end', () => {
     assert!(missing
         .diagnostics
         .iter()
-        .any(|diagnostic| { diagnostic.class == "agent_task.required_structured_output_missing" }));
+        .any(|diagnostic| diagnostic.class == "agent_task.output_missing"));
     assert_eq!(missing.evidence_refs[0].kind, "transcript");
 
     request.executor.config["mode"] = json!("malformed");
@@ -370,14 +391,21 @@ process.stdin.on('end', () => {
         malformed.status,
         AgentTaskOutcomeStatus::CandidateRecoverable
     );
-    assert!(malformed.diagnostics.iter().any(|diagnostic| {
-        diagnostic.class == "agent_task.required_structured_output_malformed"
-    }));
+    assert!(malformed
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.class == "agent_task.output_malformed"));
 
-    request.inputs = Value::Null;
-    request.executor.config["mode"] = json!("valid");
-    let optional = run_provider_command_once(&request, &provider);
-    assert_eq!(optional.status, AgentTaskOutcomeStatus::Succeeded);
+    request.executor.config["mode"] = json!("oversized");
+    let oversized = run_provider_command_once(&request, &provider);
+    assert_eq!(
+        oversized.status,
+        AgentTaskOutcomeStatus::CandidateRecoverable
+    );
+    assert!(oversized
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.class == "agent_task.output_oversized"));
 }
 
 #[cfg(unix)]

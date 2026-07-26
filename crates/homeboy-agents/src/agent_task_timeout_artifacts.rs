@@ -761,6 +761,7 @@ mod tests {
             limits: AgentTaskLimits::default(),
             expected_artifacts: Vec::new(),
             artifact_declarations: Vec::new(),
+            output_declarations: Vec::new(),
             metadata,
         }
     }
