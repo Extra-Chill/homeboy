@@ -27,7 +27,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      # Full history: the scope tests resolve real revisions (`HEAD~1`) against
+      # this checkout, which a shallow clone cannot provide.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Run action shell tests
         run: bash scripts/run-tests.sh
