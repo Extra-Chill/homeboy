@@ -146,7 +146,8 @@ mod tests {
     fn schedule(id: &str) -> Schedule {
         Schedule {
             id: id.to_string(),
-            command: vec!["triage".to_string()],
+            command: Some(vec!["triage".to_string()]),
+            exec: None,
             every: Cadence::from_seconds(3_600).expect("cadence"),
             notify_on: NotifyPolicy::default(),
             on_overlap: OverlapPolicy::default(),
@@ -160,19 +161,24 @@ mod tests {
     }
 
     struct CountingRunner {
-        calls: Arc<Mutex<Vec<Vec<String>>>>,
+        calls: Arc<Mutex<Vec<String>>>,
         block: Option<Arc<std::sync::Barrier>>,
     }
 
     impl ScheduleCommandRunner for CountingRunner {
-        fn run(&self, argv: &[String]) -> crate::Result<serde_json::Value> {
+        fn run(
+            &self,
+            command: crate::schedule::types::ScheduledCommand<'_>,
+        ) -> crate::Result<crate::schedule::execution::ScheduleCommandResult> {
             if let Ok(mut calls) = self.calls.lock() {
-                calls.push(argv.to_vec());
+                calls.push(format!("{command:?}"));
             }
             if let Some(barrier) = &self.block {
                 barrier.wait();
             }
-            Ok(serde_json::json!({ "status": "succeeded", "exit_code": 0 }))
+            Ok(crate::schedule::execution::ScheduleCommandResult::Envelope(
+                serde_json::json!({ "status": "succeeded", "exit_code": 0 }),
+            ))
         }
     }
 

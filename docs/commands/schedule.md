@@ -1,7 +1,8 @@
 # `homeboy schedule`
 
 ```text
-homeboy schedule add <id> --command <argv> --every <interval> [--notify-on <policy>] [--on-overlap <policy>]
+homeboy schedule add <id> (--command <argv> | --exec <program> [--exec-arg <arg>]... [--working-dir <dir>])
+                         --every <interval> [--notify-on <policy>] [--on-overlap <policy>]
                          [--notification-transport <id> --notification-route <route>]
                          [--jitter-seconds <n>] [--description <text>] [--force]
 homeboy schedule list
@@ -18,6 +19,27 @@ A schedule is stored in two parts:
 
 - the **declaration** is reviewable configuration at `~/.config/homeboy/schedules/<id>.json`
 - the **runtime record** — last status, last result fingerprint, in-flight marker — lives separately under the data directory, so the declaration stays diffable
+
+## What a schedule runs
+
+A schedule runs **either** a homeboy command or an external program — one or the other, never both.
+
+```sh
+# a homeboy command
+homeboy schedule add fleet-drift --command 'fleet check prod' --every 1h
+
+# an external program
+homeboy schedule add e2e \
+  --exec npm --exec-arg run --exec-arg test \
+  --working-dir /srv/project \
+  --every 24h
+```
+
+External programs are executed **directly, never through a shell**. Nothing is word-split, so an argument containing spaces stays one argument, and there is no quoting or injection surface. Shell operators (`|`, `&&`, `>`, `$`) in the program are refused at declaration time rather than failing later with a confusing "no such file" — to run a pipeline, put it in a script and schedule the script.
+
+Arguments are passed through untouched, so an argument may legitimately contain those characters.
+
+`--working-dir` matters for the common case: test runners and build tools usually only work from their project root.
 
 ## Cadence
 
@@ -37,7 +59,12 @@ Cadence is measured from the previous run's **start**, so a slow run does not pu
 
 `change` is the default because the useful behavior for a periodic check is silence while healthy and a ping when something drifts — a notification should mean something needs attention.
 
-Change detection fingerprints the result envelope with volatile fields (timestamps, durations, run ids) removed. Without that, every run would look like a change and `change` would be indistinguishable from `always`.
+Change detection depends on what ran:
+
+- a **homeboy command** is fingerprinted from its result envelope, with volatile fields (timestamps, durations, run ids) removed — without that, every run would look like a change and `change` would be indistinguishable from `always`
+- an **external program** has no envelope, so its combined stdout/stderr is fingerprinted together with its exit code. A probe whose output stops changing goes quiet; one whose output changes reports, even if the exit code is unchanged.
+
+External output is captured up to 64 KiB and only the tail is kept, so a chatty program cannot grow the runtime state without bound. The notification carries a bounded tail of that output.
 
 A repeated **identical failure** still notifies. An ongoing outage that goes quiet because it is "unchanged" is the worst available outcome.
 
