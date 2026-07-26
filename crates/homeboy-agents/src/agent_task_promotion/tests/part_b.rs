@@ -1249,6 +1249,128 @@ fn promotion_runs_clean_checkout_gate_against_immutable_candidate() {
 }
 
 #[test]
+fn promotion_hydrates_a_bounded_nested_dependency_root_before_its_gate() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        git(&workspace, &["init", "-b", "main"]);
+        git(&workspace, &["config", "user.email", "test@example.com"]);
+        git(&workspace, &["config", "user.name", "Homeboy Test"]);
+        std::fs::create_dir_all(workspace.join("src")).expect("source directory");
+        std::fs::create_dir_all(workspace.join("php-transformer")).expect("nested package");
+        std::fs::write(workspace.join("src/lib.rs"), "old\n").expect("base file");
+        std::fs::write(
+            workspace.join("php-transformer/homeboy.json"),
+            r#"{"id":"nested-php-transformer"}"#,
+        )
+        .expect("component manifest");
+        std::fs::write(
+            workspace.join("php-transformer/composer.lock"),
+            "fixture-lock\n",
+        )
+        .expect("composer lock fixture");
+        std::fs::write(
+            workspace.join("php-transformer/homeboy-deps.json"),
+            r#"{"provider":"fixture-composer","commands":{"install":{"argv":["sh","-c","mkdir -p vendor && printf fixture > vendor/autoload.php"]}}}"#,
+        )
+        .expect("provider declaration");
+        git(&workspace, &["add", "."]);
+        git(&workspace, &["commit", "-m", "base"]);
+        let (source_path, source) = write_patch_source(&temp);
+        let mut provider = FakePromotionWorkspaceProvider {
+            workspace_path: Some(workspace.clone()),
+            apply_to_git: true,
+            run_verify_command: true,
+            ..Default::default()
+        };
+
+        let report = promote_with_provider(
+            AgentTaskPromotionOptions {
+                source,
+                source_run_id: Some("nested-dependency-hydration".to_string()),
+                source_path: Some(source_path),
+                source_worktree_path: None,
+                base_ref: None,
+                task_base_sha: None,
+                candidate_ref: None,
+                to_worktree: "fixture@target".to_string(),
+                task_id: None,
+                artifact_id: None,
+                dry_run: false,
+                gates: VerifyGateOptions {
+                    verify: vec!["test -f php-transformer/vendor/autoload.php".to_string()],
+                    ..Default::default()
+                },
+                provider_command: None,
+                provider_invocation: None,
+            },
+            &mut provider,
+        )
+        .expect("nested dependency setup makes the gate runnable");
+
+        assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
+        assert_eq!(
+            report.provenance["gate_setup"][0]["package_root"],
+            "php-transformer"
+        );
+        assert_eq!(
+            report.provenance["gate_setup"][0]["setup_capability"],
+            "dependency.install"
+        );
+        assert!(
+            !workspace.join("php-transformer/vendor").exists(),
+            "setup writes only to the candidate checkout"
+        );
+    });
+}
+
+#[test]
+fn promotion_can_disable_candidate_dependency_hydration() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    git(&workspace, &["init", "-b", "main"]);
+    git(&workspace, &["config", "user.email", "test@example.com"]);
+    git(&workspace, &["config", "user.name", "Homeboy Test"]);
+    std::fs::create_dir_all(workspace.join("src")).expect("source directory");
+    std::fs::write(workspace.join("src/lib.rs"), "old\n").expect("base file");
+    git(&workspace, &["add", "."]);
+    git(&workspace, &["commit", "-m", "base"]);
+    let (source_path, source) = write_patch_source(&temp);
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(workspace),
+        apply_to_git: true,
+        ..Default::default()
+    };
+    let report = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("disable-dependency-hydration".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "fixture@target".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec!["true".to_string()],
+                hydrate_dependencies: false,
+                ..Default::default()
+            },
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect("disabled setup still runs gates");
+    assert_eq!(report.provenance["gate_setup"], serde_json::json!([]));
+}
+
+#[test]
 fn promotion_rejects_mutation_after_checkpoint_before_gate_materialization() {
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
