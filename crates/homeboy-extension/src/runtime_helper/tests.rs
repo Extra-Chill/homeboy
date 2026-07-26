@@ -72,6 +72,48 @@ fn helper_path_resolves_by_filename_and_env_var() {
 }
 
 #[test]
+fn declared_helper_is_content_addressed_and_reports_provenance() {
+    with_isolated_home(|_| {
+        let requirement = RuntimeHelperRequirement {
+            id: RUNTIME_SETTINGS_HELPER_ID.to_string(),
+            revision: None,
+        };
+        let provision = provision_declared_helpers(&[requirement])
+            .expect("core materializes declared helper");
+
+        assert_eq!(provision.len(), 1);
+        assert_eq!(provision[0].env_var, RUNTIME_SETTINGS_HELPER_ENV);
+        assert_eq!(provision[0].source, "homeboy-core-embedded");
+        assert!(provision[0].revision.starts_with("sha256:"));
+        assert!(provision[0].path.contains(&provision[0].revision));
+        assert_eq!(
+            std::fs::read_to_string(&provision[0].path).expect("helper contents"),
+            assets::SETTINGS_SH
+        );
+    });
+}
+
+#[test]
+fn declared_helper_rejects_missing_or_incompatible_identity() {
+    with_isolated_home(|_| {
+        let missing = provision_declared_helpers(&[RuntimeHelperRequirement {
+            id: "missing-helper".to_string(),
+            revision: None,
+        }])
+        .expect_err("unknown identity must fail before execution");
+        assert!(missing.message.contains("not supplied by Homeboy core"));
+
+        let incompatible = provision_declared_helpers(&[RuntimeHelperRequirement {
+            id: RUNTIME_SETTINGS_HELPER_ID.to_string(),
+            revision: Some("sha256:incompatible".to_string()),
+        }])
+        .expect_err("revision mismatch must fail before execution");
+        assert!(incompatible.message.contains("requires revision"));
+        assert!(incompatible.message.contains("Homeboy core provides"));
+    });
+}
+
+#[test]
 fn runner_prelude_initializes_context_steps_trap_and_sidecar() {
     let dir = tempfile::tempdir().expect("tempdir");
     let runtime_dir = dir.path().join("runtime");

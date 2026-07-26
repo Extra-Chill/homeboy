@@ -97,6 +97,7 @@ pub mod manifest_test_config;
 pub mod manifest_toolchain_config;
 pub mod notification_transport_config;
 pub mod runner_contract;
+pub mod runtime_helper;
 pub mod sidecar_config;
 pub use manifest::ExtensionManifest;
 pub use manifest_artifact_cleanup::{
@@ -123,5 +124,6 @@ pub use runner_contract::{
     PhaseFailure, PhaseFailureCategory, PhaseReport, PhaseStatus, RunnerStepFilter,
     VerificationPhase, GENERIC_INFRASTRUCTURE_FAILURE_MARKERS,
 };
+pub use runtime_helper::RuntimeHelperRequirement;
 pub use test_drift::TestDriftConfig;
 pub use version::{parse_extension_version, VersionConstraint};

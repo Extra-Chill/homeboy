@@ -11,6 +11,7 @@ pub(super) const RESOLVE_CONTEXT_SH: &str = include_str!("../runtime/resolve-con
 pub(super) const DISPOSABLE_LOCAL_DB_SH: &str = include_str!("../runtime/disposable-local-db.sh");
 pub(super) const BENCH_HELPER_SH: &str = include_str!("../runtime/bench-helper.sh");
 pub(super) const BENCH_HELPER_JS: &str = include_str!("../runtime/bench-helper.mjs");
+pub(super) const SETTINGS_SH: &str = include_str!("../runtime/settings.sh");
 
 #[cfg(test)]
 mod tests {
@@ -32,6 +33,7 @@ mod tests {
             DISPOSABLE_LOCAL_DB_SH,
             BENCH_HELPER_SH,
             BENCH_HELPER_JS,
+            SETTINGS_SH,
         ] {
             assert!(!content.trim().is_empty());
         }

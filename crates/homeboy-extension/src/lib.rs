@@ -136,7 +136,9 @@ pub use refactor_protocol::{
 pub use repair::{relink, replace, replace_with_revision, ReplaceResult};
 pub use runner::{ExtensionRunner, RunnerOutput, STRICT_VALIDATION_DEPENDENCIES_ENV};
 pub use runtime_helper::{
-    helper_path, BASH_PREFLIGHT_ENV, COMMAND_CAPTURE_ENV, RUNNER_PRELUDE_ENV, RUNNER_STEPS_ENV,
+    declared_helper_env_names, helper_path, provision_declared_helpers, RuntimeHelperProvision,
+    BASH_PREFLIGHT_ENV, COMMAND_CAPTURE_ENV, RUNNER_PRELUDE_ENV, RUNNER_STEPS_ENV,
+    RUNTIME_SETTINGS_HELPER_ENV, RUNTIME_SETTINGS_HELPER_ID,
 };
 pub use summary::{list_summaries, ActionSummary, ExtensionSummary};
 pub use validation::{
@@ -145,6 +147,7 @@ pub use validation::{
 
 pub use homeboy_extension_contract::{
     core_compat, exec_context, runner_contract, source_metadata_repair, update_output, version,
+    RuntimeHelperRequirement,
 };
 
 #[cfg(test)]
