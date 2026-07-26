@@ -552,16 +552,20 @@ fn skip_publish_with_package_provider_still_packages_before_github_release() {
     let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
     let package_preflight_index = step_index(&ids, "preflight.package");
     let package_index = step_index(&ids, "package");
+    let authority_index = step_index(&ids, "artifacts.authority");
+    let commit_index = step_index(&ids, "git.commit");
+    let tag_index = step_index(&ids, "git.tag");
+    let push_index = step_index(&ids, "git.push");
     let github_release_index = step_index(&ids, "github.release");
 
     assert!(package_preflight_index < package_index);
+    assert!(package_index < authority_index);
+    assert!(authority_index < commit_index);
+    assert!(authority_index < tag_index);
+    assert!(authority_index < push_index);
     assert!(package_index < github_release_index);
-    assert_eq!(steps[package_index].needs, vec!["git.commit"]);
-    assert!(step_index(&ids, "package") < step_index(&ids, "artifacts.authority"));
-    assert_eq!(
-        steps[step_index(&ids, "git.tag")].needs,
-        vec!["artifacts.authority"]
-    );
+    assert_eq!(steps[commit_index].needs, vec!["artifacts.authority"]);
+    assert_eq!(steps[tag_index].needs, vec!["git.commit"]);
     assert_eq!(steps[github_release_index].needs, vec!["git.push"]);
     assert!(!ids.contains(&"publish.artifact-packager"));
     assert_eq!(
@@ -685,10 +689,7 @@ fn component_build_artifact_packages_before_github_release_without_extension() {
     let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
     assert!(step_index(&ids, "preflight.package") < step_index(&ids, "package"));
     assert!(step_index(&ids, "package") < step_index(&ids, "github.release"));
-    assert_eq!(
-        steps[step_index(&ids, "git.tag")].needs,
-        vec!["artifacts.authority"]
-    );
+    assert_eq!(steps[step_index(&ids, "git.tag")].needs, vec!["git.commit"]);
     assert_eq!(
         steps[step_index(&ids, "cleanup")].needs,
         vec!["github.release"]
