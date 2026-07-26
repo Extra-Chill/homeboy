@@ -399,6 +399,37 @@ where
                     record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
                     continue;
                 }
+                let source_identity_valid = request
+                    .metadata
+                    .get("cook_workspace_identity")
+                    .map(|attestation| {
+                        request.workspace.root.as_deref().is_some_and(|root| {
+                            crate::agent_task_workspace_identity::workspace_matches_attestation(
+                                Path::new(root),
+                                attestation,
+                            )
+                        })
+                    })
+                    .unwrap_or(true);
+                if !source_identity_valid {
+                    let root = request.workspace.root.as_deref().unwrap_or("<missing>");
+                    let outcome = committed_harvest_failure(
+                        committed_harvest_preflight_outcome(task_id.clone()),
+                        HarvestError::Git {
+                            command: "verify Cook source workspace identity".to_string(),
+                            cwd: Path::new(root).to_path_buf(),
+                            message: "source workspace no longer matches its Cook admission identity attestation".to_string(),
+                        },
+                    );
+                    events.push(event(
+                        &task_id,
+                        AgentTaskState::Failed,
+                        scheduled.attempt,
+                        outcome.summary.clone(),
+                    ));
+                    record_completed_outcome(&mut completed_by_task, &mut outcomes, outcome);
+                    continue;
+                }
                 let harvest_preflight = match prepare_committed_harvest(
                     &request,
                     derived_cook_baseline,

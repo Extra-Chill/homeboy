@@ -630,6 +630,14 @@ pub(super) fn prepare_attempt_workspace(
     let base_fingerprint = fingerprint(attempt_base.as_bytes());
     remap_workspace_config(&mut request.executor.config, &root, &attempt_root);
     request.workspace.root = Some(attempt_root.display().to_string());
+    request.metadata["cook_attempt_workspace_identity"] =
+        crate::agent_task_workspace_identity::attest_workspace(&attempt_root).map_err(|error| {
+            HarvestError::Git {
+                command: "attest Cook attempt workspace".to_string(),
+                cwd: attempt_root.clone(),
+                message: error.message,
+            }
+        })?;
     request.workspace.attempt = Some(crate::agent_task::AgentTaskAttemptWorkspace {
         identity,
         base_ref: attempt_base,

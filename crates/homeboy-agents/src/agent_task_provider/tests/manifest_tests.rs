@@ -351,7 +351,7 @@ fn provider_refuses_git_file_replaced_by_directory_before_spawn() {
     ));
     let (mut request, provider) = request("attested-workspace", format!("node {script}"));
     request.workspace.root = Some(workspace.display().to_string());
-    request.metadata = serde_json::json!({ "cook_workspace_identity": attestation });
+    request.metadata = serde_json::json!({ "cook_attempt_workspace_identity": attestation });
 
     std::fs::remove_file(workspace.join(".git")).expect("remove linked git file");
     std::fs::create_dir(workspace.join(".git")).expect("replace with git directory");
@@ -379,7 +379,7 @@ fn provider_refuses_linked_git_target_swap_before_spawn() {
     ));
     let (mut request, provider) = request("attested-workspace", format!("node {script}"));
     request.workspace.root = Some(workspace.display().to_string());
-    request.metadata = serde_json::json!({ "cook_workspace_identity": attestation });
+    request.metadata = serde_json::json!({ "cook_attempt_workspace_identity": attestation });
 
     std::fs::create_dir_all(temp.path().join("replacement-gitdir")).expect("replacement gitdir");
     std::fs::write(workspace.join(".git"), "gitdir: ../replacement-gitdir\n")

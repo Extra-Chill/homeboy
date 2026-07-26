@@ -1,0 +1,97 @@
+use std::path::Path;
+
+use homeboy_core::{Error, Result};
+use serde_json::Value;
+
+#[cfg(unix)]
+pub(crate) fn attest_workspace(path: &Path) -> Result<Value> {
+    use std::os::unix::fs::MetadataExt;
+
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    let metadata = std::fs::symlink_metadata(&canonical).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(canonical.display().to_string()))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(Error::validation_invalid_argument(
+            "workspace",
+            "Cook workspace must be a non-symlink directory",
+            Some(canonical.display().to_string()),
+            None,
+        ));
+    }
+    let git_file = canonical.join(".git");
+    let git_metadata = std::fs::symlink_metadata(&git_file).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(git_file.display().to_string()))
+    })?;
+    let git_content = std::fs::read_to_string(&git_file).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(git_file.display().to_string()))
+    })?;
+    let gitdir_target = git_content
+        .strip_prefix("gitdir: ")
+        .map(str::trim)
+        .and_then(|target| std::fs::canonicalize(canonical.join(target)).ok());
+    Ok(serde_json::json!({
+        "canonical_path": canonical,
+        "device": metadata.dev(),
+        "inode": metadata.ino(),
+        "git_file_is_file": git_metadata.file_type().is_file(),
+        "git_file_content": git_content,
+        "gitdir_target": gitdir_target,
+    }))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn attest_workspace(path: &Path) -> Result<Value> {
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    Ok(serde_json::json!({ "canonical_path": canonical }))
+}
+
+#[cfg(unix)]
+pub(crate) fn workspace_matches_attestation(path: &Path, attestation: &Value) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(canonical) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    let Ok(metadata) = std::fs::symlink_metadata(&canonical) else {
+        return false;
+    };
+    !metadata.file_type().is_symlink()
+        && attestation["canonical_path"].as_str() == canonical.to_str()
+        && attestation["device"].as_u64() == Some(metadata.dev())
+        && attestation["inode"].as_u64() == Some(metadata.ino())
+        && linked_git_metadata_matches(&canonical, attestation)
+}
+
+#[cfg(unix)]
+fn linked_git_metadata_matches(worktree: &Path, attestation: &Value) -> bool {
+    let git_file = worktree.join(".git");
+    let Ok(metadata) = std::fs::symlink_metadata(&git_file) else {
+        return false;
+    };
+    if !metadata.file_type().is_file() || attestation["git_file_is_file"] != true {
+        return false;
+    }
+    let Ok(content) = std::fs::read_to_string(&git_file) else {
+        return false;
+    };
+    if attestation["git_file_content"].as_str() != Some(content.as_str()) {
+        return false;
+    }
+    let target = content
+        .strip_prefix("gitdir: ")
+        .map(str::trim)
+        .and_then(|target| std::fs::canonicalize(worktree.join(target)).ok());
+    target.as_deref().and_then(|path| path.to_str()) == attestation["gitdir_target"].as_str()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn workspace_matches_attestation(path: &Path, attestation: &Value) -> bool {
+    std::fs::canonicalize(path)
+        .ok()
+        .and_then(|path| path.to_str().map(str::to_string))
+        .as_deref()
+        == attestation["canonical_path"].as_str()
+}
