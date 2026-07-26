@@ -584,7 +584,7 @@ impl JobStore {
                 ));
             }
         }
-        let job = Job {
+        let mut job = Job {
             id: Uuid::new_v4(),
             operation: request.operation.clone(),
             status: JobStatus::Queued,
@@ -639,6 +639,7 @@ impl JobStore {
             );
         }
         let mut evidence = run_ref_metadata.unwrap_or_else(|| serde_json::json!({}));
+        evidence["status"] = serde_json::json!("queued");
         if let (Some(submission_key), Some(fingerprint)) =
             (request.submission_key(), submission_fingerprint.as_deref())
         {
@@ -661,6 +662,8 @@ impl JobStore {
             data: Some(evidence),
         });
         stored.job.event_count = stored.events.len();
+        // Return the admitted projection, including the durable queued event.
+        job = stored.job.clone();
         // Persist job creation, queue evidence, and key index as one locked
         // snapshot. This is the admission commit point used by lost-response
         // recovery and daemon restart replay.

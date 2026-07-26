@@ -1478,6 +1478,39 @@ fn corrupt_replay_tombstone_journal_fails_closed() {
 }
 
 #[test]
+fn jsonl_replay_tombstones_migrate_before_restart_lookup() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("jobs.json");
+    let legacy = path.with_file_name("jobs.json.replay-tombstones.jsonl");
+    let job_id = Uuid::new_v4();
+    let tombstone = super::super::persistence::ReplayTombstone {
+        kind: super::super::persistence::ReplayTombstoneKind::RemoteRunner,
+        key: "agent-task:v1:legacy".to_string(),
+        fingerprint: "sha256:legacy".to_string(),
+        job_id,
+        terminal_job: None,
+    };
+    fs::write(
+        &legacy,
+        format!(
+            "{}\n",
+            serde_json::to_string(&tombstone).expect("serialize legacy tombstone")
+        ),
+    )
+    .expect("write legacy journal");
+
+    let store = JobStore::open_with_retention(&path, 3, 1).expect("migrate legacy journal");
+    assert!(super::super::persistence::tombstone_path(&path).exists());
+    assert!(legacy.with_extension("jsonl.migrated").exists());
+    let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+    request.metadata = Some(json!({ "submission_key": "agent-task:v1:legacy" }));
+    let error = store
+        .submit_remote_runner_job(request)
+        .expect_err("migrated key remains exactly-once evidence");
+    assert_eq!(error.details["expired_job_id"], json!(job_id));
+}
+
+#[test]
 fn remote_runner_job_env_is_scoped_to_submitted_job() {
     let store = JobStore::default();
     let mut first = remote_runner_request("homeboy-lab", Some("extrachill"));
