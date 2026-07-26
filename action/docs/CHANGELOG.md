@@ -2,6 +2,12 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.23] - 2026-07-26
+
+### Fixed
+- survive processes exiting during supervisor /proc scan
+- validate command result envelopes against the command root
+
 ## [2.8.22] - 2026-07-25
 
 ### Fixed
