@@ -213,3 +213,9 @@ preview/apply rules for future write endpoints.
 
 - [self](self.md)
 - [status](status.md)
+
+## Scheduled runs
+
+A running daemon fires due [schedules](schedule.md) without an external timer. It polls every 30 seconds by default; override with `HOMEBOY_DAEMON_SCHEDULE_TICK_SECS`, or set it to `0` to disable daemon-driven scheduling and drive `homeboy schedule tick` yourself.
+
+Each due schedule runs on its own thread, so a slow scheduled command delays neither the poll loop nor daemon shutdown. Markers left by a run the daemon did not finish are reclaimed at start.

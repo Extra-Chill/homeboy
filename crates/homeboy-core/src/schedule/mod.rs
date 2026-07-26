@@ -20,12 +20,14 @@
 mod entity;
 pub mod execution;
 pub mod state;
+pub mod ticker;
 pub mod types;
 
 pub use execution::{
     result_digest, run_schedule, ScheduleCommandRunner, ScheduleRunOutcome, SubprocessRunner,
 };
 pub use state::{load_state, remove_state, save_state, ScheduleState};
+pub use ticker::{reclaim_stale_runs, ScheduleTicker};
 pub use types::{Cadence, NotifyPolicy, OverlapPolicy, Schedule};
 
 crate::entity_crud!(Schedule; list_ids);

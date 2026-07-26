@@ -903,9 +903,11 @@ where
 
     let (local_shutdown_tx, local_shutdown_rx) = mpsc::channel();
     let (completion_shutdown_tx, completion_shutdown_rx) = mpsc::channel();
+    let (schedule_shutdown_tx, schedule_shutdown_rx) = mpsc::channel();
     let local_child_reconciler =
         spawn_local_child_reservation_reconciler(job_store.clone(), local_shutdown_rx);
     let completion_notifier = spawn_completion_notifier(completion_shutdown_rx);
+    let schedule_ticker = spawn_schedule_ticker(schedule_shutdown_rx);
 
     let mut accepted = 0;
     let mut serve_result = Ok(());
@@ -931,8 +933,10 @@ where
 
     let _ = local_shutdown_tx.send(());
     let _ = completion_shutdown_tx.send(());
+    let _ = schedule_shutdown_tx.send(());
     let _ = local_child_reconciler.join();
     let _ = completion_notifier.join();
+    let _ = schedule_ticker.join();
     serve_result.map(|()| state)
 }
 
@@ -941,6 +945,68 @@ where
 const COMPLETION_NOTIFY_INTERVAL_ENV: &str = "HOMEBOY_DAEMON_NOTIFY_INTERVAL_SECS";
 const COMPLETION_NOTIFY_DEFAULT_INTERVAL_SECS: u64 = 5;
 const LOCAL_CHILD_RESERVATION_RECONCILE_INTERVAL_SECS: u64 = 5;
+
+/// Environment variable overriding how often the daemon checks for due
+/// schedules, in seconds. Defaults to [`SCHEDULE_TICK_DEFAULT_INTERVAL_SECS`].
+///
+/// This is the *polling* cadence, not a schedule's own cadence. Polling more
+/// often than the shortest declared interval is harmless — a schedule that is
+/// not due is skipped — and it bounds how late a due schedule can fire.
+const SCHEDULE_TICK_INTERVAL_ENV: &str = "HOMEBOY_DAEMON_SCHEDULE_TICK_SECS";
+const SCHEDULE_TICK_DEFAULT_INTERVAL_SECS: u64 = 30;
+
+/// Setting the tick interval to zero disables daemon-driven scheduling, for
+/// operators who would rather drive `homeboy schedule tick` themselves.
+fn schedule_tick_interval() -> Option<std::time::Duration> {
+    parse_schedule_tick_interval(std::env::var(SCHEDULE_TICK_INTERVAL_ENV).ok().as_deref())
+}
+
+/// Interval parsing, split from the environment read so it can be tested
+/// without mutating process-wide state under parallel tests.
+fn parse_schedule_tick_interval(configured: Option<&str>) -> Option<std::time::Duration> {
+    let seconds = configured
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(SCHEDULE_TICK_DEFAULT_INTERVAL_SECS);
+    (seconds > 0).then(|| std::time::Duration::from_secs(seconds))
+}
+
+/// Fire due schedules on a cadence so homeboy does not need an external timer
+/// to run its own periodic work (#10131).
+fn spawn_schedule_ticker(shutdown: mpsc::Receiver<()>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let Some(interval) = schedule_tick_interval() else {
+            // Disabled: still consume the shutdown signal so the join at
+            // teardown returns promptly.
+            let _ = shutdown.recv();
+            return;
+        };
+        schedule_tick_loop(interval, shutdown)
+    })
+}
+
+/// Poll for due schedules and dispatch them.
+///
+/// Runs are dispatched onto their own threads by the ticker, so a slow
+/// scheduled command delays neither this loop nor daemon shutdown. Stale
+/// `running` markers left by a previous process are reclaimed once at start,
+/// matching how the job store reconciles expired reservations when it opens.
+fn schedule_tick_loop(interval: std::time::Duration, shutdown: mpsc::Receiver<()>) {
+    let _ = crate::schedule::reclaim_stale_runs(chrono::Utc::now());
+
+    let runner: std::sync::Arc<dyn crate::schedule::ScheduleCommandRunner> =
+        match crate::schedule::SubprocessRunner::new() {
+            Ok(runner) => std::sync::Arc::new(runner),
+            Err(_) => return,
+        };
+    let ticker = crate::schedule::ScheduleTicker::new();
+
+    loop {
+        let _ = ticker.dispatch_due(chrono::Utc::now(), std::sync::Arc::clone(&runner));
+        if shutdown.recv_timeout(interval).is_ok() {
+            return;
+        }
+    }
+}
 
 /// Reclaim capacity even when no controller polls the daemon after a failed
 /// handoff. The store owns the fail-closed child-identity check.
@@ -2571,6 +2637,59 @@ mod tests {
     use crate::daemon::runner_exec_driver::{
         self, DaemonExecOutput, PreparedDaemonExec, RunnerExecDriver, RunnerExecPrepareRequest,
     };
+
+    /// Polling cadence is independent of any schedule's own cadence, and an
+    /// operator can opt out of daemon-driven scheduling entirely.
+    #[test]
+    fn schedule_tick_interval_defaults_and_can_be_disabled() {
+        assert_eq!(
+            super::parse_schedule_tick_interval(None),
+            Some(Duration::from_secs(
+                super::SCHEDULE_TICK_DEFAULT_INTERVAL_SECS
+            ))
+        );
+        assert_eq!(
+            super::parse_schedule_tick_interval(Some(" 5 ")),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            super::parse_schedule_tick_interval(Some("0")),
+            None,
+            "zero disables daemon-driven scheduling"
+        );
+        assert_eq!(
+            super::parse_schedule_tick_interval(Some("not-a-number")),
+            Some(Duration::from_secs(
+                super::SCHEDULE_TICK_DEFAULT_INTERVAL_SECS
+            )),
+            "an unparseable value falls back to the default rather than disabling"
+        );
+    }
+
+    /// The daemon must not wait a full poll interval to shut down. The loop
+    /// blocks on `recv_timeout`, so the shutdown signal has to win the race.
+    #[test]
+    fn schedule_tick_loop_exits_promptly_on_shutdown() {
+        crate::test_support::with_isolated_home(|_| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let handle = std::thread::spawn(move || {
+                // A long poll interval: only the shutdown signal can end this
+                // loop in reasonable time.
+                super::schedule_tick_loop(Duration::from_secs(300), rx);
+            });
+
+            std::thread::sleep(Duration::from_millis(50));
+            tx.send(()).expect("send shutdown");
+
+            let start = Instant::now();
+            handle.join().expect("ticker thread joins");
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "shutdown must not wait out the poll interval, took {:?}",
+                start.elapsed()
+            );
+        });
+    }
 
     #[test]
     fn heartbeat_only_liveness_stalls_after_the_bounded_window() {
