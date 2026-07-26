@@ -365,15 +365,29 @@ pub(super) fn run_materialized_provider_command_once(
             .get("cook_attempt_workspace_identity")
             .or_else(|| request.request.metadata.get("cook_workspace_identity"))
         {
-            if !crate::agent_task_workspace_identity::workspace_matches_attestation(
+            let identity_match = crate::agent_task_workspace_identity::workspace_attestation_match(
                 &cwd,
                 attestation,
-            ) {
+            );
+            if identity_match
+                != crate::agent_task_workspace_identity::WorkspaceAttestationMatch::Matched
+            {
+                let representation_drift = identity_match
+                    == crate::agent_task_workspace_identity::WorkspaceAttestationMatch::GitRepresentationDrift;
                 return failure_outcome(
-                    request, AgentTaskOutcomeStatus::ProviderError,
+                    request,
+                    AgentTaskOutcomeStatus::ProviderError,
                     AgentTaskFailureClassification::InvalidInput,
-                    "agent_task.workspace_identity_changed",
-                    "provider workspace no longer matches its Cook attempt identity attestation; refusing execution".to_string(),
+                    if representation_drift {
+                        "agent_task.workspace_git_representation_changed"
+                    } else {
+                        "agent_task.workspace_identity_changed"
+                    },
+                    if representation_drift {
+                        "provider workspace .git representation no longer matches its Cook attempt identity attestation; refusing execution".to_string()
+                    } else {
+                        "provider workspace no longer matches its Cook attempt identity attestation; refusing execution".to_string()
+                    },
                     json!({ "provider": provider.id, "workspace": cwd }),
                 );
             }

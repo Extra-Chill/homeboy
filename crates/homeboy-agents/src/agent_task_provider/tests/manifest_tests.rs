@@ -469,7 +469,7 @@ fn provider_refuses_legacy_source_attestation_git_file_replaced_before_spawn() {
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
     assert_eq!(
         outcome.diagnostics[0].class,
-        "agent_task.workspace_identity_changed"
+        "agent_task.workspace_git_representation_changed"
     );
     assert!(!marker.exists(), "provider command must not start");
 }

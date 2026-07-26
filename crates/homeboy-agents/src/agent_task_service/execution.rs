@@ -154,8 +154,7 @@ where
 /// plan is persisted or executed; the predecessor remains audit provenance.
 pub fn bind_runner_snapshot_workspace_attestations(plan: &mut AgentTaskPlan) -> Result<()> {
     for task in &mut plan.tasks {
-        let Some(controller_identity) = task.metadata.get("cook_workspace_identity").cloned()
-        else {
+        let Some(current_identity) = task.metadata.get("cook_workspace_identity").cloned() else {
             continue;
         };
         let root = task.workspace.root.as_deref().ok_or_else(|| {
@@ -169,7 +168,13 @@ pub fn bind_runner_snapshot_workspace_attestations(plan: &mut AgentTaskPlan) -> 
         let runner_identity =
             crate::agent_task_workspace_identity::attest_workspace(std::path::Path::new(root))?;
         task.metadata["cook_workspace_identity"] = runner_identity;
-        task.metadata["cook_workspace_identity_predecessor"] = controller_identity;
+        if task
+            .metadata
+            .get("cook_workspace_identity_predecessor")
+            .is_none()
+        {
+            task.metadata["cook_workspace_identity_predecessor"] = current_identity;
+        }
     }
     Ok(())
 }
