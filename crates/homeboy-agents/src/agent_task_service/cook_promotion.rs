@@ -874,9 +874,8 @@ fn cook_review_dossier(
     promotion: &AgentTaskPromotionReport,
     successful_run_id: &str,
 ) -> Result<AgentTaskReviewDossier> {
-    // A form-only run owns reviewer metadata but has no patch or gate work of
-    // its own. Render deterministic scope and verification from the promoted
-    // implementation it explicitly carries forward.
+    // A form-only run owns reviewer metadata but carries forward the durable
+    // gate proof while its authenticated source owns candidate scope.
     let terminal_promotion = promotion;
     let source_run_id = terminal_promotion
         .provenance
@@ -897,9 +896,12 @@ fn cook_review_dossier(
     let promotion = implementation_promotion
         .as_ref()
         .unwrap_or(terminal_promotion);
+    // A form-only continuation carries its source's normalized gate proof.
+    // The terminal record is therefore the durable reviewer-proof boundary.
+    let verification_promotion = terminal_promotion;
     let changed_files = promotion.changed_files.join(", ");
     let changed_file_count = promotion.changed_files.len();
-    let gate_count = promotion.gate_results.len();
+    let gate_count = verification_promotion.gate_results.len();
     let task_summary = options
         .initial_plan
         .tasks
@@ -917,7 +919,7 @@ fn cook_review_dossier(
         .verify
         .iter()
         .map(|command| {
-            let matched = promotion.has_visible_passed_gate_for_command(command);
+            let matched = verification_promotion.has_visible_passed_gate_for_command(command);
             if !matched {
                 return Err(Error::validation_invalid_argument(
                     "verification",

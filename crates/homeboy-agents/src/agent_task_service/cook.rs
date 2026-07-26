@@ -2483,16 +2483,6 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
         .into()
     };
     homeboy_core::worktree_providers::validate_task_worktree_root(&target, &options.to_worktree)?;
-    if options
-        .initial_plan
-        .tasks
-        .iter()
-        .all(|task| task.inputs["cook_loop"]["review_form_required"] == true)
-    {
-        // A form-only continuation executes against its authenticated materialized
-        // candidate baseline, not the implementation attempt's source checkout.
-        return Ok(());
-    }
     let source = options.source_worktree_path.as_deref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "workspace",

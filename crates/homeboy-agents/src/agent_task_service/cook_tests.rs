@@ -1603,7 +1603,7 @@ impl CandidateAdoptionFixture {
         options.provider_command = Some(provider.display().to_string());
         // This fixture establishes the persisted multi-attempt disclosure
         // prerequisite. Gate-proof behavior is covered by promotion fixtures.
-        options.gates.verify = vec!["test \"$(cat lib.rs)\" = candidate".to_string()];
+        options.gates.verify = Vec::new();
         options.max_attempts = max_attempts;
         options.initial_plan.options.execution_budget =
             crate::agent_task_scheduler::AgentTaskExecutionBudget::new(
@@ -2789,9 +2789,7 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
         options.task_base_sha = Some(base.clone());
         options.provider_command = Some(provider.display().to_string());
         options.attempt_dispatcher = None;
-        // This fixture establishes the persisted multi-attempt disclosure
-        // prerequisite. Gate-proof behavior is covered by promotion fixtures.
-        options.gates.verify = Vec::new();
+        options.gates.verify = vec!["test \"$(cat lib.rs)\" = candidate".to_string()];
         options.max_attempts = 2;
         options.initial_plan.options.execution_budget =
             crate::agent_task_scheduler::AgentTaskExecutionBudget::new(2, 1, 0);
@@ -2957,7 +2955,7 @@ fn historical_orphan_recipe_adoption_uses_recorded_policy_without_provider_repla
 }
 
 #[test]
-fn adoption_form_only_follow_up_preserves_authenticated_patch_authorship() {
+fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_finalizes() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("temporary repositories");
         let source = temp.path().join("source");
@@ -3008,9 +3006,9 @@ fn adoption_form_only_follow_up_preserves_authenticated_patch_authorship() {
                 "HEAD",
             ],
         );
-        std::fs::write(source.join("lib.rs"), "candidate\n").unwrap();
-        git(&source, &["commit", "-am", "candidate"]);
-        let candidate = git_output(&source, &["rev-parse", "HEAD"]);
+        std::fs::write(target.join("lib.rs"), "candidate\n").unwrap();
+        git(&target, &["commit", "-am", "candidate"]);
+        let candidate = git_output(&target, &["rev-parse", "HEAD"]);
         let provider = temp.path().join("promotion-provider.sh");
         std::fs::write(
             &provider,
@@ -3032,18 +3030,19 @@ fn adoption_form_only_follow_up_preserves_authenticated_patch_authorship() {
         let run_id = "cook-adopt-review-form-attempt-1";
         let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
         options.initial_run_id = run_id.to_string();
-        options.source_worktree_path = Some(source.clone());
+        options.source_worktree_path = Some(target.clone());
         options.task_base_sha = Some(base.clone());
         options.provider_command = Some(provider.display().to_string());
         options.attempt_dispatcher = None;
-        options.gates.verify = Vec::new();
+        options.gates.verify = vec!["test \"$(cat lib.rs)\" = candidate".to_string()];
         options.max_attempts = 2;
         options.no_finalize = false;
         options.head = Some("fix/8058".to_string());
-        options.ai_tool = "OpenCode".to_string();
-        options.ai_model = Some("openai/gpt-5.6-sol".to_string());
-        options.initial_plan.tasks[0].executor.backend = "OpenCode".to_string();
-        options.initial_plan.tasks[0].executor.model = Some("openai/gpt-5.6-sol".to_string());
+        options.ai_tool = "fixture-provider".to_string();
+        options.ai_model = Some("fixture-model-implementation".to_string());
+        options.initial_plan.tasks[0].executor.backend = "fixture-provider".to_string();
+        options.initial_plan.tasks[0].executor.model =
+            Some("fixture-model-implementation".to_string());
         let workspace_handle = format!("fixture@{cook_id}");
         homeboy_core::worktree::adopt(homeboy_core::worktree::WorktreeAdoptOptions {
             handle: workspace_handle.clone(),
@@ -3085,7 +3084,7 @@ fn adoption_form_only_follow_up_preserves_authenticated_patch_authorship() {
             cook_id,
             &candidate,
             AgentTaskCandidateAdoptionOptions {
-                ai_model: Some("openai/gpt-5.6-terra".to_string()),
+                ai_model: Some("fixture-model-review".to_string()),
                 replace_interrupted: false,
             },
             |_| Ok(None),
@@ -3118,6 +3117,9 @@ fn adoption_form_only_follow_up_preserves_authenticated_patch_authorship() {
         let follow_up_promotion = persisted_promotion_for_attempt(follow_up_run_id)
             .unwrap()
             .expect("form-only continuation carries promoted candidate");
+        let source_promotion = persisted_promotion_for_attempt(run_id)
+            .unwrap()
+            .expect("source attempt retains its normalized gate proof");
         let alias_promotion = persisted_promotion_for_attempt(cook_id)
             .unwrap()
             .expect("Cook alias carries the same promoted candidate");
@@ -3140,25 +3142,46 @@ fn adoption_form_only_follow_up_preserves_authenticated_patch_authorship() {
             replayed_alias_promotion.source.run_id,
             follow_up_promotion.source.run_id
         );
+        assert_eq!(source_promotion.target.worktree, workspace_handle);
+        assert_eq!(
+            source_promotion.target.path.as_deref(),
+            Some(target.to_str().unwrap())
+        );
+        assert_eq!(
+            source_promotion
+                .verified_base
+                .as_ref()
+                .expect("source proof records the verified base")
+                .sha,
+            base
+        );
+        assert_eq!(
+            source_promotion.provenance["adoption"]["candidate_ref"],
+            candidate
+        );
+        assert_eq!(
+            source_promotion.provenance["candidate"]["fingerprint"]["head"],
+            candidate
+        );
         assert_eq!(
             std::fs::read_to_string(target.join("lib.rs")).unwrap(),
             "candidate\n"
         );
         assert!(backend.body.contains("## Summary\ncomplete the task"));
+        assert!(backend.body.contains(
+            "1. Run `test \"$(cat lib.rs)\" = candidate`; expect passes as recorded by Cook's deterministic gate."
+        ));
+        assert!(backend.body.contains(
+            "**Tool(s):** Implementation: Homeboy (fixture-provider); review form: Homeboy (fixture-provider)"
+        ));
         assert!(backend
             .body
-            .contains("Updated `lib.rs` in the delivered candidate."));
+            .contains("**Model:** Implementation: fixture-model-implementation; review form: fixture-model-review"));
         assert!(backend.body.contains(
-            "**Tool(s):** Implementation: Homeboy (OpenCode); review form: Homeboy (OpenCode)"
+            "**Used for:** Implementation: Homeboy (fixture-provider) authored the delivered candidate changes"
         ));
         assert!(backend.body.contains(
-            "**Model:** Implementation: openai/gpt-5.6-sol; review form: openai/gpt-5.6-terra"
-        ));
-        assert!(backend.body.contains(
-            "**Used for:** Implementation: Homeboy (OpenCode) authored the delivered candidate changes"
-        ));
-        assert!(backend.body.contains(
-            "Review form: Homeboy (OpenCode) reviewed the validated candidate and supplied the reviewer metadata."
+            "Review form: Homeboy (fixture-provider) reviewed the validated candidate and supplied the reviewer metadata."
         ));
         assert!(backend.committed && backend.pushed && backend.created);
     });
@@ -4553,9 +4576,8 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
         let run_id = "cook-8058-attempt-1";
         let mut fixture_options =
             batch_cook_options("cook-8058", Arc::new(AcceptedDetachedAttemptDispatcher));
-        fixture_options.initial_plan.tasks[0].executor.backend = "OpenCode".to_string();
-        fixture_options.initial_plan.tasks[0].executor.model =
-            Some("openai/gpt-5.6-terra".to_string());
+        fixture_options.initial_plan.tasks[0].executor.backend = "fixture-provider".to_string();
+        fixture_options.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
         let plan = fixture_options.initial_plan.clone();
         agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
         let options = AgentTaskCookServiceOptions {
@@ -4581,8 +4603,8 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
             commit_message: "test".to_string(),
             source_refs: vec!["https://github.com/Extra-Chill/homeboy/issues/8058".to_string()],
             protected_branches: vec!["main".to_string()],
-            ai_tool: "OpenCode".to_string(),
-            ai_model: Some("openai/gpt-5.6-terra".to_string()),
+            ai_tool: "fixture-provider".to_string(),
+            ai_model: Some("fixture-model".to_string()),
             ai_used_for: "Drafted test coverage.".to_string(),
             attempt_dispatcher: None,
             harvest_context: crate::agent_task_scheduler::HarvestExecutionContext::default(),
@@ -4751,8 +4773,8 @@ fn cook_rejects_test_claim_without_matching_durable_gate() {
             commit_message: "test".to_string(),
             source_refs: Vec::new(),
             protected_branches: vec!["main".to_string()],
-            ai_tool: "OpenCode".to_string(),
-            ai_model: Some("openai/gpt-5.6-terra".to_string()),
+            ai_tool: "fixture-provider".to_string(),
+            ai_model: Some("fixture-model".to_string()),
             ai_used_for: "Drafted test coverage.".to_string(),
             attempt_dispatcher: None,
             harvest_context: crate::agent_task_scheduler::HarvestExecutionContext::default(),

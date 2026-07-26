@@ -93,7 +93,13 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
                 None,
             ));
         }
-        if eligibility == DurablePublicationEligibility::ProviderRun {
+        if eligibility == DurablePublicationEligibility::ProviderRun
+            && !options
+                .review_dossier
+                .ai_assistance
+                .model
+                .contains("; review form:")
+        {
             options.review_dossier.ai_assistance.model = durable_model(&lifecycle)?;
         }
         options.evidence.lifecycle = Some(lifecycle);

@@ -151,10 +151,20 @@ impl AgentTaskPromotionReport {
         if serde_json::to_value(candidate).ok().as_ref() != Some(recorded) {
             return false;
         }
-        self.provenance
+        let Some(adopted) = self
+            .provenance
             .pointer("/adoption/candidate_ref")
             .and_then(Value::as_str)
-            .is_none_or(|adopted| adopted == candidate.commit)
+        else {
+            return true;
+        };
+        // Gate verification runs from an immutable commit-tree checkout, whose
+        // synthetic commit differs from the adopted source revision. Bind the
+        // adoption to the original candidate fingerprint instead.
+        self.provenance
+            .pointer("/candidate/fingerprint/head")
+            .and_then(Value::as_str)
+            == Some(adopted)
     }
 }
 
