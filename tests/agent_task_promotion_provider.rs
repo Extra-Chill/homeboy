@@ -94,9 +94,14 @@ fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_i
 
     let helper_source = temp.path().join("bind_socket.rs");
     let helper = temp.path().join("bind_socket");
+    // Gate toolchain preflight probes this command with `--version` in the same
+    // environment the gate itself receives, so the helper must answer that probe
+    // without side effects — exactly like a real toolchain. Binding on every
+    // invocation would leave `gate.sock` behind and make the gate's own bind
+    // fail with EADDRINUSE.
     std::fs::write(
         &helper_source,
-        "use std::{env, os::unix::net::UnixListener, path::PathBuf};\nfn main() { let path = PathBuf::from(env::var_os(\"TMPDIR\").unwrap()).join(\"gate.sock\"); UnixListener::bind(&path).unwrap(); println!(\"{}\", path.display()); }\n",
+        "use std::{env, os::unix::net::UnixListener, path::PathBuf};\nfn main() { if env::args().any(|arg| arg == \"--version\") { println!(\"bind_socket 1.0\"); return; } let path = PathBuf::from(env::var_os(\"TMPDIR\").expect(\"TMPDIR\")).join(\"gate.sock\"); UnixListener::bind(&path).unwrap(); println!(\"{}\", path.display()); }\n",
     )
     .expect("socket helper source");
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());

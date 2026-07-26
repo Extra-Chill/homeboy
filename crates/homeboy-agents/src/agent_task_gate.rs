@@ -27,6 +27,10 @@ const XDG_ENV_VARS: &[&str] = &[
     "XDG_RUNTIME_DIR",
 ];
 
+/// Temp-dir variables pinned to the invocation temp dir so every gate process
+/// — preflight probes included — shares one temporary root.
+const TMPDIR_ENV_VARS: &[&str] = &["TMPDIR", "TEMP", "TMP"];
+
 pub type AgentTaskGateVisibility = HomeboyGateVisibility;
 pub type AgentTaskGateRevealPolicy = HomeboyGateRevealPolicy;
 
@@ -946,12 +950,6 @@ pub(crate) fn run_gate_command_with_supervision(
         .stderr(Stdio::piped());
     let selected_environment = selected_gate_environment(gate_environment, runtime_tmpdir)?;
     selected_environment.apply(&mut process);
-    if let Some(runtime_tmpdir) = runtime_tmpdir {
-        process
-            .env("TMPDIR", runtime_tmpdir)
-            .env("TEMP", runtime_tmpdir)
-            .env("TMP", runtime_tmpdir);
-    }
     if supervision.is_some() {
         if !homeboy_core::engine::command::supports_process_tree_isolation() {
             return Err(Error::validation_invalid_argument(
@@ -1065,10 +1063,6 @@ pub(crate) fn run_gate_command_with_timeout(
         .stderr(Stdio::piped());
     let selected_environment = selected_gate_environment(gate_environment, Some(runtime_tmpdir))?;
     selected_environment.apply(&mut process);
-    process
-        .env("TMPDIR", runtime_tmpdir)
-        .env("TEMP", runtime_tmpdir)
-        .env("TMP", runtime_tmpdir);
     homeboy_core::engine::command::isolate_process_tree(&mut process);
     let mut child = process.spawn().map_err(|error| {
         Error::internal_io(
@@ -1155,6 +1149,18 @@ fn selected_gate_environment(
         let value = preserved_environment_value(source)?;
         values.insert(name.clone(), value);
         report.preserved.insert(name.clone(), source.clone());
+    }
+
+    // The invocation temp dir belongs to the shared environment definition, not
+    // to individual call sites. Preflight and execution must agree on it, or
+    // preflight validates a different directory than the gate will use — and,
+    // under the default inherit mode, silently falls back to the ambient TMPDIR
+    // or fails outright when the host has none. (#10245)
+    if let Some(runtime_tmpdir) = runtime_tmpdir {
+        let runtime_tmpdir = runtime_tmpdir.display().to_string();
+        for name in TMPDIR_ENV_VARS {
+            values.insert((*name).to_string(), runtime_tmpdir.clone());
+        }
     }
 
     let needs_scratch = policy.isolate_home || policy.isolate_xdg;
@@ -2049,5 +2055,64 @@ mod tests {
         }
         assert!(error.message.contains("gate toolchain preflight"));
         assert!(!error.message.contains("Fix the code"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn toolchain_preflight_runs_in_the_invocation_tmpdir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Deliberately hermetic: the probe is addressed by absolute path so the
+        // test never mutates PATH. Sibling tests spawn `sh` without holding
+        // ENV_MUTEX, so clobbering PATH here would break them under the test
+        // harness's parallelism.
+        let workspace = tempfile::tempdir().expect("workspace");
+        let runtime_tmpdir = tempfile::tempdir().expect("runtime tmpdir");
+        let bin = tempfile::tempdir().expect("bin");
+
+        // Fails unless every temp-dir variable points at the invocation temp
+        // dir. An unset variable compares as empty and exits non-zero too.
+        let tool = bin.path().join("record-tmpdir");
+        fs::write(
+            &tool,
+            format!(
+                "#!/bin/sh\n[ \"$TMPDIR\" = '{dir}' ] || exit 3\n[ \"$TEMP\" = '{dir}' ] || exit 4\n[ \"$TMP\" = '{dir}' ] || exit 5\nexit 0\n",
+                dir = runtime_tmpdir.path().display()
+            ),
+        )
+        .expect("tool");
+        let mut permissions = fs::metadata(&tool).expect("tool metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&tool, permissions).expect("tool executable");
+
+        preflight_gate_toolchains(
+            workspace.path(),
+            &AgentTaskGateEnvironmentPolicy::default(),
+            &[AgentTaskGateToolchainRequirement {
+                command: tool.display().to_string(),
+                probe_arguments: vec!["initialize".to_string()],
+            }],
+            Some(runtime_tmpdir.path()),
+        )
+        .expect("preflight probes run in the invocation temp dir");
+    }
+
+    #[test]
+    fn gate_environment_pins_temp_dir_variables_to_the_invocation_tmpdir() {
+        let runtime_tmpdir = tempfile::tempdir().expect("runtime tmpdir");
+        let selected = selected_gate_environment(
+            &AgentTaskGateEnvironmentPolicy::default(),
+            Some(runtime_tmpdir.path()),
+        )
+        .expect("gate environment");
+
+        let expected = runtime_tmpdir.path().display().to_string();
+        for name in TMPDIR_ENV_VARS {
+            assert_eq!(
+                selected.values.get(*name),
+                Some(&expected),
+                "{name} must resolve to the invocation temp dir"
+            );
+        }
     }
 }
