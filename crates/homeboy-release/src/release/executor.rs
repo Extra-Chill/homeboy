@@ -245,7 +245,15 @@ pub(crate) fn run_version(
     }
 
     state.version = Some(result.new_version.clone());
-    state.tag = Some(format!("v{}", result.new_version));
+    // Use the component-scoped tag name. Monorepo components namespace their
+    // tags (`<component>-v<version>`), and `state.tag` is read by steps that
+    // run before `git.tag` — notably `package`, which embeds it in the release
+    // payload handed to publish extensions. Writing the unscoped form here
+    // leaked a tag that never existed for those components (#10099).
+    state.tag = Some(
+        crate::release::component_tag_name(component, &result.new_version)
+            .unwrap_or_else(|_| format!("v{}", result.new_version)),
+    );
     state.notes = Some(load_release_notes(component)?);
 
     Ok(step_success("version", "version", Some(data), Vec::new()))
