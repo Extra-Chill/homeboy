@@ -221,6 +221,7 @@ variables.
 - `pre_build_script`
 - `artifact_pattern` — Default artifact path pattern with template support. Supports: {component_id}, {local_path}
 - `cleanup_paths` — Paths to clean up after successful deploy (e.g., node_modules, vendor, target)
+- `artifact_cleanup` — Structured extension-owned reconstructable output consumed by canonical aggregate cleanup. Each rule requires `category`, safe relative `path`, and `rehydrate`; optional exact `manifest_names` scope nested paths beside supported manifests, and `retention: release_asset` explicitly preserves package output. Core owns activity/merge/age/Git/containment policy and deletion.
 
 ### `LintConfig`
 

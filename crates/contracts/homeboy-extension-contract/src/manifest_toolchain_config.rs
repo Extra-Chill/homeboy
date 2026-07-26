@@ -203,6 +203,11 @@ pub struct BuildConfig {
     /// Paths to clean up after successful deploy (e.g., node_modules, vendor, target)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cleanup_paths: Vec<String>,
+    /// Extension-owned reconstructable artifact rules consumed by canonical
+    /// aggregate worktree cleanup. Core owns all eligibility and deletion
+    /// policy; extensions only identify owned paths and how to recreate them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_cleanup: Vec<ArtifactCleanupRule>,
     /// Repo-relative paths to lockfiles this extension's build process
     /// regenerates.
     ///
@@ -216,6 +221,35 @@ pub struct BuildConfig {
     /// is the caller's responsibility.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lockfile_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactCleanupRule {
+    /// Stable, ecosystem-neutral grouping such as `dependencies`, `generated`,
+    /// or `cache`.
+    pub category: String,
+    /// Path relative to the repository root or to each matched manifest.
+    pub path: String,
+    /// Exact manifest filenames that establish supported install scopes. An
+    /// empty list makes this a single repository-root-relative declaration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub manifest_names: Vec<String>,
+    /// Whether the path is reconstructable development output or a retained
+    /// release/package asset. Release assets are inventory skips, never cleanup
+    /// candidates.
+    #[serde(default)]
+    pub retention: ArtifactCleanupRetention,
+    /// Operator-facing command or instruction that recreates the artifact.
+    pub rehydrate: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactCleanupRetention {
+    #[default]
+    Reconstructable,
+    ReleaseAsset,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

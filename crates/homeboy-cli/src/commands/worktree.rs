@@ -257,6 +257,7 @@ pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<Worktre
                         temp_roots: Vec::new(),
                         sort: ArtifactCleanupSort::Discovery,
                         limit: None,
+                        older_than_days: None,
                         merged_only: false,
                     },
                 )?)

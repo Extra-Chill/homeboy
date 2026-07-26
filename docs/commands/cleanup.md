@@ -8,19 +8,22 @@ This is the canonical artifact cleanup path. Worktree lifecycle cleanup is handl
 
 Scans the current repository and its managed Git worktrees for built-in and declared artifact paths. The command defaults to dry-run output and only removes files when `--apply` is passed.
 
-Homeboy always treats Rust `target` directories as rebuildable artifacts. Projects can add repo-relative cleanup paths with `artifact_cleanup_paths` in `homeboy.json`.
+Homeboy always treats Rust `target` directories as rebuildable artifacts. Projects can add repo-relative cleanup paths with `artifact_cleanup_paths` in `homeboy.json`. Installed extensions linked by the worktree's `homeboy.json` can add structured `build.artifact_cleanup` rules for owned reconstructable output.
 
 ```bash
 homeboy cleanup artifacts
 homeboy cleanup artifacts --path /path/to/checkout
 homeboy cleanup artifacts --sort size --limit 10
+homeboy cleanup artifacts --older-than-days 14
 homeboy cleanup artifacts --merged-only --sort size --limit 10
 homeboy cleanup artifacts --apply
 ```
 
-Use `--sort size` to review the largest artifacts first, `--limit N` to bound the reported or removed candidates after sorting, and `--merged-only` to preserve artifacts from worktrees whose branch is not merged into its upstream.
+Use `--sort size` to review the largest artifacts first, `--limit N` to bound the reported or removed candidates after sorting, and `--merged-only` to preserve artifacts from worktrees whose branch is not merged into its upstream. Extension-owned artifacts always require an inactive worktree with a merged branch and default to a seven-day age gate; `--older-than-days` overrides that core-owned age policy.
 
-The JSON output includes worktree identity, candidate paths, estimated bytes, skipped reasons, applied rows, and a `summary` object. The terminal summary shows bounded candidate rows and points to the JSON output for full large reviews. `summary.invocation_reclaimed_bytes` reports bytes reclaimed by the current command, `summary.remaining_candidate_bytes` reports cleanup candidates still present after the command, and `summary.cumulative_session_reclaimed_bytes` carries the local cumulative total for repeated `--apply` runs against the same repository. Cleanup refuses unsafe path declarations and skips artifact paths that contain tracked or staged source changes.
+The JSON output includes worktree identity, declaration owner/category, liveness, logical and allocated bytes, skipped reasons, rehydration guidance, applied rows, and a `summary` object. The terminal summary shows bounded candidate rows and points to the JSON output for full large reviews. `summary.invocation_reclaimed_bytes` reports bytes reclaimed by the current command, `summary.remaining_candidate_bytes` reports cleanup candidates still present after the command, and `summary.cumulative_session_reclaimed_bytes` carries the local cumulative total for repeated `--apply` runs against the same repository. Cleanup refuses unsafe or escaping paths and skips artifact paths that contain tracked, staged, or non-ignored untracked work. Eligibility and containment are revalidated immediately before removal.
+
+Extension rules are static repo-relative paths unless `manifest_names` lists exact supported manifest filenames. Manifest-scoped rules resolve the declared path only beside matching manifests; recursive deletion globs are not supported. Set `retention` to `release_asset` to inventory and preserve package/release output explicitly. Existing string `build.cleanup_paths` declarations remain the post-deploy component cleanup contract and are not promoted into aggregate cleanup because they lack retention and rehydration semantics.
 
 Configured worktree-provider previews run independently with a 30-second cancellation boundary. The output records each provider's typed `outcome`, `inventory_completeness`, elapsed time, and heartbeat count, so a timed-out or failed provider yields a partial inventory without blocking healthy providers. Preview commands remain the only provider operation invoked without `--apply`.
 

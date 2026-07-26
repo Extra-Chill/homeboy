@@ -121,6 +121,10 @@ pub struct CleanupArtifactsArgs {
     #[arg(long, value_name = "N")]
     pub limit: Option<usize>,
 
+    /// Override the seven-day age gate for extension-declared artifacts.
+    #[arg(long, value_name = "DAYS")]
+    pub older_than_days: Option<u64>,
+
     /// Only reclaim artifacts from worktrees whose branch is already merged
     /// into its upstream. Preserves in-progress cooks' build dirs.
     #[arg(long)]
@@ -164,6 +168,7 @@ pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<Value> {
                         CleanupArtifactsSortArg::Size => ArtifactCleanupSort::Size,
                     },
                     limit: args.limit,
+                    older_than_days: args.older_than_days,
                     merged_only: args.merged_only,
                 }),
                 worktree_providers: None,
@@ -1127,6 +1132,7 @@ fn repo_artifact_roots(
                     temp_roots: Vec::new(),
                     sort: ArtifactCleanupSort::Discovery,
                     limit: None,
+                    older_than_days: None,
                     merged_only: false,
                 },
             ));
@@ -1142,6 +1148,7 @@ fn repo_artifact_roots(
                 temp_roots: Vec::new(),
                 sort: ArtifactCleanupSort::Discovery,
                 limit: None,
+                older_than_days: None,
                 merged_only: false,
             },
         ));
@@ -1651,6 +1658,8 @@ mod tests {
             "size",
             "--limit",
             "7",
+            "--older-than-days",
+            "14",
             "--merged-only",
         ]);
 
@@ -1662,6 +1671,7 @@ mod tests {
         };
         assert!(matches!(args.sort, CleanupArtifactsSortArg::Size));
         assert_eq!(args.limit, Some(7));
+        assert_eq!(args.older_than_days, Some(14));
         assert!(args.merged_only);
     }
 

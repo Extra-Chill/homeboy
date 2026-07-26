@@ -106,8 +106,9 @@ pub use maintenance::{exec_tool, update_all};
 pub use manifest::{
     structured_sidecar_schema_version, structured_sidecars, ActionConfig, ActionType,
     AgentRuntimeManifestConfig, AuditCapability, AutofixVerifyConfig, BehaviorScenarioNames,
-    BenchConfig, BuildConfig, CiCapability, CiJobFidelity, CiJobMapping, CiJobSpec, CiLocalContext,
-    CiProfileSpec, CliAutoFlag, CliAutoFlagCondition, CliConfig, CliHelpConfig, ComponentEnvConfig,
+    ArtifactCleanupRetention, ArtifactCleanupRule, BenchConfig, BuildConfig, CiCapability,
+    CiJobFidelity, CiJobMapping, CiJobSpec, CiLocalContext, CiProfileSpec, CliAutoFlag,
+    CliAutoFlagCondition, CliConfig, CliHelpConfig, ComponentEnvConfig,
     DatabaseCliConfig, DatabaseConfig, DeployCapability, DeployOverride, DeployOwnerHint,
     DeployVerification, DepsConfig, DiscoveryConfig, DiscoveryMarkerConfig, DocTarget,
     ExecutableCapability, ExtensionContractProducer, ExtensionContractProducerInvocation,
