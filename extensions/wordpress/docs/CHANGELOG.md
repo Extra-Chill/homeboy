@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.4] - 2026-07-26
+
+### Fixed
+- preserve PHPUnit multisite topology
+
 ## [3.34.3] - 2026-07-26
 
 ### Fixed
