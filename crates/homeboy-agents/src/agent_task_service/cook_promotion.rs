@@ -878,11 +878,22 @@ fn cook_review_dossier(
     // its own. Render deterministic scope and verification from the promoted
     // implementation it explicitly carries forward.
     let terminal_promotion = promotion;
-    let implementation_promotion = terminal_promotion
+    let source_run_id = terminal_promotion
         .provenance
         .pointer("/cook_follow_up/source_run_id")
-        .and_then(Value::as_str)
-        .and_then(|run_id| persisted_promotion_for_attempt(run_id).ok().flatten());
+        .and_then(Value::as_str);
+    let implementation_promotion = source_run_id
+        .map(|run_id| {
+            persisted_promotion_for_attempt(run_id)?.ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "promotion.provenance.cook_follow_up.source_run_id",
+                    "form-only finalization requires its source attempt's persisted promotion",
+                    Some(run_id.to_string()),
+                    None,
+                )
+            })
+        })
+        .transpose()?;
     let promotion = implementation_promotion
         .as_ref()
         .unwrap_or(terminal_promotion);
@@ -1007,18 +1018,16 @@ struct CookAttemptExecution {
     review_form_only: bool,
 }
 
-/// Read provider identity from the durable execution record rather than the
-/// recipe or finalization flags. The plan records the dispatched tool while the
-/// selected outcome records the model the provider actually ran.
-fn cook_attempt_execution(run_id: &str) -> Result<CookAttemptExecution> {
-    let plan = agent_task_lifecycle::load_plan(run_id)?;
+fn selected_outcome_for_attempt(run_id: &str) -> Result<crate::agent_task::AgentTaskOutcome> {
     let aggregate = agent_task_lifecycle::read_aggregate(run_id)?;
-    let outcome = aggregate
+    aggregate
         .selected_outcome()
+        .cloned()
         .or_else(|| {
             (aggregate.outcomes.len() == 1)
                 .then(|| aggregate.outcomes.first())
                 .flatten()
+                .cloned()
         })
         .ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -1027,7 +1036,15 @@ fn cook_attempt_execution(run_id: &str) -> Result<CookAttemptExecution> {
                 Some(run_id.to_string()),
                 None,
             )
-        })?;
+        })
+}
+
+/// Read provider identity from the durable execution record rather than the
+/// recipe or finalization flags. The plan records the dispatched tool while the
+/// selected outcome records the model the provider actually ran.
+fn cook_attempt_execution(run_id: &str) -> Result<CookAttemptExecution> {
+    let plan = agent_task_lifecycle::load_plan(run_id)?;
+    let outcome = selected_outcome_for_attempt(run_id)?;
     let task = plan
         .tasks
         .iter()
@@ -1108,15 +1125,13 @@ fn cook_ai_lineage(
     // Preserve the byte-for-byte single-attempt output. Multi-attempt form-only
     // recovery instead makes each authenticated role visible to reviewers.
     if terminal_index == 0 {
+        let execution = cook_attempt_execution(successful_run_id)?;
         return Ok(CookAiLineage {
             summary: terminal_form.summary.clone(),
             what_changed: terminal_form.what_changed.clone(),
             compatibility: terminal_form.compatibility.clone(),
-            tool: crate::agent_task_review_dossier::homeboy_tool_disclosure(&options.ai_tool),
-            model: options
-                .ai_model
-                .clone()
-                .unwrap_or_else(|| "not recorded".to_string()),
+            tool: crate::agent_task_review_dossier::homeboy_tool_disclosure(&execution.tool),
+            model: execution.model,
             used_for: terminal_form.used_for.clone(),
         });
     }
@@ -1211,17 +1226,10 @@ fn cook_ai_lineage(
 fn review_form_for_finalization(
     run_id: &str,
 ) -> Result<crate::agent_task_review_dossier::AiFilledReviewForm> {
-    let aggregate = crate::agent_task_lifecycle::read_aggregate(run_id)?;
-    let form = aggregate
-        .outcomes
-        .last()
-        .map(|outcome| {
-            crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(
-                &outcome.outputs,
-            )
-        })
-        .transpose()?
-        .flatten()
+    let outcome = selected_outcome_for_attempt(run_id)?;
+    let form = crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(
+        &outcome.outputs,
+    )?
         .ok_or_else(|| {
             Error::validation_invalid_argument(
                 "review_form",
