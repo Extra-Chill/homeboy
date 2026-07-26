@@ -911,6 +911,7 @@ fn synthetic_resources(recommendation: ResourceRecommendation) -> DoctorOutput {
         },
         rig_leases: RigLeaseSummary {
             active_count: 0,
+            concurrency_limit: None,
             leases: Vec::new(),
             recommendation: ResourceRecommendation::Ok,
         },

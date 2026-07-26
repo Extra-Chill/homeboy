@@ -117,10 +117,12 @@ pub fn resource_policy_context_from_evaluation(
                 .map(|memory| severity_str(memory.recommendation).to_string()),
             memory_used_percent: resources.memory.as_ref().map(|memory| memory.used_percent),
             memory_available_mb: resources.memory.as_ref().map(|memory| memory.available_mb),
+            memory_total_mb: resources.memory.as_ref().map(|memory| memory.total_mb),
             relevant_process_count: resources.processes.relevant_count,
             process_severity: severity_str(resources.processes.recommendation).to_string(),
             active_rig_lease_count: resources.rig_leases.active_count,
             rig_lease_severity: severity_str(resources.rig_leases.recommendation).to_string(),
+            rig_lease_concurrency_limit: resources.rig_leases.concurrency_limit,
         },
     }
 }
@@ -423,6 +425,7 @@ mod tests {
             },
             rig_leases: RigLeaseSummary {
                 active_count: 0,
+                concurrency_limit: None,
                 leases: Vec::new(),
                 recommendation: ResourceRecommendation::Ok,
             },
@@ -1011,7 +1014,6 @@ mod tests {
             used_percent: 95.3,
             recommendation: ResourceRecommendation::Warm,
         });
-
         assert!(!admits_warm_runner_coordination(
             command,
             &resources,
@@ -1376,6 +1378,7 @@ mod tests {
             used_percent: 95.3,
             recommendation: ResourceRecommendation::Warm,
         });
+        resources.rig_leases.concurrency_limit = Some(8);
         let context = resource_policy_context_from_evaluation(
             lab_supported_hot("bench"),
             &resources,
@@ -1388,6 +1391,8 @@ mod tests {
         assert_eq!(context.host.memory_severity.as_deref(), Some("warm"));
         assert_eq!(context.host.memory_used_percent, Some(95.3));
         assert_eq!(context.host.memory_available_mb, Some(1_500));
+        assert_eq!(context.host.memory_total_mb, Some(32_000));
+        assert_eq!(context.host.rig_lease_concurrency_limit, Some(8));
     }
 
     #[test]
@@ -1421,6 +1426,7 @@ mod tests {
         assert_eq!(value["runner_selection"]["reason"], "default_lab_runner");
         assert_eq!(value["host"]["load_severity"], "hot");
         assert_eq!(value["host"]["cpu_count"], 4);
+        assert!(value["host"].get("rig_lease_concurrency_limit").is_none());
     }
 
     #[test]

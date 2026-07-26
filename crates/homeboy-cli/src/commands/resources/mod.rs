@@ -9,6 +9,7 @@ mod classification;
 mod load;
 mod memory;
 
+use crate::runner::runners::{self as runner, Runner};
 use classification::{classify_processes, classify_rig_leases, overall_recommendation};
 
 const RELEVANT_PROCESS_EXECUTABLES: &[&str] = &["homeboy"];
@@ -78,6 +79,8 @@ pub struct ProcessRow {
 #[derive(Debug, Serialize)]
 pub struct RigLeaseSummary {
     pub active_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub concurrency_limit: Option<usize>,
     pub leases: Vec<RigLeaseRow>,
     pub recommendation: ResourceRecommendation,
 }
@@ -120,7 +123,10 @@ fn run_with_mode(mode: ResourceProbeMode) -> CmdResult<DoctorOutput> {
     };
 
     let processes = match mode {
-        ResourceProbeMode::Full => match collect_process_summary() {
+        ResourceProbeMode::Full => match collect_process_summary(
+            load.cpu_count,
+            memory.as_ref().map(|summary| summary.total_mb),
+        ) {
             Ok(summary) => summary,
             Err(note) => {
                 notes.push(note);
@@ -177,12 +183,16 @@ fn empty_process_summary() -> ProcessSummary {
 fn empty_rig_lease_summary() -> RigLeaseSummary {
     RigLeaseSummary {
         active_count: 0,
+        concurrency_limit: None,
         leases: Vec::new(),
         recommendation: ResourceRecommendation::Ok,
     }
 }
 
-fn collect_process_summary() -> Result<ProcessSummary, String> {
+fn collect_process_summary(
+    cpu_count: usize,
+    total_memory_mb: Option<u64>,
+) -> Result<ProcessSummary, String> {
     let output = Command::new("ps")
         .args(["-axo", "pid=,pcpu=,rss=,comm=,args="])
         .output()
@@ -197,7 +207,7 @@ fn collect_process_summary() -> Result<ProcessSummary, String> {
         .filter_map(parse_process_row)
         .filter(is_relevant_process)
         .collect();
-    let recommendation = classify_processes(&rows);
+    let recommendation = classify_processes(&rows, cpu_count, total_memory_mb);
     let relevant_count = rows.len();
 
     let mut top_cpu = rows.clone();
@@ -298,13 +308,30 @@ fn collect_rig_leases() -> Result<RigLeaseSummary, String> {
             started_at: lease.started_at,
         })
         .collect();
-    let recommendation = classify_rig_leases(rows.len());
+    let concurrency_limit = local_runner_concurrency_limit();
+    let recommendation = classify_rig_leases(rows.len(), concurrency_limit);
 
     Ok(RigLeaseSummary {
         active_count: rows.len(),
+        concurrency_limit,
         leases: rows,
         recommendation,
     })
+}
+
+fn local_runner_concurrency_limit() -> Option<usize> {
+    let runner_id = homeboy::core::resource_policy_context::is_runner_hosted_exec()
+        .then(|| std::env::var(crate::runner::RUNNER_ID_ENV).ok())
+        .flatten();
+    runner_concurrency_limit(runner_id.as_deref(), runner::list().ok()?)
+}
+
+fn runner_concurrency_limit(runner_id: Option<&str>, runners: Vec<Runner>) -> Option<usize> {
+    let runner_id = runner_id?;
+    runners
+        .into_iter()
+        .find(|runner| runner.id == runner_id)
+        .and_then(|runner| runner.settings.concurrency_limit)
 }
 
 fn round1(value: f64) -> f64 {
@@ -364,5 +391,33 @@ mod tests {
         assert!(output.processes.top_rss.is_empty());
         assert_eq!(output.rig_leases.active_count, 0);
         assert!(output.rig_leases.leases.is_empty());
+    }
+
+    #[test]
+    fn uses_only_the_hosted_runner_capacity() {
+        let configured = |id: &str, concurrency_limit| Runner {
+            id: id.to_string(),
+            kind: runner::RunnerKind::Local,
+            server_id: None,
+            workspace_root: None,
+            settings: homeboy::core::server::RunnerSettings {
+                concurrency_limit,
+                ..Default::default()
+            },
+            env: Default::default(),
+            secret_env: Default::default(),
+            resources: Default::default(),
+            policy: Default::default(),
+        };
+        let runners = vec![
+            configured("controller-local", Some(2)),
+            configured("lab-local", Some(8)),
+        ];
+
+        assert_eq!(runner_concurrency_limit(None, runners.clone()), None);
+        assert_eq!(
+            runner_concurrency_limit(Some("lab-local"), runners),
+            Some(8)
+        );
     }
 }
