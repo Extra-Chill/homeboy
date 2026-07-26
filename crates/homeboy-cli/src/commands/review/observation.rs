@@ -1,11 +1,14 @@
 use std::path::Path;
 
 use homeboy::core::git::short_head_revision_at;
-use homeboy::core::observation::{merge_metadata, ActiveObservation, NewRunRecord, RunStatus};
+use homeboy::core::observation::{
+    merge_metadata, ActiveObservation, NewRunRecord, ObservationStore, RunStatus,
+};
 use homeboy::core::ObservationOutputMetadata;
 use homeboy_review::review::{
     artifact_command, ReviewArtifactFindings, ReviewCommandOutput, ReviewStage,
 };
+use serde::Serialize;
 
 use super::ReviewArgs;
 
@@ -15,6 +18,21 @@ impl ReviewObservation {
     pub(super) fn output_metadata(&self) -> ObservationOutputMetadata {
         ObservationOutputMetadata::for_run(&self.0.run().kind, self.0.run_id())
     }
+
+    pub(super) fn run_id(&self) -> &str {
+        self.0.run_id()
+    }
+}
+
+#[derive(Serialize)]
+struct EarlyReviewLifecycle<'a> {
+    schema: &'static str,
+    event: &'static str,
+    run_id: &'a str,
+    status: &'static str,
+    show_command: String,
+    watch_command: String,
+    cancel_command: String,
 }
 
 pub(super) struct ReviewObservationStart<'a> {
@@ -26,14 +44,14 @@ pub(super) struct ReviewObservationStart<'a> {
     pub changed_file_count: Option<usize>,
 }
 
-pub(super) fn start(start: ReviewObservationStart<'_>) -> Option<ReviewObservation> {
+pub(super) fn start(start: ReviewObservationStart<'_>) -> homeboy::core::Result<ReviewObservation> {
     let metadata = review_observation_initial_metadata(
         start.component_label,
         start.args,
         start.scope,
         start.changed_file_count,
     );
-    ActiveObservation::start_best_effort(
+    ActiveObservation::start(
         NewRunRecord::builder("review")
             .component_id(start.component_id)
             .command(review_observation_command(start.component_id, start.args))
@@ -44,6 +62,33 @@ pub(super) fn start(start: ReviewObservationStart<'_>) -> Option<ReviewObservati
             .build(),
     )
     .map(ReviewObservation)
+}
+
+/// Emit a JSONL lifecycle event after persistence. The final stdout envelope is unchanged.
+pub(super) fn emit_early_lifecycle(observation: &Option<ReviewObservation>) {
+    let Some(observation) = observation else {
+        return;
+    };
+    let run_id = observation.0.run_id();
+    let lifecycle = EarlyReviewLifecycle {
+        schema: "homeboy/review-lifecycle/v1",
+        event: "persisted",
+        run_id,
+        status: "running",
+        show_command: format!("homeboy runs show {run_id}"),
+        watch_command: format!("homeboy runs watch {run_id}"),
+        cancel_command: format!("homeboy runs cancel {run_id}"),
+    };
+    if let Ok(json) = serde_json::to_string(&lifecycle) {
+        eprintln!("{json}");
+    }
+}
+
+pub(super) fn is_cancelled(run_id: &str) -> bool {
+    ObservationStore::open_initialized()
+        .ok()
+        .and_then(|store| store.get_run(run_id).ok().flatten())
+        .is_some_and(|run| run.status == RunStatus::Skipped.as_str())
 }
 
 pub(super) fn finish_success(
@@ -68,7 +113,7 @@ pub(super) fn finish_success(
         exit_code,
         None,
     );
-    observation.0.finish(status, Some(metadata));
+    finish_if_running(&observation.0, status, Some(metadata));
 }
 
 pub(super) fn finish_error(observation: Option<ReviewObservation>, error: &homeboy::core::Error) {
@@ -83,7 +128,17 @@ pub(super) fn finish_error(observation: Option<ReviewObservation>, error: &homeb
             "error": error.to_string(),
         }),
     );
-    observation.0.finish_error(Some(metadata));
+    finish_if_running(&observation.0, RunStatus::Error, Some(metadata));
+}
+
+fn finish_if_running(
+    observation: &ActiveObservation,
+    status: RunStatus,
+    metadata: Option<serde_json::Value>,
+) {
+    let _ = observation
+        .store()
+        .finish_running_run(observation.run_id(), status, metadata);
 }
 
 fn review_observation_command(component_id: &str, args: &ReviewArgs) -> String {
@@ -189,6 +244,7 @@ mod tests {
     fn review_args() -> ReviewArgs {
         ReviewArgs {
             command: None,
+            run_id: None,
             comp: PositionalComponentArgs {
                 component: None,
                 path: None,
@@ -218,6 +274,73 @@ mod tests {
         assert_eq!(metadata["changed_since"], "origin/main");
         assert_eq!(metadata["changed_file_count"], 3);
         assert_eq!(metadata["observation_status"], "running");
+    }
+
+    #[test]
+    fn persisted_lifecycle_survives_an_interrupted_foreground_client() {
+        homeboy::test_support::with_isolated_home(|_| {
+            let args = review_args();
+            let observation = start(ReviewObservationStart {
+                component_id: "homeboy",
+                component_label: "homeboy",
+                source_path: Path::new("/tmp/homeboy"),
+                args: &args,
+                scope: "changed-since",
+                changed_file_count: Some(3),
+            })
+            .expect("persisted observation");
+            let run_id = observation.run_id().to_string();
+
+            // No terminal cleanup runs after this point, as if the caller timed out.
+            let run = ObservationStore::open_initialized()
+                .expect("store")
+                .get_run(&run_id)
+                .expect("read")
+                .expect("run");
+            assert_eq!(run.kind, "review");
+            assert_eq!(run.status, "running");
+
+            let lifecycle = serde_json::to_value(EarlyReviewLifecycle {
+                schema: "homeboy/review-lifecycle/v1",
+                event: "persisted",
+                run_id: &run_id,
+                status: "running",
+                show_command: format!("homeboy runs show {run_id}"),
+                watch_command: format!("homeboy runs watch {run_id}"),
+                cancel_command: format!("homeboy runs cancel {run_id}"),
+            })
+            .expect("lifecycle JSON");
+            assert_eq!(lifecycle["run_id"], run_id);
+            assert_eq!(
+                lifecycle["show_command"],
+                format!("homeboy runs show {run_id}")
+            );
+            assert_eq!(
+                lifecycle["watch_command"],
+                format!("homeboy runs watch {run_id}")
+            );
+            assert_eq!(
+                lifecycle["cancel_command"],
+                format!("homeboy runs cancel {run_id}")
+            );
+
+            let (attached, exit_code) = super::super::attach_to_persisted_review(&run_id)
+                .expect("attach to existing review");
+            assert_eq!(exit_code, 0);
+            assert_eq!(attached.observation.expect("observation").run_id, run_id);
+            let review_runs = ObservationStore::open_initialized()
+                .expect("store")
+                .list_runs(homeboy::core::observation::RunListFilter {
+                    kind: Some("review".to_string()),
+                    ..Default::default()
+                })
+                .expect("review runs");
+            assert_eq!(
+                review_runs.len(),
+                1,
+                "attaching must not create duplicate work"
+            );
+        });
     }
 
     #[test]

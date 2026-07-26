@@ -4,6 +4,17 @@ Run scoped audit + lint + test in a single invocation against PR-style changes.
 `review` also owns the individual quality gates: `review audit`, `review lint`,
 `review test`, `review build`, and `review ci`.
 
+Before audit, lint, or test starts, review persists its observation and writes a
+newline-delimited `homeboy/review-lifecycle/v1` JSON event to stderr. The event
+contains the canonical `run_id` and exact `runs show`, `runs watch`, and `runs
+cancel` commands. Stdout remains the existing final result envelope. If the
+foreground client is interrupted, attach without starting duplicate work:
+
+```bash
+homeboy review --run-id <run-id>
+homeboy runs watch <run-id>
+```
+
 ## Synopsis
 
 ```bash

@@ -196,6 +196,73 @@ impl ObservationStore {
         })
     }
 
+    /// Finish a run only while it is still active. This prevents concurrent
+    /// lifecycle owners from replacing an already-recorded terminal outcome.
+    pub fn finish_running_run(
+        &self,
+        run_id: &str,
+        status: RunStatus,
+        metadata_json: Option<serde_json::Value>,
+    ) -> Result<Option<RunRecord>> {
+        validate_required("run_id", run_id)?;
+        let finished_at = chrono::Utc::now().to_rfc3339();
+        let rows = match metadata_json {
+            Some(mut metadata_json) => {
+                if crate::notification_route::NotificationRoute::from_metadata(&metadata_json)
+                    .is_none()
+                {
+                    if let Some(existing) = self.get_run(run_id)? {
+                        if let Some(route) =
+                            crate::notification_route::NotificationRoute::from_metadata(
+                                &existing.metadata_json,
+                            )
+                        {
+                            route.insert_into_metadata(&mut metadata_json);
+                        }
+                    }
+                }
+                let serialized = serialize_metadata(&metadata_json)?;
+                execute_with_retry("finish running run record with metadata", || {
+                    self.connection.execute(
+                        r#"
+                        UPDATE runs
+                        SET finished_at = ?1, status = ?2, metadata_json = ?3
+                        WHERE id = ?4 AND status = ?5
+                        "#,
+                        params![
+                            finished_at,
+                            status.as_str(),
+                            serialized,
+                            run_id,
+                            RunStatus::Running.as_str(),
+                        ],
+                    )
+                })?
+            }
+            None => execute_with_retry("finish running run record", || {
+                self.connection.execute(
+                    r#"
+                    UPDATE runs
+                    SET finished_at = ?1, status = ?2
+                    WHERE id = ?3 AND status = ?4
+                    "#,
+                    params![
+                        finished_at,
+                        status.as_str(),
+                        run_id,
+                        RunStatus::Running.as_str(),
+                    ],
+                )
+            })?,
+        };
+
+        if rows == 0 {
+            return Ok(None);
+        }
+
+        Ok(self.get_run(run_id)?)
+    }
+
     pub fn update_run_metadata(
         &self,
         run_id: &str,
