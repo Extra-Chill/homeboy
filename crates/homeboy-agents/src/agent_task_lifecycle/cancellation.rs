@@ -73,6 +73,15 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
         record = store::read_record(&record.run_id)?;
     }
     if record.state == AgentTaskRunState::Cancelled {
+        let cancelled_at = record
+            .metadata
+            .get("cancelled_at")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| record.updated_at.as_deref().unwrap_or("unknown"))
+            .to_string();
+        terminalize_running_provider_executions(record.ensure_metadata_object(), &cancelled_at);
+        store::write_record(&record)?;
+        crate::controller_scratch::finalize_run(&record.run_id)?;
         return Ok(record);
     }
 
@@ -177,6 +186,7 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
     }
 
     let metadata = record.ensure_metadata_object();
+    terminalize_running_provider_executions(metadata, &cancelled_at);
     metadata.insert("cancelled_at".to_string(), json!(cancelled_at));
     metadata.insert("cancelled_by_pid".to_string(), json!(std::process::id()));
     metadata.insert(
@@ -236,6 +246,7 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
     metadata.remove(METADATA_KEY_STALE_RUNNING_REASON);
 
     store::write_record(&record)?;
+    crate::controller_scratch::finalize_run(&record.run_id)?;
     homeboy_core::controller_runtime::cancel_admission(&record.run_id)?;
     Ok(record)
 }
@@ -437,7 +448,8 @@ pub fn cancel(run_id: &str) -> Result<AgentTaskRunRecord> {
         ));
     }
 
-    record.updated_at = Some(now_timestamp());
+    let cancelled_at = now_timestamp();
+    record.updated_at = Some(cancelled_at.clone());
     set_run_state(&mut record, AgentTaskRunState::Cancelled);
     for task in &mut record.tasks {
         if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
@@ -453,11 +465,31 @@ pub fn cancel(run_id: &str) -> Result<AgentTaskRunRecord> {
         }
     }
     let metadata = record.ensure_metadata_object();
-    metadata.insert("cancel_requested_at".to_string(), json!(now_timestamp()));
+    terminalize_running_provider_executions(metadata, &cancelled_at);
+    metadata.insert("cancel_requested_at".to_string(), json!(cancelled_at));
     metadata.insert(
         "cancel_note".to_string(),
         json!("provider-specific cancellation is delegated through opaque provider handles"),
     );
     store::write_record(&record)?;
+    crate::controller_scratch::finalize_run(&record.run_id)?;
     Ok(record)
+}
+
+fn terminalize_running_provider_executions(
+    metadata: &mut serde_json::Map<String, serde_json::Value>,
+    finished_at: &str,
+) {
+    let Some(executions) = metadata
+        .get_mut("provider_executions")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for execution in executions {
+        if execution["state"] == "running" {
+            execution["state"] = json!("cancelled");
+            execution["finished_at"] = json!(finished_at);
+        }
+    }
 }
