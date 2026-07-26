@@ -826,6 +826,7 @@ impl BatchCookSpec {
                     gate_environment: self.gate_environment.clone(),
                     gate_toolchains: self.gate_toolchains.clone(),
                     gate_diagnostic_sidecars: Vec::new(),
+                    hydrate_dependencies: true,
                 },
                 max_attempts: self.max_attempts,
                 no_finalize: self.no_finalize,

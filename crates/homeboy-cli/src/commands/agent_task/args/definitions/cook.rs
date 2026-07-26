@@ -136,6 +136,7 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
                 })
                 .collect(),
             gate_diagnostic_sidecars: Vec::new(),
+            hydrate_dependencies: true,
         }
     }
 }
@@ -171,6 +172,7 @@ mod tests {
         assert_eq!(defaults.gate_timeout_seconds, 30 * 60);
         assert_eq!(defaults.gate_heartbeat_interval_seconds, 5);
         assert!(!defaults.rerun_completed_gates);
+        assert!(defaults.hydrate_dependencies);
 
         let options: VerifyGateOptions = TestCli::try_parse_from([
             "homeboy",
