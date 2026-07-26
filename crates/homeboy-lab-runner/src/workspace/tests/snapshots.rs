@@ -4,8 +4,8 @@ use std::sync::{Mutex, OnceLock};
 use super::git;
 use crate::workspace::snapshot::{incremental_prepare_command_fits, snapshot_manifest_delta};
 use crate::workspace::sync::{
-    reuse_compatible_snapshot_workspace, sync_workspace, workspace_snapshot_scan_command,
-    workspace_snapshots,
+    reuse_compatible_snapshot_workspace, save_prepared_source_cache, sync_workspace,
+    workspace_snapshot_scan_command, workspace_snapshots,
 };
 use crate::workspace::types::{
     RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
@@ -382,6 +382,74 @@ fn clean_snapshot_reuse_preserves_exact_source_provenance_without_git_materializ
             "snapshot_reused_clean_workspace"
         );
         assert!(reused.materialization_plan.controller_git_bundle.is_none());
+    });
+}
+
+#[test]
+fn same_commit_prepared_source_cache_creates_private_job_views() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        create_local_runner("lab-local-prepared-cache", runner_root.path());
+        let source = git_source("homeboy@prepared-cache", "fix/prepared-cache", "source\n");
+        git(
+            source.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.test/prepared-cache.git",
+            ],
+        );
+        let mut options = sync_options(
+            source.path().display().to_string(),
+            Some("job-one".to_string()),
+        );
+        options.mode = RunnerWorkspaceSyncMode::Git;
+        options.controller_routed_git = true;
+        let (first, _) = sync_workspace("lab-local-prepared-cache", options.clone())
+            .expect("first job materializes source");
+        std::fs::write(
+            std::path::Path::new(&first.remote_path).join("dependency-marker"),
+            "hydrated\n",
+        )
+        .expect("simulate dependency hydration");
+        save_prepared_source_cache(
+            "lab-local-prepared-cache",
+            &first.local_path,
+            &first.remote_path,
+        )
+        .expect("save immutable prepared source");
+
+        options.run_isolation_token = Some("job-two".to_string());
+        let (second, _) = sync_workspace("lab-local-prepared-cache", options)
+            .expect("same commit receives private cached view");
+
+        assert_ne!(first.remote_path, second.remote_path);
+        assert_eq!(
+            second
+                .materialization_plan
+                .actual_materialization_mode
+                .as_deref(),
+            Some("prepared_source_view")
+        );
+        assert!(std::path::Path::new(&second.remote_path)
+            .join("dependency-marker")
+            .is_file());
+        std::fs::write(
+            std::path::Path::new(&second.remote_path).join("job-only"),
+            "private\n",
+        )
+        .expect("mutate private job view");
+        assert!(!std::path::Path::new(&first.remote_path)
+            .join("job-only")
+            .exists());
+        assert!(runner_root
+            .path()
+            .join("_lab_prepared_sources")
+            .read_dir()
+            .expect("prepared cache directory")
+            .next()
+            .is_some());
     });
 }
 

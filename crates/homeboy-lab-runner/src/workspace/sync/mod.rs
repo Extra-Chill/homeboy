@@ -341,11 +341,22 @@ pub fn sync_workspace(
                 &includes,
                 workspace_cleanliness,
             );
-            let materialized = if options.controller_routed_git
+            // A prepared source is immutable and keyed by the controller path
+            // plus exact commit. Jobs never execute from it: each receives a
+            // private copied view which preserves #10105's ownership boundary.
+            let prepared_cache = prepared_source_cache_path(workspace_root, &local_path, &git.head);
+            let reused_prepared_source =
+                materialize_prepared_source_view(&runner, &prepared_cache, &remote_path)?;
+            let materialized = if reused_prepared_source {
+                materialization_plan.actual_materialization_mode =
+                    Some("prepared_source_view".to_string());
+                Ok(None)
+            } else if options.controller_routed_git
                 || git.branch.is_none()
                 || source_materialization::requires_controller_routed_workspace_sync(
                     &git.remote_url,
-                ) {
+                )
+            {
                 materialize_git_from_controller_bundle(
                     &runner,
                     &local_path,
@@ -476,6 +487,89 @@ pub fn sync_workspace(
                 0,
             ))
         }
+    }
+}
+
+/// Cache only a source that has completed dependency hydration. The cache lives
+/// outside `_lab_workspaces`, is never handed to a job, and has no terminal-job
+/// cleanup owner. A private job view is copied from it on a same-commit hit.
+pub(crate) fn save_prepared_source_cache(
+    runner_id: &str,
+    local_path: &str,
+    remote_path: &str,
+) -> Result<()> {
+    let runner = load(runner_id)?;
+    let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace_root",
+            "runner workspace cache requires workspace_root",
+            Some(runner.id.clone()),
+            None,
+        )
+    })?;
+    let local_path = canonical_workspace_path(local_path)?;
+    let commit = git_output(&local_path, &["rev-parse", "HEAD"])?;
+    let cache = prepared_source_cache_path(workspace_root, &local_path, &commit);
+    let command = format!(
+        "cache={cache}; source={source}; lock=\"$cache.lock\"; mkdir -p \"$(dirname \"$cache\")\"; test -f \"$cache/.homeboy/prepared-source-ready\" && exit 0; mkdir \"$lock\" 2>/dev/null || exit 0; trap 'rmdir \"$lock\"' EXIT; tmp=\"$cache.tmp.$$\"; rm -rf \"$tmp\"; cp -a \"$source\" \"$tmp\"; mkdir -p \"$tmp/.homeboy\"; : > \"$tmp/.homeboy/prepared-source-ready\"; chmod -R a-w \"$tmp\"; mv \"$tmp\" \"$cache\"",
+        cache = shell::quote_arg(&cache),
+        source = shell::quote_arg(remote_path),
+    );
+    run_workspace_shell_command(&runner, &command, "save prepared Lab source cache")
+}
+
+fn prepared_source_cache_path(workspace_root: &str, local_path: &Path, commit: &str) -> String {
+    let view = deterministic_remote_path(workspace_root, local_path, commit, None);
+    let name = Path::new(&view)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("workspace");
+    format!(
+        "{}/_lab_prepared_sources/{name}",
+        workspace_root.trim_end_matches('/')
+    )
+}
+
+fn materialize_prepared_source_view(
+    runner: &super::super::Runner,
+    cache: &str,
+    remote_path: &str,
+) -> Result<bool> {
+    let command = format!(
+        "test -f {cache}/.homeboy/prepared-source-ready && test ! -e {destination} && mkdir -p $(dirname {destination}) && cp -a {cache} {destination} && chmod -R u+w {destination}",
+        cache = shell::quote_arg(cache),
+        destination = shell::quote_arg(remote_path),
+    );
+    run_workspace_shell_success(runner, &command, "materialize prepared Lab source view")
+}
+
+fn run_workspace_shell_success(
+    runner: &super::super::Runner,
+    command: &str,
+    action: &str,
+) -> Result<bool> {
+    match runner.kind {
+        RunnerKind::Local => Ok(std::process::Command::new("sh")
+            .args(["-c", command])
+            .status()
+            .map_err(|error| Error::internal_io(error.to_string(), Some(action.to_string())))?
+            .success()),
+        RunnerKind::Ssh => {
+            let (_server, client) = ssh_client_for_runner(runner)?;
+            Ok(client.execute(command).success)
+        }
+    }
+}
+
+fn run_workspace_shell_command(
+    runner: &super::super::Runner,
+    command: &str,
+    action: &str,
+) -> Result<()> {
+    if run_workspace_shell_success(runner, command, action)? {
+        Ok(())
+    } else {
+        Err(Error::internal_unexpected(format!("{action} failed")))
     }
 }
 
