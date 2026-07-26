@@ -123,6 +123,49 @@ fn prune_workspaces_apply_removes_only_metadata_backed_orphans() {
     });
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn prune_preserves_process_owned_workspace_in_preview_and_apply() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        let workspace = runner_root.path().join("_lab_workspaces/process-owned");
+        write_orphan_workspace(&workspace);
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-local-prune-process-owned","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .current_dir(&workspace)
+            .spawn()
+            .expect("hold workspace cwd");
+
+        for apply in [false, true] {
+            let (output, exit_code) = prune_workspaces(
+                "lab-local-prune-process-owned",
+                RunnerWorkspacePruneOptions {
+                    apply,
+                    min_age_hours: 0,
+                    limit: 10,
+                    passes: 1,
+                },
+            )
+            .expect("prune process-owned workspace");
+            assert_eq!(exit_code, 0);
+            assert!(output.candidates.is_empty());
+            assert_eq!(output.skipped_live_count, 1);
+            assert!(workspace.exists());
+        }
+        child.kill().expect("stop held process");
+        child.wait().expect("reap held process");
+    });
+}
+
 #[test]
 fn prune_workspaces_reaps_ttl_expired_lifecycle_workspace_with_live_source() {
     homeboy_core::test_support::with_isolated_home(|_| {

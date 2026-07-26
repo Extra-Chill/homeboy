@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use base64::Engine;
@@ -31,11 +32,12 @@ use super::snapshot::{
 };
 use super::types::{
     canonical_workspace_path, ByteFileCounts, LocalGitState, RunnerWorkspaceCurrentSummary,
-    RunnerWorkspaceMaterializationPlan, RunnerWorkspaceMetadata, RunnerWorkspacePruneEntry,
-    RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry,
-    RunnerWorkspaceSnapshotEntry, RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, RunnerWorkspaceTerminalEvidence,
-    RunnerWorkspaceUpdateOptions, RunnerWorkspaceUpdateOutput, DEFAULT_EXCLUDES,
+    RunnerWorkspaceLivenessEvidence, RunnerWorkspaceMaterializationPlan, RunnerWorkspaceMetadata,
+    RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
+    RunnerWorkspacePruneSkippedEntry, RunnerWorkspaceSnapshotEntry, RunnerWorkspaceSnapshotFilters,
+    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
+    RunnerWorkspaceTerminalEvidence, RunnerWorkspaceUpdateOptions, RunnerWorkspaceUpdateOutput,
+    DEFAULT_EXCLUDES,
 };
 use super::util::{
     deterministic_remote_path, git_output, parent_remote_path, ssh_client_for_runner,
@@ -1141,6 +1143,9 @@ pub fn prune_workspaces(
     };
     let mut removed = Vec::new();
     let mut skipped = Vec::new();
+    let mut skipped_live_count = 0;
+    let mut skipped_unknown_count = 0;
+    let mut stop_commands = Vec::new();
     let mut candidate_entries = Vec::new();
     let mut total_candidate_count = 0;
     let mut total_candidate_bytes = 0;
@@ -1152,6 +1157,34 @@ pub fn prune_workspaces(
         scanned_workspace_count += scan.scanned_workspace_count;
         scan_complete = scan.scan_complete;
         let candidates = scan.candidates;
+        for withheld in scan.withheld {
+            match withheld.liveness.state.as_str() {
+                "live" => skipped_live_count += 1,
+                _ => skipped_unknown_count += 1,
+            }
+            stop_commands.extend(
+                withheld
+                    .liveness
+                    .observations
+                    .iter()
+                    .filter_map(|observation| observation.strip_prefix("active_runner_job:"))
+                    .map(|job_id| {
+                        format!(
+                            "homeboy runner job cancel {} {}",
+                            shell_arg(&runner.id),
+                            shell_arg(job_id)
+                        )
+                    }),
+            );
+            skipped.push(RunnerWorkspacePruneSkippedEntry {
+                remote_path: withheld.remote_path,
+                reason: format!(
+                    "workspace liveness is {}; {}",
+                    withheld.liveness.state,
+                    withheld.liveness.observations.join(", ")
+                ),
+            });
+        }
         if pass == 0 {
             total_candidate_count = candidates.len();
             total_candidate_bytes = candidates.iter().map(|entry| entry.bytes).sum();
@@ -1213,6 +1246,13 @@ pub fn prune_workspaces(
             candidates: candidate_entries,
             removed,
             skipped,
+            skipped_live_count,
+            skipped_unknown_count,
+            inspect_command: format!("homeboy runner status {runner_arg}"),
+            stop_command: stop_commands.into_iter().next().unwrap_or_else(|| {
+                format!("homeboy runner doctor {runner_arg} --scope lab-offload --repair")
+            }),
+            reconcile_command: format!("homeboy runner job reconcile {runner_arg}"),
             scanned_workspace_count,
             scan_complete,
             total_candidate_count,
@@ -1236,7 +1276,7 @@ fn prune_candidates_for_runner(
 ) -> Result<PruneCandidateScan> {
     match runner.kind {
         RunnerKind::Local => {
-            prune_candidates_local(Path::new(lab_workspaces_root), options, scan_limit)
+            prune_candidates_local(runner, Path::new(lab_workspaces_root), options, scan_limit)
         }
         RunnerKind::Ssh => prune_candidates_ssh(runner, lab_workspaces_root, options, scan_limit),
     }
@@ -1244,6 +1284,7 @@ fn prune_candidates_for_runner(
 
 struct PruneCandidateScan {
     candidates: Vec<RunnerWorkspacePruneEntry>,
+    withheld: Vec<RunnerWorkspacePruneEntry>,
     scanned_workspace_count: usize,
     scan_complete: bool,
 }
@@ -1922,6 +1963,7 @@ fn exclude_homeboy_metadata_from_git_status(workspace_path: &Path) -> Result<()>
 }
 
 fn prune_candidates_local(
+    runner: &super::super::Runner,
     root: &Path,
     options: &RunnerWorkspacePruneOptions,
     scan_limit: usize,
@@ -1929,11 +1971,13 @@ fn prune_candidates_local(
     if !root.is_dir() {
         return Ok(PruneCandidateScan {
             candidates: Vec::new(),
+            withheld: Vec::new(),
             scanned_workspace_count: 0,
             scan_complete: true,
         });
     }
     let mut candidates = Vec::new();
+    let mut withheld = Vec::new();
     let mut entries = fs::read_dir(root).map_err(|err| {
         Error::internal_io(
             err.to_string(),
@@ -1958,8 +2002,12 @@ fn prune_candidates_local(
             break;
         }
         scanned_workspace_count += 1;
-        if let Some(candidate) = classify_local_candidate(root, &path, options)? {
-            candidates.push(candidate);
+        if let Some(candidate) = classify_local_candidate(runner, root, &path, options)? {
+            if candidate.liveness.state == "inactive" {
+                candidates.push(candidate);
+            } else {
+                withheld.push(candidate);
+            }
         }
     }
     candidates.sort_by(|a, b| {
@@ -1970,12 +2018,14 @@ fn prune_candidates_local(
     });
     Ok(PruneCandidateScan {
         candidates,
+        withheld,
         scanned_workspace_count,
         scan_complete,
     })
 }
 
 fn classify_local_candidate(
+    runner: &super::super::Runner,
     root: &Path,
     path: &Path,
     options: &RunnerWorkspacePruneOptions,
@@ -2032,6 +2082,7 @@ fn classify_local_candidate(
         age_seconds,
         bytes: directory_size(path)?,
         reason,
+        liveness: workspace_liveness(runner, &metadata, path),
     }))
 }
 
@@ -2071,6 +2122,148 @@ fn prune_candidate_reason(
     Ok(None)
 }
 
+/// Bulk pruning is intentionally stricter than run-owned reaping.  Age and a
+/// missing controller source identify an orphan candidate, but they cannot
+/// prove that no independently surviving workload still owns its files.
+fn workspace_liveness(
+    runner: &super::super::Runner,
+    metadata: &serde_json::Value,
+    path: &Path,
+) -> RunnerWorkspaceLivenessEvidence {
+    if (metadata
+        .get("job_id")
+        .and_then(|value| value.as_str())
+        .is_some()
+        || metadata
+            .get("run_id")
+            .and_then(|value| value.as_str())
+            .is_some())
+        && metadata
+            .get("resource_lifecycle")
+            .and_then(|value| value.get("status"))
+            .and_then(|value| value.as_str())
+            == Some("active")
+    {
+        return liveness("live", vec!["active_resource_lifecycle_lease".to_string()]);
+    }
+
+    if let Some(job_id) = metadata.get("job_id").and_then(|value| value.as_str()) {
+        match super::super::status(&runner.id) {
+            Ok(report)
+                if report.active_job_state == super::super::RunnerActiveJobState::Available =>
+            {
+                if report.active_jobs.iter().any(|job| job.job_id == job_id) {
+                    return liveness("live", vec![format!("active_runner_job:{job_id}")]);
+                }
+            }
+            Ok(_) => return liveness("unknown", vec!["runner_job_probe_unavailable".to_string()]),
+            Err(_) => return liveness("unknown", vec!["runner_job_probe_failed".to_string()]),
+        }
+    }
+
+    match runner.kind {
+        RunnerKind::Local => local_process_liveness(path),
+        RunnerKind::Ssh => ssh_process_liveness(runner, &path.display().to_string()),
+    }
+}
+
+fn liveness(state: &str, observations: Vec<String>) -> RunnerWorkspaceLivenessEvidence {
+    RunnerWorkspaceLivenessEvidence {
+        state: state.to_string(),
+        observations,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn local_process_liveness(path: &Path) -> RunnerWorkspaceLivenessEvidence {
+    const MAX_PROCESSES: usize = 4096;
+    const MAX_FDS_PER_PROCESS: usize = 1024;
+    let target = path.to_string_lossy();
+    let Ok(processes) = fs::read_dir("/proc") else {
+        return liveness(
+            "unknown",
+            vec!["process_probe_unavailable:/proc".to_string()],
+        );
+    };
+    let mut seen = 0usize;
+    for process in processes.flatten() {
+        let pid = process.file_name();
+        if pid.to_string_lossy().parse::<u32>().is_err() {
+            continue;
+        }
+        seen += 1;
+        if seen > MAX_PROCESSES {
+            return liveness("unknown", vec!["process_probe_process_limit".to_string()]);
+        }
+        let process_path = process.path();
+        let cwd = fs::read_link(process_path.join("cwd")).ok();
+        let command = fs::read(process_path.join("cmdline")).unwrap_or_default();
+        if cwd.as_ref().is_some_and(|cwd| cwd.starts_with(path))
+            || String::from_utf8_lossy(&command).contains(target.as_ref())
+        {
+            return liveness("live", vec![format!("process:{}", pid.to_string_lossy())]);
+        }
+        let Ok(fds) = fs::read_dir(process_path.join("fd")) else {
+            continue;
+        };
+        for (index, fd) in fds.flatten().enumerate() {
+            if index >= MAX_FDS_PER_PROCESS {
+                return liveness("unknown", vec!["process_probe_fd_limit".to_string()]);
+            }
+            if fs::read_link(fd.path())
+                .ok()
+                .is_some_and(|open| open.starts_with(path))
+            {
+                return liveness(
+                    "live",
+                    vec![format!("process_open_file:{}", pid.to_string_lossy())],
+                );
+            }
+        }
+    }
+    liveness("inactive", Vec::new())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn local_process_liveness(path: &Path) -> RunnerWorkspaceLivenessEvidence {
+    let output = Command::new("lsof")
+        .args(["-Fn", "+D", &path.display().to_string()])
+        .output();
+    match output {
+        Ok(output) if output.stdout.is_empty() => liveness("inactive", Vec::new()),
+        Ok(output) if output.status.success() => {
+            liveness("live", vec!["process_open_file".to_string()])
+        }
+        _ => liveness(
+            "unknown",
+            vec!["process_probe_unavailable:lsof".to_string()],
+        ),
+    }
+}
+
+fn ssh_process_liveness(
+    runner: &super::super::Runner,
+    path: &str,
+) -> RunnerWorkspaceLivenessEvidence {
+    let Ok((_server, mut client)) = ssh_client_for_runner(runner) else {
+        return liveness(
+            "unknown",
+            vec!["process_probe_connection_failed".to_string()],
+        );
+    };
+    client.env.extend(runner.env.clone());
+    let command = format!(
+        "p={}; command -v ps >/dev/null 2>&1 && command -v lsof >/dev/null 2>&1 || {{ printf unknown; exit 0; }}; if ps -eo pid=,args= | grep -F -- \"$p\" | grep -v grep >/dev/null || lsof -Fn +D \"$p\" 2>/dev/null | grep -q .; then printf live; else printf inactive; fi",
+        shell::quote_arg(path)
+    );
+    let output = client.execute_with_timeout(&command, WORKSPACE_PRUNE_TIMEOUT);
+    match output.stdout.trim() {
+        "inactive" if output.success => liveness("inactive", Vec::new()),
+        "live" if output.success => liveness("live", vec!["remote_process_ownership".to_string()]),
+        _ => liveness("unknown", vec!["remote_process_probe_failed".to_string()]),
+    }
+}
+
 fn prune_candidates_ssh(
     runner: &super::super::Runner,
     root: &str,
@@ -2089,6 +2282,7 @@ fn prune_candidates_ssh(
         )));
     }
     let mut candidates = Vec::new();
+    let mut withheld = Vec::new();
     let mut scan_status = None;
     for line in output.stdout.lines() {
         if let Some(status) = line.strip_prefix("__homeboy_prune_scan__\t") {
@@ -2140,7 +2334,7 @@ fn prune_candidates_ssh(
         let Some(reason) = reason else {
             continue;
         };
-        candidates.push(RunnerWorkspacePruneEntry {
+        let entry = RunnerWorkspacePruneEntry {
             remote_path,
             source_path: source_path.to_string(),
             run_id: metadata
@@ -2162,7 +2356,13 @@ fn prune_candidates_ssh(
             age_seconds,
             bytes,
             reason,
-        });
+            liveness: workspace_liveness(runner, &metadata, Path::new(&parts[2])),
+        };
+        if entry.liveness.state == "inactive" {
+            candidates.push(entry);
+        } else {
+            withheld.push(entry);
+        }
     }
     candidates.sort_by(|a, b| {
         b.bytes
@@ -2177,6 +2377,7 @@ fn prune_candidates_ssh(
     })?;
     Ok(PruneCandidateScan {
         candidates,
+        withheld,
         scanned_workspace_count,
         scan_complete,
     })
