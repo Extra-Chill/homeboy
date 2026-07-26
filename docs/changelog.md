@@ -4,6 +4,33 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.319.1] - 2026-07-26
+
+### Changed
+- format runtime helper contract import
+- bound compacted tombstone storage
+- cover reused provider pid
+
+### Fixed
+- preserve promotion provider stdin
+- complete gate preflight fixtures
+- index replay tombstones
+- preserve joinable local executions
+- recheck moving-base destination
+- bound compacted replay memory
+- preflight declared gate commands
+- preserve moving-base candidate lineage
+- bound prepared source cache retention
+- preserve daemon admission failure context
+- preserve declared helper isolation
+- preflight isolated gate toolchains
+- provision declared runtime helpers
+- reconcile local provider ownership
+- reuse immutable prepared source views
+- recover daemon startup token admission
+- isolate moving-base candidate promotion
+- complete bounded output follow-up
+
 ## [0.319.0] - 2026-07-26
 
 ### Added
