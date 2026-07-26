@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.0] - 2026-07-26
+
+### Added
+- declare reconstructable dependency and build trees for cleanup
+
 ## [3.33.0] - 2026-07-26
 
 ### Added
