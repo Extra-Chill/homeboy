@@ -239,6 +239,22 @@ envelope semantics, and public variant discrimination. Prefer command execution 
 focused contract assertions over golden fixtures that only serialize hand-built
 payload structs and compare them with checked-in JSON produced from the same code.
 
+## Progressive Disclosure Budgets
+
+Agent-facing readers use one finite output contract from `homeboy-output`:
+
+- `compact_summary` returns fixed summary fields only.
+- `bounded_collection` defaults to 20 items and 64 KiB of serialized items.
+- `bounded_stream` defaults to 200 events, 64 KiB, and five minutes.
+- `lossless_export` is explicit through `--output <path>` or a command-specific
+  export artifact.
+
+Bounded payloads add `output_budget` with stable `total_items`,
+`returned_items`, `omitted_items`, `total_bytes`, `returned_bytes`,
+`omitted_bytes`, `truncated`, `continue_command`, and `export_command` fields.
+The item payload schema remains unchanged. Continuations are focused commands;
+exports are the explicit lossless path rather than an unbounded stdout default.
+
 ## Observation-backed payloads
 
 `--output` remains the per-invocation command-result artifact. It must continue

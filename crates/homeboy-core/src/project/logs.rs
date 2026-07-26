@@ -13,6 +13,9 @@ use crate::paths as base_path;
 use crate::project::{self, Project};
 use serde::Serialize;
 
+const MAX_PINNED_LOGS: usize = 8;
+const MAX_PINNED_LOG_BYTES: usize = 8 * 1024;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct LogEntry {
     pub path: String,
@@ -78,6 +81,10 @@ pub struct PinnedLogContent {
 pub struct PinnedLogsContent {
     pub logs: Vec<PinnedLogContent>,
     pub total_logs: usize,
+    pub returned_logs: usize,
+    pub omitted_logs: usize,
+    pub returned_bytes: usize,
+    pub omitted_bytes: usize,
 }
 
 fn load_project(project_id: &str, local: bool) -> Result<Project> {
@@ -124,7 +131,9 @@ pub fn show_pinned(project_id: &str, lines: u32, local: bool) -> Result<PinnedLo
     let base_path = require_project_base_path(project_id, &project)?;
 
     let mut logs = Vec::new();
-    for pinned_log in &project.remote_logs.pinned_logs {
+    let total_logs = project.remote_logs.pinned_logs.len();
+    let mut omitted_bytes = 0;
+    for pinned_log in project.remote_logs.pinned_logs.iter().take(MAX_PINNED_LOGS) {
         let log_lines = if lines > 0 {
             lines
         } else {
@@ -134,24 +143,41 @@ pub fn show_pinned(project_id: &str, lines: u32, local: bool) -> Result<PinnedLo
 
         let command = format!("tail -n {} {}", log_lines, shell::quote_path(&full_path));
         let output = execute_for_project(&project, &command)?;
-        let evidence = LogEvidenceMetadata::tail(
-            &full_path,
-            pinned_log.label.clone(),
-            log_lines,
-            &output.stdout,
-        );
+        let (content, omitted) = truncate_utf8(&output.stdout, MAX_PINNED_LOG_BYTES);
+        omitted_bytes += omitted;
+        let evidence =
+            LogEvidenceMetadata::tail(&full_path, pinned_log.label.clone(), log_lines, &content);
 
         logs.push(PinnedLogContent {
             path: full_path,
             label: pinned_log.label.clone(),
             lines: log_lines,
             evidence,
-            content: output.stdout,
+            content,
         });
     }
 
-    let total_logs = logs.len();
-    Ok(PinnedLogsContent { logs, total_logs })
+    let returned_logs = logs.len();
+    let returned_bytes = logs.iter().map(|log| log.content.len()).sum();
+    Ok(PinnedLogsContent {
+        logs,
+        total_logs,
+        returned_logs,
+        omitted_logs: total_logs.saturating_sub(returned_logs),
+        returned_bytes,
+        omitted_bytes,
+    })
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> (String, usize) {
+    if value.len() <= max_bytes {
+        return (value.to_string(), 0);
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (value[..end].to_string(), value.len() - end)
 }
 
 pub fn show(project_id: &str, path: &str, lines: u32, local: bool) -> Result<LogContent> {
