@@ -771,6 +771,20 @@ pub fn load_recipe_for_attempt(run_id: &str) -> Result<Option<AgentTaskCookRecip
 }
 
 pub fn enqueue_terminal_continuation(cook_id: &str, run_id: &str) -> Result<bool> {
+    enqueue_terminal_continuation_with_recovery(cook_id, run_id, false)
+}
+
+/// Explicit operator recovery may rearm a continuation that previously failed
+/// before Cook execution. Automatic scheduling keeps failed entries terminal.
+pub fn rearm_failed_terminal_continuation(cook_id: &str, run_id: &str) -> Result<bool> {
+    enqueue_terminal_continuation_with_recovery(cook_id, run_id, true)
+}
+
+fn enqueue_terminal_continuation_with_recovery(
+    cook_id: &str,
+    run_id: &str,
+    rearm_failed: bool,
+) -> Result<bool> {
     let recipe = load_recipe(cook_id)?;
     if !recipe
         .attempts
@@ -791,7 +805,7 @@ pub fn enqueue_terminal_continuation(cook_id: &str, run_id: &str) -> Result<bool
         run_id: run_id.to_string(),
         retries: 0,
     };
-    DurableCookContinuationQueue.enqueue(&continuation)
+    DurableCookContinuationQueue.enqueue(&continuation, rearm_failed)
 }
 
 pub fn claim_continuation() -> Result<Option<ClaimedCookContinuation>> {
@@ -1159,8 +1173,12 @@ fn recipe_value_error(field: &'static str) -> impl FnOnce(serde_json::Error) -> 
 }
 
 struct DurableCookContinuationQueue;
-impl AgentTaskCookContinuationScheduler for DurableCookContinuationQueue {
-    fn enqueue(&self, continuation: &AgentTaskCookContinuation) -> Result<bool> {
+impl DurableCookContinuationQueue {
+    fn enqueue(
+        &self,
+        continuation: &AgentTaskCookContinuation,
+        rearm_failed: bool,
+    ) -> Result<bool> {
         validate_continuation(continuation)?;
         let root = queue_root()?;
         fs::create_dir_all(&root).map_err(|error| {
@@ -1169,7 +1187,6 @@ impl AgentTaskCookContinuationScheduler for DurableCookContinuationQueue {
         let hash = format!("{:x}", sha2::Sha256::digest(continuation.key.as_bytes()));
         let path = root.join(format!("{hash}.pending"));
         if root.join(format!("{hash}.completed")).exists()
-            || root.join(format!("{hash}.failed")).exists()
             || fs::read_dir(&root)
                 .map_err(|error| {
                     Error::internal_io(error.to_string(), Some(root.display().to_string()))
@@ -1179,6 +1196,49 @@ impl AgentTaskCookContinuationScheduler for DurableCookContinuationQueue {
                 .any(|name| name.starts_with(&format!("{hash}.claimed.")))
         {
             return Ok(false);
+        }
+        let failed = root.join(format!("{hash}.failed"));
+        if failed.exists() {
+            if !rearm_failed {
+                return Ok(false);
+            }
+            let existing: AgentTaskCookContinuation =
+                serde_json::from_slice(&fs::read(&failed).map_err(|error| {
+                    Error::internal_io(error.to_string(), Some(failed.display().to_string()))
+                })?)
+                .map_err(|error| {
+                    Error::validation_invalid_argument(
+                        "cook_continuation",
+                        format!("malformed failed durable continuation: {error}"),
+                        Some(failed.display().to_string()),
+                        None,
+                    )
+                })?;
+            validate_continuation(&existing)?;
+            if existing.key != continuation.key {
+                return Err(Error::validation_invalid_argument(
+                    "cook_continuation",
+                    "failed durable continuation key does not match its Cook attempt",
+                    Some(existing.key),
+                    None,
+                ));
+            }
+            fs::write(
+                &failed,
+                serde_json::to_vec(continuation)
+                    .map_err(|error| Error::internal_json(error.to_string(), None))?,
+            )
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(failed.display().to_string()))
+            })?;
+            return match fs::rename(&failed, &path) {
+                Ok(()) => Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(Error::internal_io(
+                    error.to_string(),
+                    Some(failed.display().to_string()),
+                )),
+            };
         }
         let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(file) => file,
@@ -1199,6 +1259,12 @@ impl AgentTaskCookContinuationScheduler for DurableCookContinuationQueue {
             Error::internal_io(error.to_string(), Some(path.display().to_string()))
         })?;
         Ok(true)
+    }
+}
+
+impl AgentTaskCookContinuationScheduler for DurableCookContinuationQueue {
+    fn enqueue(&self, continuation: &AgentTaskCookContinuation) -> Result<bool> {
+        self.enqueue(continuation, false)
     }
 }
 
@@ -1656,6 +1722,29 @@ mod tests {
                     .unwrap()
                     .is_none()
             );
+        });
+    }
+
+    #[test]
+    fn explicit_recovery_rearms_failed_continuation_but_not_completed_work() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            write_recipe(&recipe()).unwrap();
+            enqueue_terminal_continuation("cook", "run").unwrap();
+            claim_continuation()
+                .unwrap()
+                .unwrap()
+                .fail("wrong controller runtime")
+                .unwrap();
+
+            assert!(!enqueue_terminal_continuation("cook", "run").unwrap());
+            assert!(rearm_failed_terminal_continuation("cook", "run").unwrap());
+            let claim = claim_continuation_for("cook", "run")
+                .unwrap()
+                .expect("explicit recovery rearmed the failed continuation");
+            assert_eq!(claim.continuation().retries, 0);
+            claim.complete().unwrap();
+
+            assert!(!rearm_failed_terminal_continuation("cook", "run").unwrap());
         });
     }
 
