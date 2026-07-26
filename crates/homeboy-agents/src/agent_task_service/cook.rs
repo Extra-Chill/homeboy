@@ -2385,57 +2385,14 @@ fn bind_dispatch_workspace_attestations(plan: &mut AgentTaskPlan) -> Result<()> 
             )
         })?;
         let prior = task.metadata.get("cook_workspace_identity").cloned();
-        let identity = dispatch_workspace_identity(std::path::Path::new(root))?;
+        let identity =
+            crate::agent_task_workspace_identity::attest_workspace(std::path::Path::new(root))?;
         task.metadata["cook_workspace_identity"] = identity;
         if let Some(prior) = prior {
             task.metadata["cook_workspace_identity_predecessor"] = prior;
         }
     }
     Ok(())
-}
-
-#[cfg(unix)]
-fn dispatch_workspace_identity(path: &std::path::Path) -> Result<Value> {
-    use std::os::unix::fs::MetadataExt;
-    let canonical = std::fs::canonicalize(path)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
-    let metadata = std::fs::symlink_metadata(&canonical).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(canonical.display().to_string()))
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(Error::validation_invalid_argument(
-            "workspace",
-            "Cook baseline workspace must be a non-symlink directory",
-            Some(canonical.display().to_string()),
-            None,
-        ));
-    }
-    let git_file = canonical.join(".git");
-    let git_metadata = std::fs::symlink_metadata(&git_file).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(git_file.display().to_string()))
-    })?;
-    let git_content = std::fs::read_to_string(&git_file).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(git_file.display().to_string()))
-    })?;
-    let gitdir_target = git_content
-        .strip_prefix("gitdir: ")
-        .map(str::trim)
-        .and_then(|target| std::fs::canonicalize(canonical.join(target)).ok());
-    Ok(serde_json::json!({
-        "canonical_path": canonical,
-        "device": metadata.dev(),
-        "inode": metadata.ino(),
-        "git_file_is_file": git_metadata.file_type().is_file(),
-        "git_file_content": git_content,
-        "gitdir_target": gitdir_target,
-    }))
-}
-
-#[cfg(not(unix))]
-fn dispatch_workspace_identity(path: &std::path::Path) -> Result<Value> {
-    let canonical = std::fs::canonicalize(path)
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
-    Ok(serde_json::json!({ "canonical_path": canonical }))
 }
 
 /// Re-resolve the declared Cook target before a provider can run. Durable
