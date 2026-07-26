@@ -24,12 +24,14 @@ pub mod ticker;
 pub mod types;
 
 pub use execution::{
-    raw_digest, result_digest, run_schedule, ScheduleCommandResult, ScheduleCommandRunner,
-    ScheduleRunOutcome, SubprocessRunner,
+    raw_digest, result_digest, run_schedule, sequence_digest, ScheduleCommandResult,
+    ScheduleCommandRunner, ScheduleRunOutcome, ScheduleStepOutcome, SubprocessRunner,
 };
 pub use state::{load_state, remove_state, save_state, ScheduleState};
 pub use ticker::{reclaim_stale_runs, ScheduleTicker};
-pub use types::{Cadence, ExecCommand, NotifyPolicy, OverlapPolicy, Schedule, ScheduledCommand};
+pub use types::{
+    Cadence, ExecCommand, NotifyPolicy, OverlapPolicy, Schedule, ScheduleStep, ScheduledCommand,
+};
 
 crate::entity_crud!(Schedule; list_ids);
 
@@ -50,6 +52,7 @@ mod tests {
             id: id.to_string(),
             command: Some(vec!["triage".to_string()]),
             exec: None,
+            steps: Vec::new(),
             every: Cadence::from_seconds(3_600).expect("cadence"),
             notify_on: NotifyPolicy::default(),
             on_overlap: OverlapPolicy::default(),

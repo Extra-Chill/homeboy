@@ -197,6 +197,43 @@ pub struct ExecCommand {
     pub working_dir: Option<String>,
 }
 
+/// One step of a schedule.
+///
+/// A step runs either a homeboy command or a program, the same choice a
+/// single-step schedule makes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduleStep {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec: Option<ExecCommand>,
+}
+
+impl ScheduleStep {
+    pub fn resolve(&self) -> Option<ScheduledCommand<'_>> {
+        match (&self.command, &self.exec) {
+            (Some(argv), None) => Some(ScheduledCommand::Homeboy(argv.as_slice())),
+            (None, Some(exec)) => Some(ScheduledCommand::Exec(exec)),
+            _ => None,
+        }
+    }
+
+    pub fn display(&self) -> String {
+        match self.resolve() {
+            Some(ScheduledCommand::Homeboy(argv)) => format!("homeboy {}", argv.join(" ")),
+            Some(ScheduledCommand::Exec(exec)) => {
+                if exec.args.is_empty() {
+                    exec.program.clone()
+                } else {
+                    format!("{} {}", exec.program, exec.args.join(" "))
+                }
+            }
+            None => "<no command>".to_string(),
+        }
+    }
+}
+
 /// What a schedule runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScheduledCommand<'a> {
@@ -227,6 +264,13 @@ pub struct Schedule {
     /// Mutually exclusive with `command`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec: Option<ExecCommand>,
+
+    /// An ordered sequence to run instead of a single command.
+    ///
+    /// Steps run in order and stop at the first failure. Mutually exclusive
+    /// with `command` and `exec`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<ScheduleStep>,
 
     pub every: Cadence,
 
@@ -266,30 +310,28 @@ fn default_true() -> bool {
 }
 
 impl Schedule {
-    /// What this schedule runs.
+    /// The ordered steps this schedule runs.
     ///
-    /// Validation guarantees exactly one of `command` / `exec` is set, so a
-    /// stored schedule always resolves.
-    pub fn scheduled_command(&self) -> Option<ScheduledCommand<'_>> {
-        match (&self.command, &self.exec) {
-            (Some(argv), None) => Some(ScheduledCommand::Homeboy(argv.as_slice())),
-            (None, Some(exec)) => Some(ScheduledCommand::Exec(exec)),
-            _ => None,
+    /// A single-command schedule is one step, so callers never need to
+    /// distinguish the two forms. Validation guarantees this is non-empty and
+    /// that every step resolves.
+    pub fn resolved_steps(&self) -> Vec<ScheduleStep> {
+        if !self.steps.is_empty() {
+            return self.steps.clone();
         }
+        vec![ScheduleStep {
+            command: self.command.clone(),
+            exec: self.exec.clone(),
+        }]
     }
 
     /// Human-readable rendering of what runs, for logs and notifications.
     pub fn command_display(&self) -> String {
-        match self.scheduled_command() {
-            Some(ScheduledCommand::Homeboy(argv)) => format!("homeboy {}", argv.join(" ")),
-            Some(ScheduledCommand::Exec(exec)) => {
-                if exec.args.is_empty() {
-                    exec.program.clone()
-                } else {
-                    format!("{} {}", exec.program, exec.args.join(" "))
-                }
-            }
-            None => "<no command>".to_string(),
+        let steps = self.resolved_steps();
+        match steps.len() {
+            0 => "<no command>".to_string(),
+            1 => steps[0].display(),
+            count => format!("{} steps: {}", count, steps[0].display()),
         }
     }
 
@@ -358,6 +400,7 @@ mod tests {
             id: id.to_string(),
             command: Some(vec!["triage".to_string()]),
             exec: None,
+            steps: Vec::new(),
             every: Cadence::from_seconds(3_600).expect("cadence"),
             notify_on: NotifyPolicy::default(),
             on_overlap: OverlapPolicy::default(),
@@ -405,8 +448,10 @@ mod tests {
             ])
         );
         assert!(schedule.exec.is_none());
+        let steps = schedule.resolved_steps();
+        assert_eq!(steps.len(), 1, "a single command is one step");
         assert!(matches!(
-            schedule.scheduled_command(),
+            steps[0].resolve(),
             Some(ScheduledCommand::Homeboy(_))
         ));
         assert_eq!(
@@ -425,11 +470,40 @@ mod tests {
 
         let schedule: Schedule = serde_json::from_str(stored).expect("exec declaration loads");
         assert!(schedule.command.is_none());
+        let steps = schedule.resolved_steps();
+        assert_eq!(steps.len(), 1);
         assert!(matches!(
-            schedule.scheduled_command(),
+            steps[0].resolve(),
             Some(ScheduledCommand::Exec(_))
         ));
         assert_eq!(schedule.command_display(), "/usr/bin/true --now");
+    }
+
+    /// A step list stored on disk must resolve in order.
+    #[test]
+    fn a_step_list_deserializes_and_resolves_in_order() {
+        let stored = r#"{
+            "id": "managed",
+            "steps": [
+                { "command": ["harvest", "production", "--check"] },
+                { "exec": { "program": "npm", "args": ["test"], "working_dir": "/srv/p" } }
+            ],
+            "every": 86400
+        }"#;
+
+        let schedule: Schedule = serde_json::from_str(stored).expect("step list loads");
+        let steps = schedule.resolved_steps();
+        assert_eq!(steps.len(), 2);
+        assert!(matches!(
+            steps[0].resolve(),
+            Some(ScheduledCommand::Homeboy(_))
+        ));
+        assert!(matches!(
+            steps[1].resolve(),
+            Some(ScheduledCommand::Exec(_))
+        ));
+        assert_eq!(steps[1].display(), "npm test");
+        assert!(schedule.command_display().starts_with("2 steps:"));
     }
 
     #[test]
