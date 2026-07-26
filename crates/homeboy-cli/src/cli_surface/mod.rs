@@ -90,6 +90,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub skip_deps_hydration: bool,
 
+    /// Preserve a failed Lab workspace for bounded TTL-based inspection.
+    #[arg(long, global = true)]
+    pub preserve_workspace_on_failure: bool,
+
     /// Add a job-scoped environment variable to a Lab offload without mutating runner config.
     #[arg(long, global = true, value_name = "KEY=VALUE")]
     pub runner_env: Vec<String>,
@@ -1083,6 +1087,20 @@ mod tests {
     }
 
     #[test]
+    fn preserve_workspace_on_failure_global_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "trace",
+            "--runner",
+            "homeboy-lab",
+            "--preserve-workspace-on-failure",
+        ])
+        .expect("Lab failure-retention profile should parse");
+
+        assert!(cli.preserve_workspace_on_failure);
+    }
+
+    #[test]
     fn legacy_placement_flags_are_rejected() {
         for flag in [
             format!("--{}-{}", "force", "hot"),
@@ -1185,6 +1203,7 @@ mod tests {
             "--detach-after-handoff",
             "--allow-dirty-lab-workspace",
             "--skip-deps-hydration",
+            "--preserve-workspace-on-failure",
             "--runner-env",
             "--lab-env-json",
             "--runner-workspace-root",
@@ -1207,6 +1226,7 @@ mod tests {
             "--detach-after-handoff",
             "--allow-dirty-lab-workspace",
             "--skip-deps-hydration",
+            "--preserve-workspace-on-failure",
             "--runner-env",
             "--lab-env-json",
             "--runner-workspace-root",

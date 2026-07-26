@@ -2,10 +2,14 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use crate::workspace::sync::{prune_scan_command, prune_workspaces, sync_workspace};
+use crate::workspace::sync::{
+    prune_scan_command, prune_workspaces, sync_workspace, update_workspace_resource_lifecycle,
+    WORKSPACE_METADATA_FILE,
+};
 use crate::workspace::types::{
     RunnerWorkspacePruneOptions, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
+use crate::{MaterializedWorkspace, WorkspaceCleanupPolicy, WorkspaceTerminalOutcome};
 
 #[test]
 fn prune_workspaces_previews_orphans_without_deleting_by_default() {
@@ -165,6 +169,154 @@ fn prune_workspaces_reaps_ttl_expired_lifecycle_workspace_with_live_source() {
         assert_eq!(output.candidates[0].reason, "resource_ttl_expired");
         assert!(Path::new(&synced.remote_path).exists());
         assert!(source.exists());
+    });
+}
+
+#[test]
+fn preserved_failure_lifecycle_is_registered_for_ttl_pruning() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let source_parent = tempfile::tempdir().expect("source parent");
+        let source = source_parent.path().join("live-source");
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        fs::create_dir_all(&source).expect("source dir");
+        fs::write(source.join("file.txt"), "live\n").expect("source file");
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-local-prune-retained","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+        let (synced, _) = sync_workspace(
+            "lab-local-prune-retained",
+            sync_options(source.display().to_string()),
+        )
+        .expect("sync workspace");
+        let mut lifecycle = synced.resource_lifecycle;
+        lifecycle.cleanup_policy =
+            homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteAfterTtl;
+        lifecycle.ttl = Some("2020-01-01T00:00:00Z".to_string());
+        lifecycle.cleanup_command = Some(
+            "homeboy runner workspace prune lab-local-prune-retained --apply --min-age-hours 0"
+                .to_string(),
+        );
+        update_workspace_resource_lifecycle(
+            "lab-local-prune-retained",
+            &synced.remote_path,
+            lifecycle,
+        )
+        .expect("register ttl lifecycle");
+        {
+            let mut handle = MaterializedWorkspace::new(
+                "lab-local-prune-retained".to_string(),
+                synced.remote_path.clone(),
+                None,
+                WorkspaceCleanupPolicy::PreserveOnFailure,
+            );
+            handle.set_terminal_outcome(WorkspaceTerminalOutcome::Failure);
+        }
+        let metadata =
+            fs::read_to_string(Path::new(&synced.remote_path).join(WORKSPACE_METADATA_FILE))
+                .expect("terminal metadata");
+        let metadata: serde_json::Value = serde_json::from_str(&metadata).expect("metadata json");
+        assert_eq!(metadata["terminal_evidence"]["final_outcome"], "failure");
+        assert_eq!(
+            metadata["terminal_evidence"]["retained_location"],
+            synced.remote_path
+        );
+
+        let (preview, _) = prune_workspaces(
+            "lab-local-prune-retained",
+            RunnerWorkspacePruneOptions {
+                apply: false,
+                min_age_hours: 0,
+                limit: 10,
+                passes: 1,
+            },
+        )
+        .expect("prune preview");
+
+        assert_eq!(preview.candidates[0].reason, "resource_ttl_expired");
+        assert_eq!(preview.candidates[0].remote_path, synced.remote_path);
+        assert!(Path::new(&synced.remote_path).exists());
+
+        let (applied, exit_code) = prune_workspaces(
+            "lab-local-prune-retained",
+            RunnerWorkspacePruneOptions {
+                apply: true,
+                min_age_hours: 0,
+                limit: 10,
+                passes: 1,
+            },
+        )
+        .expect("apply ttl prune");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(applied.removed.len(), 1);
+        assert_eq!(applied.removed[0].reason, "resource_ttl_expired");
+        assert_eq!(applied.removed[0].remote_path, synced.remote_path);
+        assert!(
+            !Path::new(&synced.remote_path).exists(),
+            "registered TTL lifecycle must be reaped by the owning runner prune path"
+        );
+    });
+}
+
+#[test]
+fn uncertain_handoff_disarms_ttl_pruning() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let source_parent = tempfile::tempdir().expect("source parent");
+        let source = source_parent.path().join("live-source");
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        fs::create_dir_all(&source).expect("source dir");
+        fs::write(source.join("file.txt"), "live\n").expect("source file");
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-local-prune-handoff","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+        let (synced, _) = sync_workspace(
+            "lab-local-prune-handoff",
+            sync_options(source.display().to_string()),
+        )
+        .expect("sync workspace");
+        let mut lifecycle = synced.resource_lifecycle;
+        lifecycle.cleanup_policy =
+            homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy::DeleteAfterTtl;
+        lifecycle.ttl = Some("2020-01-01T00:00:00Z".to_string());
+        update_workspace_resource_lifecycle(
+            "lab-local-prune-handoff",
+            &synced.remote_path,
+            lifecycle,
+        )
+        .expect("register ttl lifecycle");
+        {
+            let mut handle = MaterializedWorkspace::new(
+                "lab-local-prune-handoff".to_string(),
+                synced.remote_path.clone(),
+                None,
+                WorkspaceCleanupPolicy::PreserveOnFailure,
+            );
+            handle.preserve();
+        }
+
+        let (preview, _) = prune_workspaces(
+            "lab-local-prune-handoff",
+            RunnerWorkspacePruneOptions {
+                apply: false,
+                min_age_hours: 0,
+                limit: 10,
+                passes: 1,
+            },
+        )
+        .expect("prune preview");
+
+        assert!(preview.candidates.is_empty());
+        assert!(Path::new(&synced.remote_path).exists());
     });
 }
 

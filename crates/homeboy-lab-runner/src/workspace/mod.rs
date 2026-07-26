@@ -18,6 +18,7 @@ mod types;
 mod util;
 
 pub use pull::{plan_workspace_pull, pull_workspace};
+pub(crate) use sync::update_workspace_resource_lifecycle;
 #[cfg(test)]
 pub(crate) use sync::workspace_resource_lifecycle;
 pub use sync::{
@@ -37,7 +38,9 @@ pub use types::{
     RunnerWorkspaceUpdateOutput,
 };
 
-pub(crate) use materialized::{MaterializedWorkspace, WorkspaceCleanupPolicy};
+pub(crate) use materialized::{
+    MaterializedWorkspace, WorkspaceCleanupPolicy, WorkspaceTerminalOutcome,
+};
 pub(crate) use materializer::{
     dependency_cache_manifest_command, dependency_cache_restore_command,
     dependency_cache_save_command,

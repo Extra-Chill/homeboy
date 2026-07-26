@@ -41,6 +41,7 @@ impl LabOffloadProvider for RunnerLabOffload {
             allow_local_fallback: request.allow_local_fallback,
             allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
             skip_deps_hydration: request.skip_deps_hydration,
+            preserve_workspace_on_failure: request.preserve_workspace_on_failure,
             capture_patch: request.capture_patch,
             mutation_flag: request.mutation_flag,
             detach_after_handoff: request.detach_after_handoff,

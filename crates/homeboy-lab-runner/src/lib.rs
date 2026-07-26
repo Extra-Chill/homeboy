@@ -94,12 +94,15 @@ pub(crate) use workspace::copy_snapshot_to_directory;
 pub use workspace::register_workspace_snapshot_provider;
 // Only test code (extension::trace::canonicality) still calls verify_lab_workspace
 // directly; production goes through the LabWorkspaceProvenanceProvider hook.
+pub(crate) use workspace::update_workspace_resource_lifecycle;
 #[cfg(test)]
 pub(crate) use workspace::verify_lab_workspace;
 #[cfg(test)]
 pub(crate) use workspace::workspace_resource_lifecycle;
 
-pub(crate) use workspace::{MaterializedWorkspace, WorkspaceCleanupPolicy};
+pub(crate) use workspace::{
+    MaterializedWorkspace, WorkspaceCleanupPolicy, WorkspaceTerminalOutcome,
+};
 
 pub use apply::{
     apply_change_artifact, apply_workspace_patch, RunnerWorkspaceApplyOptions,
