@@ -3,7 +3,7 @@
  * External dependencies
  */
 import { createWriteStream } from 'node:fs';
-import { access, copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
@@ -21,6 +21,7 @@ const slug = process.env.COMPONENT_ID || path.basename(componentPath);
 const root = settings.wp_codebox_source_root || componentPath;
 const subpath = settings.wp_codebox_source_subpath || undefined;
 const pluginSourceDirectory = subpath ? path.join(root, subpath) : root;
+const phpunitProfile = await resolvePhpunitProfile(settings, pluginSourceDirectory, slug);
 const multisite = await resolveMultisite(settings, pluginSourceDirectory);
 const databaseService = resolveDatabaseService(settings, process.env);
 requireDatabaseServiceCapability(databaseService);
@@ -30,7 +31,7 @@ const optionsPath = path.join(directory, 'options.json');
 const recipePath = path.join(directory, 'recipe.json');
 const artifacts = process.env.HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR || path.join(directory, 'artifacts');
 const runArtifacts = path.join(artifacts, `wp-codebox-phpunit.${process.pid}`);
-const dependencies = await Promise.all(dependencyPaths(settings).map(async (source) => {
+const dependencies = await Promise.all((await dependencyPaths(settings, [componentPath, pluginSourceDirectory])).map(async (source) => {
   const dependencySlug = path.basename(source).replace(/@[^/]+$/, '');
   return { source, slug: dependencySlug, sandboxDirectory: sandboxPluginDirectory(dependencySlug), composer: await composerPreparation(source) };
 }));
@@ -43,12 +44,12 @@ const options = clean({
   pluginSlug: slug,
   extra_plugins: [
     { source: root, sourceSubpath: subpath, slug, activate: false },
-    ...dependencies.map(({ source, slug: dependencySlug, composer }) => clean({ source, slug: dependencySlug, activate: false, composer })),
+    ...dependencies.map(({ source, slug: dependencySlug, composer }) => clean({ source, slug: dependencySlug, activate: true, composer })),
   ],
   dependencyMounts: [...new Set([sandboxPluginDirectory(slug), ...dependencies.map(({ sandboxDirectory }) => sandboxDirectory)])],
-  testRoot: settings.wp_codebox_phpunit_test_root,
-  phpunitXml: settings.wp_codebox_phpunit_config,
-  cwd: settings.wp_codebox_phpunit_cwd,
+  testRoot: phpunitProfile.testRoot,
+  phpunitXml: phpunitProfile.config,
+  cwd: phpunitProfile.cwd,
   phpunitArgs: process.argv.slice(2),
   env: settings.bench_env,
   wpConfigDefines: settings.wp_config_defines,
@@ -64,6 +65,7 @@ try {
   run(['recipe', 'build', 'phpunit', '--options', optionsPath, '--output', recipePath]);
   await applyDatabaseServiceAuthorization(recipePath);
   await mkdir(runArtifacts, { recursive: true });
+  await persistRecipeEvidence(runArtifacts, options, recipePath, phpunitProfile, dependencies);
   const executionArgs = ['recipe-run', '--recipe', recipePath, '--artifacts', runArtifacts, '--json'];
   if (databaseService?.boundary) {
     executionArgs.push('--approve-external-service-writes', '--policy', JSON.stringify(databaseService.policy));
@@ -96,12 +98,10 @@ async function runCaptured(args) {
     child.stdout.on('data', (chunk) => {
       chunk = stdoutRedactor.write(chunk);
       stdoutFile.write(chunk);
-      process.stdout.write(chunk);
     });
     child.stderr.on('data', (chunk) => {
       chunk = stderrRedactor.write(chunk);
       stderrFile.write(chunk);
-      process.stderr.write(chunk);
     });
     child.on('error', (error) => { childError = error; });
     child.on('close', (status) => {
@@ -109,8 +109,6 @@ async function runCaptured(args) {
       const stderrTail = stderrRedactor.end();
       stdoutFile.write(stdoutTail);
       stderrFile.write(stderrTail);
-      process.stdout.write(stdoutTail);
-      process.stderr.write(stderrTail);
       stdoutFile.end();
       stderrFile.end();
       Promise.all([
@@ -137,6 +135,7 @@ function configuredSecretValues() {
 function createLineRedactor(secretValues) {
   const decoder = new StringDecoder('utf8');
   let pending = '';
+  const overlap = Math.max(0, ...secretValues.map((secret) => secret.length - 1));
   const redact = (text) => {
     for (const secret of secretValues) {
       text = text.replaceAll(secret, '[REDACTED]');
@@ -147,7 +146,15 @@ function createLineRedactor(secretValues) {
     write(chunk) {
       pending += decoder.write(chunk);
       const boundary = pending.lastIndexOf('\n') + 1;
-      if (boundary === 0) { return ''; }
+      // JSON recipe responses can be a single line larger than a pipe buffer.
+      // Flush bounded chunks so a crashed PHPUnit run cannot deadlock at 64 KiB.
+      if (boundary === 0) {
+        if (pending.length < 8192) { return ''; }
+        // Keep enough input to redact a secret split across the flush boundary.
+        const buffered = pending.slice(0, Math.max(0, pending.length - overlap));
+        pending = pending.slice(buffered.length);
+        return redact(buffered);
+      }
       const completeLines = pending.slice(0, boundary);
       pending = pending.slice(boundary);
       return redact(completeLines);
@@ -230,10 +237,31 @@ function parseSettings(value) {
 }
 function json(value, fallback) { try { return value ? JSON.parse(value) : fallback; } catch { return fallback; } }
 function clean(value) { return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined && entry !== '' && !(Array.isArray(entry) && entry.length === 0))); }
-function dependencyPaths(configuration) {
+async function dependencyPaths(configuration, primarySources) {
   const configured = Array.isArray(configuration.validation_dependencies) ? configuration.validation_dependencies : [];
   const canonical = (process.env.HOMEBOY_WORDPRESS_DEPENDENCY_PATHS || '').split('\n');
-  return [...new Set([...canonical, ...configured].filter((value) => typeof value === 'string' && path.isAbsolute(value)))];
+  const declared = configured.map((value) => {
+    if (typeof value === 'string') { return value; }
+    if (isObject(value)) { return value.path || value.local_path || value.source || ''; }
+    return '';
+  }).filter(Boolean);
+  const unresolved = declared.filter((value) => !path.isAbsolute(value));
+  if (unresolved.length > 0) {
+    throw new Error(`Declared WordPress validation dependencies were not resolved to source paths: ${unresolved.join(', ')}`);
+  }
+  // Preserve explicitly declared paths in recipe provenance while canonicalizing
+  // aliases solely for identity and duplicate detection.
+  const sources = [...new Set([...declared, ...canonical].filter((value) => typeof value === 'string' && path.isAbsolute(value)))];
+  const resolved = await Promise.all(sources.map(async (source) => {
+    try { return { source, canonicalSource: await realpath(source) }; } catch { throw new Error(`Declared WordPress validation dependency sources are unavailable: ${source}`); }
+  }));
+  const primary = new Set(await Promise.all(primarySources.map(async (source) => {
+    try { return await realpath(source); } catch { return path.resolve(source); }
+  })));
+  const seen = new Set();
+  return resolved
+    .filter(({ canonicalSource }) => !primary.has(canonicalSource) && !seen.has(canonicalSource) && Boolean(seen.add(canonicalSource)))
+    .map(({ source }) => source);
 }
 async function composerPreparation(source) {
   try {
@@ -449,7 +477,19 @@ async function requireHarness(source) {
 }
 async function handoffArtifacts(artifactRoot, execution) {
   let pointer;
-  try { pointer = json(await readFile(path.join(artifactRoot, 'latest-runtime.json'), 'utf8'), null); } catch { return; }
+  try { pointer = json(await readFile(path.join(artifactRoot, 'latest-runtime.json'), 'utf8'), null); } catch {
+    // A crashed workload may never write a runtime pointer. Preserve and parse
+    // the captured aggregate at the stable artifact root rather than reporting
+    // a zero-test run.
+    await preservePhpunitOutput(artifactRoot, execution, []);
+    if (process.env.HOMEBOY_TEST_RESULTS_FILE) {
+      runScript('parse-test-results.sh', [artifactRoot]);
+    }
+    if (process.env.HOMEBOY_TEST_FAILURES_FILE) {
+      runScript('parse-test-failures.sh', [artifactRoot, componentPath]);
+    }
+    return;
+  }
   const runtime = pointer?.paths?.runtimeDirectory;
   if (typeof runtime !== 'string' || !/^runtime-[A-Za-z0-9][A-Za-z0-9-]*$/.test(runtime)) {
     return;
@@ -483,9 +523,17 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
     await writeFile(managedRuntimeServicesPath, `${JSON.stringify(managedRuntimeServices, null, 2)}\n`);
   }
 
+  const aggregate = phpunitAggregate(output);
   let results;
   try { results = json(await readFile(testResultsPath, 'utf8'), null); } catch { results = null; }
+  if (!results && aggregate) {
+    results = { schema: 'wp-codebox/test-results/v1', status: aggregate.failed > 0 ? 'failed' : 'passed', summary: aggregate };
+  }
   if (results && typeof results === 'object') {
+    const summary = isObject(results.summary) ? results.summary : {};
+    if (aggregate) {
+      results.summary = { ...summary, ...aggregate };
+    }
     const references = Array.isArray(results.rawLogReferences) ? results.rawLogReferences : [];
     results.rawLogReferences = [
       ...references.filter((reference) => reference?.path !== 'files/phpunit-output.log'),
@@ -523,6 +571,58 @@ function extractPhpunitOutput(stdout, stderr) {
     }
   }
   return stdout + stderr;
+}
+function phpunitAggregate(output) {
+  const ok = output.match(/\bOK \((\d+) tests?,\s*(\d+) assertions?\)/i);
+  if (ok) {
+    return { total: Number(ok[1]), passed: Number(ok[1]), failed: 0, skipped: 0, assertions: Number(ok[2]) };
+  }
+  const summary = [...output.matchAll(/\bTests:\s*(\d+),\s*Assertions:\s*(\d+)([^\n]*)/gi)].pop();
+  if (!summary) { return null; }
+  const total = Number(summary[1]);
+  const assertions = Number(summary[2]);
+  const tail = summary[3];
+  const count = (name) => Number((tail.match(new RegExp(`\\b${name}:\\s*(\\d+)`, 'i')) || [])[1] || 0);
+  const failed = count('Errors') + count('Failures');
+  const skipped = count('Skipped') + count('Incomplete');
+  return { total, passed: Math.max(0, total - failed - skipped), failed, skipped, assertions };
+}
+async function resolvePhpunitProfile(configuration, pluginDirectory, pluginSlug) {
+  const sandboxRoot = sandboxPluginDirectory(pluginSlug);
+  const configured = typeof configuration.wp_codebox_phpunit_config === 'string' ? configuration.wp_codebox_phpunit_config : '';
+  let config = configured;
+  let hostConfig = '';
+  if (configured) {
+    hostConfig = path.isAbsolute(configured) ? configured : path.join(pluginDirectory, configured);
+  } else {
+    for (const candidate of ['phpunit.xml', 'phpunit.xml.dist']) {
+      try { await access(path.join(pluginDirectory, candidate)); config = `${sandboxRoot}/${candidate}`; hostConfig = path.join(pluginDirectory, candidate); break; } catch {}
+    }
+  }
+  const testRoot = configuration.wp_codebox_phpunit_test_root || `${sandboxRoot}/tests`;
+  const cwd = configuration.wp_codebox_phpunit_cwd || sandboxRoot;
+  let environment = 'wordpress-integration';
+  if (hostConfig) {
+    try {
+      const xml = await readFile(hostConfig, 'utf8');
+      const bootstrap = xml.match(/\bbootstrap\s*=\s*["']([^"']+)["']/i)?.[1];
+      if (bootstrap) {
+        const bootstrapPath = path.resolve(path.dirname(hostConfig), bootstrap);
+        const source = await readFile(bootstrapPath, 'utf8').catch(() => '');
+        environment = /WP_UnitTestCase|wp-load\.php|WP_TESTS_DIR|wp-tests-config/i.test(source) ? 'wordpress-integration' : 'standalone-php';
+      }
+    } catch {}
+  }
+  return { config, testRoot, cwd, environment, hostConfig };
+}
+async function persistRecipeEvidence(artifactDirectory, recipeOptions, generatedRecipePath, profile, resolvedDependencies) {
+  const sourceRefs = [{ slug, source: root, source_subpath: subpath || null }, ...resolvedDependencies.map((dependency) => ({ slug: dependency.slug, source: dependency.source }))];
+  await Promise.all([
+    copyFile(generatedRecipePath, path.join(artifactDirectory, 'wp-codebox-phpunit-recipe.json')),
+    writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-recipe-options.json'), `${JSON.stringify(recipeOptions, null, 2)}\n`),
+    writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-profile.json'), `${JSON.stringify({ phpunit: { config: profile.config, cwd: profile.cwd, test_root: profile.testRoot, environment: profile.environment, bootstrap_mode: recipeOptions.bootstrapMode, passthrough_args: recipeOptions.phpunitArgs, extra_mounts: recipeOptions.mounts } }, null, 2)}\n`),
+    writeFile(path.join(artifactDirectory, 'wp-codebox-phpunit-provenance.json'), `${JSON.stringify({ source_refs: sourceRefs, wp_codebox: { cli_bin: process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox', resolved_cli_path: process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox', command: [process.env.HOMEBOY_WP_CODEBOX_BIN || process.env.WP_CODEBOX_BIN || 'wp-codebox'] } }, null, 2)}\n`),
+  ]);
 }
 function runScript(script, args) {
   const result = spawnSync('bash', [path.join(scriptDirectory, script), ...args], { cwd: componentPath, env: environmentWithoutDatabaseAdministration(), encoding: 'utf8', stdio: 'inherit' });

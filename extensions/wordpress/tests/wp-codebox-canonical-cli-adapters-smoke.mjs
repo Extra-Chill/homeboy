@@ -1,3 +1,6 @@
+/**
+ * External dependencies
+ */
 import { strict as assert } from 'node:assert';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -68,8 +71,7 @@ try {
     { source: '/workspace/monorepo', sourceSubpath: 'plugins/canonical-plugin', slug: 'canonical-plugin', activate: false },
   ]);
   assert.deepEqual(options[1].extra_plugins.slice(1), [
-    { source: component, slug: 'canonical-plugin', activate: false },
-    { source: dependency, slug: 'db-touching-dependency', activate: false },
+    { source: dependency, slug: 'db-touching-dependency', activate: true },
   ]);
   assert.deepEqual(options[1].dependencyMounts, [
     '/wordpress/wp-content/plugins/canonical-plugin',

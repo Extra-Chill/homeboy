@@ -39,7 +39,7 @@ fs.writeFileSync(path.join(runtime, 'files', 'test-results.json'), JSON.stringif
   summary: { total: 3, passed: 0, failed: 2, skipped: 1, unknown: 0 },
   suites: [{ name: 'phpunit', tests: 3, passed: 0, failed: 2, skipped: 1 }],
 }));
-const output = 'x'.repeat(70 * 1024) + '\\n' + [
+const output = 'x'.repeat(8192 - 32) + 'fixture-secret-value' + 'x'.repeat(70 * 1024) + '\\n' + [
   'PHPUnit 9.6.22 by Sebastian Bergmann and contributors.',
   'fixture token: fixture-secret-value',
   '',
@@ -69,7 +69,7 @@ const output = 'x'.repeat(70 * 1024) + '\\n' + [
   .replaceAll('SamplePluginRunner', ['SamplePlugin', 'Runner'].join(String.fromCharCode(92)));
 fs.writeFileSync('${expectedOutputFile}', output);
 process.stdout.write(JSON.stringify({ success: false, executions: [{ stdout: output, stderr: '' }] }));
-process.exit(1);
+process.exitCode = 1;
 `);
 await chmod(cli, 0o755);
 
@@ -104,9 +104,12 @@ try {
   assert.ok(Buffer.byteLength(retainedOutput) > 64 * 1024);
   assert.equal(retainedOutput, expectedOutput);
   assert.doesNotMatch(retainedOutput, /fixture-secret-value/);
+  assert.match(retainedOutput, /\[REDACTED\]x{100}/);
   assert.match(retainedOutput, /fixture token: \[REDACTED\]/);
 
   const artifactResults = JSON.parse(await readFile(path.join(runtime, 'files/test-results.json'), 'utf8'));
+  const profile = JSON.parse(await readFile(path.join(artifacts, runDirectory, 'wp-codebox-phpunit-profile.json'), 'utf8'));
+  assert.equal(profile.phpunit.environment, 'wordpress-integration');
   assert.deepEqual(artifactResults.rawLogReferences.slice(-3), [
     { path: 'files/phpunit-output.log', kind: 'phpunit-output' },
     { path: 'logs/recipe-run.stdout.log', kind: 'recipe-run-stdout' },

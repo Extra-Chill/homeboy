@@ -11,7 +11,6 @@ PLUGIN_DIR="${TMPDIR}/sample-plugin"
 ARTIFACTS_DIR="${TMPDIR}/artifacts"
 FAKE_BIN="${TMPDIR}/wp-codebox"
 RESOLVE_CONTEXT_HELPER="${TMPDIR}/resolve-context-helper.sh"
-CORE_MODULE="${ROOT_DIR}/tests/fixtures/wp-codebox-core-recipe-builder.mjs"
 EXTRA_MOUNT="${TMPDIR}/extra.php"
 
 mkdir -p "${PLUGIN_DIR}/tests" "$ARTIFACTS_DIR"
@@ -38,6 +37,18 @@ set -euo pipefail
 
 if [ "${1:-}" = "commands" ]; then
 	exit 0
+fi
+
+if [ "${1:-}" = "recipe" ] && [ "${2:-}" = "build" ]; then
+	shift 3
+	while [ "$#" -gt 0 ]; do
+		if [ "$1" = "--output" ]; then
+			printf '%s\n' '{"schema":"wp-codebox/workspace-recipe/v1"}' > "$2"
+			exit 0
+		fi
+		shift
+	done
+	exit 2
 fi
 
 recipe=""
@@ -82,7 +93,6 @@ HOMEBOY_EXTENSION_PATH="$ROOT_DIR" \
 HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
 HOMEBOY_RUNTIME_RUNNER_STEPS="${TMPDIR}/missing-runner-steps.sh" \
 HOMEBOY_WP_CODEBOX_BIN="$FAKE_BIN" \
-HOMEBOY_WP_CODEBOX_CORE_MODULE="$CORE_MODULE" \
 HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR="$ARTIFACTS_DIR" \
 HOMEBOY_SETTINGS_JSON='{"wp_codebox_phpunit_test_root":"tests","wp_codebox_phpunit_config":"phpunit.xml.dist","wp_codebox_phpunit_cwd":"tests","wp_codebox_phpunit_bootstrap_mode":"managed","wp_codebox_phpunit_mounts":[{"source":"'"$EXTRA_MOUNT"'","target":"/tmp/extra.php","mode":"readonly"}]}' \
     bash "$RUNNER" --filter SampleFilter > "${TMPDIR}/runner.out" 2>&1
@@ -94,16 +104,17 @@ if [ "$status" -eq 0 ]; then
 	exit 1
 fi
 
-node - "$ARTIFACTS_DIR" "$FAKE_BIN" "$CORE_MODULE" <<'NODE'
+node - "$ARTIFACTS_DIR" "$FAKE_BIN" <<'NODE'
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
 const artifactsDir = process.argv[2];
 const fakeBin = process.argv[3];
-const coreModule = process.argv[4];
 
-const readJson = (name) => JSON.parse(fs.readFileSync(path.join(artifactsDir, name), 'utf8'));
+const runDirectory = fs.readdirSync(artifactsDir).find((entry) => entry.startsWith('wp-codebox-phpunit.'));
+assert.ok(runDirectory, 'expected a PHPUnit artifact directory');
+const readJson = (name) => JSON.parse(fs.readFileSync(path.join(artifactsDir, runDirectory, name), 'utf8'));
 const recipe = readJson('wp-codebox-phpunit-recipe.json');
 const options = readJson('wp-codebox-phpunit-recipe-options.json');
 const provenance = readJson('wp-codebox-phpunit-provenance.json');
@@ -118,7 +129,6 @@ assert.deepEqual(options.phpunitArgs, ['--filter', 'SampleFilter']);
 assert.equal(provenance.wp_codebox.cli_bin, fakeBin);
 assert.equal(provenance.wp_codebox.resolved_cli_path, fakeBin);
 assert.deepEqual(provenance.wp_codebox.command, [fakeBin]);
-assert.equal(provenance.wp_codebox.recipe_builder_source, `file://${coreModule}`);
 assert.equal(profile.phpunit.test_root, 'tests');
 assert.equal(profile.phpunit.config, 'phpunit.xml.dist');
 assert.equal(profile.phpunit.cwd, 'tests');

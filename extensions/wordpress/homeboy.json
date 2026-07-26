@@ -14,6 +14,8 @@
       "bash tests/installed-test-helper-resolution-smoke.sh",
       "bash tests/extension-composer-vendor-integrity-smoke.sh",
       "node tests/wp-codebox-phpunit-multisite-smoke.mjs",
+      "node tests/wp-codebox-phpunit-aggregate-smoke.mjs",
+      "node tests/wp-codebox-phpunit-evidence-smoke.mjs",
       "node tests/wp-codebox-database-service-smoke.mjs",
       "node tests/wp-codebox-native-database-canary.mjs",
       "bash scripts/test/full-suite-no-phpunit-smoke.sh",
