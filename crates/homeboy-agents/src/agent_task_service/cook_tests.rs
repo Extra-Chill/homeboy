@@ -1495,6 +1495,50 @@ fn batch_cook_options(
     }
 }
 
+#[test]
+fn cook_injects_canonical_review_form_requirement_once() {
+    let mut plan = AgentTaskPlan::new(
+        "structured-output",
+        vec![AgentTaskRequest {
+            schema: crate::agent_task::AGENT_TASK_REQUEST_SCHEMA.to_string(),
+            task_id: "provider".to_string(),
+            group_key: None,
+            parent_plan_id: None,
+            executor: AgentTaskExecutor {
+                backend: "opencode".to_string(),
+                selector: None,
+                runtime_selection: None,
+                required_capabilities: Vec::new(),
+                secret_env: Vec::new(),
+                model: None,
+                config: Value::Null,
+            },
+            instructions: "complete the task".to_string(),
+            inputs: serde_json::json!({ "cook_loop": "legacy-value" }),
+            source_refs: Vec::new(),
+            workspace: AgentTaskWorkspace::default(),
+            component_contracts: Vec::new(),
+            policy: AgentTaskPolicy::default(),
+            limits: AgentTaskLimits::default(),
+            expected_artifacts: Vec::new(),
+            artifact_declarations: Vec::new(),
+            metadata: Value::Null,
+        }],
+    );
+
+    inject_cook_structured_outcome_requirements(&mut plan);
+    inject_cook_structured_outcome_requirements(&mut plan);
+
+    let task = &plan.tasks[0];
+    assert_eq!(task.inputs["cook_loop"]["review_form_required"], true);
+    assert_eq!(
+        task.instructions
+            .matches("Emit a `review_form` object")
+            .count(),
+        1
+    );
+}
+
 /// A complete externally-prepared candidate: the original cook failed before a
 /// provider was accepted, while a separate immutable source commit is ready to
 /// be promoted and adopted.

@@ -560,6 +560,7 @@ pub(super) fn run_materialized_provider_command_once(
                 &request.artifacts_path,
                 &request.artifacts_path_provenance,
             );
+            classify_missing_required_structured_outputs(&mut outcome, request);
             surface_provider_process_failure(
                 &mut outcome,
                 request,
@@ -591,6 +592,52 @@ pub(super) fn run_materialized_provider_command_once(
             ),
         ),
     }
+}
+
+/// A successful process only proves that the provider process exited cleanly.
+/// Cook's reviewer-facing output is a separate, durable result contract.
+fn classify_missing_required_structured_outputs(
+    outcome: &mut AgentTaskOutcome,
+    request: &AgentTaskRequest,
+) {
+    if !matches!(
+        outcome.status,
+        AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp
+    ) || request.inputs["cook_loop"]["review_form_required"] != true
+    {
+        return;
+    }
+
+    let review_form = crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(
+        &outcome.outputs,
+    );
+    let (class, message, data) = match review_form {
+        Ok(Some(_)) => return,
+        Ok(None) => (
+            "agent_task.required_structured_output_missing",
+            "provider completed successfully but required structured output 'review_form' was absent",
+            json!({ "required_output": "review_form", "provider_completed": true }),
+        ),
+        Err(error) => (
+            "agent_task.required_structured_output_malformed",
+            "provider completed successfully but required structured output 'review_form' was malformed",
+            json!({
+                "required_output": "review_form",
+                "provider_completed": true,
+                "validation_error": error.message,
+            }),
+        ),
+    };
+
+    outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
+    outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
+    outcome.summary = Some(message.to_string());
+    push_unique_diagnostic(
+        &mut outcome.diagnostics,
+        class.to_string(),
+        message.to_string(),
+        data,
+    );
 }
 
 #[cfg(unix)]

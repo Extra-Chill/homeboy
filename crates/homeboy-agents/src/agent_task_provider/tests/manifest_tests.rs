@@ -305,6 +305,80 @@ process.stdin.on('end', () => {
     assert!(!original.join("provider-observation.json").exists());
 }
 
+#[test]
+fn opencode_adapter_preserves_required_review_form_and_recovers_missing_or_malformed_output() {
+    let review_form = json!({
+        "summary": "Capture the provider-authored review form.",
+        "what_changed": ["Normalized the final structured output."],
+        "compatibility": "No compatibility impact.",
+        "used_for": "Reviewer-facing pull request context."
+    });
+    let script = script(
+        r#"const fs = require('fs');
+let input = '';
+process.stdin.on('data', (chunk) => input += chunk);
+process.stdin.on('end', () => {
+  const request = JSON.parse(input);
+  const mode = request.executor.config.mode;
+  const outputs = mode === 'valid'
+    ? { review_form: request.executor.config.review_form }
+    : mode === 'malformed'
+      ? { review_form: { summary: 42 } }
+      : {};
+  process.stdout.write(JSON.stringify({
+    schema: 'homeboy/agent-task-outcome/v1',
+    task_id: request.task_id,
+    status: 'succeeded',
+    summary: 'OpenCode completed successfully.',
+    outputs,
+    evidence_refs: [{ kind: 'transcript', uri: 'file:///provider-transcript.log' }]
+  }));
+});"#,
+    );
+    let (mut request, mut provider) =
+        request("opencode-structured-output", format!("node {script}"));
+    provider.id = "opencode.agent-task-executor".to_string();
+    provider.backend = "opencode".to_string();
+    request.executor.backend = "opencode".to_string();
+    request.inputs = json!({ "cook_loop": { "review_form_required": true } });
+    request.executor.config = json!({ "mode": "valid", "review_form": review_form });
+
+    let valid = run_provider_command_once(&request, &provider);
+    assert_eq!(valid.status, AgentTaskOutcomeStatus::Succeeded);
+    assert_eq!(
+        valid.outputs["review_form"]["summary"],
+        "Capture the provider-authored review form."
+    );
+    assert_eq!(valid.evidence_refs[0].kind, "transcript");
+
+    request.executor.config["mode"] = json!("missing");
+    let missing = run_provider_command_once(&request, &provider);
+    assert_eq!(missing.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+    assert_eq!(
+        missing.failure_classification,
+        Some(AgentTaskFailureClassification::ExecutionFailed)
+    );
+    assert!(missing
+        .diagnostics
+        .iter()
+        .any(|diagnostic| { diagnostic.class == "agent_task.required_structured_output_missing" }));
+    assert_eq!(missing.evidence_refs[0].kind, "transcript");
+
+    request.executor.config["mode"] = json!("malformed");
+    let malformed = run_provider_command_once(&request, &provider);
+    assert_eq!(
+        malformed.status,
+        AgentTaskOutcomeStatus::CandidateRecoverable
+    );
+    assert!(malformed.diagnostics.iter().any(|diagnostic| {
+        diagnostic.class == "agent_task.required_structured_output_malformed"
+    }));
+
+    request.inputs = Value::Null;
+    let optional = run_provider_command_once(&request, &provider);
+    assert_eq!(optional.status, AgentTaskOutcomeStatus::Succeeded);
+}
+
 #[cfg(unix)]
 fn workspace_attestation(path: &std::path::Path) -> Value {
     use std::os::unix::fs::MetadataExt;

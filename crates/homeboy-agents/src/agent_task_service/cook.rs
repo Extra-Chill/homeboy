@@ -1435,7 +1435,7 @@ where
 }
 
 fn run_cook_with_boundaries_observed_inner<E, S>(
-    options: AgentTaskCookServiceOptions,
+    mut options: AgentTaskCookServiceOptions,
     executor: E,
     mut side_effects: S,
     durable_observer: Option<&CookProgressObserver<'_>>,
@@ -1444,6 +1444,7 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
+    inject_cook_structured_outcome_requirements(&mut options.initial_plan);
     validate_cook_workspace(&options)?;
     validate_cook_candidate_group(&options.initial_plan)?;
     // A configured provider is controller authority. Resolve it before an
@@ -2333,6 +2334,37 @@ where
         1,
         Some(&run_id),
     ))
+}
+
+/// Cook publication needs a reviewer-facing form in addition to a successful
+/// provider process. Put that requirement on the first attempt so adapters can
+/// request and normalize it in the same execution.
+fn inject_cook_structured_outcome_requirements(plan: &mut AgentTaskPlan) {
+    for task in &mut plan.tasks {
+        if !task.inputs.is_object() {
+            task.inputs = serde_json::json!({});
+        }
+        let inputs = task
+            .inputs
+            .as_object_mut()
+            .expect("input was normalized to an object");
+        let cook_loop = inputs
+            .entry("cook_loop")
+            .or_insert_with(|| serde_json::json!({}));
+        if !cook_loop.is_object() {
+            *cook_loop = serde_json::json!({});
+        }
+        let cook_loop = cook_loop
+            .as_object_mut()
+            .expect("cook loop input was normalized to an object");
+        cook_loop.insert("review_form_required".to_string(), Value::Bool(true));
+        if !task.instructions.contains("Emit a `review_form` object") {
+            task.instructions.push_str("\n\n");
+            task.instructions.push_str(
+                crate::agent_task_review_dossier::AiFilledReviewForm::requirement_feedback(),
+            );
+        }
+    }
 }
 
 /// A multi-candidate Cook has one controller-owned destination. Reject ambiguous
