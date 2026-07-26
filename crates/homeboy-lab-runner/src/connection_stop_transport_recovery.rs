@@ -66,6 +66,22 @@ pub(crate) fn disconnect_with_session(
         // SSH and clean up stale local tunnel processes only after its stop.
         let retained_generations =
             super::super::generation_store::live_sessions(runner_id, Some(session))?;
+        if remote_daemon::authoritative_stale_generations_are_dead(
+            &probe_authoritative_daemon_status(runner_id)?,
+            &eligible_stale_generation_leases(&retained_generations).unwrap_or_default(),
+        ) {
+            let leases =
+                eligible_stale_generation_leases(&retained_generations).unwrap_or_default();
+            super::super::generation_store::tombstone_dead_direct_generations(runner_id, &leases)?;
+            remove_session(runner_id)?;
+            remove_ownership(runner_id)?;
+            return Ok(RunnerDisconnectReport {
+                runner_id: runner_id.to_string(),
+                disconnected: true,
+                session: None,
+                session_path: session_path(runner_id)?.display().to_string(),
+            });
+        }
         if let Some(authoritative_session) =
             reconcile_authoritative_idle_stale_generations(runner_id, &retained_generations)?
         {
@@ -114,6 +130,21 @@ pub(crate) fn disconnect_with_session(
         if should_stop_remote_daemon(session, ownership.as_ref(), has_live_peer_session(session)?) {
             remove_ownership(runner_id)?;
         }
+    } else {
+        // A prior lease-safe stop can remove the controller session before the
+        // historical registry is reconciled. Do not make reconnect create a
+        // new generation merely to clean that already-dead inventory.
+        let retained_generations = super::super::generation_store::live_sessions(runner_id, None)?;
+        let leases = eligible_stale_generation_leases(&retained_generations).unwrap_or_default();
+        if !leases.is_empty()
+            && remote_daemon::authoritative_stale_generations_are_dead(
+                &probe_authoritative_daemon_status(runner_id)?,
+                &leases,
+            )
+        {
+            super::super::generation_store::tombstone_dead_direct_generations(runner_id, &leases)?;
+            remove_ownership(runner_id)?;
+        }
     }
     remove_session(runner_id)?;
     Ok(RunnerDisconnectReport {
@@ -122,6 +153,29 @@ pub(crate) fn disconnect_with_session(
         session,
         session_path: session_path(runner_id)?.display().to_string(),
     })
+}
+
+fn probe_authoritative_daemon_status(runner_id: &str) -> Result<remote_daemon::RemoteDaemonStatus> {
+    let runner = load(runner_id)?;
+    let homeboy = remote_runner_homeboy_path(&runner, "runner stale-generation reconciliation")?;
+    let Some((_, _, client)) = remote_daemon::resolve_ssh_runner(&runner)? else {
+        return Err(Error::validation_invalid_argument(
+            "disconnect",
+            "runner stale-generation reconciliation requires an SSH authority",
+            Some(runner_id.to_string()),
+            None,
+        ));
+    };
+    let mut status = remote_daemon::remote_daemon_status(&client, homeboy).map_err(|error| {
+        Error::validation_invalid_argument(
+            "disconnect",
+            format!("authoritative daemon reconciliation probe failed: {error}"),
+            Some(runner_id.to_string()),
+            None,
+        )
+    })?;
+    remote_daemon::probe_remote_daemon_endpoint(&client, &mut status);
+    Ok(status)
 }
 
 /// A refresh can inherit a ledger from interrupted rotations while the remote
@@ -137,20 +191,7 @@ fn reconcile_authoritative_idle_stale_generations(
     if persisted_leases.is_empty() {
         return Ok(None);
     }
-    let runner = load(runner_id)?;
-    let homeboy = remote_runner_homeboy_path(&runner, "runner stale-generation reconciliation")?;
-    let Some((_, _, client)) = remote_daemon::resolve_ssh_runner(&runner)? else {
-        return Ok(None);
-    };
-    let mut status = remote_daemon::remote_daemon_status(&client, homeboy).map_err(|error| {
-        Error::validation_invalid_argument(
-            "disconnect",
-            format!("authoritative daemon reconciliation probe failed: {error}"),
-            Some(runner_id.to_string()),
-            None,
-        )
-    })?;
-    remote_daemon::probe_remote_daemon_endpoint(&client, &mut status);
+    let status = probe_authoritative_daemon_status(runner_id)?;
     let Some(lease_id) =
         remote_daemon::authoritative_idle_lease_for_stale_generations(&status, &persisted_leases)
             .map_err(|error| {
