@@ -1,7 +1,7 @@
 # `homeboy schedule`
 
 ```text
-homeboy schedule add <id> (--command <argv> | --exec <program> [--exec-arg <arg>]... [--working-dir <dir>])
+homeboy schedule add <id> (--command <argv>... | --exec <program> [--exec-arg <arg>]... [--working-dir <dir>])
                          --every <interval> [--notify-on <policy>] [--on-overlap <policy>]
                          [--notification-transport <id> --notification-route <route>]
                          [--jitter-seconds <n>] [--description <text>] [--force]
@@ -40,6 +40,25 @@ External programs are executed **directly, never through a shell**. Nothing is w
 Arguments are passed through untouched, so an argument may legitimately contain those characters.
 
 `--working-dir` matters for the common case: test runners and build tools usually only work from their project root.
+
+### Multi-step runs
+
+Repeat `--command` to declare an ordered sequence. Steps run in order and **stop at the first failure** — running a later step after an earlier one failed is usually worse than not running it.
+
+```sh
+homeboy schedule add managed \
+  --command 'harvest production --check' \
+  --command 'fleet check production' \
+  --every 24h
+```
+
+A chain produces **one notification per run**, not one per step. Chaining exists to get a single report; per-step notifications would recreate the noise `notify-on-change` avoids. The failure summary names which step failed, and every attempted step appears individually in the structured output, so an operator can see where it stopped without re-running.
+
+Change detection covers the whole sequence: a chain producing the same outcomes twice stays silent, and a chain that starts failing at a different step is a change even when the earlier steps are unchanged.
+
+A single-step schedule is stored in the flat `command` / `exec` form, so simple schedules stay simple to read and diff.
+
+Mixed sequences are declared by editing the schedule file directly. On the command line, repeated `--command` steps are ordered before repeated `--exec` steps, because clap does not preserve relative order across different flags — an interleaved command line would silently reorder itself.
 
 ## Cadence
 
