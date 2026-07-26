@@ -74,11 +74,26 @@ homeboy schedule tick --dry-run
 
 ## Triggering
 
-`schedule tick` is the trigger surface. Point any external timer at it:
+A running daemon fires due schedules itself — `homeboy daemon start` is all that is required for declared schedules to run.
 
 ```sh
-# systemd timer, cron, or any supervisor
+homeboy daemon start
+homeboy schedule add nightly --command 'harvest production --check' --every 24h
+```
+
+The daemon polls every 30 seconds by default. That is the *polling* cadence, not a schedule's own cadence: it bounds how late a due schedule can fire, and polling more often than the shortest declared interval is harmless because a schedule that is not due is skipped. Override with `HOMEBOY_DAEMON_SCHEDULE_TICK_SECS`, or set it to `0` to turn daemon-driven scheduling off entirely.
+
+Each due schedule runs on its own thread, so a slow scheduled command delays neither the poll loop nor daemon shutdown.
+
+`homeboy schedule tick` remains available for operators who would rather drive scheduling from systemd, cron, or another supervisor — pair it with `HOMEBOY_DAEMON_SCHEDULE_TICK_SECS=0` so the two do not both fire.
+
+```sh
+# external trigger, with daemon-driven scheduling disabled
 homeboy schedule tick
 ```
 
-Running the tick more often than the shortest cadence is safe — a schedule that is not due is skipped, and `--on-overlap skip` prevents pile-up.
+## Recovering an interrupted run
+
+A schedule is marked in flight while it runs so an overlapping tick declines it. If the process is killed between that marker and the recorded result, the marker would otherwise block the schedule forever under `--on-overlap skip`.
+
+The daemon clears markers older than six hours when it starts, in the same way it reconciles expired job reservations. A marker with no recorded start time cannot be aged and is cleared as well.
