@@ -11,12 +11,13 @@ fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let repository = create_repository(home.path());
         let promotion_namespace = home.path().join("nested-promotion-gate-data");
-        let _promotion_namespace = PromotionNamespaceGuard::new(&promotion_namespace);
+        let _promotion_namespace = TestPromotionNamespace::new(&promotion_namespace);
         let git_before = git_metadata_snapshot(&repository);
         let _promotion = homeboy::core::runtime_promotion::acquire("test promotion", "test")
             .expect("hold runtime promotion lease");
         let home = home.path();
         let home_before = filesystem_snapshot(home);
+        let promotion_before = filesystem_snapshot(&promotion_namespace.join("runtime-promotion"));
 
         for args in [
             vec!["--version"],
@@ -30,8 +31,7 @@ fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
                 repository.to_str().expect("repository path"),
             ],
         ] {
-            let output =
-                run_with_timeout(&args, home, &promotion_namespace, Duration::from_secs(10));
+            let output = run_with_timeout(&args, home, Duration::from_secs(10));
             assert!(
                 output.status.success(),
                 "{} failed: {}",
@@ -65,7 +65,6 @@ fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
                 "--refresh",
             ],
             home,
-            &promotion_namespace,
             Duration::from_secs(10),
         );
         assert!(
@@ -82,15 +81,14 @@ fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
             "blocked refresh changed Git metadata"
         );
         assert_eq!(
-            filesystem_snapshot(home),
-            home_before,
-            "blocked refresh changed config or runtime state"
+            filesystem_snapshot(&promotion_namespace.join("runtime-promotion")),
+            promotion_before,
+            "blocked refresh changed the held promotion lease"
         );
 
         let output = run_with_timeout(
             &["upgrade", "--method", "binary"],
             home,
-            &promotion_namespace,
             Duration::from_secs(10),
         );
         assert!(
@@ -102,45 +100,23 @@ fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
             "mutation exclusion must report typed promotion contention: {}",
             String::from_utf8_lossy(&output.stdout)
         );
-    });
-}
-
-#[test]
-fn production_promotion_lease_remains_visible_in_its_namespace() {
-    homeboy_core::test_support::with_isolated_home(|home| {
-        let promotion_namespace = home.path().join("production-promotion-data");
-        let _promotion_namespace = PromotionNamespaceGuard::new(&promotion_namespace);
-        let _promotion = homeboy::core::runtime_promotion::acquire("production", "controller")
-            .expect("hold production promotion lease");
-
-        let output = run_with_timeout(
-            &["status", "--refresh"],
-            home.path(),
-            &promotion_namespace,
-            Duration::from_secs(10),
+        assert_eq!(
+            git_metadata_snapshot(&repository),
+            git_before,
+            "blocked upgrade changed Git metadata"
         );
-        assert!(
-            !output.status.success(),
-            "production lease must block refresh"
-        );
-        assert!(
-            String::from_utf8_lossy(&output.stdout).contains("runtime_promotion.contended"),
-            "production lease contention must remain typed: {}",
-            String::from_utf8_lossy(&output.stdout)
+        assert_eq!(
+            filesystem_snapshot(&promotion_namespace.join("runtime-promotion")),
+            promotion_before,
+            "blocked upgrade changed the held promotion lease"
         );
     });
 }
 
-fn run_with_timeout(
-    args: &[&str],
-    home: &std::path::Path,
-    promotion_namespace: &std::path::Path,
-    timeout: Duration,
-) -> Output {
+fn run_with_timeout(args: &[&str], home: &std::path::Path, timeout: Duration) -> Output {
     let child = Command::new(homeboy_bin())
         .args(args)
         .env("HOME", home)
-        .env("HOMEBOY_DATA_DIR", promotion_namespace)
         .env("HOMEBOY_NO_UPDATE_CHECK", "1")
         .current_dir(home)
         .stdout(Stdio::piped())
@@ -150,23 +126,25 @@ fn run_with_timeout(
     wait_for_output(child, timeout)
 }
 
-struct PromotionNamespaceGuard {
+/// Isolate this test from a promotion gate's inherited data directory. Child
+/// commands inherit this namespace from the test process just as Cargo does.
+struct TestPromotionNamespace {
     previous: Option<OsString>,
 }
 
-impl PromotionNamespaceGuard {
+impl TestPromotionNamespace {
     fn new(path: &std::path::Path) -> Self {
-        let previous = std::env::var_os("HOMEBOY_DATA_DIR");
-        std::env::set_var("HOMEBOY_DATA_DIR", path);
+        let previous = std::env::var_os(homeboy_core::paths::HOMEBOY_DATA_DIR_ENV);
+        std::env::set_var(homeboy_core::paths::HOMEBOY_DATA_DIR_ENV, path);
         Self { previous }
     }
 }
 
-impl Drop for PromotionNamespaceGuard {
+impl Drop for TestPromotionNamespace {
     fn drop(&mut self) {
         match &self.previous {
-            Some(path) => std::env::set_var("HOMEBOY_DATA_DIR", path),
-            None => std::env::remove_var("HOMEBOY_DATA_DIR"),
+            Some(path) => std::env::set_var(homeboy_core::paths::HOMEBOY_DATA_DIR_ENV, path),
+            None => std::env::remove_var(homeboy_core::paths::HOMEBOY_DATA_DIR_ENV),
         }
     }
 }

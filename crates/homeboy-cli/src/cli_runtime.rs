@@ -178,11 +178,9 @@ impl CliRuntime {
         // core depending on runner behavior.
         crate::runner::register_runner_continuation_provider();
         // Recover completed generic runner-exec jobs before a mutating invocation
-        // can evict their evidence. Read-only commands and a competing promotion
-        // must not perform this optional durable-state mutation.
-        if command_capability == CommandCapability::Mutation
-            && !crate::core::runtime_promotion::lease_is_present()
-        {
+        // can evict their evidence. Read-only commands must not mutate durable
+        // state during startup.
+        if command_capability == CommandCapability::Mutation {
             let _ = crate::runner::reconcile_terminal_runner_exec_runs();
         }
         // Register the runner daemon-exec driver so the daemon's /exec endpoint
