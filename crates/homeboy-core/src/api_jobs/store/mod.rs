@@ -11,9 +11,10 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::persistence::{
-    apply_event_retention, compact_terminal_jobs, job_not_found, lookup_tombstone, timestamp_ms,
-    validate_transition, write_durable_store_with_tombstones, JobStoreCompactionEvidence,
-    ReplayTombstoneKind, DEFAULT_EVENT_RETENTION_LIMIT, DEFAULT_TERMINAL_JOB_RETENTION_BYTES,
+    apply_event_retention, compact_terminal_jobs, job_not_found, lookup_tombstone,
+    prepare_tombstone_store, timestamp_ms, tombstone_store_report, validate_transition,
+    write_durable_store_with_tombstones, JobStoreCompactionEvidence, ReplayTombstoneKind,
+    DEFAULT_EVENT_RETENTION_LIMIT, DEFAULT_TERMINAL_JOB_RETENTION_BYTES,
     DEFAULT_TERMINAL_JOB_RETENTION_LIMIT,
 };
 #[cfg(test)]
@@ -295,26 +296,7 @@ impl JobStore {
             + serde_json::to_vec(&durable.expired_controller_submissions)
                 .unwrap_or_default()
                 .len();
-        let journal = super::persistence::tombstone_path(&path);
-        let (journal_count, journal_bytes) = match fs::File::open(&journal) {
-            Ok(file) => {
-                use std::io::BufRead;
-                let count = std::io::BufReader::new(file).lines().count();
-                (
-                    count,
-                    fs::metadata(&journal)
-                        .map(|metadata| metadata.len())
-                        .unwrap_or(0),
-                )
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (0, 0),
-            Err(error) => {
-                return Err(Error::internal_io(
-                    error.to_string(),
-                    Some(format!("read {}", journal.display())),
-                ))
-            }
-        };
+        let (journal_count, journal_bytes) = tombstone_store_report(&path)?;
         Ok(serde_json::json!({
             "jobs": { "count": durable.jobs.len(), "bytes": job_bytes, "active_count": active_count, "terminal_count": terminal_count },
             "live_submission_keys": { "count": live_submission_keys, "bytes": live_submission_bytes },
@@ -366,6 +348,7 @@ impl JobStore {
         terminal_job_retention_bytes: usize,
     ) -> Result<Self> {
         let path = path.into();
+        prepare_tombstone_store(&path)?;
         let mut durable = read_durable_store(&path)?;
         let event_retention_limit = event_retention_limit.max(1);
         let terminal_job_retention_limit = terminal_job_retention_limit.max(1);
@@ -410,6 +393,7 @@ impl JobStore {
     /// restart. Daemon lifecycle recovery must select ownership explicitly.
     pub fn open_without_reconciliation(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
+        prepare_tombstone_store(&path)?;
         let raw = fs::read(&path).unwrap_or_else(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 b"{\"jobs\":[]}".to_vec()
@@ -491,6 +475,7 @@ impl JobStore {
         terminal_job_retention_bytes: usize,
     ) -> Result<Self> {
         let path = path.into();
+        prepare_tombstone_store(&path)?;
         let mut durable: DurableJobStore = serde_json::from_slice(raw)
             .map_err(|err| Error::config_invalid_json(path.display().to_string(), err))?;
         let event_retention_limit = event_retention_limit.max(1);

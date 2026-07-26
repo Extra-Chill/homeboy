@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -45,6 +46,15 @@ pub(super) enum ReplayTombstoneKind {
 
 pub(super) fn tombstone_path(path: &Path) -> std::path::PathBuf {
     path.with_file_name(format!(
+        "{}.replay-tombstones.sqlite",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("jobs.json")
+    ))
+}
+
+fn legacy_tombstone_path(path: &Path) -> std::path::PathBuf {
+    path.with_file_name(format!(
         "{}.replay-tombstones.jsonl",
         path.file_name()
             .and_then(|name| name.to_str())
@@ -52,41 +62,230 @@ pub(super) fn tombstone_path(path: &Path) -> std::path::PathBuf {
     ))
 }
 
-/// Stream the sidecar so permanent identities do not become daemon-resident
-/// state. A malformed record is a fail-closed store corruption, never absence.
+fn tombstone_kind_name(kind: ReplayTombstoneKind) -> &'static str {
+    match kind {
+        ReplayTombstoneKind::RemoteRunner => "remote_runner",
+        ReplayTombstoneKind::Controller => "controller",
+    }
+}
+
+fn tombstone_error(path: &Path, operation: &str, error: rusqlite::Error) -> Error {
+    Error::internal_io(
+        error.to_string(),
+        Some(format!("{operation} {}", path.display())),
+    )
+}
+
+fn open_tombstone_store(path: &Path) -> Result<Connection> {
+    let journal = tombstone_path(path);
+    if let Some(parent) = journal.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("create {}", parent.display())),
+            )
+        })?;
+    }
+    let connection = Connection::open(&journal)
+        .map_err(|error| tombstone_error(&journal, "open replay tombstone index", error))?;
+    connection
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|error| tombstone_error(&journal, "configure replay tombstone index", error))?;
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;
+             CREATE TABLE IF NOT EXISTS replay_tombstones (
+                 kind TEXT NOT NULL,
+                 key TEXT NOT NULL,
+                 fingerprint TEXT NOT NULL,
+                 job_id TEXT NOT NULL,
+                 terminal_job TEXT,
+                 PRIMARY KEY (kind, key)
+             );",
+        )
+        .map_err(|error| tombstone_error(&journal, "initialize replay tombstone index", error))?;
+    Ok(connection)
+}
+
+fn insert_tombstone(
+    connection: &Connection,
+    path: &Path,
+    tombstone: &ReplayTombstone,
+) -> Result<()> {
+    let journal = tombstone_path(path);
+    let terminal_job = tombstone
+        .terminal_job
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize replay tombstone".to_string()),
+            )
+        })?;
+    let changed = connection
+        .execute(
+            "INSERT OR IGNORE INTO replay_tombstones (kind, key, fingerprint, job_id, terminal_job)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                tombstone_kind_name(tombstone.kind),
+                tombstone.key,
+                tombstone.fingerprint,
+                tombstone.job_id.to_string(),
+                terminal_job,
+            ],
+        )
+        .map_err(|error| tombstone_error(&journal, "insert replay tombstone", error))?;
+    if changed == 0 {
+        let existing =
+            lookup_tombstone_in_connection(connection, path, tombstone.kind, &tombstone.key)?
+                .expect("existing replay tombstone must be readable");
+        let expected = serde_json::to_value(tombstone).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize replay tombstone".to_string()),
+            )
+        })?;
+        let actual = serde_json::to_value(existing).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize replay tombstone".to_string()),
+            )
+        })?;
+        if actual != expected {
+            return Err(Error::internal_unexpected(
+                "replay tombstone index contains conflicting exactly-once evidence",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Migrate the short-lived JSONL format introduced by this branch before any
+/// lookup. Renaming only after the SQLite transaction commits makes a crash
+/// repeat migration safely instead of ever treating an accepted key as absent.
+pub(super) fn prepare_tombstone_store(path: &Path) -> Result<()> {
+    let legacy = legacy_tombstone_path(path);
+    if !legacy.exists() {
+        return Ok(());
+    }
+    let connection = open_tombstone_store(path)?;
+    let transaction = connection.unchecked_transaction().map_err(|error| {
+        tombstone_error(
+            &tombstone_path(path),
+            "begin replay tombstone migration",
+            error,
+        )
+    })?;
+    let file = fs::File::open(&legacy).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("read {}", legacy.display())),
+        )
+    })?;
+    for line in BufReader::new(file).lines() {
+        let line = line.map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("read {}", legacy.display())),
+            )
+        })?;
+        let tombstone: ReplayTombstone = serde_json::from_str(&line)
+            .map_err(|error| Error::config_invalid_json(legacy.display().to_string(), error))?;
+        insert_tombstone(&transaction, path, &tombstone)?;
+    }
+    transaction.commit().map_err(|error| {
+        tombstone_error(
+            &tombstone_path(path),
+            "commit replay tombstone migration",
+            error,
+        )
+    })?;
+    fs::rename(&legacy, legacy.with_extension("jsonl.migrated")).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("migrate {}", legacy.display())),
+        )
+    })
+}
+
+fn lookup_tombstone_in_connection(
+    connection: &Connection,
+    path: &Path,
+    kind: ReplayTombstoneKind,
+    key: &str,
+) -> Result<Option<ReplayTombstone>> {
+    let journal = tombstone_path(path);
+    let row = connection
+        .query_row(
+            "SELECT fingerprint, job_id, terminal_job FROM replay_tombstones WHERE kind = ?1 AND key = ?2",
+            params![tombstone_kind_name(kind), key],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)),
+        )
+        .optional()
+        .map_err(|error| tombstone_error(&journal, "lookup replay tombstone", error))?;
+    row.map(|(fingerprint, job_id, terminal_job)| {
+        Ok(ReplayTombstone {
+            kind,
+            key: key.to_string(),
+            fingerprint,
+            job_id: Uuid::parse_str(&job_id).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("read {}", journal.display())),
+                )
+            })?,
+            terminal_job: terminal_job
+                .map(|value| {
+                    serde_json::from_str(&value).map_err(|error| {
+                        Error::config_invalid_json(journal.display().to_string(), error)
+                    })
+                })
+                .transpose()?,
+        })
+    })
+    .transpose()
+}
+
+/// SQLite's primary key provides bounded indexed lookup and an atomic durable
+/// commit. A damaged index is a fail-closed store corruption, never absence.
 pub(super) fn lookup_tombstone(
     path: &Path,
     kind: ReplayTombstoneKind,
     key: &str,
 ) -> Result<Option<ReplayTombstone>> {
-    let path = tombstone_path(path);
-    let file = match fs::File::open(&path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(Error::internal_io(
-                error.to_string(),
-                Some(format!("read {}", path.display())),
-            ))
-        }
-    };
-    let mut found = None;
-    for line in BufReader::new(file).lines() {
-        let line = line.map_err(|error| {
-            Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-        })?;
-        let tombstone: ReplayTombstone = serde_json::from_str(&line)
-            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
-        if tombstone.kind == kind && tombstone.key == key {
-            found = Some(tombstone);
-        }
-    }
-    Ok(found)
+    prepare_tombstone_store(path)?;
+    let connection = open_tombstone_store(path)?;
+    lookup_tombstone_in_connection(&connection, path, kind, key)
 }
 
-/// The journal is synced before the compacted primary store is atomically
-/// replaced. A crash can retain an extra rejection, but can never forget an
-/// accepted key and replay it as new work.
+pub(super) fn tombstone_store_report(path: &Path) -> Result<(usize, u64)> {
+    prepare_tombstone_store(path)?;
+    let journal = tombstone_path(path);
+    if !journal.exists() {
+        return Ok((0, 0));
+    }
+    let connection = open_tombstone_store(path)?;
+    let count = connection
+        .query_row("SELECT COUNT(*) FROM replay_tombstones", [], |row| {
+            row.get(0)
+        })
+        .map_err(|error| tombstone_error(&journal, "count replay tombstones", error))?;
+    let bytes = fs::metadata(&journal)
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("read {}", journal.display())),
+            )
+        })?
+        .len();
+    Ok((count, bytes))
+}
+
+/// The indexed tombstone transaction commits before the compacted primary store
+/// is atomically replaced. A crash can retain an extra rejection, but can never
+/// forget an accepted key and replay it as new work.
 pub(super) fn write_durable_store_with_tombstones(
     path: &Path,
     durable: &mut DurableJobStore,
@@ -111,8 +310,7 @@ pub(super) fn write_durable_store_with_tombstones(
         });
     }
     if !tombstones.is_empty() {
-        let journal = tombstone_path(path);
-        if let Some(parent) = journal.parent() {
+        if let Some(parent) = tombstone_path(path).parent() {
             fs::create_dir_all(parent).map_err(|error| {
                 Error::internal_io(
                     error.to_string(),
@@ -120,34 +318,23 @@ pub(super) fn write_durable_store_with_tombstones(
                 )
             })?;
         }
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&journal)
-            .map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!("open {}", journal.display())),
-                )
-            })?;
+        prepare_tombstone_store(path)?;
+        let connection = open_tombstone_store(path)?;
+        let transaction = connection.unchecked_transaction().map_err(|error| {
+            tombstone_error(
+                &tombstone_path(path),
+                "begin replay tombstone commit",
+                error,
+            )
+        })?;
         for tombstone in tombstones {
-            serde_json::to_writer(&mut file, &tombstone).map_err(|error| {
-                Error::internal_json(
-                    error.to_string(),
-                    Some("serialize replay tombstone".to_string()),
-                )
-            })?;
-            file.write_all(b"\n").map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!("write {}", journal.display())),
-                )
-            })?;
+            insert_tombstone(&transaction, path, &tombstone)?;
         }
-        file.sync_all().map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("sync {}", journal.display())),
+        transaction.commit().map_err(|error| {
+            tombstone_error(
+                &tombstone_path(path),
+                "commit replay tombstone index",
+                error,
             )
         })?;
     }
@@ -253,7 +440,19 @@ pub(super) fn write_durable_store(path: &Path, durable: &DurableJobStore) -> Res
                 path.display()
             )),
         )
-    })
+    })?;
+    // The file contents are synced above; syncing the directory makes the
+    // rename itself durable across a power loss on filesystems that require it.
+    #[cfg(unix)]
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("sync {}", parent.display())),
+            )
+        })?;
+    Ok(())
 }
 
 pub(super) fn compact_terminal_jobs(
