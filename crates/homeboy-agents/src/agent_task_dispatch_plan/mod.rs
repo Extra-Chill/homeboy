@@ -303,6 +303,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
                 "transcript".to_string(),
             ],
             artifact_declarations: Vec::new(),
+            output_declarations: Vec::new(),
             metadata: serde_json::json!({
                 "repo": repo,
                 "client_context": client_context,

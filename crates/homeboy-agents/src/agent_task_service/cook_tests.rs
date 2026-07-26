@@ -1471,6 +1471,7 @@ fn batch_cook_options(
                 limits: AgentTaskLimits::default(),
                 expected_artifacts: Vec::new(),
                 artifact_declarations: Vec::new(),
+                output_declarations: Vec::new(),
                 metadata: Value::Null,
             }],
         ),
@@ -2564,6 +2565,7 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
                 limits: AgentTaskLimits::default(),
                 expected_artifacts: Vec::new(),
                 artifact_declarations: Vec::new(),
+                output_declarations: Vec::new(),
                 metadata: Value::Null,
             }],
         );

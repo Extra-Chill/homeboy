@@ -298,6 +298,16 @@ pub(super) fn run_materialized_provider_command_once(
     let mut provider_request = request.clone();
     provider_request.request.limits.timeout_ms = Some(requested_timeout_ms);
     provider_request.request.normalize_artifact_declarations();
+    if let Err(error) = project_output_declarations_for_provider(&mut provider_request.request) {
+        return failure_outcome(
+            request,
+            AgentTaskOutcomeStatus::Failed,
+            AgentTaskFailureClassification::InvalidInput,
+            "agent_task.output_declaration_invalid",
+            error,
+            json!({ "provider": provider.id }),
+        );
+    }
     let input = match serde_json::to_vec(&provider_request) {
         Ok(input) => input,
         Err(error) => {
@@ -570,6 +580,7 @@ pub(super) fn run_materialized_provider_command_once(
                 &request.artifacts_path,
                 &request.artifacts_path_provenance,
             );
+            validate_declared_outputs(&mut outcome, request);
             surface_provider_process_failure(
                 &mut outcome,
                 request,
@@ -601,6 +612,199 @@ pub(super) fn run_materialized_provider_command_once(
             ),
         ),
     }
+}
+
+// Provider adapters that predate the top-level declaration field consume the
+// generic input representation. Project only missing names so caller-provided
+// input declarations remain authoritative during the additive migration.
+fn project_output_declarations_for_provider(request: &mut AgentTaskRequest) -> Result<(), String> {
+    if request.output_declarations.is_empty() {
+        return Ok(());
+    }
+    let output_declarations = request.output_declarations.clone();
+
+    let inputs = request.inputs.as_object_mut().ok_or_else(|| {
+        "output declarations require object task inputs for provider projection".to_string()
+    })?;
+    let declarations = inputs
+        .entry("required_outputs")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| "inputs.required_outputs must be an array".to_string())?;
+
+    for declaration in &output_declarations {
+        if declarations.iter().any(|value| {
+            value.get("name").and_then(serde_json::Value::as_str) == Some(&declaration.name)
+        }) {
+            continue;
+        }
+        declarations.push(json!({
+            "name": declaration.name,
+            "required": declaration.required,
+            "schema": declaration.schema,
+            "json_schema": declaration.structural_schema,
+            "max_bytes": declaration.max_bytes,
+            "evidence_relationship": declaration.evidence_relationship,
+        }));
+    }
+
+    Ok(())
+}
+
+/// A clean provider process is not sufficient when its declared result contract
+/// is absent, invalid, oversized, or unsupported by its required evidence.
+fn validate_declared_outputs(outcome: &mut AgentTaskOutcome, request: &AgentTaskRequest) {
+    if !matches!(
+        outcome.status,
+        AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp
+    ) {
+        return;
+    }
+
+    for declaration in &request.output_declarations {
+        let Some(value) = outcome.outputs.get(&declaration.name).cloned() else {
+            if declaration.required {
+                declared_output_failure(
+                    outcome,
+                    "agent_task.output_missing",
+                    format!("required output '{}' was absent", declaration.name),
+                    json!({ "output": declaration.name, "required": true }),
+                );
+            }
+            continue;
+        };
+
+        if !declaration.structural_schema.is_null() {
+            if let Err(error) = validate_output_value(&value, &declaration.structural_schema) {
+                declared_output_failure(
+                    outcome,
+                    "agent_task.output_malformed",
+                    format!(
+                        "output '{}' did not satisfy its declared schema",
+                        declaration.name
+                    ),
+                    json!({ "output": declaration.name, "validation_error": error }),
+                );
+            }
+        }
+
+        if let Some(max_bytes) = declaration.max_bytes {
+            match serde_json::to_vec(&value) {
+                Ok(encoded) if encoded.len() as u64 > max_bytes => declared_output_failure(
+                    outcome,
+                    "agent_task.output_oversized",
+                    format!(
+                        "output '{}' exceeded its declared size limit",
+                        declaration.name
+                    ),
+                    json!({ "output": declaration.name, "max_bytes": max_bytes, "actual_bytes": encoded.len() }),
+                ),
+                Err(error) => declared_output_failure(
+                    outcome,
+                    "agent_task.output_malformed",
+                    format!("output '{}' could not be encoded", declaration.name),
+                    json!({ "output": declaration.name, "validation_error": error.to_string() }),
+                ),
+                _ => {}
+            }
+        }
+
+        if let Some(requirement) = &declaration.evidence_relationship {
+            let evidence_present = outcome.evidence_refs.iter().any(|evidence| {
+                evidence.kind == requirement.evidence.kind
+                    && evidence.uri == requirement.evidence.uri
+                    && evidence.label == requirement.evidence.label
+            });
+            if !evidence_present {
+                declared_output_failure(
+                    outcome,
+                    "agent_task.output_evidence_missing",
+                    format!(
+                        "output '{}' is missing declared supporting evidence",
+                        declaration.name
+                    ),
+                    json!({
+                        "output": declaration.name,
+                        "relationship": requirement.relationship,
+                        "evidence": requirement.evidence,
+                    }),
+                );
+            }
+        }
+    }
+}
+
+fn declared_output_failure(
+    outcome: &mut AgentTaskOutcome,
+    class: &str,
+    message: String,
+    data: serde_json::Value,
+) {
+    outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
+    outcome.failure_classification = Some(AgentTaskFailureClassification::ExecutionFailed);
+    outcome.summary = Some(message.clone());
+    push_unique_diagnostic(&mut outcome.diagnostics, class.to_string(), message, data);
+}
+
+fn validate_output_value(
+    value: &serde_json::Value,
+    schema: &serde_json::Value,
+) -> Result<(), String> {
+    if let Some(expected) = schema.get("type").and_then(serde_json::Value::as_str) {
+        let matches = match expected {
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            "string" => value.is_string(),
+            "number" => value.is_number(),
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+            "boolean" => value.is_boolean(),
+            "null" => value.is_null(),
+            _ => return Err(format!("unsupported schema type '{expected}'")),
+        };
+        if !matches {
+            return Err(format!("expected {expected}"));
+        }
+    }
+
+    if let Some(required) = schema.get("required").and_then(serde_json::Value::as_array) {
+        let Some(object) = value.as_object() else {
+            return Err("required properties need an object value".to_string());
+        };
+        for name in required {
+            let Some(name) = name.as_str() else {
+                return Err("required property names must be strings".to_string());
+            };
+            if !object.contains_key(name) {
+                return Err(format!("missing required property '{name}'"));
+            }
+        }
+    }
+
+    if let Some(properties) = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    {
+        let Some(object) = value.as_object() else {
+            return Err("properties need an object value".to_string());
+        };
+        for (name, property_schema) in properties {
+            if let Some(property) = object.get(name) {
+                validate_output_value(property, property_schema)
+                    .map_err(|error| format!("property '{name}': {error}"))?;
+            }
+        }
+    }
+
+    if let Some(items) = schema.get("items") {
+        let Some(values) = value.as_array() else {
+            return Err("items need an array value".to_string());
+        };
+        for (index, item) in values.iter().enumerate() {
+            validate_output_value(item, items).map_err(|error| format!("item {index}: {error}"))?;
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(unix)]

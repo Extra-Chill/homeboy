@@ -553,6 +553,7 @@ pub(super) fn request(task_id: &str) -> AgentTaskRequest {
         limits: AgentTaskLimits::default(),
         expected_artifacts: Vec::new(),
         artifact_declarations: Vec::new(),
+        output_declarations: Vec::new(),
         metadata: Value::Null,
     }
 }

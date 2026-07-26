@@ -301,6 +301,7 @@ pub fn record_pre_dispatch_failure(
             limits: AgentTaskLimits::default(),
             expected_artifacts: Vec::new(),
             artifact_declarations: Vec::new(),
+            output_declarations: Vec::new(),
             metadata: metadata.clone(),
         }],
     );
@@ -609,6 +610,7 @@ fn synthetic_remote_dispatch_plan(
                 limits: AgentTaskLimits::default(),
                 expected_artifacts: Vec::new(),
                 artifact_declarations: Vec::new(),
+                output_declarations: Vec::new(),
                 metadata: outcome.metadata.clone(),
             }
         })

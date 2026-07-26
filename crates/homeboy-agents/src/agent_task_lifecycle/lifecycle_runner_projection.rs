@@ -588,6 +588,7 @@ fn aggregate_projection_plan_from_outcomes(aggregate: &AgentTaskAggregate) -> Ag
             limits: AgentTaskLimits::default(),
             expected_artifacts: Vec::new(),
             artifact_declarations: Vec::new(),
+            output_declarations: Vec::new(),
             metadata: outcome.metadata.clone(),
         })
         .collect();

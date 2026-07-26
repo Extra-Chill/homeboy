@@ -46,8 +46,9 @@ pub use policy::{
 pub use request::{
     AgentTaskArtifactsPathProvenance, AgentTaskComponentContract, AgentTaskExecutionHandle,
     AgentTaskExecutionHandleKind, AgentTaskExecutionState, AgentTaskExecutorCapabilities,
-    AgentTaskExecutorRequest, AgentTaskPreparedWorkspace, AgentTaskProgress,
-    AgentTaskProgressEvent, AgentTaskRequest, AgentTaskStart,
+    AgentTaskExecutorRequest, AgentTaskOutputDeclaration, AgentTaskOutputEvidenceRelationship,
+    AgentTaskPreparedWorkspace, AgentTaskProgress, AgentTaskProgressEvent, AgentTaskRequest,
+    AgentTaskStart,
 };
 pub use schema::{
     AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_MATRIX_AGGREGATE_SCHEMA, AGENT_TASK_MATRIX_PLAN_SCHEMA,
