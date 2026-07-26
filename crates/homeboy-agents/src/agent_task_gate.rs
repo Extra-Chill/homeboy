@@ -163,6 +163,27 @@ impl VerifyGateOptions {
     pub fn gate_heartbeat_interval(&self) -> Duration {
         Duration::from_secs(self.gate_heartbeat_interval_seconds.max(1))
     }
+
+    /// Commands already declared as gates are toolchain requirements too. This
+    /// protects existing Cook invocations without duplicate CLI ceremony.
+    pub(crate) fn required_toolchains(&self) -> Vec<AgentTaskGateToolchainRequirement> {
+        let mut requirements = self.gate_toolchains.clone();
+        for gate in self.verify.iter().chain(&self.private_verify) {
+            let Some(command) = gate.split_whitespace().next() else {
+                continue;
+            };
+            if !requirements
+                .iter()
+                .any(|requirement| requirement.command == command)
+            {
+                requirements.push(AgentTaskGateToolchainRequirement {
+                    command: command.to_string(),
+                    probe_arguments: default_toolchain_probe_arguments(),
+                });
+            }
+        }
+        requirements
+    }
 }
 
 impl Default for VerifyGateOptions {
@@ -1059,8 +1080,9 @@ pub(crate) fn preflight_gate_toolchains(
     cwd: &Path,
     policy: &AgentTaskGateEnvironmentPolicy,
     requirements: &[AgentTaskGateToolchainRequirement],
+    runtime_tmpdir: Option<&Path>,
 ) -> Result<()> {
-    let selected_environment = selected_gate_environment(policy, None)?;
+    let selected_environment = selected_gate_environment(policy, runtime_tmpdir)?;
     for requirement in requirements {
         let mut process = Command::new(&requirement.command);
         process
@@ -1765,6 +1787,33 @@ mod tests {
         assert_eq!(report.environment.inherited[0].value, "kept");
     }
 
+    #[test]
+    fn existing_gate_commands_are_automatic_toolchain_requirements() {
+        let options = VerifyGateOptions {
+            verify: vec!["cargo test --lib".to_string()],
+            private_verify: vec!["npm test".to_string()],
+            gate_toolchains: vec![AgentTaskGateToolchainRequirement {
+                command: "cargo".to_string(),
+                probe_arguments: vec!["metadata".to_string()],
+            }],
+            ..VerifyGateOptions::default()
+        };
+
+        assert_eq!(
+            options.required_toolchains(),
+            vec![
+                AgentTaskGateToolchainRequirement {
+                    command: "cargo".to_string(),
+                    probe_arguments: vec!["metadata".to_string()],
+                },
+                AgentTaskGateToolchainRequirement {
+                    command: "npm".to_string(),
+                    probe_arguments: vec!["--version".to_string()],
+                },
+            ]
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn toolchain_preflight_preserves_only_declared_homes_for_cargo_on_path() {
@@ -1807,6 +1856,7 @@ mod tests {
                 command: "cargo".to_string(),
                 probe_arguments: vec!["--version".to_string()],
             }],
+            None,
         );
 
         match prior_home {
@@ -1843,6 +1893,7 @@ mod tests {
                 command: "other-tool".to_string(),
                 probe_arguments: vec!["initialize".to_string()],
             }],
+            None,
         )
         .expect_err("unusable declared toolchain fails preflight");
 
