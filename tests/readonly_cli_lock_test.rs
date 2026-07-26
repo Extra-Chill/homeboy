@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
@@ -9,11 +10,14 @@ use std::time::{Duration, Instant};
 fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let repository = create_repository(home.path());
+        let promotion_namespace = home.path().join("nested-promotion-gate-data");
+        let _promotion_namespace = TestPromotionNamespace::new(&promotion_namespace);
         let git_before = git_metadata_snapshot(&repository);
         let _promotion = homeboy::core::runtime_promotion::acquire("test promotion", "test")
             .expect("hold runtime promotion lease");
         let home = home.path();
         let home_before = filesystem_snapshot(home);
+        let promotion_before = filesystem_snapshot(&promotion_namespace.join("runtime-promotion"));
 
         for args in [
             vec!["--version"],
@@ -77,9 +81,9 @@ fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
             "blocked refresh changed Git metadata"
         );
         assert_eq!(
-            filesystem_snapshot(home),
-            home_before,
-            "blocked refresh changed config or runtime state"
+            filesystem_snapshot(&promotion_namespace.join("runtime-promotion")),
+            promotion_before,
+            "blocked refresh changed the held promotion lease"
         );
 
         let output = run_with_timeout(
@@ -96,6 +100,16 @@ fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
             "mutation exclusion must report typed promotion contention: {}",
             String::from_utf8_lossy(&output.stdout)
         );
+        assert_eq!(
+            git_metadata_snapshot(&repository),
+            git_before,
+            "blocked upgrade changed Git metadata"
+        );
+        assert_eq!(
+            filesystem_snapshot(&promotion_namespace.join("runtime-promotion")),
+            promotion_before,
+            "blocked upgrade changed the held promotion lease"
+        );
     });
 }
 
@@ -110,6 +124,29 @@ fn run_with_timeout(args: &[&str], home: &std::path::Path, timeout: Duration) ->
         .spawn()
         .expect("start Homeboy child");
     wait_for_output(child, timeout)
+}
+
+/// Isolate this test from a promotion gate's inherited data directory. Child
+/// commands inherit this namespace from the test process just as Cargo does.
+struct TestPromotionNamespace {
+    previous: Option<OsString>,
+}
+
+impl TestPromotionNamespace {
+    fn new(path: &std::path::Path) -> Self {
+        let previous = std::env::var_os(homeboy_core::paths::HOMEBOY_DATA_DIR_ENV);
+        std::env::set_var(homeboy_core::paths::HOMEBOY_DATA_DIR_ENV, path);
+        Self { previous }
+    }
+}
+
+impl Drop for TestPromotionNamespace {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(path) => std::env::set_var(homeboy_core::paths::HOMEBOY_DATA_DIR_ENV, path),
+            None => std::env::remove_var(homeboy_core::paths::HOMEBOY_DATA_DIR_ENV),
+        }
+    }
 }
 
 fn wait_for_output(mut child: Child, timeout: Duration) -> Output {

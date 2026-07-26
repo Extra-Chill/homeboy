@@ -798,6 +798,7 @@ fn io(context: &'static str) -> impl FnOnce(std::io::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn stale_owner_is_bounded_by_liveness_or_expiry() {
         let dead = RuntimePromotionLeaseRecord {
