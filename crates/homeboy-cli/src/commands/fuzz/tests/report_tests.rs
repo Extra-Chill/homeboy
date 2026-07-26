@@ -95,6 +95,7 @@ fn fuzz_campaign_contract_surfaces_extension_metadata() {
     let config = FuzzConfig {
         extension_script: Some("fuzz.sh".to_string()),
         env: Vec::new(),
+        runtime_helpers: Vec::new(),
         workloads: Vec::new(),
         case_artifact: Some("failing-case".to_string()),
         corpus_artifacts: vec!["corpus".to_string()],

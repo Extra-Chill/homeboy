@@ -113,6 +113,10 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         &run_dir,
         &execution_request_path,
         sequence_plan_path.as_deref(),
+        fuzz_config
+            .as_ref()
+            .map(|config| config.runtime_helpers.as_slice())
+            .unwrap_or_default(),
     )?;
     let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
     let artifacts_dir =
@@ -1194,6 +1198,11 @@ pub(super) fn fuzz_runner_contract(config: Option<&FuzzConfig>) -> FuzzRunnerCon
                 env.push(key.to_string());
             }
         }
+        for key in homeboy_extension::declared_helper_env_names(&config.runtime_helpers) {
+            if !env.iter().any(|existing| existing == &key) {
+                env.push(key);
+            }
+        }
     }
 
     FuzzRunnerContract {
@@ -1213,6 +1222,7 @@ fn run_fuzz_extension_script(
     run_dir: &RunDir,
     execution_request_path: &Path,
     sequence_plan_path: Option<&Path>,
+    runtime_helpers: &[homeboy_extension::RuntimeHelperRequirement],
 ) -> homeboy::core::Result<homeboy_extension::RunnerOutput> {
     let results_path = run_dir.step_file(homeboy::core::engine::run_dir::files::FUZZ_RESULTS);
     let env = fuzz_runner_env(
@@ -1224,15 +1234,31 @@ fn run_fuzz_extension_script(
         Some(execution_request_path),
         sequence_plan_path,
     )?;
+    let helper_provenance = homeboy_extension::provision_declared_helpers(runtime_helpers)?;
+    let mut helper_env = helper_provenance
+        .iter()
+        .map(|helper| (helper.env_var.clone(), helper.path.clone()))
+        .collect::<Vec<_>>();
+    if !helper_provenance.is_empty() {
+        let provenance = serde_json::to_string(&helper_provenance).map_err(|error| {
+            homeboy::core::Error::internal_json(
+                error.to_string(),
+                Some("serialize runtime helper provenance".to_string()),
+            )
+        })?;
+        helper_env.push(("HOMEBOY_RUNTIME_HELPERS_PROVENANCE".to_string(), provenance));
+    }
 
     if ctx.component.has_script(ExtensionCapability::Fuzz) {
+        let mut component_env = env;
+        component_env.extend(helper_env);
         let output = homeboy_extension::component_script::run_component_scripts_with_run_dir(
             &ctx.component,
             ExtensionCapability::Fuzz,
             &ctx.source_path,
             run_dir,
             false,
-            &env,
+            &component_env,
             &args.args,
         )?;
         return Ok(output.into());
@@ -1266,6 +1292,9 @@ fn run_fuzz_extension_script(
         .script_args(&args.args);
 
     for (key, value) in env {
+        runner = runner.env(&key, &value);
+    }
+    for (key, value) in helper_env {
         runner = runner.env(&key, &value);
     }
 

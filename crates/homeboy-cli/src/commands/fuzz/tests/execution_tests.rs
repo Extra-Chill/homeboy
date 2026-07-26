@@ -43,6 +43,25 @@ fn auto_run_ids_scope_identical_payloads_while_explicit_ids_remain_stable() {
 }
 
 #[test]
+fn fuzz_contract_exposes_only_declared_core_helper_environment() {
+    let config = FuzzConfig {
+        runtime_helpers: vec![homeboy_extension::RuntimeHelperRequirement {
+            id: homeboy_extension::RUNTIME_SETTINGS_HELPER_ID.to_string(),
+            revision: None,
+        }],
+        ..Default::default()
+    };
+    let contract = fuzz_runner_contract(Some(&config));
+
+    assert!(contract
+        .env
+        .contains(&homeboy_extension::RUNTIME_SETTINGS_HELPER_ENV.to_string()));
+    assert!(!contract
+        .env
+        .contains(&"HOMEBOY_RUNTIME_HELPERS_PROVENANCE".to_string()));
+}
+
+#[test]
 fn fuzz_run_persists_requested_run_id_and_results_artifact() {
     with_isolated_home(|home| {
         let args = FuzzRunArgs {
