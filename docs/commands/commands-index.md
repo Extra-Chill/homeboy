@@ -13,6 +13,7 @@
 - [daemon](daemon.md) — local-only HTTP API daemon
 - [db](db.md)
 - [deploy](deploy.md)
+- [harvest](harvest.md) — compare managed remote component bytes and safely recover reviewed drift
 - [deps](deps.md) — component dependency inspection and updates
 - [extension](extension.md)
 - [file](file.md) — remote file operations, downloads, copies, and syncs

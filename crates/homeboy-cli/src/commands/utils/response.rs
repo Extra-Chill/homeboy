@@ -678,13 +678,61 @@ fn release_failure_digest(data: &Value) -> Option<CommandFailureDigest> {
         stdout_tail: None,
         stderr_tail: None,
         artifact_refs: Vec::new(),
-        next_actions: vec![CommandNextAction::new(
-            "inspect release state",
-            format!("homeboy release {component_id} --dry-run"),
-        )
-        .with_kind(CommandNextActionKind::Repair)],
+        next_actions: vec![release_gate_repro_action(step_id, step_type, component_id)],
         retryable: None,
     })
+}
+
+/// Map a failed release step to a non-mutating command that actually executes
+/// that gate.
+///
+/// `release --dry-run` only renders a plan: it reports quality gates as `ready`
+/// without running them, so recommending it after a gate failure returns
+/// success while the blocker is untouched (#10114). Point each gate at the
+/// surface that can reproduce it instead, and when no such surface exists say
+/// plainly that the fallback only inspects the plan.
+fn release_gate_repro_action(
+    step_id: &str,
+    step_type: &str,
+    component_id: &str,
+) -> CommandNextAction {
+    let gate = |value: &str| {
+        value
+            .strip_prefix("preflight.")
+            .unwrap_or(value)
+            .to_string()
+    };
+    let gate_name = {
+        let by_id = gate(step_id);
+        if by_id == step_id && step_type != step_id {
+            gate(step_type)
+        } else {
+            by_id
+        }
+    };
+
+    let review_gate = match gate_name.as_str() {
+        "lint" => Some("lint"),
+        "test" => Some("test"),
+        "audit" => Some("audit"),
+        // Package and build-structure validation are reproduced by the local
+        // build quality gate rather than by re-running the release.
+        "package" | "build" => Some("build"),
+        _ => None,
+    };
+
+    match review_gate {
+        Some(gate) => CommandNextAction::new(
+            format!("reproduce the failed {gate} gate"),
+            format!("homeboy review {gate} {component_id}"),
+        )
+        .with_kind(CommandNextActionKind::Repair),
+        None => CommandNextAction::new(
+            "inspect release plan (plan only — does not run quality gates)",
+            format!("homeboy release {component_id} --dry-run"),
+        )
+        .with_kind(CommandNextActionKind::Repair),
+    }
 }
 
 fn bounded_text(value: &str, max_chars: usize) -> String {
@@ -942,6 +990,60 @@ pub fn write_json_to_file_for_command(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn release_failure_payload(step_id: &str, step_type: &str) -> Value {
+        json!({
+            "command": "release",
+            "result": {
+                "component_id": "fixture",
+                "run": { "result": { "steps": [
+                    { "id": step_id, "type": step_type, "status": "failed", "error": "gate failed" }
+                ] } }
+            }
+        })
+    }
+
+    /// #10114: a failed quality gate must hand back a command that actually
+    /// runs that gate. `release --dry-run` reports gates as `ready` without
+    /// executing them, so recommending it returns success while the blocker
+    /// is unchanged.
+    #[test]
+    fn release_gate_failures_recommend_the_gate_that_can_reproduce_them() {
+        for (step, expected) in [
+            ("preflight.lint", "homeboy review lint fixture"),
+            ("preflight.test", "homeboy review test fixture"),
+            ("preflight.audit", "homeboy review audit fixture"),
+            ("preflight.package", "homeboy review build fixture"),
+        ] {
+            let digest = release_failure_digest(&release_failure_payload(step, step))
+                .expect("release digest");
+            let action = digest.next_actions.first().expect("next action");
+            assert_eq!(
+                action.command, expected,
+                "{step} should be reproducible via its own gate"
+            );
+            assert!(
+                !action.command.contains("--dry-run"),
+                "{step} must not recommend a plan-only dry run"
+            );
+        }
+    }
+
+    /// Steps with no non-mutating reproduction surface still fall back to the
+    /// plan, but the label must not imply the gates were verified.
+    #[test]
+    fn non_gate_release_failures_label_dry_run_as_plan_only() {
+        let digest = release_failure_digest(&release_failure_payload("git.push", "git.push"))
+            .expect("release digest");
+        let action = digest.next_actions.first().expect("next action");
+
+        assert_eq!(action.command, "homeboy release fixture --dry-run");
+        assert!(
+            action.label.contains("plan only"),
+            "dry-run fallback must be labeled plan-only, got: {}",
+            action.label
+        );
+    }
 
     #[test]
     fn json_mapping_preserves_success_payload_and_exit_code() {

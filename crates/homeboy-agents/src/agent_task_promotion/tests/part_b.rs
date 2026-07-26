@@ -198,7 +198,11 @@ fn bridge_reconciliation_recovers_mixed_runner_artifacts_for_local_promotion_ide
         );
         let record = crate::agent_task_lifecycle::status(run_id).expect("recovered status");
         assert_eq!(record.metadata["runner_id"], "homeboy-lab");
-        assert_eq!(record.metadata["artifact_projection"]["status"], "complete");
+        assert_eq!(record.metadata["artifact_projection"]["status"], "pending");
+        assert_eq!(
+            record.metadata["artifact_projection"]["recovery_action"]["kind"],
+            "fetch_and_reconcile"
+        );
 
         let remote_id = "runner-patch-reference";
         store

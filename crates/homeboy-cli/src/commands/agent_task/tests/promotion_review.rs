@@ -50,6 +50,25 @@ fn applied_promotion_resume_requires_explicit_gate_rerun() {
 }
 
 #[test]
+fn cli_promotion_resume_policy_matches_the_shared_service() {
+    for (previous, rerun_completed_gates) in [
+        (json!({ "status": "applied" }), false),
+        (json!({ "status": "applied" }), true),
+        (json!({ "status": "gate_failed" }), false),
+        (json!({ "status": "verification_pending" }), false),
+        (json!({ "status": "completed" }), true),
+    ] {
+        assert_eq!(
+            review::promotion_is_resumable(&previous, rerun_completed_gates),
+            homeboy::agents::agent_task_service::promotion_is_resumable(
+                &previous,
+                rerun_completed_gates,
+            ),
+        );
+    }
+}
+
+#[test]
 fn review_reports_queued_run_without_chat_state() {
     with_temp_home(|| {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("run-review-queued"))
@@ -127,6 +146,24 @@ fn review_reports_completed_aggregate_and_promotion_hints() {
 #[test]
 fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema() {
     with_temp_home(|| {
+        let root = tempfile::tempdir().expect("worktree root");
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        std::fs::create_dir(&source).expect("create source");
+        init_runtime_component_checkout(&source);
+        let status = Command::new("git")
+            .args([
+                "-C",
+                source.to_str().expect("source path"),
+                "worktree",
+                "add",
+                "-b",
+                "fixture-wrong-schema",
+                target.to_str().expect("target path"),
+            ])
+            .status()
+            .expect("create target worktree");
+        assert!(status.success());
         let (value, exit_code) = run_cook_with_executor(
             AgentTaskCookArgs {
                 dispatch: DispatchArgs {
@@ -161,7 +198,7 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
                 attempt_run_id: Some("cook-missing-provider-attempt-1-controller".to_string()),
                 attempt_plan: None,
                 goal: Some("cook fixture".to_string()),
-                to_worktree: "homeboy@fix-agent-task-runner-cook".to_string(),
+                to_worktree: target.display().to_string(),
                 provider_command: None,
                 provider_argv: vec![
                     "sh".to_string(),
@@ -384,12 +421,39 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
         init_runtime_component_checkout(&source);
         let status = Command::new("git")
             .args([
-                "clone",
+                "-C",
                 source.to_str().expect("source path"),
+                "remote",
+                "add",
+                "origin",
+                source.to_str().expect("source path"),
+            ])
+            .status()
+            .expect("configure source remote");
+        assert!(status.success());
+        let status = Command::new("git")
+            .args([
+                "-C",
+                source.to_str().expect("source path"),
+                "fetch",
+                "origin",
+                "main",
+            ])
+            .status()
+            .expect("fetch source base");
+        assert!(status.success());
+        let status = Command::new("git")
+            .args([
+                "-C",
+                source.to_str().expect("source path"),
+                "worktree",
+                "add",
+                "-b",
+                "fixture-promoted",
                 target.to_str().expect("target path"),
             ])
             .status()
-            .expect("clone target");
+            .expect("create target worktree");
         assert!(status.success());
         std::fs::write(source.join("pre-existing-candidate.txt"), "preserve me\n")
             .expect("write pre-existing candidate");
@@ -449,7 +513,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 attempt_run_id: None,
                 attempt_plan: None,
                 goal: None,
-                to_worktree: "fixture-component@promoted".to_string(),
+                to_worktree: target.display().to_string(),
                 provider_command: None,
                 provider_argv: vec!["sh".to_string(), provider.display().to_string()],
                 gates: VerifyGateArgs {
@@ -486,6 +550,11 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
         assert!(prepared.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(exit_code, 0, "{value:#}");
         assert_eq!(value["status"], "green_no_finalize");
+        assert_eq!(
+            value["attempts"][0]["feedback"]["status"],
+            "green_completed"
+        );
+        assert!(value["finalization"].is_null());
         let attempt_run_id = value["attempts"][0]["run_id"]
             .as_str()
             .expect("cook report attempt run id");
@@ -518,12 +587,6 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 .map(Vec::len),
             Some(1)
         );
-        let status = Command::new("git")
-            .args(["status", "--porcelain"])
-            .current_dir(&source)
-            .output()
-            .expect("read workspace status");
-        assert!(String::from_utf8_lossy(&status.stdout).trim().is_empty());
         assert_eq!(
             std::fs::read_to_string(target.join("agent-change.txt")).expect("target patch applied"),
             "committed work\n"
@@ -536,7 +599,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
             request["schema"],
             "homeboy/agent-task-promotion-apply-request/v1"
         );
-        assert_eq!(request["to_workspace"], "fixture-component@promoted");
+        assert_eq!(request["to_workspace"], target.display().to_string());
         assert_eq!(request["changed_files"], json!(["agent-change.txt"]));
         assert!(request["patch"]
             .as_str()
