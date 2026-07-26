@@ -664,6 +664,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     crate::ops_command_spec!(logs),
     crate::ops_command_spec!(triage),
     crate::ops_command_spec!(deploy),
+    crate::ops_command_spec!(harvest),
     CommandSpec {
         subcommand_safety: COMPONENT_SUBCOMMAND_SAFETY,
         ..command_spec("component", CommandJsonFamily::Workspace)
