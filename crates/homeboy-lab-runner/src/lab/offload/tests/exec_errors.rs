@@ -432,24 +432,8 @@ fn plan_records_skipped_auto_offload() {
     let outcome = execute_lab_offload(LabOffloadRequest {
         command: Some(portable_lab_command("test")),
         normalized_args: &["homeboy".to_string(), "test".to_string()],
-        explicit_runner: None,
         placement: homeboy_cli_contract::Placement::Local,
-        allow_local_fallback: false,
-        allow_dirty_lab_workspace: false,
-        skip_deps_hydration: false,
-        preserve_workspace_on_failure: false,
-        capture_patch: false,
-        mutation_flag: None,
-        detach_after_handoff: false,
-        output_file_requested: false,
-        read_only_polling: false,
-        local_output_file: None,
-        durable_agent_task_plan: None,
-        source_path: None,
-        verified_cook_baseline: None,
-        require_controller_git_bundle: false,
-        reuse_compatible_snapshot: false,
-        job_overrides: LabJobOverrides::default(),
+        ..LabOffloadRequest::for_test(&["homeboy".to_string(), "test".to_string()])
     })
     .expect("outcome");
 
@@ -465,26 +449,9 @@ fn plan_records_skipped_auto_offload() {
 #[test]
 fn lab_placement_refuses_local_execution_without_lab_contract() {
     let outcome = execute_lab_offload(LabOffloadRequest {
-        command: None,
         normalized_args: &["homeboy".to_string(), "status".to_string()],
-        explicit_runner: None,
         placement: homeboy_cli_contract::Placement::Lab,
-        allow_local_fallback: false,
-        allow_dirty_lab_workspace: false,
-        skip_deps_hydration: false,
-        preserve_workspace_on_failure: false,
-        capture_patch: false,
-        mutation_flag: None,
-        detach_after_handoff: false,
-        output_file_requested: false,
-        read_only_polling: false,
-        local_output_file: None,
-        durable_agent_task_plan: None,
-        source_path: None,
-        verified_cook_baseline: None,
-        require_controller_git_bundle: false,
-        reuse_compatible_snapshot: false,
-        job_overrides: LabJobOverrides::default(),
+        ..LabOffloadRequest::for_test(&["homeboy".to_string(), "status".to_string()])
     });
 
     let Err(err) = outcome else {
@@ -505,24 +472,13 @@ fn lab_placement_refuses_local_only_rig_install_with_actionable_boundary() {
             "install".to_string(),
             "./rig-package".to_string(),
         ],
-        explicit_runner: None,
         placement: homeboy_cli_contract::Placement::Lab,
-        allow_local_fallback: false,
-        allow_dirty_lab_workspace: false,
-        skip_deps_hydration: false,
-        preserve_workspace_on_failure: false,
-        capture_patch: false,
-        mutation_flag: None,
-        detach_after_handoff: false,
-        output_file_requested: false,
-        read_only_polling: false,
-        local_output_file: None,
-        durable_agent_task_plan: None,
-        source_path: None,
-        verified_cook_baseline: None,
-        require_controller_git_bundle: false,
-        reuse_compatible_snapshot: false,
-        job_overrides: LabJobOverrides::default(),
+        ..LabOffloadRequest::for_test(&[
+            "homeboy".to_string(),
+            "rig".to_string(),
+            "install".to_string(),
+            "./rig-package".to_string(),
+        ])
     });
 
     let Err(err) = outcome else {
@@ -539,30 +495,17 @@ fn lab_placement_refuses_local_only_rig_install_with_actionable_boundary() {
 #[test]
 fn build_runner_error_gives_managed_runner_replacement() {
     let outcome = execute_lab_offload(LabOffloadRequest {
-        command: None,
         normalized_args: &[
             "homeboy".to_string(),
             "build".to_string(),
             "homeboy".to_string(),
         ],
         explicit_runner: Some("homeboy-lab"),
-        placement: homeboy_cli_contract::Placement::Auto,
-        allow_local_fallback: false,
-        allow_dirty_lab_workspace: false,
-        skip_deps_hydration: false,
-        preserve_workspace_on_failure: false,
-        capture_patch: false,
-        mutation_flag: None,
-        detach_after_handoff: false,
-        output_file_requested: false,
-        read_only_polling: false,
-        local_output_file: None,
-        durable_agent_task_plan: None,
-        source_path: None,
-        verified_cook_baseline: None,
-        require_controller_git_bundle: false,
-        reuse_compatible_snapshot: false,
-        job_overrides: LabJobOverrides::default(),
+        ..LabOffloadRequest::for_test(&[
+            "homeboy".to_string(),
+            "build".to_string(),
+            "homeboy".to_string(),
+        ])
     });
 
     let Err(err) = outcome else {
@@ -588,30 +531,17 @@ fn build_runner_error_gives_managed_runner_replacement() {
 #[test]
 fn build_lab_placement_error_gives_managed_runner_replacement() {
     let outcome = execute_lab_offload(LabOffloadRequest {
-        command: None,
         normalized_args: &[
             "homeboy".to_string(),
             "build".to_string(),
             "homeboy".to_string(),
         ],
-        explicit_runner: None,
         placement: homeboy_cli_contract::Placement::Lab,
-        allow_local_fallback: false,
-        allow_dirty_lab_workspace: false,
-        skip_deps_hydration: false,
-        preserve_workspace_on_failure: false,
-        capture_patch: false,
-        mutation_flag: None,
-        detach_after_handoff: false,
-        output_file_requested: false,
-        read_only_polling: false,
-        local_output_file: None,
-        durable_agent_task_plan: None,
-        source_path: None,
-        verified_cook_baseline: None,
-        require_controller_git_bundle: false,
-        reuse_compatible_snapshot: false,
-        job_overrides: LabJobOverrides::default(),
+        ..LabOffloadRequest::for_test(&[
+            "homeboy".to_string(),
+            "build".to_string(),
+            "homeboy".to_string(),
+        ])
     });
 
     let Err(err) = outcome else {
@@ -637,7 +567,6 @@ fn build_lab_placement_error_gives_managed_runner_replacement() {
 #[test]
 fn unsupported_runner_error_guides_tunnel_service_inspection() {
     let outcome = execute_lab_offload(LabOffloadRequest {
-        command: None,
         normalized_args: &[
             "homeboy".to_string(),
             "tunnel".to_string(),
@@ -646,23 +575,13 @@ fn unsupported_runner_error_guides_tunnel_service_inspection() {
             "wpcom-ai-manual-held".to_string(),
         ],
         explicit_runner: Some("homeboy-lab"),
-        placement: homeboy_cli_contract::Placement::Auto,
-        allow_local_fallback: false,
-        allow_dirty_lab_workspace: false,
-        skip_deps_hydration: false,
-        preserve_workspace_on_failure: false,
-        capture_patch: false,
-        mutation_flag: None,
-        detach_after_handoff: false,
-        output_file_requested: false,
-        read_only_polling: false,
-        local_output_file: None,
-        durable_agent_task_plan: None,
-        source_path: None,
-        verified_cook_baseline: None,
-        require_controller_git_bundle: false,
-        reuse_compatible_snapshot: false,
-        job_overrides: LabJobOverrides::default(),
+        ..LabOffloadRequest::for_test(&[
+            "homeboy".to_string(),
+            "tunnel".to_string(),
+            "service".to_string(),
+            "status".to_string(),
+            "wpcom-ai-manual-held".to_string(),
+        ])
     });
 
     let Err(err) = outcome else {
