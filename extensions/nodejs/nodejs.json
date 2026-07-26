@@ -351,6 +351,9 @@
   "fuzz": {
     "extension_script": "scripts/fuzz/fuzz-runner.sh",
     "capabilities": ["nodejs-fuzz-workload"],
+    "runtime_helpers": [
+      { "id": "runtime-settings" }
+    ],
     "env": [
       "HOMEBOY_FUZZ_RESULTS_FILE",
       "HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE",

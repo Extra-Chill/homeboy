@@ -62,6 +62,7 @@ const runner = fs.readFileSync(runnerPath, 'utf8');
 if (!manifest.provides?.capabilities?.includes('fuzz')) throw new Error('Node.js manifest does not advertise fuzz capability');
 if (manifest.fuzz?.extension_script !== 'scripts/fuzz/fuzz-runner.sh') throw new Error('fuzz runner path is not declared in nodejs.json');
 if (!manifest.fuzz?.capabilities?.includes('nodejs-fuzz-workload')) throw new Error('Node.js fuzz workload capability missing');
+if (!manifest.fuzz?.runtime_helpers?.some((helper) => helper.id === 'runtime-settings')) throw new Error('Node.js fuzz runner must declare the runtime-settings helper capability');
 for (const token of [
   'HOMEBOY_FUZZ_RESULTS_FILE',
   'HOMEBOY_FUZZ_WORKLOAD_PATH',
@@ -97,7 +98,12 @@ mkdir -p "$ISOLATED_EXTENSION/scripts/fuzz" "$ISOLATED_EXTENSION/scripts/lib"
 cp "$RUNNER" "$ISOLATED_EXTENSION/scripts/fuzz/fuzz-runner.sh"
 cp "$EXTENSION_DIR/scripts/lib/node-helpers.sh" "$ISOLATED_EXTENSION/scripts/lib/node-helpers.sh"
 ISOLATED_RESULTS="$TMP_DIR/isolated-results.json"
-HOMEBOY_RUNTIME_SETTINGS_HELPER="$EXTENSION_DIR/../scripts/lib/settings.sh" \
+ISOLATED_SETTINGS_HELPER="${HOMEBOY_RUNTIME_SETTINGS_HELPER:?HOMEBOY_RUNTIME_SETTINGS_HELPER must name the core-declared settings helper}"
+if [ ! -f "$ISOLATED_SETTINGS_HELPER" ]; then
+    echo "Missing core-declared settings helper: $ISOLATED_SETTINGS_HELPER" >&2
+    exit 1
+fi
+HOMEBOY_RUNTIME_SETTINGS_HELPER="$ISOLATED_SETTINGS_HELPER" \
 HOMEBOY_RUNTIME_PROJECT_SCRIPTS="$EXTENSION_DIR/../scripts/lib/project-scripts.sh" \
     run_fuzz "$SCRIPT_PROJECT" "$ISOLATED_RESULTS" "$WORKLOAD_SCRIPT" \
         "$ISOLATED_EXTENSION/scripts/fuzz/fuzz-runner.sh" "$ISOLATED_EXTENSION" >/dev/null
