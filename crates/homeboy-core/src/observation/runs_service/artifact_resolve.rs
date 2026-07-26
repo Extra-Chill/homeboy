@@ -1,4 +1,8 @@
 use super::*;
+use std::io::Read;
+
+const PUBLIC_ARTIFACT_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const MAX_PUBLIC_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Resolve an artifact record by run/artifact token, validating that the
 /// recorded `run_id` matches the requested run.
@@ -190,11 +194,157 @@ pub fn download_remote_artifact(
     })
 }
 
+/// Fetch a declared public artifact without using runner credentials. Public
+/// locators survive ephemeral runner cleanup; the timeout and streaming cap
+/// keep an unreachable or oversized object from stalling `artifact get`.
+pub fn download_public_artifact(
+    artifact: ArtifactRecord,
+    output: Option<PathBuf>,
+) -> Result<ArtifactFetchOutcome> {
+    let url = artifact
+        .url
+        .as_deref()
+        .or(artifact.public_url.as_deref())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "artifact_id",
+                format!("artifact {} has no public content URL", artifact.id),
+                Some(artifact.id.clone()),
+                None,
+            )
+        })?;
+    let parsed = reqwest::Url::parse(url).map_err(|err| {
+        Error::validation_invalid_argument(
+            "artifact_id",
+            err.to_string(),
+            Some(artifact.id.clone()),
+            None,
+        )
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            "public artifact URL must use HTTP or HTTPS",
+            Some(artifact.id.clone()),
+            None,
+        ));
+    }
+    let client =
+        crate::http_probe::blocking_client(PUBLIC_ARTIFACT_FETCH_TIMEOUT).map_err(|err| {
+            Error::internal_unexpected(format!("build public artifact client: {err}"))
+        })?;
+    let mut response = client.get(parsed.clone()).send().map_err(|err| {
+        Error::internal_unexpected(format!("fetch public artifact {}: {err}", artifact.id))
+    })?;
+    if !response.status().is_success() {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            format!(
+                "public artifact {} returned HTTP {}",
+                artifact.id,
+                response.status()
+            ),
+            Some(artifact.id.clone()),
+            None,
+        ));
+    }
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_PUBLIC_ARTIFACT_BYTES)
+    {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            format!(
+                "public artifact {} exceeds the {} byte download limit",
+                artifact.id, MAX_PUBLIC_ARTIFACT_BYTES
+            ),
+            Some(artifact.id.clone()),
+            None,
+        ));
+    }
+    let filename = parsed
+        .path_segments()
+        .and_then(Iterator::last)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&artifact.id)
+        .to_string();
+    let output = output.unwrap_or_else(|| PathBuf::from(filename));
+    if let Some(parent) = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            Error::internal_io(
+                err.to_string(),
+                Some(format!("create {}", parent.display())),
+            )
+        })?;
+    }
+    let mut writer = File::create(&output).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!("create {}", output.display())),
+        )
+    })?;
+    let copied = io::copy(
+        &mut response.by_ref().take(MAX_PUBLIC_ARTIFACT_BYTES + 1),
+        &mut writer,
+    )
+    .map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!("download public artifact {}", artifact.id)),
+        )
+    })?;
+    if copied > MAX_PUBLIC_ARTIFACT_BYTES {
+        drop(writer);
+        std::fs::remove_file(&output).ok();
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            format!(
+                "public artifact {} exceeds the {} byte download limit",
+                artifact.id, MAX_PUBLIC_ARTIFACT_BYTES
+            ),
+            Some(artifact.id.clone()),
+            None,
+        ));
+    }
+    writer.flush().map_err(|err| {
+        Error::internal_io(err.to_string(), Some(format!("flush {}", output.display())))
+    })?;
+    writer.sync_all().map_err(|err| {
+        Error::internal_io(err.to_string(), Some(format!("sync {}", output.display())))
+    })?;
+    Ok(ArtifactFetchOutcome {
+        run_id: artifact.run_id,
+        artifact_id: artifact.id,
+        output_path: output,
+        content_type: response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+            .or(artifact.mime),
+        size_bytes: i64::try_from(copied).ok(),
+        sha256: artifact.sha256,
+        artifact_ref: None,
+    })
+}
+
 /// Classify an artifact's storage so callers can decide between local
 /// copy, remote download, or a metadata-only error.
 pub fn classify_artifact_storage(artifact: &ArtifactRecord) -> ArtifactStorage {
     if artifact.artifact_type == "file" {
         return ArtifactStorage::LocalFile;
+    }
+    if artifact.artifact_type == "url"
+        && artifact
+            .url
+            .as_deref()
+            .or(artifact.public_url.as_deref())
+            .is_some()
+    {
+        return ArtifactStorage::PublicUrl;
     }
     if crate::execution_contract::is_remote_runner_artifact_path(&artifact.path)
         || artifact.artifact_type == "remote_file"
