@@ -82,6 +82,7 @@
   "scripts": {
     "lint:js": "eslint",
     "test:eslint-build-ignore": "bash scripts/lint/eslint-build-ignore-smoke.sh",
+    "test:eslint-dependency-tree-scope": "bash scripts/lint/eslint-dependency-tree-scope-smoke.sh",
     "test:admin-page-scenarios": "node tests/admin-page-scenarios-smoke.js",
     "test:admin-page-fuzz-surfaces": "node tests/admin-page-fuzz-surfaces-smoke.js",
     "test:wordpress-admin-form-action-surfaces": "node tests/wordpress-admin-form-action-surfaces-smoke.js",

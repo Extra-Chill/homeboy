@@ -60,9 +60,13 @@ write_eslint_findings_sidecar() {
     HOMEBOY_LINT_FINDINGS_FILE="$previous_target"
 }
 
-# Check if component has JavaScript files
+# Check if component has JavaScript files.
+#
+# This count is a gate: zero means skip ESLint entirely. The installed
+# dependency tree must be excluded or any component with dependencies installed
+# looks like it has JavaScript of its own, defeating the skip.
 js_file_count=$(find "$PLUGIN_PATH" -type f \( -name "*.js" -o -name "*.jsx" -o -name "*.ts" -o -name "*.tsx" \) \
-    -not -path "*/node_extensions/*" \
+    -not -path "*/node_modules/*" \
     -not -path "*/vendor/*" \
     -not -path "*/vendor_prefixed/*" \
     -not -path "*/vendor-prefixed/*" \
@@ -141,9 +145,6 @@ if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
 fi
 
 ESLINT_BIN="${EXTENSION_PATH}/node_modules/.bin/eslint"
-if [ ! -f "$ESLINT_BIN" ]; then
-    ESLINT_BIN="${EXTENSION_PATH}/node_extensions/.bin/eslint"
-fi
 ESLINT_CONFIG="${EXTENSION_PATH}/eslint.config.mjs"
 
 # Validate tools exist

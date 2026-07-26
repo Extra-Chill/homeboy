@@ -52,7 +52,6 @@ function fixer_path_is_excluded($path) {
         'vendor-prefixed',
         'vendor_scoped',
         'vendor-scoped',
-        'node_extensions',
         'node_modules',
         'dist',
         'build',

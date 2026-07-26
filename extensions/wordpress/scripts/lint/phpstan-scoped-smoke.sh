@@ -200,6 +200,17 @@ assert_contains "${COMPONENT_DIR}/includes/extra.php" "glob scope includes match
 assert_not_contains "assets/app.js" "glob scope ignores non-PHP files"
 assert_file_contains "$OUTPUT_FILE" "PHPStan scoped lint: analyzing 2 PHP file(s)" "relative glob scope reports analyzed PHP files"
 
+# A glob that resolves to a directory expands through a find, which is the one
+# scope that walks whatever the directory happens to contain. An installed
+# dependency tree ships PHP of its own, and analyzing it is neither the
+# component's code nor the component's problem.
+mkdir -p "${COMPONENT_DIR}/includes/node_modules/example-package"
+printf '%s\n' '<?php missing_function();' > "${COMPONENT_DIR}/includes/node_modules/example-package/shim.php"
+HOMEBOY_LINT_GLOB='{includes,main.php}' run_phpstan
+assert_contains "${COMPONENT_DIR}/includes/extra.php" "directory glob scope includes component PHP files"
+assert_not_contains "node_modules" "directory glob scope excludes the installed dependency tree"
+rm -rf "${COMPONENT_DIR}/includes/node_modules"
+
 HOMEBOY_LINT_GLOB="{${COMPONENT_DIR}/main.php,${COMPONENT_DIR}/assets/app.js,${COMPONENT_DIR}/includes/extra.php}" run_phpstan
 assert_contains "${COMPONENT_DIR}/main.php" "absolute glob scope includes matching PHP source file"
 assert_contains "${COMPONENT_DIR}/includes/extra.php" "absolute glob scope includes matching PHP runtime file"

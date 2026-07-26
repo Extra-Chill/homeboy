@@ -397,7 +397,6 @@ generate_scoped_context_config() {
             -not -path "*/.homeboy-build/*" \
             -not -path "*/vendor/*" \
             -not -path "*/vendor_prefixed/*" \
-            -not -path "*/node_extensions/*" \
             -not -path "*/node_modules/*" \
             -not -path "*/build/*" \
             -not -path "*/dist/*" \
@@ -491,7 +490,7 @@ resolve_phpstan_targets() {
                     -not -path "*/.homeboy-build/*" \
                     -not -path "*/vendor/*" \
                     -not -path "*/vendor_prefixed/*" \
-                    -not -path "*/node_extensions/*" \
+                    -not -path "*/node_modules/*" \
                     -not -path "*/build/*" \
                     -not -path "*/dist/*" \
                     -not -path "*/tools/*" \
@@ -521,7 +520,6 @@ resolve_phpstan_full_targets() {
         -not -path "*/.homeboy-build/*" \
         -not -path "*/vendor/*" \
         -not -path "*/vendor_prefixed/*" \
-        -not -path "*/node_extensions/*" \
         -not -path "*/node_modules/*" \
         -not -path "*/build/*" \
         -not -path "*/dist/*" \

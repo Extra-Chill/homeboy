@@ -5,7 +5,7 @@
   "self_checks": {
     "lint": [
       "jq empty wordpress.json",
-      "bash -n scripts/build/install-composer-dependencies.sh scripts/test/test-runner.sh scripts/test/test-runner-wp-codebox.sh scripts/bench/bench-runner.sh scripts/bench/bench-runner-wp-codebox.sh scripts/doctor/wp-codebox-doctor.sh scripts/test/wp-codebox-doctor-smoke.sh tests/extension-composer-vendor-integrity-smoke.sh",
+      "bash -n scripts/build/install-composer-dependencies.sh scripts/test/test-runner.sh scripts/test/test-runner-wp-codebox.sh scripts/bench/bench-runner.sh scripts/bench/bench-runner-wp-codebox.sh scripts/doctor/wp-codebox-doctor.sh scripts/test/wp-codebox-doctor-smoke.sh tests/extension-composer-vendor-integrity-smoke.sh scripts/lint/eslint-dependency-tree-scope-smoke.sh",
       "node --check index.js lib/codebox-client.js lib/wp-codebox-resolver.js lib/wp-codebox-fuzz-run.js scripts/fuzz/fuzz-runner.cjs scripts/bench/wp-codebox-bench-adapter.mjs scripts/test/wp-codebox-phpunit-adapter.mjs"
     ],
     "test": [
@@ -22,7 +22,8 @@
       "node tests/wordpress-fuzz-runner-smoke.js",
       "node tests/wp-codebox-artifacts-isolated-snapshot-smoke.js",
       "node tests/wordpress-manifest-settings-smoke.js",
-      "node tests/wordpress-artifact-cleanup-declarations-smoke.js"
+      "node tests/wordpress-artifact-cleanup-declarations-smoke.js",
+      "bash scripts/lint/eslint-dependency-tree-scope-smoke.sh"
     ]
   }
 }

@@ -6,7 +6,7 @@ import wordpress from '@wordpress/eslint-plugin';
 export default [
   {
     ignores: [
-      'node_extensions/',
+      'node_modules/',
       'vendor/',
       '**/build/**',
       'dist/',
