@@ -4,6 +4,7 @@ use serde::Serialize;
 use homeboy::core::project::logs::{
     self, LogContent, LogEntry, LogSearchResult, PinnedLogsContent,
 };
+use homeboy::core::output::{OutputPresentation, OutputTruncation};
 
 use crate::commands::CmdResult;
 
@@ -130,6 +131,8 @@ pub struct LogsOutput {
     pub cleared_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub search_result: Option<LogSearchResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_budget: Option<OutputTruncation>,
 }
 
 fn list(project_id: &str) -> CmdResult<LogsOutput> {
@@ -144,6 +147,7 @@ fn list(project_id: &str) -> CmdResult<LogsOutput> {
             pinned_logs: None,
             cleared_path: None,
             search_result: None,
+            output_budget: None,
         },
         0,
     ))
@@ -168,6 +172,7 @@ fn show(
                 pinned_logs: None,
                 cleared_path: None,
                 search_result: None,
+                output_budget: None,
             },
             code,
         ))
@@ -183,6 +188,7 @@ fn show(
                 pinned_logs: None,
                 cleared_path: None,
                 search_result: None,
+                output_budget: None,
             },
             0,
         ))
@@ -204,6 +210,18 @@ fn show_pinned(project_id: &str, lines: u32, follow: bool, local: bool) -> CmdRe
 
     let content = logs::show_pinned(project_id, lines, local)?;
 
+    let output_budget = OutputTruncation {
+        presentation: OutputPresentation::BoundedCollection,
+        total_items: content.total_logs,
+        returned_items: content.returned_logs,
+        omitted_items: content.omitted_logs,
+        total_bytes: content.returned_bytes + content.omitted_bytes,
+        returned_bytes: content.returned_bytes,
+        omitted_bytes: content.omitted_bytes,
+        truncated: content.omitted_logs > 0 || content.omitted_bytes > 0,
+        continue_command: format!("homeboy logs list {project_id}"),
+        export_command: format!("homeboy logs show {project_id} --output <path>"),
+    };
     Ok((
         LogsOutput {
             command: "logs.show_pinned".to_string(),
@@ -213,6 +231,7 @@ fn show_pinned(project_id: &str, lines: u32, follow: bool, local: bool) -> CmdRe
             pinned_logs: Some(content),
             cleared_path: None,
             search_result: None,
+            output_budget: Some(output_budget),
         },
         0,
     ))
@@ -230,6 +249,7 @@ fn clear(project_id: &str, path: &str, local: bool) -> CmdResult<LogsOutput> {
             pinned_logs: None,
             cleared_path: Some(cleared_path),
             search_result: None,
+            output_budget: None,
         },
         0,
     ))
@@ -263,6 +283,7 @@ fn search(
             pinned_logs: None,
             cleared_path: None,
             search_result: Some(result),
+            output_budget: None,
         },
         0,
     ))

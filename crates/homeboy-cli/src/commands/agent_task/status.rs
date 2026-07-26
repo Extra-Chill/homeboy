@@ -16,6 +16,7 @@ use homeboy::agents::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan}
 use homeboy::agents::agent_tasks::service as agent_task_service;
 use homeboy::agents::agent_tasks::{AgentTaskEvidenceRef, AgentTaskOutcomeStatus};
 use homeboy::core::engine::shell::quote_arg;
+use homeboy::core::output::{budget_json_values, OutputBudget};
 use homeboy::runner::runners::{self as runner, RunnerKind};
 
 use super::super::CmdResult;
@@ -90,6 +91,12 @@ pub(super) fn list_runs(
 ) -> CmdResult<Value> {
     let report = agent_task_service_direct::discover_runs_with_options(filter, options)?;
     let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
+    attach_collection_budget(
+        &mut value,
+        "runs",
+        "homeboy agent-task list --limit 20",
+        "homeboy agent-task list --output <path>",
+    );
     attach_agent_task_discovery_actionable(&mut value);
     Ok((value, 0))
 }
@@ -119,6 +126,12 @@ pub(super) fn list_active(
             json!("run the per-run `commands.reconcile` preview, then repeat it with `--apply` after reviewing authoritative provider state"),
         );
     }
+    attach_collection_budget(
+        &mut value,
+        "runs",
+        "homeboy agent-task active --limit 20",
+        "homeboy agent-task active --output <path>",
+    );
     attach_agent_task_discovery_actionable(&mut value);
     Ok((value, 0))
 }
@@ -450,7 +463,19 @@ pub(super) fn logs(args: LogsArgs) -> CmdResult<Value> {
 
 pub(super) fn artifacts(args: StatusArgs) -> CmdResult<Value> {
     let artifacts = agent_task_service::artifacts(&args.run_id)?;
-    Ok((serde_json::to_value(artifacts).unwrap_or(Value::Null), 0))
+    let mut value = serde_json::to_value(artifacts).unwrap_or(Value::Null);
+    // Artifact indexes are bounded before presentation; durable artifact files
+    // remain losslessly available through the global output artifact.
+    attach_collection_budget(
+        &mut value,
+        "artifacts",
+        &format!("homeboy agent-task artifacts {}", quote_arg(&args.run_id)),
+        &format!(
+            "homeboy agent-task artifacts {} --output <path>",
+            quote_arg(&args.run_id)
+        ),
+    );
+    Ok((value, 0))
 }
 
 pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
@@ -460,6 +485,7 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
     let plan = agent_task_lifecycle::load_plan(&args.run_id).ok();
 
     let mut hydrated = Vec::new();
+    let mut total = 0;
     for (evidence_ref, task_id) in
         evidence_refs_with_tasks(&artifacts.evidence_refs, aggregate.as_ref())
     {
@@ -485,6 +511,12 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
             continue;
         }
 
+        total += 1;
+        // Count filtered refs without hydrating their payload once the shared
+        // collection budget is full.
+        if hydrated.len() >= OutputBudget::COLLECTION.max_items {
+            continue;
+        }
         hydrated.push(agent_task_service::hydrate_evidence_ref(
             &args.run_id,
             &evidence_ref,
@@ -494,32 +526,45 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
         ));
     }
 
-    Ok((
-        serde_json::to_value(AgentTaskEvidenceReport {
-            schema: "homeboy/agent-task-evidence/v1",
-            run_id: args.run_id,
-            filters: AgentTaskEvidenceFilters {
-                kind: args.kind,
-                task: args.task,
-                failure_only: args.failure_only,
-            },
-            count: hydrated.len(),
-            evidence: hydrated,
-        })
-        .unwrap_or(Value::Null),
-        0,
-    ))
+    let mut value = serde_json::to_value(AgentTaskEvidenceReport {
+        schema: "homeboy/agent-task-evidence/v1",
+        run_id: args.run_id.clone(),
+        filters: AgentTaskEvidenceFilters {
+            kind: args.kind,
+            task: args.task,
+            failure_only: args.failure_only,
+        },
+        count: total,
+        evidence_total: total,
+        evidence: hydrated,
+    })
+    .unwrap_or(Value::Null);
+    attach_collection_budget(
+        &mut value,
+        "evidence",
+        &format!("homeboy agent-task evidence {}", quote_arg(&args.run_id)),
+        &format!(
+            "homeboy agent-task evidence {} --output <path>",
+            quote_arg(&args.run_id)
+        ),
+    );
+    Ok((value, 0))
 }
 
 pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
     let record = agent_task_service::status(&args.run_id)?;
     let aggregate = completed_run_aggregate(&args.run_id).transpose()?;
     let mut hydrated_evidence = Vec::new();
+    let mut total_hydrated_evidence = 0;
     let mut nested_reasons = Vec::new();
 
     if let Some(aggregate) = aggregate.as_ref() {
         for outcome in &aggregate.outcomes {
             for evidence in &outcome.evidence_refs {
+                total_hydrated_evidence += 1;
+                if hydrated_evidence.len() >= OutputBudget::COLLECTION.max_items {
+                    continue;
+                }
                 if let Some(summary) =
                     agent_task_service::hydrate_evidence_summary(&outcome.task_id, evidence)
                 {
@@ -555,19 +600,63 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         .unwrap_or_default();
     let next_commands = diagnose_next_commands(&args.run_id);
 
-    Ok((
-        json!({
-            "schema": "homeboy/agent-task-diagnose/v1",
-            "run_id": record.run_id,
-            "state": record.state,
-            "root_cause": root_cause,
-            "causal_chain": causal_chain,
-            "missing_artifacts": missing_artifacts,
-            "hydrated_evidence": hydrated_evidence,
-            "next_commands": next_commands,
-        }),
-        0,
-    ))
+    let mut value = json!({
+        "schema": "homeboy/agent-task-diagnose/v1",
+        "run_id": record.run_id,
+        "state": record.state,
+        "root_cause": root_cause,
+        "causal_chain": causal_chain,
+        "missing_artifacts": missing_artifacts,
+        "hydrated_evidence": hydrated_evidence,
+        "hydrated_evidence_total": total_hydrated_evidence,
+        "next_commands": next_commands,
+    });
+    attach_collection_budget(
+        &mut value,
+        "hydrated_evidence",
+        &format!("homeboy agent-task diagnose {}", quote_arg(&args.run_id)),
+        &format!(
+            "homeboy agent-task diagnose {} --output <path>",
+            quote_arg(&args.run_id)
+        ),
+    );
+    Ok((value, 0))
+}
+
+/// Apply the shared output primitive to a JSON collection while retaining every
+/// command's established field names and schema.
+fn attach_collection_budget(
+    value: &mut Value,
+    field: &str,
+    continue_command: &str,
+    export_command: &str,
+) {
+    let Some(map) = value.as_object_mut() else {
+        return;
+    };
+    let values = map
+        .get(field)
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let total = map
+        .get(&format!("{field}_total"))
+        .or_else(|| map.get("total"))
+        .and_then(Value::as_u64)
+        .map(|count| count as usize)
+        .unwrap_or(values.len());
+    let (bounded, metadata) = budget_json_values(
+        values,
+        total,
+        OutputBudget::COLLECTION,
+        continue_command,
+        export_command,
+    );
+    map.insert(field.to_string(), Value::Array(bounded));
+    map.insert(
+        "output_budget".to_string(),
+        serde_json::to_value(metadata).unwrap_or(Value::Null),
+    );
 }
 
 pub(super) fn recover_runtime(args: RuntimeRecoverArgs) -> CmdResult<Value> {
@@ -827,6 +916,7 @@ struct AgentTaskEvidenceReport {
     run_id: String,
     filters: AgentTaskEvidenceFilters,
     count: usize,
+    evidence_total: usize,
     evidence: Vec<agent_task_service::AgentTaskHydratedEvidence>,
 }
 

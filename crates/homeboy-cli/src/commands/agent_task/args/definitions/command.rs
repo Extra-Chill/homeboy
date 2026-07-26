@@ -1,6 +1,11 @@
 use clap::{Args, Subcommand, ValueEnum};
 use homeboy::agents::agent_task_service::AgentTaskDiscoveryOptions;
 
+/// Agent-facing discovery defaults to a finite page. A caller can request a
+/// different page with `--limit`; full durable records remain available through
+/// focused status/artifact commands and `--output` artifacts.
+const DEFAULT_DISCOVERY_LIMIT: usize = 20;
+
 use super::super::super::prompts::AgentTaskPromptsArgs;
 use super::super::super::tool::AgentTaskToolArgs;
 use super::cook::{AgentTaskCookArgs, AgentTaskLoopArgs, PromotionProviderArgs};
@@ -138,17 +143,23 @@ pub struct LatestArgs {
 }
 impl From<ListArgs> for AgentTaskDiscoveryOptions {
     fn from(args: ListArgs) -> Self {
-        Self { limit: args.limit }
+        Self {
+            limit: Some(args.limit.unwrap_or(DEFAULT_DISCOVERY_LIMIT)),
+        }
     }
 }
 impl From<ActiveArgs> for AgentTaskDiscoveryOptions {
     fn from(args: ActiveArgs) -> Self {
-        Self { limit: args.limit }
+        Self {
+            limit: Some(args.limit.unwrap_or(DEFAULT_DISCOVERY_LIMIT)),
+        }
     }
 }
 impl From<LatestArgs> for AgentTaskDiscoveryOptions {
     fn from(args: LatestArgs) -> Self {
-        Self { limit: args.limit }
+        Self {
+            limit: Some(args.limit.unwrap_or(DEFAULT_DISCOVERY_LIMIT)),
+        }
     }
 }
 #[derive(Args, Debug)]

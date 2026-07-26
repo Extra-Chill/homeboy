@@ -37,9 +37,13 @@ pub struct RunsWatchArgs {
     /// Observation run id to watch until it reaches a terminal state.
     pub run_id: String,
     /// Maximum time to wait before giving up (e.g. `30m`, `2h`, `7d`).
-    /// Unbounded when omitted.
-    #[arg(long)]
-    pub timeout: Option<String>,
+    /// Defaults to five minutes; use `--forever` for an intentional indefinite watch.
+    #[arg(long, default_value = "5m", conflicts_with = "forever")]
+    pub timeout: String,
+    /// Keep watching without a time bound. This is explicit because streams are
+    /// otherwise finite by default.
+    #[arg(long, conflicts_with = "timeout")]
+    pub forever: bool,
     /// Delay between status polls (e.g. `2s`, `1m`).
     #[arg(long, default_value = "2s")]
     pub interval: String,
@@ -112,7 +116,9 @@ pub(super) struct WatchResult {
 
 pub fn watch_run(args: RunsWatchArgs) -> CmdResult<RunsOutput> {
     let interval = parse_duration(&args.interval)?;
-    let timeout = args.timeout.as_deref().map(parse_duration).transpose()?;
+    let timeout = (!args.forever)
+        .then(|| parse_duration(&args.timeout))
+        .transpose()?;
     let config = WatchConfig { interval, timeout };
 
     let store = ObservationStore::open_initialized()?;

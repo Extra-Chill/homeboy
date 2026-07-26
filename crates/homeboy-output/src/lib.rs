@@ -7,6 +7,109 @@
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
+// Progressive-disclosure output budgets
+// ============================================================================
+
+/// Stable presentation classes for read-side command output.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputPresentation {
+    CompactSummary,
+    BoundedCollection,
+    BoundedStream,
+    LosslessExport,
+}
+
+/// Finite defaults used by agent-facing readers unless an explicit export is
+/// requested. Commands may lower these values, but may not make defaults infinite.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OutputBudget {
+    pub max_items: usize,
+    pub max_bytes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_events: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_seconds: Option<u64>,
+}
+
+impl OutputBudget {
+    pub const COLLECTION: Self = Self {
+        max_items: 20,
+        max_bytes: 64 * 1024,
+        max_events: None,
+        max_seconds: None,
+    };
+    pub const STREAM: Self = Self {
+        max_items: 0,
+        max_bytes: 64 * 1024,
+        max_events: Some(200),
+        max_seconds: Some(300),
+    };
+}
+
+/// Additive, schema-stable disclosure metadata attached to a bounded payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OutputTruncation {
+    pub presentation: OutputPresentation,
+    pub total_items: usize,
+    pub returned_items: usize,
+    pub omitted_items: usize,
+    pub total_bytes: usize,
+    pub returned_bytes: usize,
+    pub omitted_bytes: usize,
+    pub truncated: bool,
+    pub continue_command: String,
+    pub export_command: String,
+}
+
+/// Apply an aggregate item and serialized-byte budget without changing the item
+/// schema. Callers can obtain `total_items` from indexed sources without
+/// hydrating every record, and use the exact continuation/export commands in the
+/// returned metadata.
+pub fn budget_json_values(
+    values: impl IntoIterator<Item = serde_json::Value>,
+    total_items: usize,
+    budget: OutputBudget,
+    continue_command: impl Into<String>,
+    export_command: impl Into<String>,
+) -> (Vec<serde_json::Value>, OutputTruncation) {
+    let mut returned = Vec::new();
+    let mut returned_bytes: usize = 0;
+    let mut observed_bytes: usize = 0;
+    for value in values {
+        let bytes = serde_json::to_vec(&value)
+            .map(|value| value.len())
+            .unwrap_or(0);
+        observed_bytes += bytes;
+        if returned.len() >= budget.max_items
+            || returned_bytes.saturating_add(bytes) > budget.max_bytes
+        {
+            continue;
+        }
+        returned_bytes += bytes;
+        returned.push(value);
+    }
+    let returned_items = returned.len();
+    let omitted_items = total_items.saturating_sub(returned_items);
+    let total_bytes = observed_bytes.max(returned_bytes);
+    (
+        returned,
+        OutputTruncation {
+            presentation: OutputPresentation::BoundedCollection,
+            total_items,
+            returned_items,
+            omitted_items,
+            total_bytes,
+            returned_bytes,
+            omitted_bytes: total_bytes.saturating_sub(returned_bytes),
+            truncated: omitted_items > 0 || total_bytes > returned_bytes,
+            continue_command: continue_command.into(),
+            export_command: export_command.into(),
+        },
+    )
+}
+
+// ============================================================================
 // Observation-backed Outputs
 // ============================================================================
 
@@ -387,6 +490,31 @@ impl<T: Serialize, E: Serialize + Default> Default for EntityCrudOutput<T, E> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn collection_budget_reports_adversarial_item_and_byte_truncation() {
+        let values = (0..100)
+            .map(|index| json!({ "id": index, "payload": "x".repeat(8 * 1024) }))
+            .collect::<Vec<_>>();
+        let (returned, metadata) = budget_json_values(
+            values,
+            100,
+            OutputBudget::COLLECTION,
+            "homeboy example list --limit 20",
+            "homeboy example list --output <path>",
+        );
+
+        assert!(returned.len() < 20);
+        assert_eq!(metadata.total_items, 100);
+        assert_eq!(metadata.returned_items, returned.len());
+        assert_eq!(metadata.omitted_items, 100 - returned.len());
+        assert!(metadata.truncated);
+        assert_eq!(metadata.continue_command, "homeboy example list --limit 20");
+        assert_eq!(
+            metadata.export_command,
+            "homeboy example list --output <path>"
+        );
+    }
 
     #[test]
     fn test_for_run() {
