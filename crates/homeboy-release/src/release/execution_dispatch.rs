@@ -208,15 +208,10 @@ pub(super) fn execute_release_plan_step(
             )
             .unwrap_or_else(|err| failed_result("github.release", "github.release", err)),
         )),
-        "cleanup" => {
-            if context.publish_failed {
-                return Ok(None);
-            }
-            Ok(Some(
-                executor::run_cleanup(context.component, &context.state)
-                    .unwrap_or_else(|err| failed_result("cleanup", "cleanup", err)),
-            ))
-        }
+        "cleanup" => Ok(Some(
+            executor::run_cleanup(context.component, &context.state)
+                .unwrap_or_else(|err| failed_result("cleanup", "cleanup", err)),
+        )),
         "post_release" => {
             let commands = step_config_string_array(step, "commands");
             Ok(Some(
@@ -229,6 +224,7 @@ pub(super) fn execute_release_plan_step(
             context.state.version.as_deref(),
             context.state.tag.as_deref(),
             &context.state.artifacts,
+            &context.state.package_owned_paths,
         ))),
         step_kind if step_kind.starts_with("publish.") => {
             let target = step_kind.strip_prefix("publish.").unwrap_or_default();
@@ -977,6 +973,120 @@ mod tests {
     }
 
     #[test]
+    fn package_cleanup_uses_invocation_ownership_and_restores_clean_preflight() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let repo = tempfile::tempdir().expect("repo");
+            std::fs::write(repo.path().join("plugin.php"), "<?php\n").expect("plugin");
+            run_in(repo.path(), &["git", "init", "-q"]);
+            configure_git_user(repo.path());
+            run_in(repo.path(), &["git", "add", "plugin.php"]);
+            run_in(repo.path(), &["git", "commit", "-qm", "Initial commit"]);
+            let preexisting = repo.path().join("fixture-previous.tgz");
+            std::fs::write(&preexisting, "operator artifact").expect("preexisting artifact");
+            let package = package_extension(
+                "mkdir -p build/stage; printf intermediate > build/stage/file; \
+                 printf package > fixture-1.2.3.tgz; \
+                 printf '[{\"path\":\"fixture-1.2.3.tgz\",\"type\":\"archive\"}]'",
+            );
+            homeboy_extension::save_manifest(&package).expect("save package extension");
+            let component = Component {
+                id: "fixture".to_string(),
+                local_path: repo.path().to_string_lossy().to_string(),
+                ..Component::default()
+            };
+            let options = ReleaseOptions::default();
+            let extensions = vec![package];
+            let mut context = ReleaseExecutionContext {
+                component: &component,
+                extensions: &extensions,
+                component_id: "fixture",
+                options: &options,
+                state: ReleaseState {
+                    version: Some("1.2.3".to_string()),
+                    ..ReleaseState::default()
+                },
+                publish_failed: false,
+            };
+
+            let package_result = execute_release_plan_step(&plan_step("package"), &mut context)
+                .expect("package dispatch")
+                .expect("package result");
+            assert_eq!(package_result.status, ReleaseStepStatus::Success);
+            assert_eq!(
+                context.state.package_owned_paths,
+                vec!["build".to_string(), "fixture-1.2.3.tgz".to_string()]
+            );
+
+            let cleanup = execute_release_plan_step(&plan_step("cleanup"), &mut context)
+                .expect("cleanup dispatch")
+                .expect("cleanup result");
+            assert_eq!(cleanup.status, ReleaseStepStatus::Success);
+            assert!(!repo.path().join("build").exists());
+            assert!(!repo.path().join("fixture-1.2.3.tgz").exists());
+            assert_eq!(
+                std::fs::read_to_string(&preexisting).expect("preexisting remains"),
+                "operator artifact"
+            );
+
+            std::fs::remove_file(preexisting).expect("remove test fixture");
+            let preflight =
+                execute_release_plan_step(&plan_step("preflight.working_tree"), &mut context)
+                    .expect("preflight dispatch")
+                    .expect("preflight result");
+            assert_eq!(preflight.status, ReleaseStepStatus::Success);
+        });
+    }
+
+    #[test]
+    fn failed_package_retains_outputs_without_claiming_cleanup_ownership() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let repo = tempfile::tempdir().expect("repo");
+            std::fs::write(repo.path().join("plugin.php"), "<?php\n").expect("plugin");
+            run_in(repo.path(), &["git", "init", "-q"]);
+            configure_git_user(repo.path());
+            run_in(repo.path(), &["git", "add", "plugin.php"]);
+            run_in(repo.path(), &["git", "commit", "-qm", "Initial commit"]);
+            let package = package_extension(
+                "mkdir -p build; printf diagnostic > build/output; \
+                 printf partial > fixture-1.2.3.tgz; printf failed >&2; exit 1",
+            );
+            homeboy_extension::save_manifest(&package).expect("save package extension");
+            let component = Component {
+                id: "fixture".to_string(),
+                local_path: repo.path().to_string_lossy().to_string(),
+                ..Component::default()
+            };
+            let options = ReleaseOptions::default();
+            let extensions = vec![package];
+            let mut context = ReleaseExecutionContext {
+                component: &component,
+                extensions: &extensions,
+                component_id: "fixture",
+                options: &options,
+                state: ReleaseState {
+                    version: Some("1.2.3".to_string()),
+                    ..ReleaseState::default()
+                },
+                publish_failed: false,
+            };
+
+            let result = execute_release_plan_step(&plan_step("package"), &mut context)
+                .expect("package dispatch")
+                .expect("package result");
+
+            assert_eq!(result.status, ReleaseStepStatus::Failed);
+            assert!(result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("failed"));
+            assert!(context.state.package_owned_paths.is_empty());
+            assert!(repo.path().join("build/output").is_file());
+            assert!(repo.path().join("fixture-1.2.3.tgz").is_file());
+        });
+    }
+
+    #[test]
     fn final_package_completeness_failure_stops_before_publication() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let repo = tempfile::tempdir().expect("repo");
@@ -1268,7 +1378,7 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_release_plan_step() {
+    fn cleanup_runs_after_publish_failure_because_durable_artifacts_are_recoverable() {
         let component = Component {
             id: "fixture".to_string(),
             local_path: "/tmp/fixture".to_string(),
@@ -1288,8 +1398,10 @@ mod tests {
         };
         let step = plan_step("cleanup");
 
-        let result = execute_release_plan_step(&step, &mut context).expect("dispatch");
-        assert!(result.is_none());
+        let result = execute_release_plan_step(&step, &mut context)
+            .expect("dispatch")
+            .expect("cleanup result");
+        assert_eq!(result.status, ReleaseStepStatus::Success);
     }
 
     #[test]

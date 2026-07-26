@@ -181,16 +181,6 @@ pub(in crate::release) fn build_release_steps(
                 StepConfig::new(),
             ));
         }
-
-        if !options.pipeline.deploy {
-            steps.push(ready_step(
-                "cleanup",
-                "cleanup",
-                "Clean up release artifacts",
-                publish_step_ids.clone(),
-                StepConfig::new(),
-            ));
-        }
     } else if options.pipeline.skip_publish && !publish_targets.is_empty() {
         homeboy_core::log_status!(
             "release",
@@ -198,16 +188,35 @@ pub(in crate::release) fn build_release_steps(
         );
     }
 
+    if package_step_needed && !options.pipeline.deploy {
+        let cleanup_needs = if !publish_step_ids.is_empty() {
+            publish_step_ids.clone()
+        } else if github_release_needed {
+            vec!["github.release".to_string()]
+        } else {
+            vec!["git.push".to_string()]
+        };
+        steps.push(ready_step(
+            "cleanup",
+            "cleanup",
+            "Clean up release artifacts",
+            cleanup_needs,
+            StepConfig::new(),
+        ));
+    }
+
     let post_release_hooks = homeboy_core::engine::hooks::resolve_hooks(
         component,
         homeboy_core::engine::hooks::events::POST_RELEASE,
     )?;
     if !post_release_hooks.is_empty() {
-        let post_release_needs = if !options.pipeline.skip_publish && !publish_targets.is_empty() {
+        let post_release_needs = if package_step_needed && !options.pipeline.deploy {
+            vec!["cleanup".to_string()]
+        } else if !options.pipeline.skip_publish && !publish_targets.is_empty() {
             if options.pipeline.deploy {
                 publish_step_ids.clone()
             } else {
-                vec!["cleanup".to_string()]
+                vec!["git.push".to_string()]
             }
         } else {
             vec!["git.push".to_string()]
@@ -254,6 +263,8 @@ fn build_head_release_steps(
 ) -> Result<Vec<PlanStep>> {
     let mut steps = Vec::new();
     let mut artifact_need = "preflight.remote_sync".to_string();
+    let package_step_needed = options.pipeline.from_artifacts.is_none()
+        && head_package_step_needed(component, extensions, publish_targets, options);
 
     if !publish_targets.is_empty()
         && !options.pipeline.skip_publish
@@ -276,7 +287,7 @@ fn build_head_release_steps(
             string_config("dir", dir),
         ));
         artifact_need = "artifacts.inventory".to_string();
-    } else if head_package_step_needed(component, extensions, publish_targets, options) {
+    } else if package_step_needed {
         steps.push(ready_step(
             "package",
             "package",
@@ -318,16 +329,23 @@ fn build_head_release_steps(
                 StepConfig::new(),
             ));
         }
+    }
 
-        if !options.pipeline.deploy {
-            steps.push(ready_step(
-                "cleanup",
-                "cleanup",
-                "Clean up release artifacts",
-                publish_step_ids.clone(),
-                StepConfig::new(),
-            ));
-        }
+    if package_step_needed && !options.pipeline.deploy {
+        let cleanup_needs = if !publish_step_ids.is_empty() {
+            publish_step_ids.clone()
+        } else if github_release_needed(component, options) {
+            vec!["github.release".to_string()]
+        } else {
+            vec![artifact_need.clone()]
+        };
+        steps.push(ready_step(
+            "cleanup",
+            "cleanup",
+            "Clean up release artifacts",
+            cleanup_needs,
+            StepConfig::new(),
+        ));
     }
 
     let post_release_hooks = homeboy_core::engine::hooks::resolve_hooks(
@@ -335,11 +353,13 @@ fn build_head_release_steps(
         homeboy_core::engine::hooks::events::POST_RELEASE,
     )?;
     if !post_release_hooks.is_empty() {
-        let post_release_needs = if !options.pipeline.skip_publish && !publish_targets.is_empty() {
+        let post_release_needs = if package_step_needed && !options.pipeline.deploy {
+            vec!["cleanup".to_string()]
+        } else if !options.pipeline.skip_publish && !publish_targets.is_empty() {
             if options.pipeline.deploy {
                 publish_step_ids.clone()
             } else {
-                vec!["cleanup".to_string()]
+                vec![artifact_need.clone()]
             }
         } else if github_release_needed(component, options) {
             vec!["github.release".to_string()]

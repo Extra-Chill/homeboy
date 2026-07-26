@@ -36,8 +36,15 @@ pub(super) fn run_deployment_step(
     expected_version: Option<&str>,
     released_tag: Option<&str>,
     artifacts: &[ReleaseArtifact],
+    package_owned_paths: &[String],
 ) -> ReleaseStepResult {
-    let deployment = execute_deployment(component, expected_version, released_tag, artifacts);
+    let deployment = execute_deployment(
+        component,
+        expected_version,
+        released_tag,
+        artifacts,
+        package_owned_paths,
+    );
     let deploy_failed = deployment.summary.failed > 0;
 
     ReleaseStepResult {
@@ -69,13 +76,14 @@ fn execute_deployment(
     expected_version: Option<&str>,
     released_tag: Option<&str>,
     artifacts: &[ReleaseArtifact],
+    package_owned_paths: &[String],
 ) -> ReleaseDeploymentResult {
     let component_id = &component.id;
     let local_path = &component.local_path;
     let projects = release_deploy_targets(component_id);
 
     if projects.is_empty() {
-        cleanup_release_artifacts(local_path, artifacts);
+        cleanup_release_artifacts(local_path, package_owned_paths);
         return ReleaseDeploymentResult {
             projects: vec![],
             summary: ReleaseDeploymentSummary::default(),
@@ -108,9 +116,14 @@ fn execute_deployment(
         Ok(result) => {
             if result.summary.failed > 0 {
                 if let Some(run_id) = result.deploy_run_id.as_deref() {
-                    if let Err(error) =
-                        save_recovery(component, expected_version, &projects, &config, run_id)
-                    {
+                    if let Err(error) = save_recovery(
+                        component,
+                        expected_version,
+                        &projects,
+                        &config,
+                        run_id,
+                        package_owned_paths,
+                    ) {
                         return failed_deployment(
                             &projects,
                             format!(
@@ -169,7 +182,7 @@ fn execute_deployment(
     };
 
     if should_cleanup_release_artifacts(&deployment) {
-        cleanup_release_artifacts(local_path, artifacts);
+        cleanup_release_artifacts(local_path, package_owned_paths);
     } else {
         homeboy_core::log_status!(
             "release",
@@ -385,6 +398,10 @@ struct DeploymentRecovery {
     artifact: PreparedDeployArtifact,
     projection: PreparedDeployProjection,
     deploy_run_id: String,
+    #[serde(default)]
+    component_path: String,
+    #[serde(default)]
+    package_owned_paths: Vec<String>,
 }
 
 fn recovery_path(component_id: &str) -> Result<std::path::PathBuf> {
@@ -399,6 +416,7 @@ fn save_recovery(
     projects: &[String],
     config: &DeployConfig,
     deploy_run_id: &str,
+    package_owned_paths: &[String],
 ) -> Result<()> {
     let record = DeploymentRecovery {
         component_id: component.id.clone(),
@@ -413,6 +431,8 @@ fn save_recovery(
             .clone()
             .expect("release deploy has projection"),
         deploy_run_id: deploy_run_id.to_string(),
+        component_path: component.local_path.clone(),
+        package_owned_paths: package_owned_paths.to_vec(),
     };
     let path = recovery_path(&component.id)?;
     fs::create_dir_all(path.parent().expect("recovery path parent"))
@@ -480,6 +500,9 @@ pub(super) fn resume_deployment(component_id: &str) -> Result<Option<ReleaseDepl
         },
     };
     if deployment.summary.failed == 0 {
+        if !record.component_path.is_empty() {
+            cleanup_release_artifacts(&record.component_path, &record.package_owned_paths);
+        }
         remove_recovery(component_id)?;
     }
     Ok(Some(deployment))
@@ -512,13 +535,20 @@ fn release_deploy_targets(component_id: &str) -> Vec<String> {
     }
 }
 
-fn cleanup_release_artifacts(local_path: &str, artifacts: &[ReleaseArtifact]) {
-    for path in release_cleanup_paths(local_path, artifacts) {
+fn cleanup_release_artifacts(local_path: &str, package_owned_paths: &[String]) {
+    for path in release_cleanup_paths(local_path, package_owned_paths) {
         if !path.exists() {
             continue;
         }
 
-        if let Err(error) = std::fs::remove_dir_all(&path) {
+        let result = std::fs::symlink_metadata(&path).and_then(|metadata| {
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            }
+        });
+        if let Err(error) = result {
             homeboy_core::log_status!(
                 "release",
                 "Warning: failed to clean up {}: {}",
@@ -705,6 +735,7 @@ mod tests {
             None,
             None,
             &[],
+            &[],
         );
 
         assert_eq!(result.id, "deploy");
@@ -736,6 +767,7 @@ mod tests {
             None,
             None,
             &artifacts,
+            &["build".to_string()],
         );
 
         assert_eq!(result.status, ReleaseStepStatus::Success);
@@ -851,6 +883,10 @@ mod tests {
                 artifact_type: None,
                 platform: None,
             };
+            std::fs::create_dir_all(source.join("build")).expect("package build directory");
+            std::fs::write(source.join("build/intermediate"), "build").expect("build output");
+            std::fs::write(source.join("fixture-1.2.4.tgz"), "package").expect("package output");
+            let package_owned_paths = vec!["build".to_string(), "fixture-1.2.4.tgz".to_string()];
             let component = Component {
                 id: "fixture".to_string(),
                 local_path: source.display().to_string(),
@@ -902,7 +938,13 @@ mod tests {
                 .expect("save project");
             }
 
-            let first = run_deployment_step(&component, Some("1.2.4"), None, &[artifact]);
+            let first = run_deployment_step(
+                &component,
+                Some("1.2.4"),
+                None,
+                &[artifact],
+                &package_owned_paths,
+            );
             assert_eq!(first.status, ReleaseStepStatus::Failed);
             let first_deployment = first
                 .data
@@ -924,6 +966,8 @@ mod tests {
             assert!(super::recovery_path("fixture")
                 .expect("recovery path")
                 .exists());
+            assert!(source.join("build/intermediate").is_file());
+            assert!(source.join("fixture-1.2.4.tgz").is_file());
 
             // A process restart reloads the checkpoint, not an in-memory release plan.
             // The completed target is now invalid: success proves the resumed lifecycle skips it.
@@ -985,6 +1029,8 @@ mod tests {
                 )
             );
             assert!(retry_target.join("plugins/retry/plugin.txt").exists());
+            assert!(!source.join("build").exists());
+            assert!(!source.join("fixture-1.2.4.tgz").exists());
             assert_eq!(run_git(&source, &["tag", "--list"]), "v1.2.4");
             assert_eq!(
                 run_git(&source, &["rev-parse", "v1.2.4^{commit}"]),

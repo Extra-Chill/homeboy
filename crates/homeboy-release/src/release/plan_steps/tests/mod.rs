@@ -556,7 +556,10 @@ fn skip_publish_with_package_provider_still_packages_before_github_release() {
     assert_eq!(steps[step_index(&ids, "git.tag")].needs, vec!["package"]);
     assert_eq!(steps[github_release_index].needs, vec!["git.push"]);
     assert!(!ids.contains(&"publish.artifact-packager"));
-    assert!(!ids.contains(&"cleanup"));
+    assert_eq!(
+        steps[step_index(&ids, "cleanup")].needs,
+        vec!["github.release"]
+    );
 }
 
 #[test]
@@ -628,8 +631,9 @@ fn head_skip_publish_with_package_provider_still_packages_before_github_release(
     .expect("steps");
 
     let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
-    assert_eq!(ids, vec!["package", "github.release"]);
+    assert_eq!(ids, vec!["package", "github.release", "cleanup"]);
     assert_eq!(steps[1].needs, vec!["package"]);
+    assert_eq!(steps[2].needs, vec!["github.release"]);
 }
 
 #[test]
@@ -665,6 +669,10 @@ fn component_build_artifact_packages_before_github_release_without_extension() {
     assert!(step_index(&ids, "preflight.package") < step_index(&ids, "package"));
     assert!(step_index(&ids, "package") < step_index(&ids, "github.release"));
     assert_eq!(steps[step_index(&ids, "git.tag")].needs, vec!["package"]);
+    assert_eq!(
+        steps[step_index(&ids, "cleanup")].needs,
+        vec!["github.release"]
+    );
 }
 
 #[test]
@@ -701,8 +709,9 @@ fn head_component_build_artifact_packages_before_github_release_without_extensio
     .expect("steps");
 
     let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
-    assert_eq!(ids, vec!["package", "github.release"]);
+    assert_eq!(ids, vec!["package", "github.release", "cleanup"]);
     assert_eq!(steps[1].needs, vec!["package"]);
+    assert_eq!(steps[2].needs, vec!["github.release"]);
 }
 
 #[test]
@@ -868,12 +877,7 @@ fn head_release_plan_skips_mutation_steps_and_uses_existing_artifacts() {
     assert!(!ids.contains(&"git.push"));
     assert_eq!(
         ids,
-        vec![
-            "artifacts.inventory",
-            "github.release",
-            "publish.wordpress",
-            "cleanup"
-        ]
+        vec!["artifacts.inventory", "github.release", "publish.wordpress"]
     );
     assert_eq!(
         steps[0].inputs.get("dir").and_then(|value| value.as_str()),
