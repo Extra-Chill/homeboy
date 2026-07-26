@@ -879,48 +879,52 @@ fn persist_lab_staging_recipe_for_transport(
 }
 
 fn ensure_current_controller_daemon() -> Result<homeboy_core::daemon::DaemonStartResult> {
-    let expected = homeboy_core::build_identity::current().display;
-    for _ in 0..2 {
-        let daemon = homeboy_core::daemon::ensure_running(homeboy_core::daemon::DEFAULT_ADDR)
-            .map_err(|mut error| {
-                // Daemon admission happens before the controller job or any
-                // provider dispatch. Preserve the source invocation as the
-                // only safe replay after its one managed startup recovery.
-                error.details["lab_daemon_admission"] = json!({
-                    "phase": "pre_provider",
-                    "provider_budget_consumed": false,
-                    "preserved_invocation": preserved_invocation(),
-                });
-                error
-            })?;
-        let status = homeboy_core::daemon::read_status()?;
-        let Some(state) = status.state else {
-            return Err(Error::internal_unexpected(
-                "controller daemon did not publish a lease after startup",
-            ));
-        };
-        if state.build_identity.display == expected {
-            return Ok(daemon);
-        }
-        if !status.active_job_recovery_evidence.is_empty() {
-            return Err(Error::validation_invalid_argument(
-                "controller_daemon",
-                "controller daemon build does not match the submitting Homeboy binary while durable jobs are active",
-                Some(state.build_identity.display),
-                Some(vec!["Wait for the listed controller jobs to finish before retrying the Lab handoff.".to_string()]),
-            ));
-        }
+    (|| {
+        let expected = homeboy_core::build_identity::current().display;
+        for _ in 0..2 {
+            let daemon = homeboy_core::daemon::ensure_running(homeboy_core::daemon::DEFAULT_ADDR)?;
+            let status = homeboy_core::daemon::read_status()?;
+            let Some(state) = status.state else {
+                return Err(Error::internal_unexpected(
+                    "controller daemon did not publish a lease after startup",
+                ));
+            };
+            if state.build_identity.display == expected {
+                return Ok(daemon);
+            }
+            if !status.active_job_recovery_evidence.is_empty() {
+                return Err(Error::validation_invalid_argument(
+                    "controller_daemon",
+                    "controller daemon build does not match the submitting Homeboy binary while durable jobs are active",
+                    Some(state.build_identity.display),
+                    Some(vec!["Wait for the listed controller jobs to finish before retrying the Lab handoff.".to_string()]),
+                ));
+            }
 
-        // A private staging recipe is a typed protocol payload. Replace an idle
-        // stale daemon before it can read a newer attachment with an older schema.
-        homeboy_core::daemon::stop_for_lease(&state.lease_id)?;
-    }
-    Err(Error::validation_invalid_argument(
-        "controller_daemon",
-        "controller daemon did not converge to the submitting Homeboy build before Lab staging admission",
-        Some(expected),
-        None,
-    ))
+            // A private staging recipe is a typed protocol payload. Replace an idle
+            // stale daemon before it can read a newer attachment with an older schema.
+            homeboy_core::daemon::stop_for_lease(&state.lease_id)?;
+        }
+        Err(Error::validation_invalid_argument(
+            "controller_daemon",
+            "controller daemon did not converge to the submitting Homeboy build before Lab staging admission",
+            Some(expected),
+            None,
+        ))
+    })()
+    .map_err(lab_daemon_admission_error)
+}
+
+fn lab_daemon_admission_error(mut error: Error) -> Error {
+    // Daemon admission happens before the controller job or any provider
+    // dispatch. Preserve the source invocation as the only safe replay after
+    // its one managed startup recovery.
+    error.details["lab_daemon_admission"] = json!({
+        "phase": "pre_provider",
+        "provider_budget_consumed": false,
+        "preserved_invocation": preserved_invocation(),
+    });
+    error
 }
 
 /// Controller-owned admission for a detached agent-task attempt.
@@ -4634,6 +4638,30 @@ mod tests {
         assert_eq!(
             error.details["homeboy_handoff_identity"]["executed_command_build_identity"],
             serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn daemon_admission_errors_preserve_the_pre_provider_replay_boundary() {
+        let error = lab_daemon_admission_error(Error::validation_invalid_argument(
+            "controller_daemon",
+            "lease publication failed",
+            None,
+            None,
+        ));
+
+        assert_eq!(
+            error.details["lab_daemon_admission"]["phase"],
+            "pre_provider"
+        );
+        assert_eq!(
+            error.details["lab_daemon_admission"]["provider_budget_consumed"],
+            false
+        );
+        assert!(
+            error.details["lab_daemon_admission"]["preserved_invocation"]
+                .as_str()
+                .is_some_and(|invocation| !invocation.is_empty())
         );
     }
 
