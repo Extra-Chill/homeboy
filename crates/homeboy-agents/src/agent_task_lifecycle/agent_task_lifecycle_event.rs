@@ -54,14 +54,17 @@ pub fn is_agent_task_run_plan_envelope(value: &serde_json::Value) -> bool {
     let Some(data) = value.get("data") else {
         return false;
     };
-    data.get("schema").and_then(serde_json::Value::as_str)
-        == Some("homeboy/agent-task-aggregate/v1")
-        || data.get("plan_id").is_some()
-        || data.get("aggregate").is_some_and(|aggregate| {
-            aggregate.get("schema").and_then(serde_json::Value::as_str)
-                == Some("homeboy/agent-task-aggregate/v1")
-                || aggregate.get("plan_id").is_some()
-        })
+    is_authoritative_agent_task_aggregate(data)
+        || data
+            .get("aggregate")
+            .is_some_and(is_authoritative_agent_task_aggregate)
+}
+
+fn is_authoritative_agent_task_aggregate(value: &serde_json::Value) -> bool {
+    value.get("view").and_then(serde_json::Value::as_str) != Some("summary")
+        && (value.get("schema").and_then(serde_json::Value::as_str)
+            == Some("homeboy/agent-task-aggregate/v1")
+            || value.get("plan_id").is_some())
 }
 
 pub fn agent_task_run_plan_lifecycle_event_from_job_events(
@@ -208,28 +211,19 @@ pub fn agent_task_run_plan_lifecycle_event_from_workload_result(
 /// instead of treating a valid aggregate as opaque terminal metadata.
 fn agent_task_aggregate_from_terminal_result(
     value: &serde_json::Value,
-    allow_compact_summary: bool,
+    _allow_compact_summary: bool,
 ) -> Result<Option<AgentTaskAggregate>> {
     const MAX_ENVELOPE_DEPTH: usize = 8;
 
     let mut current = value;
     for _ in 0..MAX_ENVELOPE_DEPTH {
         if current.get("view").and_then(serde_json::Value::as_str) == Some("summary") {
-            if allow_compact_summary {
-                if let Some(aggregate) = agent_task_aggregate_from_compact_summary(current)? {
-                    return Ok(Some(aggregate));
-                }
-            } else {
-                return Ok(None);
-            }
+            return Ok(None);
         }
         if let Some(aggregate) = agent_task_aggregate_from_value(current) {
             return Ok(Some(aggregate));
         }
-        if current.get("schema").and_then(serde_json::Value::as_str)
-            == Some("homeboy/agent-task-aggregate/v1")
-            || current.get("plan_id").is_some()
-        {
+        if is_authoritative_agent_task_aggregate(current) {
             return serde_json::from_value(current.clone())
                 .map(Some)
                 .map_err(|error| {
@@ -289,96 +283,8 @@ fn persisted_result_matches_run_plan(result: &serde_json::Value, run_id: &str) -
             .any(|args| args[0] == "--record-run-id" && args[1] == run_id)
 }
 
-fn agent_task_aggregate_from_compact_summary(
-    value: &serde_json::Value,
-) -> Result<Option<AgentTaskAggregate>> {
-    const COMPACT_REF_LIMIT: usize = 12;
-    const COMPACT_TEXT_LIMIT: usize = 512;
-
-    if value.get("schema").and_then(serde_json::Value::as_str)
-        != Some("homeboy/agent-task-aggregate/v1")
-        || value.get("view").and_then(serde_json::Value::as_str) != Some("summary")
-    {
-        return Ok(None);
-    }
-    if value
-        .get("tasks_omitted")
-        .and_then(serde_json::Value::as_u64)
-        != Some(0)
-    {
-        return Err(Error::internal_unexpected(
-            "cannot recover a truncated Lab terminal agent-task summary",
-        ));
-    }
-    let Some(tasks) = value.get("tasks").and_then(serde_json::Value::as_array) else {
-        return Ok(None);
-    };
-    for task in tasks {
-        let refs_are_bounded = ["artifacts", "evidence_refs"].into_iter().all(|field| {
-            task.get(field)
-                .and_then(serde_json::Value::as_array)
-                .is_none_or(|items| items.len() < COMPACT_REF_LIMIT)
-        });
-        let retained_text_is_bounded = task
-            .get("summary")
-            .and_then(serde_json::Value::as_str)
-            .is_none_or(|text| text.chars().count() <= COMPACT_TEXT_LIMIT)
-            && ["artifacts", "evidence_refs"].into_iter().all(|field| {
-                task.get(field)
-                    .and_then(serde_json::Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .flat_map(|item| item.as_object().into_iter().flat_map(|item| item.values()))
-                    .filter_map(serde_json::Value::as_str)
-                    .all(|text| text.chars().count() <= COMPACT_TEXT_LIMIT)
-            });
-        if !refs_are_bounded || !retained_text_is_bounded {
-            return Err(Error::internal_unexpected(
-                "cannot recover a potentially truncated Lab terminal agent-task summary",
-            ));
-        }
-    }
-    let mut canonical = value.clone();
-    let Some(canonical) = canonical.as_object_mut() else {
-        return Ok(None);
-    };
-    canonical.insert(
-        "outcomes".to_string(),
-        serde_json::Value::Array(tasks.clone()),
-    );
-    for key in [
-        "view",
-        "tasks",
-        "tasks_omitted",
-        "failure_reasons",
-        "run_id",
-        "full_command",
-        "evidence_command",
-    ] {
-        canonical.remove(key);
-    }
-    serde_json::from_value::<AgentTaskAggregate>(serde_json::Value::Object(canonical.clone()))
-        .map(|mut aggregate| {
-            for outcome in &mut aggregate.outcomes {
-                outcome.metadata = serde_json::json!({
-                    "terminal_recovery": "authenticated_compact_summary",
-                });
-            }
-            Some(aggregate)
-        })
-        .map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("hydrate authenticated compact Lab terminal agent-task aggregate".to_string()),
-            )
-        })
-}
-
 fn agent_task_aggregate_from_value(value: &serde_json::Value) -> Option<AgentTaskAggregate> {
-    if value.get("schema").and_then(serde_json::Value::as_str)
-        == Some("homeboy/agent-task-aggregate/v1")
-        || value.get("plan_id").is_some()
-    {
+    if is_authoritative_agent_task_aggregate(value) {
         return serde_json::from_value(value.clone()).ok();
     }
     None
@@ -592,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_command_result_stdout_recovers_authenticated_compact_aggregate() {
+    fn persisted_compact_aggregate_is_not_an_authoritative_terminal_result() {
         let stdout = format!(
             "HOMEBOY_RUNNER_PROGRESS {{\"phase\":\"finished\"}}\n{}",
             serde_json::json!({
@@ -637,16 +543,9 @@ mod tests {
             "fc3215cb-e657-485b-9887-96deaf0d5c5a",
             "cook-ssi-510-after-9849-v5-attempt-1-4f0b66a4",
         )
-        .expect("command-result stdout recovery")
-        .expect("agent-task lifecycle event");
+        .expect("compact summary detection");
 
-        assert_eq!(event.aggregate.outcomes.len(), 1);
-        let patch = &event.aggregate.outcomes[0].artifacts[0];
-        assert_eq!(patch.size_bytes, Some(12_704));
-        assert_eq!(
-            patch.sha256.as_deref(),
-            Some("b86157f2c3735b453880c486455b263dfdbd8e77541cb5846b89754065fc9d9a")
-        );
+        assert!(event.is_none());
     }
 
     #[test]
@@ -682,61 +581,5 @@ mod tests {
         .expect("mismatched compact aggregate is ignored");
 
         assert!(event.is_none());
-    }
-
-    #[test]
-    fn authenticated_compact_aggregate_rejects_ambiguous_reference_truncation() {
-        let artifacts = (0..12)
-            .map(|index| {
-                serde_json::json!({
-                    "id": format!("artifact-{index}"),
-                    "kind": "patch",
-                })
-            })
-            .collect::<Vec<_>>();
-        let summary = serde_json::json!({
-            "schema": "homeboy/agent-task-aggregate/v1",
-            "view": "summary",
-            "plan_id": "plan-x",
-            "status": "succeeded",
-            "totals": { "skipped": 0, "succeeded": 1, "failed": 0 },
-            "tasks": [{
-                "task_id": "task-x",
-                "status": "succeeded",
-                "artifacts": artifacts,
-            }],
-            "tasks_omitted": 0,
-        });
-
-        let error = agent_task_aggregate_from_terminal_result(&summary, true)
-            .expect_err("a list at the compact cap may have omitted references");
-
-        assert!(error.message.contains("potentially truncated"));
-    }
-
-    #[test]
-    fn authenticated_compact_aggregate_rejects_bounded_reference_text() {
-        let summary = serde_json::json!({
-            "schema": "homeboy/agent-task-aggregate/v1",
-            "view": "summary",
-            "plan_id": "plan-x",
-            "status": "succeeded",
-            "totals": { "skipped": 0, "succeeded": 1, "failed": 0 },
-            "tasks": [{
-                "task_id": "task-x",
-                "status": "succeeded",
-                "artifacts": [{
-                    "id": "patch",
-                    "kind": "patch",
-                    "url": format!("{}...", "x".repeat(512)),
-                }],
-            }],
-            "tasks_omitted": 0,
-        });
-
-        let error = agent_task_aggregate_from_terminal_result(&summary, true)
-            .expect_err("bounded artifact text is not authoritative evidence");
-
-        assert!(error.message.contains("potentially truncated"));
     }
 }

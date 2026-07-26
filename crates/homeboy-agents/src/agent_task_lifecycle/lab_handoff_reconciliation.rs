@@ -325,7 +325,12 @@ pub fn run_owes_candidate_follow_up(run_id: &str) -> Result<bool> {
                 .metadata
                 .get("candidate_preserved")
                 .and_then(Value::as_bool)
-                == Some(true)),
+                == Some(true)
+            || record
+                .metadata
+                .pointer("/artifact_projection/status")
+                .and_then(Value::as_str)
+                == Some("pending")),
         Err(_) => Ok(false),
     }
 }

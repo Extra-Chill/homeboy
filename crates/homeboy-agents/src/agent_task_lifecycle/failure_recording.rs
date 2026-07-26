@@ -654,6 +654,7 @@ pub(crate) fn record_terminal_artifact_projection(
     record: &mut AgentTaskRunRecord,
     aggregate: &AgentTaskAggregate,
 ) -> Result<()> {
+    let recovery_command = format!("homeboy agent-task status {}", record.run_id);
     if record.runner_id().is_none() && aggregate_has_runner_backed_actionable_patch(aggregate) {
         match runner_id_from_artifact_provenance(aggregate) {
             Ok(runner_id) => {
@@ -664,7 +665,14 @@ pub(crate) fn record_terminal_artifact_projection(
             Err(error) => {
                 record.ensure_metadata_object().insert(
                     "artifact_projection".to_string(),
-                    json!({ "status": "pending", "error": error.message }),
+                    json!({
+                        "status": "pending",
+                        "error": error.message,
+                        "recovery_action": {
+                            "kind": "fetch_and_reconcile",
+                            "command": recovery_command,
+                        },
+                    }),
                 );
                 return store::write_record(record);
             }
@@ -680,7 +688,14 @@ pub(crate) fn record_terminal_artifact_projection(
         Err(error) => {
             record.ensure_metadata_object().insert(
                 "artifact_projection".to_string(),
-                json!({ "status": "pending", "error": error.message }),
+                json!({
+                    "status": "pending",
+                    "error": error.message,
+                    "recovery_action": {
+                        "kind": "fetch_and_reconcile",
+                        "command": recovery_command,
+                    },
+                }),
             );
         }
     }
@@ -882,7 +897,7 @@ pub(crate) fn terminal_artifact_projection_is_verified(
 ) -> Result<bool> {
     for outcome in &aggregate.outcomes {
         for artifact in &outcome.artifacts {
-            if crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact) {
+            if requires_durable_lab_projection(artifact) {
                 if artifact.path.is_none()
                     || artifact.size_bytes.is_none()
                     || artifact.sha256.is_none()
@@ -1191,21 +1206,15 @@ pub(crate) fn project_terminal_artifacts(
                         let remote_ref = homeboy_core::execution_contract::EXECUTION_CONTRACT
                             .artifacts
                             .runner_artifact_ref(runner_id, &record.run_id, &logical_id);
-                        let mirror_result =
-                            if crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(
-                                artifact,
-                            ) {
-                                (|| -> Result<()> {
-                                    let mirror =
-                                        tempfile::NamedTempFile::new().map_err(|error| {
-                                            Error::internal_io(
-                                                error.to_string(),
-                                                Some(
-                                                    "create controller artifact mirror".to_string(),
-                                                ),
-                                            )
-                                        })?;
-                                    let download =
+                        let mirror_result = if requires_durable_lab_projection(artifact) {
+                            (|| -> Result<()> {
+                                let mirror = tempfile::NamedTempFile::new().map_err(|error| {
+                                    Error::internal_io(
+                                        error.to_string(),
+                                        Some("create controller artifact mirror".to_string()),
+                                    )
+                                })?;
+                                let download =
                                 homeboy_core::observation::runs_service::runner_evidence::with_runner_evidence(
                                     |p| {
                                         p.download_remote_artifact(
@@ -1214,28 +1223,23 @@ pub(crate) fn project_terminal_artifacts(
                                         )
                                     },
                                 )?;
-                                    let expected_size = artifact.size_bytes.expect("checked above");
-                                    let expected_sha256 =
-                                        artifact.sha256.as_deref().expect("checked above");
-                                    let actual_size = std::fs::metadata(&download.output_path)
-                                        .map_err(|error| {
-                                            Error::internal_io(
-                                                error.to_string(),
-                                                Some(
-                                                    "inspect controller artifact mirror"
-                                                        .to_string(),
-                                                ),
-                                            )
-                                        })?
-                                        .len();
-                                    let actual_sha256 =
-                                        homeboy_core::artifact_metadata::sha256_file(
-                                            &download.output_path,
-                                        )?;
-                                    if actual_size != expected_size
-                                        || actual_sha256 != expected_sha256
-                                    {
-                                        return Err(Error::validation_invalid_argument(
+                                let expected_size = artifact.size_bytes.expect("checked above");
+                                let expected_sha256 =
+                                    artifact.sha256.as_deref().expect("checked above");
+                                let actual_size = std::fs::metadata(&download.output_path)
+                                    .map_err(|error| {
+                                        Error::internal_io(
+                                            error.to_string(),
+                                            Some("inspect controller artifact mirror".to_string()),
+                                        )
+                                    })?
+                                    .len();
+                                let actual_sha256 = homeboy_core::artifact_metadata::sha256_file(
+                                    &download.output_path,
+                                )?;
+                                if actual_size != expected_size || actual_sha256 != expected_sha256
+                                {
+                                    return Err(Error::validation_invalid_argument(
                                     "artifact_id",
                                     format!(
                                         "runner artifact mirror for run '{}', task '{}', and artifact '{}' does not match the aggregate SHA-256 and size",
@@ -1244,33 +1248,30 @@ pub(crate) fn project_terminal_artifacts(
                                     Some(artifact.id.clone()),
                                     None,
                                 ));
-                                    }
-                                    let mut controller_hash = sha2::Sha256::new();
-                                    sha2::Digest::update(&mut controller_hash, b"controller");
-                                    sha2::Digest::update(&mut controller_hash, [0]);
-                                    sha2::Digest::update(
-                                        &mut controller_hash,
-                                        artifact_id.as_bytes(),
-                                    );
-                                    let controller_artifact_id =
-                                        format!("agent-task-{:x}", controller_hash.finalize());
-                                    let mut controller_metadata = metadata.clone();
-                                    controller_metadata["agent_task"]["projection"] =
-                                        json!("runner_mirrored");
-                                    store.record_verified_artifact_with_id(
-                                        &record.run_id,
-                                        &artifact.kind,
-                                        &download.output_path,
-                                        &controller_artifact_id,
-                                        Some(expected_size as i64),
-                                        Some(expected_sha256),
-                                        controller_metadata,
-                                    )?;
-                                    Ok(())
-                                })()
-                            } else {
+                                }
+                                let mut controller_hash = sha2::Sha256::new();
+                                sha2::Digest::update(&mut controller_hash, b"controller");
+                                sha2::Digest::update(&mut controller_hash, [0]);
+                                sha2::Digest::update(&mut controller_hash, artifact_id.as_bytes());
+                                let controller_artifact_id =
+                                    format!("agent-task-{:x}", controller_hash.finalize());
+                                let mut controller_metadata = metadata.clone();
+                                controller_metadata["agent_task"]["projection"] =
+                                    json!("runner_mirrored");
+                                store.record_verified_artifact_with_id(
+                                    &record.run_id,
+                                    &artifact.kind,
+                                    &download.output_path,
+                                    &controller_artifact_id,
+                                    Some(expected_size as i64),
+                                    Some(expected_sha256),
+                                    controller_metadata,
+                                )?;
                                 Ok(())
-                            };
+                            })()
+                        } else {
+                            Ok(())
+                        };
 
                         // Preserve the canonical runner retrieval alias even when
                         // the controller also materializes verified bytes.
@@ -1313,6 +1314,14 @@ pub(crate) fn project_terminal_artifacts(
         }
     }
     projection_error.map_or(Ok(()), Err)
+}
+
+fn requires_durable_lab_projection(artifact: &AgentTaskArtifact) -> bool {
+    crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact)
+        || matches!(
+            artifact.kind.as_str(),
+            "transcript" | "agent-result" | "agent_result"
+        )
 }
 
 /// A direct artifact import can retain the same deterministic lifecycle id

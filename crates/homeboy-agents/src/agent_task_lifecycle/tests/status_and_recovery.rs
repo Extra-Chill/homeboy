@@ -1415,6 +1415,12 @@ fn controller_leaves_runner_artifact_projection_pending_when_it_cannot_mirror_by
         assert!(record.metadata["artifact_projection"]["error"]
             .as_str()
             .is_some_and(|error| !error.is_empty()));
+        assert_eq!(
+            record.metadata["artifact_projection"]["recovery_action"]["command"],
+            format!("homeboy agent-task status {}", submitted.run_id)
+        );
+        assert!(run_owes_candidate_follow_up(&submitted.run_id)
+            .expect("pending import retains the runner workspace"));
         let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
         let remote_alias = homeboy_core::observation::runs_service::resolve_artifact_for_run(
             &store,
