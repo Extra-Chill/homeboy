@@ -11,9 +11,10 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::persistence::{
-    apply_event_retention, compact_terminal_jobs, job_not_found, timestamp_ms, validate_transition,
-    write_durable_store, JobStoreCompactionEvidence, DEFAULT_EVENT_RETENTION_LIMIT,
-    DEFAULT_TERMINAL_JOB_RETENTION_BYTES, DEFAULT_TERMINAL_JOB_RETENTION_LIMIT,
+    apply_event_retention, compact_terminal_jobs, job_not_found, lookup_tombstone, timestamp_ms,
+    validate_transition, write_durable_store_with_tombstones, JobStoreCompactionEvidence,
+    ReplayTombstoneKind, DEFAULT_EVENT_RETENTION_LIMIT, DEFAULT_TERMINAL_JOB_RETENTION_BYTES,
+    DEFAULT_TERMINAL_JOB_RETENTION_LIMIT,
 };
 #[cfg(test)]
 use super::persistence::{read_durable_store, reconcile_stale_jobs};
@@ -243,6 +244,83 @@ impl JobStore {
                         .is_none_or(|lease| lease.expires_at_ms > now)
             })
             .count())
+    }
+
+    /// Report the durable owners that a daemon would retain after opening this
+    /// store. Tombstone identities remain on disk and are deliberately excluded
+    /// from resident owner counts.
+    pub fn retained_owner_report_at_path(path: impl Into<PathBuf>) -> Result<Value> {
+        let path = path.into();
+        if !path.exists() {
+            return Ok(serde_json::json!({
+                "jobs": { "count": 0, "bytes": 0, "active_count": 0, "terminal_count": 0 },
+                "live_submission_keys": { "count": 0, "bytes": 0 },
+                "legacy_expired_submission_keys": { "count": 0, "bytes": 0 },
+                "replay_tombstone_journal": { "count": 0, "bytes": 0, "resident": false },
+            }));
+        }
+        let content = fs::read_to_string(&path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
+        })?;
+        let durable: DurableJobStore = serde_json::from_str(&content)
+            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
+        let job_bytes = durable
+            .jobs
+            .iter()
+            .map(|job| {
+                serde_json::to_vec(job)
+                    .map(|bytes| bytes.len())
+                    .unwrap_or(0)
+            })
+            .sum::<usize>();
+        let active_count = durable
+            .jobs
+            .iter()
+            .filter(|job| !job.job.status.is_terminal())
+            .count();
+        let terminal_count = durable.jobs.len() - active_count;
+        let live_submission_keys =
+            durable.submission_keys.len() + durable.controller_submissions.len();
+        let live_submission_bytes = serde_json::to_vec(&durable.submission_keys)
+            .unwrap_or_default()
+            .len()
+            + serde_json::to_vec(&durable.controller_submissions)
+                .unwrap_or_default()
+                .len();
+        let legacy_count =
+            durable.expired_submission_keys.len() + durable.expired_controller_submissions.len();
+        let legacy_bytes = serde_json::to_vec(&durable.expired_submission_keys)
+            .unwrap_or_default()
+            .len()
+            + serde_json::to_vec(&durable.expired_controller_submissions)
+                .unwrap_or_default()
+                .len();
+        let journal = super::persistence::tombstone_path(&path);
+        let (journal_count, journal_bytes) = match fs::File::open(&journal) {
+            Ok(file) => {
+                use std::io::BufRead;
+                let count = std::io::BufReader::new(file).lines().count();
+                (
+                    count,
+                    fs::metadata(&journal)
+                        .map(|metadata| metadata.len())
+                        .unwrap_or(0),
+                )
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (0, 0),
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some(format!("read {}", journal.display())),
+                ))
+            }
+        };
+        Ok(serde_json::json!({
+            "jobs": { "count": durable.jobs.len(), "bytes": job_bytes, "active_count": active_count, "terminal_count": terminal_count },
+            "live_submission_keys": { "count": live_submission_keys, "bytes": live_submission_bytes },
+            "legacy_expired_submission_keys": { "count": legacy_count, "bytes": legacy_bytes },
+            "replay_tombstone_journal": { "count": journal_count, "bytes": journal_bytes, "resident": false },
+        }))
     }
 
     #[cfg(test)]
@@ -1081,7 +1159,7 @@ impl JobStore {
             stored.job.finished_at_ms = Some(now);
         }
         if let Some(persistence) = &self.persistence {
-            let durable = DurableJobStore {
+            let mut durable = DurableJobStore {
                 jobs: inner.jobs.values().cloned().collect(),
                 submission_keys: inner.submission_keys.clone(),
                 expired_submission_keys: inner.expired_submission_keys.clone(),
@@ -1089,7 +1167,8 @@ impl JobStore {
                 expired_controller_submissions: inner.expired_controller_submissions.clone(),
                 compaction: inner.compaction.clone(),
             };
-            if let Err(error) = write_durable_store(&persistence.path, &durable) {
+            if let Err(error) = write_durable_store_with_tombstones(&persistence.path, &mut durable)
+            {
                 *inner.jobs.get_mut(&job_id).expect("controller job exists") = prior;
                 return Err(error);
             }
@@ -1284,7 +1363,8 @@ impl JobStore {
                 persistence.terminal_job_retention_limit,
                 persistence.terminal_job_retention_bytes,
             );
-            if let Err(error) = write_durable_store(&persistence.path, &durable) {
+            if let Err(error) = write_durable_store_with_tombstones(&persistence.path, &mut durable)
+            {
                 *inner = prior;
                 return Err(error);
             }
@@ -1392,6 +1472,32 @@ impl JobStore {
                 None,
             ));
         }
+        if let Some(tombstone) = self
+            .persistence
+            .as_ref()
+            .map(|persistence| {
+                lookup_tombstone(
+                    &persistence.path,
+                    ReplayTombstoneKind::Controller,
+                    &idempotency_key,
+                )
+            })
+            .transpose()?
+            .flatten()
+        {
+            if tombstone.fingerprint != fingerprint {
+                return Err(controller_idempotency_conflict(&idempotency_key));
+            }
+            if let Some(job) = tombstone.terminal_job {
+                return Ok(ControllerJobSubmissionOutcome::Existing(job));
+            }
+            return Err(Error::validation_invalid_argument(
+                "idempotency_key",
+                "controller idempotency key belongs to compacted terminal work; choose a new key for a new attempt",
+                Some(idempotency_key),
+                None,
+            ));
+        }
         let job = Job {
             id: Uuid::new_v4(),
             operation,
@@ -1446,7 +1552,7 @@ impl JobStore {
         // Persist the initial event, job, and submission index as one admission
         // commit. Roll back memory on failure so retries cannot observe a ghost.
         if let Some(persistence) = &self.persistence {
-            let durable = DurableJobStore {
+            let mut durable = DurableJobStore {
                 jobs: inner.jobs.values().cloned().collect(),
                 submission_keys: inner.submission_keys.clone(),
                 expired_submission_keys: inner.expired_submission_keys.clone(),
@@ -1454,7 +1560,8 @@ impl JobStore {
                 expired_controller_submissions: inner.expired_controller_submissions.clone(),
                 compaction: inner.compaction.clone(),
             };
-            if let Err(error) = write_durable_store(&persistence.path, &durable) {
+            if let Err(error) = write_durable_store_with_tombstones(&persistence.path, &mut durable)
+            {
                 inner.jobs.remove(&job_id);
                 inner.controller_submissions.remove(&idempotency_key);
                 return Err(error);
@@ -1542,7 +1649,7 @@ impl JobStore {
         stored.job.updated_at_ms = timestamp_ms();
         let controller = controller.clone();
         if let Some(persistence) = &self.persistence {
-            let durable = DurableJobStore {
+            let mut durable = DurableJobStore {
                 jobs: inner.jobs.values().cloned().collect(),
                 submission_keys: inner.submission_keys.clone(),
                 expired_submission_keys: inner.expired_submission_keys.clone(),
@@ -1550,7 +1657,8 @@ impl JobStore {
                 expired_controller_submissions: inner.expired_controller_submissions.clone(),
                 compaction: inner.compaction.clone(),
             };
-            if let Err(error) = write_durable_store(&persistence.path, &durable) {
+            if let Err(error) = write_durable_store_with_tombstones(&persistence.path, &mut durable)
+            {
                 *inner.jobs.get_mut(&job_id).expect("controller job exists") = prior;
                 return Err(error);
             }
@@ -2029,7 +2137,8 @@ impl JobStore {
                 persistence.terminal_job_retention_limit,
                 persistence.terminal_job_retention_bytes,
             );
-            if let Err(error) = write_durable_store(&persistence.path, &durable) {
+            if let Err(error) = write_durable_store_with_tombstones(&persistence.path, &mut durable)
+            {
                 inner.jobs.insert(job_id, prior);
                 return Err(error);
             }
@@ -2310,7 +2419,8 @@ impl JobStore {
                 persistence.terminal_job_retention_limit,
                 persistence.terminal_job_retention_bytes,
             );
-            if let Err(error) = write_durable_store(&persistence.path, &durable) {
+            if let Err(error) = write_durable_store_with_tombstones(&persistence.path, &mut durable)
+            {
                 *inner.jobs.get_mut(&job_id).expect("job exists") = prior;
                 return Err(error);
             }
@@ -2412,7 +2522,7 @@ impl JobStore {
             self.terminal_job_retention_limit(),
             self.terminal_job_retention_bytes(),
         );
-        write_durable_store(&persistence.path, &durable)?;
+        write_durable_store_with_tombstones(&persistence.path, &mut durable)?;
         inner.jobs = durable
             .jobs
             .iter()

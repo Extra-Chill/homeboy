@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -9,7 +10,7 @@ use uuid::Uuid;
 
 use super::remote_runner::RemoteRunnerJobRequest;
 use super::store::{DurableJobStore, StoredJob};
-use super::types::{JobEvent, JobEventKind, JobStatus};
+use super::types::{Job, JobEvent, JobEventKind, JobStatus};
 use crate::error::{Error, Result};
 
 pub(super) const DEFAULT_EVENT_RETENTION_LIMIT: usize = 1000;
@@ -19,6 +20,139 @@ pub(super) const DEFAULT_TERMINAL_JOB_RETENTION_LIMIT: usize = 1000;
 /// Bound terminal history independently of active jobs, whose recovery records
 /// must remain durable until they reach a terminal state.
 pub(super) const DEFAULT_TERMINAL_JOB_RETENTION_BYTES: usize = 4 * 1024 * 1024;
+
+/// A compacted key is permanent exactly-once evidence. It intentionally carries
+/// no request or event payload. Controller tombstones retain only their existing
+/// safe terminal job projection so lost-response retries stay observable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct ReplayTombstone {
+    pub(super) kind: ReplayTombstoneKind,
+    pub(super) key: String,
+    pub(super) fingerprint: String,
+    pub(super) job_id: Uuid,
+    /// Controller callers need the safe terminal status projection to make a
+    /// lost-response retry observable. Remote runner tombstones omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) terminal_job: Option<Job>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ReplayTombstoneKind {
+    RemoteRunner,
+    Controller,
+}
+
+pub(super) fn tombstone_path(path: &Path) -> std::path::PathBuf {
+    path.with_file_name(format!(
+        "{}.replay-tombstones.jsonl",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("jobs.json")
+    ))
+}
+
+/// Stream the sidecar so permanent identities do not become daemon-resident
+/// state. A malformed record is a fail-closed store corruption, never absence.
+pub(super) fn lookup_tombstone(
+    path: &Path,
+    kind: ReplayTombstoneKind,
+    key: &str,
+) -> Result<Option<ReplayTombstone>> {
+    let path = tombstone_path(path);
+    let file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(format!("read {}", path.display())),
+            ))
+        }
+    };
+    let mut found = None;
+    for line in BufReader::new(file).lines() {
+        let line = line.map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
+        })?;
+        let tombstone: ReplayTombstone = serde_json::from_str(&line)
+            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
+        if tombstone.kind == kind && tombstone.key == key {
+            found = Some(tombstone);
+        }
+    }
+    Ok(found)
+}
+
+/// The journal is synced before the compacted primary store is atomically
+/// replaced. A crash can retain an extra rejection, but can never forget an
+/// accepted key and replay it as new work.
+pub(super) fn write_durable_store_with_tombstones(
+    path: &Path,
+    durable: &mut DurableJobStore,
+) -> Result<()> {
+    let mut tombstones = Vec::new();
+    for (key, submission) in std::mem::take(&mut durable.expired_submission_keys) {
+        tombstones.push(ReplayTombstone {
+            kind: ReplayTombstoneKind::RemoteRunner,
+            key,
+            fingerprint: submission.fingerprint,
+            job_id: submission.job_id,
+            terminal_job: None,
+        });
+    }
+    for (key, submission) in std::mem::take(&mut durable.expired_controller_submissions) {
+        tombstones.push(ReplayTombstone {
+            kind: ReplayTombstoneKind::Controller,
+            key,
+            fingerprint: submission.fingerprint,
+            job_id: submission.job_id,
+            terminal_job: submission.terminal_job,
+        });
+    }
+    if !tombstones.is_empty() {
+        let journal = tombstone_path(path);
+        if let Some(parent) = journal.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("create {}", parent.display())),
+                )
+            })?;
+        }
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&journal)
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("open {}", journal.display())),
+                )
+            })?;
+        for tombstone in tombstones {
+            serde_json::to_writer(&mut file, &tombstone).map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("serialize replay tombstone".to_string()),
+                )
+            })?;
+            file.write_all(b"\n").map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("write {}", journal.display())),
+                )
+            })?;
+        }
+        file.sync_all().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("sync {}", journal.display())),
+            )
+        })?;
+    }
+    write_durable_store(path, durable)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct JobStoreCompactionEvidence {
@@ -235,7 +369,6 @@ pub(super) fn compact_terminal_jobs(
     );
     Some(evidence)
 }
-
 #[cfg(test)]
 pub(super) fn reconcile_stale_jobs(
     durable: &mut DurableJobStore,

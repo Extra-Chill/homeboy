@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::persistence::{apply_event_retention, job_not_found, timestamp_ms, validate_transition};
+use super::persistence::{
+    apply_event_retention, job_not_found, lookup_tombstone, timestamp_ms, validate_transition,
+    write_durable_store_with_tombstones, ReplayTombstoneKind,
+};
 use super::store::{JobStore, RemoteRunnerSubmission, StoredJob};
 use super::types::{Job, JobEvent, JobEventKind, JobStatus};
 use crate::engine::command::CommandCaptureMetadata;
@@ -556,6 +559,30 @@ impl JobStore {
                     }),
                 ));
             }
+            if let Some(expired) = self
+                .persistence
+                .as_ref()
+                .map(|persistence| {
+                    lookup_tombstone(
+                        &persistence.path,
+                        ReplayTombstoneKind::RemoteRunner,
+                        submission_key,
+                    )
+                })
+                .transpose()?
+                .flatten()
+            {
+                return Err(Error::new(
+                    ErrorCode::ValidationInvalidArgument,
+                    "remote runner submission key has expired with its retained job evidence",
+                    serde_json::json!({
+                        "schema": "homeboy/remote-runner-submission-expired/v1",
+                        "submission_key": submission_key,
+                        "payload_fingerprint": expired.fingerprint,
+                        "expired_job_id": expired.job_id,
+                    }),
+                ));
+            }
         }
         let job = Job {
             id: Uuid::new_v4(),
@@ -638,7 +665,7 @@ impl JobStore {
         // snapshot. This is the admission commit point used by lost-response
         // recovery and daemon restart replay.
         if let Some(persistence) = &self.persistence {
-            let durable = super::store::DurableJobStore {
+            let mut durable = super::store::DurableJobStore {
                 jobs: inner.jobs.values().cloned().collect(),
                 submission_keys: inner.submission_keys.clone(),
                 expired_submission_keys: inner.expired_submission_keys.clone(),
@@ -646,7 +673,7 @@ impl JobStore {
                 expired_controller_submissions: inner.expired_controller_submissions.clone(),
                 compaction: inner.compaction.clone(),
             };
-            if let Err(error) = super::persistence::write_durable_store(&persistence.path, &durable)
+            if let Err(error) = write_durable_store_with_tombstones(&persistence.path, &mut durable)
             {
                 inner.jobs.remove(&job.id);
                 if let Some(submission_key) = request.submission_key() {
