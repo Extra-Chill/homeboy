@@ -193,6 +193,50 @@ Each dependency entry may be either:
 - a registered Homeboy component ID
 - an absolute path to another local plugin checkout
 
+## Artifact cleanup declarations
+
+WordPress bootstrap installs large reconstructable trees into every worktree it
+touches. The extension declares those trees through `artifact_cleanup` in
+`wordpress.json` so canonical `homeboy cleanup artifacts` can inventory and
+reclaim them across managed worktrees.
+
+The boundary is deliberate. The extension declares only what is reconstructable
+and how to rehydrate it. Homeboy owns resolution across worktrees, dry-run and
+apply, path containment, active-worktree and age gating, Git safety, limits, and
+byte accounting. There is no WordPress-specific deletion path.
+
+| Declaration | Path | Category | Resolves beside | Rehydrate |
+|---|---|---|---|---|
+| `npm-node-modules` | `node_modules` | `dependencies` | `package.json` + `package-lock.json` | `npm ci` |
+| `composer-vendor` | `vendor` | `dependencies` | `composer.json` + `composer.lock` | `composer install --no-interaction --prefer-dist` |
+| `generated-js-assets` | `dist` | `build_output` | `package.json` | `npm run build` |
+| `phpunit-result-cache` | `.phpunit.result.cache` | `build_cache` | `phpunit.xml.dist` or `phpunit.xml` | next test run |
+| `packaged-release-output` | `build` | `release_asset` | `package.json` | never reclaimed |
+
+Retention and readiness tradeoffs:
+
+- **Dependency trees are anchored to a manifest *and* lockfile pair.** That is
+  what makes the rehydration command correct: `npm ci` and `composer install`
+  both need the lockfile. A checkout without one keeps its tree.
+- **Dependency trees carry a one-day age floor.** Reinstalling is the most
+  expensive rehydration this extension has, so a tree installed for in-flight
+  work survives even when the checkout is not registered as a task worktree.
+  Homeboy's `--min-age-days` composes with this floor; the stricter wins.
+- **Nested scopes are supported and bounded.** Block-level and package-level
+  install scopes (`inc/**`, `packages/**`) resolve to depth 5. Discovery never
+  descends into a declared artifact tree, so a nested rule cannot degrade into a
+  recursive deletion glob.
+- **Packaging output is inventory-only.** `build/` holds both generated JS assets
+  and the `{component_id}.zip` that `build.artifact_pattern` points at, so it is
+  reported for review and never removed.
+
+Review before reclaiming:
+
+```bash
+homeboy cleanup artifacts --sort size --limit 10
+homeboy cleanup artifacts --min-age-days 7 --apply
+```
+
 ## Configurable WP Codebox Bench Workloads
 
 WordPress bench runs can declare runtime workloads in extension settings when
