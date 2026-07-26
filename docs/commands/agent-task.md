@@ -761,9 +761,12 @@ available, changed files, and an operator notification. `agent-task status
 completed or is blocked without spelunking Lab artifact paths.
 
 When promotion runs without `--dry-run`, each `--verify <command>` is treated as
-a visible deterministic gate in the promoted worktree. Promotion reports gate
-results as `deterministic_gates[]` using
-`homeboy/agent-task-gate-report/v1`. Failed visible gates set promotion
+a visible deterministic gate in the promoted worktree. Gates run in declaration
+order and, by default, a failure records every remaining gate as `skipped` with
+its blocking gate ID without invoking its command; use
+`--gate-execution-policy continue-all` for independent or exhaustive suites.
+Promotion reports gate results as `deterministic_gates[]` using
+`homeboy/agent-task-gate-report/v2`. Failed visible gates set promotion
 `status: "gate_failed"`, exit nonzero, and include
 `failure_evidence.agent_feedback` plus stdout/stderr tails so the next cook
 agent task can receive exact failure context instead of a generic shell error.

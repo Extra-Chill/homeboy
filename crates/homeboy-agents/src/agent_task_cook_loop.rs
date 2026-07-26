@@ -193,7 +193,9 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
     let follow_up_request = if should_retry {
         Some(build_follow_up_request(
             &options,
-            &failed_gates,
+            // Ordered fail-fast guarantees this is the only failure. Continue-all
+            // still repairs the first declared failure before broad follow-up work.
+            &failed_gates[..1],
             &failure_progression,
         ))
     } else if let Some(Some(gap)) = &review_form_gap {
@@ -864,6 +866,46 @@ mod tests {
             "homeboy://agent-task/run/run-3676"
         );
         assert_eq!(request.workspace.mode, AgentTaskWorkspaceMode::Existing);
+    }
+
+    #[test]
+    fn continue_all_feedback_uses_the_first_failing_gate() {
+        let mut later_failure = failed_gate();
+        later_failure.id = "gate-2".to_string();
+        later_failure.command[2] = "broad-gate".to_string();
+        later_failure
+            .failure_evidence
+            .as_mut()
+            .expect("evidence")
+            .command = "broad-gate".to_string();
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::GateFailed,
+                vec![failed_gate(), later_failure],
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-first-failure".to_string()),
+            current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
+            metadata: Value::Null,
+        });
+
+        assert_eq!(report.failed_gates.len(), 2);
+        let request = report.follow_up_request.expect("follow-up request");
+        assert_eq!(
+            request.inputs["cook_loop"]["failed_gates"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            request.inputs["cook_loop"]["failed_gates"][0]["gate_id"],
+            "gate-1"
+        );
+        assert!(!request.instructions.contains("broad-gate"));
     }
 
     #[test]

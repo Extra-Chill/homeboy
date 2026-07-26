@@ -169,6 +169,8 @@ pub fn resume_promoted_patch(
     } else {
         None
     };
+    let operator_notification =
+        promotion_notification_with_gate_summary(gates.status, &target, &gates.deterministic_gates);
     let mut report = AgentTaskPromotionReport {
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
         status: gates.status,
@@ -196,7 +198,7 @@ pub fn resume_promoted_patch(
             "resumed_post_apply_promotion": true,
             "resume_contract": previous.pointer("/provenance/resume_contract"),
         }),
-        operator_notification: promotion_notification(gates.status, &target),
+        operator_notification,
     };
     if let Some(provenance) = provider.provenance() {
         report.provenance["worktree_provider"] = provenance.clone();
@@ -587,7 +589,8 @@ pub(super) fn promote_with_provider_and_checkpoint(
             AgentTaskPromotionStatus::GateFailed => AgentTaskPromotionStatus::NoChangesGateFailed,
             _ => AgentTaskPromotionStatus::NoChanges,
         };
-        let operator_notification = promotion_notification(status, &target);
+        let operator_notification =
+            promotion_notification_with_gate_summary(status, &target, &gates.deterministic_gates);
         let verified_revision = target.head.clone();
         let candidate = target
             .path
@@ -740,7 +743,8 @@ pub(super) fn promote_with_provider_and_checkpoint(
         (PromotionGateRun::without_gates(options.dry_run), None)
     };
     let (gates, verified_base) = verified_base;
-    let operator_notification = promotion_notification(gates.status, &target);
+    let operator_notification =
+        promotion_notification_with_gate_summary(gates.status, &target, &gates.deterministic_gates);
     // Gates can create incidental files. Feedback must retain the identity that
     // was captured immediately after applying the provider candidate.
     let candidate = post_apply
@@ -1312,7 +1316,8 @@ fn promote_committed_changes(
         (PromotionGateRun::without_gates(options.dry_run), None)
     };
     let (gates, verified_base) = verified_base;
-    let operator_notification = promotion_notification(gates.status, &target);
+    let operator_notification =
+        promotion_notification_with_gate_summary(gates.status, &target, &gates.deterministic_gates);
     let candidate = post_apply
         .as_ref()
         .and_then(|report| report.provenance.get("candidate").cloned())
@@ -1384,29 +1389,53 @@ fn run_promotion_gates(
     // verification sees the candidate as committed content, never the dirty
     // promotion target that finalization still owns.
     homeboy_core::hygiene::materialize_worktree_dependencies(gate_path)?;
+    let declared_gates = options
+        .gates
+        .verify
+        .iter()
+        .map(|command| {
+            (
+                command,
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+            )
+        })
+        .chain(options.gates.private_verify.iter().map(|command| {
+            (
+                command,
+                AgentTaskGateVisibility::Private,
+                options.gates.private_gate_reveal,
+            )
+        }));
     let mut deterministic_gates = Vec::new();
-    for (index, command) in options.gates.verify.iter().enumerate() {
-        deterministic_gates.push(run_promotion_gate(
-            options,
-            provider,
-            gate_path,
-            index + 1,
-            command,
-            AgentTaskGateVisibility::Visible,
-            AgentTaskGateRevealPolicy::FullEvidence,
-        )?);
-    }
-    let private_offset = deterministic_gates.len();
-    for (index, command) in options.gates.private_verify.iter().enumerate() {
-        deterministic_gates.push(run_promotion_gate(
-            options,
-            provider,
-            gate_path,
-            private_offset + index + 1,
-            command,
-            AgentTaskGateVisibility::Private,
-            options.gates.private_gate_reveal,
-        )?);
+    let mut blocking_gate_id = None;
+    for (index, (command, visibility, reveal_policy)) in declared_gates.enumerate() {
+        let gate = if let Some(blocking_gate_id) = blocking_gate_id.as_deref() {
+            crate::agent_task_gate::AgentTaskGateReport::skipped(
+                format!("gate-{}", index + 1),
+                vec!["sh".to_string(), "-lc".to_string(), command.to_string()],
+                visibility,
+                reveal_policy,
+                blocking_gate_id,
+            )
+        } else {
+            run_promotion_gate(
+                options,
+                provider,
+                gate_path,
+                index + 1,
+                command,
+                visibility,
+                reveal_policy,
+            )?
+        };
+        if gate.status == AgentTaskGateStatus::Failed
+            && options.gates.execution_policy
+                == crate::agent_task_gate::AgentTaskGateExecutionPolicy::OrderedFailFast
+        {
+            blocking_gate_id = Some(gate.id.clone());
+        }
+        deterministic_gates.push(gate);
     }
     let has_gate_failure = deterministic_gates
         .iter()
@@ -1862,6 +1891,34 @@ fn promotion_notification(
             next_command: None,
         },
     }
+}
+
+fn promotion_notification_with_gate_summary(
+    status: AgentTaskPromotionStatus,
+    target: &AgentTaskPromotionTarget,
+    gates: &[crate::agent_task_gate::AgentTaskGateReport],
+) -> AgentTaskPromotionNotification {
+    let mut notification = promotion_notification(status, target);
+    if !gates.is_empty() {
+        let gate_ids = |statuses: &[AgentTaskGateStatus]| {
+            gates
+                .iter()
+                .filter(|gate| statuses.contains(&gate.status))
+                .map(|gate| gate.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let passed = gate_ids(&[
+            AgentTaskGateStatus::Succeeded,
+            AgentTaskGateStatus::AcceptedInheritedFailure,
+        ]);
+        let failed = gate_ids(&[AgentTaskGateStatus::Failed]);
+        let skipped = gate_ids(&[AgentTaskGateStatus::Skipped]);
+        notification.message.push_str(&format!(
+            "; deterministic gates: passed=[{passed}], failed=[{failed}], skipped=[{skipped}]"
+        ));
+    }
+    notification
 }
 
 fn post_apply_report(

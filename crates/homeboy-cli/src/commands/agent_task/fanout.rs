@@ -11,7 +11,8 @@ use homeboy::agents::agent_tasks::dispatch_service::{
     AgentTaskDispatchCommand, DispatchCoreInputs,
 };
 use homeboy::agents::agent_tasks::gate::{
-    AgentTaskGateEnvironmentPolicy, AgentTaskGateRevealPolicy, VerifyGateOptions,
+    AgentTaskGateEnvironmentPolicy, AgentTaskGateExecutionPolicy, AgentTaskGateRevealPolicy,
+    VerifyGateOptions,
 };
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::agents::agent_tasks::provider::{self, AgentTaskProviderCatalog};
@@ -667,6 +668,8 @@ struct BatchCookSpec {
     private_verify: Vec<String>,
     #[serde(default = "default_private_gate_reveal")]
     private_gate_reveal: AgentTaskGateRevealPolicy,
+    #[serde(default)]
+    execution_policy: AgentTaskGateExecutionPolicy,
     #[serde(default = "default_gate_timeout_seconds")]
     gate_timeout_seconds: u64,
     #[serde(default = "default_gate_heartbeat_interval_seconds")]
@@ -814,6 +817,7 @@ impl BatchCookSpec {
                     verify: self.verify.clone(),
                     private_verify: self.private_verify.clone(),
                     private_gate_reveal: self.private_gate_reveal,
+                    execution_policy: self.execution_policy,
                     gate_timeout_seconds: self.gate_timeout_seconds,
                     gate_heartbeat_interval_seconds: self.gate_heartbeat_interval_seconds,
                     rerun_completed_gates: self.rerun_completed_gates,
@@ -970,6 +974,7 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
             verify: args.gates.verify.clone(),
             private_verify: args.gates.private_verify.clone(),
             private_gate_reveal: args.gates.private_gate_reveal,
+            execution_policy: VerifyGateOptions::from(args.gates.clone()).execution_policy,
             gate_timeout_seconds: args.gates.gate_timeout_seconds,
             gate_heartbeat_interval_seconds: args.gates.gate_heartbeat_interval_seconds,
             rerun_completed_gates: args.gates.rerun_completed_gates,
@@ -1633,6 +1638,7 @@ mod tests {
                 verify: vec!["cargo test --lib".to_string()],
                 private_verify: Vec::new(),
                 private_gate_reveal: AgentTaskGateRevealPolicy::SummaryOnly,
+                gate_execution_policy: "ordered-fail-fast".to_string(),
                 gate_timeout_seconds: 30 * 60,
                 gate_heartbeat_interval_seconds: 5,
                 rerun_completed_gates: false,
