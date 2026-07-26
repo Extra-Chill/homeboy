@@ -243,8 +243,9 @@ pub mod review_dossier {
 pub mod gate {
     pub use super::super::agent_task_gate::{
         AgentTaskGateEnvironment, AgentTaskGateEnvironmentMode, AgentTaskGateEnvironmentPolicy,
-        AgentTaskGateEnvironmentVariable, AgentTaskGateFailureEvidence, AgentTaskGateReport,
-        AgentTaskGateRevealPolicy, AgentTaskGateStatus, AgentTaskGateVisibility, VerifyGateOptions,
+        AgentTaskGateEnvironmentVariable, AgentTaskGateExecutionPolicy,
+        AgentTaskGateFailureEvidence, AgentTaskGateReport, AgentTaskGateRevealPolicy,
+        AgentTaskGateStatus, AgentTaskGateVisibility, VerifyGateOptions,
         AGENT_TASK_GATE_REPORT_SCHEMA,
     };
 }

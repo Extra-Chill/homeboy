@@ -177,7 +177,7 @@ fn durable_gate_passed(gate: &AgentTaskGateReport) -> bool {
                     comparison.matches_candidate_failure && !comparison.base_ref.is_empty()
                 })
         }
-        AgentTaskGateStatus::Failed => false,
+        AgentTaskGateStatus::Failed | AgentTaskGateStatus::Skipped => false,
     }
 }
 

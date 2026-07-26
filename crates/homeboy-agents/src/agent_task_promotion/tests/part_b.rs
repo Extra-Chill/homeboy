@@ -24,7 +24,8 @@ use crate::agent_task::{
     AGENT_TASK_OUTCOME_SCHEMA,
 };
 use crate::agent_task_gate::{
-    AgentTaskGateReport, AgentTaskGateRevealPolicy, AgentTaskGateVisibility, VerifyGateOptions,
+    AgentTaskGateExecutionPolicy, AgentTaskGateReport, AgentTaskGateRevealPolicy,
+    AgentTaskGateStatus, AgentTaskGateVisibility, VerifyGateOptions,
 };
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy_core::command_invocation::CommandInvocation;
@@ -1041,6 +1042,139 @@ fn explicit_candidate_gate_failure_is_recorded_after_normal_promotion_handoff() 
     assert_eq!(report.status, AgentTaskPromotionStatus::GateFailed);
     assert_eq!(provider.apply_calls.len(), 1);
     assert_eq!(provider.verify_calls.len(), 1);
+}
+
+#[test]
+fn ordered_gate_failure_skips_downstream_command_with_durable_blocker_evidence() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    git(&workspace, &["init", "-b", "main"]);
+    git(&workspace, &["config", "user.email", "test@example.com"]);
+    git(&workspace, &["config", "user.name", "Homeboy Test"]);
+    std::fs::create_dir_all(workspace.join("src")).expect("source directory");
+    std::fs::write(workspace.join("src/lib.rs"), "old\n").expect("base file");
+    git(&workspace, &["add", "."]);
+    git(&workspace, &["commit", "-m", "base"]);
+    let (source_path, source) = write_patch_source(&temp);
+    let downstream_marker = temp.path().join("broad-gate-ran");
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(workspace),
+        apply_to_git: true,
+        run_verify_command: true,
+        ..Default::default()
+    };
+
+    let report = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("ordered-fail-fast".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "fixture@target".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec![
+                    "exit 1".to_string(),
+                    format!("touch '{}'", downstream_marker.display()),
+                ],
+                ..Default::default()
+            },
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect("failed gate produces promotion report");
+
+    assert_eq!(report.status, AgentTaskPromotionStatus::GateFailed);
+    assert_eq!(provider.verify_calls.len(), 1, "broad gate was not invoked");
+    assert!(!downstream_marker.exists(), "broad gate was not executed");
+    assert_eq!(
+        report.deterministic_gates[1].status,
+        AgentTaskGateStatus::Skipped
+    );
+    assert_eq!(
+        report.deterministic_gates[1]
+            .skip_reason
+            .as_ref()
+            .expect("skip reason")
+            .blocking_gate_id,
+        "gate-1"
+    );
+    assert_eq!(
+        report.gate_results[1].status,
+        homeboy_core::gate::HomeboyGateStatus::Skipped
+    );
+    assert!(report
+        .operator_notification
+        .message
+        .contains("passed=[], failed=[gate-1], skipped=[gate-2]"));
+}
+
+#[test]
+fn continue_all_gate_policy_runs_downstream_command_after_failure() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    git(&workspace, &["init", "-b", "main"]);
+    git(&workspace, &["config", "user.email", "test@example.com"]);
+    git(&workspace, &["config", "user.name", "Homeboy Test"]);
+    std::fs::create_dir_all(workspace.join("src")).expect("source directory");
+    std::fs::write(workspace.join("src/lib.rs"), "old\n").expect("base file");
+    git(&workspace, &["add", "."]);
+    git(&workspace, &["commit", "-m", "base"]);
+    let (source_path, source) = write_patch_source(&temp);
+    let downstream_marker = temp.path().join("broad-gate-ran");
+    let mut provider = FakePromotionWorkspaceProvider {
+        workspace_path: Some(workspace),
+        apply_to_git: true,
+        run_verify_command: true,
+        ..Default::default()
+    };
+
+    let report = promote_with_provider(
+        AgentTaskPromotionOptions {
+            source,
+            source_run_id: Some("continue-all".to_string()),
+            source_path: Some(source_path),
+            source_worktree_path: None,
+            base_ref: None,
+            task_base_sha: None,
+            candidate_ref: None,
+            to_worktree: "fixture@target".to_string(),
+            task_id: None,
+            artifact_id: None,
+            dry_run: false,
+            gates: VerifyGateOptions {
+                verify: vec![
+                    "exit 1".to_string(),
+                    format!("touch '{}'", downstream_marker.display()),
+                ],
+                execution_policy: AgentTaskGateExecutionPolicy::ContinueAll,
+                ..Default::default()
+            },
+            provider_command: None,
+            provider_invocation: None,
+        },
+        &mut provider,
+    )
+    .expect("failed gate produces promotion report");
+
+    assert_eq!(provider.verify_calls.len(), 2);
+    assert!(
+        downstream_marker.exists(),
+        "continue-all ran the broad gate"
+    );
+    assert_eq!(
+        report.deterministic_gates[1].status,
+        AgentTaskGateStatus::Succeeded
+    );
 }
 
 #[test]

@@ -52,6 +52,10 @@ pub struct VerifyGateOptions {
     /// Feedback policy for failed private gates.
     #[serde(default = "default_private_gate_reveal")]
     pub private_gate_reveal: AgentTaskGateRevealPolicy,
+    /// Ordered gates stop after the first failure unless exhaustive verification
+    /// is explicitly requested. Persist this policy with Cook recipes.
+    #[serde(default)]
+    pub execution_policy: AgentTaskGateExecutionPolicy,
     /// Maximum duration for each deterministic gate. Persisted in cook recipes
     /// so adoption never silently changes its historical verification policy.
     #[serde(default = "default_gate_timeout_seconds")]
@@ -70,6 +74,17 @@ pub struct VerifyGateOptions {
     /// consumes declared schemas and paths; producer semantics remain opaque.
     #[serde(default)]
     pub gate_diagnostic_sidecars: Vec<AgentTaskGateDiagnosticSidecarMapping>,
+}
+
+/// Scheduling policy for a declared sequence of deterministic gates.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskGateExecutionPolicy {
+    /// Each gate is a prerequisite for subsequent gates.
+    #[default]
+    OrderedFailFast,
+    /// Run every gate even after failures, for independent or exhaustive suites.
+    ContinueAll,
 }
 
 /// Whether a gate starts with the caller's environment or an empty one.
@@ -133,6 +148,7 @@ impl Default for VerifyGateOptions {
             verify: Vec::new(),
             private_verify: Vec::new(),
             private_gate_reveal: default_private_gate_reveal(),
+            execution_policy: AgentTaskGateExecutionPolicy::OrderedFailFast,
             gate_timeout_seconds: default_gate_timeout_seconds(),
             gate_heartbeat_interval_seconds: default_gate_heartbeat_interval_seconds(),
             rerun_completed_gates: false,
@@ -162,6 +178,10 @@ pub struct AgentTaskGateReport {
     pub stderr: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_evidence: Option<AgentTaskGateFailureEvidence>,
+    /// Why this declared gate was not invoked. This remains durable evidence so
+    /// downstream consumers do not have to infer skipped work from a missing row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<AgentTaskGateSkipReason>,
     /// The same command's result against the immutable base when candidate
     /// adoption needs to distinguish inherited failures from regressions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -239,9 +259,16 @@ impl AgentTaskGateEnvironment {
 pub enum AgentTaskGateStatus {
     Succeeded,
     Failed,
+    Skipped,
     /// The candidate command failed, but the identical failure was reproduced
     /// against the controller-recorded immutable baseline.
     AcceptedInheritedFailure,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateSkipReason {
+    pub blocking_gate_id: String,
+    pub reason: String,
 }
 
 /// Canonical bridge from the binary agent-task gate status to the shared
@@ -253,6 +280,7 @@ impl From<AgentTaskGateStatus> for HomeboyGateStatus {
         match status {
             AgentTaskGateStatus::Succeeded => HomeboyGateStatus::Passed,
             AgentTaskGateStatus::Failed => HomeboyGateStatus::Failed,
+            AgentTaskGateStatus::Skipped => HomeboyGateStatus::Skipped,
             AgentTaskGateStatus::AcceptedInheritedFailure => HomeboyGateStatus::Passed,
         }
     }
@@ -457,6 +485,7 @@ impl AgentTaskGateReport {
                     PlanStepStatus::Success
                 }
                 AgentTaskGateStatus::Failed => PlanStepStatus::Failed,
+                AgentTaskGateStatus::Skipped => PlanStepStatus::Skipped,
             },
         )
         .inputs(PlanValues::new().json("command", &command))
@@ -476,9 +505,59 @@ impl AgentTaskGateReport {
             stdout: stdout.into(),
             stderr: stderr.into(),
             failure_evidence,
+            skip_reason: None,
             baseline_comparison: None,
             candidate_checkout: None,
             environment,
+        }
+    }
+
+    pub fn skipped(
+        id: impl Into<String>,
+        command: Vec<String>,
+        visibility: AgentTaskGateVisibility,
+        reveal_policy: AgentTaskGateRevealPolicy,
+        blocking_gate_id: impl Into<String>,
+    ) -> Self {
+        let id = id.into();
+        let skip_reason = AgentTaskGateSkipReason {
+            blocking_gate_id: blocking_gate_id.into(),
+            reason: "ordered_fail_fast".to_string(),
+        };
+        let gate_result = HomeboyGateResult::new(
+            id.clone(),
+            id.clone(),
+            HomeboyGateKind::Command,
+            HomeboyGateStatus::Skipped,
+        )
+        .summary(format!(
+            "deterministic gate skipped after prerequisite {} failed",
+            skip_reason.blocking_gate_id
+        ))
+        .visibility(visibility)
+        .reveal_policy(reveal_policy)
+        .retryable(false);
+        let step = PlanStep::builder(id.clone(), "agent_task.gate", PlanStepStatus::Skipped)
+            .inputs(PlanValues::new().json("command", &command))
+            .output_value("skip_reason", serde_json::json!(&skip_reason))
+            .gate_result(gate_result)
+            .build();
+        Self {
+            schema: AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
+            step,
+            id,
+            visibility,
+            reveal_policy,
+            status: AgentTaskGateStatus::Skipped,
+            command,
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            failure_evidence: None,
+            skip_reason: Some(skip_reason),
+            baseline_comparison: None,
+            candidate_checkout: None,
+            environment: AgentTaskGateEnvironment::default(),
         }
     }
 
@@ -1000,6 +1079,14 @@ impl From<AgentTaskGateReport> for HomeboyGateResult {
 }
 
 fn gate_result_summary(report: &AgentTaskGateReport, command: &str) -> String {
+    if report.status == AgentTaskGateStatus::Skipped {
+        let blocker = report
+            .skip_reason
+            .as_ref()
+            .map(|reason| reason.blocking_gate_id.as_str())
+            .unwrap_or("an earlier gate");
+        return format!("deterministic gate skipped after prerequisite {blocker} failed");
+    }
     if report.status == AgentTaskGateStatus::Failed
         && report.visibility == AgentTaskGateVisibility::Private
     {
@@ -1028,6 +1115,9 @@ fn gate_result_summary(report: &AgentTaskGateReport, command: &str) -> String {
 }
 
 fn gate_result_agent_feedback(report: &AgentTaskGateReport) -> String {
+    if report.status == AgentTaskGateStatus::Skipped {
+        return String::new();
+    }
     if report.status == AgentTaskGateStatus::Failed
         && report.visibility == AgentTaskGateVisibility::Private
     {
@@ -1053,6 +1143,9 @@ fn gate_result_agent_feedback(report: &AgentTaskGateReport) -> String {
 }
 
 fn gate_result_evidence(report: &AgentTaskGateReport) -> serde_json::Value {
+    if report.status == AgentTaskGateStatus::Skipped {
+        return json!({ "skipped": true, "skip_reason": report.skip_reason });
+    }
     if report.visibility == AgentTaskGateVisibility::Private {
         match report.reveal_policy {
             AgentTaskGateRevealPolicy::SummaryOnly => {
@@ -1273,6 +1366,10 @@ mod tests {
         assert_eq!(defaults.gate_timeout(), Duration::from_secs(30 * 60));
         assert_eq!(defaults.gate_heartbeat_interval(), Duration::from_secs(5));
         assert!(!defaults.rerun_completed_gates);
+        assert_eq!(
+            defaults.execution_policy,
+            AgentTaskGateExecutionPolicy::OrderedFailFast
+        );
 
         let legacy: VerifyGateOptions = serde_json::from_value(serde_json::json!({
             "verify": ["cargo test"],

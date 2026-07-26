@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 
 use homeboy::agents::agent_task_scheduler::AgentTaskCandidateCompletionPolicy;
 use homeboy::agents::agent_tasks::gate::{
-    AgentTaskGateEnvironmentMode, AgentTaskGateEnvironmentPolicy, AgentTaskGateRevealPolicy,
-    VerifyGateOptions,
+    AgentTaskGateEnvironmentMode, AgentTaskGateEnvironmentPolicy, AgentTaskGateExecutionPolicy,
+    AgentTaskGateRevealPolicy, VerifyGateOptions,
 };
 
 use super::super::super::super::agent_task_dispatch::DispatchArgs;
@@ -31,6 +31,15 @@ pub struct VerifyGateArgs {
         value_name = "POLICY"
     )]
     pub private_gate_reveal: AgentTaskGateRevealPolicy,
+    /// Gate scheduling policy: `ordered-fail-fast` (default) skips downstream
+    /// gates after the first failure; `continue-all` runs every declared gate.
+    #[arg(
+        long = "gate-execution-policy",
+        default_value = "ordered-fail-fast",
+        value_name = "POLICY"
+    )]
+    #[arg(value_parser = ["ordered-fail-fast", "continue-all"])]
+    pub gate_execution_policy: String,
     /// Wall-clock timeout, in seconds, for each verification gate command
     /// (default 1800 = 30 min). A gate exceeding this fails.
     #[arg(long = "gate-timeout-seconds", default_value_t = 30 * 60, value_name = "SECONDS")]
@@ -87,6 +96,10 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
             verify: args.verify,
             private_verify: args.private_verify,
             private_gate_reveal: args.private_gate_reveal,
+            execution_policy: match args.gate_execution_policy.as_str() {
+                "continue-all" => AgentTaskGateExecutionPolicy::ContinueAll,
+                _ => AgentTaskGateExecutionPolicy::OrderedFailFast,
+            },
             gate_timeout_seconds: args.gate_timeout_seconds,
             gate_heartbeat_interval_seconds: args.gate_heartbeat_interval_seconds,
             rerun_completed_gates: args.rerun_completed_gates,
@@ -155,6 +168,16 @@ mod tests {
         assert!(options.rerun_completed_gates);
         assert!(options.gate_environment.isolate_home);
         assert!(options.gate_environment.isolate_xdg);
+
+        let options: VerifyGateOptions =
+            TestCli::try_parse_from(["homeboy", "--gate-execution-policy", "continue-all"])
+                .expect("parse continue-all gate policy")
+                .gates
+                .into();
+        assert_eq!(
+            options.execution_policy,
+            AgentTaskGateExecutionPolicy::ContinueAll
+        );
 
         let options: VerifyGateOptions = TestCli::try_parse_from([
             "homeboy",
