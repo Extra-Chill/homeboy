@@ -34,9 +34,10 @@ pub(super) fn plan_deployment(component_id: &str) -> ReleaseDeploymentResult {
 pub(super) fn run_deployment_step(
     component: &homeboy_core::component::Component,
     expected_version: Option<&str>,
+    released_tag: Option<&str>,
     artifacts: &[ReleaseArtifact],
 ) -> ReleaseStepResult {
-    let deployment = execute_deployment(component, expected_version, artifacts);
+    let deployment = execute_deployment(component, expected_version, released_tag, artifacts);
     let deploy_failed = deployment.summary.failed > 0;
 
     ReleaseStepResult {
@@ -66,6 +67,7 @@ pub(super) fn extract_deployment_from_run(run: &ReleaseRun) -> Option<ReleaseDep
 fn execute_deployment(
     component: &homeboy_core::component::Component,
     expected_version: Option<&str>,
+    released_tag: Option<&str>,
     artifacts: &[ReleaseArtifact],
 ) -> ReleaseDeploymentResult {
     let component_id = &component.id;
@@ -88,7 +90,7 @@ fn execute_deployment(
     );
 
     let prepared_artifact =
-        match prepared_release_artifact(component_id, local_path, expected_version, artifacts) {
+        match prepared_release_artifact(component, expected_version, released_tag, artifacts) {
             Ok(artifact) => artifact,
             Err(error) => return failed_deployment(&projects, error.to_string()),
         };
@@ -216,11 +218,13 @@ fn scoped_release_tag(component_id: &str, local_path: &str, version: &str) -> St
 }
 
 fn prepared_release_artifact(
-    component_id: &str,
-    local_path: &str,
+    component: &homeboy_core::component::Component,
     expected_version: Option<&str>,
+    released_tag: Option<&str>,
     artifacts: &[ReleaseArtifact],
 ) -> homeboy_core::error::Result<PreparedDeployArtifact> {
+    let component_id = component.id.as_str();
+    let local_path = component.local_path.as_str();
     let version = expected_version.ok_or_else(|| {
         homeboy_core::error::Error::validation_invalid_argument(
             "version",
@@ -251,11 +255,16 @@ fn prepared_release_artifact(
             Some(durable_path.clone()),
         )
     })?;
-    // Use the component-scoped tag the release actually created (e.g.
-    // `wp-native-auth-v0.2.0`), not a reconstructed unscoped `v{version}`.
-    // Monorepo components namespace their tags; deploying the unscoped form
-    // fails to resolve to a source commit (#9888).
-    let tag = scoped_release_tag(component_id, local_path, version);
+    // Prefer the tag the release actually created and recorded in state. Any
+    // independently recomputed name can disagree with it — for monorepo
+    // components a failed re-resolution silently degrades to the unscoped
+    // `v{version}`, which never existed and cannot resolve to a commit
+    // (#10099). Only fall back to deriving a name when no release tag was
+    // recorded, such as a deploy that did not follow a release in-process.
+    let tag = released_tag
+        .map(str::to_string)
+        .filter(|tag| !tag.trim().is_empty())
+        .unwrap_or_else(|| scoped_release_tag(component_id, local_path, version));
     let source_commit = homeboy_core::engine::command::run_in_optional(
         local_path,
         "git",
@@ -525,8 +534,8 @@ fn cleanup_release_artifacts(local_path: &str, artifacts: &[ReleaseArtifact]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_deployment_from_run, plan_deployment, run_deployment_step,
-        should_cleanup_release_artifacts,
+        extract_deployment_from_run, plan_deployment, prepared_release_artifact,
+        run_deployment_step, should_cleanup_release_artifacts,
     };
     use crate::release::types::{
         ReleaseArtifact, ReleaseCommandInput, ReleaseDeploymentResult, ReleaseDeploymentSummary,
@@ -602,6 +611,89 @@ mod tests {
         assert_eq!(tag, "v0.2.0");
     }
 
+    /// A monorepo component's release tag is namespaced (`<id>-v<version>`).
+    /// The deploy step must use the tag the release actually recorded rather
+    /// than recomputing a name, because an independently derived name can
+    /// silently degrade to the unscoped `v{version}` that never existed
+    /// (#10099).
+    #[test]
+    fn prepared_artifact_uses_the_recorded_release_tag() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path();
+        run_git(root, &["init", "-q", "-b", "main"]);
+        run_git(root, &["config", "user.email", "test@example.invalid"]);
+        run_git(root, &["config", "user.name", "Test"]);
+
+        let component_dir = root.join("plugins").join("scoped-component");
+        std::fs::create_dir_all(&component_dir).expect("component dir");
+        std::fs::write(component_dir.join("file.txt"), "content").expect("write");
+        run_git(root, &["add", "."]);
+        run_git(root, &["commit", "-q", "-m", "initial"]);
+
+        let scoped_tag = "scoped-component-v0.3.0";
+        run_git(root, &["tag", scoped_tag]);
+        let head = run_git(root, &["rev-parse", "HEAD"]);
+
+        let artifact_path = root.join("artifact.zip");
+        std::fs::write(&artifact_path, b"zip").expect("write artifact");
+        let artifacts = vec![ReleaseArtifact {
+            path: artifact_path.display().to_string(),
+            durable_path: Some(artifact_path.display().to_string()),
+            artifact_type: None,
+            platform: None,
+        }];
+
+        let component = Component {
+            id: "scoped-component".to_string(),
+            local_path: component_dir.display().to_string(),
+            ..Default::default()
+        };
+
+        let prepared =
+            prepared_release_artifact(&component, Some("0.3.0"), Some(scoped_tag), &artifacts)
+                .expect("prepared artifact");
+
+        assert_eq!(prepared.tag, scoped_tag);
+        assert_eq!(prepared.source_commit, head);
+    }
+
+    /// An empty recorded tag must not be treated as authoritative; the derived
+    /// name is used instead so the step still has something to resolve.
+    #[test]
+    fn prepared_artifact_ignores_a_blank_recorded_tag() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path();
+        run_git(root, &["init", "-q", "-b", "main"]);
+        run_git(root, &["config", "user.email", "test@example.invalid"]);
+        run_git(root, &["config", "user.name", "Test"]);
+        std::fs::write(root.join("file.txt"), "content").expect("write");
+        run_git(root, &["add", "."]);
+        run_git(root, &["commit", "-q", "-m", "initial"]);
+        run_git(root, &["tag", "v0.3.0"]);
+        let head = run_git(root, &["rev-parse", "HEAD"]);
+
+        let artifact_path = root.join("artifact.zip");
+        std::fs::write(&artifact_path, b"zip").expect("write artifact");
+        let artifacts = vec![ReleaseArtifact {
+            path: artifact_path.display().to_string(),
+            durable_path: Some(artifact_path.display().to_string()),
+            artifact_type: None,
+            platform: None,
+        }];
+
+        let component = Component {
+            id: "definitely-no-such-component-10099".to_string(),
+            local_path: root.display().to_string(),
+            ..Default::default()
+        };
+
+        let prepared = prepared_release_artifact(&component, Some("0.3.0"), Some("  "), &artifacts)
+            .expect("prepared artifact");
+
+        assert_eq!(prepared.tag, "v0.3.0");
+        assert_eq!(prepared.source_commit, head);
+    }
+
     #[test]
     fn test_run_deployment_step() {
         let result = super::run_deployment_step(
@@ -610,6 +702,7 @@ mod tests {
                 local_path: "/tmp".to_string(),
                 ..Default::default()
             },
+            None,
             None,
             &[],
         );
@@ -640,6 +733,7 @@ mod tests {
                 local_path: temp.path().to_string_lossy().to_string(),
                 ..Default::default()
             },
+            None,
             None,
             &artifacts,
         );
@@ -808,7 +902,7 @@ mod tests {
                 .expect("save project");
             }
 
-            let first = run_deployment_step(&component, Some("1.2.4"), &[artifact]);
+            let first = run_deployment_step(&component, Some("1.2.4"), None, &[artifact]);
             assert_eq!(first.status, ReleaseStepStatus::Failed);
             let first_deployment = first
                 .data

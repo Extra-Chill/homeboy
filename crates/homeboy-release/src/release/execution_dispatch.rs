@@ -227,6 +227,7 @@ pub(super) fn execute_release_plan_step(
         "deploy" => Ok(Some(super::deployment::run_deployment_step(
             context.component,
             context.state.version.as_deref(),
+            context.state.tag.as_deref(),
             &context.state.artifacts,
         ))),
         step_kind if step_kind.starts_with("publish.") => {
