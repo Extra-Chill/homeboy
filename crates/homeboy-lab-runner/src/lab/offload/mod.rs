@@ -21,7 +21,7 @@ mod execute;
 mod fallback_commands;
 mod hydration;
 mod inner;
-mod metadata;
+pub(crate) mod metadata;
 mod overhead;
 mod path_materialization;
 mod resident;

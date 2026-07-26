@@ -33,6 +33,19 @@ fn read_cache() -> Option<UpdateCheckCache> {
     update_check_cache::read_cache(CACHE_FILENAME)
 }
 
+/// Return the latest stable version already admitted by the normal update
+/// check. Durable admission deliberately never performs network I/O: an
+/// unavailable cache is explicit offline evidence, not a reason to guess.
+pub fn latest_allowed_stable() -> Option<String> {
+    if is_disabled_by_env() || is_disabled_by_config() {
+        return None;
+    }
+    read_cache().and_then(|cache| {
+        (is_cache_fresh(&cache) && cache.update_available && !cache.latest_version.is_empty())
+            .then_some(cache.latest_version)
+    })
+}
+
 fn write_cache(cache: &UpdateCheckCache) {
     update_check_cache::write_cache(CACHE_FILENAME, cache);
 }

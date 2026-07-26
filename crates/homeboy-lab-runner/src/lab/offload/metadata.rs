@@ -517,7 +517,7 @@ fn runner_configured_binary_select_command(
     ))
 }
 
-fn controller_homeboy_recovery_command() -> String {
+pub(crate) fn controller_homeboy_recovery_command() -> String {
     let Ok(exe) = std::env::current_exe() else {
         return "homeboy upgrade".to_string();
     };
