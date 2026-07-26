@@ -265,6 +265,17 @@ fn rust_cargo_changed_test_env(component: &Component, files: &[String]) -> Vec<(
             continue;
         }
 
+        // A test file mounted with `#[path = "..."] mod <name>;` lives at the
+        // module path of whichever module declares it, not the one its file
+        // name implies. Deriving the filter from the file name emits a filter
+        // that matches zero tests, and the runner fails closed on "ran 0
+        // tests". Resolve the real mount point before falling back to the file
+        // name. (#10179)
+        if let Some(mounted) = path_attr_mounted_module_path(component, test_file, &routing_file) {
+            filter_args.push(mounted);
+            continue;
+        }
+
         module_path = module_path.replace('/', "::");
         if !module_path.is_empty() {
             filter_args.push(module_path);
@@ -495,6 +506,153 @@ fn file_declares_test_function(contents: &str) -> bool {
             .trim();
         head == "test" || head.rsplit("::").next() == Some("test")
     })
+}
+
+/// Resolves the module path a test file is actually mounted at when a sibling
+/// module declares it with `#[path = "..."] mod <name>;`.
+///
+/// `src/agent_task_service/cook_tests.rs` mounted from `cook.rs` as
+/// `#[path = "cook_tests.rs"] mod tests;` lives at
+/// `agent_task_service::cook::tests`, not the `agent_task_service::cook_tests`
+/// its file name implies. Returns `None` when no declaring module is found, so
+/// callers keep the file-name derivation.
+fn path_attr_mounted_module_path(
+    component: &Component,
+    test_file: &str,
+    routing_file: &str,
+) -> Option<String> {
+    let target = component_source_path(component).join(test_file);
+    let target = target.canonicalize().unwrap_or(target);
+    let search_dir = component_source_path(component)
+        .join(test_file)
+        .parent()?
+        .to_path_buf();
+    let routing_dir = routing_file
+        .rsplit_once('/')
+        .map(|(dir, _)| dir)
+        .unwrap_or("");
+
+    for entry in std::fs::read_dir(&search_dir).ok()? {
+        let Ok(entry) = entry else { continue };
+        let declaring = entry.path();
+        if declaring.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let declaring_canonical = declaring
+            .canonicalize()
+            .unwrap_or_else(|_| declaring.clone());
+        if declaring_canonical == target {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(&declaring) else {
+            continue;
+        };
+
+        for (value, module) in path_attr_mod_declarations(&contents) {
+            // `#[path]` on a module outside an inline `mod` block resolves
+            // relative to the directory holding the declaring file. A non
+            // `mod.rs` file also owns a directory named after it, so accept
+            // either anchor rather than guessing which form the crate uses.
+            let mut anchors = vec![search_dir.clone()];
+            if let Some(stem) = declaring.file_stem().and_then(|stem| stem.to_str()) {
+                if stem != "mod" && stem != "lib" && stem != "main" {
+                    anchors.push(search_dir.join(stem));
+                }
+            }
+
+            let mounted = anchors.into_iter().any(|anchor| {
+                let candidate = anchor.join(&value);
+                candidate.canonicalize().unwrap_or(candidate) == target
+            });
+            if !mounted {
+                continue;
+            }
+
+            let declaring_name = declaring.file_name()?.to_str()?;
+            let declaring_routing = if routing_dir.is_empty() {
+                declaring_name.to_string()
+            } else {
+                format!("{routing_dir}/{declaring_name}")
+            };
+            let owner = module_path_from_routing_file(&declaring_routing);
+            return Some(if owner.is_empty() {
+                module
+            } else {
+                format!("{owner}::{module}")
+            });
+        }
+    }
+
+    None
+}
+
+/// Converts a package-relative source path into its cargo module path,
+/// returning an empty string for crate roots (`src/lib.rs`, `src/main.rs`).
+fn module_path_from_routing_file(routing_file: &str) -> String {
+    let relative = routing_file
+        .strip_prefix("src/")
+        .unwrap_or(routing_file)
+        .trim_end_matches(".rs")
+        .trim_end_matches("/mod");
+    if relative == "lib" || relative == "main" || relative == "mod" {
+        return String::new();
+    }
+    relative.replace('/', "::")
+}
+
+/// Extracts `(path_value, module_name)` pairs from `#[path = "..."] mod x;`
+/// declarations. Intervening attributes such as `#[cfg(test)]`, comments, and
+/// blank lines are tolerated between the attribute and the `mod` item.
+fn path_attr_mod_declarations(contents: &str) -> Vec<(String, String)> {
+    let mut declarations = Vec::new();
+    let mut pending: Option<String> = None;
+
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if trimmed.starts_with("#[path") {
+            pending = trimmed
+                .split_once('"')
+                .and_then(|(_, rest)| rest.split_once('"'))
+                .map(|(value, _)| value.to_string());
+            continue;
+        }
+        if trimmed.starts_with("#[") || trimmed.starts_with("#!") {
+            continue;
+        }
+        if let Some(value) = pending.take() {
+            if let Some(module) = parse_mod_declaration_ident(trimmed) {
+                declarations.push((value, module));
+            }
+        }
+    }
+
+    declarations
+}
+
+/// Parses the module name out of a `mod x;` item, tolerating visibility
+/// modifiers. Returns `None` for inline `mod x { ... }` blocks and non-module
+/// lines.
+fn parse_mod_declaration_ident(line: &str) -> Option<String> {
+    let mut rest = line.trim();
+    if let Some(after) = rest.strip_prefix("pub") {
+        let after = after.trim_start();
+        rest = match after.strip_prefix('(') {
+            Some(inner) => inner.split_once(')')?.1.trim_start(),
+            None => after,
+        };
+    }
+    let rest = rest.strip_prefix("mod")?;
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let ident = rest.trim().strip_suffix(';')?.trim();
+    if ident.is_empty() || !ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some(ident.to_string())
 }
 
 fn exclusive_changed_test_env(
@@ -1015,6 +1173,107 @@ mod tests {
             "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
             "--\ncommands::agent_task::tests::lifecycle".to_string()
         )));
+    }
+
+    #[test]
+    fn rust_cargo_changed_routing_uses_path_attr_mount_instead_of_file_name() {
+        // Mirrors homeboy-agents: `cook.rs` mounts `cook_tests.rs` as its
+        // `tests` module, so the filter must target `...::cook::tests` rather
+        // than the `...::cook_tests` the file name implies.
+        let dir = TempDir::new().expect("temp dir should be created");
+        let module_dir = dir.path().join("src/agent_task_service");
+        std::fs::create_dir_all(&module_dir).expect("create module dirs");
+        std::fs::write(
+            module_dir.join("cook.rs"),
+            "pub fn cook() {}\n\n#[cfg(test)]\n#[path = \"cook_tests.rs\"]\nmod tests;\n",
+        )
+        .expect("write owning module");
+        std::fs::write(
+            module_dir.join("cook_tests.rs"),
+            "#[test]\nfn cooks() { assert!(true); }\n",
+        )
+        .expect("write mounted test module");
+
+        let component = Component::new(
+            "fixture-component".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(
+            &component,
+            &["src/agent_task_service/cook_tests.rs".to_string()],
+        );
+
+        assert!(env.contains(&(
+            "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
+            "--\nagent_task_service::cook::tests".to_string()
+        )));
+    }
+
+    #[test]
+    fn rust_cargo_changed_routing_keeps_file_name_when_no_path_attr_mount_exists() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        let module_dir = dir.path().join("src/agent_task_service");
+        std::fs::create_dir_all(&module_dir).expect("create module dirs");
+        // A sibling that mounts a *different* file must not capture this one.
+        std::fs::write(
+            module_dir.join("cook.rs"),
+            "#[cfg(test)]\n#[path = \"other_tests.rs\"]\nmod tests;\n",
+        )
+        .expect("write owning module");
+        std::fs::write(
+            module_dir.join("cook_tests.rs"),
+            "#[test]\nfn cooks() { assert!(true); }\n",
+        )
+        .expect("write standalone test module");
+
+        let component = Component::new(
+            "fixture-component".to_string(),
+            dir.path().to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(
+            &component,
+            &["src/agent_task_service/cook_tests.rs".to_string()],
+        );
+
+        assert!(env.contains(&(
+            "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
+            "--\nagent_task_service::cook_tests".to_string()
+        )));
+    }
+
+    #[test]
+    fn path_attr_mod_declarations_pairs_attributes_with_module_items() {
+        let declarations = path_attr_mod_declarations(
+            "#[cfg(test)]\n#[path = \"cook_tests.rs\"]\nmod tests;\n\n#[path = \"a/b.rs\"]\npub(crate) mod nested;\n\nmod plain;\n",
+        );
+
+        assert_eq!(
+            declarations,
+            vec![
+                ("cook_tests.rs".to_string(), "tests".to_string()),
+                ("a/b.rs".to_string(), "nested".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn module_path_from_routing_file_maps_roots_and_nested_modules() {
+        assert_eq!(module_path_from_routing_file("src/lib.rs"), "");
+        assert_eq!(module_path_from_routing_file("src/main.rs"), "");
+        assert_eq!(
+            module_path_from_routing_file("src/agent_task_service/mod.rs"),
+            "agent_task_service"
+        );
+        assert_eq!(
+            module_path_from_routing_file("src/agent_task_service/cook.rs"),
+            "agent_task_service::cook"
+        );
     }
 
     #[test]
