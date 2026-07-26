@@ -91,6 +91,8 @@ pub(super) enum RunsCommand {
     /// detached/offloaded runs.
     #[command(visible_aliases = ["follow", "tail"])]
     Watch(RunsWatchArgs),
+    /// Cooperatively cancel a persisted foreground run before its next stage.
+    Cancel { run_id: String },
     /// Show one persisted observation run
     Show {
         run_id: String,
@@ -268,6 +270,7 @@ pub enum RunsOutput {
     Reconcile(RunsReconcileOutput),
     Retention(RunsRetentionOutput),
     Watch(RunsWatchOutput),
+    Cancel(RunsCancelOutput),
     Export(RunsExportOutput),
     Import(RunsImportOutput),
     ImportFromGhActions(GhActionsImportOutput),
@@ -276,6 +279,19 @@ pub enum RunsOutput {
     Resources(RunsResourcesOutput),
     Drift(RunsDriftOutput),
     LoopSync(RunsLoopSyncOutput),
+}
+
+#[derive(Serialize)]
+pub struct RunsCancelOutput {
+    pub command: &'static str,
+    pub run_id: String,
+    pub status: String,
+    pub cancellation: &'static str,
+    #[serde(
+        rename = "_homeboy_actionable",
+        skip_serializing_if = "CommandActionableMetadata::is_empty"
+    )]
+    pub actionable: CommandActionableMetadata,
 }
 
 #[derive(Serialize)]

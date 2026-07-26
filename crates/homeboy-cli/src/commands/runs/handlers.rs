@@ -12,7 +12,9 @@ use homeboy::core::api_jobs;
 use homeboy::core::artifact_address::ArtifactAddress;
 use homeboy::core::observation::evidence_report::directory_publication_guidance;
 use homeboy::core::observation::runs_service;
-use homeboy::core::observation::{FindingListFilter, ObservationStore, RunListFilter, RunRecord};
+use homeboy::core::observation::{
+    merge_metadata, FindingListFilter, ObservationStore, RunListFilter, RunRecord, RunStatus,
+};
 use homeboy::core::resource_lifecycle_index::resource_lifecycle_index_from_artifacts;
 use homeboy::core::validation_progress::ValidationProgressLedger;
 use homeboy::core::Error;
@@ -24,9 +26,10 @@ use super::types::{
     actionable_for_run_detail, actionable_for_run_list, RunDetail, RunsArtifactArgs,
     RunsArtifactCommand, RunsArtifactCommandHint, RunsArtifactGetArgs, RunsArtifactGetOutput,
     RunsArtifactPathGuide, RunsArtifactPullEntry, RunsArtifactPullSummary, RunsArtifactsArgs,
-    RunsArtifactsOutput, RunsDirectoryArtifactPublicationGuidance, RunsEnvKeyOutput, RunsEnvOutput,
-    RunsEnvSourceLayerOutput, RunsEnvSummary, RunsFieldSelectionOutput, RunsListArgs,
-    RunsListOutput, RunsOutput, RunsResumePlanOutput, RunsSelectedField, RunsShowOutput,
+    RunsArtifactsOutput, RunsCancelOutput, RunsDirectoryArtifactPublicationGuidance,
+    RunsEnvKeyOutput, RunsEnvOutput, RunsEnvSourceLayerOutput, RunsEnvSummary,
+    RunsFieldSelectionOutput, RunsListArgs, RunsListOutput, RunsOutput, RunsResumePlanOutput,
+    RunsSelectedField, RunsShowOutput,
 };
 use super::{reconcile, remote, remote_artifact, CmdResult};
 
@@ -98,6 +101,38 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
             runs,
             matched_runs,
             hidden_mirrors,
+            actionable,
+        }),
+        0,
+    ))
+}
+
+pub fn cancel_run(run_id: &str) -> CmdResult<RunsOutput> {
+    let store = ObservationStore::open_initialized()?;
+    let run = runs_service::require_run(&store, run_id)?;
+    if run.status != RunStatus::Running.as_str() {
+        return Err(Error::validation_invalid_argument(
+            "run-id",
+            "only running observation runs can be cancelled",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    let metadata = merge_metadata(
+        run.metadata_json,
+        serde_json::json!({
+            "cancellation": { "requested": true, "requested_at": chrono::Utc::now().to_rfc3339() }
+        }),
+    );
+    let cancelled = store.finish_run(run_id, RunStatus::Skipped, Some(metadata))?;
+    let actionable =
+        super::types::actionable_for_run_summary(&super::run_summary(cancelled.clone()));
+    Ok((
+        RunsOutput::Cancel(RunsCancelOutput {
+            command: "runs.cancel",
+            run_id: cancelled.id.clone(),
+            status: cancelled.status,
+            cancellation: "cooperative; the foreground owner stops before its next stage",
             actionable,
         }),
         0,

@@ -17,6 +17,7 @@ use homeboy::core::ci_profile::{self, CiRunSelection};
 use homeboy::core::code_audit::AuditCommandOutput;
 use homeboy::core::engine::execution_context::{self, ResolveOptions};
 use homeboy::core::git;
+use homeboy::core::observation::ObservationStore;
 use homeboy::core::plan::PlanStep;
 use homeboy::core::quality::{build_quality_plan, QualityPlanOptions};
 use homeboy_extension::lint::LintCommandOutput;
@@ -44,6 +45,11 @@ pub(super) mod raw_output;
 pub struct ReviewArgs {
     #[command(subcommand)]
     pub command: Option<ReviewCommand>,
+
+    /// Attach to an already-persisted review run instead of starting another
+    /// audit/lint/test execution.
+    #[arg(long, value_name = "RUN_ID")]
+    pub run_id: Option<String>,
 
     #[command(flatten)]
     pub comp: PositionalComponentArgs,
@@ -349,6 +355,10 @@ fn review_lint_args(mut args: lint::LintArgs) -> lint::LintArgs {
 }
 
 pub fn run_umbrella(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutput> {
+    if let Some(run_id) = args.run_id.as_deref() {
+        return attach_to_persisted_review(run_id);
+    }
+
     // Resolve component ID (auto-discovers from CWD when omitted) and source
     // path so we can probe git for the changed-file set ourselves.
     let component_args = args.effective_component_args();
@@ -411,6 +421,7 @@ pub fn run_umbrella(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCo
         scope: &scope,
         changed_file_count,
     });
+    observation::emit_early_lifecycle(&review_observation);
 
     let mut top_hints: Vec<String> = Vec::new();
 
@@ -430,8 +441,22 @@ pub fn run_umbrella(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCo
     let mut audit_stage = None;
     let mut lint_stage = None;
     let mut test_stage = None;
+    let review_run_id = review_observation
+        .as_ref()
+        .map(|observation| observation.run_id().to_string());
 
     let stage_run = match review::execute_review_plan_steps(&quality_plan.steps, |step| {
+        if review_run_id
+            .as_deref()
+            .is_some_and(observation::is_cancelled)
+        {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "run-id",
+                "review was cancelled before the next stage started",
+                review_run_id.clone(),
+                None,
+            ));
+        }
         // homeboy-audit: allow-thin-command-adapter
         dispatch_review_plan_step(step, &args, global, &component_label, &review_context)
         // homeboy-audit: allow-thin-command-adapter
@@ -547,6 +572,55 @@ pub fn run_umbrella(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCo
     observation::finish_success(review_observation, &output, overall_exit);
 
     Ok((output, overall_exit))
+}
+
+/// Return the persisted record rather than silently starting another expensive
+/// review when an interrupted foreground client retries by ID.
+fn attach_to_persisted_review(run_id: &str) -> CmdResult<ReviewCommandOutput> {
+    let store = ObservationStore::open_initialized()?;
+    let run = store.get_run(run_id)?.ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            "run-id",
+            "review run was not found",
+            Some(run_id.to_string()),
+            Some(vec![format!(
+                "Run `homeboy runs show {run_id}` to inspect persisted runs."
+            )]),
+        )
+    })?;
+    if run.kind != "review" {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "run-id",
+            "run-id must identify a review run",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+
+    let component = run
+        .component_id
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let observation = homeboy::core::ObservationOutputMetadata::for_run("review", run_id);
+    let mut output = ReviewService::skipped_output(
+        ReviewOutputInput {
+            component: component.clone(),
+            plan: build_quality_plan(QualityPlanOptions::review(&component)),
+            observation: Some(observation),
+            scope: run.metadata_json.get("scope").and_then(Value::as_str).unwrap_or("full").to_string(),
+            changed_since: run.metadata_json.get("changed_since").and_then(Value::as_str).map(str::to_string),
+            changed_file_count: run.metadata_json.get("changed_file_count").and_then(Value::as_u64).and_then(|count| usize::try_from(count).ok()),
+            head_ref: run.git_sha.unwrap_or_default(),
+            hints: vec![format!(
+                "Attached to persisted review run {run_id} (status {}); no new review was started. Watch it with: homeboy runs watch {run_id}",
+                run.status
+            )],
+        },
+        "attached to persisted run",
+        false,
+    );
+    attach_review_actionable(&mut output);
+    Ok((output, 0))
 }
 
 fn manual_changelog_edit(
@@ -1094,6 +1168,7 @@ mod tests {
     fn scope_flag_suffix_renders_changed_since() {
         let args = ReviewArgs {
             command: None,
+            run_id: None,
             comp: PositionalComponentArgs {
                 component: None,
                 path: None,
@@ -1117,6 +1192,7 @@ mod tests {
     fn scope_flag_suffix_renders_changed_only_only_when_allowed() {
         let args = ReviewArgs {
             command: None,
+            run_id: None,
             comp: PositionalComponentArgs {
                 component: None,
                 path: None,
@@ -1142,6 +1218,7 @@ mod tests {
     fn scope_flag_suffix_empty_for_full_run() {
         let args = ReviewArgs {
             command: None,
+            run_id: None,
             comp: PositionalComponentArgs {
                 component: None,
                 path: None,
@@ -1285,6 +1362,7 @@ mod tests {
     fn review_args_fixture() -> ReviewArgs {
         ReviewArgs {
             command: None,
+            run_id: None,
             comp: PositionalComponentArgs {
                 component: Some("fixture".to_string()),
                 path: None,

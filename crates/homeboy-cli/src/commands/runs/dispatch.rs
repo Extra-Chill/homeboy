@@ -174,6 +174,7 @@ pub fn run(args: RunsArgs, _global: &GlobalArgs) -> CmdResult<RunsOutput> {
         RunsCommand::Reconcile(args) => reconcile::reconcile_runs(args),
         RunsCommand::Retention(args) => retention::retain_terminal_runs(args),
         RunsCommand::Watch(args) => watch::watch_run(args),
+        RunsCommand::Cancel { run_id } => handlers::cancel_run(&run_id),
         RunsCommand::Show {
             run_id,
             json: _,
