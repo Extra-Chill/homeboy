@@ -2059,16 +2059,92 @@ fn status_keeps_live_local_provider_owner_running_idempotently() {
 }
 
 #[test]
+fn status_does_not_terminalize_a_live_owner_after_provider_success() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("owner-live-late-import")).expect("submitted");
+        mark_running("owner-live-late-import").expect("running");
+        reserve_provider_execution("owner-live-late-import", &plan.tasks[0], 1).expect("reserved");
+        record_provider_execution_terminal("owner-live-late-import", "task-a", 1, "succeeded")
+            .expect("provider success recorded");
+
+        let record = status("owner-live-late-import").expect("status before aggregate import");
+        assert_eq!(record.state, AgentTaskRunState::Running);
+        assert_eq!(
+            record.metadata["provider_executions"][0]["owner_state"],
+            json!("live")
+        );
+    });
+}
+
+#[test]
+fn legacy_provider_reservation_without_owner_proof_remains_joinable() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("owner-legacy")).expect("submitted");
+        mark_running("owner-legacy").expect("running");
+        reserve_provider_execution("owner-legacy", &plan.tasks[0], 1).expect("reserved");
+        rewrite_record_for_test("owner-legacy", |record| {
+            let execution = record.metadata["provider_executions"][0]
+                .as_object_mut()
+                .expect("provider execution object");
+            execution.remove("owner_pid");
+            execution.remove("owner_linux_starttime_ticks");
+            execution.remove("owner_identity");
+        })
+        .expect("legacy reservation fixture");
+
+        let record = status("owner-legacy").expect("legacy status");
+        assert_eq!(record.state, AgentTaskRunState::Running);
+        assert_eq!(
+            record.metadata["provider_executions"][0]["owner_state"],
+            json!("unverifiable")
+        );
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn pid_starttime_mismatch_reclaims_a_reused_provider_pid_without_signalling_it() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("owner-pid-reused")).expect("submitted");
+        mark_running("owner-pid-reused").expect("running");
+        reserve_provider_execution("owner-pid-reused", &plan.tasks[0], 1).expect("reserved");
+        rewrite_record_for_test("owner-pid-reused", |record| {
+            record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] = json!(0);
+        })
+        .expect("reused PID fixture");
+
+        let record = status("owner-pid-reused").expect("reconcile PID reuse");
+        assert_eq!(record.state, AgentTaskRunState::Cancelled);
+        assert_eq!(
+            record.metadata["provider_executions"][0]["owner_state"],
+            json!("identity_mismatch")
+        );
+        assert!(homeboy_core::process::pid_is_running(std::process::id()));
+    });
+}
+
+#[cfg(unix)]
+#[test]
 fn dead_local_provider_owner_terminalizes_running_reservation_once() {
     with_isolated_home(|_| {
         let plan = test_plan();
         submit_plan(&plan, Some("owner-dead")).expect("submitted");
         mark_running("owner-dead").expect("running");
         reserve_provider_execution("owner-dead", &plan.tasks[0], 1).expect("reserved");
+        let mut owner = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("start provider owner");
         rewrite_record_for_test("owner-dead", |record| {
-            record.metadata["provider_executions"][0]["owner_pid"] = json!(u32::MAX);
+            record.metadata["provider_executions"][0]["owner_pid"] = json!(owner.id());
+            record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] = Value::Null;
         })
-        .expect("dead owner fixture");
+        .expect("provider owner fixture");
+        owner.kill().expect("interrupt provider owner");
+        owner.wait().expect("reap provider owner");
 
         let terminal = status("owner-dead").expect("reconciled status");
         let replay = status("owner-dead").expect("idempotent status");
@@ -2085,6 +2161,7 @@ fn dead_local_provider_owner_terminalizes_running_reservation_once() {
     });
 }
 
+#[cfg(unix)]
 #[test]
 fn dead_owner_preserves_late_provider_success_as_recoverable_candidate() {
     with_isolated_home(|_| {
@@ -2094,10 +2171,17 @@ fn dead_owner_preserves_late_provider_success_as_recoverable_candidate() {
         reserve_provider_execution("owner-late-success", &plan.tasks[0], 1).expect("reserved");
         record_provider_execution_terminal("owner-late-success", "task-a", 1, "succeeded")
             .expect("provider success recorded");
+        let mut owner = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("start provider owner");
         rewrite_record_for_test("owner-late-success", |record| {
-            record.metadata["provider_executions"][0]["owner_pid"] = json!(u32::MAX);
+            record.metadata["provider_executions"][0]["owner_pid"] = json!(owner.id());
+            record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] = Value::Null;
         })
-        .expect("dead owner fixture");
+        .expect("provider owner fixture");
+        owner.kill().expect("interrupt provider owner");
+        owner.wait().expect("reap provider owner");
 
         let recovered = status("owner-late-success").expect("recovered status");
         assert_eq!(recovered.state, AgentTaskRunState::CandidateRecoverable);

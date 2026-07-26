@@ -893,14 +893,16 @@ fn reconcile_local_provider_ownership(record: &mut AgentTaskRunRecord) -> bool {
         return false;
     };
 
-    let mut has_running = false;
+    let mut has_reconcilable_execution = false;
     let mut has_live_owner = false;
+    let mut has_unverifiable_owner = false;
     let mut has_succeeded = false;
     let mut recovery_identity = Vec::new();
     for execution in executions.iter_mut() {
         match execution["state"].as_str() {
-            Some("running") => {
-                has_running = true;
+            Some("running") | Some("succeeded") => {
+                has_reconcilable_execution = true;
+                has_succeeded |= execution["state"] == json!("succeeded");
                 recovery_identity.push(execution["owner_identity"].clone());
                 let identity_state = execution
                     .get("owner_pid")
@@ -918,6 +920,14 @@ fn reconcile_local_provider_ownership(record: &mut AgentTaskRunRecord) -> bool {
                     identity_state,
                     Some(homeboy_core::process::ProcessIdentityState::Live)
                 );
+                has_unverifiable_owner |= !matches!(
+                    identity_state,
+                    Some(
+                        homeboy_core::process::ProcessIdentityState::Live
+                            | homeboy_core::process::ProcessIdentityState::Dead
+                            | homeboy_core::process::ProcessIdentityState::IdentityMismatch
+                    )
+                );
                 execution["owner_state"] = json!(match identity_state {
                     Some(homeboy_core::process::ProcessIdentityState::Live) => "live",
                     Some(homeboy_core::process::ProcessIdentityState::Dead) => "dead",
@@ -927,14 +937,16 @@ fn reconcile_local_provider_ownership(record: &mut AgentTaskRunRecord) -> bool {
                 });
                 has_live_owner |= live;
             }
-            Some("succeeded") => has_succeeded = true,
             _ => {}
         }
     }
-    if has_live_owner {
+    // Older records predate per-provider ownership, and non-Linux hosts can be
+    // unable to verify a persisted identity. Neither is proof that the owner
+    // died, so retain the joinable run instead of terminalizing it on a read.
+    if has_live_owner || has_unverifiable_owner {
         return true;
     }
-    if !has_running && !has_succeeded {
+    if !has_reconcilable_execution {
         return false;
     }
 
