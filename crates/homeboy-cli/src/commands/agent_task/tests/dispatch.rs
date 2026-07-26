@@ -29,6 +29,17 @@ impl AgentTaskCookAttemptDispatcher for RecipeOnlyDispatcher {
     }
 }
 
+fn cook_args_from_cli(args: Vec<String>) -> AgentTaskCookArgs {
+    let cli = Cli::parse_from(args);
+    let Commands::AgentTask(agent_task) = cli.command else {
+        panic!("agent-task command");
+    };
+    let AgentTaskCommand::Cook(cook) = agent_task.command else {
+        panic!("cook command");
+    };
+    cook
+}
+
 #[test]
 fn cook_rejects_queue_only_before_creating_a_durable_recipe() {
     with_isolated_home(|_| {
@@ -291,6 +302,160 @@ fn invalid_cook_inputs_do_not_mutate_a_configured_provider_destination() {
             !ensured.exists(),
             "invalid Cook inputs must cause zero ensure mutations"
         );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn cook_resolves_existing_provider_destination_without_creation_metadata() {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        init_runtime_component_checkout(workspace.path());
+        let destination_root = tempfile::tempdir().expect("destination root");
+        let destination = destination_root.path().join("task");
+        assert!(Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "fix/existing",
+                destination.to_str().expect("destination path"),
+                "HEAD",
+            ])
+            .current_dir(workspace.path())
+            .status()
+            .expect("create linked worktree")
+            .success());
+        let provider_dir = tempfile::tempdir().expect("provider dir");
+        let provider = provider_dir.path().join("provider");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@existing\",\"path\":\"{}\",\"branch\":\"fix/existing\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
+                destination.display()
+            ),
+        )
+        .expect("write provider");
+        let mut permissions = std::fs::metadata(&provider)
+            .expect("metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
+
+        let mut config = homeboy::core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            homeboy::core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                commands: homeboy::core::defaults::WorktreeProviderCommands {
+                    resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy::core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                    },
+                ),
+            },
+        );
+        homeboy::core::defaults::save_config(&config).expect("save provider config");
+
+        let args = cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "reuse destination".to_string(),
+            "--to-worktree".to_string(),
+            "fixture@existing".to_string(),
+            "--no-finalize".to_string(),
+        ]);
+        let provision = super::super::run::provision_cook_destination(&args)
+            .expect("existing provider destination resolves without creation fields");
+
+        assert_eq!(provision["action"], "existing");
+        assert_eq!(provision["provider"], "fixture");
+        assert_eq!(provision["path"], destination.display().to_string());
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn cook_does_not_collapse_provider_lookup_failures_into_missing_destination_metadata() {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("provider tempdir");
+        let ensured = temp.path().join("ensured");
+        let provider = temp.path().join("provider");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = resolve ]; then exit 77; fi\ntouch '{}'\n",
+                ensured.display()
+            ),
+        )
+        .expect("write provider");
+        let mut permissions = std::fs::metadata(&provider)
+            .expect("metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions).expect("make provider executable");
+
+        let mut config = homeboy::core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            homeboy::core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                commands: homeboy::core::defaults::WorktreeProviderCommands {
+                    resolve: Some(vec![provider.display().to_string(), "resolve".to_string()]),
+                    ensure: Some(vec![provider.display().to_string(), "ensure".to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy::core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                    },
+                ),
+            },
+        );
+        homeboy::core::defaults::save_config(&config).expect("save provider config");
+
+        let args = cook_args_from_cli(vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+            "--prompt".to_string(),
+            "resolve destination".to_string(),
+            "--to-worktree".to_string(),
+            "fixture@missing".to_string(),
+            "--no-finalize".to_string(),
+        ]);
+        let error = super::super::run::provision_cook_destination(&args)
+            .expect_err("provider lookup failure is not a missing destination");
+
+        assert!(error
+            .message
+            .contains("provider `fixture` resolve command failed"));
+        assert!(!ensured.exists(), "failed lookup must not run ensure");
     });
 }
 
