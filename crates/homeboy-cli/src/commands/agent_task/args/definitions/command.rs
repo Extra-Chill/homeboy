@@ -109,13 +109,21 @@ pub struct CookContinueArgs {
 
 #[derive(Args, Debug)]
 pub struct ListArgs {
-    #[arg(long = "limit", value_name = "N")]
+    #[arg(long = "limit", value_name = "N", conflicts_with = "full")]
     pub limit: Option<usize>,
+    /// Return every matching record. This is intentionally explicit because
+    /// discovery defaults to a finite agent-facing page.
+    #[arg(long)]
+    pub full: bool,
 }
 #[derive(Args, Debug)]
 pub struct ActiveArgs {
-    #[arg(long = "limit", value_name = "N")]
+    #[arg(long = "limit", value_name = "N", conflicts_with = "full")]
     pub limit: Option<usize>,
+    /// Return every matching record. This is intentionally explicit because
+    /// discovery defaults to a finite agent-facing page.
+    #[arg(long, conflicts_with = "reconcile")]
+    pub full: bool,
     #[arg(long = "reconcile")]
     pub reconcile: bool,
     #[arg(long = "dry-run", requires = "reconcile", conflicts_with = "apply")]
@@ -144,14 +152,14 @@ pub struct LatestArgs {
 impl From<ListArgs> for AgentTaskDiscoveryOptions {
     fn from(args: ListArgs) -> Self {
         Self {
-            limit: Some(args.limit.unwrap_or(DEFAULT_DISCOVERY_LIMIT)),
+            limit: (!args.full).then(|| args.limit.unwrap_or(DEFAULT_DISCOVERY_LIMIT)),
         }
     }
 }
 impl From<ActiveArgs> for AgentTaskDiscoveryOptions {
     fn from(args: ActiveArgs) -> Self {
         Self {
-            limit: Some(args.limit.unwrap_or(DEFAULT_DISCOVERY_LIMIT)),
+            limit: (!args.full).then(|| args.limit.unwrap_or(DEFAULT_DISCOVERY_LIMIT)),
         }
     }
 }

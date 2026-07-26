@@ -246,13 +246,14 @@ Agent-facing readers use one finite output contract from `homeboy-output`:
 - `compact_summary` returns fixed summary fields only.
 - `bounded_collection` defaults to 20 items and 64 KiB of serialized items.
 - `bounded_stream` defaults to 200 events, 64 KiB, and five minutes.
-- `lossless_export` is explicit through `--output <path>` or a command-specific
-  export artifact.
+- `lossless_export` is explicit through a command's `--full --output <path>`
+  pair or a command-specific export artifact.
 
 Bounded payloads add `output_budget` with stable `total_items`,
 `returned_items`, `omitted_items`, `total_bytes`, `returned_bytes`,
-`omitted_bytes`, `truncated`, `continue_command`, and `export_command` fields.
-The item payload schema remains unchanged. Continuations are focused commands;
+`omitted_bytes`, `total_bytes_known`, `truncated`, `continue_command`, and
+`export_command` fields. Byte totals are marked incomplete rather than forcing a
+reader to serialize an unbounded source merely to calculate metadata. The item payload schema remains unchanged. Continuations are focused commands;
 exports are the explicit lossless path rather than an unbounded stdout default.
 
 ## Observation-backed payloads

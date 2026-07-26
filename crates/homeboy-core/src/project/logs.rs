@@ -14,7 +14,8 @@ use crate::project::{self, Project};
 use serde::Serialize;
 
 const MAX_PINNED_LOGS: usize = 8;
-const MAX_PINNED_LOG_BYTES: usize = 8 * 1024;
+const MAX_PINNED_LOG_TOTAL_BYTES: usize = 48 * 1024;
+const MAX_PINNED_LOG_BYTES: usize = MAX_PINNED_LOG_TOTAL_BYTES / MAX_PINNED_LOGS;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LogEntry {
@@ -141,10 +142,27 @@ pub fn show_pinned(project_id: &str, lines: u32, local: bool) -> Result<PinnedLo
         };
         let full_path = base_path::join_remote_path(Some(&base_path), &pinned_log.path)?;
 
-        let command = format!("tail -n {} {}", log_lines, shell::quote_path(&full_path));
+        // Limit inside the remote shell so the executor never buffers an
+        // arbitrarily large `tail` result before this reader can truncate it.
+        let command = format!(
+            "tail -n {} {} | head -c {}",
+            log_lines,
+            shell::quote_path(&full_path),
+            MAX_PINNED_LOG_BYTES
+        );
         let output = execute_for_project(&project, &command)?;
-        let (content, omitted) = truncate_utf8(&output.stdout, MAX_PINNED_LOG_BYTES);
-        omitted_bytes += omitted;
+        let content = output.stdout;
+        let size_command = format!(
+            "tail -n {} {} | wc -c",
+            log_lines,
+            shell::quote_path(&full_path)
+        );
+        let total_bytes = execute_for_project(&project, &size_command)?
+            .stdout
+            .trim()
+            .parse::<usize>()
+            .unwrap_or(content.len());
+        omitted_bytes += total_bytes.saturating_sub(content.len());
         let evidence =
             LogEvidenceMetadata::tail(&full_path, pinned_log.label.clone(), log_lines, &content);
 
@@ -167,17 +185,6 @@ pub fn show_pinned(project_id: &str, lines: u32, local: bool) -> Result<PinnedLo
         returned_bytes,
         omitted_bytes,
     })
-}
-
-fn truncate_utf8(value: &str, max_bytes: usize) -> (String, usize) {
-    if value.len() <= max_bytes {
-        return (value.to_string(), 0);
-    }
-    let mut end = max_bytes;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    (value[..end].to_string(), value.len() - end)
 }
 
 pub fn show(project_id: &str, path: &str, lines: u32, local: bool) -> Result<LogContent> {

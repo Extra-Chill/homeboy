@@ -94,8 +94,8 @@ pub(super) fn list_runs(
     attach_collection_budget(
         &mut value,
         "runs",
-        "homeboy agent-task list --limit 20",
-        "homeboy agent-task list --output <path>",
+        "homeboy agent-task list --full",
+        "homeboy agent-task list --full --output <path>",
     );
     attach_agent_task_discovery_actionable(&mut value);
     Ok((value, 0))
@@ -129,8 +129,8 @@ pub(super) fn list_active(
     attach_collection_budget(
         &mut value,
         "runs",
-        "homeboy agent-task active --limit 20",
-        "homeboy agent-task active --output <path>",
+        "homeboy agent-task active --full",
+        "homeboy agent-task active --full --output <path>",
     );
     attach_agent_task_discovery_actionable(&mut value);
     Ok((value, 0))
@@ -464,17 +464,20 @@ pub(super) fn logs(args: LogsArgs) -> CmdResult<Value> {
 pub(super) fn artifacts(args: StatusArgs) -> CmdResult<Value> {
     let artifacts = agent_task_service::artifacts(&args.run_id)?;
     let mut value = serde_json::to_value(artifacts).unwrap_or(Value::Null);
-    // Artifact indexes are bounded before presentation; durable artifact files
-    // remain losslessly available through the global output artifact.
-    attach_collection_budget(
-        &mut value,
-        "artifacts",
-        &format!("homeboy agent-task artifacts {}", quote_arg(&args.run_id)),
-        &format!(
-            "homeboy agent-task artifacts {} --output <path>",
-            quote_arg(&args.run_id)
-        ),
-    );
+    if !args.full {
+        attach_collection_budget(
+            &mut value,
+            "artifacts",
+            &format!(
+                "homeboy agent-task artifacts {} --full",
+                quote_arg(&args.run_id)
+            ),
+            &format!(
+                "homeboy agent-task artifacts {} --full --output <path>",
+                quote_arg(&args.run_id)
+            ),
+        );
+    }
     Ok((value, 0))
 }
 
@@ -514,7 +517,7 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
         total += 1;
         // Count filtered refs without hydrating their payload once the shared
         // collection budget is full.
-        if hydrated.len() >= OutputBudget::COLLECTION.max_items {
+        if !args.full && hydrated.len() >= OutputBudget::COLLECTION.max_items {
             continue;
         }
         hydrated.push(agent_task_service::hydrate_evidence_ref(
@@ -539,15 +542,20 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
         evidence: hydrated,
     })
     .unwrap_or(Value::Null);
-    attach_collection_budget(
-        &mut value,
-        "evidence",
-        &format!("homeboy agent-task evidence {}", quote_arg(&args.run_id)),
-        &format!(
-            "homeboy agent-task evidence {} --output <path>",
-            quote_arg(&args.run_id)
-        ),
-    );
+    if !args.full {
+        attach_collection_budget(
+            &mut value,
+            "evidence",
+            &format!(
+                "homeboy agent-task evidence {} --full",
+                quote_arg(&args.run_id)
+            ),
+            &format!(
+                "homeboy agent-task evidence {} --full --output <path>",
+                quote_arg(&args.run_id)
+            ),
+        );
+    }
     Ok((value, 0))
 }
 
@@ -562,7 +570,7 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         for outcome in &aggregate.outcomes {
             for evidence in &outcome.evidence_refs {
                 total_hydrated_evidence += 1;
-                if hydrated_evidence.len() >= OutputBudget::COLLECTION.max_items {
+                if !args.full && hydrated_evidence.len() >= OutputBudget::COLLECTION.max_items {
                     continue;
                 }
                 if let Some(summary) =
@@ -611,15 +619,20 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
         "hydrated_evidence_total": total_hydrated_evidence,
         "next_commands": next_commands,
     });
-    attach_collection_budget(
-        &mut value,
-        "hydrated_evidence",
-        &format!("homeboy agent-task diagnose {}", quote_arg(&args.run_id)),
-        &format!(
-            "homeboy agent-task diagnose {} --output <path>",
-            quote_arg(&args.run_id)
-        ),
-    );
+    if !args.full {
+        attach_collection_budget(
+            &mut value,
+            "hydrated_evidence",
+            &format!(
+                "homeboy agent-task diagnose {} --full",
+                quote_arg(&args.run_id)
+            ),
+            &format!(
+                "homeboy agent-task diagnose {} --full --output <path>",
+                quote_arg(&args.run_id)
+            ),
+        );
+    }
     Ok((value, 0))
 }
 
@@ -635,9 +648,9 @@ fn attach_collection_budget(
         return;
     };
     let values = map
-        .get(field)
-        .and_then(Value::as_array)
-        .cloned()
+        .get_mut(field)
+        .and_then(Value::as_array_mut)
+        .map(std::mem::take)
         .unwrap_or_default();
     let total = map
         .get(&format!("{field}_total"))
