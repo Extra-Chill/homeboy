@@ -1,12 +1,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 
 use crate::agent_task::{
     AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkspaceMode, AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::agent_task_gate::{
-    text_tail, AgentTaskGateReport, AgentTaskGateRevealPolicy, AgentTaskGateStatus,
-    AgentTaskGateVisibility,
+    text_tail, AgentTaskGateDiagnosticProducer, AgentTaskGateDiagnosticRecord, AgentTaskGateReport,
+    AgentTaskGateRevealPolicy, AgentTaskGateStatus, AgentTaskGateVisibility,
 };
 use crate::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
 use crate::agent_task_review_dossier::AiFilledReviewForm;
@@ -15,6 +16,10 @@ use homeboy_core::gate::{HomeboyGateResult, HomeboyGateStatus};
 pub const AGENT_TASK_COOK_FEEDBACK_REPORT_SCHEMA: &str =
     "homeboy/agent-task-cook-feedback-report/v1";
 const RISKY_CHANGED_FILE_THRESHOLD: usize = 20;
+const MAX_FAILURE_DIAGNOSTICS: usize = 8;
+const MAX_FAILURE_DELTA_IDENTITIES: usize = 8;
+const MAX_DIAGNOSTIC_FIELD_BYTES: usize = 512;
+const MAX_DIAGNOSTIC_ACTIONS: usize = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskCookLoopOptions {
@@ -80,6 +85,8 @@ pub struct AgentTaskCookLoopQualityReport {
     pub summary: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signals: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_progression: Option<AgentTaskCookLoopFailureProgression>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -90,6 +97,30 @@ pub enum AgentTaskCookLoopQualityClassification {
     LargeOrRiskyPatch,
     VerifiedPatch,
     VerifiedNoOp,
+    Regressing,
+    Stagnating,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskCookLoopFailureProgression {
+    pub status: AgentTaskCookLoopFailureProgressionStatus,
+    pub previous_count: usize,
+    pub current_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unchanged: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskCookLoopFailureProgressionStatus {
+    Initial,
+    Improving,
+    Regressing,
+    Stagnating,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -108,6 +139,23 @@ pub struct AgentTaskCookLoopGateFailure {
     pub stderr_tail: String,
     pub summary: String,
     pub agent_feedback: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<AgentTaskCookLoopFailureDiagnostic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_evidence_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskCookLoopFailureDiagnostic {
+    pub schema: String,
+    pub identity: String,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_location: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggested_actions: Vec<String>,
+    pub producer: AgentTaskGateDiagnosticProducer,
+    pub full_evidence_ref: String,
 }
 
 pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoopReport {
@@ -116,7 +164,7 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         .deterministic_gates
         .iter()
         .filter(|gate| gate.status == AgentTaskGateStatus::Failed)
-        .map(gate_failure)
+        .map(|gate| gate_failure(gate, options.source_run_id.as_deref()))
         .collect();
     let failed_gate_results: Vec<HomeboyGateResult> = options
         .promotion_report
@@ -126,7 +174,9 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         .filter(|gate| gate.status == HomeboyGateStatus::Failed)
         .collect();
     let retry_budget_remaining = options.max_attempts.saturating_sub(options.attempt);
-    let quality = classify_cook_loop_quality(&options.promotion_report);
+    let mut quality = classify_cook_loop_quality(&options.promotion_report);
+    let failure_progression = failure_progression(&options, &failed_gates);
+    apply_failure_progression_to_quality(&mut quality, &failure_progression);
     let should_retry = options.promotion_report.status == AgentTaskPromotionStatus::GateFailed
         && !failed_gates.is_empty()
         && retry_budget_remaining > 0;
@@ -141,7 +191,11 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         .then(|| review_form_requirement_gap(&options.review_form));
 
     let follow_up_request = if should_retry {
-        Some(build_follow_up_request(&options, &failed_gates))
+        Some(build_follow_up_request(
+            &options,
+            &failed_gates,
+            &failure_progression,
+        ))
     } else if let Some(Some(gap)) = &review_form_gap {
         // Gates are green but the AI form is missing/invalid: nudge another
         // attempt with actionable feedback, exactly like a red gate — unless the
@@ -180,7 +234,7 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         failed_gates,
         failed_gate_results,
         follow_up_request,
-        metadata: options.metadata,
+        metadata: report_metadata(options.metadata, &failure_progression),
     }
 }
 
@@ -197,6 +251,7 @@ fn classify_cook_loop_quality(report: &AgentTaskPromotionReport) -> AgentTaskCoo
                     "changed_files=0".to_string(),
                     "verification=passed".to_string(),
                 ],
+                failure_progression: None,
             };
         }
         return AgentTaskCookLoopQualityReport {
@@ -204,6 +259,7 @@ fn classify_cook_loop_quality(report: &AgentTaskPromotionReport) -> AgentTaskCoo
             summary: "cook produced no changed files; task likely still requires review or retry"
                 .to_string(),
             signals: vec!["changed_files=0".to_string()],
+            failure_progression: None,
         };
     }
 
@@ -216,6 +272,7 @@ fn classify_cook_loop_quality(report: &AgentTaskPromotionReport) -> AgentTaskCoo
                 "cook changed {changed_file_count} files; review patch shape before treating it as ready"
             ),
             signals,
+            failure_progression: None,
         };
     }
 
@@ -229,6 +286,7 @@ fn classify_cook_loop_quality(report: &AgentTaskPromotionReport) -> AgentTaskCoo
             classification: AgentTaskCookLoopQualityClassification::VerifiedPatch,
             summary: "cook produced a patch and deterministic gates passed".to_string(),
             signals,
+            failure_progression: None,
         };
     }
 
@@ -236,12 +294,14 @@ fn classify_cook_loop_quality(report: &AgentTaskPromotionReport) -> AgentTaskCoo
         classification: AgentTaskCookLoopQualityClassification::PatchProduced,
         summary: "cook produced a patch that needs promotion or verification".to_string(),
         signals,
+        failure_progression: None,
     }
 }
 
 fn build_follow_up_request(
     options: &AgentTaskCookLoopOptions,
     failed_gates: &[AgentTaskCookLoopGateFailure],
+    failure_progression: &AgentTaskCookLoopFailureProgression,
 ) -> AgentTaskRequest {
     let mut request = options.source_request.clone();
     let next_attempt = options.attempt.saturating_add(1);
@@ -252,7 +312,8 @@ fn build_follow_up_request(
         .parent_plan_id
         .clone()
         .or_else(|| options.source_run_id.clone());
-    request.instructions = follow_up_instructions(options, &agent_visible_failed_gates);
+    request.instructions =
+        follow_up_instructions(options, &agent_visible_failed_gates, failure_progression);
     request.inputs = json!({
         "cook_loop": {
             "source_run_id": options.source_run_id,
@@ -267,6 +328,9 @@ fn build_follow_up_request(
             "changed_files": options.promotion_report.changed_files,
             "patch_artifact": options.promotion_report.patch_artifact,
             "failed_gates": agent_visible_failed_gates,
+            "failure_set": failure_set(failed_gates),
+            "failure_progression": failure_progression,
+            "retry_policy": retry_policy(failure_progression),
             "current_diff": options.current_diff,
         }
     });
@@ -308,6 +372,8 @@ fn build_follow_up_request(
             "source_run_id": options.source_run_id,
             "failed_gate_count": failed_gates.len(),
             "private_failed_gate_count": failed_gates.iter().filter(|gate| gate.visibility == AgentTaskGateVisibility::Private).count(),
+            "failure_progression": failure_progression,
+            "retry_policy": retry_policy(failure_progression),
         }
     });
     request
@@ -393,7 +459,10 @@ fn build_review_form_follow_up_request(
     request
 }
 
-fn gate_failure(gate: &AgentTaskGateReport) -> AgentTaskCookLoopGateFailure {
+fn gate_failure(
+    gate: &AgentTaskGateReport,
+    source_run_id: Option<&str>,
+) -> AgentTaskCookLoopGateFailure {
     let command = gate
         .failure_evidence
         .as_ref()
@@ -429,6 +498,12 @@ fn gate_failure(gate: &AgentTaskGateReport) -> AgentTaskCookLoopGateFailure {
             )
         });
 
+    let diagnostics = gate
+        .failure_evidence
+        .as_ref()
+        .map(|evidence| bounded_diagnostics(&evidence.diagnostics))
+        .unwrap_or_default();
+    let full_evidence_ref = source_run_id.map(|run_id| gate_evidence_ref(run_id, &gate.id));
     AgentTaskCookLoopGateFailure {
         gate_id: gate.id.clone(),
         visibility: gate.visibility,
@@ -439,6 +514,8 @@ fn gate_failure(gate: &AgentTaskGateReport) -> AgentTaskCookLoopGateFailure {
         stderr_tail,
         summary,
         agent_feedback,
+        diagnostics,
+        full_evidence_ref,
     }
 }
 
@@ -473,6 +550,8 @@ fn agent_visible_gate_failure(
                 failure.gate_id
             ),
             agent_feedback: "A private deterministic verification gate failed. Generalize the fix against the public objective and visible evidence; hidden evaluator details are withheld.".to_string(),
+            diagnostics: Vec::new(),
+            full_evidence_ref: None,
         },
         AgentTaskGateRevealPolicy::Redacted => AgentTaskCookLoopGateFailure {
             gate_id: failure.gate_id.clone(),
@@ -484,6 +563,8 @@ fn agent_visible_gate_failure(
             stderr_tail: String::new(),
             summary: "private deterministic gate failed; evidence redacted".to_string(),
             agent_feedback: "A private deterministic verification gate failed. Details are redacted; continue from the public task objective and visible gate evidence.".to_string(),
+            diagnostics: Vec::new(),
+            full_evidence_ref: None,
         },
         AgentTaskGateRevealPolicy::NoDetail => AgentTaskCookLoopGateFailure {
             gate_id: failure.gate_id.clone(),
@@ -495,6 +576,8 @@ fn agent_visible_gate_failure(
             stderr_tail: String::new(),
             summary: "private deterministic gate failed".to_string(),
             agent_feedback: "A private deterministic verification gate failed.".to_string(),
+            diagnostics: Vec::new(),
+            full_evidence_ref: None,
         },
     }
 }
@@ -502,6 +585,7 @@ fn agent_visible_gate_failure(
 fn follow_up_instructions(
     options: &AgentTaskCookLoopOptions,
     failed_gates: &[AgentTaskCookLoopGateFailure],
+    failure_progression: &AgentTaskCookLoopFailureProgression,
 ) -> String {
     let gate_list = failed_gates
         .iter()
@@ -524,9 +608,198 @@ fn follow_up_instructions(
         options.promotion_report.changed_files.join(", ")
     };
 
+    let priority = match failure_progression.status {
+        AgentTaskCookLoopFailureProgressionStatus::Regressing => format!(
+            "The failure set regressed. Fix these newly introduced failures first: {}.",
+            failure_progression.added.join(", ")
+        ),
+        AgentTaskCookLoopFailureProgressionStatus::Stagnating => format!(
+            "The failure set is unchanged. Focus on shared root causes across: {}.",
+            failure_progression.unchanged.join(", ")
+        ),
+        AgentTaskCookLoopFailureProgressionStatus::Improving => {
+            "The failure set improved. Preserve resolved failures while fixing the remaining shared failures.".to_string()
+        }
+        AgentTaskCookLoopFailureProgressionStatus::Initial => {
+            "Start with the producer-provided diagnostics and suggested actions.".to_string()
+        }
+    };
+
     format!(
-        "Continue the Homeboy cook loop from the current candidate worktree state.\n\nDeterministic gates failed after Homeboy applied the previous candidate patch. Produce a focused follow-up patch that makes the failed gates pass while preserving the candidate intent.\n\nFailed gates:\n{gate_list}\n\nChanged files in the candidate patch: {changed_files}\n\nUse the structured `inputs.cook_loop` evidence as the primary context. Return an updated patch artifact and concise summary of the fix."
+        "Continue the Homeboy cook loop from the current candidate worktree state.\n\nDeterministic gates failed after Homeboy applied the previous candidate patch. Produce a focused follow-up patch that makes the failed gates pass while preserving the candidate intent. {priority}\n\nFailed gates:\n{gate_list}\n\nChanged files in the candidate patch: {changed_files}\n\nUse the structured `inputs.cook_loop` evidence as the primary context. Return an updated patch artifact and concise summary of the fix."
     )
+}
+
+fn report_metadata(metadata: Value, progression: &AgentTaskCookLoopFailureProgression) -> Value {
+    let mut metadata = metadata.as_object().cloned().unwrap_or_default();
+    metadata.insert("failure_progression".to_string(), json!(progression));
+    Value::Object(metadata)
+}
+
+fn retry_policy(progression: &AgentTaskCookLoopFailureProgression) -> &'static str {
+    match progression.status {
+        AgentTaskCookLoopFailureProgressionStatus::Regressing => "new_failures_first",
+        AgentTaskCookLoopFailureProgressionStatus::Stagnating => "shared_root_cause",
+        AgentTaskCookLoopFailureProgressionStatus::Improving => "preserve_resolved_failures",
+        AgentTaskCookLoopFailureProgressionStatus::Initial => "producer_diagnostics",
+    }
+}
+
+fn failure_set(failed_gates: &[AgentTaskCookLoopGateFailure]) -> Vec<String> {
+    failed_gates
+        .iter()
+        .flat_map(|failure| {
+            if failure.diagnostics.is_empty() {
+                vec![failure.gate_id.clone()]
+            } else {
+                failure
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| format!("{}:{}", failure.gate_id, diagnostic.identity))
+                    .collect()
+            }
+        })
+        .collect()
+}
+
+fn previous_failure_set(options: &AgentTaskCookLoopOptions) -> Vec<String> {
+    options
+        .metadata
+        .get("previous_failure_set")
+        .or_else(|| {
+            options
+                .source_request
+                .inputs
+                .pointer("/cook_loop/failure_set")
+        })
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn failure_progression(
+    options: &AgentTaskCookLoopOptions,
+    failed_gates: &[AgentTaskCookLoopGateFailure],
+) -> AgentTaskCookLoopFailureProgression {
+    let previous: BTreeSet<_> = previous_failure_set(options).into_iter().collect();
+    let current: BTreeSet<_> = failure_set(failed_gates).into_iter().collect();
+    let limit = |items: BTreeSet<String>| -> Vec<String> {
+        items
+            .into_iter()
+            .take(MAX_FAILURE_DELTA_IDENTITIES)
+            .collect()
+    };
+    let added_set: BTreeSet<_> = current.difference(&previous).cloned().collect();
+    let removed_set: BTreeSet<_> = previous.difference(&current).cloned().collect();
+    let has_added = !added_set.is_empty();
+    let added = limit(added_set);
+    let removed = limit(removed_set);
+    let unchanged = limit(current.intersection(&previous).cloned().collect());
+    let status = if previous.is_empty() {
+        AgentTaskCookLoopFailureProgressionStatus::Initial
+    } else if has_added || current.len() > previous.len() {
+        AgentTaskCookLoopFailureProgressionStatus::Regressing
+    } else if current == previous {
+        AgentTaskCookLoopFailureProgressionStatus::Stagnating
+    } else {
+        AgentTaskCookLoopFailureProgressionStatus::Improving
+    };
+    AgentTaskCookLoopFailureProgression {
+        status,
+        previous_count: previous.len(),
+        current_count: current.len(),
+        added,
+        removed,
+        unchanged,
+    }
+}
+
+fn apply_failure_progression_to_quality(
+    quality: &mut AgentTaskCookLoopQualityReport,
+    progression: &AgentTaskCookLoopFailureProgression,
+) {
+    if matches!(
+        progression.status,
+        AgentTaskCookLoopFailureProgressionStatus::Regressing
+    ) {
+        quality.classification = AgentTaskCookLoopQualityClassification::Regressing;
+        quality.summary =
+            "candidate regressed deterministic gate failures; fix newly introduced failures first"
+                .to_string();
+    } else if matches!(
+        progression.status,
+        AgentTaskCookLoopFailureProgressionStatus::Stagnating
+    ) {
+        quality.classification = AgentTaskCookLoopQualityClassification::Stagnating;
+        quality.summary =
+            "candidate did not reduce deterministic gate failures; focus on shared root causes"
+                .to_string();
+    }
+    quality
+        .signals
+        .push(format!("failure_progression={:?}", progression.status).to_ascii_lowercase());
+    quality.failure_progression = Some(progression.clone());
+}
+
+fn bounded_diagnostics(
+    records: &[AgentTaskGateDiagnosticRecord],
+) -> Vec<AgentTaskCookLoopFailureDiagnostic> {
+    let mut identities = BTreeSet::new();
+    records
+        .iter()
+        .filter(|record| record_is_complete(record) && identities.insert(record.identity.clone()))
+        .take(MAX_FAILURE_DIAGNOSTICS)
+        .map(|record| AgentTaskCookLoopFailureDiagnostic {
+            schema: bounded_text(&record.schema, MAX_DIAGNOSTIC_FIELD_BYTES),
+            identity: bounded_text(&record.identity, MAX_DIAGNOSTIC_FIELD_BYTES),
+            summary: bounded_text(&record.summary, MAX_DIAGNOSTIC_FIELD_BYTES),
+            source_location: record
+                .source_location
+                .as_deref()
+                .map(|value| bounded_text(value, MAX_DIAGNOSTIC_FIELD_BYTES)),
+            suggested_actions: record
+                .suggested_actions
+                .iter()
+                .take(MAX_DIAGNOSTIC_ACTIONS)
+                .map(|action| bounded_text(action, MAX_DIAGNOSTIC_FIELD_BYTES))
+                .collect(),
+            producer: AgentTaskGateDiagnosticProducer {
+                id: bounded_text(&record.producer.id, MAX_DIAGNOSTIC_FIELD_BYTES),
+                schema: bounded_text(&record.producer.schema, MAX_DIAGNOSTIC_FIELD_BYTES),
+            },
+            full_evidence_ref: bounded_text(&record.full_evidence_ref, MAX_DIAGNOSTIC_FIELD_BYTES),
+        })
+        .collect()
+}
+
+fn record_is_complete(record: &AgentTaskGateDiagnosticRecord) -> bool {
+    !record.schema.is_empty()
+        && !record.identity.is_empty()
+        && !record.summary.is_empty()
+        && !record.producer.id.is_empty()
+        && !record.producer.schema.is_empty()
+        && !record.full_evidence_ref.is_empty()
+}
+
+fn bounded_text(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
+fn gate_evidence_ref(run_id: &str, gate_id: &str) -> String {
+    format!("homeboy://agent-task/run/{run_id}/gates#gate={gate_id}")
 }
 
 fn worktree_root_hint(report: &AgentTaskPromotionReport) -> Option<String> {
@@ -577,7 +850,7 @@ mod tests {
         let request = report.follow_up_request.expect("follow-up request");
         assert_eq!(request.task_id, "cook-homeboy-gate-fix-2");
         assert!(request.instructions.contains("Deterministic gates failed"));
-        assert!(request.instructions.contains("cargo test agent_task_gate"));
+        assert!(request.instructions.contains("opaque-gate"));
         assert_eq!(
             request.inputs["cook_loop"]["failed_gates"][0]["exit_code"],
             101
@@ -798,9 +1071,221 @@ mod tests {
 
         let request = report.follow_up_request.expect("follow-up request");
         let feedback = request.inputs.to_string();
-        assert!(feedback.contains("cargo test agent_task_gate"));
+        assert!(feedback.contains("opaque-gate"));
         assert!(feedback.contains("boom"));
-        assert!(request.instructions.contains("cargo test agent_task_gate"));
+        assert!(request.instructions.contains("opaque-gate"));
+    }
+
+    #[test]
+    fn producer_diagnostic_record_is_bounded_without_interpreting_its_contents() {
+        let diagnostic: AgentTaskGateDiagnosticRecord = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/agent_task_gate_feedback/producer-diagnostic-record.json"
+        ))
+        .expect("producer diagnostic fixture");
+        let gate = AgentTaskGateReport::new(
+            "gate-1",
+            vec!["opaque-gate".to_string()],
+            1,
+            "producer output is opaque",
+            String::new(),
+            Some(AgentTaskGateFailureEvidence {
+                summary: "producer reported a failure".to_string(),
+                command: "opaque-gate".to_string(),
+                exit_code: 1,
+                stdout_tail: String::new(),
+                stderr_tail: String::new(),
+                agent_feedback: "Use the structured diagnostic.".to_string(),
+                diagnostics: vec![diagnostic],
+            }),
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            AgentTaskGateEnvironment::default(),
+        );
+
+        let failure = gate_failure(&gate, Some("run-1"));
+
+        assert_eq!(failure.diagnostics.len(), 1);
+        assert_eq!(failure.diagnostics[0].identity, "rule:stable-identity");
+        assert_eq!(
+            failure.diagnostics[0].source_location.as_deref(),
+            Some("opaque://source/42")
+        );
+        assert_eq!(
+            failure.diagnostics[0].suggested_actions,
+            vec!["Apply the producer's remediation."]
+        );
+        assert_eq!(
+            failure.full_evidence_ref.as_deref(),
+            Some("homeboy://agent-task/run/run-1/gates#gate=gate-1")
+        );
+    }
+
+    #[test]
+    fn unparsed_output_keeps_a_persisted_full_evidence_ref() {
+        let gate = AgentTaskGateReport::new(
+            "gate-1",
+            vec!["sh".to_string(), "-lc".to_string(), "npm test".to_string()],
+            1,
+            "unstructured failure",
+            "details are retained in the gate report",
+            None,
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            AgentTaskGateEnvironment::default(),
+        );
+
+        let failure = gate_failure(&gate, Some("run-1"));
+
+        assert!(failure.diagnostics.is_empty());
+        assert!(failure.full_evidence_ref.as_deref().is_some_and(
+            |reference| reference == "homeboy://agent-task/run/run-1/gates#gate=gate-1"
+        ));
+    }
+
+    #[test]
+    fn retry_fixtures_classify_regressing_and_improving_failure_sets() {
+        let regressing: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/agent_task_gate_feedback/regressing-retry.json"
+        ))
+        .expect("regressing fixture");
+        let improving: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/agent_task_gate_feedback/improving-retry.json"
+        ))
+        .expect("improving fixture");
+
+        let failure = |identity: &str| AgentTaskCookLoopGateFailure {
+            gate_id: "gate-1".to_string(),
+            visibility: AgentTaskGateVisibility::Visible,
+            reveal_policy: AgentTaskGateRevealPolicy::FullEvidence,
+            command: "opaque-gate".to_string(),
+            exit_code: 101,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            summary: String::new(),
+            agent_feedback: String::new(),
+            diagnostics: vec![AgentTaskCookLoopFailureDiagnostic {
+                schema: "example/diagnostic/v7".to_string(),
+                identity: identity.to_string(),
+                summary: String::new(),
+                source_location: None,
+                suggested_actions: Vec::new(),
+                producer: AgentTaskGateDiagnosticProducer {
+                    id: "example-producer".to_string(),
+                    schema: "example/producer-output/v7".to_string(),
+                },
+                full_evidence_ref: "homeboy://agent-task/run/run-1/gates#gate=gate-1".to_string(),
+            }],
+            full_evidence_ref: None,
+        };
+        let options = |previous_failure_set: Value| AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::GateFailed,
+                vec![failed_gate()],
+            ),
+            attempt: 2,
+            max_attempts: 3,
+            source_run_id: None,
+            current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
+            metadata: json!({"previous_failure_set": previous_failure_set}),
+        };
+
+        let regression = failure_progression(
+            &options(regressing["previous_failure_set"].clone()),
+            &[failure("policy:existing"), failure("policy:new")],
+        );
+        assert_eq!(
+            regression.status,
+            AgentTaskCookLoopFailureProgressionStatus::Regressing
+        );
+        assert_eq!(
+            regression.added,
+            regressing["current_failure_set"].as_array().unwrap()[1..]
+        );
+
+        let improvement = failure_progression(
+            &options(improving["previous_failure_set"].clone()),
+            &[failure("policy:remaining")],
+        );
+        assert_eq!(
+            improvement.status,
+            AgentTaskCookLoopFailureProgressionStatus::Improving
+        );
+        assert_eq!(
+            improvement.removed,
+            improving["previous_failure_set"].as_array().unwrap()[0..1]
+        );
+
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::GateFailed,
+                vec![failed_gate()],
+            ),
+            attempt: 2,
+            max_attempts: 3,
+            source_run_id: Some("run-regression".to_string()),
+            current_diff: String::new(),
+            require_review_form: false,
+            review_form: None,
+            metadata: json!({"previous_failure_set": ["gate-previous"]}),
+        });
+        let request = report.follow_up_request.expect("regression retries");
+        assert_eq!(
+            request.inputs["cook_loop"]["retry_policy"],
+            "new_failures_first"
+        );
+        assert_eq!(
+            request.metadata["cook_loop"]["retry_policy"],
+            "new_failures_first"
+        );
+    }
+
+    #[test]
+    fn producer_diagnostics_are_deduplicated_and_bounded() {
+        let record = |identity: &str| AgentTaskGateDiagnosticRecord {
+            schema: "example/diagnostic/v7".to_string(),
+            identity: identity.to_string(),
+            summary: "x".repeat(MAX_DIAGNOSTIC_FIELD_BYTES * 2),
+            source_location: None,
+            suggested_actions: (0..MAX_DIAGNOSTIC_ACTIONS + 1)
+                .map(|_| "action".to_string())
+                .collect(),
+            producer: AgentTaskGateDiagnosticProducer {
+                id: "example-producer".to_string(),
+                schema: "example/producer-output/v7".to_string(),
+            },
+            full_evidence_ref: "homeboy://agent-task/run/run-1/gates#gate=gate-1".to_string(),
+        };
+        let diagnostics = bounded_diagnostics(&[record("policy:one"), record("policy:one")]);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].identity, "policy:one");
+        assert_eq!(diagnostics[0].summary.len(), MAX_DIAGNOSTIC_FIELD_BYTES);
+        assert_eq!(
+            diagnostics[0].suggested_actions.len(),
+            MAX_DIAGNOSTIC_ACTIONS
+        );
+    }
+
+    #[test]
+    fn incomplete_producer_diagnostics_are_not_consumed() {
+        let diagnostics = bounded_diagnostics(&[AgentTaskGateDiagnosticRecord {
+            schema: "example/diagnostic/v7".to_string(),
+            identity: "policy:missing-evidence".to_string(),
+            summary: "The producer did not provide an evidence ref.".to_string(),
+            source_location: None,
+            suggested_actions: Vec::new(),
+            producer: AgentTaskGateDiagnosticProducer {
+                id: "example-producer".to_string(),
+                schema: "example/producer-output/v7".to_string(),
+            },
+            full_evidence_ref: String::new(),
+        }]);
+
+        assert!(diagnostics.is_empty());
     }
 
     #[test]
@@ -1079,19 +1564,19 @@ mod tests {
             vec![
                 "sh".to_string(),
                 "-lc".to_string(),
-                "cargo test agent_task_gate".to_string(),
+                "opaque-gate".to_string(),
             ],
             101,
             "running tests",
             "boom",
             Some(AgentTaskGateFailureEvidence {
-                summary: "agent_task_gate failed".to_string(),
-                command: "cargo test agent_task_gate".to_string(),
+                summary: "opaque gate failed".to_string(),
+                command: "opaque-gate".to_string(),
                 exit_code: 101,
                 stdout_tail: "running tests".to_string(),
                 stderr_tail: "boom".to_string(),
-                agent_feedback: "Update the patch so cargo test agent_task_gate passes."
-                    .to_string(),
+                agent_feedback: "Update the patch so opaque-gate passes.".to_string(),
+                diagnostics: Vec::new(),
             }),
             AgentTaskGateVisibility::Visible,
             AgentTaskGateRevealPolicy::FullEvidence,
@@ -1105,7 +1590,7 @@ mod tests {
             vec![
                 "sh".to_string(),
                 "-lc".to_string(),
-                "cargo test".to_string(),
+                "opaque-gate".to_string(),
             ],
             0,
             "ok",
@@ -1135,6 +1620,7 @@ mod tests {
                 stdout_tail: "secret fixture mismatch".to_string(),
                 stderr_tail: "private evaluator stack trace".to_string(),
                 agent_feedback: "Fix the randomized secret fixture mismatch.".to_string(),
+                diagnostics: Vec::new(),
             }),
             AgentTaskGateVisibility::Private,
             reveal_policy,

@@ -794,7 +794,13 @@ The command returns `homeboy/agent-task-cook-feedback-report/v1`. Red gates with
 remaining budget produce `status: "retry_requested"` and a complete
 `follow_up_request` containing the failed command, exit status, log tails,
 changed files, patch artifact ref, current diff context, and source run/task
-refs. Red gates with exhausted budget return `status: "retries_exhausted"`.
+refs. When a gate producer supplies versioned diagnostic records in its
+declared versioned sidecar evidence, Homeboy carries their stable identities, bounded
+summaries, opaque locations/actions, and resolvable evidence refs without
+parsing raw command output. Follow-up attempts retain and compare compact
+failure sets, prioritizing new failures and shared unchanged failures without
+expanding default output. Red gates with exhausted budget return
+`status: "retries_exhausted"`.
 Green promotion returns `status: "green_completed"` and no follow-up task.
 
 Queued runs that should not execute can be cancelled without chat/session state:

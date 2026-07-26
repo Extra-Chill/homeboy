@@ -1,0 +1,9 @@
+[
+  {
+    "schema": "example/producer-diagnostic/v1",
+    "identity": "opaque:stable-identity",
+    "summary": "The producer-defined check did not pass.",
+    "source_location": "opaque://source/42",
+    "suggested_actions": ["Apply the producer's remediation."]
+  }
+]

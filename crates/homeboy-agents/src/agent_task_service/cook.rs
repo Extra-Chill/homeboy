@@ -2073,6 +2073,13 @@ where
         };
 
         let review_form = review_form_from_aggregate(&aggregate)?;
+        let previous_failure_set = attempts
+            .last()
+            .and_then(|attempt| attempt.feedback.as_ref())
+            .and_then(|feedback| feedback.follow_up_request.as_ref())
+            .and_then(|request| request.inputs.pointer("/cook_loop/failure_set"))
+            .cloned()
+            .unwrap_or(Value::Null);
         let feedback = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request.clone(),
             promotion_report: promotion.clone(),
@@ -2084,7 +2091,7 @@ where
             // the verified patch for review without entering finalization.
             require_review_form: !options.no_finalize,
             review_form,
-            metadata: Value::Null,
+            metadata: serde_json::json!({"previous_failure_set": previous_failure_set}),
         });
         let feedback_status = feedback.status;
         let follow_up_request = feedback.follow_up_request.clone();

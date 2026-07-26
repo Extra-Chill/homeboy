@@ -102,6 +102,7 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
                 isolate_home: args.isolate_gate_home,
                 isolate_xdg: args.isolate_gate_xdg,
             },
+            gate_diagnostic_sidecars: Vec::new(),
         }
     }
 }

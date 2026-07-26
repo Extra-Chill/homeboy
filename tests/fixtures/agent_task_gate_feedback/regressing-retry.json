@@ -1,0 +1,4 @@
+{
+  "previous_failure_set": ["gate-1:policy:existing"],
+  "current_failure_set": ["gate-1:policy:existing", "gate-1:policy:new"]
+}
