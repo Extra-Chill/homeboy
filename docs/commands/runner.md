@@ -823,6 +823,17 @@ Safety rules:
 - Output includes `local_path`, `remote_path`, `sync_mode`, `snapshot_identity`, and snapshot `files` / `bytes` when available.
 - The runner workspace is execution-only; this command does not push branches, commit, or make the runner authoritative for source changes.
 
+### `workspace prune`
+
+```sh
+homeboy runner workspace prune <runner-id> --min-age-hours 24 --limit 5
+homeboy runner workspace prune <runner-id> --apply --min-age-hours 24 --limit 5 --passes 10
+```
+
+`workspace prune` only removes metadata-backed, inactive Lab workspaces that are old enough, have no pending patch or diff artifact, and are orphaned or have an expired lifecycle TTL. It never removes outside `_lab_workspaces`.
+
+`--limit` bounds the workspace directories inspected, sized, retained in memory, and removed in each pass. `--passes` bounds apply passes. Output now includes `scanned_workspace_count` and `scan_complete`: when `scan_complete` is false, `has_more` is true and `total_candidate_*` plus `remaining_candidate_*` describe only the inspected window, not every runner workspace. Use the emitted `next_command` or `drain_command` to continue safely.
+
 ### `workspace apply`
 
 ```sh

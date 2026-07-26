@@ -1040,8 +1040,14 @@ pub fn prune_workspaces(
     let mut candidate_entries = Vec::new();
     let mut total_candidate_count = 0;
     let mut total_candidate_bytes = 0;
+    let mut scanned_workspace_count = 0;
+    let mut scan_complete = true;
+    let remaining_candidates: Vec<RunnerWorkspacePruneEntry> = Vec::new();
     for pass in 0..passes {
-        let candidates = prune_candidates_for_runner(&runner, &lab_workspaces_root, &options)?;
+        let scan = prune_candidates_for_runner(&runner, &lab_workspaces_root, &options, limit)?;
+        scanned_workspace_count += scan.scanned_workspace_count;
+        scan_complete = scan.scan_complete;
+        let candidates = scan.candidates;
         if pass == 0 {
             total_candidate_count = candidates.len();
             total_candidate_bytes = candidates.iter().map(|entry| entry.bytes).sum();
@@ -1049,7 +1055,7 @@ pub fn prune_workspaces(
         if candidates.is_empty() {
             break;
         }
-        for candidate in candidates.into_iter().take(limit) {
+        for candidate in candidates {
             if !options.apply {
                 candidate_entries.push(candidate);
                 continue;
@@ -1062,22 +1068,14 @@ pub fn prune_workspaces(
                 }),
             }
         }
-        if !options.apply || total_candidate_count <= limit {
+        if !options.apply || scan_complete {
             break;
         }
     }
 
-    let remaining_candidates = if options.apply {
-        prune_candidates_for_runner(&runner, &lab_workspaces_root, &options)?
-    } else {
-        prune_candidates_for_runner(&runner, &lab_workspaces_root, &options)?
-            .into_iter()
-            .skip(limit)
-            .collect()
-    };
     let remaining_candidate_count = remaining_candidates.len();
     let remaining_candidate_bytes = remaining_candidates.iter().map(|entry| entry.bytes).sum();
-    let has_more = remaining_candidate_count > 0;
+    let has_more = !scan_complete || remaining_candidate_count > 0 || !skipped.is_empty();
     let runner_arg = shell_arg(&runner.id);
     let next_command = has_more.then(|| {
         if options.apply {
@@ -1111,6 +1109,8 @@ pub fn prune_workspaces(
             candidates: candidate_entries,
             removed,
             skipped,
+            scanned_workspace_count,
+            scan_complete,
             total_candidate_count,
             total_candidate_bytes,
             total_removed_bytes,
@@ -1128,11 +1128,20 @@ fn prune_candidates_for_runner(
     runner: &super::super::Runner,
     lab_workspaces_root: &str,
     options: &RunnerWorkspacePruneOptions,
-) -> Result<Vec<RunnerWorkspacePruneEntry>> {
+    scan_limit: usize,
+) -> Result<PruneCandidateScan> {
     match runner.kind {
-        RunnerKind::Local => prune_candidates_local(Path::new(lab_workspaces_root), options),
-        RunnerKind::Ssh => prune_candidates_ssh(runner, lab_workspaces_root, options),
+        RunnerKind::Local => {
+            prune_candidates_local(Path::new(lab_workspaces_root), options, scan_limit)
+        }
+        RunnerKind::Ssh => prune_candidates_ssh(runner, lab_workspaces_root, options, scan_limit),
     }
+}
+
+struct PruneCandidateScan {
+    candidates: Vec<RunnerWorkspacePruneEntry>,
+    scanned_workspace_count: usize,
+    scan_complete: bool,
 }
 
 /// Reap a single run-scoped materialized workspace (and its sibling Homeboy
@@ -1811,17 +1820,25 @@ fn exclude_homeboy_metadata_from_git_status(workspace_path: &Path) -> Result<()>
 fn prune_candidates_local(
     root: &Path,
     options: &RunnerWorkspacePruneOptions,
-) -> Result<Vec<RunnerWorkspacePruneEntry>> {
+    scan_limit: usize,
+) -> Result<PruneCandidateScan> {
     if !root.is_dir() {
-        return Ok(Vec::new());
+        return Ok(PruneCandidateScan {
+            candidates: Vec::new(),
+            scanned_workspace_count: 0,
+            scan_complete: true,
+        });
     }
     let mut candidates = Vec::new();
-    for entry in fs::read_dir(root).map_err(|err| {
+    let mut entries = fs::read_dir(root).map_err(|err| {
         Error::internal_io(
             err.to_string(),
             Some("read runner workspace root".to_string()),
         )
-    })? {
+    })?;
+    let mut scanned_workspace_count = 0;
+    let mut scan_complete = true;
+    while let Some(entry) = entries.next() {
         let entry = entry.map_err(|err| {
             Error::internal_io(
                 err.to_string(),
@@ -1832,6 +1849,11 @@ fn prune_candidates_local(
         if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
             continue;
         }
+        if scanned_workspace_count == scan_limit {
+            scan_complete = false;
+            break;
+        }
+        scanned_workspace_count += 1;
         if let Some(candidate) = classify_local_candidate(root, &path, options)? {
             candidates.push(candidate);
         }
@@ -1840,8 +1862,13 @@ fn prune_candidates_local(
         b.bytes
             .cmp(&a.bytes)
             .then_with(|| b.age_seconds.cmp(&a.age_seconds))
+            .then_with(|| a.remote_path.cmp(&b.remote_path))
     });
-    Ok(candidates)
+    Ok(PruneCandidateScan {
+        candidates,
+        scanned_workspace_count,
+        scan_complete,
+    })
 }
 
 fn classify_local_candidate(
@@ -1944,11 +1971,12 @@ fn prune_candidates_ssh(
     runner: &super::super::Runner,
     root: &str,
     options: &RunnerWorkspacePruneOptions,
-) -> Result<Vec<RunnerWorkspacePruneEntry>> {
+    scan_limit: usize,
+) -> Result<PruneCandidateScan> {
     let (_server, mut client) = ssh_client_for_runner(runner)?;
     client.env.extend(runner.env.clone());
     let min_age = options.min_age_hours.saturating_mul(3600);
-    let command = prune_scan_command(root, min_age);
+    let command = prune_scan_command(root, min_age, scan_limit);
     let output = client.execute_with_timeout(&command, WORKSPACE_PRUNE_TIMEOUT);
     if !output.success {
         return Err(Error::internal_unexpected(format!(
@@ -1957,7 +1985,33 @@ fn prune_candidates_ssh(
         )));
     }
     let mut candidates = Vec::new();
+    let mut scan_status = None;
     for line in output.stdout.lines() {
+        if let Some(status) = line.strip_prefix("__homeboy_prune_scan__\t") {
+            let parts = status.split('\t').collect::<Vec<_>>();
+            let [scanned_workspace_count, completion] = parts.as_slice() else {
+                return Err(Error::internal_unexpected(
+                    "runner workspace prune scan returned an invalid completion status".to_string(),
+                ));
+            };
+            let scanned_workspace_count = scanned_workspace_count.parse().map_err(|err| {
+                Error::internal_unexpected(format!(
+                    "runner workspace prune scan returned an invalid inspected count: {err}"
+                ))
+            })?;
+            let scan_complete = match *completion {
+                "complete" => true,
+                "partial" => false,
+                _ => {
+                    return Err(Error::internal_unexpected(
+                        "runner workspace prune scan returned an invalid completion status"
+                            .to_string(),
+                    ));
+                }
+            };
+            scan_status = Some((scanned_workspace_count, scan_complete));
+            continue;
+        }
         let parts = line.splitn(4, '\t').collect::<Vec<_>>();
         if parts.len() != 4 {
             continue;
@@ -1970,6 +2024,11 @@ fn prune_candidates_ssh(
             .map_err(|err| Error::internal_json(err.to_string(), None))?;
         let metadata: serde_json::Value = serde_json::from_slice(&decoded)
             .map_err(|err| Error::internal_json(err.to_string(), Some(remote_path.clone())))?;
+        if metadata.get("schema").and_then(|value| value.as_str())
+            != Some("homeboy/runner-workspace/v1")
+        {
+            continue;
+        }
         let Some(source_path) = metadata.get("local_path").and_then(|value| value.as_str()) else {
             continue;
         };
@@ -2005,8 +2064,18 @@ fn prune_candidates_ssh(
         b.bytes
             .cmp(&a.bytes)
             .then_with(|| b.age_seconds.cmp(&a.age_seconds))
+            .then_with(|| a.remote_path.cmp(&b.remote_path))
     });
-    Ok(candidates)
+    let (scanned_workspace_count, scan_complete) = scan_status.ok_or_else(|| {
+        Error::internal_unexpected(
+            "runner workspace prune scan did not return a completion status".to_string(),
+        )
+    })?;
+    Ok(PruneCandidateScan {
+        candidates,
+        scanned_workspace_count,
+        scan_complete,
+    })
 }
 
 fn prune_candidate_reason_from_decoded_metadata(
@@ -2035,13 +2104,13 @@ fn prune_candidate_reason_from_decoded_metadata(
     (!Path::new(source_path).exists()).then(|| "source_path_missing".to_string())
 }
 
-pub(crate) fn prune_scan_command(root: &str, min_age: u64) -> String {
+pub(crate) fn prune_scan_command(root: &str, min_age: u64, scan_limit: usize) -> String {
     format!(
-        "root={root}; meta_rel={meta}; now=$(date +%s); if [ -d \"$root\" ]; then find \"$root\" -mindepth 1 -maxdepth 1 -type d -exec sh -c 'meta_rel=$1; now=$2; min_age=$3; shift 3; for dir do meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; mtime=$(stat -c %Y \"$dir\" 2>/dev/null || stat -f %m \"$dir\" 2>/dev/null || echo 0); age=$((now-mtime)); [ \"$age\" -ge \"$min_age\" ] || continue; if find \"$dir/.homeboy\" -type f \\( -name \"*.patch\" -o -name \"*.diff\" -o -name \"*patch*\" \\) 2>/dev/null | grep -q .; then continue; fi; blocks=$(du -sk \"$dir\" 2>/dev/null); blocks=${{blocks%%[!0-9]*}}; bytes=$((blocks * 1024)); printf \"%s\\t%s\\t%s\\t\" \"$age\" \"${{bytes:-0}}\" \"$dir\"; base64 < \"$meta\" | tr -d \"\\n\"; printf \"\\n\"; done' sh {meta_arg} \"$now\" {min_age_arg} {{}} +; fi",
+        "root={root}; meta_rel={meta}; min_age={min_age}; now=$(date +%s); if [ -d \"$root\" ]; then find \"$root\" -mindepth 1 -maxdepth 1 -type d -print | {{ scanned=0; complete=complete; while IFS= read -r dir; do if [ \"$scanned\" -ge {scan_limit} ]; then complete=partial; break; fi; scanned=$((scanned + 1)); meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; mtime=$(stat -c %Y \"$dir\" 2>/dev/null || stat -f %m \"$dir\" 2>/dev/null || echo 0); age=$((now-mtime)); [ \"$age\" -ge \"$min_age\" ] || continue; if find \"$dir/.homeboy\" -type f \\( -name \"*.patch\" -o -name \"*.diff\" -o -name \"*patch*\" \\) 2>/dev/null | grep -q .; then continue; fi; blocks=$(du -sk \"$dir\" 2>/dev/null); blocks=${{blocks%%[!0-9]*}}; bytes=$((blocks * 1024)); printf \"%s\\t%s\\t%s\\t\" \"$age\" \"${{bytes:-0}}\" \"$dir\"; base64 < \"$meta\" | tr -d \"\\n\"; printf \"\\n\"; done; printf \"__homeboy_prune_scan__\\t%s\\t%s\\n\" \"$scanned\" \"$complete\"; }}; else printf \"__homeboy_prune_scan__\\t0\\tcomplete\\n\"; fi",
         root = shell::quote_arg(root),
         meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
-        meta_arg = shell::quote_arg(WORKSPACE_METADATA_FILE),
-        min_age_arg = shell::quote_arg(&min_age.to_string()),
+        min_age = shell::quote_arg(&min_age.to_string()),
+        scan_limit = scan_limit,
     )
 }
 

@@ -426,10 +426,11 @@ fn prune_workspaces_reports_remaining_bytes_and_drain_command_when_limited() {
         assert_eq!(exit_code, 0);
         assert!(output.dry_run);
         assert_eq!(output.candidates.len(), 1);
-        assert_eq!(output.total_candidate_count, 2);
-        assert!(output.total_candidate_bytes > output.candidates[0].bytes);
-        assert_eq!(output.remaining_candidate_count, 1);
-        assert!(output.remaining_candidate_bytes > 0);
+        assert_eq!(output.scanned_workspace_count, 1);
+        assert!(!output.scan_complete);
+        assert_eq!(output.total_candidate_count, 1);
+        assert_eq!(output.remaining_candidate_count, 0);
+        assert_eq!(output.remaining_candidate_bytes, 0);
         assert!(output.has_more);
         assert_eq!(
             output.next_command.as_deref(),
@@ -487,7 +488,8 @@ fn prune_workspaces_apply_passes_drain_until_empty() {
 
         assert_eq!(exit_code, 0);
         assert!(!output.dry_run);
-        assert_eq!(output.total_candidate_count, 2);
+        assert_eq!(output.scanned_workspace_count, 2);
+        assert_eq!(output.total_candidate_count, 1);
         assert_eq!(output.removed.len(), 2);
         assert_eq!(output.remaining_candidate_count, 0);
         assert_eq!(output.remaining_candidate_bytes, 0);
@@ -496,6 +498,85 @@ fn prune_workspaces_apply_passes_drain_until_empty() {
         assert!(!Path::new(&workspace_a.remote_path).exists());
         assert!(!Path::new(&workspace_b.remote_path).exists());
     });
+}
+
+#[test]
+fn prune_workspaces_bounds_thousands_of_entries_per_pass_and_drains_stably() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        const WORKSPACE_COUNT: usize = 5_214;
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        let workspaces_root = runner_root.path().join("_lab_workspaces");
+        fs::create_dir_all(&workspaces_root).expect("workspaces root");
+        for index in 0..WORKSPACE_COUNT {
+            write_orphan_workspace(&workspaces_root.join(format!("workspace-{index:05}")));
+        }
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-local-prune-thousands","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let options = RunnerWorkspacePruneOptions {
+            apply: true,
+            min_age_hours: 0,
+            limit: 5,
+            passes: 3,
+        };
+        let (first, _) = prune_workspaces("lab-local-prune-thousands", options.clone())
+            .expect("first bounded drain");
+        let (second, _) =
+            prune_workspaces("lab-local-prune-thousands", options).expect("second bounded drain");
+
+        assert_eq!(first.scanned_workspace_count, 15);
+        assert_eq!(first.removed.len(), 15);
+        assert_eq!(first.total_candidate_count, 5);
+        assert!(!first.scan_complete);
+        assert!(first.has_more);
+        assert_eq!(second.scanned_workspace_count, 15);
+        assert_eq!(second.removed.len(), 15);
+        assert!(first.removed.iter().all(|entry| !second
+            .removed
+            .iter()
+            .any(|next| next.remote_path == entry.remote_path)));
+        assert_eq!(
+            fs::read_dir(&workspaces_root)
+                .expect("remaining workspaces")
+                .count(),
+            WORKSPACE_COUNT - 30
+        );
+    });
+}
+
+#[test]
+fn ssh_prune_scan_command_bounds_thousands_of_entries() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    for index in 0..5_214 {
+        write_orphan_workspace(&temp.path().join(format!("workspace-{index:05}")));
+    }
+
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(prune_scan_command(&temp.path().display().to_string(), 0, 5))
+        .output()
+        .expect("run generated prune scan command");
+
+    assert!(output.status.success(), "{:?}", output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| !line.starts_with("__homeboy_prune_scan__"))
+            .count(),
+        5,
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("__homeboy_prune_scan__\t5\tpartial"),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -522,7 +603,7 @@ fn ssh_prune_scan_command_handles_paths_that_need_shell_quoting() {
 
     let output = Command::new("sh")
         .arg("-c")
-        .arg(prune_scan_command(&root.display().to_string(), 0))
+        .arg(prune_scan_command(&root.display().to_string(), 0, 10))
         .output()
         .expect("run generated prune scan command");
 
@@ -537,7 +618,11 @@ fn ssh_prune_scan_command_handles_paths_that_need_shell_quoting() {
         "{stdout}"
     );
     assert!(stdout.contains('\t'), "{stdout}");
-    assert!(stdout.lines().count() == 1, "{stdout}");
+    assert!(stdout.lines().count() == 2, "{stdout}");
+    assert!(
+        stdout.contains("__homeboy_prune_scan__\t1\tcomplete"),
+        "{stdout}"
+    );
 }
 
 fn sync_options(path: String) -> RunnerWorkspaceSyncOptions {
@@ -551,4 +636,18 @@ fn sync_options(path: String) -> RunnerWorkspaceSyncOptions {
         allow_dirty_lab_workspace: false,
         run_isolation_token: None,
     }
+}
+
+fn write_orphan_workspace(path: &Path) {
+    fs::create_dir_all(path.join(".homeboy")).expect("workspace metadata dir");
+    fs::write(path.join("file.txt"), "orphan\n").expect("workspace file");
+    fs::write(
+        path.join(WORKSPACE_METADATA_FILE),
+        serde_json::json!({
+            "schema": "homeboy/runner-workspace/v1",
+            "local_path": path.join("missing-source").display().to_string(),
+        })
+        .to_string(),
+    )
+    .expect("workspace metadata");
 }
