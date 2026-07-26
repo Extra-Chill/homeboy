@@ -57,6 +57,9 @@ const METADATA_SSH_RECOVERY_ATTEMPTS: usize = 2;
 const WORKSPACE_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 const WORKSPACE_METADATA_OUTPUT_LIMIT: usize = 4 * 1024;
 const WORKSPACE_PRUNE_TIMEOUT: Duration = Duration::from_secs(30);
+// Prepared sources include hydrated dependency trees, so retain a small fixed
+// working set instead of making every historical commit permanent runner state.
+const PREPARED_SOURCE_CACHE_MAX_ENTRIES: usize = 8;
 
 pub fn sync_workspace(
     runner_id: &str,
@@ -427,8 +430,8 @@ pub fn sync_workspace(
                 &local_path,
                 &remote_path,
                 RunnerWorkspaceSyncMode::Git,
-                None,
-                None,
+                materialization_plan.actual_materialization_mode.as_deref(),
+                materialization_plan.fallback_reason.as_deref(),
                 &git.head,
                 &excludes,
                 None,
@@ -510,10 +513,13 @@ pub(crate) fn save_prepared_source_cache(
     let local_path = canonical_workspace_path(local_path)?;
     let commit = git_output(&local_path, &["rev-parse", "HEAD"])?;
     let cache = prepared_source_cache_path(workspace_root, &local_path, &commit);
+    let cache_root = prepared_source_cache_root(workspace_root);
     let command = format!(
-        "cache={cache}; source={source}; lock=\"$cache.lock\"; mkdir -p \"$(dirname \"$cache\")\"; test -f \"$cache/.homeboy/prepared-source-ready\" && exit 0; mkdir \"$lock\" 2>/dev/null || exit 0; trap 'rmdir \"$lock\"' EXIT; tmp=\"$cache.tmp.$$\"; rm -rf \"$tmp\"; cp -a \"$source\" \"$tmp\"; mkdir -p \"$tmp/.homeboy\"; : > \"$tmp/.homeboy/prepared-source-ready\"; chmod -R a-w \"$tmp\"; mv \"$tmp\" \"$cache\"",
+        "cache={cache}; cache_root={cache_root}; source={source}; lock=\"$cache.lock\"; mkdir -p \"$cache_root\"; test -f \"$cache/.homeboy/prepared-source-ready\" || {{ mkdir \"$lock\" 2>/dev/null || exit 0; trap 'rmdir \"$lock\"' EXIT; tmp=\"$cache.tmp.$$\"; rm -rf \"$tmp\"; cp -a \"$source\" \"$tmp\"; mkdir -p \"$tmp/.homeboy\"; : > \"$tmp/.homeboy/prepared-source-ready\"; chmod -R a-w \"$tmp\"; mv \"$tmp\" \"$cache\"; }}; kept=0; ls -1dt \"$cache_root\"/* 2>/dev/null | while IFS= read -r candidate; do test -f \"$candidate/.homeboy/prepared-source-ready\" || continue; if [ \"$kept\" -lt {max_entries} ]; then kept=$((kept + 1)); continue; fi; test -e \"$candidate.lock\" && continue; ls \"$candidate\".lease.* >/dev/null 2>&1 && continue; chmod -R u+w \"$candidate\" && rm -rf \"$candidate\"; done",
         cache = shell::quote_arg(&cache),
+        cache_root = shell::quote_arg(&cache_root),
         source = shell::quote_arg(remote_path),
+        max_entries = PREPARED_SOURCE_CACHE_MAX_ENTRIES,
     );
     run_workspace_shell_command(&runner, &command, "save prepared Lab source cache")
 }
@@ -524,8 +530,12 @@ fn prepared_source_cache_path(workspace_root: &str, local_path: &Path, commit: &
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("workspace");
+    format!("{}/{name}", prepared_source_cache_root(workspace_root))
+}
+
+fn prepared_source_cache_root(workspace_root: &str) -> String {
     format!(
-        "{}/_lab_prepared_sources/{name}",
+        "{}/_lab_prepared_sources",
         workspace_root.trim_end_matches('/')
     )
 }
@@ -536,7 +546,7 @@ fn materialize_prepared_source_view(
     remote_path: &str,
 ) -> Result<bool> {
     let command = format!(
-        "test -f {cache}/.homeboy/prepared-source-ready && test ! -e {destination} && mkdir -p $(dirname {destination}) && cp -a {cache} {destination} && chmod -R u+w {destination}",
+        "cache={cache}; destination={destination}; test -f \"$cache/.homeboy/prepared-source-ready\" && test ! -e \"$destination\" || exit 1; lease=\"$cache.lease.$$\"; : > \"$lease\" || exit 1; trap 'rm -f \"$lease\"' EXIT HUP INT TERM; test -f \"$cache/.homeboy/prepared-source-ready\" && mkdir -p \"$(dirname \"$destination\")\" && cp -a \"$cache\" \"$destination\" && chmod -R u+w \"$destination\" || {{ rm -rf \"$destination\"; exit 1; }}",
         cache = shell::quote_arg(cache),
         destination = shell::quote_arg(remote_path),
     );

@@ -1926,7 +1926,6 @@ pub(crate) fn run_lab_offload_inner(
         "status": synced.workspace_cleanliness,
         "allow_dirty_lab_workspace": request.allow_dirty_lab_workspace,
     });
-    attach_lab_offload_overhead(&mut lab_metadata, &overhead);
     lab_metadata["lab_host_telemetry"] = host_telemetry.before_metadata();
     let secret_env_delta = secret_env_handoff
         .env_delta
@@ -2031,6 +2030,9 @@ pub(crate) fn run_lab_offload_inner(
             },
         },
     });
+    // Admission is the final setup step before handing metadata to the runner.
+    // Attach now so the published setup total includes every completed phase.
+    attach_lab_offload_overhead(&mut lab_metadata, &overhead);
     exec_lab_context(LabDispatchExecutionContext {
         request: &request,
         selection: &selection,

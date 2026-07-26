@@ -432,6 +432,18 @@ fn same_commit_prepared_source_cache_creates_private_job_views() {
                 .as_deref(),
             Some("prepared_source_view")
         );
+        assert!(second.materialization_plan.controller_git_bundle.is_none());
+        let second_metadata: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(
+                std::path::Path::new(&second.remote_path).join(".homeboy/runner-workspace.json"),
+            )
+            .expect("second workspace metadata"),
+        )
+        .expect("parse second workspace metadata");
+        assert_eq!(
+            second_metadata["actual_materialization_mode"],
+            "prepared_source_view"
+        );
         assert!(std::path::Path::new(&second.remote_path)
             .join("dependency-marker")
             .is_file());
@@ -450,6 +462,64 @@ fn same_commit_prepared_source_cache_creates_private_job_views() {
             .expect("prepared cache directory")
             .next()
             .is_some());
+    });
+}
+
+#[test]
+fn prepared_source_cache_retains_a_bounded_completed_working_set() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root");
+        create_local_runner("lab-local-prepared-cache-retention", runner_root.path());
+        let source = git_source(
+            "homeboy@prepared-cache-retention",
+            "fix/prepared-cache",
+            "one\n",
+        );
+        git(
+            source.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.test/prepared-cache-retention.git",
+            ],
+        );
+        let mut options = sync_options(
+            source.path().display().to_string(),
+            Some("job-0".to_string()),
+        );
+        options.mode = RunnerWorkspaceSyncMode::Git;
+        options.controller_routed_git = true;
+
+        for index in 0..=8 {
+            fs::write(source.path().join("file.txt"), format!("source-{index}\n"))
+                .expect("update source");
+            git(source.path(), &["add", "."]);
+            git(source.path(), &["commit", "-m", &format!("source {index}")]);
+            options.run_isolation_token = Some(format!("job-{index}"));
+            let (synced, _) = sync_workspace("lab-local-prepared-cache-retention", options.clone())
+                .expect("materialize source");
+            save_prepared_source_cache(
+                "lab-local-prepared-cache-retention",
+                &synced.local_path,
+                &synced.remote_path,
+            )
+            .expect("save prepared cache");
+        }
+
+        let cache_root = runner_root.path().join("_lab_prepared_sources");
+        let completed = cache_root
+            .read_dir()
+            .expect("prepared cache root")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .join(".homeboy/prepared-source-ready")
+                    .is_file()
+            })
+            .count();
+        assert_eq!(completed, 8);
     });
 }
 

@@ -38,8 +38,6 @@ pub(crate) enum LabOffloadPhase {
     Command,
     /// Importing artifacts / structured-output files back from the runner.
     ArtifactImport,
-    /// Reaping the job-owned view. Immutable preparation is never reaped here.
-    Cleanup,
 }
 
 impl LabOffloadPhase {
@@ -53,13 +51,12 @@ impl LabOffloadPhase {
             LabOffloadPhase::DependencyHydration => "dependency_hydration",
             LabOffloadPhase::Command => "command",
             LabOffloadPhase::ArtifactImport => "artifact_import",
-            LabOffloadPhase::Cleanup => "cleanup",
         }
     }
 
     /// The setup phases in canonical order, used to render a stable per-phase
     /// duration map even when some phases were never reached.
-    pub(crate) const fn overhead_phases() -> [LabOffloadPhase; 7] {
+    pub(crate) const fn overhead_phases() -> [LabOffloadPhase; 6] {
         [
             LabOffloadPhase::Selection,
             LabOffloadPhase::Preflight,
@@ -67,7 +64,6 @@ impl LabOffloadPhase {
             LabOffloadPhase::SourceMaterialization,
             LabOffloadPhase::DependencyHydration,
             LabOffloadPhase::ArtifactImport,
-            LabOffloadPhase::Cleanup,
         ]
     }
 }
@@ -119,7 +115,6 @@ pub(crate) struct LabOffloadOverhead {
     dependency_hydration: Option<Duration>,
     command: Option<Duration>,
     artifact_import: Option<Duration>,
-    cleanup: Option<Duration>,
     attempted: AttemptedSelection,
     fallback_reason: Option<String>,
 }
@@ -139,7 +134,6 @@ impl LabOffloadOverhead {
             LabOffloadPhase::DependencyHydration => &mut self.dependency_hydration,
             LabOffloadPhase::Command => &mut self.command,
             LabOffloadPhase::ArtifactImport => &mut self.artifact_import,
-            LabOffloadPhase::Cleanup => &mut self.cleanup,
         }
     }
 
@@ -194,7 +188,6 @@ impl LabOffloadOverhead {
             LabOffloadPhase::DependencyHydration => &self.dependency_hydration,
             LabOffloadPhase::Command => &self.command,
             LabOffloadPhase::ArtifactImport => &self.artifact_import,
-            LabOffloadPhase::Cleanup => &self.cleanup,
         }
     }
 
