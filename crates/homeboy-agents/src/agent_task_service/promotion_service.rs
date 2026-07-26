@@ -7,6 +7,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::daemon::controller_job_driver::{
@@ -55,6 +56,10 @@ pub struct AgentTaskPromotionJob {
     pub request: AgentTaskPromotionRequest,
     #[serde(default)]
     pub phase: AgentTaskPromotionJobPhase,
+    /// Private terminal evidence retained in the recovery checkpoint. It is
+    /// deliberately omitted from every public controller-job projection.
+    #[serde(default)]
+    pub report: Option<AgentTaskPromotionReport>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -83,12 +88,10 @@ impl AgentTaskPromotionJob {
 
         Ok(Self {
             schema: AGENT_TASK_PROMOTION_JOB_SCHEMA.to_string(),
-            idempotency_key: format!(
-                "promotion:{source_run_id}:{artifact_id}:{}",
-                request.to_worktree
-            ),
+            idempotency_key: promotion_job_idempotency_key(source_run_id, artifact_id, &request)?,
             request,
             phase: AgentTaskPromotionJobPhase::Queued,
+            report: None,
         })
     }
 
@@ -113,7 +116,24 @@ impl AgentTaskPromotionJob {
                 "promotion job idempotency key does not match its immutable request",
             ));
         }
+        if self.phase == AgentTaskPromotionJobPhase::Completed && self.report.is_none() {
+            return Err(invalid_promotion_job(
+                "completed promotion jobs require a durable result",
+            ));
+        }
+        if self.phase != AgentTaskPromotionJobPhase::Completed && self.report.is_some() {
+            return Err(invalid_promotion_job(
+                "only completed promotion jobs may contain a durable result",
+            ));
+        }
         Ok(())
+    }
+
+    fn completed_result(&self) -> Result<Value> {
+        let report = self.report.as_ref().ok_or_else(|| {
+            invalid_promotion_job("completed promotion jobs require a durable result")
+        })?;
+        Ok(serde_json::json!({ "phase": self.phase, "promotion": report }))
     }
 
     fn public_projection(&self) -> Value {
@@ -128,6 +148,25 @@ impl AgentTaskPromotionJob {
             "base_ref": self.request.base_ref,
         })
     }
+}
+
+fn promotion_job_idempotency_key(
+    source_run_id: &str,
+    artifact_id: &str,
+    request: &AgentTaskPromotionRequest,
+) -> Result<String> {
+    let serialized = serde_json::to_vec(request).map_err(|error| {
+        homeboy_core::Error::internal_json(
+            error.to_string(),
+            Some("serialize promotion job identity".to_string()),
+        )
+    })?;
+    // The digest makes every immutable execution input part of the identity
+    // without exposing aggregate content, paths, or gate configuration.
+    Ok(format!(
+        "promotion:{source_run_id}:{artifact_id}:{:x}",
+        Sha256::digest(serialized)
+    ))
 }
 
 fn required_job_field<'a>(value: &'a Option<String>, name: &str) -> Result<&'a str> {
@@ -181,8 +220,52 @@ impl ControllerJobDriver for AgentTaskPromotionJobDriver {
         AgentTaskPromotionJob::parse(request.clone()).map(|_| ())
     }
 
+    fn prepare(&self, request: Value) -> Result<Value> {
+        let job = AgentTaskPromotionJob::parse(request)?;
+        if job.phase != AgentTaskPromotionJobPhase::Queued || job.report.is_some() {
+            return Err(invalid_promotion_job(
+                "new promotion jobs must start queued without a result",
+            ));
+        }
+        serde_json::to_value(job).map_err(|error| {
+            homeboy_core::Error::internal_json(
+                error.to_string(),
+                Some("serialize prepared promotion job".to_string()),
+            )
+        })
+    }
+
     fn execute(&self, prepared: Value, handle: ControllerJobHandle) -> Result<Value> {
         let mut job = AgentTaskPromotionJob::parse(prepared)?;
+        if job.phase != AgentTaskPromotionJobPhase::Queued || job.report.is_some() {
+            return Err(invalid_promotion_job(
+                "promotion execution requires a queued job without a result",
+            ));
+        }
+        self.execute_pending(&mut job, handle)
+    }
+
+    fn resume(&self, checkpoint: Value, handle: ControllerJobHandle) -> Result<Value> {
+        let mut job = AgentTaskPromotionJob::parse(checkpoint)?;
+        if job.phase == AgentTaskPromotionJobPhase::Completed {
+            return job.completed_result();
+        }
+        self.execute_pending(&mut job, handle)
+    }
+
+    fn cancel(&self, _prepared: &Value) -> Result<()> {
+        Err(invalid_promotion_job(
+            "promotion jobs cannot be cancelled after execution starts",
+        ))
+    }
+}
+
+impl AgentTaskPromotionJobDriver {
+    fn execute_pending(
+        &self,
+        job: &mut AgentTaskPromotionJob,
+        handle: ControllerJobHandle,
+    ) -> Result<Value> {
         job.phase = AgentTaskPromotionJobPhase::MutatingAndVerifying;
         handle.checkpoint(serde_json::to_value(&job).map_err(|error| {
             homeboy_core::Error::internal_json(
@@ -191,7 +274,7 @@ impl ControllerJobDriver for AgentTaskPromotionJobDriver {
             )
         })?)?;
         handle.progress(serde_json::json!({ "phase": job.phase }))?;
-        let report = execute_promotion(job.request.clone())?;
+        job.report = Some(execute_promotion(job.request.clone())?);
         job.phase = AgentTaskPromotionJobPhase::Completed;
         handle.checkpoint(serde_json::to_value(&job).map_err(|error| {
             homeboy_core::Error::internal_json(
@@ -199,17 +282,7 @@ impl ControllerJobDriver for AgentTaskPromotionJobDriver {
                 Some("serialize promotion checkpoint".to_string()),
             )
         })?)?;
-        Ok(serde_json::json!({ "phase": job.phase, "promotion": report }))
-    }
-
-    fn resume(&self, checkpoint: Value, handle: ControllerJobHandle) -> Result<Value> {
-        self.execute(checkpoint, handle)
-    }
-
-    fn cancel(&self, _prepared: &Value) -> Result<()> {
-        Err(invalid_promotion_job(
-            "promotion jobs cannot be cancelled after execution starts",
-        ))
+        job.completed_result()
     }
 }
 
@@ -353,6 +426,40 @@ mod tests {
             AgentTaskPromotionJobPhase::MutatingAndVerifying
         );
         assert_eq!(recovered.idempotency_key, job.idempotency_key);
+    }
+
+    #[test]
+    fn durable_job_identity_includes_every_execution_input_without_exposing_it() {
+        let job = AgentTaskPromotionJob::new(request()).expect("valid durable job");
+        let mut different_gates = request();
+        different_gates.gates.rerun_completed_gates = true;
+        let different_job = AgentTaskPromotionJob::new(different_gates).expect("valid durable job");
+
+        assert_ne!(job.idempotency_key, different_job.idempotency_key);
+        assert!(!job.idempotency_key.contains("private aggregate content"));
+        assert!(!job.idempotency_key.contains("base-sha"));
+    }
+
+    #[test]
+    fn completed_checkpoint_replays_its_durable_result_without_reexecution() {
+        let mut job = AgentTaskPromotionJob::new(request()).expect("valid durable job");
+        job.phase = AgentTaskPromotionJobPhase::Completed;
+        job.report = Some(
+            serde_json::from_value(serde_json::json!({
+                "schema": "homeboy/agent-task-promotion-report/v1",
+                "status": "applied",
+                "source": { "kind": "aggregate", "task_id": "task" },
+                "to_worktree": "homeboy@promotion",
+                "target": { "worktree": "homeboy@promotion" },
+                "patch_artifact": { "id": "patch-1", "kind": "patch", "path": "patch" },
+                "operator_notification": { "status": "completed", "message": "complete" }
+            }))
+            .expect("promotion report"),
+        );
+
+        let result = job.completed_result().expect("completed result");
+        assert_eq!(result["phase"], "completed");
+        assert_eq!(result["promotion"]["status"], "applied");
     }
 
     #[test]

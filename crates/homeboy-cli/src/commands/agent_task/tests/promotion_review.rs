@@ -146,6 +146,24 @@ fn review_reports_completed_aggregate_and_promotion_hints() {
 #[test]
 fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema() {
     with_temp_home(|| {
+        let root = tempfile::tempdir().expect("worktree root");
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        std::fs::create_dir(&source).expect("create source");
+        init_runtime_component_checkout(&source);
+        let status = Command::new("git")
+            .args([
+                "-C",
+                source.to_str().expect("source path"),
+                "worktree",
+                "add",
+                "-b",
+                "fixture-wrong-schema",
+                target.to_str().expect("target path"),
+            ])
+            .status()
+            .expect("create target worktree");
+        assert!(status.success());
         let (value, exit_code) = run_cook_with_executor(
             AgentTaskCookArgs {
                 dispatch: DispatchArgs {
@@ -180,7 +198,7 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
                 attempt_run_id: Some("cook-missing-provider-attempt-1-controller".to_string()),
                 attempt_plan: None,
                 goal: Some("cook fixture".to_string()),
-                to_worktree: "homeboy@fix-agent-task-runner-cook".to_string(),
+                to_worktree: target.display().to_string(),
                 provider_command: None,
                 provider_argv: vec![
                     "sh".to_string(),
@@ -204,7 +222,7 @@ fn cook_preserves_successful_candidate_when_provider_response_has_wrong_schema()
                 no_finalize: false,
                 full: true,
                 base: "main".to_string(),
-                head: Some("fix/agent-task-runner-cook".to_string()),
+                head: None,
                 title: None,
                 commit_message: None,
                 protected_branches: review::default_protected_branches(),
@@ -403,12 +421,39 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
         init_runtime_component_checkout(&source);
         let status = Command::new("git")
             .args([
-                "clone",
+                "-C",
                 source.to_str().expect("source path"),
+                "remote",
+                "add",
+                "origin",
+                source.to_str().expect("source path"),
+            ])
+            .status()
+            .expect("configure source remote");
+        assert!(status.success());
+        let status = Command::new("git")
+            .args([
+                "-C",
+                source.to_str().expect("source path"),
+                "fetch",
+                "origin",
+                "main",
+            ])
+            .status()
+            .expect("fetch source base");
+        assert!(status.success());
+        let status = Command::new("git")
+            .args([
+                "-C",
+                source.to_str().expect("source path"),
+                "worktree",
+                "add",
+                "-b",
+                "fixture-promoted",
                 target.to_str().expect("target path"),
             ])
             .status()
-            .expect("clone target");
+            .expect("create target worktree");
         assert!(status.success());
         std::fs::write(source.join("pre-existing-candidate.txt"), "preserve me\n")
             .expect("write pre-existing candidate");
@@ -468,7 +513,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 attempt_run_id: None,
                 attempt_plan: None,
                 goal: None,
-                to_worktree: "fixture-component@promoted".to_string(),
+                to_worktree: target.display().to_string(),
                 provider_command: None,
                 provider_argv: vec!["sh".to_string(), provider.display().to_string()],
                 gates: VerifyGateArgs {
@@ -487,7 +532,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 no_finalize: true,
                 full: true,
                 base: "main".to_string(),
-                head: Some("fix/mirrored-remote-attempt".to_string()),
+                head: None,
                 title: None,
                 commit_message: None,
                 protected_branches: review::default_protected_branches(),
