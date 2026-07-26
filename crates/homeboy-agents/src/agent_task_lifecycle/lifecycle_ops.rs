@@ -931,6 +931,14 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
         let _ = expire_unaccepted_lab_handoff(&resolved_run_id)?;
         record = store::read_record(&resolved_run_id)?;
     }
+    // A daemon can evict a completed job from its active store before a restarted
+    // controller observes it. The terminal event log already mirrored into this
+    // observation record is sufficient to recover the aggregate and artifacts.
+    // Consume it before querying the live runner, which is no longer authority
+    // once its active entry has been evicted.
+    if project_persisted_terminal_runner_events(&mut record)? {
+        record = store::read_record(&resolved_run_id)?;
+    }
     if !record.state.is_terminal() {
         let controller_plan = store::read_controller_plan(&record.run_id)?;
         let controller_plan_path = store::controller_plan_path(&record.run_id)?

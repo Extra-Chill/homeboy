@@ -33,7 +33,8 @@ pub(crate) fn reconcile_runner_job_snapshot(
         // published the inner agent-task aggregate. Adopt that later evidence
         // when it proves the same controller run rather than losing its patch.
         if let Some(event) = terminal_runner_lifecycle_event(record, snapshot)? {
-            if store::read_aggregate(&record.run_id).ok().as_ref() != Some(&event.aggregate) {
+            let aggregate = projected_runner_aggregate(record, &event.aggregate);
+            if store::read_aggregate(&record.run_id).ok().as_ref() != Some(&aggregate) {
                 project_terminal_runner_lifecycle_event(record, snapshot, &event)?;
             }
         }
@@ -151,7 +152,8 @@ pub fn project_terminal_runner_result(
     bind_pending_lab_handoff_snapshot(&mut record, snapshot)?;
     validate_runner_job_snapshot(&record, snapshot)?;
     if let Some(event) = terminal_runner_lifecycle_event(&record, snapshot)? {
-        if store::read_aggregate(&record.run_id).ok().as_ref() == Some(&event.aggregate) {
+        let aggregate = projected_runner_aggregate(&record, &event.aggregate);
+        if store::read_aggregate(&record.run_id).ok().as_ref() == Some(&aggregate) {
             return Ok(false);
         }
         project_terminal_runner_lifecycle_event(&mut record, snapshot, &event)?;
@@ -279,8 +281,7 @@ fn project_terminal_runner_lifecycle_event(
     preserve_terminal_runner_identity(record, event)?;
     validate_runner_job_snapshot(record, snapshot)?;
     validate_terminal_child_identity(record, snapshot, event)?;
-    let mut aggregate = event.aggregate.clone();
-    crate::agent_task_lifecycle::project_runner_evidence_refs(record, &mut aggregate);
+    let aggregate = projected_runner_aggregate(record, &event.aggregate);
     let projection_plan = aggregate_projection_plan_from_outcomes(&aggregate);
     let aggregate_path = store::aggregate_path(&record.run_id)
         .map(|path| path.display().to_string())
@@ -323,17 +324,23 @@ pub(crate) fn project_persisted_terminal_runner_events(
     else {
         return Ok(false);
     };
-    let Some(event) = crate::agent_task_lifecycle::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_persisted_job_events(
+    let event = crate::agent_task_lifecycle::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_persisted_job_events(
         &events,
         record.runner_id().unwrap_or_default(),
         runner_job_id,
         &record.run_id,
-    )? else {
+    )?
+    .or_else(|| {
+        crate::agent_task_lifecycle::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events(Some(&events))
+    });
+    let Some(event) = event else {
         return Ok(false);
     };
     validate_terminal_child_event_identity(record, &event)?;
-    let mut aggregate = event.aggregate.clone();
-    crate::agent_task_lifecycle::project_runner_evidence_refs(record, &mut aggregate);
+    let aggregate = projected_runner_aggregate(record, &event.aggregate);
+    if store::read_aggregate(&record.run_id).ok().as_ref() == Some(&aggregate) {
+        return Ok(false);
+    }
     let projection_plan = aggregate_projection_plan_from_outcomes(&aggregate);
     let aggregate_path = store::aggregate_path(&record.run_id)
         .map(|path| path.display().to_string())
@@ -346,6 +353,15 @@ pub(crate) fn project_persisted_terminal_runner_events(
     store::write_aggregate_and_record(record, &aggregate)?;
     crate::agent_task_lifecycle::record_terminal_artifact_projection(record, &aggregate)?;
     Ok(true)
+}
+
+fn projected_runner_aggregate(
+    record: &AgentTaskRunRecord,
+    aggregate: &AgentTaskAggregate,
+) -> AgentTaskAggregate {
+    let mut aggregate = aggregate.clone();
+    crate::agent_task_lifecycle::project_runner_evidence_refs(record, &mut aggregate);
+    aggregate
 }
 
 fn preserve_terminal_runner_identity(

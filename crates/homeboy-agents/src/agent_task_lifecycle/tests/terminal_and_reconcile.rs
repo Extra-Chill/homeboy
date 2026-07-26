@@ -3,10 +3,11 @@
 
 use super::*;
 use crate::agent_task::{
-    AgentTaskArtifact, AgentTaskArtifactDeclaration, AgentTaskExecutionHandle, AgentTaskExecutor,
-    AgentTaskLimits, AgentTaskOutcomeStatus, AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef,
-    AgentTaskWorkflowEvidence, AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus,
-    AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA,
+    AgentTaskArtifact, AgentTaskArtifactDeclaration, AgentTaskEvidenceRef,
+    AgentTaskExecutionHandle, AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcomeStatus,
+    AgentTaskPolicy, AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkflowEvidence,
+    AgentTaskWorkflowStepEvidence, AgentTaskWorkflowStepStatus, AgentTaskWorkspace,
+    AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA,
 };
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
@@ -16,6 +17,7 @@ use crate::agent_task_service::reconcile_stale_active_runs;
 use homeboy_core::api_jobs::{Job, JobEvent, JobEventKind, JobStore, RemoteRunnerJobRequest};
 use homeboy_core::test_support::with_isolated_home;
 use sha2::{Digest, Sha256};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 struct TerminalSnapshotProvider {
@@ -850,6 +852,230 @@ fn stale_reconcile_imports_terminal_runner_aggregate_before_cancelling_controlle
         assert_eq!(
             status(run_id).expect("terminal state retained").state,
             AgentTaskRunState::PartialRecoverable
+        );
+    });
+}
+
+#[test]
+fn status_recovers_evicted_terminal_runner_job_from_durable_observation_once() {
+    with_isolated_home(|_| {
+        let run_id = "cook-9969-evicted-terminal-observation";
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        })
+        .expect("accepted runner handoff");
+
+        let mut aggregate = succeeded_aggregate(&test_plan());
+        aggregate.outcomes[0]
+            .evidence_refs
+            .push(AgentTaskEvidenceRef {
+                kind: "transcript".to_string(),
+                uri: "file:///runner/private/transcript.json".to_string(),
+                label: Some("Runner transcript".to_string()),
+            });
+        let mut snapshot = terminal_child_snapshot(&aggregate);
+        snapshot.events[0].data.as_mut().expect("event data")["identity"]["run_id"] = json!(run_id);
+        snapshot.events[0].data.as_mut().expect("event data")["identity"]["persisted_run_id"] =
+            json!(run_id);
+        rewrite_record_for_test(run_id, |record| {
+            record.metadata["runner_job_status"] = json!(snapshot.job.status);
+            record.metadata["runner_job_events"] = json!(snapshot.events);
+        })
+        .expect("persist terminal daemon observation before controller restart");
+
+        // The active daemon store no longer has this job. Recovery must use the
+        // terminal observation persisted before eviction rather than terminalizing
+        // the controller projection as a missing live job.
+        let _provider = RunnerContinuationTestGuard::install(Box::new(ConnectedRunnerProvider));
+        let recovered = status(run_id).expect("recover terminal observation");
+        assert_eq!(recovered.state, AgentTaskRunState::Succeeded);
+        assert!(store::read_aggregate(run_id).is_ok());
+
+        let recovered_aggregate = store::read_aggregate(run_id).expect("recovered aggregate");
+        assert!(recovered_aggregate.outcomes[0].evidence_refs[0]
+            .uri
+            .starts_with("homeboy://agent-task/run/"));
+        let mut repeated_record = store::read_record(run_id).expect("recovered record");
+        assert!(
+            !project_persisted_terminal_runner_events(&mut repeated_record)
+                .expect("terminal projection is exactly once")
+        );
+        let repeated = status(run_id).expect("idempotent recovery");
+        assert_eq!(repeated.state, AgentTaskRunState::Succeeded);
+        assert_eq!(
+            store::read_aggregate(run_id).expect("recovered aggregate remains stable"),
+            recovered_aggregate
+        );
+    });
+}
+
+#[test]
+fn stale_reconcile_keeps_an_accepted_runner_job_active_after_controller_owner_exit() {
+    with_isolated_home(|_| {
+        let run_id = "cook-9969-active-runner-after-owner-exit";
+        let plan = test_plan();
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000009969",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        })
+        .expect("daemon acceptance persists runner identity before owner exit");
+
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&plan));
+        snapshot.job.id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000009969")
+            .expect("valid runner job id");
+        snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
+        snapshot.events.clear();
+        let _provider = RunnerContinuationTestGuard::install(Box::new(TerminalSnapshotProvider {
+            snapshot: Mutex::new(Some(snapshot)),
+        }));
+
+        rewrite_record_for_test(run_id, |record| {
+            record.metadata["runner_pid"] = json!(u32::MAX);
+            record.annotate_stale_running();
+        })
+        .expect("persist dead controller owner");
+
+        let report = reconcile_stale_active_runs(false).expect("reconcile active runner job");
+        assert_eq!(report.considered, 0);
+        assert_eq!(report.reconciled, 0);
+
+        let active = store::read_record(run_id).expect("active runner projection retained");
+        assert_eq!(active.state, AgentTaskRunState::Running);
+        assert_eq!(active.runner_id(), Some("homeboy-lab"));
+        assert_eq!(
+            active.runner_job_id(),
+            Some("00000000-0000-0000-0000-000000009969")
+        );
+        assert!(active.metadata.get(METADATA_KEY_STALE_RUNNING).is_none());
+    });
+}
+
+#[test]
+fn cancellation_race_projects_runner_success_instead_of_cancelling_controller_projection() {
+    with_isolated_home(|_| {
+        let run_id = "cook-9969-cancel-success-race";
+        let plan = test_plan();
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000000123",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        })
+        .expect("accepted runner handoff");
+
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&plan));
+        snapshot.events[0].data.as_mut().expect("event data")["identity"]["run_id"] = json!(run_id);
+        snapshot.events[0].data.as_mut().expect("event data")["identity"]["persisted_run_id"] =
+            json!(run_id);
+        let expected_job_id = snapshot.job.id;
+        let _cancel = super::cancellation::test_cancel_hook::install(Box::new(
+            move |runner_id, runner_job_id, durable_run_id| {
+                assert_eq!(runner_id, "homeboy-lab");
+                assert_eq!(runner_job_id, expected_job_id.to_string());
+                assert_eq!(durable_run_id, run_id);
+                Ok((snapshot.job.clone(), snapshot.events.clone()))
+            },
+        ));
+
+        let terminal = cancel_run(run_id, Some("operator cancellation"))
+            .expect("daemon terminal result wins cancellation race");
+        assert_eq!(terminal.state, AgentTaskRunState::Succeeded);
+        assert_eq!(terminal.tasks[0].state, AgentTaskState::Succeeded);
+        assert!(terminal.metadata.get("cancel_reason").is_none());
+        assert!(store::read_aggregate(run_id).is_ok());
+    });
+}
+
+#[test]
+fn accepted_runner_cancellation_fails_closed_when_daemon_cannot_be_reached() {
+    with_isolated_home(|_| {
+        let run_id = "cook-9969-runner-cancellation-fails-closed";
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000009971",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        })
+        .expect("accepted runner handoff");
+
+        let _cancel = super::cancellation::test_cancel_hook::install(Box::new(
+            |_runner_id, _runner_job_id, _durable_run_id| {
+                Err(Error::internal_unexpected("runner daemon is unavailable"))
+            },
+        ));
+
+        cancel_run(run_id, Some("operator cancellation"))
+            .expect_err("accepted runner cancellation must fail closed");
+        assert_eq!(
+            store::read_record(run_id).expect("durable record").state,
+            AgentTaskRunState::Running
+        );
+    });
+}
+
+#[test]
+fn accepted_runner_cancellation_does_not_signal_a_controller_local_pid() {
+    with_isolated_home(|_| {
+        let run_id = "cook-9969-runner-cancellation-authority";
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id: "00000000-0000-0000-0000-000000009970",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        })
+        .expect("accepted runner handoff");
+
+        let mut local_controller = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("start controller-local sentinel");
+        rewrite_record_for_test(run_id, |record| {
+            record.metadata["runner_pid"] = json!(local_controller.id());
+        })
+        .expect("persist stale controller pid");
+
+        let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        snapshot.job.id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000009970")
+            .expect("valid runner job id");
+        snapshot.job.status = homeboy_core::api_jobs::JobStatus::Cancelled;
+        let _cancel = super::cancellation::test_cancel_hook::install(Box::new(
+            move |runner_id, runner_job_id, durable_run_id| {
+                assert_eq!(runner_id, "homeboy-lab");
+                assert_eq!(runner_job_id, snapshot.job.id.to_string());
+                assert_eq!(durable_run_id, run_id);
+                Ok((snapshot.job.clone(), snapshot.events.clone()))
+            },
+        ));
+
+        let cancelled = cancel_run(run_id, Some("operator cancellation"))
+            .expect("runner cancellation succeeds");
+        let controller_was_not_signalled = local_controller
+            .try_wait()
+            .expect("inspect controller-local sentinel")
+            .is_none();
+        let _ = local_controller.kill();
+        let _ = local_controller.wait();
+
+        assert!(controller_was_not_signalled);
+        assert_eq!(cancelled.state, AgentTaskRunState::Cancelled);
+        assert_eq!(
+            cancelled.metadata["live_cancellation"]["cancellation"],
+            "runner_job_cancel"
         );
     });
 }

@@ -148,6 +148,21 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
     } else {
         LiveCancellationOutcome::NotRunning
     };
+    // A runner cancellation can race with the daemon publishing its terminal
+    // result. The daemon outcome is authoritative: project it rather than
+    // overwriting completed work with a controller-only cancellation.
+    if let LiveCancellationOutcome::RunnerJobCancelled { job, events } = &cancellation {
+        if job.status.is_terminal() && job.status != homeboy_core::api_jobs::JobStatus::Cancelled {
+            reconcile_runner_job_snapshot(
+                &mut record,
+                &homeboy_core::api_jobs::RunnerJobLogSnapshot {
+                    job: job.clone(),
+                    events: events.clone(),
+                },
+            )?;
+            return Ok(record);
+        }
+    }
     let runner_id = record.runner_id().map(str::to_string);
     let runner_job_id = record.runner_job_id().map(str::to_string);
 
@@ -254,26 +269,25 @@ struct UnsupportedLiveCancellation {
 fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancellationOutcome> {
     let owner_pid = record.owner_pid();
 
-    // Local, live owner process: terminate its tree directly (SIGTERM then
-    // SIGKILL escalation handled inside terminate_process_tree).
-    if let Some(pid) = owner_pid {
-        if record.owner_process_is_running() {
-            let termination = homeboy_core::process::terminate_process_tree(pid)?;
-            return Ok(LiveCancellationOutcome::Terminated(termination));
-        }
-    }
-
     // Runner-backed run whose provider process tree lives on a different host:
-    // we cannot signal it from this controller. Emit deterministic recovery
-    // commands keyed on the recorded runner + pid instead of failing.
+    // its accepted daemon job is authoritative over any controller-local PID.
+    // A PID left by the caller can be stale or reused, so it must never be
+    // signalled instead of the owning runner job.
     if record.is_runner_backed() {
         let runner_id = record.runner_id().map(str::to_string);
         let runner_job_id = record.runner_job_id().map(str::to_string);
         if let (Some(runner_id), Some(runner_job_id)) =
             (runner_id.as_deref(), runner_job_id.as_deref())
         {
-            if let Ok((job, events)) = cancel_runner_job(runner_id, runner_job_id, &record.run_id) {
-                return Ok(LiveCancellationOutcome::RunnerJobCancelled { job, events });
+            match cancel_runner_job(runner_id, runner_job_id, &record.run_id) {
+                Ok((job, events)) => {
+                    return Ok(LiveCancellationOutcome::RunnerJobCancelled { job, events });
+                }
+                // An accepted Lab handoff has an authoritative remote owner.
+                // Leaving it active while only cancelling this projection loses
+                // the result, so propagate the failure before mutating the run.
+                Err(error) if record.has_accepted_lab_handoff() => return Err(error),
+                Err(_) => {}
             }
         }
         let mut recovery_commands = Vec::new();
@@ -304,6 +318,15 @@ fn classify_live_cancellation(record: &AgentTaskRunRecord) -> Result<LiveCancell
                 recovery_commands,
             },
         ));
+    }
+
+    // Local, live owner process: terminate its tree directly (SIGTERM then
+    // SIGKILL escalation handled inside terminate_process_tree).
+    if let Some(pid) = owner_pid {
+        if record.owner_process_is_running() {
+            let termination = homeboy_core::process::terminate_process_tree(pid)?;
+            return Ok(LiveCancellationOutcome::Terminated(termination));
+        }
     }
 
     // No reachable live process (stale running record, or no recorded pid): the
