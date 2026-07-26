@@ -26,7 +26,7 @@ pub(crate) struct GhCommandOutput {
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub(crate) struct GitHubReleaseMetadata {
-    #[serde(rename = "isDraft")]
+    #[serde(rename = "draft", alias = "isDraft")]
     pub is_draft: bool,
     #[serde(default)]
     pub assets: Vec<GitHubReleaseAsset>,
@@ -259,12 +259,12 @@ pub(crate) fn reconcile_release_publications(
             upload.push(publication.clone());
             continue;
         };
-        let digest = remote
-            .digest
-            .as_deref()
-            .and_then(|value| value.strip_prefix("sha256:"));
+        let digest = canonical_remote_digest(remote)?;
         match digest {
-            Some(digest) if digest == publication.sha256 && remote.size == publication.size => {
+            Some(digest)
+                if digest == format!("sha256:{}", publication.sha256)
+                    && remote.size == publication.size =>
+            {
                 existing.push(publication.clone());
             }
             Some(_) => return Err(format!(
@@ -396,27 +396,19 @@ pub(crate) fn gh_release_metadata(
     tag: &str,
     repo_flag: &str,
 ) -> Result<GitHubReleaseMetadata, String> {
+    // `gh release view --json` uses GraphQL, whose release asset shape omits
+    // the REST digest field. Recovery authority requires that digest, including
+    // for drafts, so read the tag endpoint directly.
+    let endpoint = format!("repos/{repo_flag}/releases/tags/{tag}");
     let output = run_gh_command(
-        gh_command(
-            github,
-            config,
-            &[
-                "release",
-                "view",
-                tag,
-                "-R",
-                repo_flag,
-                "--json",
-                "isDraft,assets",
-            ],
-        ),
+        gh_command(github, config, &["api", &endpoint]),
         github_release_upload_timeout(),
     );
     if output.timed_out || output.exit_code != Some(0) {
-        return Err(gh_failure_detail("gh release view", &output));
+        return Err(gh_failure_detail("gh api release metadata", &output));
     }
     serde_json::from_str(&output.stdout)
-        .map_err(|error| format!("gh release view returned invalid metadata: {error}"))
+        .map_err(|error| format!("GitHub REST release metadata was invalid: {error}"))
 }
 
 pub(crate) fn verify_release_assets(
@@ -483,8 +475,9 @@ pub(crate) fn verify_release_publications(
                     publication.target_name
                 )
             })?;
+        let digest = canonical_remote_digest(asset)?;
         if asset.size != publication.size
-            || asset.digest.as_deref() != Some(&format!("sha256:{}", publication.sha256))
+            || digest.as_deref() != Some(&format!("sha256:{}", publication.sha256))
         {
             return Err(format!(
                 "GitHub Release asset '{}' does not match the canonical publication bytes",
@@ -493,6 +486,27 @@ pub(crate) fn verify_release_publications(
         }
     }
     Ok(())
+}
+
+/// GitHub REST represents release asset checksums as `sha256:<hex>`. Preserve
+/// that algorithm marker while canonicalizing hex case before authority checks.
+fn canonical_remote_digest(asset: &GitHubReleaseAsset) -> Result<Option<String>, String> {
+    let Some(digest) = asset.digest.as_deref() else {
+        return Ok(None);
+    };
+    let Some(hex) = digest.strip_prefix("sha256:") else {
+        return Err(format!(
+            "GitHub Release asset '{}' has an invalid digest; cannot safely verify canonical publication ownership",
+            asset.name
+        ));
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!(
+            "GitHub Release asset '{}' has an invalid digest; cannot safely verify canonical publication ownership",
+            asset.name
+        ));
+    }
+    Ok(Some(format!("sha256:{}", hex.to_ascii_lowercase())))
 }
 
 pub(crate) fn gh_failure_detail(command: &str, output: &GhCommandOutput) -> String {
@@ -909,6 +923,90 @@ mod tests {
     }
 
     #[test]
+    fn rest_release_metadata_preserves_digest_for_draft_and_published_releases() {
+        for draft in [true, false] {
+            let metadata: GitHubReleaseMetadata = serde_json::from_value(serde_json::json!({
+                "draft": draft,
+                "assets": [{
+                    "name": "component.zip",
+                    "size": 15,
+                    "digest": "sha256:ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789"
+                }]
+            }))
+            .expect("GitHub REST metadata");
+
+            assert_eq!(metadata.is_draft, draft);
+            assert_eq!(
+                canonical_remote_digest(&metadata.assets[0]).expect("valid digest"),
+                Some(
+                    "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                        .to_string()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn partial_reupload_reuses_verified_asset_and_uploads_only_missing_asset() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("first.zip");
+        let second = dir.path().join("second.zip");
+        std::fs::write(&first, b"first bytes").expect("write first");
+        std::fs::write(&second, b"second bytes").expect("write second");
+        let publications = github_release_publications(&release_state_with_artifacts(vec![
+            artifact(&first, None),
+            artifact(&second, None),
+        ]))
+        .expect("publication identities");
+
+        let (uploads, existing) = reconcile_release_publications(
+            &publications,
+            &[GitHubReleaseAsset {
+                name: "first.zip".to_string(),
+                size: publications[0].size,
+                digest: Some(format!("sha256:{}", publications[0].sha256)),
+            }],
+        )
+        .expect("partial recovery");
+
+        assert_eq!(existing, vec![publications[0].clone()]);
+        assert_eq!(uploads, vec![publications[1].clone()]);
+    }
+
+    #[test]
+    fn authority_rejects_missing_malformed_and_mismatching_remote_digests() {
+        let publication = ReleaseAssetPublication {
+            target_name: "component.zip".to_string(),
+            sha256: "a".repeat(64),
+            size: 1,
+            source_path: "component.zip".to_string(),
+        };
+        for digest in [None, Some("sha256:not-a-digest"), Some("sha512:abcd")] {
+            let error = reconcile_release_publications(
+                &[publication.clone()],
+                &[GitHubReleaseAsset {
+                    name: publication.target_name.clone(),
+                    size: publication.size,
+                    digest: digest.map(str::to_string),
+                }],
+            )
+            .expect_err("unverifiable remote digest must fail closed");
+            assert!(error.contains("cannot safely verify canonical publication ownership"));
+        }
+
+        let error = reconcile_release_publications(
+            &[publication.clone()],
+            &[GitHubReleaseAsset {
+                name: publication.target_name.clone(),
+                size: publication.size,
+                digest: Some(format!("sha256:{}", "b".repeat(64))),
+            }],
+        )
+        .expect_err("mismatching remote digest must fail closed");
+        assert!(error.contains("conflicts with the canonical publication bytes"));
+    }
+
+    #[test]
     fn conflicting_preexisting_canonical_asset_is_rejected() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("component.zip");
@@ -922,7 +1020,7 @@ mod tests {
             &[GitHubReleaseAsset {
                 name: "component.zip".to_string(),
                 size: publications[0].size,
-                digest: Some("sha256:conflicting".to_string()),
+                digest: Some(format!("sha256:{}", "f".repeat(64))),
             }],
         )
         .expect_err("conflicting bytes must fail");
