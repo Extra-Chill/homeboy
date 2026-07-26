@@ -66,6 +66,25 @@ pub struct BackendSelection {
     pub overrides_default: bool,
 }
 
+/// The initial model decision persisted with a dispatch plan. This avoids
+/// deriving execution provenance from presentation-oriented disclosure text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgentTaskModelSelection {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected: Option<String>,
+    pub reason: AgentTaskModelSelectionReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentTaskModelSelectionReason {
+    ExplicitRequest,
+    PolicyRotation,
+    Default,
+}
+
 /// Dispatch inputs shared verbatim across the dispatch arg, command, and request
 /// carriers (and their test override fixtures). Factored into one struct so the
 /// `[attempts, client_context, provider_config, queue_only, tasks_json]` group
@@ -158,6 +177,7 @@ where
             catalog.provider_requires_cwd_git_checkout(backend, selector)
         })?;
     catalog.apply_provider_runner_secret_env_contracts(&mut plan);
+    catalog.validate_explicit_models(&plan)?;
     catalog.enforce_runtime_preflight_checks_for_plan(&plan)?;
     preflight_dispatch_provider_secrets(&plan)?;
     preflight_plan_provider_config_with_providers(&plan, catalog.providers())?;
@@ -184,6 +204,7 @@ where
         provider_requires_cwd_git_checkout,
     )?;
     apply_provider_runner_secret_env_contracts(&mut plan);
+    AgentTaskProviderCatalog::discover().validate_explicit_models(&plan)?;
     enforce_runtime_preflight_checks_for_plan(&plan)?;
     preflight_dispatch_provider_secrets(&plan)?;
     preflight_plan_provider_config_with_providers(
@@ -355,9 +376,9 @@ pub fn controller_resolved_execution_policy(
             .as_ref()
             .and_then(|policy| policy.liveness_timeout_ms),
         rotation,
-        // An explicit CLI backend/model is the first attempt. Default policy
-        // rotation retains its existing first-entry selection behavior.
-        rotation_starts_with_first_entry: !explicit_backend,
+        // An explicit model is immutable for the initial invocation. Rotation
+        // remains available for retries, but cannot silently replace it.
+        rotation_starts_with_first_entry: !explicit_backend && request.model.is_none(),
         runtime_identity,
     }
 }
@@ -693,5 +714,23 @@ mod tests {
             assert_eq!(identity.provider_id, "codex.agent-task-executor");
             assert_eq!(identity.provider["backend"], "codex");
         });
+    }
+
+    #[test]
+    fn explicit_model_prevents_default_rotation_from_replacing_the_initial_invocation() {
+        let request = resolve_dispatch_request_with_default_and_config(
+            AgentTaskDispatchCommand {
+                prompt: Some("Cook with Sol.".to_string()),
+                model: Some("openai/gpt-5.6-sol".to_string()),
+                ..AgentTaskDispatchCommand::default()
+            },
+            |_| Ok(Some("opencode".to_string())),
+            || Some("opencode".to_string()),
+        )
+        .expect("request");
+        let policy = controller_resolved_execution_policy(&request);
+
+        assert_eq!(policy.model.as_deref(), Some("openai/gpt-5.6-sol"));
+        assert!(!policy.rotation_starts_with_first_entry);
     }
 }

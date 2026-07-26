@@ -766,6 +766,17 @@ pub fn compile_cook_attempt(
     )?;
     let request = agent_task_dispatch_service::resolve_dispatch_request(dispatch.into())?;
     options.initial_plan = build_dispatch_plan(&request)?;
+    crate::agent_task_provider::AgentTaskProviderCatalog::discover()
+        .validate_explicit_models(&options.initial_plan)?;
+    // Finalization disclosure is derived from the compiled provider invocation,
+    // not a pre-resolution CLI value. The plan is persisted in the recipe and
+    // remains authoritative across continuation.
+    options.ai_model = options
+        .initial_plan
+        .tasks
+        .first()
+        .and_then(|task| task.executor.model())
+        .map(str::to_string);
     Ok(options)
 }
 
