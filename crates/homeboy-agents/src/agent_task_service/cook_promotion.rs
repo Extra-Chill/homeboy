@@ -1265,11 +1265,21 @@ pub(crate) fn cook_report(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let latest_run_id = invocation_latest_run_id.map(str::to_string).or_else(|| {
-        agent_task_lifecycle::cook_index(&cook_id)
-            .ok()
-            .map(|index| index.latest_run_id)
-    });
+    let latest_run_id = invocation_latest_run_id
+        .map(str::to_string)
+        .or_else(|| {
+            agent_task_lifecycle::cook_index(&cook_id)
+                .ok()
+                .map(|index| index.latest_run_id)
+        })
+        .or_else(|| {
+            // A recipe is persisted before its lifecycle record and Cook index. If
+            // materialization fails in that window, its final immutable attempt is
+            // still the only durable identity we can safely report.
+            super::load_recipe(&cook_id)
+                .ok()
+                .and_then(|recipe| recipe.attempts.last().map(|attempt| attempt.run_id.clone()))
+        });
     let invocation_run_ids: Vec<String> = attempts
         .iter()
         .map(|attempt| attempt.run_id.clone())
@@ -1305,11 +1315,14 @@ fn cook_failure_context(
     latest_run_id: Option<&str>,
 ) -> Option<super::AgentTaskCookFailureContext> {
     let recipe = super::load_recipe(cook_id).ok()?;
-    let latest_run_id = latest_run_id.map(str::to_string).or_else(|| {
-        agent_task_lifecycle::cook_index(cook_id)
-            .ok()
-            .map(|index| index.latest_run_id)
-    })?;
+    let latest_run_id = latest_run_id
+        .map(str::to_string)
+        .or_else(|| {
+            agent_task_lifecycle::cook_index(cook_id)
+                .ok()
+                .map(|index| index.latest_run_id)
+        })
+        .or_else(|| recipe.attempts.last().map(|attempt| attempt.run_id.clone()))?;
     let record = agent_task_lifecycle::status(&latest_run_id).ok();
     let provider_executions_consumed = recipe
         .attempts

@@ -5617,6 +5617,44 @@ fn post_materialization_failure_families_expose_only_durable_identity_and_legal_
 }
 
 #[test]
+fn post_recipe_failure_without_lifecycle_retains_identity_but_offers_no_recovery_command() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-9655-recipe-only";
+        let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        persist_initial_recipe(&options).expect("persist durable recipe");
+
+        let report = durable_cook_error_report(
+            &options,
+            Error::internal_unexpected("lifecycle materialization failed"),
+        )
+        .expect("convert post-recipe error");
+
+        assert_eq!(
+            report.value.latest_run_id.as_deref(),
+            Some(options.initial_run_id.as_str())
+        );
+        let context = report
+            .value
+            .failure_context
+            .expect("durable failure context");
+        assert_eq!(context.cook_id, cook_id);
+        assert_eq!(context.latest_run_id, options.initial_run_id);
+        assert_eq!(
+            context.durable_recipe_ref,
+            format!("homeboy://agent-task/cooks/{cook_id}/recipe")
+        );
+        assert_eq!(
+            context.lifecycle_state,
+            "recipe_persisted_without_lifecycle_record"
+        );
+        assert!(!context.recovery_legal);
+        assert!(context.legal_actions.is_empty());
+        assert!(!context.provider_budget_consumed);
+        assert_eq!(context.provider_executions_consumed, 0);
+    });
+}
+
+#[test]
 fn re_materialize_follow_up_baseline_recovers_after_worktree_deletion() {
     let temp = tempfile::tempdir().expect("tempdir");
     let root = &temp.path().join("repo");
