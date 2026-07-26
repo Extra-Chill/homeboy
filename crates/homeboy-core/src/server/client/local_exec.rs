@@ -1,4 +1,5 @@
 use std::io::{Cursor, Read, Write};
+use std::path::PathBuf;
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -6,6 +7,9 @@ use std::sync::{
 };
 use std::thread;
 use std::time::{Duration, Instant};
+
+use chrono::Utc;
+use serde::Serialize;
 
 use crate::engine::invocation;
 
@@ -158,6 +162,7 @@ fn run_local_command(
         }
     };
     let mut cleanup_guard = Some(ProcessGroupCleanupGuard::new(child.id()));
+    let mut supervision = ChildSupervision::start(env, command, child.id());
     let _invocation_child_guard = invocation_child_guard(
         env,
         child.id(),
@@ -190,8 +195,13 @@ fn run_local_command(
         })
     });
 
-    let (status, delegated_failure, timed_out) =
-        wait_for_child_or_delegated_failure(&mut child, env, &mut cleanup_guard, timeout);
+    let (status, delegated_failure, timed_out) = wait_for_child_or_delegated_failure(
+        &mut child,
+        env,
+        &mut cleanup_guard,
+        timeout,
+        supervision.as_mut(),
+    );
     let interrupted_signal = active_cleanup_signal();
 
     let stdin_failed = stdin_handle
@@ -255,6 +265,9 @@ fn run_local_command(
             child_resource: Some(monitor.finish()),
         },
     };
+    if let Some(supervision) = supervision.as_mut() {
+        supervision.finish(&output, interrupted_signal, timed_out, timeout);
+    }
     if let Some(cleanup_guard) = cleanup_guard.take() {
         cleanup_guard.cleanup();
     }
@@ -675,6 +688,7 @@ fn wait_for_child_or_delegated_failure(
     env: Option<&[(&str, &str)]>,
     cleanup_guard: &mut Option<ProcessGroupCleanupGuard>,
     timeout: Option<Duration>,
+    mut supervision: Option<&mut ChildSupervision>,
 ) -> (
     std::io::Result<std::process::ExitStatus>,
     Option<DelegatedRunTerminalFailure>,
@@ -684,6 +698,9 @@ fn wait_for_child_or_delegated_failure(
     let deadline = timeout.map(|timeout| Instant::now() + timeout);
 
     loop {
+        if let Some(supervision) = supervision.as_deref_mut() {
+            supervision.heartbeat();
+        }
         match child.try_wait() {
             Ok(Some(status)) => return (Ok(status), None, false),
             Ok(None) => {}
@@ -714,5 +731,203 @@ fn wait_for_child_or_delegated_failure(
             .map(|monitor| monitor.poll_interval)
             .unwrap_or_else(|| Duration::from_millis(50));
         std::thread::sleep(poll_interval);
+    }
+}
+
+const CHILD_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+const CHILD_OUTPUT_TAIL_BYTES: usize = 16 * 1024;
+
+#[derive(Serialize)]
+struct ChildSupervisionRecord {
+    schema: &'static str,
+    status: String,
+    phase: &'static str,
+    command: String,
+    child_pid: u32,
+    started_at: String,
+    heartbeat_at: String,
+    finished_at: Option<String>,
+    timeout_ms: Option<u128>,
+    cancellation_reason: Option<String>,
+    exit_code: Option<i32>,
+    stdout_tail: String,
+    stderr_tail: String,
+}
+
+struct ChildSupervision {
+    path: PathBuf,
+    record: ChildSupervisionRecord,
+    last_heartbeat: Instant,
+}
+
+impl ChildSupervision {
+    fn start(env: Option<&[(&str, &str)]>, command: &str, child_pid: u32) -> Option<Self> {
+        let run_dir = env?.iter().find_map(|(key, value)| {
+            (*key == crate::engine::run_dir::run_dir_env()).then_some(*value)
+        })?;
+        let now = Utc::now().to_rfc3339();
+        let supervision = Self {
+            path: PathBuf::from(run_dir).join(crate::engine::run_dir::files::CHILD_SUPERVISION),
+            record: ChildSupervisionRecord {
+                schema: "homeboy.child_supervision.v1",
+                status: "running".to_string(),
+                phase: "child",
+                command: crate::redaction::redact_string(command),
+                child_pid,
+                started_at: now.clone(),
+                heartbeat_at: now,
+                finished_at: None,
+                timeout_ms: None,
+                cancellation_reason: None,
+                exit_code: None,
+                stdout_tail: String::new(),
+                stderr_tail: String::new(),
+            },
+            last_heartbeat: Instant::now(),
+        };
+        supervision.persist();
+        Some(supervision)
+    }
+
+    fn heartbeat(&mut self) {
+        if self.last_heartbeat.elapsed() < CHILD_HEARTBEAT_INTERVAL {
+            return;
+        }
+        self.record.heartbeat_at = Utc::now().to_rfc3339();
+        self.last_heartbeat = Instant::now();
+        self.persist();
+    }
+
+    fn finish(
+        &mut self,
+        output: &CommandOutput,
+        signal: Option<i32>,
+        timed_out: bool,
+        timeout: Option<Duration>,
+    ) {
+        self.record.status = if timed_out || signal.is_some() {
+            "interrupted".to_string()
+        } else {
+            "completed".to_string()
+        };
+        self.record.heartbeat_at = Utc::now().to_rfc3339();
+        self.record.finished_at = Some(self.record.heartbeat_at.clone());
+        self.record.timeout_ms =
+            timed_out.then(|| timeout.map(|timeout| timeout.as_millis()).unwrap_or(0));
+        self.record.cancellation_reason = if timed_out {
+            Some("timeout".to_string())
+        } else {
+            signal.map(|signal| format!("signal:{signal}"))
+        };
+        self.record.exit_code = Some(output.exit_code);
+        self.record.stdout_tail = bounded_redacted_tail(&output.stdout);
+        self.record.stderr_tail = bounded_redacted_tail(&output.stderr);
+        self.persist();
+    }
+
+    fn persist(&self) {
+        let Some(parent) = self.path.parent() else {
+            return;
+        };
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+        let Ok(payload) = serde_json::to_vec_pretty(&self.record) else {
+            return;
+        };
+        let temporary = self
+            .path
+            .with_extension(format!("tmp-{}", std::process::id()));
+        if std::fs::write(&temporary, payload).is_ok() {
+            let _ = std::fs::rename(temporary, &self.path);
+        }
+    }
+}
+
+fn bounded_redacted_tail(output: &str) -> String {
+    let start = output.len().saturating_sub(CHILD_OUTPUT_TAIL_BYTES);
+    let start = output
+        .char_indices()
+        .find_map(|(index, _)| (index >= start).then_some(index))
+        .unwrap_or_default();
+    crate::redaction::redact_string(&output[start..])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn supervision_output(run_dir: &tempfile::TempDir) -> serde_json::Value {
+        let payload = std::fs::read_to_string(
+            run_dir
+                .path()
+                .join(crate::engine::run_dir::files::CHILD_SUPERVISION),
+        )
+        .expect("child supervision artifact");
+        serde_json::from_str(&payload).expect("parseable child supervision artifact")
+    }
+
+    #[test]
+    fn timeout_persists_terminal_supervision_and_reaps_silent_child() {
+        let run_dir = tempfile::tempdir().expect("run dir");
+        let key = crate::engine::run_dir::run_dir_env();
+        let value = run_dir.path().to_string_lossy().to_string();
+        let env = [(key.as_str(), value.as_str())];
+
+        let output = execute_local_command_in_dir_with_timeout(
+            "sleep 30",
+            None,
+            Some(&env),
+            Duration::from_millis(25),
+        );
+
+        assert!(output.timed_out);
+        assert_eq!(output.exit_code, 124);
+        let supervision = supervision_output(&run_dir);
+        assert_eq!(supervision["schema"], "homeboy.child_supervision.v1");
+        assert_eq!(supervision["status"], "interrupted");
+        assert_eq!(supervision["cancellation_reason"], "timeout");
+        assert!(supervision["started_at"].is_string());
+        assert!(supervision["finished_at"].is_string());
+        assert!(supervision["heartbeat_at"].is_string());
+        assert!(supervision["command"].is_string());
+        assert!(supervision["child_pid"].as_u64().is_some());
+        #[cfg(unix)]
+        {
+            let pid = supervision["child_pid"].as_i64().expect("child pid") as libc::pid_t;
+            assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "child was reaped");
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sigterm_persists_terminal_supervision_and_reaps_silent_child() {
+        let run_dir = tempfile::tempdir().expect("run dir");
+        let key = crate::engine::run_dir::run_dir_env();
+        let value = run_dir.path().to_string_lossy().to_string();
+        let env = [(key.as_str(), value.as_str())];
+        let foreground_pid = unsafe { libc::getpid() };
+        let interrupter = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(25));
+            unsafe { libc::kill(foreground_pid, libc::SIGTERM) };
+        });
+
+        let output = execute_local_command_in_dir("sleep 30", None, Some(&env));
+        interrupter.join().expect("interrupter");
+
+        assert_eq!(output.exit_code, 143);
+        let supervision = supervision_output(&run_dir);
+        assert_eq!(supervision["status"], "interrupted");
+        assert_eq!(supervision["cancellation_reason"], "signal:15");
+        let pid = supervision["child_pid"].as_i64().expect("child pid") as libc::pid_t;
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "child was reaped");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
     }
 }
