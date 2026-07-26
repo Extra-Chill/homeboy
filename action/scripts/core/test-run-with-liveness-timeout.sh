@@ -111,6 +111,28 @@ else
   printf 'PASS: unsupported strict platform refuses launch before double-fork escape\n'
 fi
 
+# Containment failure must not swallow ordinary outcomes: a strict command that
+# leaves nothing behind still reports its own exit code, success or failure.
+if [ "$(uname -s)" = Linux ]; then
+  set +e
+  HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF=true HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS=30 HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS=1 bash "${RUNNER}" "strict clean" bash -c 'exit 0' >"${TMP_DIR}/strict-clean.log" 2>&1
+  clean_exit=$?
+  HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF=true HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS=30 HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS=1 bash "${RUNNER}" "strict failing" bash -c 'exit 3' >"${TMP_DIR}/strict-failing.log" 2>&1
+  failing_exit=$?
+  set -e
+  if [ "${clean_exit}" -ne 0 ]; then
+    printf 'FAIL: strict clean command reported %s instead of success\n' "${clean_exit}"
+    cat "${TMP_DIR}/strict-clean.log"
+    exit 1
+  fi
+  if [ "${failing_exit}" -ne 3 ]; then
+    printf 'FAIL: strict failing command reported %s instead of its own exit code\n' "${failing_exit}"
+    cat "${TMP_DIR}/strict-failing.log"
+    exit 1
+  fi
+  printf 'PASS: strict commands without leaked descendants report their own exit codes\n'
+fi
+
 python3 - "${ROOT_DIR}/scripts/core/run-with-liveness-timeout-supervisor.py" <<'PY'
 import importlib.util
 import os
