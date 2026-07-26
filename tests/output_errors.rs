@@ -63,6 +63,8 @@ fn validation_error_writes_json_output_file() {
 
     assert_eq!(file_json, stdout_json);
     assert_eq!(file_json["schema"], "homeboy/command-result/v3");
+    assert_eq!(file_json["command"], "runner");
+    assert_eq!(file_json["operation"], "exec");
     assert_eq!(file_json["success"], false);
     assert_eq!(
         file_json["diagnostics"]["code"],

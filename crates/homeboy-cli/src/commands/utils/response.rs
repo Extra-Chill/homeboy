@@ -16,6 +16,8 @@ pub const ACTIONABLE_METADATA_KEY: &str = "_homeboy_actionable";
 pub struct CommandResultEnvelope<T: Serialize> {
     pub schema: &'static str,
     pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
     pub success: bool,
     pub exit_code: i32,
     pub status: String,
@@ -37,6 +39,31 @@ pub struct CommandResultEnvelope<T: Serialize> {
     pub data: Option<T>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub presentation: Option<CommandPresentationEnvelope>,
+}
+
+/// The resolved CLI identity carried by command-result envelopes. `command` is
+/// always the top-level command; nested subcommands are represented by the
+/// optional operation without changing the v3 envelope's existing fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandIdentity {
+    pub command: String,
+    pub operation: Option<String>,
+}
+
+impl CommandIdentity {
+    pub fn top_level(command: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+            operation: None,
+        }
+    }
+
+    pub fn with_operation(command: impl Into<String>, operation: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+            operation: Some(operation.into()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -264,6 +291,7 @@ impl<T: Serialize> CommandResultEnvelope<T> {
         Self {
             schema: COMMAND_RESULT_SCHEMA,
             command: command.to_string(),
+            operation: None,
             success: true,
             exit_code: 0,
             status: "succeeded".to_string(),
@@ -287,10 +315,11 @@ impl<T: Serialize> CommandResultEnvelope<T> {
 }
 
 impl CommandResultEnvelope<()> {
-    fn from_error(command: &str, err: &Error, exit_code: i32) -> Self {
+    fn from_error(identity: &CommandIdentity, err: &Error, exit_code: i32) -> Self {
         Self {
             schema: COMMAND_RESULT_SCHEMA,
-            command: command.to_string(),
+            command: identity.command.clone(),
+            operation: identity.operation.clone(),
             success: false,
             exit_code,
             status: status_for_result(None, exit_code),
@@ -344,7 +373,7 @@ pub fn print_result<T: Serialize>(result: Result<T>) -> Result<()> {
     match result {
         Ok(data) => print_success(data),
         Err(err) => print_response(&CommandResultEnvelope::<()>::from_error(
-            "unknown",
+            &CommandIdentity::top_level("unknown"),
             &err,
             exit_code_for_error(err.code),
         )),
@@ -445,10 +474,24 @@ pub fn print_json_result_for_command(
     command: &str,
     presentation: Option<CommandPresentationEnvelope>,
 ) -> Result<()> {
-    print_response(&cli_response_for_json_result_for_command(
+    print_json_result_for_identity(
+        result,
+        exit_code,
+        &CommandIdentity::top_level(command),
+        presentation,
+    )
+}
+
+pub fn print_json_result_for_identity(
+    result: Result<Value>,
+    exit_code: i32,
+    identity: &CommandIdentity,
+    presentation: Option<CommandPresentationEnvelope>,
+) -> Result<()> {
+    print_response(&cli_response_for_json_result_for_identity(
         &result,
         exit_code,
-        command,
+        identity,
         presentation,
     ))
 }
@@ -466,9 +509,23 @@ pub fn cli_response_for_json_result_for_command(
     command: &str,
     presentation: Option<CommandPresentationEnvelope>,
 ) -> CommandResultEnvelope<serde_json::Value> {
+    cli_response_for_json_result_for_identity(
+        result,
+        exit_code,
+        &CommandIdentity::top_level(command),
+        presentation,
+    )
+}
+
+pub fn cli_response_for_json_result_for_identity(
+    result: &Result<serde_json::Value>,
+    exit_code: i32,
+    identity: &CommandIdentity,
+    presentation: Option<CommandPresentationEnvelope>,
+) -> CommandResultEnvelope<serde_json::Value> {
     match result {
-        Ok(data) => envelope_for_data(command, data.clone(), exit_code, presentation),
-        Err(err) => CommandResultEnvelope::<()>::from_error(command, err, exit_code).into_value(),
+        Ok(data) => envelope_for_data(identity, data.clone(), exit_code, presentation),
+        Err(err) => CommandResultEnvelope::<()>::from_error(identity, err, exit_code).into_value(),
     }
 }
 
@@ -477,6 +534,7 @@ impl CommandResultEnvelope<()> {
         CommandResultEnvelope {
             schema: self.schema,
             command: self.command,
+            operation: self.operation,
             success: self.success,
             exit_code: self.exit_code,
             status: self.status,
@@ -494,7 +552,7 @@ impl CommandResultEnvelope<()> {
 }
 
 fn envelope_for_data(
-    command: &str,
+    identity: &CommandIdentity,
     mut data: Value,
     exit_code: i32,
     presentation: Option<CommandPresentationEnvelope>,
@@ -538,7 +596,8 @@ fn envelope_for_data(
 
     CommandResultEnvelope {
         schema: COMMAND_RESULT_SCHEMA,
-        command: command.to_string(),
+        command: identity.command.clone(),
+        operation: identity.operation.clone(),
         success,
         exit_code,
         status: status_for_result(Some(&data), exit_code),
@@ -972,8 +1031,24 @@ pub fn write_json_to_file_for_command(
     command: &str,
     presentation: Option<CommandPresentationEnvelope>,
 ) {
+    write_json_to_file_for_identity(
+        result,
+        path,
+        exit_code,
+        &CommandIdentity::top_level(command),
+        presentation,
+    );
+}
+
+pub fn write_json_to_file_for_identity(
+    result: &Result<serde_json::Value>,
+    path: &str,
+    exit_code: i32,
+    identity: &CommandIdentity,
+    presentation: Option<CommandPresentationEnvelope>,
+) {
     let response =
-        cli_response_for_json_result_for_command(result, exit_code, command, presentation);
+        cli_response_for_json_result_for_identity(result, exit_code, identity, presentation);
 
     let json = match serde_json::to_string_pretty(&response) {
         Ok(j) => j,
@@ -992,6 +1067,23 @@ pub fn write_json_to_file_for_command(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn preflight_failures_keep_resolved_nested_command_identity() {
+        let identity = CommandIdentity::with_operation("agent-task", "cook");
+        for failure in [
+            "destination is dirty",
+            "destination has unpushed commits",
+            "base does not resolve",
+            "destination worktree is missing",
+        ] {
+            let error = Error::validation_invalid_argument("to_worktree", failure, None, None);
+            let result = cli_response_for_json_result_for_identity(&Err(error), 2, &identity, None);
+            let value = serde_json::to_value(result).expect("serialize result");
+            assert_eq!(value["command"], "agent-task", "{failure}");
+            assert_eq!(value["operation"], "cook", "{failure}");
+        }
+    }
 
     fn release_failure_payload(step_id: &str, step_type: &str) -> Value {
         json!({
