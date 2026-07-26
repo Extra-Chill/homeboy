@@ -16,6 +16,7 @@ use crate::exec_context::*;
 use crate::extension_contract_producer::*;
 use crate::fuzz_config::*;
 use crate::manifest_action_config::*;
+use crate::manifest_artifact_cleanup::*;
 use crate::manifest_capabilities::*;
 use crate::manifest_capability_config::*;
 use crate::manifest_deploy_config::*;
@@ -99,6 +100,11 @@ pub struct ExtensionManifest {
     pub cli: Option<CliConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build: Option<BuildConfig>,
+    /// Reconstructable install/build trees this extension owns, plus the
+    /// rehydration guidance for them. Core resolves and gates these; the
+    /// extension only declares what is reconstructable.
+    #[serde(default, skip_serializing_if = "ArtifactCleanupConfig::is_empty")]
+    pub artifact_cleanup: ArtifactCleanupConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deps: Option<DepsConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]

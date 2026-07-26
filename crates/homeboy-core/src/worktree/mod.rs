@@ -93,6 +93,32 @@ pub fn cleanup(options: WorktreeCleanupOptions) -> Result<WorktreeCleanupOutput>
     cleanup_with_store(options, &store)
 }
 
+/// Register an active task-worktree record against the current test home.
+///
+/// Other modules gate behavior on task-worktree liveness and need a registered
+/// active checkout to exercise it. Keeping the helper here means the record
+/// store layout stays owned by this module instead of being reimplemented by
+/// every caller's test fixtures.
+#[cfg(test)]
+pub(crate) fn record_active_for_test(id: &str, worktree_path: &Path) {
+    let record = TaskWorktreeRecord {
+        id: id.to_string(),
+        component_id: "fixture".to_string(),
+        source_checkout: worktree_path.to_string_lossy().to_string(),
+        worktree_path: worktree_path.to_string_lossy().to_string(),
+        branch: format!("task/{id}"),
+        base_ref: "main".to_string(),
+        task_url: None,
+        run_id: None,
+        cleanup_policy: CleanupPolicy::RemoveWhenSafe,
+        branch_cleanup_intent: BranchCleanupIntent::default(),
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        state: TaskWorktreeState::Active,
+    };
+    let store = metadata_dir().expect("task worktree store");
+    write_record(&store, &record).expect("write task worktree record");
+}
+
 use store_ops::*;
 
 pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueueCreateOutput> {

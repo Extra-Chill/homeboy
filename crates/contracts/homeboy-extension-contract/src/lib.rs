@@ -89,6 +89,7 @@ pub mod extension_contract_producer;
 pub mod fuzz_config;
 pub mod manifest;
 pub mod manifest_action_config;
+pub mod manifest_artifact_cleanup;
 pub mod manifest_capabilities;
 pub mod manifest_capability_config;
 pub mod manifest_deploy_config;
@@ -98,6 +99,10 @@ pub mod notification_transport_config;
 pub mod runner_contract;
 pub mod sidecar_config;
 pub use manifest::ExtensionManifest;
+pub use manifest_artifact_cleanup::{
+    ArtifactCleanupCategory, ArtifactCleanupConfig, ArtifactCleanupDeclaration,
+    ArtifactCleanupScope, DEFAULT_NESTED_SCOPE_MAX_DEPTH,
+};
 pub mod source_metadata_repair;
 pub mod test_drift;
 pub mod trace_config;
