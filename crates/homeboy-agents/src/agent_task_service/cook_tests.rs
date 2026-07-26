@@ -5554,6 +5554,107 @@ fn cook_report_latest_run_id_prefers_invocation_over_stale_cook_index() {
 }
 
 #[test]
+fn post_materialization_failure_families_expose_only_durable_identity_and_legal_recovery() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-9655";
+        let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        persist_initial_recipe(&options).expect("persist durable recipe");
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&options.initial_run_id))
+            .expect("materialize durable run");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, &options.initial_run_id)
+            .expect("index durable run");
+        agent_task_lifecycle::rewrite_record_for_test(&options.initial_run_id, |record| {
+            record.metadata["provider_executions_consumed"] = serde_json::json!(1);
+        })
+        .expect("record provider budget consumption");
+
+        // Promotion, deterministic-gate, follow-up materialization, and
+        // finalization all return through cook_report after this point.
+        for status in [
+            "promotion_failure",
+            "deterministic_gate_failure",
+            "follow_up_materialization_failure",
+            "finalization_failure",
+        ] {
+            let report = cook_report(
+                cook_id.to_string(),
+                status,
+                Vec::new(),
+                None,
+                Some("private provider evidence remains in durable diagnostics".to_string()),
+                1,
+                Some(&options.initial_run_id),
+            );
+            let value = serde_json::to_value(report.value).expect("serialize command data");
+            let context = &value["failure_context"];
+
+            assert_eq!(context["cook_id"], cook_id, "{status}");
+            assert_eq!(context["latest_run_id"], options.initial_run_id, "{status}");
+            assert_eq!(
+                context["durable_recipe_ref"],
+                format!("homeboy://agent-task/cooks/{cook_id}/recipe"),
+                "{status}"
+            );
+            assert_eq!(context["lifecycle_state"], "Queued", "{status}");
+            assert_eq!(context["provider_budget_consumed"], true, "{status}");
+            assert_eq!(context["provider_executions_consumed"], 1, "{status}");
+            assert_eq!(context["recovery_legal"], true, "{status}");
+            assert_eq!(
+                context["legal_actions"],
+                serde_json::json!([
+                    { "action": "status", "command": format!("homeboy agent-task status {} --full", options.initial_run_id) },
+                    { "action": "diagnose", "command": format!("homeboy agent-task diagnose {}", options.initial_run_id) },
+                    { "action": "resume", "command": format!("homeboy agent-task cook-continue {cook_id}") },
+                ]),
+                "{status}"
+            );
+            assert!(
+                !context.to_string().contains("private provider evidence"),
+                "{status} must not copy private evidence into failure_context"
+            );
+        }
+    });
+}
+
+#[test]
+fn post_recipe_failure_without_lifecycle_retains_identity_but_offers_no_recovery_command() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-9655-recipe-only";
+        let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        persist_initial_recipe(&options).expect("persist durable recipe");
+
+        let report = durable_cook_error_report(
+            &options,
+            Error::internal_unexpected("lifecycle materialization failed"),
+        )
+        .expect("convert post-recipe error");
+
+        assert_eq!(
+            report.value.latest_run_id.as_deref(),
+            Some(options.initial_run_id.as_str())
+        );
+        let context = report
+            .value
+            .failure_context
+            .expect("durable failure context");
+        assert_eq!(context.cook_id, cook_id);
+        assert_eq!(context.latest_run_id, options.initial_run_id);
+        assert_eq!(
+            context.durable_recipe_ref,
+            format!("homeboy://agent-task/cooks/{cook_id}/recipe")
+        );
+        assert_eq!(
+            context.lifecycle_state,
+            "recipe_persisted_without_lifecycle_record"
+        );
+        assert!(!context.recovery_legal);
+        assert!(context.legal_actions.is_empty());
+        assert!(!context.provider_budget_consumed);
+        assert_eq!(context.provider_executions_consumed, 0);
+    });
+}
+
+#[test]
 fn re_materialize_follow_up_baseline_recovers_after_worktree_deletion() {
     let temp = tempfile::tempdir().expect("tempdir");
     let root = &temp.path().join("repo");

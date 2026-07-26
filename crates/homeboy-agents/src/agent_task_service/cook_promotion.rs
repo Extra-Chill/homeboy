@@ -1265,15 +1265,28 @@ pub(crate) fn cook_report(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let latest_run_id = invocation_latest_run_id.map(str::to_string).or_else(|| {
-        agent_task_lifecycle::cook_index(&cook_id)
-            .ok()
-            .map(|index| index.latest_run_id)
-    });
+    let latest_run_id = invocation_latest_run_id
+        .map(str::to_string)
+        .or_else(|| {
+            agent_task_lifecycle::cook_index(&cook_id)
+                .ok()
+                .map(|index| index.latest_run_id)
+        })
+        .or_else(|| {
+            // A recipe is persisted before its lifecycle record and Cook index. If
+            // materialization fails in that window, its final immutable attempt is
+            // still the only durable identity we can safely report.
+            super::load_recipe(&cook_id)
+                .ok()
+                .and_then(|recipe| recipe.attempts.last().map(|attempt| attempt.run_id.clone()))
+        });
     let invocation_run_ids: Vec<String> = attempts
         .iter()
         .map(|attempt| attempt.run_id.clone())
         .collect();
+    let failure_context = (exit_code != 0)
+        .then(|| cook_failure_context(&cook_id, latest_run_id.as_deref()))
+        .flatten();
     AgentTaskRunResult {
         value: AgentTaskCookReport {
             schema: "homeboy/agent-task-cook/v1",
@@ -1288,9 +1301,82 @@ pub(crate) fn cook_report(
             terminal_phase: None,
             terminal_failure_classification: None,
             moving_base_recovery: None,
+            failure_context,
         },
         exit_code,
     }
+}
+
+/// Build recovery coordinates from durable controller records only. Provider
+/// output, gate output, and filesystem paths stay behind `diagnose` so a failed
+/// command envelope cannot disclose private evidence.
+fn cook_failure_context(
+    cook_id: &str,
+    latest_run_id: Option<&str>,
+) -> Option<super::AgentTaskCookFailureContext> {
+    let recipe = super::load_recipe(cook_id).ok()?;
+    let latest_run_id = latest_run_id
+        .map(str::to_string)
+        .or_else(|| {
+            agent_task_lifecycle::cook_index(cook_id)
+                .ok()
+                .map(|index| index.latest_run_id)
+        })
+        .or_else(|| recipe.attempts.last().map(|attempt| attempt.run_id.clone()))?;
+    let record = agent_task_lifecycle::status(&latest_run_id).ok();
+    let provider_executions_consumed = recipe
+        .attempts
+        .iter()
+        .filter_map(|attempt| agent_task_lifecycle::status(&attempt.run_id).ok())
+        .map(|record| {
+            record.metadata["provider_executions_consumed"]
+                .as_u64()
+                .unwrap_or_else(|| {
+                    record.metadata["provider_executions"]
+                        .as_array()
+                        .map(|executions| executions.len() as u64)
+                        .unwrap_or_default()
+                })
+        })
+        .sum();
+    let lifecycle_state = record
+        .as_ref()
+        .map(|record| format!("{:?}", record.state))
+        .unwrap_or_else(|| "recipe_persisted_without_lifecycle_record".to_string());
+    let recovery_legal = record.is_some();
+    let legal_actions = recovery_legal
+        .then(|| {
+            vec![
+                super::AgentTaskCookRecoveryAction {
+                    action: "status".to_string(),
+                    command: format!("homeboy agent-task status {latest_run_id} --full"),
+                },
+                super::AgentTaskCookRecoveryAction {
+                    action: "diagnose".to_string(),
+                    command: format!("homeboy agent-task diagnose {latest_run_id}"),
+                },
+                super::AgentTaskCookRecoveryAction {
+                    action: "resume".to_string(),
+                    command: format!("homeboy agent-task cook-continue {cook_id}"),
+                },
+            ]
+        })
+        .unwrap_or_default();
+    Some(super::AgentTaskCookFailureContext {
+        cook_id: cook_id.to_string(),
+        latest_run_id,
+        durable_recipe_ref: format!("homeboy://agent-task/cooks/{cook_id}/recipe"),
+        lifecycle_state,
+        provider_budget_consumed: provider_executions_consumed > 0,
+        provider_executions_consumed,
+        recovery_legal,
+        recovery_reason: if recovery_legal {
+            "Only status, diagnose, and cook-continue are legal automatic recovery actions for this Cook state; retry and adopt require an explicit operator decision after diagnosis.".to_string()
+        } else {
+            "No recovery command is legal because the durable recipe has no lifecycle record. Start a fresh Cook after preserving the recipe reference for investigation.".to_string()
+        },
+        legal_actions,
+    })
 }
 
 pub(crate) fn source_spec_path(spec: &str) -> Option<PathBuf> {
