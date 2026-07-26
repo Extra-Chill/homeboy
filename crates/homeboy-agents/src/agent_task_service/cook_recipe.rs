@@ -707,6 +707,14 @@ pub fn load_recipe(cook_id: &str) -> Result<AgentTaskCookRecipe> {
         )
     })?;
     validate_recipe(&recipe)?;
+    if recipe.cook_id != cook_id {
+        return Err(Error::validation_invalid_argument(
+            "cook_recipe.cook_id",
+            "durable cook recipe identity does not match its storage location",
+            Some(recipe.cook_id.clone()),
+            None,
+        ));
+    }
     Ok(recipe)
 }
 
@@ -1348,6 +1356,14 @@ fn validate_continuation(continuation: &AgentTaskCookContinuation) -> Result<()>
             None,
         ));
     }
+    if continuation.key != format!("{}:{}", continuation.cook_id, continuation.run_id) {
+        return Err(Error::validation_invalid_argument(
+            "cook_continuation.key",
+            "durable continuation key does not match its Cook attempt",
+            Some(continuation.key.clone()),
+            None,
+        ));
+    }
     Ok(())
 }
 
@@ -1722,6 +1738,44 @@ mod tests {
                 serde_json::to_vec(&AgentTaskCookContinuation {
                     schema: CONTINUATION_SCHEMA.to_string(),
                     key: "other:other-run".to_string(),
+                    cook_id: "other".to_string(),
+                    run_id: "other-run".to_string(),
+                    retries: 0,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+
+            let error = claim_continuation_for("cook", "run").unwrap_err();
+            assert!(error.message.contains("does not match"));
+            assert_eq!(
+                claim_continuation_for("other", "other-run")
+                    .unwrap()
+                    .expect("unrelated continuation remains pending")
+                    .continuation()
+                    .key,
+                "other:other-run"
+            );
+        });
+    }
+
+    #[test]
+    fn targeted_claim_rejects_a_key_with_unrelated_cook_fields() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut other = recipe();
+            other.cook_id = "other".to_string();
+            other.attempts[0].run_id = "other-run".to_string();
+            write_recipe(&recipe()).unwrap();
+            write_recipe(&other).unwrap();
+            enqueue_terminal_continuation("other", "other-run").unwrap();
+
+            let key = "cook:run";
+            let hash = format!("{:x}", sha2::Sha256::digest(key.as_bytes()));
+            fs::write(
+                queue_root().unwrap().join(format!("{hash}.pending")),
+                serde_json::to_vec(&AgentTaskCookContinuation {
+                    schema: CONTINUATION_SCHEMA.to_string(),
+                    key: key.to_string(),
                     cook_id: "other".to_string(),
                     run_id: "other-run".to_string(),
                     retries: 0,
