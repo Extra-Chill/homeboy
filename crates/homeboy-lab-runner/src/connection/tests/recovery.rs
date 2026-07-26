@@ -72,6 +72,24 @@ fn tunnel_only_failure_reattaches_the_persisted_daemon() {
 }
 
 #[test]
+fn repeated_tunnel_flaps_continue_to_select_the_same_active_daemon() {
+    let mut session = direct_ssh_session("lease-active");
+    let status = remote_daemon_status_for_test(true, true, 2, "lease-active", 4242);
+
+    for stale_tunnel_pid in [999_991, 999_992, 999_993] {
+        session.tunnel_pid = Some(stale_tunnel_pid);
+        session.local_url = Some("http://127.0.0.1:1".to_string());
+        assert_eq!(
+            remote_daemon_connect_action(Some(&session), &status).expect("reattach"),
+            RemoteDaemonConnectAction::Reattach
+        );
+        let daemon = status.daemon.as_ref().expect("daemon remains live");
+        assert_eq!(daemon.lease_id.as_deref(), Some("lease-active"));
+        assert_eq!(daemon.pid, Some(4242));
+    }
+}
+
+#[test]
 fn stale_daemon_without_a_matching_session_fails_closed_without_replacement() {
     let status = remote_daemon_status_for_test(false, true, 0, "lease-stale", 4444);
 
