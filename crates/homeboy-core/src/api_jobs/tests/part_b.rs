@@ -1421,6 +1421,13 @@ fn replay_tombstones_keep_terminal_payload_memory_bounded_across_restart() {
         .expired_submission_keys
         .is_empty());
     assert!(fs::metadata(&path).expect("jobs metadata").len() < 40_000);
+    assert!(
+        fs::metadata(super::super::persistence::tombstone_path(&path))
+            .expect("tombstone index metadata")
+            .len()
+            < 128_000,
+        "128 compacted 32 KiB requests retain identity records, not 4 MiB of payloads"
+    );
 
     let restarted = JobStore::open_with_retention(&path, 3, 1).expect("restart");
     assert_eq!(restarted.list().len(), 1);
