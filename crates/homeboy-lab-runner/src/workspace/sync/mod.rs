@@ -1197,8 +1197,25 @@ pub fn prune_workspaces(
                 candidate_entries.push(candidate);
                 continue;
             }
-            match remove_workspace(&runner, &lab_workspaces_root, &candidate.remote_path) {
-                Ok(()) => removed.push(candidate),
+            // The scan is only a snapshot. Recheck ownership at the destructive boundary.
+            match revalidate_candidate_liveness(&runner, &candidate) {
+                Ok(liveness) if liveness.state == "inactive" => {
+                    match remove_workspace(&runner, &lab_workspaces_root, &candidate.remote_path) {
+                        Ok(()) => removed.push(candidate),
+                        Err(err) => skipped.push(RunnerWorkspacePruneSkippedEntry {
+                            remote_path: candidate.remote_path,
+                            reason: err.to_string(),
+                        }),
+                    }
+                }
+                Ok(liveness) => skipped.push(RunnerWorkspacePruneSkippedEntry {
+                    remote_path: candidate.remote_path,
+                    reason: format!(
+                        "workspace liveness changed to {}; {}",
+                        liveness.state,
+                        liveness.observations.join(", ")
+                    ),
+                }),
                 Err(err) => skipped.push(RunnerWorkspacePruneSkippedEntry {
                     remote_path: candidate.remote_path,
                     reason: err.to_string(),
@@ -2167,6 +2184,34 @@ fn workspace_liveness(
     }
 }
 
+fn revalidate_candidate_liveness(
+    runner: &super::super::Runner,
+    candidate: &RunnerWorkspacePruneEntry,
+) -> Result<RunnerWorkspaceLivenessEvidence> {
+    // Job state and process ownership can both change after the bounded scan.
+    // Keep this check immediately adjacent to the delete call.
+    let metadata = match runner.kind {
+        RunnerKind::Local => {
+            let path = Path::new(&candidate.remote_path).join(WORKSPACE_METADATA_FILE);
+            let contents = fs::read(&path).map_err(|err| {
+                Error::internal_io(err.to_string(), Some("read workspace metadata".to_string()))
+            })?;
+            serde_json::from_slice(&contents).map_err(|err| {
+                Error::internal_json(err.to_string(), Some(path.display().to_string()))
+            })?
+        }
+        RunnerKind::Ssh => serde_json::json!({
+            "job_id": candidate.job_id,
+            "run_id": candidate.run_id,
+        }),
+    };
+    Ok(workspace_liveness(
+        runner,
+        &metadata,
+        Path::new(&candidate.remote_path),
+    ))
+}
+
 fn liveness(state: &str, observations: Vec<String>) -> RunnerWorkspaceLivenessEvidence {
     RunnerWorkspaceLivenessEvidence {
         state: state.to_string(),
@@ -2196,15 +2241,23 @@ fn local_process_liveness(path: &Path) -> RunnerWorkspaceLivenessEvidence {
             return liveness("unknown", vec!["process_probe_process_limit".to_string()]);
         }
         let process_path = process.path();
-        let cwd = fs::read_link(process_path.join("cwd")).ok();
-        let command = fs::read(process_path.join("cmdline")).unwrap_or_default();
-        if cwd.as_ref().is_some_and(|cwd| cwd.starts_with(path))
-            || String::from_utf8_lossy(&command).contains(target.as_ref())
-        {
+        let cwd = match fs::read_link(process_path.join("cwd")) {
+            Ok(cwd) => cwd,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return liveness("unknown", vec!["process_probe_cwd_failed".to_string()]),
+        };
+        let command = match fs::read(process_path.join("cmdline")) {
+            Ok(command) => command,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return liveness("unknown", vec!["process_probe_argv_failed".to_string()]),
+        };
+        if cwd.starts_with(path) || String::from_utf8_lossy(&command).contains(target.as_ref()) {
             return liveness("live", vec![format!("process:{}", pid.to_string_lossy())]);
         }
-        let Ok(fds) = fs::read_dir(process_path.join("fd")) else {
-            continue;
+        let fds = match fs::read_dir(process_path.join("fd")) {
+            Ok(fds) => fds,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return liveness("unknown", vec!["process_probe_fd_failed".to_string()]),
         };
         for (index, fd) in fds.flatten().enumerate() {
             if index >= MAX_FDS_PER_PROCESS {
@@ -2230,9 +2283,16 @@ fn local_process_liveness(path: &Path) -> RunnerWorkspaceLivenessEvidence {
         .args(["-Fn", "+D", &path.display().to_string()])
         .output();
     match output {
-        Ok(output) if output.stdout.is_empty() => liveness("inactive", Vec::new()),
-        Ok(output) if output.status.success() => {
+        Ok(output) if output.status.success() && output.stdout.is_empty() => {
+            liveness("inactive", Vec::new())
+        }
+        Ok(output) if !output.stdout.is_empty() => {
             liveness("live", vec!["process_open_file".to_string()])
+        }
+        // lsof uses status 1 for a clean no-match result. Diagnostics make the
+        // result ambiguous, and must therefore prevent deletion.
+        Ok(output) if output.status.code() == Some(1) && output.stderr.is_empty() => {
+            liveness("inactive", Vec::new())
         }
         _ => liveness(
             "unknown",
@@ -2252,16 +2312,20 @@ fn ssh_process_liveness(
         );
     };
     client.env.extend(runner.env.clone());
-    let command = format!(
-        "p={}; command -v ps >/dev/null 2>&1 && command -v lsof >/dev/null 2>&1 || {{ printf unknown; exit 0; }}; if ps -eo pid=,args= | grep -F -- \"$p\" | grep -v grep >/dev/null || lsof -Fn +D \"$p\" 2>/dev/null | grep -q .; then printf live; else printf inactive; fi",
-        shell::quote_arg(path)
-    );
+    let command = ssh_process_liveness_command(path);
     let output = client.execute_with_timeout(&command, WORKSPACE_PRUNE_TIMEOUT);
     match output.stdout.trim() {
         "inactive" if output.success => liveness("inactive", Vec::new()),
         "live" if output.success => liveness("live", vec!["remote_process_ownership".to_string()]),
         _ => liveness("unknown", vec!["remote_process_probe_failed".to_string()]),
     }
+}
+
+pub(crate) fn ssh_process_liveness_command(path: &str) -> String {
+    format!(
+        "p={}; command -v ps >/dev/null 2>&1 && command -v lsof >/dev/null 2>&1 || {{ printf unknown; exit 0; }}; if ps -eo pid=,ppid=,args= | awk -v p=\"$p\" -v self=\"$$\" -v parent=\"$PPID\" '$1 != self && $1 != parent && index($0, p) {{ found=1 }} END {{ exit !found }}' || lsof -Fn -a -d cwd +D \"$p\" 2>/dev/null | grep -q . || lsof -Fn +D \"$p\" 2>/dev/null | grep -q .; then printf live; else printf inactive; fi",
+        shell::quote_arg(path)
+    )
 }
 
 fn prune_candidates_ssh(

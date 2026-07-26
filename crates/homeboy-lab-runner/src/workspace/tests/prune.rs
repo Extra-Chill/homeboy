@@ -3,8 +3,8 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::workspace::sync::{
-    prune_scan_command, prune_workspaces, sync_workspace, update_workspace_resource_lifecycle,
-    WORKSPACE_METADATA_FILE,
+    prune_scan_command, prune_workspaces, ssh_process_liveness_command, sync_workspace,
+    update_workspace_resource_lifecycle, WORKSPACE_METADATA_FILE,
 };
 use crate::workspace::types::{
     RunnerWorkspacePruneOptions, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
@@ -163,6 +163,59 @@ fn prune_preserves_process_owned_workspace_in_preview_and_apply() {
         }
         child.kill().expect("stop held process");
         child.wait().expect("reap held process");
+    });
+}
+
+#[test]
+fn prune_preserves_active_job_lifecycle_lease() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        let workspace = runner_root.path().join("_lab_workspaces/active-lease");
+        write_orphan_workspace(&workspace);
+        let metadata_path = workspace.join(WORKSPACE_METADATA_FILE);
+        let mut metadata: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
+                .expect("metadata json");
+        metadata["job_id"] = serde_json::json!("active-job");
+        metadata["resource_lifecycle"] = serde_json::json!({
+            "owner": "runner.workspace",
+            "run_id": "active-job",
+            "runner_id": null,
+            "path": workspace.display().to_string(),
+            "root_bound": runner_root.path().join("_lab_workspaces").display().to_string(),
+            "kind": "runner_workspace",
+            "ttl": null,
+            "cleanup_policy": "delete_on_success",
+            "evidence_retention": "metadata",
+            "cleanup_intent": "dry_run",
+            "cleanup_command": null,
+            "status": "active",
+        });
+        fs::write(&metadata_path, metadata.to_string()).expect("write metadata");
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-local-prune-active-lease","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let (output, exit_code) = prune_workspaces(
+            "lab-local-prune-active-lease",
+            RunnerWorkspacePruneOptions {
+                apply: true,
+                min_age_hours: 0,
+                limit: 10,
+                passes: 1,
+            },
+        )
+        .expect("prune active lease workspace");
+
+        assert_eq!(exit_code, 0);
+        assert!(output.removed.is_empty());
+        assert_eq!(output.skipped_live_count, 1);
+        assert!(workspace.exists());
     });
 }
 
@@ -666,6 +719,30 @@ fn ssh_prune_scan_command_handles_paths_that_need_shell_quoting() {
         stdout.contains("__homeboy_prune_scan__\t1\tcomplete"),
         "{stdout}"
     );
+}
+
+#[test]
+fn ssh_shaped_liveness_probe_detects_process_cwd_ownership() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg("sleep 30")
+        .current_dir(workspace.path())
+        .spawn()
+        .expect("hold workspace cwd");
+
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(ssh_process_liveness_command(
+            &workspace.path().display().to_string(),
+        ))
+        .output()
+        .expect("run SSH-shaped liveness probe");
+
+    child.kill().expect("stop held process");
+    child.wait().expect("reap held process");
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "live");
 }
 
 fn sync_options(path: String) -> RunnerWorkspaceSyncOptions {
