@@ -407,63 +407,7 @@ else
 
     if homeboy_test_failures_enabled; then
         homeboy_runner_harness_temp TEST_FAILURES_TMP "homeboy-rust-test-failures.XXXXXX"
-        python3 - "$PROJECT_PATH" "$TEST_TMPFILE" "$TEST_FAILURES_TMP" <<'PY'
-import hashlib
-import json
-import os
-import re
-import sys
-
-project, output_file, target = sys.argv[1:]
-with open(output_file, encoding="utf-8") as handle:
-    lines = handle.read().splitlines()
-
-failed = []
-for raw in lines:
-    match = re.match(r"^test (?P<name>.+) \.\.\. FAILED$", raw)
-    if match:
-        failed.append(match.group("name"))
-
-if not failed:
-    for raw in lines:
-        match = re.match(r"^---- (?P<name>.+) stdout ----$", raw)
-        if match:
-            failed.append(match.group("name"))
-
-failures = []
-for name in dict.fromkeys(failed):
-    message = f"Rust test failed: {name}"
-    identity = f"rust:test:{name}"
-    failures.append({
-        "test_id": name,
-        "suite": None,
-        "file": None,
-        "line": None,
-        "message": message,
-        "failure_type": "test_failure",
-        "fingerprint": hashlib.sha256(identity.encode()).hexdigest(),
-        "stdout_excerpt": "\n".join(lines)[-4000:],
-        "stderr_excerpt": "",
-    })
-
-if not failures:
-    identity = "rust:cargo-test:failed"
-    failures.append({
-        "test_id": "cargo test",
-        "suite": None,
-        "file": None,
-        "line": None,
-        "message": "cargo test failed before individual test failures could be parsed",
-        "failure_type": "infrastructure",
-        "fingerprint": hashlib.sha256(identity.encode()).hexdigest(),
-        "stdout_excerpt": "\n".join(lines)[-4000:],
-        "stderr_excerpt": "",
-    })
-
-with open(target, "w", encoding="utf-8") as handle:
-    json.dump(failures, handle, indent=2)
-    handle.write("\n")
-PY
+        python3 "${EXTENSION_PATH}/scripts/parse-test-failures.py" "$PROJECT_PATH" "$TEST_TMPFILE" "$TEST_FAILURES_TMP"
         homeboy_test_failures_merge_file "$TEST_FAILURES_TMP"
     fi
 

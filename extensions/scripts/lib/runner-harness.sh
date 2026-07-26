@@ -6,7 +6,7 @@ homeboy_runner_harness_init() {
     if [ -z "$prelude" ]; then
         local repo_root
         repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-        prelude="${repo_root}/../homeboy/src/core/extension/runtime/runner-prelude.sh"
+        prelude="${repo_root}/../homeboy/crates/homeboy-extension/src/runtime/runner-prelude.sh"
     fi
     if [ ! -f "$prelude" ]; then
         echo "Error: HOMEBOY_RUNTIME_RUNNER_PRELUDE is required" >&2
@@ -22,7 +22,7 @@ homeboy_runner_harness_source_command_capture() {
     if [ -z "$helper" ]; then
         local repo_root
         repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-        helper="${repo_root}/../homeboy/src/core/extension/runtime/command-capture.sh"
+        helper="${repo_root}/../homeboy/crates/homeboy-extension/src/runtime/command-capture.sh"
     fi
     if [ ! -f "$helper" ]; then
         echo "Error: HOMEBOY_RUNTIME_COMMAND_CAPTURE is required" >&2
