@@ -6,6 +6,27 @@ pub fn apply(
     options: &RunnerDoctorOptions,
     report: &mut RunnerDoctorOutput,
 ) {
+    if options.scope == RunnerDoctorScope::SecretEnv {
+        match runner::apply_secret_env_migration(&report.runner_id) {
+            Ok(plan) => report.repairs.push(RunnerRepair {
+                id: "repair.secret_env_migration".to_string(),
+                status: RunnerDoctorStatus::Ok,
+                message: format!(
+                    "Migrated {} runner env entries into OS keychain references",
+                    plan.entries.len()
+                ),
+                commands: Vec::new(),
+            }),
+            Err(error) => report.repairs.push(RunnerRepair {
+                id: "repair.secret_env_migration".to_string(),
+                status: RunnerDoctorStatus::Error,
+                message: error.message,
+                commands: Vec::new(),
+            }),
+        }
+        return;
+    }
+
     if options.scope != RunnerDoctorScope::LabOffload {
         report.repairs.push(RunnerRepair {
             id: "repair.scope".to_string(),

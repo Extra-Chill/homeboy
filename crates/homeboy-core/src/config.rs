@@ -405,6 +405,7 @@ fn write_entity<T: ConfigEntity>(entity: &T) -> Result<()> {
 pub fn save<T: ConfigEntity>(entity: &T) -> Result<()> {
     identifier::validate_component_id(entity.id())?;
     check_id_collision(entity.id(), T::entity_type())?;
+    entity.validate()?;
 
     write_entity(entity)
 }

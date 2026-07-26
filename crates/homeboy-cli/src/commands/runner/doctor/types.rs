@@ -19,6 +19,10 @@ pub struct RunnerDoctorOutput {
     pub capabilities: RunnerCapabilities,
     pub resources: RunnerResources,
     pub checks: Vec<RunnerCheck>,
+    /// Value-free legacy migration plan. Entries contain only key names,
+    /// locations, and secret references; never resolved values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret_env_migration: Option<homeboy::runner::runners::RunnerSecretEnvMigrationPlan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<RunnerDoctorDiagnostics>,
     #[serde(skip_serializing_if = "Option::is_none")]
