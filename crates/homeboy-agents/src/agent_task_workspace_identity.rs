@@ -59,7 +59,7 @@ pub(crate) fn attest_workspace(path: &Path) -> Result<Value> {
 }
 
 #[cfg(unix)]
-pub(crate) fn workspace_matches_attestation(path: &Path, attestation: &Value) -> bool {
+pub fn workspace_matches_attestation(path: &Path, attestation: &Value) -> bool {
     use std::os::unix::fs::MetadataExt;
 
     let Ok(supplied_metadata) = std::fs::symlink_metadata(path) else {
@@ -104,7 +104,7 @@ fn linked_git_metadata_matches(worktree: &Path, attestation: &Value) -> bool {
 }
 
 #[cfg(not(unix))]
-pub(crate) fn workspace_matches_attestation(path: &Path, attestation: &Value) -> bool {
+pub fn workspace_matches_attestation(path: &Path, attestation: &Value) -> bool {
     std::fs::canonicalize(path)
         .ok()
         .and_then(|path| path.to_str().map(str::to_string))

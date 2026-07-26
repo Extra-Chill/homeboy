@@ -27,12 +27,14 @@ mod workspace_contract_tests;
 /// Lab offload rewriting can distinguish it from synthesized passthrough args.
 pub(super) const EXPLICIT_PASSTHROUGH_SENTINEL: &str = "__homeboy_explicit_passthrough__";
 
-pub(super) use agent_task_specs::materialize_agent_task_specs_in_args;
 #[cfg(test)]
 pub(super) use agent_task_specs::materialize_inline_agent_task_json_specs_in_args;
 #[cfg(test)]
 pub(super) use agent_task_specs::{
     inline_agent_task_prompt_files_in_args, remap_agent_task_plan_in_args,
+};
+pub(super) use agent_task_specs::{
+    materialize_agent_task_specs_in_args, verify_cook_workspace_attestations_in_args,
 };
 pub(super) use at_files::{lab_at_file_specs, remap_lab_at_file_args, LabAtFileSpec};
 pub(super) use offload::{

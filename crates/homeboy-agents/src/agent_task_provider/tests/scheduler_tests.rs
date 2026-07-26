@@ -44,30 +44,49 @@ fn linked_cook_source(temp: &tempfile::TempDir) -> std::path::PathBuf {
     source
 }
 
+fn remapped_cook_source(temp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+    let controller = linked_cook_source(temp);
+    let runner = temp.path().join("runner-snapshot");
+    git(
+        &controller,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            runner.to_str().expect("runner path"),
+            "HEAD",
+        ],
+    );
+    (controller, runner)
+}
+
 #[test]
-fn isolated_cook_attempt_spawns_a_real_provider_against_its_own_attestation() {
+fn remapped_lab_cook_spawns_and_harvests_from_runner_snapshot_identity() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let source = linked_cook_source(&temp);
+    let (controller, source) = remapped_cook_source(&temp);
     let marker = temp.path().join("provider-started");
     let command = format!(
         "node {}",
         script(&format!(
-            "let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); fs.writeFileSync({:?}, JSON.stringify({{cwd:process.cwd(),workspace:req.workspace.root,attestation:req.metadata.cook_attempt_workspace_identity}})); process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'provider spawned'}}));",
+            "let cp=require('child_process'),fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); fs.writeFileSync('provider-change.txt','changed\\n'); cp.execFileSync('git',['add','provider-change.txt']); cp.execFileSync('git',['-c','user.name=Homeboy','-c','user.email=homeboy@example.test','commit','-m','provider change']); fs.writeFileSync({:?}, JSON.stringify({{cwd:process.cwd(),workspace:req.workspace.root,attestation:req.metadata.cook_attempt_workspace_identity}})); process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'provider spawned'}}));",
             marker.display().to_string()
         ))
     );
     let (mut request, provider) = request("cook-provider", command);
     request.workspace.root = Some(source.display().to_string());
     request.metadata = serde_json::json!({
-        "cook_workspace_identity": crate::agent_task_workspace_identity::attest_workspace(&source)
+        "cook_workspace_identity": crate::agent_task_workspace_identity::attest_workspace(&controller)
             .expect("attest source"),
     });
+    let mut plan = AgentTaskPlan::new("remapped-lab-cook-provider", vec![request]);
+    crate::agent_task_service::bind_runner_snapshot_workspace_attestations(&mut plan)
+        .expect("bind runner snapshot");
 
     let aggregate =
         AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
             provider,
         ]))
-        .run(AgentTaskPlan::new("isolated-cook-provider", vec![request]));
+        .run(plan);
 
     assert_eq!(aggregate.totals.succeeded, 1, "{aggregate:?}");
     let provider_observation: serde_json::Value =
@@ -86,6 +105,59 @@ fn isolated_cook_attempt_spawns_a_real_provider_against_its_own_attestation() {
     assert_eq!(
         provider_observation["attestation"]["canonical_path"], provider_cwd,
         "the spawned provider must receive the attestation for its isolated cwd"
+    );
+    let patch = aggregate.outcomes[0]
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.kind == "patch")
+        .expect("committed change harvest patch");
+    assert!(
+        std::fs::read_to_string(patch.path.as_deref().expect("patch path"))
+            .expect("read patch")
+            .contains("provider-change.txt")
+    );
+}
+
+#[test]
+fn remapped_lab_cook_rejects_runner_snapshot_drift_before_provider_spawn() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (controller, runner) = remapped_cook_source(&temp);
+    let marker = temp.path().join("provider-started");
+    let (mut request, provider) = request(
+        "cook-provider",
+        format!(
+            "node {}",
+            script(&format!(
+                "let fs=require('fs'); fs.writeFileSync({:?}, 'started'); process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:'cook-provider',status:'succeeded'}}));",
+                marker.display().to_string()
+            ))
+        ),
+    );
+    request.workspace.root = Some(runner.display().to_string());
+    request.metadata = serde_json::json!({
+        "cook_workspace_identity": crate::agent_task_workspace_identity::attest_workspace(&controller)
+            .expect("attest controller source"),
+    });
+    let mut plan = AgentTaskPlan::new("runner-drift-cook", vec![request]);
+    crate::agent_task_service::bind_runner_snapshot_workspace_attestations(&mut plan)
+        .expect("bind runner snapshot");
+    std::fs::write(runner.join(".git"), "gitdir: ../replaced-gitdir\n")
+        .expect("replace runner gitdir reference");
+
+    let aggregate =
+        AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
+            provider,
+        ]))
+        .run(plan);
+
+    assert_eq!(aggregate.totals.failed, 1);
+    assert_eq!(
+        aggregate.outcomes[0].diagnostics[0].class,
+        "agent_task.committed_harvest_git_failed"
+    );
+    assert!(
+        !marker.exists(),
+        "provider must not start after runner drift"
     );
 }
 
