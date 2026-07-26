@@ -3,6 +3,7 @@ use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::agent_task::AgentTaskOutcome;
 use homeboy_core::observation::ObservationStore;
@@ -297,6 +298,8 @@ pub struct ControllerScratchSkipped {
     pub owner_pid: Option<u32>,
     pub lifecycle_state: Option<String>,
     pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_command: Option<String>,
 }
 
 /// Bounded retention inventory for operators investigating cleanup convergence.
@@ -468,7 +471,10 @@ fn register_outcome_resources_unlocked(run_id: &str, outcomes: &[AgentTaskOutcom
                     .get("reconstructable")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false),
-                ephemeral: false,
+                ephemeral: value
+                    .get("ephemeral")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
                 retention: value
                     .get("retention")
                     .and_then(serde_json::Value::as_str)
@@ -512,6 +518,31 @@ fn finalize_run_unlocked(run_id: &str) -> Result<()> {
         if resource.run_id == run_id {
             if resource.finalized_at.is_none() {
                 resource.finalized_at = Some(now.clone());
+                changed = true;
+            }
+            let recovery_state = resource
+                .terminal_evidence
+                .as_ref()
+                .and_then(|evidence| evidence.pointer("/workspace_recovery/state"))
+                .and_then(serde_json::Value::as_str);
+            let needs_recovery = matches!(
+                resource.lifecycle_state.as_str(),
+                "active" | "provider_registered"
+            ) || (resource.lifecycle_state == "interrupted"
+                && !matches!(
+                    recovery_state,
+                    Some("recovered" | "explicitly_ephemeral" | "authoritative_checkout_absent")
+                ));
+            if needs_recovery {
+                let workspace_recovery = recover_authoritative_workspace(resource);
+                resource.lifecycle_state = "interrupted".to_string();
+                resource.interrupted_at = Some(now.clone());
+                resource.terminal_reason = Some("owning_run_terminalized".to_string());
+                resource.terminal_evidence = Some(serde_json::json!({
+                    "run_id": run_id,
+                    "retention": INTERRUPTED_RETENTION,
+                    "workspace_recovery": workspace_recovery,
+                }));
                 changed = true;
             }
         }
@@ -570,6 +601,7 @@ fn cleanup_unlocked(
                     run_id: Some(resource.run_id.clone()),
                     owner_pid: Some(resource.owner_pid),
                     lifecycle_state: Some(resource.lifecycle_state.clone()),
+                    recovery_command: scratch_recovery_command(resource),
                     reason,
                 });
             }
@@ -621,6 +653,7 @@ fn cleanup_unlocked(
                             run_id: Some(candidate.run_id.clone()),
                             owner_pid: Some(candidate.owner_pid),
                             lifecycle_state: Some(candidate.lifecycle_state.clone()),
+                            recovery_command: None,
                             reason,
                         });
                     }
@@ -763,8 +796,20 @@ fn cleanup_block_reason(
     if !retention_expired(resource.finalized_at.as_deref(), retention, path, now) {
         return Ok(Some("retention has not expired".to_string()));
     }
-    if !resource.ephemeral && git_dirty_or_unpushed(path) {
-        return Ok(Some("git checkout has dirty or unpushed state".to_string()));
+    if !resource.ephemeral {
+        match git_safety_path(resource, path) {
+            Some(path) if recovered_workspace_matches(resource, &path) => {}
+            Some(path) if git_dirty_or_unpushed(&path) => {
+                return Ok(Some("git checkout has dirty or unpushed state".to_string()));
+            }
+            Some(_) => {}
+            None if resource.plan_id.is_empty() => {
+                return Ok(Some(
+                    "resource has no explicit authoritative Git checkout".to_string(),
+                ));
+            }
+            None => {}
+        }
     }
     Ok(None)
 }
@@ -890,6 +935,212 @@ fn git_dirty_or_unpushed(path: &Path) -> bool {
     )
     .map(|count| count.trim() != "0")
     .unwrap_or(true)
+}
+
+fn git_safety_path(resource: &ControllerScratchResource, path: &Path) -> Option<PathBuf> {
+    if is_git_checkout(path) {
+        return Some(path.to_path_buf());
+    }
+
+    // Scheduler-owned attempt roots contain one authoritative checkout at this
+    // fixed path. Other nested repositories are provider/test temporary state,
+    // not source candidates, and must not retain the whole scratch lease.
+    if !resource.plan_id.is_empty() {
+        let workspace = path.join("workspace");
+        if is_git_checkout(&workspace) {
+            return Some(workspace);
+        }
+    }
+
+    None
+}
+
+fn recover_authoritative_workspace(resource: &ControllerScratchResource) -> serde_json::Value {
+    recover_authoritative_workspace_inner(resource).unwrap_or_else(|error| {
+        serde_json::json!({
+            "state": "recovery_failed",
+            "message": error.message,
+        })
+    })
+}
+
+fn recover_authoritative_workspace_inner(
+    resource: &ControllerScratchResource,
+) -> Result<serde_json::Value> {
+    if resource.ephemeral {
+        return Ok(serde_json::json!({ "state": "explicitly_ephemeral" }));
+    }
+    let root = Path::new(&resource.path);
+    let Some(workspace) = git_safety_path(resource, root) else {
+        return Ok(serde_json::json!({
+            "state": if resource.plan_id.is_empty() {
+                "authoritative_checkout_unknown"
+            } else {
+                "authoritative_checkout_absent"
+            },
+        }));
+    };
+    let status = git::run_git(&workspace, &["status", "--porcelain=v1"], "git status")?;
+    if status.lines().any(|line| line.starts_with("??")) {
+        return Ok(serde_json::json!({
+            "state": "untracked_changes_retained",
+            "workspace": workspace,
+        }));
+    }
+    let staged = git::run_git(&workspace, &["ls-files", "--stage"], "git ls-files --stage")?;
+    if staged.lines().any(|line| line.starts_with("160000 ")) {
+        return Ok(serde_json::json!({
+            "state": "submodules_retained",
+            "workspace": workspace,
+        }));
+    }
+    let head = git::run_git(&workspace, &["rev-parse", "HEAD"], "git rev-parse HEAD")?;
+    let patch = git::run_git(
+        &workspace,
+        &[
+            "diff",
+            "--binary",
+            "--full-index",
+            "--find-renames",
+            "HEAD",
+            "--",
+            ".",
+        ],
+        "git diff HEAD",
+    )?;
+    let recovery_root = paths::artifact_root()?
+        .join("controller-scratch-recovery")
+        .join(paths::sanitize_path_segment(&resource.run_id))
+        .join(paths::sanitize_path_segment(&resource.lease_id));
+    fs::create_dir_all(&recovery_root).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create {}", recovery_root.display())),
+        )
+    })?;
+    let bundle_path = recovery_root.join("workspace.bundle");
+    git::run_git(
+        &workspace,
+        &[
+            "bundle",
+            "create",
+            &bundle_path.display().to_string(),
+            "HEAD",
+        ],
+        "git bundle create",
+    )?;
+    let patch_path = recovery_root.join("tracked-changes.patch");
+    fs::write(&patch_path, patch.as_bytes()).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("write {}", patch_path.display())),
+        )
+    })?;
+    let bundle_sha256 = file_sha256(&bundle_path)?;
+    let patch_sha256 = sha256(patch.as_bytes());
+    Ok(serde_json::json!({
+        "state": "recovered",
+        "workspace": workspace,
+        "head": head.trim(),
+        "status": status,
+        "bundle": {
+            "path": bundle_path,
+            "sha256": bundle_sha256,
+        },
+        "patch": {
+            "path": patch_path,
+            "sha256": patch_sha256,
+        },
+    }))
+}
+
+fn recovered_workspace_matches(resource: &ControllerScratchResource, workspace: &Path) -> bool {
+    let Some(recovery) = resource
+        .terminal_evidence
+        .as_ref()
+        .and_then(|evidence| evidence.get("workspace_recovery"))
+        .filter(|recovery| recovery["state"] == "recovered")
+    else {
+        return false;
+    };
+    let Some(bundle_path) = recovery
+        .pointer("/bundle/path")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let Some(bundle_sha256) = recovery
+        .pointer("/bundle/sha256")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let Some(patch_path) = recovery
+        .pointer("/patch/path")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let Some(patch_sha256) = recovery
+        .pointer("/patch/sha256")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let expected_head = recovery.get("head").and_then(serde_json::Value::as_str);
+    let expected_status = recovery.get("status").and_then(serde_json::Value::as_str);
+    let current_head = git::run_git(workspace, &["rev-parse", "HEAD"], "git rev-parse HEAD").ok();
+    let current_status = git::run_git(workspace, &["status", "--porcelain=v1"], "git status").ok();
+    let current_patch = git::run_git(
+        workspace,
+        &[
+            "diff",
+            "--binary",
+            "--full-index",
+            "--find-renames",
+            "HEAD",
+            "--",
+            ".",
+        ],
+        "git diff HEAD",
+    )
+    .ok();
+
+    expected_head == current_head.as_deref().map(str::trim)
+        && expected_status == current_status.as_deref()
+        && current_patch
+            .as_deref()
+            .is_some_and(|patch| sha256(patch.as_bytes()) == patch_sha256)
+        && file_sha256(Path::new(bundle_path)).ok().as_deref() == Some(bundle_sha256)
+        && file_sha256(Path::new(patch_path)).ok().as_deref() == Some(patch_sha256)
+}
+
+fn file_sha256(path: &Path) -> Result<String> {
+    let bytes = fs::read(path).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
+    })?;
+    Ok(sha256(&bytes))
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn scratch_recovery_command(resource: &ControllerScratchResource) -> Option<String> {
+    (resource.lifecycle_state == "interrupted")
+        .then(|| format!("homeboy agent-task cancel {}", resource.run_id))
+}
+
+fn is_git_checkout(path: &Path) -> bool {
+    git::run_git(
+        path,
+        &["rev-parse", "--show-toplevel"],
+        "git rev-parse top-level",
+    )
+    .ok()
+    .and_then(|top_level| PathBuf::from(top_level.trim()).canonicalize().ok())
+    .zip(path.canonicalize().ok())
+    .is_some_and(|(top_level, path)| top_level == path)
 }
 
 fn path_size(path: &Path) -> Result<u64> {
@@ -1169,7 +1420,7 @@ mod tests {
         ControllerScratchResource {
             path: path.display().to_string(),
             run_id: "missing-terminal-run".to_string(),
-            plan_id: String::new(),
+            plan_id: "test-plan".to_string(),
             task_id: "task-1".to_string(),
             attempt: 0,
             root_bound: root.display().to_string(),
@@ -1604,6 +1855,249 @@ mod tests {
                 Some("git checkout has dirty or unpushed state".to_string())
             );
             assert!(scratch.exists());
+        });
+    }
+
+    #[test]
+    fn generated_nested_dirty_repo_does_not_retain_scheduler_scratch() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("root");
+            let scratch = root.path().join("scratch");
+            let generated = scratch.join("generated-repo");
+            fs::create_dir_all(&generated).expect("generated repo");
+            run_git(&generated, &["init", "-b", "main"]);
+            fs::write(generated.join("untracked.txt"), "generated").expect("dirty fixture");
+            let mut resource = resource(&scratch, root.path());
+            resource.plan_id = "scheduler-plan".to_string();
+            resource.lifecycle_state = "released".to_string();
+
+            assert_eq!(
+                cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now(), Some(0))
+                    .expect("cleanup check"),
+                None
+            );
+        });
+    }
+
+    #[test]
+    fn dirty_scheduler_attempt_workspace_retains_its_scratch() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("root");
+            let scratch = root.path().join("scratch");
+            let workspace = scratch.join("workspace");
+            fs::create_dir_all(&workspace).expect("attempt workspace");
+            run_git(&workspace, &["init", "-b", "main"]);
+            fs::write(workspace.join("untracked.txt"), "candidate").expect("dirty candidate");
+            let mut resource = resource(&scratch, root.path());
+            resource.plan_id = "scheduler-plan".to_string();
+            resource.lifecycle_state = "released".to_string();
+
+            assert_eq!(
+                cleanup_block_reason(&mut resource, &scratch, chrono::Utc::now(), Some(0))
+                    .expect("cleanup check"),
+                Some("git checkout has dirty or unpushed state".to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn finalized_workspace_changes_are_recovered_before_nested_fixtures_converge() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let allocation =
+                allocate_attempt("recovery-run", "scheduler-plan", "task", 1).expect("allocate");
+            let workspace = allocation.path.join("workspace");
+            fs::create_dir(&workspace).expect("workspace");
+            run_git(&workspace, &["init", "-b", "main"]);
+            fs::write(workspace.join("tracked.txt"), "base\n").expect("base file");
+            run_git(&workspace, &["add", "."]);
+            run_git(
+                &workspace,
+                &[
+                    "-c",
+                    "user.name=Homeboy",
+                    "-c",
+                    "user.email=homeboy@example.test",
+                    "commit",
+                    "-m",
+                    "base",
+                ],
+            );
+            fs::write(workspace.join("tracked.txt"), "candidate\n").expect("candidate change");
+            let generated = allocation.path.join("generated-fixture");
+            fs::create_dir(&generated).expect("generated fixture");
+            run_git(&generated, &["init", "-b", "main"]);
+            fs::write(generated.join("untracked.txt"), "fixture").expect("dirty fixture");
+            abandon_attempt_for_test(&allocation).expect("dead owner");
+
+            finalize_run("recovery-run").expect("recover and finalize");
+            let resource = read_index()
+                .expect("index")
+                .resources
+                .into_iter()
+                .find(|resource| resource.lease_id == allocation.lease_id)
+                .expect("resource");
+            let recovery =
+                &resource.terminal_evidence.as_ref().expect("evidence")["workspace_recovery"];
+            assert_eq!(recovery["state"], "recovered");
+            assert!(Path::new(recovery["bundle"]["path"].as_str().expect("bundle path")).is_file());
+            assert!(Path::new(recovery["patch"]["path"].as_str().expect("patch path")).is_file());
+
+            let output = cleanup(ControllerScratchCleanupOptions {
+                apply: false,
+                limit: 1,
+                retention_override_seconds: Some(0),
+            })
+            .expect("cleanup preview");
+            assert_eq!(output.candidate_count, 1);
+            assert_eq!(
+                output.candidates[0].path,
+                allocation.path.display().to_string()
+            );
+        });
+    }
+
+    #[test]
+    fn workspace_changed_after_recovery_remains_retained() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let allocation =
+                allocate_attempt("changed-run", "scheduler-plan", "task", 1).expect("allocate");
+            let workspace = allocation.path.join("workspace");
+            fs::create_dir(&workspace).expect("workspace");
+            run_git(&workspace, &["init", "-b", "main"]);
+            fs::write(workspace.join("tracked.txt"), "base\n").expect("base file");
+            run_git(&workspace, &["add", "."]);
+            run_git(
+                &workspace,
+                &[
+                    "-c",
+                    "user.name=Homeboy",
+                    "-c",
+                    "user.email=homeboy@example.test",
+                    "commit",
+                    "-m",
+                    "base",
+                ],
+            );
+            fs::write(workspace.join("tracked.txt"), "first\n").expect("first change");
+            abandon_attempt_for_test(&allocation).expect("dead owner");
+            finalize_run("changed-run").expect("recover and finalize");
+            fs::write(workspace.join("tracked.txt"), "second\n").expect("later change");
+
+            let output = cleanup(ControllerScratchCleanupOptions {
+                apply: false,
+                limit: 1,
+                retention_override_seconds: Some(0),
+            })
+            .expect("cleanup preview");
+            assert_eq!(output.candidate_count, 0);
+            assert_eq!(
+                output.skipped[0].reason,
+                "git checkout has dirty or unpushed state"
+            );
+        });
+    }
+
+    #[test]
+    fn submodule_workspaces_remain_retained() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("root");
+            let submodule = root.path().join("submodule");
+            fs::create_dir(&submodule).expect("submodule source");
+            run_git(&submodule, &["init", "-b", "main"]);
+            fs::write(submodule.join("source.txt"), "source\n").expect("submodule source file");
+            run_git(&submodule, &["add", "."]);
+            run_git(
+                &submodule,
+                &[
+                    "-c",
+                    "user.name=Homeboy",
+                    "-c",
+                    "user.email=homeboy@example.test",
+                    "commit",
+                    "-m",
+                    "submodule",
+                ],
+            );
+            let scratch = root.path().join("scratch");
+            fs::create_dir(&scratch).expect("scratch");
+            run_git(&scratch, &["init", "-b", "main"]);
+            run_git(
+                &scratch,
+                &[
+                    "-c",
+                    "protocol.file.allow=always",
+                    "submodule",
+                    "add",
+                    submodule.to_str().expect("submodule path"),
+                    "vendor/submodule",
+                ],
+            );
+            let mut resource = resource(&scratch, root.path());
+            resource.plan_id.clear();
+
+            let recovery =
+                recover_authoritative_workspace_inner(&resource).expect("inspect workspace");
+
+            assert_eq!(recovery["state"], "submodules_retained");
+        });
+    }
+
+    #[test]
+    fn unknown_legacy_checkout_layout_fails_closed_with_recovery_command() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("root");
+            let scratch = root.path().join("scratch");
+            fs::create_dir(&scratch).expect("scratch");
+            let mut legacy = resource(&scratch, root.path());
+            legacy.plan_id.clear();
+            legacy.lifecycle_state = "interrupted".to_string();
+            legacy.run_id = "legacy-run".to_string();
+            write_index(&ControllerScratchIndex {
+                schema: schema(),
+                resources: vec![legacy],
+            })
+            .expect("legacy resource");
+
+            let output = cleanup(ControllerScratchCleanupOptions {
+                apply: false,
+                limit: 1,
+                retention_override_seconds: Some(0),
+            })
+            .expect("cleanup preview");
+
+            assert_eq!(output.candidate_count, 0);
+            assert_eq!(
+                output.skipped[0].reason,
+                "resource has no explicit authoritative Git checkout"
+            );
+            assert_eq!(
+                output.skipped[0].recovery_command.as_deref(),
+                Some("homeboy agent-task cancel legacy-run")
+            );
+        });
+    }
+
+    #[test]
+    fn finalizing_a_run_starts_interrupted_scratch_retention() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let allocation =
+                allocate_attempt("terminal-run", "plan", "task", 1).expect("scratch allocation");
+
+            finalize_run("terminal-run").expect("finalize scratch");
+
+            let resource = read_index()
+                .expect("index")
+                .resources
+                .into_iter()
+                .find(|resource| resource.lease_id == allocation.lease_id)
+                .expect("resource");
+            assert_eq!(resource.lifecycle_state, "interrupted");
+            assert!(resource.finalized_at.is_some());
+            assert!(resource.interrupted_at.is_some());
+            assert_eq!(
+                resource.terminal_reason.as_deref(),
+                Some("owning_run_terminalized")
+            );
         });
     }
 
