@@ -11,6 +11,7 @@ use super::types::AgentTaskPromotionOptions;
 pub(crate) struct CommittedChangesPatch {
     pub(crate) base_ref: String,
     pub(crate) candidate: String,
+    pub(crate) historical_task_base: Option<String>,
     pub(crate) patch_path: PathBuf,
     pub(crate) sha256: String,
     pub(crate) commit_range: String,
@@ -26,14 +27,6 @@ pub(crate) fn committed_changes_patch(
     if !worktree_path.is_dir() {
         return Ok(None);
     }
-    let Some(mut base_ref) = resolve_committed_changes_base(
-        worktree_path,
-        options.task_base_sha.as_deref(),
-        options.base_ref.as_deref(),
-    )?
-    else {
-        return Ok(None);
-    };
     if options.candidate_ref.is_some() {
         ensure_clean_source(worktree_path)?;
     }
@@ -50,30 +43,23 @@ pub(crate) fn committed_changes_patch(
         }
     }
 
-    // Explicit adoption of a pre-existing immutable candidate: the cook can
-    // record the candidate commit itself as the task base, so a provider that
-    // reviews it and returns no-op leaves an empty base..candidate diff and
-    // promotion has nothing to adopt (#8895). When the caller supplied an
-    // explicit candidate_ref and the recorded base IS the candidate, resolve the
-    // effective base to the candidate's first parent so the immutable commit
-    // becomes the promotable change. Fail closed: a root commit (no parent)
-    // cannot be adopted this way. This only triggers for explicit adoption, so
-    // ordinary no-op cooks still reject a base-equal promotion.
-    if options.candidate_ref.is_some() && base_ref == candidate {
-        let parent = git_stdout(
+    let (base_ref, historical_task_base) = if options.candidate_ref.is_some() {
+        resolve_adoption_candidate_base(
             worktree_path,
-            &["rev-parse", "--verify", &format!("{candidate}^{{commit}}~1")],
-        )
-        .map_err(|_| {
-            Error::validation_invalid_argument(
-                "candidate_ref",
-                "adopted candidate equals the recorded task base but has no parent commit to adopt against; supply a candidate with at least one committed change",
-                Some(candidate.clone()),
-                None,
-            )
-        })?;
-        base_ref = parent.trim().to_string();
-    }
+            &candidate,
+            options.task_base_sha.as_deref(),
+        )?
+    } else {
+        let Some(base_ref) = resolve_committed_changes_base(
+            worktree_path,
+            options.task_base_sha.as_deref(),
+            options.base_ref.as_deref(),
+        )?
+        else {
+            return Ok(None);
+        };
+        (base_ref, None)
+    };
     let is_ancestor = Command::new("git")
         .args(["merge-base", "--is-ancestor", &base_ref, &candidate])
         .current_dir(worktree_path)
@@ -130,11 +116,78 @@ pub(crate) fn committed_changes_patch(
     Ok(Some(CommittedChangesPatch {
         base_ref,
         candidate,
+        historical_task_base,
         patch_path,
         sha256,
         commit_range,
         commits,
     }))
+}
+
+/// Explicit adoption is scoped to the immutable candidate's sole parent, not
+/// the task's historical workspace base. A rebased candidate may have many
+/// unrelated upstream commits between those two points.
+fn resolve_adoption_candidate_base(
+    cwd: &Path,
+    candidate: &str,
+    task_base_sha: Option<&str>,
+) -> Result<(String, Option<String>)> {
+    let parents = git_stdout(cwd, &["rev-list", "--parents", "-n", "1", candidate])?;
+    let mut identities = parents.split_whitespace();
+    let _commit = identities.next();
+    let parent = identities.next();
+    if parent.is_none() || identities.next().is_some() {
+        return Err(Error::validation_invalid_argument(
+            "candidate_ref",
+            "adopted candidate must have exactly one parent so its immutable base is unambiguous",
+            Some(candidate.to_string()),
+            None,
+        ));
+    }
+    let parent = parent.expect("validated candidate parent").to_string();
+    let is_ancestor = Command::new("git")
+        .args(["merge-base", "--is-ancestor", &parent, candidate])
+        .current_dir(cwd)
+        .status()
+        .map_err(|error| Error::git_command_failed(error.to_string()))?
+        .success();
+    if !is_ancestor {
+        return Err(Error::validation_invalid_argument(
+            "candidate_ref",
+            "adopted candidate is not descended from its immutable parent base",
+            Some(candidate.to_string()),
+            None,
+        ));
+    }
+    let historical_task_base = task_base_sha
+        .filter(|base| !base.trim().is_empty())
+        .map(|base| {
+            git_stdout(
+                cwd,
+                &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+            )
+            .map(|base| base.trim().to_string())
+        })
+        .transpose()?;
+    if let Some(historical) = historical_task_base.as_deref() {
+        if historical != candidate {
+            let related = Command::new("git")
+                .args(["merge-base", "--is-ancestor", historical, &parent])
+                .current_dir(cwd)
+                .status()
+                .map_err(|error| Error::git_command_failed(error.to_string()))?
+                .success();
+            if !related {
+                return Err(Error::validation_invalid_argument(
+                    "task_base_sha",
+                    "recorded task base is unrelated to the adopted candidate parent; refusing ambiguous adoption provenance",
+                    Some(historical.to_string()),
+                    None,
+                ));
+            }
+        }
+    }
+    Ok((parent, historical_task_base))
 }
 
 fn ensure_clean_source(cwd: &Path) -> Result<()> {
