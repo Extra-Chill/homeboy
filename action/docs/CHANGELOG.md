@@ -2,6 +2,12 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.25] - 2026-07-26
+
+### Changed
+- check out full history for the self-test suite
+- gate releases on the action's own shell tests
+
 ## [2.8.24] - 2026-07-26
 
 ### Fixed
