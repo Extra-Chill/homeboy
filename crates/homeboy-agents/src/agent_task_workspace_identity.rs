@@ -34,18 +34,34 @@ pub(crate) fn attest_workspace(path: &Path) -> Result<Value> {
     let git_metadata = std::fs::symlink_metadata(&git_file).map_err(|error| {
         Error::internal_io(error.to_string(), Some(git_file.display().to_string()))
     })?;
-    let git_content = std::fs::read_to_string(&git_file).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(git_file.display().to_string()))
-    })?;
-    let gitdir_target = git_content
-        .strip_prefix("gitdir: ")
-        .map(str::trim)
-        .and_then(|target| std::fs::canonicalize(canonical.join(target)).ok());
+    let git_file_is_file = git_metadata.file_type().is_file();
+    let git_file_is_dir = git_metadata.file_type().is_dir();
+    if !git_file_is_file && !git_file_is_dir {
+        return Err(Error::validation_invalid_argument(
+            "workspace",
+            "Cook workspace .git must be a regular file or directory",
+            Some(git_file.display().to_string()),
+            None,
+        ));
+    }
+    let git_content = git_file_is_file
+        .then(|| std::fs::read_to_string(&git_file))
+        .transpose()
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some(git_file.display().to_string()))
+        })?;
+    let gitdir_target = git_content.as_deref().and_then(|content| {
+        content
+            .strip_prefix("gitdir: ")
+            .map(str::trim)
+            .and_then(|target| std::fs::canonicalize(canonical.join(target)).ok())
+    });
     Ok(serde_json::json!({
         "canonical_path": canonical,
         "device": metadata.dev(),
         "inode": metadata.ino(),
-        "git_file_is_file": git_metadata.file_type().is_file(),
+        "git_file_is_file": git_file_is_file,
+        "git_file_is_dir": git_file_is_dir,
         "git_file_content": git_content,
         "gitdir_target": gitdir_target,
     }))
@@ -87,6 +103,9 @@ fn linked_git_metadata_matches(worktree: &Path, attestation: &Value) -> bool {
     let Ok(metadata) = std::fs::symlink_metadata(&git_file) else {
         return false;
     };
+    if metadata.file_type().is_dir() {
+        return attestation["git_file_is_dir"] == true;
+    }
     if !metadata.file_type().is_file() || attestation["git_file_is_file"] != true {
         return false;
     }
@@ -131,5 +150,18 @@ mod tests {
 
         assert!(attest_workspace(&alias).is_err());
         assert!(!workspace_matches_attestation(&alias, &attestation));
+    }
+
+    #[test]
+    fn attests_a_standard_git_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        std::fs::create_dir(workspace.join(".git")).expect("git directory");
+
+        let attestation = attest_workspace(&workspace).expect("attest workspace");
+
+        assert_eq!(attestation["git_file_is_dir"], true);
+        assert!(workspace_matches_attestation(&workspace, &attestation));
     }
 }
