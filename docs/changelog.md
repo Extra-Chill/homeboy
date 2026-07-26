@@ -4,6 +4,36 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.317.0] - 2026-07-26
+
+### Added
+- fire due schedules without an external timer
+
+### Changed
+- assert nested command identity in output errors
+- exercise git workspace ownership
+
+### Fixed
+- preserve resource capacity fallbacks
+- version skipped gate evidence
+- fence dead generation tombstones
+- fail fast ordered verification gates
+- scale resource severity by capacity
+- gate durable runtime set admission
+- converge dead generation inventories
+- Fix bounded output for agent readers
+- Fix bounded Lab workspace pruning
+- emit context-valid repo cleanup action
+- attest normal Git directories
+- preserve bounded run inspection
+- make review lifecycle terminalization durable
+- retain recipe-only failure identity
+- retain durable failure identity
+- emit review run id before stages
+- bound persisted run reads
+- preserve nested command identity in failures
+- isolate job-owned workspaces
+
 ## [0.316.0] - 2026-07-26
 
 ### Added
