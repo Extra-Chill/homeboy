@@ -5,6 +5,8 @@ use crate::workspace::sync::{reap_run_workspace, sync_workspace, WORKSPACE_METAD
 use crate::workspace::types::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
 use crate::{MaterializedWorkspace, WorkspaceCleanupPolicy, WorkspaceTerminalOutcome};
 
+use super::git;
+
 fn sync_options(path: String) -> RunnerWorkspaceSyncOptions {
     RunnerWorkspaceSyncOptions {
         path,
@@ -410,11 +412,22 @@ fn concurrent_same_ref_jobs_keep_the_remaining_job_workspace_after_peer_reap() {
         let source = source_parent.path().join("same-ref-source");
         fs::create_dir_all(&source).expect("source dir");
         fs::write(source.join("file.txt"), "same source revision\n").expect("source file");
+        git(&source, &["init"]);
+        git(&source, &["config", "user.email", "test@example.com"]);
+        git(&source, &["config", "user.name", "Test User"]);
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "-m", "same source revision"]);
+        git(
+            &source,
+            &["remote", "add", "origin", &source.display().to_string()],
+        );
         create_local_runner("lab-local-concurrent-ownership", runner_root.path());
 
         let mut first_options = sync_options(source.display().to_string());
+        first_options.mode = RunnerWorkspaceSyncMode::Git;
         first_options.run_isolation_token = Some("job-lint".to_string());
         let mut second_options = sync_options(source.display().to_string());
+        second_options.mode = RunnerWorkspaceSyncMode::Git;
         second_options.run_isolation_token = Some("job-test".to_string());
         let (first, _) = sync_workspace("lab-local-concurrent-ownership", first_options)
             .expect("materialize lint workspace");
