@@ -50,11 +50,10 @@ fn remapped_cook_source(temp: &tempfile::TempDir) -> (std::path::PathBuf, std::p
     git(
         &controller,
         &[
-            "worktree",
-            "add",
-            "--detach",
+            "clone",
+            "--quiet",
+            controller.to_str().expect("controller path"),
             runner.to_str().expect("runner path"),
-            "HEAD",
         ],
     );
     (controller, runner)
@@ -141,8 +140,9 @@ fn remapped_lab_cook_rejects_runner_snapshot_drift_before_provider_spawn() {
     let mut plan = AgentTaskPlan::new("runner-drift-cook", vec![request]);
     crate::agent_task_service::bind_runner_snapshot_workspace_attestations(&mut plan)
         .expect("bind runner snapshot");
-    std::fs::write(runner.join(".git"), "gitdir: ../replaced-gitdir\n")
-        .expect("replace runner gitdir reference");
+    std::fs::rename(runner.join(".git"), runner.join("replaced-git-directory"))
+        .expect("replace runner git directory");
+    std::fs::create_dir(runner.join(".git")).expect("new runner git directory");
 
     let aggregate =
         AgentTaskScheduler::new(ExtensionProviderAgentTaskExecutor::with_providers(vec![
@@ -158,6 +158,39 @@ fn remapped_lab_cook_rejects_runner_snapshot_drift_before_provider_spawn() {
     assert!(
         !marker.exists(),
         "provider must not start after runner drift"
+    );
+}
+
+#[test]
+fn remapped_lab_cook_retry_retains_controller_predecessor_and_rebinds_directory_identity() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let (controller, runner) = remapped_cook_source(&temp);
+    let (mut request, _) = request("cook-provider", "true".to_string());
+    request.workspace.root = Some(runner.display().to_string());
+    let controller_identity = crate::agent_task_workspace_identity::attest_workspace(&controller)
+        .expect("attest controller source");
+    request.metadata = serde_json::json!({ "cook_workspace_identity": controller_identity });
+    let mut plan = AgentTaskPlan::new("remapped-lab-cook-retry", vec![request]);
+
+    crate::agent_task_service::bind_runner_snapshot_workspace_attestations(&mut plan)
+        .expect("bind runner snapshot");
+    crate::agent_task_service::bind_runner_snapshot_workspace_attestations(&mut plan)
+        .expect("rebind resumed runner snapshot");
+
+    let metadata = &plan.tasks[0].metadata;
+    assert_eq!(
+        metadata["cook_workspace_identity"]["git_representation"],
+        "directory"
+    );
+    assert_eq!(
+        metadata["cook_workspace_identity_predecessor"]["git_representation"], "pointer_file",
+        "resume must retain the controller attestation as provenance"
+    );
+    assert!(
+        crate::agent_task_workspace_identity::workspace_matches_attestation(
+            &runner,
+            &metadata["cook_workspace_identity"]
+        )
     );
 }
 
