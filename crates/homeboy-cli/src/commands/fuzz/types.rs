@@ -10,7 +10,7 @@ use crate::command_contract::{
 };
 use homeboy::fuzz::FuzzGateProfile;
 
-const FUZZ_PLAN_LAB_UNSUPPORTED_REASON: &str = "`fuzz plan` is controller-local planning so operators can inspect the generated request before execution. Use `homeboy fuzz plan --lab-runner <runner> ...` to emit exact Lab run commands, or pass `--execute` / use `fuzz run` with the global `--runner <runner> --lab-only` flags to execute on Lab.";
+const FUZZ_PLAN_LAB_UNSUPPORTED_REASON: &str = "`fuzz plan` is controller-local planning so operators can inspect the generated request before execution. Use `homeboy fuzz plan --runner <runner> ...` to emit exact Lab run commands, or pass `--execute` / use `fuzz run` with `--runner <runner>` to execute on Lab.";
 
 #[derive(Args)]
 pub struct FuzzArgs {
@@ -125,6 +125,36 @@ impl FuzzArgs {
         self.destructive_run_args().is_some_and(|run| {
             run.effective_allow_destructive() && !run.allow_local_destructive_fuzz
         })
+    }
+
+    /// A non-executing plan records its preferred runner rather than offloading
+    /// planning itself. Keep the global runner spelling usable on this surface.
+    pub(crate) fn absorb_planning_runner(
+        &mut self,
+        runner: Option<String>,
+    ) -> homeboy::core::Result<Option<String>> {
+        let Some(runner) = runner else {
+            return Ok(None);
+        };
+        let Some(FuzzCommand::Plan(plan)) = self.command.as_mut() else {
+            return Ok(Some(runner));
+        };
+        if plan.execute {
+            return Ok(Some(runner));
+        }
+        if let Some(lab_runner) = plan.lab_runner.as_deref() {
+            if lab_runner != runner {
+                return Err(homeboy::core::Error::validation_invalid_argument(
+                    "runner",
+                    "--runner and --lab-runner select different Lab runners; pass one runner selection".to_string(),
+                    Some(runner),
+                    Some(vec![lab_runner.to_string()]),
+                ));
+            }
+        } else {
+            plan.lab_runner = Some(runner);
+        }
+        Ok(None)
     }
 
     fn destructive_run_args(&self) -> Option<&FuzzRunArgs> {
@@ -441,6 +471,8 @@ pub(crate) struct FuzzPlanArgs {
     pub(crate) campaign_workloads: Vec<String>,
 
     /// Preferred Lab runner id to record in campaign plan entries without executing them.
+    /// Prefer the global `--runner` spelling; this alias remains compatible with
+    /// existing manifests and automation.
     #[arg(long = "lab-runner", value_name = "ID")]
     pub(crate) lab_runner: Option<String>,
 
