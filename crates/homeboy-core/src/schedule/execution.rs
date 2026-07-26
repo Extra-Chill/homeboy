@@ -43,6 +43,22 @@ pub struct ScheduleRunOutcome {
     pub notify_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// Per-step results, so an operator can see which step failed without
+    /// re-running the whole sequence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<ScheduleStepOutcome>,
+}
+
+/// What one step of a schedule produced.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleStepOutcome {
+    /// Position in the declared sequence, starting at 1.
+    pub index: usize,
+    pub command: String,
+    pub status: String,
+    pub exit_code: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 /// Executes a homeboy command and reports its structured result.
@@ -185,6 +201,112 @@ pub fn bound_output(value: &str) -> String {
     format!("[output truncated]\n{}", &value[start..])
 }
 
+/// Run a schedule's steps in order, stopping at the first failure.
+///
+/// Fail-fast is the right default for a sequence: running a later step after
+/// an earlier one failed is usually worse than not running it, and the failure
+/// is what the operator needs to see.
+fn run_steps(
+    schedule: &Schedule,
+    runner: &dyn ScheduleCommandRunner,
+) -> (
+    String,
+    i32,
+    String,
+    Option<String>,
+    Vec<ScheduleStepOutcome>,
+) {
+    let steps = schedule.resolved_steps();
+    let mut outcomes: Vec<ScheduleStepOutcome> = Vec::with_capacity(steps.len());
+    let mut digests: Vec<String> = Vec::with_capacity(steps.len());
+
+    for (index, step) in steps.iter().enumerate() {
+        let result = match step.resolve() {
+            Some(command) => runner.run(command),
+            None => Err(Error::validation_invalid_argument(
+                "command",
+                "Schedule step declares neither a homeboy command nor a program to run",
+                Some(schedule.id.clone()),
+                None,
+            )),
+        };
+        let (status, exit_code, digest, summary) = match &result {
+            Ok(outcome) => summarize(outcome),
+            Err(error) => (
+                "failed".to_string(),
+                -1,
+                String::new(),
+                Some(error.to_string()),
+            ),
+        };
+        let failed = status != "succeeded" || exit_code != 0;
+        digests.push(digest);
+        outcomes.push(ScheduleStepOutcome {
+            index: index + 1,
+            command: step.display(),
+            status: status.clone(),
+            exit_code,
+            summary: summary.clone(),
+        });
+
+        if failed {
+            // The run's status is the first failure, and the remaining steps
+            // are not attempted.
+            return (
+                status,
+                exit_code,
+                sequence_digest(&digests),
+                Some(failure_summary(index + 1, steps.len(), &outcomes)),
+                outcomes,
+            );
+        }
+    }
+
+    let summary = if outcomes.len() > 1 {
+        Some(format!("{} steps succeeded", outcomes.len()))
+    } else {
+        outcomes.first().and_then(|step| step.summary.clone())
+    };
+    (
+        "succeeded".to_string(),
+        0,
+        sequence_digest(&digests),
+        summary,
+        outcomes,
+    )
+}
+
+fn failure_summary(step: usize, total: usize, outcomes: &[ScheduleStepOutcome]) -> String {
+    let detail = outcomes
+        .last()
+        .and_then(|last| last.summary.clone())
+        .unwrap_or_default();
+    let head = if total > 1 {
+        format!("step {step} of {total} failed")
+    } else {
+        "failed".to_string()
+    };
+    if detail.is_empty() {
+        head
+    } else {
+        format!("{head}: {detail}")
+    }
+}
+
+/// Fingerprint a whole sequence, so a chain that produces the same outcomes
+/// twice stays silent under notify-on-change.
+///
+/// A run that stops early has fewer digests than one that completes, so a
+/// chain failing at a different step is itself a change.
+pub fn sequence_digest(step_digests: &[String]) -> String {
+    if step_digests.len() == 1 {
+        return step_digests[0].clone();
+    }
+    let joined = step_digests.join("\u{1e}");
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(joined.as_bytes());
+    format!("{digest:x}")
+}
+
 /// Reduce a command result to the fields the scheduler reasons about.
 fn summarize(result: &ScheduleCommandResult) -> (String, i32, String, Option<String>) {
     match result {
@@ -315,26 +437,8 @@ pub fn run_schedule(schedule: &Schedule, runner: &dyn ScheduleCommandRunner) -> 
         },
     );
 
-    let result = match schedule.scheduled_command() {
-        Some(command) => runner.run(command),
-        None => Err(Error::validation_invalid_argument(
-            "command",
-            "Schedule declares neither a homeboy command nor a program to run",
-            Some(schedule.id.clone()),
-            None,
-        )),
-    };
+    let (status, exit_code, digest, summary, step_outcomes) = run_steps(schedule, runner);
     let finished = chrono::Utc::now();
-
-    let (status, exit_code, digest, summary) = match &result {
-        Ok(outcome) => summarize(outcome),
-        Err(error) => (
-            "failed".to_string(),
-            -1,
-            String::new(),
-            Some(error.to_string()),
-        ),
-    };
 
     let succeeded = status == "succeeded" && exit_code == 0;
     let changed = previous
@@ -354,6 +458,7 @@ pub fn run_schedule(schedule: &Schedule, runner: &dyn ScheduleCommandRunner) -> 
         notified: false,
         notify_error: None,
         summary,
+        steps: step_outcomes,
     };
 
     if should_notify(schedule.notify_on, succeeded, changed) {
@@ -436,6 +541,7 @@ mod tests {
             id: "digest-fixture".to_string(),
             command: Some(vec!["triage".to_string()]),
             exec: None,
+            steps: Vec::new(),
             every: Cadence::from_seconds(3_600).expect("cadence"),
             notify_on: policy,
             on_overlap: OverlapPolicy::default(),
@@ -518,6 +624,7 @@ mod tests {
                 args: args.iter().map(|arg| arg.to_string()).collect(),
                 working_dir: None,
             }),
+            steps: Vec::new(),
             every: Cadence::from_seconds(3_600).expect("cadence"),
             notify_on: NotifyPolicy::Change,
             on_overlap: OverlapPolicy::default(),
@@ -629,6 +736,167 @@ mod tests {
         let noisy = "é".repeat(MAX_CAPTURED_OUTPUT_BYTES);
         let bounded = bound_output(&noisy);
         assert!(bounded.contains('é'), "multi-byte output must stay valid");
+    }
+
+    /// A recording runner that can be told to fail at a given call index.
+    struct SequenceRunner {
+        calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        fail_at: Option<usize>,
+    }
+
+    impl ScheduleCommandRunner for SequenceRunner {
+        fn run(&self, command: ScheduledCommand<'_>) -> Result<ScheduleCommandResult> {
+            let rendered = match command {
+                ScheduledCommand::Homeboy(argv) => argv.join(" "),
+                ScheduledCommand::Exec(exec) => exec.program.clone(),
+            };
+            let index = {
+                let mut calls = self.calls.lock().expect("calls");
+                calls.push(rendered);
+                calls.len()
+            };
+            let failing = self.fail_at == Some(index);
+            Ok(ScheduleCommandResult::Envelope(serde_json::json!({
+                "status": if failing { "failed" } else { "succeeded" },
+                "exit_code": if failing { 3 } else { 0 },
+            })))
+        }
+    }
+
+    fn step(argv: &[&str]) -> super::super::types::ScheduleStep {
+        super::super::types::ScheduleStep {
+            command: Some(argv.iter().map(|a| a.to_string()).collect()),
+            exec: None,
+        }
+    }
+
+    fn chained(id: &str) -> Schedule {
+        Schedule {
+            id: id.to_string(),
+            command: None,
+            exec: None,
+            steps: vec![step(&["harvest", "--check"]), step(&["fleet", "check"])],
+            every: Cadence::from_seconds(3_600).expect("cadence"),
+            notify_on: NotifyPolicy::Change,
+            on_overlap: OverlapPolicy::default(),
+            notification_transport: None,
+            notification_route: None,
+            jitter_seconds: None,
+            enabled: true,
+            description: None,
+            aliases: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn steps_run_in_declaration_order() {
+        crate::test_support::with_isolated_home(|_| {
+            let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let runner = SequenceRunner {
+                calls: std::sync::Arc::clone(&calls),
+                fail_at: None,
+            };
+
+            let outcome = run_schedule(&chained("ordered"), &runner);
+            assert_eq!(outcome.status, "succeeded");
+            assert_eq!(
+                *calls.lock().expect("calls"),
+                vec!["harvest --check".to_string(), "fleet check".to_string()]
+            );
+            assert_eq!(outcome.steps.len(), 2);
+            assert_eq!(outcome.steps[0].index, 1);
+            assert_eq!(outcome.steps[1].index, 2);
+        });
+    }
+
+    /// Running a later step after an earlier one failed is usually worse than
+    /// not running it — a deploy after a failed check, for instance.
+    #[test]
+    fn a_failing_step_stops_the_sequence() {
+        crate::test_support::with_isolated_home(|_| {
+            let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let runner = SequenceRunner {
+                calls: std::sync::Arc::clone(&calls),
+                fail_at: Some(1),
+            };
+
+            let outcome = run_schedule(&chained("fail-fast"), &runner);
+            assert_eq!(outcome.status, "failed");
+            assert_eq!(outcome.exit_code, 3);
+            assert_eq!(
+                calls.lock().expect("calls").len(),
+                1,
+                "the second step must not run"
+            );
+            assert_eq!(outcome.steps.len(), 1, "only attempted steps are reported");
+        });
+    }
+
+    /// The operator needs to know *which* step failed without re-running.
+    #[test]
+    fn a_failure_summary_names_the_failing_step() {
+        crate::test_support::with_isolated_home(|_| {
+            let runner = SequenceRunner {
+                calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                fail_at: Some(2),
+            };
+            let outcome = run_schedule(&chained("named-failure"), &runner);
+            let summary = outcome.summary.expect("failure summary");
+            assert!(
+                summary.contains("step 2 of 2"),
+                "summary should name the failing step, got: {summary}"
+            );
+        });
+    }
+
+    #[test]
+    fn an_unchanged_chain_is_not_reported_as_a_change() {
+        crate::test_support::with_isolated_home(|_| {
+            let runner = SequenceRunner {
+                calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                fail_at: None,
+            };
+            let schedule = chained("stable-chain");
+
+            assert!(run_schedule(&schedule, &runner).changed, "first run");
+            assert!(
+                !run_schedule(&schedule, &runner).changed,
+                "an identical chain is not a change"
+            );
+        });
+    }
+
+    /// A chain that starts failing at a different point is a change, even
+    /// though the earlier steps produced identical results.
+    #[test]
+    fn a_chain_failing_at_a_different_step_is_a_change() {
+        crate::test_support::with_isolated_home(|_| {
+            let schedule = chained("moving-failure");
+            let healthy = SequenceRunner {
+                calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                fail_at: None,
+            };
+            run_schedule(&schedule, &healthy);
+
+            let broken = SequenceRunner {
+                calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                fail_at: Some(2),
+            };
+            assert!(
+                run_schedule(&schedule, &broken).changed,
+                "a newly failing step must report"
+            );
+        });
+    }
+
+    #[test]
+    fn a_single_step_digest_matches_the_unchained_form() {
+        assert_eq!(sequence_digest(&["abc".to_string()]), "abc");
+        assert_ne!(
+            sequence_digest(&["abc".to_string(), "def".to_string()]),
+            sequence_digest(&["abc".to_string()]),
+            "a partial chain must differ from a complete one"
+        );
     }
 
     struct StubRunner(serde_json::Value);

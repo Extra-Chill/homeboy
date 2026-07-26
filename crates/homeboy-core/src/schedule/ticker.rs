@@ -148,6 +148,7 @@ mod tests {
             id: id.to_string(),
             command: Some(vec!["triage".to_string()]),
             exec: None,
+            steps: Vec::new(),
             every: Cadence::from_seconds(3_600).expect("cadence"),
             notify_on: NotifyPolicy::default(),
             on_overlap: OverlapPolicy::default(),

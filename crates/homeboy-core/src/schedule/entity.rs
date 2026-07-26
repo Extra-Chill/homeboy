@@ -39,29 +39,34 @@ impl ConfigEntity for Schedule {
                 None,
             ));
         }
-        match (&self.command, &self.exec) {
-            (Some(argv), None) => validate_homeboy_command(argv)?,
-            (None, Some(exec)) => validate_exec_command(exec)?,
-            (Some(_), Some(_)) => {
-                return Err(Error::validation_invalid_argument(
-                    "command",
-                    "A schedule runs either a homeboy command or a program, not both",
-                    Some(self.id.clone()),
-                    Some(vec![
-                        "Declare one schedule per thing you want run.".to_string()
-                    ]),
-                ));
+        let single = self.command.is_some() || self.exec.is_some();
+        if single && !self.steps.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "steps",
+                "A schedule declares either a single command or a list of steps, not both",
+                Some(self.id.clone()),
+                Some(vec![
+                    "Move the single command into the step list, or drop the steps.".to_string(),
+                ]),
+            ));
+        }
+
+        if !self.steps.is_empty() {
+            for (index, step) in self.steps.iter().enumerate() {
+                validate_step(step).map_err(|error| {
+                    Error::validation_invalid_argument(
+                        "steps",
+                        format!("Step {} is invalid: {error}", index + 1),
+                        Some(self.id.clone()),
+                        None,
+                    )
+                })?;
             }
-            (None, None) => {
-                return Err(Error::validation_invalid_argument(
-                    "command",
-                    "A schedule needs something to run",
-                    Some(self.id.clone()),
-                    Some(vec![
-                        "Pass --command 'fleet check prod', or --exec with a program.".to_string(),
-                    ]),
-                ));
-            }
+        } else {
+            validate_step(&super::types::ScheduleStep {
+                command: self.command.clone(),
+                exec: self.exec.clone(),
+            })?;
         }
         // A transport without a route (or the reverse) silently never
         // notifies, which is worse than refusing it.
@@ -95,6 +100,27 @@ impl ConfigEntity for Schedule {
 
     fn aliases(&self) -> &[String] {
         &self.aliases
+    }
+}
+
+fn validate_step(step: &super::types::ScheduleStep) -> Result<()> {
+    match (&step.command, &step.exec) {
+        (Some(argv), None) => validate_homeboy_command(argv),
+        (None, Some(exec)) => validate_exec_command(exec),
+        (Some(_), Some(_)) => Err(Error::validation_invalid_argument(
+            "command",
+            "A step runs either a homeboy command or a program, not both",
+            None,
+            None,
+        )),
+        (None, None) => Err(Error::validation_invalid_argument(
+            "command",
+            "A step needs something to run",
+            None,
+            Some(vec![
+                "Pass --command 'fleet check prod', or --exec with a program.".to_string(),
+            ]),
+        )),
     }
 }
 
@@ -180,6 +206,7 @@ mod tests {
             id: "nightly-harvest".to_string(),
             command: Some(vec!["harvest".to_string(), "prod".to_string()]),
             exec: None,
+            steps: Vec::new(),
             every: Cadence::from_seconds(86_400).expect("cadence"),
             notify_on: NotifyPolicy::default(),
             on_overlap: OverlapPolicy::default(),
@@ -250,6 +277,7 @@ mod tests {
                 args: vec!["example.com".to_string()],
                 working_dir: None,
             }),
+            steps: Vec::new(),
             every: Cadence::from_seconds(43_200).expect("cadence"),
             notify_on: NotifyPolicy::default(),
             on_overlap: OverlapPolicy::default(),
@@ -281,6 +309,7 @@ mod tests {
         let invalid = Schedule {
             command: None,
             exec: None,
+            steps: Vec::new(),
             ..exec_schedule()
         };
         assert!(invalid.validate().is_err());
@@ -303,6 +332,7 @@ mod tests {
                     args: Vec::new(),
                     working_dir: None,
                 }),
+                steps: Vec::new(),
                 ..exec_schedule()
             };
             let error = invalid
@@ -325,6 +355,7 @@ mod tests {
                 args: vec!["a|b".to_string(), "$PATH".to_string()],
                 working_dir: None,
             }),
+            steps: Vec::new(),
             ..exec_schedule()
         };
         valid
@@ -342,6 +373,58 @@ mod tests {
             assert_eq!(exec.args, vec!["example.com".to_string()]);
             assert!(loaded.command.is_none());
         });
+    }
+
+    #[test]
+    fn declaring_both_a_single_command_and_steps_is_rejected() {
+        let invalid = Schedule {
+            command: Some(vec!["triage".to_string()]),
+            exec: None,
+            steps: vec![super::super::types::ScheduleStep {
+                command: Some(vec!["fleet".to_string(), "check".to_string()]),
+                exec: None,
+            }],
+            ..schedule()
+        };
+        let error = invalid.validate().expect_err("ambiguous declaration");
+        assert!(error.to_string().contains("not both"), "got: {error}");
+    }
+
+    /// A bad step must name its position, or an operator has to guess which
+    /// entry in the list is wrong.
+    #[test]
+    fn an_invalid_step_is_reported_with_its_position() {
+        let invalid = Schedule {
+            command: None,
+            exec: None,
+            steps: vec![
+                super::super::types::ScheduleStep {
+                    command: Some(vec!["triage".to_string()]),
+                    exec: None,
+                },
+                super::super::types::ScheduleStep {
+                    command: None,
+                    exec: None,
+                },
+            ],
+            ..schedule()
+        };
+        let error = invalid.validate().expect_err("empty step");
+        assert!(error.to_string().contains("Step 2"), "got: {error}");
+    }
+
+    #[test]
+    fn a_step_may_not_run_the_scheduler() {
+        let invalid = Schedule {
+            command: None,
+            exec: None,
+            steps: vec![super::super::types::ScheduleStep {
+                command: Some(vec!["schedule".to_string(), "tick".to_string()]),
+                exec: None,
+            }],
+            ..schedule()
+        };
+        assert!(invalid.validate().is_err());
     }
 
     #[test]

@@ -6,7 +6,7 @@ use serde::Serialize;
 use homeboy::core::error::{Error, Result};
 use homeboy::core::schedule::{
     self, Cadence, ExecCommand, NotifyPolicy, OverlapPolicy, Schedule, ScheduleRunOutcome,
-    ScheduleState, SubprocessRunner,
+    ScheduleState, ScheduleStep, SubprocessRunner,
 };
 
 use super::CmdResult;
@@ -43,21 +43,26 @@ pub struct AddArgs {
     id: String,
 
     /// Homeboy command to run, without the leading binary name
-    /// (for example: --command "fleet check prod")
-    #[arg(long, conflicts_with = "exec")]
-    command: Option<String>,
+    /// (for example: --command "fleet check prod").
+    ///
+    /// Repeat to declare an ordered sequence. Steps run in order and stop at
+    /// the first failure.
+    #[arg(long)]
+    command: Vec<String>,
 
-    /// External program to run instead of a homeboy command. Executed
-    /// directly, never through a shell.
-    #[arg(long, conflicts_with = "command")]
-    exec: Option<String>,
+    /// External program to run. Executed directly, never through a shell.
+    ///
+    /// Repeat to declare an ordered sequence. Pair each with --exec-arg and
+    /// --working-dir, which apply to the most recent --exec.
+    #[arg(long)]
+    exec: Vec<String>,
 
-    /// Argument for --exec. Repeat for each argument; values are passed
-    /// through untouched, so an argument may contain spaces.
+    /// Argument for the preceding --exec. Repeat for each argument; values are
+    /// passed through untouched, so an argument may contain spaces.
     #[arg(long = "exec-arg", requires = "exec")]
     exec_arg: Vec<String>,
 
-    /// Directory to run --exec from
+    /// Directory to run the preceding --exec from
     #[arg(long, requires = "exec")]
     working_dir: Option<String>,
 
@@ -171,6 +176,58 @@ fn view(schedule: Schedule) -> ScheduleView {
     }
 }
 
+/// Build the declared step sequence.
+///
+/// `--command` and `--exec` may each be repeated. Sequencing is
+/// commands-then-programs rather than interleaved, because clap does not
+/// preserve relative order across different flags — an interleaved sequence
+/// would silently reorder itself, which is worse than not offering it.
+fn build_steps(add: &AddArgs) -> Result<Vec<ScheduleStep>> {
+    let mut steps: Vec<ScheduleStep> = Vec::new();
+
+    for raw in &add.command {
+        steps.push(ScheduleStep {
+            command: Some(split_command(raw)?),
+            exec: None,
+        });
+    }
+
+    if add.exec.len() > 1 && (!add.exec_arg.is_empty() || add.working_dir.is_some()) {
+        return Err(Error::validation_invalid_argument(
+            "exec",
+            "--exec-arg and --working-dir cannot be shared across multiple --exec steps",
+            None,
+            Some(vec![
+                "Declare one --exec per schedule, or edit the schedule file to give each step its own arguments."
+                    .to_string(),
+            ]),
+        ));
+    }
+
+    for program in &add.exec {
+        steps.push(ScheduleStep {
+            command: None,
+            exec: Some(ExecCommand {
+                program: program.clone(),
+                args: add.exec_arg.clone(),
+                working_dir: add.working_dir.clone(),
+            }),
+        });
+    }
+
+    if steps.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "command",
+            "A schedule needs something to run",
+            Some(add.id.clone()),
+            Some(vec![
+                "Pass --command 'fleet check prod', or --exec with a program.".to_string(),
+            ]),
+        ));
+    }
+    Ok(steps)
+}
+
 /// Split a command string into argv.
 ///
 /// Supports quoting so an argument may contain spaces.
@@ -233,29 +290,20 @@ pub fn run(args: ScheduleArgs, _global: &super::GlobalArgs) -> CmdResult<Schedul
                     Some(vec!["Pass --force to replace it.".to_string()]),
                 ));
             }
-            let (command, exec) = match (&add.command, &add.exec) {
-                (Some(raw), None) => (Some(split_command(raw)?), None),
-                (None, Some(program)) => (
-                    None,
-                    Some(ExecCommand {
-                        program: program.clone(),
-                        args: add.exec_arg.clone(),
-                        working_dir: add.working_dir.clone(),
-                    }),
-                ),
-                _ => {
-                    return Err(Error::validation_invalid_argument(
-                        "command",
-                        "Pass exactly one of --command or --exec",
-                        Some(add.id.clone()),
-                        None,
-                    ))
-                }
+            let steps = build_steps(&add)?;
+            // A single step is stored in the flat form so simple schedules stay
+            // simple to read and to diff.
+            let (command, exec, steps) = if steps.len() == 1 {
+                let only = steps.into_iter().next().unwrap_or_default();
+                (only.command, only.exec, Vec::new())
+            } else {
+                (None, None, steps)
             };
             let declared = Schedule {
                 id: add.id.clone(),
                 command,
                 exec,
+                steps,
                 every: Cadence::parse(&add.every)?,
                 notify_on: add.notify_on.parse::<NotifyPolicy>()?,
                 on_overlap: match add.on_overlap.trim().to_ascii_lowercase().as_str() {
