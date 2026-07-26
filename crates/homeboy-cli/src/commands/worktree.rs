@@ -258,6 +258,8 @@ pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<Worktre
                         sort: ArtifactCleanupSort::Discovery,
                         limit: None,
                         merged_only: false,
+                        min_age_days: None,
+                        include_active_worktrees: false,
                     },
                 )?)
             } else {

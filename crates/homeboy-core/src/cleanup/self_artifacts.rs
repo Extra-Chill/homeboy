@@ -13,8 +13,9 @@ use std::path::{Path, PathBuf};
 use crate::{git, Error, Result};
 
 use super::{
-    git_safety, has_tracked_changes_under, path_size, ArtifactCleanupCandidate,
-    ArtifactCleanupOptions,
+    git_safety, has_tracked_changes_under, path_usage, ArtifactCleanupCandidate,
+    ArtifactCleanupOptions, SELF_TEMP_ARTIFACT_CATEGORY, SELF_TEMP_ARTIFACT_LIVENESS,
+    SELF_TEMP_ARTIFACT_READINESS,
 };
 
 pub(super) fn homeboy_source_checkout() -> Result<PathBuf> {
@@ -150,7 +151,7 @@ pub(super) fn self_temp_artifact_candidates(
                 }
                 continue;
             }
-            let size_bytes = path_size(&path)?;
+            let usage = path_usage(&path)?;
             let name = path
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -162,7 +163,13 @@ pub(super) fn self_temp_artifact_candidates(
                 relative_path: name,
                 kind: "detached_homeboy_temp_artifact".to_string(),
                 declared_by: "self_temp_root".to_string(),
-                size_bytes,
+                category: SELF_TEMP_ARTIFACT_CATEGORY.to_string(),
+                size_bytes: usage.logical_bytes,
+                allocated_bytes: usage.allocated_bytes,
+                age_seconds: usage.age_seconds(),
+                liveness: SELF_TEMP_ARTIFACT_LIVENESS.to_string(),
+                readiness: SELF_TEMP_ARTIFACT_READINESS.to_string(),
+                rehydrate_command: None,
                 source_dirty: false,
                 unpushed_commits: false,
             });
@@ -195,14 +202,20 @@ fn temp_homeboy_checkout_target_candidate(
         return Ok(None);
     }
 
-    let size_bytes = path_size(&target)?;
+    let usage = path_usage(&target)?;
     Ok(Some(ArtifactCleanupCandidate {
         worktree: checkout.to_string_lossy().to_string(),
         path: target.to_string_lossy().to_string(),
         relative_path: "target".to_string(),
         kind: "temp_homeboy_checkout_target".to_string(),
         declared_by: "self_temp_root".to_string(),
-        size_bytes,
+        category: SELF_TEMP_ARTIFACT_CATEGORY.to_string(),
+        size_bytes: usage.logical_bytes,
+        allocated_bytes: usage.allocated_bytes,
+        age_seconds: usage.age_seconds(),
+        liveness: SELF_TEMP_ARTIFACT_LIVENESS.to_string(),
+        readiness: SELF_TEMP_ARTIFACT_READINESS.to_string(),
+        rehydrate_command: None,
         source_dirty: safety.source_dirty,
         unpushed_commits: safety.unpushed_commits,
     }))
@@ -239,14 +252,20 @@ fn partial_homeboy_temp_target_candidate(
         return Ok(None);
     }
 
-    let size_bytes = path_size(&target)?;
+    let usage = path_usage(&target)?;
     Ok(Some(ArtifactCleanupCandidate {
         worktree: temp_dir.to_string_lossy().to_string(),
         path: target.to_string_lossy().to_string(),
         relative_path: "target".to_string(),
         kind: "partial_homeboy_temp_target".to_string(),
         declared_by: "self_temp_root".to_string(),
-        size_bytes,
+        category: SELF_TEMP_ARTIFACT_CATEGORY.to_string(),
+        size_bytes: usage.logical_bytes,
+        allocated_bytes: usage.allocated_bytes,
+        age_seconds: usage.age_seconds(),
+        liveness: SELF_TEMP_ARTIFACT_LIVENESS.to_string(),
+        readiness: SELF_TEMP_ARTIFACT_READINESS.to_string(),
+        rehydrate_command: None,
         source_dirty: false,
         unpushed_commits: false,
     }))

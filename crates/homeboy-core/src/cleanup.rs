@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
@@ -19,8 +19,10 @@ pub use cargo_targets::{
     acquire_shared_cargo_target, cleanup_shared_cargo_targets, shared_cargo_target_inventory,
     CargoTargetCleanupOptions, CargoTargetCleanupOutput, SharedCargoTargetLease,
 };
+mod extension_declarations;
 mod self_artifacts;
 
+use extension_declarations::extension_artifact_declarations;
 #[cfg(test)]
 use self_artifacts::validate_homeboy_manifest_dir;
 use self_artifacts::{homeboy_source_checkout, self_temp_artifact_candidates};
@@ -28,6 +30,26 @@ use self_artifacts::{homeboy_source_checkout, self_temp_artifact_candidates};
 const ARTIFACT_DIR_REMOVE_ATTEMPTS: usize = 3;
 const ARTIFACT_DIR_REMOVE_RETRY_DELAY: Duration = Duration::from_millis(50);
 const BUILTIN_ARTIFACT_PATHS: &[(&str, &str)] = &[("target", "rust_target")];
+const SECONDS_PER_DAY: u64 = 86_400;
+
+/// Default artifact class for declarations that predate categorized cleanup.
+/// Both the built-in path and repository-declared paths describe output that a
+/// build regenerates, so they report as build output.
+const LEGACY_ARTIFACT_CATEGORY: &str = "build_output";
+
+/// Liveness of the checkout an artifact belongs to.
+const LIVENESS_ACTIVE: &str = "active_task_worktree";
+const LIVENESS_IDLE: &str = "idle";
+
+/// What the checkout needs before it is usable again once the artifact is gone.
+const READINESS_REHYDRATION_REQUIRED: &str = "rehydration_required";
+const READINESS_REBUILD_ON_DEMAND: &str = "rebuild_on_demand";
+
+/// Homeboy's own scratch build output: never a registered task worktree, and
+/// always rebuilt by the next build rather than reinstalled.
+pub(crate) const SELF_TEMP_ARTIFACT_CATEGORY: &str = LEGACY_ARTIFACT_CATEGORY;
+pub(crate) const SELF_TEMP_ARTIFACT_LIVENESS: &str = LIVENESS_IDLE;
+pub(crate) const SELF_TEMP_ARTIFACT_READINESS: &str = READINESS_REBUILD_ON_DEMAND;
 
 #[derive(Debug, Clone, Default)]
 pub struct ArtifactCleanupOptions {
@@ -42,6 +64,14 @@ pub struct ArtifactCleanupOptions {
     /// keeps in-progress cooks' build dirs intact while reclaiming the large
     /// `target/` dirs left behind by merged worktrees.
     pub merged_only: bool,
+    /// Require artifacts to be untouched for at least this many days. Composes
+    /// with any age floor an extension declaration sets; the stricter wins.
+    pub min_age_days: Option<u64>,
+    /// Reclaim extension-declared artifacts even from checkouts registered as
+    /// active task worktrees. Those declarations are protected by default
+    /// because removing an install tree makes a live checkout unusable until it
+    /// is rehydrated.
+    pub include_active_worktrees: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -69,6 +99,7 @@ pub struct ResourceCleanupOutput {
     pub skipped_count: usize,
     pub remaining_count: usize,
     pub reclaimed_bytes: u64,
+    pub reclaimed_allocated_bytes: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<ArtifactCleanupOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -89,9 +120,15 @@ pub struct ArtifactCleanupOutput {
     pub remaining_count: usize,
     pub estimated_bytes: u64,
     pub reclaimed_bytes: u64,
+    /// Disk actually charged to the artifacts, not the sum of apparent file
+    /// sizes. Dependency trees are dominated by small files, so allocated bytes
+    /// are what an operator watching free space actually gets back.
+    pub estimated_allocated_bytes: u64,
+    pub reclaimed_allocated_bytes: u64,
     /// Replays the reviewed cleanup scope with mutation explicitly enabled.
     pub next_command: String,
     pub summary: ArtifactCleanupSummary,
+    pub worktrees: Vec<ArtifactCleanupWorktreeSummary>,
     pub candidates: Vec<ArtifactCleanupCandidate>,
     pub skipped: Vec<ArtifactCleanupSkipped>,
     pub applied: Vec<ArtifactCleanupApplied>,
@@ -114,6 +151,23 @@ struct ArtifactCleanupSessionState {
     cumulative_reclaimed_bytes: u64,
 }
 
+/// Per-checkout roll-up. Aggregate cleanup spans many worktrees, and the unit an
+/// operator acts on is the checkout: how much it is holding, and the command
+/// that puts it back to work.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ArtifactCleanupWorktreeSummary {
+    pub worktree: String,
+    pub liveness: String,
+    pub candidate_count: usize,
+    pub skipped_count: usize,
+    pub estimated_bytes: u64,
+    pub estimated_allocated_bytes: u64,
+    pub reclaimed_bytes: u64,
+    pub reclaimed_allocated_bytes: u64,
+    /// Commands that rehydrate what this invocation would remove or removed.
+    pub rehydrate_commands: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ArtifactCleanupCandidate {
     pub worktree: String,
@@ -121,7 +175,16 @@ pub struct ArtifactCleanupCandidate {
     pub relative_path: String,
     pub kind: String,
     pub declared_by: String,
+    /// Artifact class reported by the declaration owner.
+    pub category: String,
     pub size_bytes: u64,
+    pub allocated_bytes: u64,
+    /// Seconds since the newest write anywhere inside the artifact.
+    pub age_seconds: Option<u64>,
+    pub liveness: String,
+    pub readiness: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rehydrate_command: Option<String>,
     pub source_dirty: bool,
     pub unpushed_commits: bool,
 }
@@ -132,6 +195,8 @@ pub struct ArtifactCleanupSkipped {
     pub path: String,
     pub relative_path: String,
     pub kind: String,
+    pub declared_by: String,
+    pub category: String,
     pub reason: String,
 }
 
@@ -141,7 +206,11 @@ pub struct ArtifactCleanupApplied {
     pub path: String,
     pub relative_path: String,
     pub kind: String,
+    pub category: String,
     pub size_bytes: u64,
+    pub allocated_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rehydrate_command: Option<String>,
     pub removed: bool,
 }
 
@@ -151,7 +220,9 @@ pub struct ArtifactCleanupFailed {
     pub path: String,
     pub relative_path: String,
     pub kind: String,
+    pub category: String,
     pub size_bytes: u64,
+    pub allocated_bytes: u64,
     pub error: String,
 }
 
@@ -165,6 +236,24 @@ pub struct ArtifactDeclaration {
     pub relative_path: String,
     pub kind: String,
     pub declared_by: String,
+    /// Artifact class. Only reconstructable classes are removal candidates.
+    pub category: String,
+    pub reconstructable: bool,
+    pub rehydrate_command: Option<String>,
+    /// Age floor the declaration owner requires before removal.
+    pub min_age_days: Option<u64>,
+    /// Whether an active task worktree protects this declaration by default.
+    pub liveness_protected: bool,
+}
+
+impl ArtifactDeclaration {
+    fn readiness(&self) -> &'static str {
+        if self.rehydrate_command.is_some() {
+            READINESS_REHYDRATION_REQUIRED
+        } else {
+            READINESS_REBUILD_ON_DEMAND
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -172,6 +261,43 @@ struct GitSafety {
     source_dirty: bool,
     unpushed_commits: bool,
     dirty_paths: Vec<String>,
+    /// Untracked, non-ignored entries. An artifact path holding these is not
+    /// purely reconstructable output, so it is never removed.
+    untracked_paths: Vec<String>,
+}
+
+/// Paths of checkouts Homeboy currently records as active task worktrees.
+/// Resolved once per invocation so the registry is read a single time.
+#[derive(Debug, Default, Clone)]
+struct ActiveWorktrees {
+    paths: HashSet<PathBuf>,
+}
+
+impl ActiveWorktrees {
+    fn resolve() -> Self {
+        let Ok(listing) = crate::worktree::list() else {
+            return Self::default();
+        };
+        let paths = listing
+            .worktrees
+            .into_iter()
+            .filter(|record| record.state == crate::worktree::TaskWorktreeState::Active)
+            .map(|record| canonical_or_owned(Path::new(&record.worktree_path)))
+            .collect();
+        Self { paths }
+    }
+
+    fn liveness(&self, worktree: &Path) -> &'static str {
+        if self.paths.contains(&canonical_or_owned(worktree)) {
+            LIVENESS_ACTIVE
+        } else {
+            LIVENESS_IDLE
+        }
+    }
+}
+
+fn canonical_or_owned(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 pub fn cleanup_artifacts(options: ArtifactCleanupOptions) -> Result<ArtifactCleanupOutput> {
@@ -208,11 +334,13 @@ struct WorktreeCandidateScan {
 fn collect_worktree_candidates(
     worktree: &WorktreeInfo,
     options: &ArtifactCleanupOptions,
+    active: &ActiveWorktrees,
 ) -> Result<WorktreeCandidateScan> {
     let mut candidates = Vec::new();
     let mut skipped = Vec::new();
 
     let safety = git_safety(&worktree.path)?;
+    let liveness = active.liveness(&worktree.path);
     if options.merged_only && !branch_is_merged(&worktree.path) {
         for declaration in artifact_declarations(&worktree.path)? {
             let artifact_path = worktree.path.join(&declaration.relative_path);
@@ -246,6 +374,15 @@ fn collect_worktree_candidates(
             ));
             continue;
         }
+        if !declaration.reconstructable {
+            skipped.push(skip_row(
+                worktree,
+                &declaration,
+                display_path,
+                "declared artifact is a release asset retained for deployment",
+            ));
+            continue;
+        }
         if has_tracked_changes_under(&safety.dirty_paths, &declaration.relative_path) {
             skipped.push(skip_row(
                 worktree,
@@ -255,15 +392,55 @@ fn collect_worktree_candidates(
             ));
             continue;
         }
+        if has_untracked_work_at(&safety.untracked_paths, &declaration.relative_path) {
+            skipped.push(skip_row(
+                worktree,
+                &declaration,
+                display_path,
+                "artifact path holds untracked work that Git does not ignore",
+            ));
+            continue;
+        }
+        if declaration.liveness_protected
+            && !options.include_active_worktrees
+            && liveness == LIVENESS_ACTIVE
+        {
+            skipped.push(skip_row(
+                worktree,
+                &declaration,
+                display_path,
+                "checkout is a registered active task worktree",
+            ));
+            continue;
+        }
 
-        let size_bytes = path_size(&artifact_path)?;
+        let usage = path_usage(&artifact_path)?;
+        let age_seconds = usage.age_seconds();
+        if let Some(min_age_days) = effective_min_age_days(options, &declaration) {
+            if !meets_age_gate(age_seconds, min_age_days) {
+                skipped.push(skip_row(
+                    worktree,
+                    &declaration,
+                    display_path,
+                    &format!("artifact was modified within the {min_age_days}-day age gate"),
+                ));
+                continue;
+            }
+        }
+
         candidates.push(ArtifactCleanupCandidate {
             worktree: worktree.path.to_string_lossy().to_string(),
             path: display_path.clone(),
             relative_path: declaration.relative_path.clone(),
             kind: declaration.kind.clone(),
             declared_by: declaration.declared_by.clone(),
-            size_bytes,
+            category: declaration.category.clone(),
+            size_bytes: usage.logical_bytes,
+            allocated_bytes: usage.allocated_bytes,
+            age_seconds,
+            liveness: liveness.to_string(),
+            readiness: declaration.readiness().to_string(),
+            rehydrate_command: declaration.rehydrate_command.clone(),
             source_dirty: safety.source_dirty,
             unpushed_commits: safety.unpushed_commits,
         });
@@ -275,6 +452,25 @@ fn collect_worktree_candidates(
     })
 }
 
+/// The strictest age floor in play: the caller's gate and the declaration
+/// owner's gate both have to pass.
+fn effective_min_age_days(
+    options: &ArtifactCleanupOptions,
+    declaration: &ArtifactDeclaration,
+) -> Option<u64> {
+    match (options.min_age_days, declaration.min_age_days) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+/// An artifact whose age cannot be read fails the gate. An unreadable timestamp
+/// is not evidence of staleness, and the gate exists to protect recent work.
+fn meets_age_gate(age_seconds: Option<u64>, min_age_days: u64) -> bool {
+    age_seconds.is_some_and(|age| age >= min_age_days.saturating_mul(SECONDS_PER_DAY))
+}
+
 /// A worktree-level skip row (no specific artifact declaration), used when an
 /// entire worktree cannot be inspected.
 fn worktree_skip_row(worktree: &WorktreeInfo, reason: String) -> ArtifactCleanupSkipped {
@@ -283,6 +479,8 @@ fn worktree_skip_row(worktree: &WorktreeInfo, reason: String) -> ArtifactCleanup
         path: worktree.path.to_string_lossy().to_string(),
         relative_path: String::new(),
         kind: String::new(),
+        declared_by: String::new(),
+        category: String::new(),
         reason,
     }
 }
@@ -295,12 +493,13 @@ fn cleanup_artifacts_in_worktrees(
 ) -> Result<ArtifactCleanupOutput> {
     let mut candidates = Vec::new();
     let mut skipped = Vec::new();
+    let active = ActiveWorktrees::resolve();
 
     for worktree in &worktrees {
         // A single stale/non-Git/vanished worktree candidate must not abort the
         // whole batch: classify it, record a bounded diagnostic, and continue so
         // independent valid worktrees are still cleaned (#9925).
-        match collect_worktree_candidates(worktree, options) {
+        match collect_worktree_candidates(worktree, options, &active) {
             Ok(WorktreeCandidateScan {
                 candidates: worktree_candidates,
                 skipped: worktree_skipped,
@@ -336,6 +535,9 @@ fn cleanup_artifacts_in_worktrees(
 
     let estimated_bytes = candidates.iter().map(|row| row.size_bytes).sum();
     let reclaimed_bytes = applied.iter().map(|row| row.size_bytes).sum();
+    let estimated_allocated_bytes = candidates.iter().map(|row| row.allocated_bytes).sum();
+    let reclaimed_allocated_bytes = applied.iter().map(|row| row.allocated_bytes).sum();
+    let worktree_rows = worktree_summaries(&candidates, &skipped, &applied, &active);
     let (success_count, remaining_count) =
         artifact_cleanup_result_counts(candidates.len(), applied.len(), failed.len());
     let failure_count = failed.len();
@@ -361,8 +563,11 @@ fn cleanup_artifacts_in_worktrees(
         remaining_count,
         estimated_bytes,
         reclaimed_bytes,
+        estimated_allocated_bytes,
+        reclaimed_allocated_bytes,
         next_command: artifact_cleanup_apply_command(options),
         summary,
+        worktrees: worktree_rows,
         candidates,
         skipped,
         applied,
@@ -393,6 +598,12 @@ fn artifact_cleanup_apply_command(options: &ArtifactCleanupOptions) -> String {
     }
     if options.merged_only {
         command.push_str(" --merged-only");
+    }
+    if let Some(min_age_days) = options.min_age_days {
+        command.push_str(&format!(" --min-age-days {min_age_days}"));
+    }
+    if options.include_active_worktrees {
+        command.push_str(" --include-active-worktrees");
     }
     command.push_str(" --apply");
     command
@@ -447,6 +658,10 @@ pub fn cleanup_resources_from_config(
         .as_ref()
         .map(|output| output.reclaimed_bytes)
         .unwrap_or(0);
+    let reclaimed_allocated_bytes = artifacts
+        .as_ref()
+        .map(|output| output.reclaimed_allocated_bytes)
+        .unwrap_or(0);
     let provider_success_count = providers
         .as_ref()
         .map(|output| output.success_count)
@@ -472,6 +687,7 @@ pub fn cleanup_resources_from_config(
         skipped_count,
         remaining_count,
         reclaimed_bytes,
+        reclaimed_allocated_bytes,
         artifacts,
         worktree_providers: providers,
     })
@@ -676,6 +892,11 @@ pub fn artifact_declarations(worktree: &Path) -> Result<Vec<ArtifactDeclaration>
             relative_path: (*relative_path).to_string(),
             kind: (*kind).to_string(),
             declared_by: "homeboy:builtin_artifact_paths".to_string(),
+            category: LEGACY_ARTIFACT_CATEGORY.to_string(),
+            reconstructable: true,
+            rehydrate_command: None,
+            min_age_days: None,
+            liveness_protected: false,
         })
         .collect();
 
@@ -704,9 +925,19 @@ pub fn artifact_declarations(worktree: &Path) -> Result<Vec<ArtifactDeclaration>
                 relative_path: path.to_string(),
                 kind: "declared_artifact".to_string(),
                 declared_by: "homeboy.json:artifact_cleanup_paths".to_string(),
+                category: LEGACY_ARTIFACT_CATEGORY.to_string(),
+                reconstructable: true,
+                rehydrate_command: None,
+                min_age_days: None,
+                liveness_protected: false,
             });
         }
     }
+
+    // Extension-owned declarations resolve last: a repository that names a path
+    // explicitly has already decided how that path is treated, and the
+    // ecosystem-wide rule must not override the repository-local one.
+    declarations.extend(extension_artifact_declarations(worktree));
 
     let mut seen = HashSet::new();
     declarations.retain(|row| seen.insert(row.relative_path.clone()));
@@ -741,7 +972,41 @@ fn git_safety(worktree: &Path) -> Result<GitSafety> {
         source_dirty,
         unpushed_commits,
         dirty_paths,
+        untracked_paths: untracked_paths(worktree),
     })
+}
+
+/// Untracked entries Git does not ignore, collapsed to whole directories so a
+/// large untracked tree stays one row instead of a per-file listing.
+///
+/// Declared artifacts are normally ignored, so this list is empty in the common
+/// case. When it is not, the path holds files nothing else is tracking — that is
+/// work, not reconstructable output, and cleanup leaves it alone.
+fn untracked_paths(worktree: &Path) -> Vec<String> {
+    let output = git::run_git(
+        worktree,
+        &[
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "--directory",
+            "--no-empty-directory",
+        ],
+        "git ls-files untracked",
+    );
+    match output {
+        Ok(listing) => listing
+            .lines()
+            .map(|line| {
+                line.trim()
+                    .trim_matches('"')
+                    .trim_end_matches('/')
+                    .to_string()
+            })
+            .filter(|line| !line.is_empty())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Returns true when the worktree's current branch is already merged into its
@@ -810,13 +1075,32 @@ fn has_tracked_changes_under(dirty_paths: &[String], relative_path: &str) -> boo
         .any(|path| path == relative_path || path.starts_with(&prefix))
 }
 
+/// Whether untracked, non-ignored work sits at, inside, or above the artifact
+/// path.
+///
+/// The ancestor case matters as much as the descendant case: an artifact nested
+/// inside an untracked directory is part of a tree Git is not accounting for,
+/// and removing it would delete work nothing else records.
+fn has_untracked_work_at(untracked_paths: &[String], relative_path: &str) -> bool {
+    let artifact = relative_path.trim_end_matches('/');
+    untracked_paths.iter().any(|path| {
+        let path = path.trim_end_matches('/');
+        path == artifact
+            || path.starts_with(&format!("{artifact}/"))
+            || artifact.starts_with(&format!("{path}/"))
+    })
+}
+
 fn applied_row(candidate: &ArtifactCleanupCandidate) -> ArtifactCleanupApplied {
     ArtifactCleanupApplied {
         worktree: candidate.worktree.clone(),
         path: candidate.path.clone(),
         relative_path: candidate.relative_path.clone(),
         kind: candidate.kind.clone(),
+        category: candidate.category.clone(),
         size_bytes: candidate.size_bytes,
+        allocated_bytes: candidate.allocated_bytes,
+        rehydrate_command: candidate.rehydrate_command.clone(),
         removed: true,
     }
 }
@@ -827,7 +1111,9 @@ fn failed_row(candidate: &ArtifactCleanupCandidate, error: String) -> ArtifactCl
         path: candidate.path.clone(),
         relative_path: candidate.relative_path.clone(),
         kind: candidate.kind.clone(),
+        category: candidate.category.clone(),
         size_bytes: candidate.size_bytes,
+        allocated_bytes: candidate.allocated_bytes,
         error,
     }
 }
@@ -843,8 +1129,68 @@ fn skip_row(
         path,
         relative_path: declaration.relative_path.clone(),
         kind: declaration.kind.clone(),
+        declared_by: declaration.declared_by.clone(),
+        category: declaration.category.clone(),
         reason: reason.to_string(),
     }
+}
+
+/// Roll candidates, skips, and applied rows up per checkout.
+///
+/// Rehydration guidance is deduplicated per checkout: an operator needs the set
+/// of commands that restores the checkout, not one line per removed path.
+fn worktree_summaries(
+    candidates: &[ArtifactCleanupCandidate],
+    skipped: &[ArtifactCleanupSkipped],
+    applied: &[ArtifactCleanupApplied],
+    active: &ActiveWorktrees,
+) -> Vec<ArtifactCleanupWorktreeSummary> {
+    let mut order = Vec::new();
+    let mut seen = HashSet::new();
+    for worktree in candidates
+        .iter()
+        .map(|row| &row.worktree)
+        .chain(skipped.iter().map(|row| &row.worktree))
+    {
+        if seen.insert(worktree.clone()) {
+            order.push(worktree.clone());
+        }
+    }
+
+    order
+        .into_iter()
+        .map(|worktree| {
+            let owned: Vec<_> = candidates
+                .iter()
+                .filter(|row| row.worktree == worktree)
+                .collect();
+            let removed: Vec<_> = applied
+                .iter()
+                .filter(|row| row.worktree == worktree)
+                .collect();
+            let mut rehydrate_commands = Vec::new();
+            for command in owned.iter().filter_map(|row| row.rehydrate_command.clone()) {
+                if !rehydrate_commands.contains(&command) {
+                    rehydrate_commands.push(command);
+                }
+            }
+
+            ArtifactCleanupWorktreeSummary {
+                liveness: active.liveness(Path::new(&worktree)).to_string(),
+                candidate_count: owned.len(),
+                skipped_count: skipped
+                    .iter()
+                    .filter(|row| row.worktree == worktree)
+                    .count(),
+                estimated_bytes: owned.iter().map(|row| row.size_bytes).sum(),
+                estimated_allocated_bytes: owned.iter().map(|row| row.allocated_bytes).sum(),
+                reclaimed_bytes: removed.iter().map(|row| row.size_bytes).sum(),
+                reclaimed_allocated_bytes: removed.iter().map(|row| row.allocated_bytes).sum(),
+                rehydrate_commands,
+                worktree,
+            }
+        })
+        .collect()
 }
 
 pub fn is_safe_artifact_path(relative_path: &str) -> bool {
@@ -857,11 +1203,55 @@ pub fn is_safe_artifact_path(relative_path: &str) -> bool {
             .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
+/// What one artifact path costs and how recently it was touched.
+///
+/// Apparent size and allocated size diverge sharply for large trees of small
+/// files: apparent size answers "how much content", allocated size answers "how
+/// much disk comes back". Both are reported so an operator can reconcile a
+/// cleanup report against free space.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PathUsage {
+    pub(crate) logical_bytes: u64,
+    pub(crate) allocated_bytes: u64,
+    pub(crate) newest_modified: Option<SystemTime>,
+}
+
+impl PathUsage {
+    fn merge(&mut self, other: PathUsage) {
+        self.logical_bytes = self.logical_bytes.saturating_add(other.logical_bytes);
+        self.allocated_bytes = self.allocated_bytes.saturating_add(other.allocated_bytes);
+        self.newest_modified = match (self.newest_modified, other.newest_modified) {
+            (Some(left), Some(right)) => Some(left.max(right)),
+            (Some(value), None) | (None, Some(value)) => Some(value),
+            (None, None) => None,
+        };
+    }
+
+    /// Seconds since the newest write anywhere in the tree. `None` when no
+    /// timestamp could be read, or when the newest write is in the future.
+    pub(crate) fn age_seconds(&self) -> Option<u64> {
+        let newest = self.newest_modified?;
+        SystemTime::now()
+            .duration_since(newest)
+            .ok()
+            .map(|elapsed| elapsed.as_secs())
+    }
+}
+
 fn path_size(path: &Path) -> Result<u64> {
+    Ok(path_usage(path)?.logical_bytes)
+}
+
+pub(crate) fn path_usage(path: &Path) -> Result<PathUsage> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|e| Error::internal_io(e.to_string(), Some(format!("stat {}", path.display()))))?;
+    let modified = metadata.modified().ok();
     if metadata.is_file() || metadata.file_type().is_symlink() {
-        return Ok(metadata.len());
+        return Ok(PathUsage {
+            logical_bytes: metadata.len(),
+            allocated_bytes: allocated_bytes(&metadata, metadata.len()),
+            newest_modified: modified,
+        });
     }
 
     // Sum only the reclaimable file/symlink content. A directory's own
@@ -870,7 +1260,15 @@ fn path_size(path: &Path) -> Result<u64> {
     // sorting reflect directory nesting depth rather than actual artifact
     // weight (e.g. a 5-byte file under two nested dirs outranking a 256-byte
     // file under one). Recurse over children and count their bytes only.
-    let mut total = 0;
+    //
+    // Allocated bytes do include directory blocks: removing the tree frees the
+    // directory inodes too, and a deep tree of small files can hold a
+    // meaningful share of its footprint there.
+    let mut usage = PathUsage {
+        logical_bytes: 0,
+        allocated_bytes: allocated_bytes(&metadata, 0),
+        newest_modified: modified,
+    };
     for entry in fs::read_dir(path).map_err(|e| {
         Error::internal_io(
             e.to_string(),
@@ -883,9 +1281,23 @@ fn path_size(path: &Path) -> Result<u64> {
                 Some(format!("read directory entry {}", path.display())),
             )
         })?;
-        total += path_size(&entry.path())?;
+        usage.merge(path_usage(&entry.path())?);
     }
-    Ok(total)
+    Ok(usage)
+}
+
+/// Disk actually charged to an entry. Falls back to apparent size on platforms
+/// that do not report block allocation.
+#[cfg(unix)]
+fn allocated_bytes(metadata: &fs::Metadata, _fallback: u64) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+
+    metadata.blocks().saturating_mul(512)
+}
+
+#[cfg(not(unix))]
+fn allocated_bytes(_metadata: &fs::Metadata, fallback: u64) -> u64 {
+    fallback
 }
 
 fn remove_artifact_path(path: &Path) -> Result<()> {
@@ -984,6 +1396,29 @@ mod tests {
     }
 
     #[test]
+    fn untracked_work_is_detected_at_inside_and_above_the_artifact_path() {
+        let untracked = vec!["modules".to_string(), "build/notes.txt".to_string()];
+
+        assert!(
+            has_untracked_work_at(&untracked, "modules/alpha/deps"),
+            "an artifact nested inside an untracked tree is protected"
+        );
+        assert!(
+            has_untracked_work_at(&untracked, "modules"),
+            "an artifact path that is itself untracked is protected"
+        );
+        assert!(
+            has_untracked_work_at(&untracked, "build"),
+            "untracked work inside the artifact path is protected"
+        );
+        assert!(!has_untracked_work_at(&untracked, "target"));
+        assert!(
+            !has_untracked_work_at(&untracked, "modules-generated"),
+            "a shared name prefix is not a path prefix"
+        );
+    }
+
+    #[test]
     fn declared_artifact_paths_are_loaded_from_homeboy_json() {
         let tmp = TempDir::new().expect("tempdir");
         fs::write(
@@ -1015,17 +1450,22 @@ mod tests {
 
     #[test]
     fn artifact_declarations_include_builtin_rust_target() {
-        let tmp = TempDir::new().expect("tempdir");
+        crate::test_support::with_isolated_home(|_| {
+            let tmp = TempDir::new().expect("tempdir");
 
-        let declarations = artifact_declarations(tmp.path()).expect("declarations");
+            let declarations = artifact_declarations(tmp.path()).expect("declarations");
 
-        assert_eq!(declarations.len(), 1);
-        assert_eq!(declarations[0].relative_path, "target");
-        assert_eq!(declarations[0].kind, "rust_target");
-        assert_eq!(
-            declarations[0].declared_by,
-            "homeboy:builtin_artifact_paths"
-        );
+            assert_eq!(declarations.len(), 1);
+            assert_eq!(declarations[0].relative_path, "target");
+            assert_eq!(declarations[0].kind, "rust_target");
+            assert_eq!(
+                declarations[0].declared_by,
+                "homeboy:builtin_artifact_paths"
+            );
+            assert_eq!(declarations[0].category, LEGACY_ARTIFACT_CATEGORY);
+            assert!(declarations[0].reconstructable);
+            assert!(!declarations[0].liveness_protected);
+        });
     }
 
     #[test]
@@ -1060,6 +1500,8 @@ mod tests {
             sort: ArtifactCleanupSort::Discovery,
             limit: None,
             merged_only: false,
+            min_age_days: None,
+            include_active_worktrees: false,
         })
         .expect("dry-run cleanup");
 
@@ -1107,6 +1549,8 @@ mod tests {
                     sort: ArtifactCleanupSort::Discovery,
                     limit: None,
                     merged_only: false,
+                    min_age_days: None,
+                    include_active_worktrees: false,
                 }),
                 worktree_providers: Some(WorktreeProviderCleanupOptions {
                     provider: vec!["fixture".to_string()],
@@ -1164,6 +1608,8 @@ mod tests {
                     sort: ArtifactCleanupSort::Discovery,
                     limit: None,
                     merged_only: false,
+                    min_age_days: None,
+                    include_active_worktrees: false,
                 }),
                 worktree_providers: Some(WorktreeProviderCleanupOptions {
                     provider: vec!["fixture".to_string()],
@@ -1288,6 +1734,8 @@ mod tests {
             sort: ArtifactCleanupSort::Discovery,
             limit: None,
             merged_only: false,
+            min_age_days: None,
+            include_active_worktrees: false,
         })
         .expect_err("reject ambiguous cleanup root");
 
@@ -1305,6 +1753,8 @@ mod tests {
             sort: ArtifactCleanupSort::Discovery,
             limit: None,
             merged_only: false,
+            min_age_days: None,
+            include_active_worktrees: false,
         })
         .expect_err("reject non-git cleanup root");
 
@@ -1346,6 +1796,8 @@ mod tests {
             sort: ArtifactCleanupSort::Discovery,
             limit: None,
             merged_only: false,
+            min_age_days: None,
+            include_active_worktrees: false,
         })
         .expect("temp artifact candidates");
 
@@ -1390,6 +1842,8 @@ mod tests {
             sort: ArtifactCleanupSort::Discovery,
             limit: None,
             merged_only: false,
+            min_age_days: None,
+            include_active_worktrees: false,
         })
         .expect("apply cleanup");
 
@@ -1427,6 +1881,8 @@ mod tests {
             sort: ArtifactCleanupSort::Discovery,
             limit: None,
             merged_only: false,
+            min_age_days: None,
+            include_active_worktrees: false,
         })
         .expect("temp artifact candidates");
 
@@ -1459,6 +1915,8 @@ mod tests {
             sort: ArtifactCleanupSort::Discovery,
             limit: None,
             merged_only: false,
+            min_age_days: None,
+            include_active_worktrees: false,
         })
         .expect("apply cleanup");
 
@@ -1491,6 +1949,8 @@ mod tests {
             sort: ArtifactCleanupSort::Discovery,
             limit: None,
             merged_only: false,
+            min_age_days: None,
+            include_active_worktrees: false,
         })
         .expect("temp artifact candidates");
 
@@ -1517,6 +1977,8 @@ mod tests {
             sort: ArtifactCleanupSort::Discovery,
             limit: None,
             merged_only: false,
+            min_age_days: None,
+            include_active_worktrees: false,
         })
         .expect("temp artifact candidates");
 
@@ -1544,6 +2006,8 @@ mod tests {
             sort: ArtifactCleanupSort::Discovery,
             limit: None,
             merged_only: false,
+            min_age_days: None,
+            include_active_worktrees: false,
         })
         .expect("temp artifact candidates");
 
@@ -1568,6 +2032,8 @@ mod tests {
             sort: ArtifactCleanupSort::Discovery,
             limit: None,
             merged_only: false,
+            min_age_days: None,
+            include_active_worktrees: false,
         })
         .expect("apply cleanup");
 
@@ -1598,6 +2064,8 @@ mod tests {
             sort: ArtifactCleanupSort::Discovery,
             limit: None,
             merged_only: false,
+            min_age_days: None,
+            include_active_worktrees: false,
         })
         .expect("dry-run cleanup");
 
@@ -1634,6 +2102,8 @@ mod tests {
             sort: ArtifactCleanupSort::Size,
             limit: None,
             merged_only: false,
+            min_age_days: None,
+            include_active_worktrees: false,
         })
         .expect("dry-run cleanup");
 
@@ -1665,6 +2135,8 @@ mod tests {
             sort: ArtifactCleanupSort::Size,
             limit: Some(2),
             merged_only: false,
+            min_age_days: None,
+            include_active_worktrees: false,
         })
         .expect("apply cleanup");
 
@@ -1695,6 +2167,8 @@ mod tests {
             sort: ArtifactCleanupSort::Discovery,
             limit: None,
             merged_only: false,
+            min_age_days: None,
+            include_active_worktrees: false,
         })
         .expect("apply cleanup");
 
@@ -1721,6 +2195,8 @@ mod tests {
             sort: ArtifactCleanupSort::Discovery,
             limit: None,
             merged_only: false,
+            min_age_days: None,
+            include_active_worktrees: false,
         })
         .expect("first apply cleanup");
 
@@ -1746,6 +2222,8 @@ mod tests {
             sort: ArtifactCleanupSort::Discovery,
             limit: None,
             merged_only: false,
+            min_age_days: None,
+            include_active_worktrees: false,
         })
         .expect("second apply cleanup");
 
@@ -1850,6 +2328,8 @@ mod tests {
             sort: ArtifactCleanupSort::Discovery,
             limit: None,
             merged_only: false,
+            min_age_days: None,
+            include_active_worktrees: false,
         })
         .expect("apply cleanup");
 
@@ -1988,6 +2468,8 @@ mod tests {
             sort: ArtifactCleanupSort::Discovery,
             limit: None,
             merged_only: true,
+            min_age_days: None,
+            include_active_worktrees: false,
         })
         .expect("merged-only cleanup");
 
@@ -2019,6 +2501,8 @@ mod tests {
             sort: ArtifactCleanupSort::Discovery,
             limit: None,
             merged_only: true,
+            min_age_days: None,
+            include_active_worktrees: false,
         })
         .expect("merged-only cleanup");
 
@@ -2039,6 +2523,8 @@ mod tests {
             sort: ArtifactCleanupSort::Size,
             limit: Some(7),
             merged_only: true,
+            min_age_days: None,
+            include_active_worktrees: false,
         };
 
         assert_eq!(
@@ -2189,7 +2675,13 @@ mod tests {
             relative_path: relative_path.to_string(),
             kind: "artifact".to_string(),
             declared_by: "test".to_string(),
+            category: LEGACY_ARTIFACT_CATEGORY.to_string(),
             size_bytes: 1,
+            allocated_bytes: 512,
+            age_seconds: Some(0),
+            liveness: LIVENESS_IDLE.to_string(),
+            readiness: READINESS_REBUILD_ON_DEMAND.to_string(),
+            rehydrate_command: None,
             source_dirty: false,
             unpushed_commits: false,
         }
@@ -2219,6 +2711,7 @@ mod tests {
                 path: not_a_repo.path().to_path_buf(),
             },
             &ArtifactCleanupOptions::default(),
+            &ActiveWorktrees::default(),
         );
         assert!(
             scan.is_err(),
@@ -2268,5 +2761,453 @@ mod tests {
             "invalid worktree should be reported as skipped: {:?}",
             output.skipped
         );
+    }
+
+    /// Install an extension whose only capability is artifact cleanup. Keeps the
+    /// fixture focused on the declaration contract under test.
+    fn install_artifact_cleanup_extension(id: &str, declarations: serde_json::Value) {
+        let mut manifest: homeboy_extension_contract::ExtensionManifest =
+            serde_json::from_value(serde_json::json!({
+                "name": "Fixture",
+                "version": "1.0.0",
+                "artifact_cleanup": { "declarations": declarations },
+            }))
+            .expect("fixture manifest parses");
+        manifest.id = id.to_string();
+        crate::extension_store::save_manifest(&manifest).expect("save fixture extension");
+    }
+
+    /// A declaration for a reinstallable dependency tree resolved beside a
+    /// marker file, with rehydration guidance attached.
+    fn dependency_tree_declaration(nested: bool) -> serde_json::Value {
+        serde_json::json!([{
+            "id": "dependency-tree",
+            "category": "dependencies",
+            "path": "deps",
+            "scopes": [{ "manifest_files": ["scope.marker"], "nested": nested }],
+            "rehydrate_command": "fixture install",
+        }])
+    }
+
+    /// Repo whose declared artifact trees are ignored, which is the normal shape
+    /// for reconstructable output.
+    fn repo_with_ignored_artifacts() -> TempDir {
+        let repo = TempDir::new().expect("repo tempdir");
+        git(repo.path(), &["init", "-b", "main"]);
+        write_file(&repo.path().join("src/lib.rs"), "source");
+        write_file(&repo.path().join("scope.marker"), "{}");
+        write_file(
+            &repo.path().join(".gitignore"),
+            "deps/\npackaged/\ntarget/\n",
+        );
+        git(
+            repo.path(),
+            &["add", "src/lib.rs", "scope.marker", ".gitignore"],
+        );
+        git(
+            repo.path(),
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        repo
+    }
+
+    /// Commit everything Git is willing to track. Declared artifact trees stay
+    /// ignored, so this leaves the fixture with no untracked work.
+    fn commit_all(repo: &Path) {
+        git(repo, &["add", "-A"]);
+        git(
+            repo,
+            &[
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "fixture",
+            ],
+        );
+    }
+
+    fn register_active_task_worktree(path: &Path) {
+        crate::worktree::record_active_for_test("fixture-active", path);
+    }
+
+    fn dry_run_options(repo: &Path) -> ArtifactCleanupOptions {
+        ArtifactCleanupOptions {
+            path: Some(repo.to_path_buf()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn extension_declarations_resolve_beside_supported_install_scopes_only() {
+        crate::test_support::with_isolated_home(|_| {
+            install_artifact_cleanup_extension("fixture", dependency_tree_declaration(true));
+            let repo = repo_with_ignored_artifacts();
+            write_file(&repo.path().join("deps/package/index.txt"), "installed");
+            write_file(&repo.path().join("modules/alpha/scope.marker"), "{}");
+            write_file(
+                &repo.path().join("modules/alpha/deps/index.txt"),
+                "installed",
+            );
+            // No marker here, so this tree is not an install scope the
+            // extension supports and must not be resolved.
+            write_file(
+                &repo.path().join("modules/beta/deps/index.txt"),
+                "installed",
+            );
+            commit_all(repo.path());
+
+            let output = cleanup_artifacts(dry_run_options(repo.path())).expect("dry run");
+
+            let paths: Vec<_> = output
+                .candidates
+                .iter()
+                .map(|row| row.relative_path.clone())
+                .collect();
+            assert!(paths.contains(&"deps".to_string()));
+            assert!(paths.contains(&"modules/alpha/deps".to_string()));
+            assert!(!paths.contains(&"modules/beta/deps".to_string()));
+            assert!(repo.path().join("deps/package/index.txt").exists());
+        });
+    }
+
+    #[test]
+    fn extension_declarations_report_owner_category_and_rehydration_guidance() {
+        crate::test_support::with_isolated_home(|_| {
+            install_artifact_cleanup_extension("fixture", dependency_tree_declaration(false));
+            let repo = repo_with_ignored_artifacts();
+            write_file(&repo.path().join("deps/package/index.txt"), "installed");
+
+            let output = cleanup_artifacts(dry_run_options(repo.path())).expect("dry run");
+
+            let candidate = output
+                .candidates
+                .iter()
+                .find(|row| row.relative_path == "deps")
+                .expect("declared dependency tree is a candidate");
+            assert_eq!(candidate.declared_by, "extension:fixture");
+            assert_eq!(candidate.kind, "dependency-tree");
+            assert_eq!(candidate.category, "dependencies");
+            assert_eq!(candidate.readiness, READINESS_REHYDRATION_REQUIRED);
+            assert_eq!(
+                candidate.rehydrate_command.as_deref(),
+                Some("fixture install")
+            );
+            assert!(candidate.age_seconds.is_some());
+            assert!(candidate.allocated_bytes > 0);
+
+            let summary = output
+                .worktrees
+                .first()
+                .expect("per-worktree summary is reported");
+            assert_eq!(summary.rehydrate_commands, vec!["fixture install"]);
+            assert_eq!(
+                summary.estimated_allocated_bytes,
+                output.estimated_allocated_bytes
+            );
+            assert_eq!(summary.reclaimed_bytes, 0);
+        });
+    }
+
+    #[test]
+    fn release_assets_are_reported_but_never_removed() {
+        crate::test_support::with_isolated_home(|_| {
+            install_artifact_cleanup_extension(
+                "fixture",
+                serde_json::json!([{
+                    "id": "packaged-output",
+                    "category": "release_asset",
+                    "path": "packaged",
+                }]),
+            );
+            let repo = repo_with_ignored_artifacts();
+            write_file(&repo.path().join("packaged/bundle.bin"), "deployable");
+
+            let output = cleanup_artifacts(ArtifactCleanupOptions {
+                apply: true,
+                ..dry_run_options(repo.path())
+            })
+            .expect("apply");
+
+            assert!(output
+                .candidates
+                .iter()
+                .all(|row| row.relative_path != "packaged"));
+            let skip = output
+                .skipped
+                .iter()
+                .find(|row| row.relative_path == "packaged")
+                .expect("release asset is reported as skipped");
+            assert_eq!(skip.category, "release_asset");
+            assert_eq!(skip.declared_by, "extension:fixture");
+            assert!(skip.reason.contains("release asset"));
+            assert!(repo.path().join("packaged/bundle.bin").exists());
+        });
+    }
+
+    #[test]
+    fn age_gate_protects_recently_written_artifacts() {
+        crate::test_support::with_isolated_home(|_| {
+            install_artifact_cleanup_extension("fixture", dependency_tree_declaration(false));
+            let repo = repo_with_ignored_artifacts();
+            write_file(&repo.path().join("deps/package/index.txt"), "installed");
+
+            let output = cleanup_artifacts(ArtifactCleanupOptions {
+                min_age_days: Some(7),
+                apply: true,
+                ..dry_run_options(repo.path())
+            })
+            .expect("apply");
+
+            assert!(output.candidates.is_empty());
+            assert!(output
+                .skipped
+                .iter()
+                .any(|row| row.relative_path == "deps" && row.reason.contains("7-day age gate")));
+            assert!(repo.path().join("deps/package/index.txt").exists());
+        });
+    }
+
+    #[test]
+    fn declaration_age_floor_composes_with_the_caller_gate() {
+        let declaration = ArtifactDeclaration {
+            relative_path: "deps".to_string(),
+            kind: "dependency-tree".to_string(),
+            declared_by: "extension:fixture".to_string(),
+            category: "dependencies".to_string(),
+            reconstructable: true,
+            rehydrate_command: None,
+            min_age_days: Some(3),
+            liveness_protected: true,
+        };
+
+        assert_eq!(
+            effective_min_age_days(&ArtifactCleanupOptions::default(), &declaration),
+            Some(3)
+        );
+        assert_eq!(
+            effective_min_age_days(
+                &ArtifactCleanupOptions {
+                    min_age_days: Some(9),
+                    ..Default::default()
+                },
+                &declaration,
+            ),
+            Some(9),
+            "the stricter of the two gates wins"
+        );
+        assert_eq!(
+            effective_min_age_days(
+                &ArtifactCleanupOptions {
+                    min_age_days: Some(1),
+                    ..Default::default()
+                },
+                &declaration,
+            ),
+            Some(3),
+            "a looser caller gate cannot relax a declared floor"
+        );
+    }
+
+    #[test]
+    fn unreadable_artifact_age_fails_the_gate() {
+        assert!(!meets_age_gate(None, 1));
+        assert!(!meets_age_gate(Some(SECONDS_PER_DAY - 1), 1));
+        assert!(meets_age_gate(Some(SECONDS_PER_DAY), 1));
+        assert!(meets_age_gate(Some(0), 0));
+    }
+
+    #[test]
+    fn active_task_worktrees_protect_extension_declared_artifacts() {
+        crate::test_support::with_isolated_home(|_| {
+            install_artifact_cleanup_extension("fixture", dependency_tree_declaration(false));
+            let repo = repo_with_ignored_artifacts();
+            write_file(&repo.path().join("deps/package/index.txt"), "installed");
+            write_file(&repo.path().join("target/debug/build.o"), "artifact");
+            register_active_task_worktree(repo.path());
+
+            let output = cleanup_artifacts(ArtifactCleanupOptions {
+                apply: true,
+                ..dry_run_options(repo.path())
+            })
+            .expect("apply");
+
+            assert!(output
+                .skipped
+                .iter()
+                .any(|row| row.relative_path == "deps"
+                    && row.reason.contains("active task worktree")));
+            assert!(repo.path().join("deps/package/index.txt").exists());
+            assert_eq!(
+                output.worktrees[0].liveness, LIVENESS_ACTIVE,
+                "liveness state is reported for the checkout"
+            );
+            assert!(
+                !repo.path().join("target").exists(),
+                "built-in declarations keep their existing behavior on active checkouts"
+            );
+        });
+    }
+
+    #[test]
+    fn active_worktree_protection_can_be_opted_out_of() {
+        crate::test_support::with_isolated_home(|_| {
+            install_artifact_cleanup_extension("fixture", dependency_tree_declaration(false));
+            let repo = repo_with_ignored_artifacts();
+            write_file(&repo.path().join("deps/package/index.txt"), "installed");
+            register_active_task_worktree(repo.path());
+
+            let output = cleanup_artifacts(ArtifactCleanupOptions {
+                apply: true,
+                include_active_worktrees: true,
+                ..dry_run_options(repo.path())
+            })
+            .expect("apply");
+
+            assert!(output.applied.iter().any(|row| row.relative_path == "deps"));
+            assert!(!repo.path().join("deps").exists());
+        });
+    }
+
+    #[test]
+    fn untracked_work_inside_a_declared_artifact_path_is_protected() {
+        crate::test_support::with_isolated_home(|_| {
+            install_artifact_cleanup_extension("fixture", dependency_tree_declaration(false));
+            let repo = TempDir::new().expect("repo tempdir");
+            git(repo.path(), &["init", "-b", "main"]);
+            write_file(&repo.path().join("src/lib.rs"), "source");
+            write_file(&repo.path().join("scope.marker"), "{}");
+            git(repo.path(), &["add", "src/lib.rs", "scope.marker"]);
+            git(
+                repo.path(),
+                &[
+                    "-c",
+                    "user.name=Homeboy Test",
+                    "-c",
+                    "user.email=homeboy@example.test",
+                    "commit",
+                    "-m",
+                    "initial",
+                ],
+            );
+            // Nothing ignores this tree, so Git still considers its contents
+            // unaccounted-for work rather than reconstructable output.
+            write_file(&repo.path().join("deps/notes.txt"), "operator work");
+
+            let output = cleanup_artifacts(ArtifactCleanupOptions {
+                apply: true,
+                ..dry_run_options(repo.path())
+            })
+            .expect("apply");
+
+            assert!(output
+                .skipped
+                .iter()
+                .any(|row| row.relative_path == "deps" && row.reason.contains("untracked work")));
+            assert!(repo.path().join("deps/notes.txt").exists());
+        });
+    }
+
+    #[test]
+    fn tracked_changes_inside_a_declared_artifact_path_are_protected() {
+        crate::test_support::with_isolated_home(|_| {
+            install_artifact_cleanup_extension("fixture", dependency_tree_declaration(false));
+            let repo = repo_with_ignored_artifacts();
+            write_file(&repo.path().join("deps/generated.txt"), "generated");
+            git(repo.path(), &["add", "--force", "deps/generated.txt"]);
+
+            let output = cleanup_artifacts(ArtifactCleanupOptions {
+                apply: true,
+                ..dry_run_options(repo.path())
+            })
+            .expect("apply");
+
+            assert!(output.skipped.iter().any(|row| row.relative_path == "deps"
+                && row.reason.contains("tracked or staged source changes")));
+            assert!(repo.path().join("deps/generated.txt").exists());
+        });
+    }
+
+    #[test]
+    fn unmerged_worktrees_protect_extension_declared_artifacts() {
+        crate::test_support::with_isolated_home(|_| {
+            install_artifact_cleanup_extension("fixture", dependency_tree_declaration(false));
+            let repo = repo_with_ignored_artifacts();
+            write_file(&repo.path().join("deps/package/index.txt"), "installed");
+
+            let output = cleanup_artifacts(ArtifactCleanupOptions {
+                apply: true,
+                merged_only: true,
+                ..dry_run_options(repo.path())
+            })
+            .expect("apply");
+
+            assert!(output.candidates.is_empty());
+            assert!(output.skipped.iter().any(|row| row.relative_path == "deps"
+                && row.reason.contains("not merged into its upstream")));
+            assert!(repo.path().join("deps/package/index.txt").exists());
+        });
+    }
+
+    #[test]
+    fn applying_extension_declared_cleanup_twice_is_idempotent() {
+        crate::test_support::with_isolated_home(|_| {
+            install_artifact_cleanup_extension("fixture", dependency_tree_declaration(false));
+            let repo = repo_with_ignored_artifacts();
+            write_file(&repo.path().join("deps/package/index.txt"), "installed");
+
+            let first = cleanup_artifacts(ArtifactCleanupOptions {
+                apply: true,
+                ..dry_run_options(repo.path())
+            })
+            .expect("first apply");
+            let second = cleanup_artifacts(ArtifactCleanupOptions {
+                apply: true,
+                ..dry_run_options(repo.path())
+            })
+            .expect("second apply");
+
+            assert_eq!(first.applied_count, 1);
+            assert!(first.reclaimed_allocated_bytes > 0);
+            assert_eq!(second.candidate_count, 0);
+            assert_eq!(second.applied_count, 0);
+            assert_eq!(second.failure_count, 0);
+            assert_eq!(second.reclaimed_bytes, 0);
+            assert!(!repo.path().join("deps").exists());
+            assert!(repo.path().join("src/lib.rs").exists());
+        });
+    }
+
+    #[test]
+    fn repository_declarations_win_over_ecosystem_declarations() {
+        crate::test_support::with_isolated_home(|_| {
+            install_artifact_cleanup_extension("fixture", dependency_tree_declaration(false));
+            let repo = repo_with_ignored_artifacts();
+            write_file(
+                &repo.path().join("homeboy.json"),
+                r#"{"artifact_cleanup_paths":["deps"]}"#,
+            );
+            write_file(&repo.path().join("deps/package/index.txt"), "installed");
+
+            let declarations = artifact_declarations(repo.path()).expect("declarations");
+
+            let deps: Vec<_> = declarations
+                .iter()
+                .filter(|row| row.relative_path == "deps")
+                .collect();
+            assert_eq!(deps.len(), 1, "one path resolves to one declaration");
+            assert_eq!(deps[0].declared_by, "homeboy.json:artifact_cleanup_paths");
+            assert!(!deps[0].liveness_protected);
+        });
     }
 }

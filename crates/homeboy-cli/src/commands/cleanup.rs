@@ -125,6 +125,17 @@ pub struct CleanupArtifactsArgs {
     /// into its upstream. Preserves in-progress cooks' build dirs.
     #[arg(long)]
     pub merged_only: bool,
+
+    /// Only reclaim artifacts untouched for at least this many days. Composes
+    /// with any age floor a declaration owner sets; the stricter one wins.
+    #[arg(long, value_name = "DAYS")]
+    pub min_age_days: Option<u64>,
+
+    /// Also reclaim extension-declared artifacts from checkouts registered as
+    /// active task worktrees. Those are protected by default because removing
+    /// an install tree leaves a live checkout unusable until it is rehydrated.
+    #[arg(long)]
+    pub include_active_worktrees: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -165,6 +176,8 @@ pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<Value> {
                     },
                     limit: args.limit,
                     merged_only: args.merged_only,
+                    min_age_days: args.min_age_days,
+                    include_active_worktrees: args.include_active_worktrees,
                 }),
                 worktree_providers: None,
             },
@@ -1128,6 +1141,8 @@ fn repo_artifact_roots(
                     sort: ArtifactCleanupSort::Discovery,
                     limit: None,
                     merged_only: false,
+                    min_age_days: None,
+                    include_active_worktrees: false,
                 },
             ));
         }
@@ -1143,6 +1158,8 @@ fn repo_artifact_roots(
                 sort: ArtifactCleanupSort::Discovery,
                 limit: None,
                 merged_only: false,
+                min_age_days: None,
+                include_active_worktrees: false,
             },
         ));
     }
@@ -1430,7 +1447,15 @@ pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String>
         format!("Applied: {applied_count}"),
         format!("Remaining candidates: {remaining_candidates}"),
         format!("Estimated reclaimable: {}", format_bytes(estimated_bytes)),
+        format!(
+            "Estimated reclaimable (allocated): {}",
+            format_bytes(allocated_total(payload, "estimated_allocated_bytes"))
+        ),
         format!("Reclaimed: {}", format_bytes(reclaimed_bytes)),
+        format!(
+            "Reclaimed (allocated): {}",
+            format_bytes(allocated_total(payload, "reclaimed_allocated_bytes"))
+        ),
         format!("Skipped: {skipped_count}"),
     ];
 
@@ -1451,6 +1476,16 @@ pub(crate) fn render_artifact_cleanup_summary(payload: &Value) -> Option<String>
                 "Full candidate list is available in JSON output; use --sort size --limit {candidate_display_limit} for a bounded largest-first review."
             ));
         }
+    }
+
+    let rehydrate_commands = rehydrate_command_lines(payload);
+    if !rehydrate_commands.is_empty() {
+        lines.push("Rehydrate removed dependencies with:".to_string());
+        lines.extend(
+            rehydrate_commands
+                .into_iter()
+                .map(|command| format!("  - {command}")),
+        );
     }
 
     let next = if mode == "apply" {
@@ -1602,6 +1637,33 @@ fn artifact_candidate_lines(payload: &Value, limit: usize) -> Vec<String> {
             Some(format!("  - {} {}", format_bytes(bytes), path))
         })
         .collect()
+}
+
+/// Allocated-byte totals are optional in the payload so an older cached report
+/// still renders; a missing total reads as zero rather than hiding the line.
+fn allocated_total(payload: &Value, field: &str) -> u64 {
+    payload.get(field).and_then(Value::as_u64).unwrap_or(0)
+}
+
+/// Deduplicated rehydration guidance across every inspected checkout. Operators
+/// need the set of commands that restores what cleanup removed, not one line
+/// per removed path.
+fn rehydrate_command_lines(payload: &Value) -> Vec<String> {
+    let mut commands: Vec<String> = Vec::new();
+    for command in payload
+        .get("worktrees")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|worktree| worktree.get("rehydrate_commands").and_then(Value::as_array))
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        if !commands.iter().any(|existing| existing == command) {
+            commands.push(command.to_string());
+        }
+    }
+    commands
 }
 
 fn skipped_counts_by_reason(payload: &Value) -> Vec<(String, u64)> {

@@ -222,6 +222,37 @@ variables.
 - `artifact_pattern` — Default artifact path pattern with template support. Supports: {component_id}, {local_path}
 - `cleanup_paths` — Paths to clean up after successful deploy (e.g., node_modules, vendor, target)
 
+### `ArtifactCleanupConfig`
+
+Extension manifest key: `artifact_cleanup`. Declares the reconstructable
+install/build trees the extension owns so canonical `homeboy cleanup artifacts`
+can inventory and reclaim them across managed worktrees. The extension declares
+what is reconstructable and how to rehydrate it; Homeboy owns dry-run/apply,
+path containment, age and liveness gating, Git safety, limits, and byte
+accounting.
+
+- `declarations` — List of `ArtifactCleanupDeclaration`.
+
+### `ArtifactCleanupDeclaration`
+
+- `id` — Stable identifier, unique within the extension. Reported as the candidate `kind`.
+- `category` — One of `dependencies`, `build_output`, `build_cache`, `release_asset`. Only the first three are removal candidates; `release_asset` is inventoried and always preserved.
+- `path` — Artifact path relative to each resolved install scope.
+- `scopes` — List of `ArtifactCleanupScope`. Defaults to the worktree root.
+- `rehydrate_command` — Operator-facing command that reinstalls or regenerates the artifact. Reported per worktree.
+- `min_age_days` — Age floor before removal is allowed. Composes with `--min-age-days`; the stricter one wins.
+- `description` — Retention/readiness tradeoff for this declaration.
+
+### `ArtifactCleanupScope`
+
+- `manifest_files` — Files that must all exist in a directory for it to count as an install scope. Empty resolves the worktree root unconditionally.
+- `nested` — Resolve nested install scopes below the worktree root, not just the root.
+- `max_depth` — Depth bound for nested discovery, relative to the worktree root. Defaults to `6`.
+
+Nested discovery never descends into a directory that is itself a declared
+artifact path, so a nested scope rule cannot degrade into a recursive deletion
+glob.
+
 ### `LintConfig`
 
 - `extension_script`
