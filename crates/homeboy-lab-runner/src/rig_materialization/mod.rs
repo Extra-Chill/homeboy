@@ -356,11 +356,20 @@ fn installed_rig_path_from_stdout(stdout: &str, rig_id: &str) -> Option<String> 
 
 pub(super) fn remap_rig_default_component_to_primary_snapshot(
     args: &[String],
-    primary_remote_path: &str,
-) -> Vec<String> {
+    component_path: Option<&str>,
+) -> Result<Vec<String>> {
     if !is_bench_or_fuzz_rig_component_command(args) || has_path_arg(args) {
-        return args.to_vec();
+        return Ok(args.to_vec());
     }
+
+    let component_path = component_path.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "component",
+            "Lab offload could not resolve the selected rig component to a materialized checkout",
+            None,
+            Some(vec!["Pass --path for the intended component checkout so Lab can materialize and bind it explicitly.".to_string()]),
+        )
+    })?;
 
     let mut out = Vec::with_capacity(args.len() + 2);
     let mut inserted = false;
@@ -368,7 +377,7 @@ pub(super) fn remap_rig_default_component_to_primary_snapshot(
     for arg in args {
         if !inserted && !passthrough && arg == "--" {
             out.push("--path".to_string());
-            out.push(primary_remote_path.to_string());
+            out.push(component_path.to_string());
             inserted = true;
         }
         if arg == "--" {
@@ -378,9 +387,87 @@ pub(super) fn remap_rig_default_component_to_primary_snapshot(
     }
     if !inserted {
         out.push("--path".to_string());
-        out.push(primary_remote_path.to_string());
+        out.push(component_path.to_string());
     }
-    out
+    Ok(out)
+}
+
+fn selected_rig_component_remote_path(
+    args: &[String],
+    dependencies: &[RigComponentDependency],
+) -> Result<String> {
+    let selected = match rig_component_selector(args) {
+        Some(component_id) => Some(component_id),
+        None => default_rig_component_selector(args)?,
+    };
+    let candidates = dependencies
+        .iter()
+        .filter(|dependency| {
+            selected
+                .as_deref()
+                .is_none_or(|id| dependency.component_id == id)
+        })
+        .collect::<Vec<_>>();
+    let dependency = match candidates.as_slice() {
+        [dependency] => *dependency,
+        [] if selected.is_some() => {
+            return Err(Error::validation_invalid_argument(
+                "component",
+                format!(
+                    "Lab offload could not resolve selected rig component `{}` to a materialized checkout",
+                    selected.expect("checked above")
+                ),
+                None,
+                Some(vec!["Pass an explicit --path for the intended component checkout, or select a component declared by the rig.".to_string()]),
+            ));
+        }
+        _ => {
+            return Err(Error::validation_invalid_argument(
+                "component",
+                "Lab offload cannot infer a component checkout from a multi-component rig",
+                None,
+                Some(vec!["Pass --path for the intended component checkout so Lab can materialize and bind it explicitly.".to_string()]),
+            ));
+        }
+    };
+
+    Ok(remote_component_path(
+        &dependency.remote_checkout_root,
+        dependency.required_subpath.as_deref(),
+    ))
+}
+
+fn default_rig_component_selector(args: &[String]) -> Result<Option<String>> {
+    let rig_ids = lab_offload_rig_ids(args);
+    let [rig_id] = rig_ids.as_slice() else {
+        return Ok(None);
+    };
+    let kind = match args.get(1).map(String::as_str) {
+        Some("bench") => homeboy_rig::RigWorkloadKind::Bench,
+        Some("fuzz") => homeboy_rig::RigWorkloadKind::Fuzz,
+        _ => return Ok(None),
+    };
+    let spec = homeboy_rig::load(rig_id)?;
+    let component_ids = homeboy_rig::component_ids_for_workload(&spec, kind, None);
+    Ok((component_ids.len() == 1).then(|| component_ids[0].clone()))
+}
+
+fn rig_component_selector(args: &[String]) -> Option<String> {
+    let command_index = match args.get(1).map(String::as_str) {
+        Some("bench") => 2,
+        Some("fuzz")
+            if matches!(
+                args.get(2).map(String::as_str),
+                Some("list" | "run" | "plan" | "run-campaign")
+            ) =>
+        {
+            3
+        }
+        _ => return None,
+    };
+    args.get(command_index)
+        .filter(|value| !value.starts_with('-'))
+        .cloned()
 }
 
 fn primary_source_rig_ids(primary_local_path: &str) -> Result<HashSet<String>> {
@@ -433,6 +520,8 @@ pub(super) struct LabOffloadRigComponentSync {
     /// on the runner resolve component paths to the runner workspace instead of
     /// the controller path the rig spec declares.
     pub component_path_env: Vec<(String, String)>,
+    /// The remote `--path` binding for an implicit rig component selection.
+    pub selected_component_path: Option<String>,
 }
 
 pub(super) fn sync_lab_offload_rig_component_dependencies(
@@ -448,11 +537,18 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
         Some((primary_local_path, primary_remote_path)),
         runner_workspace_root,
     )?;
+    let selected_component_path =
+        if is_bench_or_fuzz_rig_component_command(args) && !has_path_arg(args) {
+            Some(selected_rig_component_remote_path(args, &dependencies)?)
+        } else {
+            None
+        };
     if dependencies.is_empty() {
         return Ok(LabOffloadRigComponentSync {
             materializations: Vec::new(),
             dependency_cache_saves: Vec::new(),
             component_path_env: Vec::new(),
+            selected_component_path,
         });
     }
 
@@ -501,6 +597,7 @@ pub(super) fn sync_lab_offload_rig_component_dependencies(
         materializations: synced,
         dependency_cache_saves,
         component_path_env,
+        selected_component_path,
     })
 }
 
@@ -1023,8 +1120,9 @@ mod tests {
 
         let remapped = remap_rig_default_component_to_primary_snapshot(
             &args,
-            "/runner/workspaces/rig-component",
-        );
+            Some("/runner/workspaces/rig-component"),
+        )
+        .expect("remapped args");
 
         assert_eq!(
             remapped,
@@ -1055,8 +1153,9 @@ mod tests {
 
         let remapped = remap_rig_default_component_to_primary_snapshot(
             &args,
-            "/runner/workspaces/rig-component",
-        );
+            Some("/runner/workspaces/rig-component"),
+        )
+        .expect("remapped args");
 
         assert_eq!(
             remapped,
@@ -1073,6 +1172,221 @@ mod tests {
                 "/runner/workspaces/rig-component".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn fuzz_rig_package_binds_nested_component_to_its_distinct_remote_checkout() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let rig_package = home.path().join("Developer/homeboy-rigs");
+            let monorepo = home.path().join("Developer/jetpack");
+            let component = monorepo.join("projects/plugins/jetpack");
+            std::fs::create_dir_all(rig_package.join("rigs/jetpack-api-route-inventory"))
+                .expect("rig package");
+            std::fs::create_dir_all(&component).expect("component checkout");
+            let rig_dir = homeboy_core::paths::rigs().expect("rig dir");
+            std::fs::create_dir_all(&rig_dir).expect("create rig dir");
+            std::fs::write(
+                rig_dir.join("jetpack-api-route-inventory.json"),
+                serde_json::json!({
+                    "id": "jetpack-api-route-inventory",
+                    "components": {
+                        "jetpack": {
+                            "path": component,
+                            "checkout_root": monorepo,
+                            "remote_url": "https://example.test/Automattic/jetpack.git"
+                        }
+                    },
+                    "fuzz": { "default_component": "jetpack" }
+                })
+                .to_string(),
+            )
+            .expect("save rig");
+            let args = vec![
+                "homeboy".to_string(),
+                "fuzz".to_string(),
+                "run".to_string(),
+                "jetpack".to_string(),
+                "--rig".to_string(),
+                "jetpack-api-route-inventory".to_string(),
+            ];
+            let primary_remote = "/runner/_lab_workspaces/homeboy-rigs-job";
+            let dependencies = lab_offload_rig_component_dependencies(
+                &args,
+                Some((&rig_package.display().to_string(), primary_remote)),
+                None,
+            )
+            .expect("component materialization plan");
+
+            assert_eq!(dependencies.len(), 1);
+            assert_eq!(
+                dependencies[0].remote_checkout_root,
+                "/runner/_lab_workspaces/jetpack"
+            );
+            assert_eq!(
+                dependencies[0].required_subpath.as_deref(),
+                Some("projects/plugins/jetpack")
+            );
+            let component_path = selected_rig_component_remote_path(&args, &dependencies)
+                .expect("selected component binding");
+            let overrides = rig_component_env_overrides(
+                &dependencies[0],
+                &rig_package.display().to_string(),
+                primary_remote,
+            );
+            let remote_args =
+                remap_rig_default_component_to_primary_snapshot(&args, Some(&component_path))
+                    .expect("remote command args");
+
+            assert_eq!(
+                remote_args.last().map(String::as_str),
+                Some("/runner/_lab_workspaces/jetpack/projects/plugins/jetpack")
+            );
+            assert!(!remote_args.iter().any(|arg| arg == primary_remote));
+            assert!(overrides.contains(&(
+                "HOMEBOY_RIG_COMPONENT_PATH__JETPACK_API_ROUTE_INVENTORY__JETPACK".to_string(),
+                component_path.clone(),
+            )));
+            assert!(overrides.contains(&(
+                "HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__JETPACK_API_ROUTE_INVENTORY__JETPACK"
+                    .to_string(),
+                "/runner/_lab_workspaces/jetpack".to_string(),
+            )));
+        });
+    }
+
+    #[test]
+    fn implicit_multi_component_rig_binding_fails_closed() {
+        let args = vec![
+            "homeboy".to_string(),
+            "fuzz".to_string(),
+            "run".to_string(),
+            "--rig".to_string(),
+            "ambiguous,other".to_string(),
+        ];
+        let dependencies = [
+            RigComponentDependency {
+                rig_id: "ambiguous".to_string(),
+                component_id: "first".to_string(),
+                local_checkout_root: "/controller/first".to_string(),
+                declared_checkout_root: "/controller/first".to_string(),
+                remote_checkout_root: "/runner/first".to_string(),
+                required_subpath: None,
+                remote_url: None,
+                pinned_ref: None,
+                component_ref: None,
+                dependency_cache: None,
+            },
+            RigComponentDependency {
+                rig_id: "ambiguous".to_string(),
+                component_id: "second".to_string(),
+                local_checkout_root: "/controller/second".to_string(),
+                declared_checkout_root: "/controller/second".to_string(),
+                remote_checkout_root: "/runner/second".to_string(),
+                required_subpath: None,
+                remote_url: None,
+                pinned_ref: None,
+                component_ref: None,
+                dependency_cache: None,
+            },
+        ];
+
+        let error = selected_rig_component_remote_path(&args, &dependencies)
+            .expect_err("ambiguous rig must require an explicit component path");
+
+        assert_eq!(error.details["field"], "component");
+        assert!(error.message.contains("cannot infer"));
+    }
+
+    #[test]
+    fn nested_component_in_primary_checkout_keeps_its_remote_subpath() {
+        let args = vec![
+            "homeboy".to_string(),
+            "fuzz".to_string(),
+            "run".to_string(),
+            "jetpack".to_string(),
+            "--rig".to_string(),
+            "jetpack-api-route-inventory".to_string(),
+        ];
+        let dependencies = [RigComponentDependency {
+            rig_id: "jetpack-api-route-inventory".to_string(),
+            component_id: "jetpack".to_string(),
+            local_checkout_root: "/controller/jetpack".to_string(),
+            declared_checkout_root: "/controller/jetpack".to_string(),
+            remote_checkout_root: "/runner/workspaces/jetpack".to_string(),
+            required_subpath: Some("projects/plugins/jetpack".to_string()),
+            remote_url: None,
+            pinned_ref: None,
+            component_ref: None,
+            dependency_cache: None,
+        }];
+
+        let selected = selected_rig_component_remote_path(&args, &dependencies)
+            .expect("selected component binding");
+
+        assert_eq!(
+            selected,
+            "/runner/workspaces/jetpack/projects/plugins/jetpack"
+        );
+    }
+
+    #[test]
+    fn default_component_selects_its_materialized_checkout() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let rig_dir = homeboy_core::paths::rigs().expect("rig dir");
+            std::fs::create_dir_all(&rig_dir).expect("create rig dir");
+            std::fs::write(
+                rig_dir.join("default-component.json"),
+                serde_json::json!({
+                    "id": "default-component",
+                    "components": {
+                        "selected": { "path": "/controller/selected" },
+                        "other": { "path": "/controller/other" }
+                    },
+                    "fuzz": { "default_component": "selected" }
+                })
+                .to_string(),
+            )
+            .expect("save rig");
+            let args = vec![
+                "homeboy".to_string(),
+                "fuzz".to_string(),
+                "run".to_string(),
+                "--rig".to_string(),
+                "default-component".to_string(),
+            ];
+            let dependencies = [
+                RigComponentDependency {
+                    rig_id: "default-component".to_string(),
+                    component_id: "selected".to_string(),
+                    local_checkout_root: "/controller/selected".to_string(),
+                    declared_checkout_root: "/controller/selected".to_string(),
+                    remote_checkout_root: "/runner/selected".to_string(),
+                    required_subpath: None,
+                    remote_url: None,
+                    pinned_ref: None,
+                    component_ref: None,
+                    dependency_cache: None,
+                },
+                RigComponentDependency {
+                    rig_id: "default-component".to_string(),
+                    component_id: "other".to_string(),
+                    local_checkout_root: "/controller/other".to_string(),
+                    declared_checkout_root: "/controller/other".to_string(),
+                    remote_checkout_root: "/runner/other".to_string(),
+                    required_subpath: None,
+                    remote_url: None,
+                    pinned_ref: None,
+                    component_ref: None,
+                    dependency_cache: None,
+                },
+            ];
+
+            assert_eq!(
+                selected_rig_component_remote_path(&args, &dependencies)
+                    .expect("default component binding"),
+                "/runner/selected"
+            );
+        });
     }
 
     #[test]
@@ -1655,8 +1969,9 @@ mod tests {
 
         let rewritten = remap_rig_default_component_to_primary_snapshot(
             &args,
-            "/home/user/Developer/_lab_workspaces/studio-web-release-clean-abc",
-        );
+            Some("/home/user/Developer/_lab_workspaces/studio-web-release-clean-abc"),
+        )
+        .expect("remapped args");
 
         assert_eq!(
             rewritten,
@@ -1686,8 +2001,9 @@ mod tests {
 
         let rewritten = remap_rig_default_component_to_primary_snapshot(
             &args,
-            "/home/user/Developer/_lab_workspaces/woocommerce-abc",
-        );
+            Some("/home/user/Developer/_lab_workspaces/woocommerce-abc"),
+        )
+        .expect("remapped args");
 
         assert_eq!(
             rewritten,
@@ -1743,8 +2059,9 @@ mod tests {
 
         let rewritten = remap_rig_default_component_to_primary_snapshot(
             &args,
-            "/home/user/Developer/_lab_workspaces/studio-web-release-clean-abc",
-        );
+            Some("/home/user/Developer/_lab_workspaces/studio-web-release-clean-abc"),
+        )
+        .expect("remapped args");
 
         assert_eq!(
             rewritten,
@@ -1772,7 +2089,8 @@ mod tests {
         ];
 
         assert_eq!(
-            remap_rig_default_component_to_primary_snapshot(&args, "/snapshot"),
+            remap_rig_default_component_to_primary_snapshot(&args, Some("/snapshot"))
+                .expect("explicit path preserved"),
             args
         );
     }

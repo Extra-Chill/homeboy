@@ -461,6 +461,7 @@ fn prepare_lab_offload_workspace_stage_inner(
     let synced_rig_dependencies = rig_component_sync.materializations;
     let dependency_cache_saves = rig_component_sync.dependency_cache_saves;
     let rig_component_path_overrides = rig_component_sync.component_path_env;
+    let selected_rig_component_path = rig_component_sync.selected_component_path;
     if !synced_rig_dependencies.is_empty() {
         for dependency in &synced_rig_dependencies {
             workspace_mapping.extend(workspace_mapping_entries_for_git_dependency(
@@ -501,8 +502,8 @@ fn prepare_lab_offload_workspace_stage_inner(
     preflight_provider_config_paths_materialized_in_args(&offload_args, &path_remaps)?;
     let remapped_args = rig_materialization::remap_rig_default_component_to_primary_snapshot(
         &offload_args,
-        &remote_cwd,
-    );
+        selected_rig_component_path.as_deref(),
+    )?;
     let remapped_args = remap_provider_config_with_materialization_plan_in_args(
         &remapped_args,
         &provider_config_materialization_plan,
@@ -1160,6 +1161,161 @@ mod tests {
             .expect("lookup should not fail for a plain component checkout");
 
         assert!(spec.is_none());
+    }
+
+    #[test]
+    fn stage_materializes_rig_package_and_nested_component_as_distinct_sources() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let rig_package = tempfile::tempdir().expect("rig package");
+            let component_checkout = tempfile::tempdir().expect("component checkout");
+            let component_path = component_checkout.path().join("projects/plugins/jetpack");
+            let runner_root = tempfile::tempdir().expect("runner workspace root");
+            std::fs::create_dir_all(rig_package.path().join("rigs/jetpack-api-route-inventory"))
+                .expect("rig package content");
+            std::fs::write(
+                rig_package
+                    .path()
+                    .join("rigs/jetpack-api-route-inventory/rig.json"),
+                "{}\n",
+            )
+            .expect("rig package definition");
+            std::fs::create_dir_all(&component_path).expect("component content");
+            std::fs::write(component_path.join("package.json"), "{}\n").expect("component file");
+            git(rig_package.path(), &["init"]);
+            git(
+                rig_package.path(),
+                &["config", "user.email", "test@example.com"],
+            );
+            git(rig_package.path(), &["config", "user.name", "Test User"]);
+            git(rig_package.path(), &["add", "."]);
+            git(rig_package.path(), &["commit", "-m", "rig package"]);
+            git(component_checkout.path(), &["init"]);
+            git(
+                component_checkout.path(),
+                &["config", "user.email", "test@example.com"],
+            );
+            git(
+                component_checkout.path(),
+                &["config", "user.name", "Test User"],
+            );
+            git(component_checkout.path(), &["add", "."]);
+            git(component_checkout.path(), &["commit", "-m", "component"]);
+            let component_ref = git_output(component_checkout.path(), &["rev-parse", "HEAD"]);
+            let rig_dir = homeboy_core::paths::rigs().expect("rig dir");
+            std::fs::create_dir_all(&rig_dir).expect("create rig dir");
+            std::fs::write(
+                rig_dir.join("jetpack-api-route-inventory.json"),
+                serde_json::json!({
+                    "id": "jetpack-api-route-inventory",
+                    "components": {
+                        "jetpack": {
+                            "path": component_path,
+                            "checkout_root": component_checkout.path(),
+                            "ref": component_ref,
+                        }
+                    },
+                    "fuzz": { "default_component": "jetpack" }
+                })
+                .to_string(),
+            )
+            .expect("save rig");
+            crate::create(
+                &format!(
+                    r#"{{"id":"lab-rig-component-stage","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+            let args = vec![
+                "homeboy".to_string(),
+                "fuzz".to_string(),
+                "run".to_string(),
+                "jetpack".to_string(),
+                "--rig".to_string(),
+                "jetpack-api-route-inventory".to_string(),
+            ];
+            let request = LabOffloadRequest {
+                command: None,
+                normalized_args: &args,
+                explicit_runner: Some("lab-rig-component-stage"),
+                placement: homeboy_cli_contract::Placement::Auto,
+                allow_local_fallback: false,
+                allow_dirty_lab_workspace: false,
+                skip_deps_hydration: false,
+                capture_patch: false,
+                mutation_flag: None,
+                detach_after_handoff: false,
+                output_file_requested: false,
+                read_only_polling: false,
+                local_output_file: None,
+                durable_agent_task_plan: None,
+                source_path: None,
+                verified_cook_baseline: None,
+                require_controller_git_bundle: false,
+                reuse_compatible_snapshot: false,
+                job_overrides: LabJobOverrides::default(),
+            };
+            let contract = LabOffloadCommand {
+                command: homeboy_core::lab_contract::LabCommandContract::portable(
+                    "fuzz",
+                    None,
+                    true,
+                    &[],
+                ),
+                required_extensions: Vec::new(),
+                required_capabilities: Vec::new(),
+                workload: None,
+            };
+            let stage = prepare_lab_offload_workspace_stage(
+                &request,
+                LabWorkspaceStageCommand::from(&contract),
+                crate::lab_plan::base_lab_plan(Some(&contract)),
+                "lab-rig-component-stage",
+                rig_package.path(),
+                &["homeboy".to_string()],
+                Some(runner_root.path().to_str().expect("runner root")),
+                None,
+                &args,
+                None,
+            )
+            .expect("workspace stage");
+            let component_remote_root = stage
+                .workspace_mapping
+                .iter()
+                .find(|entry| entry.role() == "rig_component_dependency")
+                .map(|entry| entry.remote_path().to_string())
+                .expect("component workspace mapping");
+            let component_remote_path = format!("{component_remote_root}/projects/plugins/jetpack");
+
+            assert!(Path::new(&component_remote_path)
+                .join("package.json")
+                .is_file());
+            assert!(
+                stage
+                    .command
+                    .windows(2)
+                    .any(|pair| pair == ["--path", component_remote_path.as_str()]),
+                "remote command: {:?}; component mappings: {:?}; overrides: {:?}",
+                stage.command,
+                stage
+                    .workspace_mapping
+                    .iter()
+                    .filter(|entry| entry.role() == "rig_component_dependency")
+                    .map(|entry| (entry.local_path(), entry.remote_path()))
+                    .collect::<Vec<_>>(),
+                stage.rig_component_path_overrides
+            );
+            assert!(stage.rig_component_path_overrides.contains(&(
+                "HOMEBOY_RIG_COMPONENT_PATH__JETPACK_API_ROUTE_INVENTORY__JETPACK".to_string(),
+                component_remote_path,
+            )));
+            assert!(stage.rig_component_path_overrides.contains(&(
+                "HOMEBOY_RIG_COMPONENT_CHECKOUT_ROOT__JETPACK_API_ROUTE_INVENTORY__JETPACK"
+                    .to_string(),
+                component_remote_root,
+            )));
+        });
     }
 
     #[test]
