@@ -101,7 +101,9 @@ pub struct RunsDossierCommandHint {
 pub fn runs_dossier(run_id: &str) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_readonly()?;
     let run = runs_service::require_run(&store, run_id)?;
-    let artifacts = runs_service::list_artifacts_for_run(&store, run_id)?;
+    // A dossier is an inspection command. Avoid the service helper here because
+    // it refreshes and indexes remote evidence, both of which can write.
+    let artifacts = runs_service::enrich_artifact_links(store.list_artifacts(run_id)?);
     let artifact_index = evidence_report::evidence_artifact_index(&artifacts);
     let failure = evidence_report::evidence_failure_summary(&run);
     let stale_reason = reconcile::running_status_note(&run);

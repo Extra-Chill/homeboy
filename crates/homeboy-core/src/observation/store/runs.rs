@@ -24,7 +24,11 @@ impl ObservationStore {
 
         let connection = schema::open_connection(&path)?;
         schema::apply_migrations(&connection)?;
-        Ok(Self { connection, path })
+        Ok(Self {
+            connection,
+            path,
+            readonly: false,
+        })
     }
 
     /// Open an existing observation database without any initialization work.
@@ -46,10 +50,18 @@ impl ObservationStore {
                     "CREATE TABLE runs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, component_id TEXT, started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL, command TEXT, cwd TEXT, homeboy_version TEXT, git_sha TEXT, rig_id TEXT, metadata_json TEXT NOT NULL DEFAULT '{}');",
                 )
                 .map_err(sqlite_error("create empty read-only observation store"))?;
-            return Ok(Self { connection, path });
+            return Ok(Self {
+                connection,
+                path,
+                readonly: true,
+            });
         }
         let connection = schema::open_readonly_connection(&path)?;
-        Ok(Self { connection, path })
+        Ok(Self {
+            connection,
+            path,
+            readonly: true,
+        })
     }
 
     pub fn status(&self) -> Result<ObservationDbStatus> {
@@ -232,17 +244,15 @@ impl ObservationStore {
                 row_to_run_record,
             )
             .optional()
-            .map_err(|error| {
-                if is_transient_lock_error(&error) {
-                    Error::observation_store_busy(
-                        self.path.to_string_lossy(),
-                        "read run record",
-                        750,
-                    )
-                } else {
-                    sqlite_error("read run record")(error)
-                }
-            })
+            .map_err(|error| self.read_error("read run record", error))
+    }
+
+    pub(crate) fn read_error(&self, operation: &'static str, error: rusqlite::Error) -> Error {
+        if self.readonly && is_transient_lock_error(&error) {
+            Error::observation_store_busy(self.path.to_string_lossy(), operation, 750)
+        } else {
+            sqlite_error(operation)(error)
+        }
     }
 
     pub fn list_runs(&self, filter: RunListFilter) -> Result<Vec<RunRecord>> {
