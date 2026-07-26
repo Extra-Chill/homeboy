@@ -1,8 +1,8 @@
 //! Fuzz workload manifest config types.
 
+use crate::runtime_helper::RuntimeHelperRequirement;
 use homeboy_lifecycle_contract::LifecycleContract;
 use serde::{Deserialize, Serialize};
-use crate::runtime_helper::RuntimeHelperRequirement;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct FuzzConfig {
