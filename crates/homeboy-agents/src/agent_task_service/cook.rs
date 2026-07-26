@@ -616,6 +616,33 @@ pub struct AgentTaskCookReport {
     pub terminal_failure_classification: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub moving_base_recovery: Option<MovingBaseCookRecovery>,
+    /// Generic durable recovery coordinates for a Cook that stopped after its
+    /// recipe was materialized. This intentionally contains no provider or gate
+    /// evidence; operators retrieve that through the listed diagnose command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_context: Option<AgentTaskCookFailureContext>,
+}
+
+/// Durable identity and legal recovery surface for a failed Cook.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentTaskCookFailureContext {
+    pub cook_id: String,
+    pub latest_run_id: String,
+    pub durable_recipe_ref: String,
+    pub lifecycle_state: String,
+    pub provider_budget_consumed: bool,
+    pub provider_executions_consumed: u64,
+    pub recovery_legal: bool,
+    pub recovery_reason: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub legal_actions: Vec<AgentTaskCookRecoveryAction>,
+}
+
+/// An exact command that is legal for the durable Cook state.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentTaskCookRecoveryAction {
+    pub action: String,
+    pub command: String,
 }
 
 /// A bounded collection of independently durable cooks. Each cook retains the
@@ -1409,8 +1436,16 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
-    let result =
-        run_cook_with_boundaries_observed_inner(options, executor, side_effects, durable_observer)?;
+    let failure_options = options.clone();
+    let result = match run_cook_with_boundaries_observed_inner(
+        options,
+        executor,
+        side_effects,
+        durable_observer,
+    ) {
+        Ok(result) => result,
+        Err(error) => return durable_cook_error_report(&failure_options, error),
+    };
     if let Some(run_id) = result.value.latest_run_id.as_deref() {
         let attempt = result
             .value
@@ -1422,16 +1457,39 @@ where
             "queued" | "running" | "in_flight" => "in_flight",
             _ => "terminal",
         };
-        report_cook_progress(
+        if let Err(error) = report_cook_progress(
             durable_observer,
             &result.value.cook_id,
             run_id,
             phase,
             attempt,
             Some(&result.value.status),
-        )?;
+        ) {
+            return durable_cook_error_report(&failure_options, error);
+        }
     }
     Ok(result)
+}
+
+/// Convert an error that occurs after recipe materialization into the normal
+/// Cook result contract. Errors before materialization still return unchanged:
+/// they have no durable identity and therefore no legal recovery command.
+fn durable_cook_error_report(
+    options: &AgentTaskCookServiceOptions,
+    error: Error,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    if super::recipe_exists(&options.cook_id)? {
+        return Ok(cook_report(
+            options.cook_id.clone(),
+            "durable_failure",
+            Vec::new(),
+            None,
+            Some("Cook stopped after durable creation; use the recovery actions in failure_context to inspect or continue it.".to_string()),
+            1,
+            None,
+        ));
+    }
+    Err(error)
 }
 
 fn run_cook_with_boundaries_observed_inner<E, S>(
@@ -2048,7 +2106,7 @@ where
         )?;
         let promotion = match side_effects.promote(&options, &run_id) {
             Ok(report) => report,
-            Err(error) => {
+            Err(_error) => {
                 attempts.push(AgentTaskCookAttemptReport {
                     attempt,
                     run_id: run_id.clone(),
@@ -2057,9 +2115,7 @@ where
                     promotion: None,
                     feedback: None,
                 });
-                let recovery = format!(
-                    "promotion provider response was rejected: {error}. The successful candidate remains durable on run {run_id}; inspect it and generate a corrected apply-provider retry with `homeboy agent-task review {run_id} --to-worktree <handle>`. To replace it with an externally prepared candidate, use `homeboy agent-task adopt {cook_id} --candidate-ref <sha> --ai-model <model>`.",
-                );
+                let recovery = "promotion provider response was rejected. The successful candidate remains durable; use failure_context to inspect or continue the Cook.".to_string();
                 return Ok(cook_report(
                     cook_id,
                     "policy_failure",
