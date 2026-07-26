@@ -39,40 +39,29 @@ impl ConfigEntity for Schedule {
                 None,
             ));
         }
-        if self.command.is_empty() {
-            return Err(Error::validation_invalid_argument(
-                "command",
-                "A schedule needs a command to run",
-                Some(self.id.clone()),
-                Some(vec![
-                    "Pass the homeboy arguments to run, for example: --command 'fleet check prod'"
-                        .to_string(),
-                ]),
-            ));
-        }
-        if self.command.iter().any(|arg| arg.trim().is_empty()) {
-            return Err(Error::validation_invalid_argument(
-                "command",
-                "A schedule command cannot contain empty arguments",
-                Some(self.command.join(" ")),
-                None,
-            ));
-        }
-        // Scheduling a schedule command would let a tick mutate its own
-        // definitions, or recurse.
-        if self
-            .command
-            .first()
-            .is_some_and(|first| first.trim() == "schedule")
-        {
-            return Err(Error::validation_invalid_argument(
-                "command",
-                "A schedule cannot run the schedule command itself",
-                Some(self.command.join(" ")),
-                Some(vec![
-                    "Schedule the work you want repeated, not the scheduler.".to_string(),
-                ]),
-            ));
+        match (&self.command, &self.exec) {
+            (Some(argv), None) => validate_homeboy_command(argv)?,
+            (None, Some(exec)) => validate_exec_command(exec)?,
+            (Some(_), Some(_)) => {
+                return Err(Error::validation_invalid_argument(
+                    "command",
+                    "A schedule runs either a homeboy command or a program, not both",
+                    Some(self.id.clone()),
+                    Some(vec![
+                        "Declare one schedule per thing you want run.".to_string()
+                    ]),
+                ));
+            }
+            (None, None) => {
+                return Err(Error::validation_invalid_argument(
+                    "command",
+                    "A schedule needs something to run",
+                    Some(self.id.clone()),
+                    Some(vec![
+                        "Pass --command 'fleet check prod', or --exec with a program.".to_string(),
+                    ]),
+                ));
+            }
         }
         // A transport without a route (or the reverse) silently never
         // notifies, which is worse than refusing it.
@@ -109,6 +98,78 @@ impl ConfigEntity for Schedule {
     }
 }
 
+fn validate_homeboy_command(argv: &[String]) -> Result<()> {
+    if argv.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "command",
+            "A schedule needs a command to run",
+            None,
+            None,
+        ));
+    }
+    if argv.iter().any(|arg| arg.trim().is_empty()) {
+        return Err(Error::validation_invalid_argument(
+            "command",
+            "A schedule command cannot contain empty arguments",
+            Some(argv.join(" ")),
+            None,
+        ));
+    }
+    // Scheduling a schedule command would let a tick mutate its own
+    // definitions, or recurse.
+    if argv.first().is_some_and(|first| first.trim() == "schedule") {
+        return Err(Error::validation_invalid_argument(
+            "command",
+            "A schedule cannot run the schedule command itself",
+            Some(argv.join(" ")),
+            Some(vec![
+                "Schedule the work you want repeated, not the scheduler.".to_string(),
+            ]),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_exec_command(exec: &super::types::ExecCommand) -> Result<()> {
+    if exec.program.trim().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "exec",
+            "A scheduled program needs a program to run",
+            None,
+            None,
+        ));
+    }
+    // The program is executed directly, never through a shell. Shell
+    // metacharacters in the program name almost always mean the operator
+    // expected shell semantics they are not getting, so say so rather than
+    // failing later with a confusing "no such file".
+    if exec
+        .program
+        .contains(['|', ';', '&', '>', '<', '$', '`', '\n'])
+    {
+        return Err(Error::validation_invalid_argument(
+            "exec",
+            "A scheduled program is run directly, not through a shell",
+            Some(exec.program.clone()),
+            Some(vec![
+                "Shell operators are not interpreted. To run a pipeline, put it in a script and schedule the script."
+                    .to_string(),
+            ]),
+        ));
+    }
+    if let Some(dir) = exec.working_dir.as_deref() {
+        if dir.trim().is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "working-dir",
+                "A scheduled program's working directory cannot be empty",
+                None,
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,7 +178,8 @@ mod tests {
     fn schedule() -> Schedule {
         Schedule {
             id: "nightly-harvest".to_string(),
-            command: vec!["harvest".to_string(), "prod".to_string()],
+            command: Some(vec!["harvest".to_string(), "prod".to_string()]),
+            exec: None,
             every: Cadence::from_seconds(86_400).expect("cadence"),
             notify_on: NotifyPolicy::default(),
             on_overlap: OverlapPolicy::default(),
@@ -138,7 +200,7 @@ mod tests {
     #[test]
     fn a_schedule_without_a_command_is_rejected() {
         let invalid = Schedule {
-            command: Vec::new(),
+            command: Some(Vec::new()),
             ..schedule()
         };
         assert!(invalid.validate().is_err());
@@ -169,10 +231,117 @@ mod tests {
     #[test]
     fn scheduling_the_scheduler_is_rejected() {
         let invalid = Schedule {
-            command: vec!["schedule".to_string(), "run".to_string(), "x".to_string()],
+            command: Some(vec![
+                "schedule".to_string(),
+                "run".to_string(),
+                "x".to_string(),
+            ]),
             ..schedule()
         };
         assert!(invalid.validate().is_err());
+    }
+
+    fn exec_schedule() -> Schedule {
+        Schedule {
+            id: "cert-expiry".to_string(),
+            command: None,
+            exec: Some(super::super::types::ExecCommand {
+                program: "/usr/local/bin/check-cert.sh".to_string(),
+                args: vec!["example.com".to_string()],
+                working_dir: None,
+            }),
+            every: Cadence::from_seconds(43_200).expect("cadence"),
+            notify_on: NotifyPolicy::default(),
+            on_overlap: OverlapPolicy::default(),
+            notification_transport: None,
+            notification_route: None,
+            jitter_seconds: None,
+            enabled: true,
+            description: None,
+            aliases: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn an_exec_schedule_validates() {
+        exec_schedule().validate().expect("valid exec schedule");
+    }
+
+    #[test]
+    fn declaring_both_a_command_and_a_program_is_rejected() {
+        let invalid = Schedule {
+            command: Some(vec!["triage".to_string()]),
+            ..exec_schedule()
+        };
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn declaring_neither_is_rejected() {
+        let invalid = Schedule {
+            command: None,
+            exec: None,
+            ..exec_schedule()
+        };
+        assert!(invalid.validate().is_err());
+    }
+
+    /// Programs run directly, never through a shell. An operator writing a
+    /// pipeline is expecting semantics they will not get, so say so at
+    /// declaration time rather than failing later with "no such file".
+    #[test]
+    fn shell_metacharacters_in_the_program_are_rejected() {
+        for program in [
+            "backup.sh | tee log",
+            "a && b",
+            "echo $HOME",
+            "run > out.txt",
+        ] {
+            let invalid = Schedule {
+                exec: Some(super::super::types::ExecCommand {
+                    program: program.to_string(),
+                    args: Vec::new(),
+                    working_dir: None,
+                }),
+                ..exec_schedule()
+            };
+            let error = invalid
+                .validate()
+                .expect_err("shell syntax must be refused");
+            assert!(
+                error.to_string().contains("not through a shell"),
+                "error should explain why, got: {error}"
+            );
+        }
+    }
+
+    /// Arguments are passed through untouched — only the program is checked.
+    /// A legitimate argument may contain characters that look shell-ish.
+    #[test]
+    fn arguments_may_contain_shell_looking_characters() {
+        let valid = Schedule {
+            exec: Some(super::super::types::ExecCommand {
+                program: "grep".to_string(),
+                args: vec!["a|b".to_string(), "$PATH".to_string()],
+                working_dir: None,
+            }),
+            ..exec_schedule()
+        };
+        valid
+            .validate()
+            .expect("arguments are not shell-interpreted");
+    }
+
+    #[test]
+    fn exec_schedules_round_trip_through_config_storage() {
+        crate::test_support::with_isolated_home(|_| {
+            crate::config::save(&exec_schedule()).expect("save");
+            let loaded = crate::config::load::<Schedule>("cert-expiry").expect("load");
+            let exec = loaded.exec.expect("exec preserved");
+            assert_eq!(exec.program, "/usr/local/bin/check-cert.sh");
+            assert_eq!(exec.args, vec!["example.com".to_string()]);
+            assert!(loaded.command.is_none());
+        });
     }
 
     #[test]
@@ -182,7 +351,10 @@ mod tests {
             crate::config::save(&schedule).expect("save schedule");
 
             let loaded = crate::config::load::<Schedule>("nightly-harvest").expect("load");
-            assert_eq!(loaded.command, vec!["harvest", "prod"]);
+            assert_eq!(
+                loaded.command,
+                Some(vec!["harvest".to_string(), "prod".to_string()])
+            );
             assert_eq!(loaded.every.seconds(), 86_400);
             assert!(loaded.enabled);
 

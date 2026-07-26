@@ -135,7 +135,8 @@ mod tests {
     fn schedule() -> Schedule {
         Schedule {
             id: "nightly".to_string(),
-            command: vec!["triage".to_string()],
+            command: Some(vec!["triage".to_string()]),
+            exec: None,
             every: Cadence::from_seconds(3_600).expect("cadence"),
             notify_on: NotifyPolicy::default(),
             on_overlap: OverlapPolicy::default(),

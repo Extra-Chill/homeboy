@@ -178,6 +178,34 @@ impl OverlapPolicy {
     }
 }
 
+/// An external program run by a schedule.
+///
+/// Program and arguments are kept separate and passed as an argument vector.
+/// There is deliberately no shell: nothing here is word-split, so an argument
+/// containing spaces stays one argument and there is no quoting or injection
+/// surface to reason about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecCommand {
+    pub program: String,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+
+    /// Directory to run from. Many useful commands — test runners, build
+    /// tools — only work from their project root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+}
+
+/// What a schedule runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScheduledCommand<'a> {
+    /// Homeboy arguments, run through the homeboy binary.
+    Homeboy(&'a [String]),
+    /// An external program.
+    Exec(&'a ExecCommand),
+}
+
 /// A declared periodic run.
 ///
 /// The declaration is stable, reviewable configuration. Everything that
@@ -189,7 +217,16 @@ pub struct Schedule {
 
     /// Homeboy arguments to run, without the leading binary name.
     /// For example `["fleet", "check", "prod"]`.
-    pub command: Vec<String>,
+    ///
+    /// Mutually exclusive with `exec`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
+
+    /// An external program to run instead of a homeboy command.
+    ///
+    /// Mutually exclusive with `command`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec: Option<ExecCommand>,
 
     pub every: Cadence,
 
@@ -229,6 +266,33 @@ fn default_true() -> bool {
 }
 
 impl Schedule {
+    /// What this schedule runs.
+    ///
+    /// Validation guarantees exactly one of `command` / `exec` is set, so a
+    /// stored schedule always resolves.
+    pub fn scheduled_command(&self) -> Option<ScheduledCommand<'_>> {
+        match (&self.command, &self.exec) {
+            (Some(argv), None) => Some(ScheduledCommand::Homeboy(argv.as_slice())),
+            (None, Some(exec)) => Some(ScheduledCommand::Exec(exec)),
+            _ => None,
+        }
+    }
+
+    /// Human-readable rendering of what runs, for logs and notifications.
+    pub fn command_display(&self) -> String {
+        match self.scheduled_command() {
+            Some(ScheduledCommand::Homeboy(argv)) => format!("homeboy {}", argv.join(" ")),
+            Some(ScheduledCommand::Exec(exec)) => {
+                if exec.args.is_empty() {
+                    exec.program.clone()
+                } else {
+                    format!("{} {}", exec.program, exec.args.join(" "))
+                }
+            }
+            None => "<no command>".to_string(),
+        }
+    }
+
     /// Deterministic per-schedule jitter offset, in seconds.
     ///
     /// Derived from the id so a given schedule always lands at the same offset
@@ -292,7 +356,8 @@ mod tests {
     fn jitter_is_stable_per_id_and_bounded_by_the_window() {
         let schedule = |id: &str| Schedule {
             id: id.to_string(),
-            command: vec!["triage".to_string()],
+            command: Some(vec!["triage".to_string()]),
+            exec: None,
             every: Cadence::from_seconds(3_600).expect("cadence"),
             notify_on: NotifyPolicy::default(),
             on_overlap: OverlapPolicy::default(),
@@ -315,6 +380,56 @@ mod tests {
             }
             .jitter_offset_seconds()
         );
+    }
+
+    /// Schedules declared before `exec` existed stored `command` as a bare
+    /// array with no `exec` key. Those files must keep loading untouched.
+    #[test]
+    fn a_pre_exec_declaration_still_deserializes() {
+        let stored = r#"{
+            "id": "nightly",
+            "command": ["harvest", "production", "--check"],
+            "every": 86400,
+            "notify_on": "change",
+            "on_overlap": "skip",
+            "enabled": true
+        }"#;
+
+        let schedule: Schedule = serde_json::from_str(stored).expect("legacy declaration loads");
+        assert_eq!(
+            schedule.command,
+            Some(vec![
+                "harvest".to_string(),
+                "production".to_string(),
+                "--check".to_string()
+            ])
+        );
+        assert!(schedule.exec.is_none());
+        assert!(matches!(
+            schedule.scheduled_command(),
+            Some(ScheduledCommand::Homeboy(_))
+        ));
+        assert_eq!(
+            schedule.command_display(),
+            "homeboy harvest production --check"
+        );
+    }
+
+    #[test]
+    fn an_exec_declaration_resolves_to_a_program() {
+        let stored = r#"{
+            "id": "probe",
+            "exec": { "program": "/usr/bin/true", "args": ["--now"] },
+            "every": 3600
+        }"#;
+
+        let schedule: Schedule = serde_json::from_str(stored).expect("exec declaration loads");
+        assert!(schedule.command.is_none());
+        assert!(matches!(
+            schedule.scheduled_command(),
+            Some(ScheduledCommand::Exec(_))
+        ));
+        assert_eq!(schedule.command_display(), "/usr/bin/true --now");
     }
 
     #[test]
