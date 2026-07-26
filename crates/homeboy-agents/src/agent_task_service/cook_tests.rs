@@ -5257,6 +5257,7 @@ fn stage_terminal_batch_child(
     cook_id: &str,
     status: crate::agent_task_scheduler::AgentTaskAggregateStatus,
     pre_finalized: bool,
+    workspace: &std::path::Path,
 ) -> String {
     let mut options = batch_cook_options(
         cook_id,
@@ -5264,12 +5265,15 @@ fn stage_terminal_batch_child(
             dispatches: Arc::new(AtomicUsize::new(0)),
         }),
     );
+    // Terminal harvest validates the same linked-worktree proof as production.
+    // The fixture receives a real task worktree rather than a provider handle.
+    options.to_worktree = workspace.display().to_string();
+    options.source_worktree_path = Some(workspace.to_path_buf());
     // The provider attempt is complete; no dispatcher work should run on resume.
     options.no_finalize = false;
     options.provider_command = Some("fixture-provider".to_string());
     options.gates = VerifyGateOptions {
-        verify: vec!["public gate".to_string()],
-        private_verify: vec!["private gate".to_string()],
+        verify: vec!["cargo test --locked agent_task_promotion --lib".to_string()],
         private_gate_reveal: crate::agent_task_gate::AgentTaskGateRevealPolicy::FullEvidence,
         ..Default::default()
     };
@@ -5304,7 +5308,7 @@ fn stage_terminal_batch_child(
                 outputs: test_review_form_outputs(),
                 workflow: None,
                 follow_up: None,
-                metadata: Value::Null,
+                metadata: serde_json::json!({ "model": "fixture-model" }),
             }],
             events: Vec::new(),
             artifact_lineage: Vec::new(),
@@ -5332,6 +5336,17 @@ fn stage_terminal_batch_child(
 #[test]
 fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provider() {
     homeboy_core::test_support::with_isolated_home(|_| {
+        let temporary = tempfile::tempdir().expect("temporary task worktree root");
+        let workspace = temporary.path().join("task-worktree");
+        let source = std::env::current_dir().expect("test repository checkout");
+        assert!(Command::new("git")
+            .args(["worktree", "add", "--detach"])
+            .arg(&workspace)
+            .arg("HEAD")
+            .current_dir(source)
+            .status()
+            .expect("create linked task worktree")
+            .success());
         // Two children finished their provider attempt but were never finalized
         // (the synchronous coordinator exited); a pre-recorded finalization
         // stands in for the real PR backend so the resume exercises the
@@ -5340,16 +5355,19 @@ fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provid
             "cook-9525-a",
             crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded,
             true,
+            &workspace,
         );
         let child_b = stage_terminal_batch_child(
             "cook-9525-b",
             crate::agent_task_scheduler::AgentTaskAggregateStatus::Succeeded,
             true,
+            &workspace,
         );
         let child_partial = stage_terminal_batch_child(
             "cook-9525-partial",
             crate::agent_task_scheduler::AgentTaskAggregateStatus::PartialRecoverable,
             true,
+            &workspace,
         );
 
         crate::agent_task_batch::persist_fanout_run_batch(
@@ -5379,7 +5397,11 @@ fn resume_cook_batch_harvests_terminal_children_without_redispatching_the_provid
         let result = resume_cook_batch("batch-9525", UnusedExecutor, test_reconstruct_dispatcher)
             .expect("resume harvests terminal children");
 
-        assert_eq!(result.exit_code, 0, "both children finalize green");
+        assert_eq!(
+            result.exit_code, 0,
+            "both children finalize green: {:#?}",
+            result.value
+        );
         assert_eq!(result.value.status, "succeeded");
         assert_eq!(result.value.total, 3);
         assert_eq!(result.value.succeeded, 3);
@@ -5816,6 +5838,12 @@ fn post_recipe_failure_without_lifecycle_retains_identity_but_offers_no_recovery
         assert_eq!(
             context.lifecycle_state,
             "recipe_persisted_without_lifecycle_record"
+        );
+        assert_eq!(context.phase, "controller");
+        assert_eq!(context.reason_code, "internal.unexpected");
+        assert_eq!(
+            context.diagnostic.expect("durable error diagnostic")["message"],
+            "lifecycle materialization failed"
         );
         assert!(!context.recovery_legal);
         assert!(context.legal_actions.is_empty());

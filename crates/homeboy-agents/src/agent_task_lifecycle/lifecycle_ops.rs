@@ -581,6 +581,15 @@ pub fn pinned_runtime_for_mutation(run_id: &str) -> Result<Option<std::path::Pat
         &record.metadata,
         &homeboy_core::build_identity::current().display,
     )
+    .map_err(|mut error| {
+        // A bad pin must never become a recursive re-exec suggestion. Name the
+        // narrow repair operation against the durable record instead.
+        error.details["next_actions"] = serde_json::json!([format!(
+            "homeboy agent-task runtime-recover {} --artifact <trusted-controller-executable>",
+            homeboy_core::engine::shell::quote_arg(&record.run_id)
+        )]);
+        error
+    })
 }
 
 /// Seal the currently executing controller into an immutable runtime before a

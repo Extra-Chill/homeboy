@@ -58,31 +58,7 @@ pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
         agent_task_service::load_recipe(&args.cook_or_attempt_id).or_else(|cook_error| {
             agent_task_service::load_recipe_for_attempt(&args.cook_or_attempt_id)?.ok_or(cook_error)
         })?;
-    let run_id = if recipe
-        .attempts
-        .iter()
-        .any(|attempt| attempt.run_id == args.cook_or_attempt_id)
-    {
-        args.cook_or_attempt_id.clone()
-    } else {
-        agent_task_lifecycle::cook_index(&recipe.cook_id)
-            .ok()
-            .map(|index| index.latest_run_id)
-            .filter(|run_id| {
-                recipe
-                    .attempts
-                    .iter()
-                    .any(|attempt| attempt.run_id == *run_id)
-            })
-            .unwrap_or_else(|| {
-                recipe
-                    .attempts
-                    .last()
-                    .expect("validated recipe has an attempt")
-                    .run_id
-                    .clone()
-            })
-    };
+    let run_id = agent_task_service::resolve_cook_continuation_run_id(&args.cook_or_attempt_id)?;
     let record = agent_task_lifecycle::status(&run_id)?;
     if record.run_id != run_id
         || record.metadata.get("cook_id").and_then(Value::as_str) != Some(recipe.cook_id.as_str())

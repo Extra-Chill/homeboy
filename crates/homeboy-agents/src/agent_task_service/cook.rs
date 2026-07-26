@@ -1550,7 +1550,7 @@ fn durable_cook_error_report(
     error: Error,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     if super::recipe_exists(&options.cook_id)? {
-        return Ok(cook_report(
+        let mut report = cook_report(
             options.cook_id.clone(),
             "durable_failure",
             Vec::new(),
@@ -1558,7 +1558,15 @@ fn durable_cook_error_report(
             Some("Cook stopped after durable creation; use the recovery actions in failure_context to inspect or continue it.".to_string()),
             1,
             None,
-        ));
+        );
+        if let Some(context) = &mut report.value.failure_context {
+            // This is a controller failure, not a provider attempt. Keep a
+            // bounded, redacted cause so continuation never needs redispatch.
+            context.phase = "controller".to_string();
+            context.reason_code = error.code.as_str().to_string();
+            context.diagnostic = Some(bounded_error_diagnostic(&error));
+        }
+        return Ok(report);
     }
     Err(error)
 }
@@ -2212,6 +2220,39 @@ where
                     record.state
                 )),
                 1,
+                Some(&run_id),
+            ));
+        }
+
+        if let Some(finalization) = record
+            .metadata
+            .get("cook_finalization")
+            .filter(|finalization| !finalization.is_null())
+            .cloned()
+        {
+            // A terminal child may outlive its coordinator. Its finalization is
+            // the durable completion receipt, so harvesting it must not repeat
+            // promotion, gates, or any provider-facing work.
+            let status = finalization["status"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string();
+            let exit_code = if status == "review_ready" { 0 } else { 1 };
+            attempts.push(AgentTaskCookAttemptReport {
+                attempt,
+                run_id: run_id.clone(),
+                run_state: format!("{:?}", record.state),
+                aggregate_path: record.aggregate_path,
+                promotion: None,
+                feedback: None,
+            });
+            return Ok(cook_report(
+                cook_id,
+                &status,
+                attempts,
+                Some(finalization),
+                None,
+                exit_code,
                 Some(&run_id),
             ));
         }
