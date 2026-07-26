@@ -293,7 +293,14 @@ fn build_head_release_steps(
             vec![artifact_need.clone()],
             string_config("dir", dir),
         ));
-        artifact_need = "artifacts.inventory".to_string();
+        steps.push(ready_step(
+            "artifacts.authority",
+            "artifacts.authority",
+            "Establish authoritative release assets",
+            vec!["artifacts.inventory".to_string()],
+            StepConfig::new(),
+        ));
+        artifact_need = "artifacts.authority".to_string();
     } else if package_step_needed {
         steps.push(ready_step(
             "package",

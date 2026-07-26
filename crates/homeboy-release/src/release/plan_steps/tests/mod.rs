@@ -906,14 +906,20 @@ fn head_release_plan_skips_mutation_steps_and_uses_existing_artifacts() {
     assert!(!ids.contains(&"git.push"));
     assert_eq!(
         ids,
-        vec!["artifacts.inventory", "github.release", "publish.wordpress"]
+        vec![
+            "artifacts.inventory",
+            "artifacts.authority",
+            "github.release",
+            "publish.wordpress"
+        ]
     );
     assert_eq!(
         steps[0].inputs.get("dir").and_then(|value| value.as_str()),
         Some("artifacts")
     );
     assert_eq!(steps[1].needs, vec!["artifacts.inventory"]);
-    assert_eq!(steps[2].needs, vec!["artifacts.inventory"]);
+    assert_eq!(steps[2].needs, vec!["artifacts.authority"]);
+    assert_eq!(steps[3].needs, vec!["artifacts.authority"]);
 }
 
 #[test]
@@ -962,8 +968,16 @@ fn head_release_skip_publish_still_uploads_existing_artifacts() {
     .expect("steps");
 
     let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
-    assert_eq!(ids, vec!["artifacts.inventory", "github.release"]);
+    assert_eq!(
+        ids,
+        vec![
+            "artifacts.inventory",
+            "artifacts.authority",
+            "github.release"
+        ]
+    );
     assert_eq!(steps[1].needs, vec!["artifacts.inventory"]);
+    assert_eq!(steps[2].needs, vec!["artifacts.authority"]);
 }
 
 #[test]

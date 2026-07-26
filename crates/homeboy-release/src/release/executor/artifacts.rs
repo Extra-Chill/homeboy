@@ -64,13 +64,11 @@ pub(crate) fn run_artifact_inventory(
 
     let artifact_count = artifacts.len();
     state.artifacts.extend(artifacts);
-    let diagnostics = establish_publication_authority(state)?;
     let artifacts = state.artifacts.clone();
     let data = serde_json::json!({
         "dir": artifact_dir,
         "artifact_count": artifact_count,
         "artifacts": artifacts,
-        "diagnostics": diagnostics,
     });
 
     Ok(step_success(
@@ -695,6 +693,31 @@ mod tests {
             1
         );
         assert!(state.artifacts[1].publication_authority);
+    }
+
+    #[test]
+    fn authority_preserves_distinct_platform_assets() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let macos = temp.path().join("component-macos.zip");
+        let linux = temp.path().join("component-linux.zip");
+        std::fs::write(&macos, b"macos").expect("macos bytes");
+        std::fs::write(&linux, b"linux").expect("linux bytes");
+        let mut state = ReleaseState {
+            artifacts: vec![
+                artifact(&macos, "final", "package"),
+                artifact(&linux, "final", "package"),
+            ],
+            ..ReleaseState::default()
+        };
+
+        establish_publication_authority(&mut state).expect("authority");
+        let publications = github_release_publications(&state).expect("publications");
+
+        assert_eq!(publications.len(), 2);
+        assert!(state
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.publication_authority));
     }
 
     fn artifact(path: &std::path::Path, phase: &str, producer: &str) -> ReleaseArtifact {
