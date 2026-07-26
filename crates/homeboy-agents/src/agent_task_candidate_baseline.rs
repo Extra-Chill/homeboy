@@ -124,6 +124,21 @@ pub(crate) fn validate_gate_feedback_candidate_baseline(
     Ok(current_diff)
 }
 
+/// Validate a committed adoption candidate when an interrupted pre-provider
+/// attempt has no dirty-worktree diff to replay.
+pub(crate) fn validate_immutable_candidate_tree(root: &Path, candidate_sha: &str) -> Result<()> {
+    if !valid_git_object_id(candidate_sha) {
+        return Err(invalid("adopted candidate has no valid immutable commit"));
+    }
+    let expected_tree = git(root, &["rev-parse", &format!("{candidate_sha}^{{tree}}")])?;
+    if workspace_tree(root)? != expected_tree {
+        return Err(invalid(
+            "candidate worktree differs from the adopted immutable commit",
+        ));
+    }
+    Ok(())
+}
+
 /// A follow-up candidate is allowed to reuse a dirty destination only when its
 /// complete tree is the controller-verified source tree used to cook that
 /// candidate. This works for materialized snapshots whose HEAD is synthetic.
@@ -205,6 +220,21 @@ fn workspace_tree(root: &Path) -> Result<String> {
     git_with_index(root, &["write-tree"], &index_path)
 }
 
+fn git(root: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .map_err(|error| invalid(&error.to_string()))?;
+    if !output.status.success() {
+        return Err(invalid(&format!(
+            "candidate baseline Git operation failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 fn git_with_index(root: &Path, args: &[&str], index_path: &str) -> Result<String> {
     let output = Command::new("git")
         .args(args)
@@ -233,6 +263,26 @@ fn invalid(message: &str) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn immutable_candidate_tree_accepts_exact_commit_and_rejects_dirty_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        git(temp.path(), &["init", "-b", "main"]);
+        git(temp.path(), &["config", "user.name", "Homeboy Test"]);
+        git(
+            temp.path(),
+            &["config", "user.email", "homeboy@example.test"],
+        );
+        std::fs::write(temp.path().join("tracked.txt"), "candidate\n").expect("candidate file");
+        git(temp.path(), &["add", "tracked.txt"]);
+        git(temp.path(), &["commit", "-m", "candidate"]);
+        let candidate_sha = git(temp.path(), &["rev-parse", "HEAD"]).trim().to_string();
+
+        validate_immutable_candidate_tree(temp.path(), &candidate_sha)
+            .expect("exact committed candidate");
+        std::fs::write(temp.path().join("tracked.txt"), "diverged\n").expect("dirty candidate");
+        assert!(validate_immutable_candidate_tree(temp.path(), &candidate_sha).is_err());
+    }
 
     #[test]
     fn layered_remediation_uses_complete_current_diff() {
