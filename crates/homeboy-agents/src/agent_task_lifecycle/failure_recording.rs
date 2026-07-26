@@ -1112,7 +1112,7 @@ pub(crate) fn project_terminal_artifacts(
         metadata_json: existing_metadata,
     })?;
 
-    let mut used_ids = std::collections::BTreeSet::new();
+    validate_unique_terminal_artifact_ids(aggregate)?;
     let mut projection_error = None;
     for outcome in &aggregate.outcomes {
         for artifact in &outcome.artifacts {
@@ -1141,7 +1141,7 @@ pub(crate) fn project_terminal_artifacts(
             validate_projection_token("artifact.id", &artifact.id)?;
             validate_projection_token("artifact.kind", &artifact.kind)?;
             let base_id = artifact.id.trim();
-            let logical_id = unique_logical_artifact_id(&mut used_ids, base_id, &outcome.task_id);
+            let logical_id = base_id;
             // Observation artifact ids are globally unique. Keep the lifecycle
             // logical id as the per-run lookup token exposed by runs artifact.
             let mut id_hash = sha2::Sha256::new();
@@ -1618,26 +1618,28 @@ pub fn verified_controller_artifact_projection(
     Ok(Some((candidate.id.clone(), bytes)))
 }
 
-fn unique_logical_artifact_id(
-    used_ids: &mut std::collections::BTreeSet<String>,
-    base_id: &str,
-    task_id: &str,
-) -> String {
-    if used_ids.insert(base_id.to_string()) {
-        return base_id.to_string();
-    }
-    let prefix = format!("{task_id}-{base_id}");
-    for suffix in 1_u64.. {
-        let candidate = if suffix == 1 {
-            prefix.clone()
-        } else {
-            format!("{prefix}-{suffix}")
-        };
-        if used_ids.insert(candidate.clone()) {
-            return candidate;
+/// Runner artifact retrieval is keyed only by artifact id. Reject duplicates
+/// rather than inventing a controller-only alias that cannot be retried safely.
+fn validate_unique_terminal_artifact_ids(aggregate: &AgentTaskAggregate) -> Result<()> {
+    let mut identities = std::collections::BTreeMap::new();
+    for outcome in &aggregate.outcomes {
+        for artifact in &outcome.artifacts {
+            validate_projection_token("artifact.id", &artifact.id)?;
+            let Some(previous_task_id) = identities.insert(&artifact.id, &outcome.task_id) else {
+                continue;
+            };
+            return Err(Error::validation_invalid_argument(
+                "artifact.id",
+                format!(
+                    "terminal aggregate reuses artifact id '{}' for tasks '{}' and '{}'; runner artifact ids must be unique",
+                    artifact.id, previous_task_id, outcome.task_id
+                ),
+                Some(artifact.id.clone()),
+                None,
+            ));
         }
     }
-    unreachable!("unbounded artifact aliases cannot exhaust u64")
+    Ok(())
 }
 
 fn validate_projection_token(field: &str, value: &str) -> Result<()> {
