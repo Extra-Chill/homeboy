@@ -818,6 +818,7 @@ impl BatchCookSpec {
                     gate_heartbeat_interval_seconds: self.gate_heartbeat_interval_seconds,
                     rerun_completed_gates: self.rerun_completed_gates,
                     gate_environment: self.gate_environment.clone(),
+                    gate_diagnostic_sidecars: Vec::new(),
                 },
                 max_attempts: self.max_attempts,
                 no_finalize: self.no_finalize,

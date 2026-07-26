@@ -66,6 +66,10 @@ pub struct VerifyGateOptions {
     /// Declarative, non-secret process environment policy for every gate.
     #[serde(default)]
     pub gate_environment: AgentTaskGateEnvironmentPolicy,
+    /// Explicit mappings for producer-owned diagnostic sidecars. Homeboy only
+    /// consumes declared schemas and paths; producer semantics remain opaque.
+    #[serde(default)]
+    pub gate_diagnostic_sidecars: Vec<AgentTaskGateDiagnosticSidecarMapping>,
 }
 
 /// Whether a gate starts with the caller's environment or an empty one.
@@ -133,6 +137,7 @@ impl Default for VerifyGateOptions {
             gate_heartbeat_interval_seconds: default_gate_heartbeat_interval_seconds(),
             rerun_completed_gates: false,
             gate_environment: AgentTaskGateEnvironmentPolicy::default(),
+            gate_diagnostic_sidecars: Vec::new(),
         }
     }
 }
@@ -289,6 +294,128 @@ pub struct AgentTaskGateDiagnosticRecord {
 pub struct AgentTaskGateDiagnosticProducer {
     pub id: String,
     pub schema: String,
+}
+
+/// A producer-declared sidecar contract mapped to Homeboy's normalized record.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateDiagnosticSidecarMapping {
+    pub source_schema: String,
+    #[serde(default = "gate_diagnostic_record_schema")]
+    pub target_schema: String,
+    pub path: String,
+    pub producer: AgentTaskGateDiagnosticProducer,
+}
+
+const MAX_GATE_DIAGNOSTICS: usize = 8;
+const MAX_GATE_DIAGNOSTIC_FIELD_BYTES: usize = 512;
+const MAX_GATE_DIAGNOSTIC_ACTIONS: usize = 4;
+const MAX_GATE_DIAGNOSTIC_SIDECAR_BYTES: u64 = 64 * 1024;
+
+/// Best-effort compatibility ingestion for a declared producer sidecar. Missing
+/// or malformed sidecars never replace the command's authoritative gate result.
+pub(crate) fn ingest_gate_diagnostic_sidecars(
+    cwd: &Path,
+    mappings: &[AgentTaskGateDiagnosticSidecarMapping],
+    report: &mut AgentTaskGateReport,
+    full_evidence_ref: &str,
+) {
+    let Some(evidence) = report.failure_evidence.as_mut() else {
+        return;
+    };
+    for mapping in mappings {
+        if evidence.diagnostics.len() >= MAX_GATE_DIAGNOSTICS
+            || mapping.target_schema != AGENT_TASK_GATE_DIAGNOSTIC_RECORD_SCHEMA
+            || mapping.source_schema.trim().is_empty()
+            || mapping.producer.id.trim().is_empty()
+            || mapping.producer.schema.trim().is_empty()
+        {
+            continue;
+        }
+        let Ok(path) = homeboy_core::resolve_contained_local_path(
+            cwd,
+            &mapping.path,
+            "gate_diagnostic_sidecars.path",
+        ) else {
+            continue;
+        };
+        let Ok(metadata) = fs::metadata(&path) else {
+            continue;
+        };
+        if metadata.len() > MAX_GATE_DIAGNOSTIC_SIDECAR_BYTES {
+            continue;
+        }
+        let Ok(body) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(records) = serde_json::from_str::<Vec<serde_json::Value>>(&body) else {
+            continue;
+        };
+        for value in records {
+            if evidence.diagnostics.len() >= MAX_GATE_DIAGNOSTICS {
+                break;
+            }
+            let Some(record) = normalize_gate_diagnostic_record(value, mapping, full_evidence_ref)
+            else {
+                continue;
+            };
+            if !evidence.diagnostics.iter().any(|existing| {
+                existing.identity == record.identity && existing.producer == record.producer
+            }) {
+                evidence.diagnostics.push(record);
+            }
+        }
+    }
+}
+
+fn normalize_gate_diagnostic_record(
+    value: serde_json::Value,
+    mapping: &AgentTaskGateDiagnosticSidecarMapping,
+    full_evidence_ref: &str,
+) -> Option<AgentTaskGateDiagnosticRecord> {
+    let object = value.as_object()?;
+    if object.get("schema")?.as_str()? != mapping.source_schema {
+        return None;
+    }
+    let identity = bounded_diagnostic_text(object.get("identity")?.as_str()?);
+    let summary = bounded_diagnostic_text(object.get("summary")?.as_str()?);
+    if identity.is_empty() || summary.is_empty() {
+        return None;
+    }
+    let source_location = object
+        .get("source_location")
+        .and_then(serde_json::Value::as_str)
+        .map(bounded_diagnostic_text)
+        .filter(|value| !value.is_empty());
+    let suggested_actions = object
+        .get("suggested_actions")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(bounded_diagnostic_text)
+        .filter(|value| !value.is_empty())
+        .take(MAX_GATE_DIAGNOSTIC_ACTIONS)
+        .collect();
+    Some(AgentTaskGateDiagnosticRecord {
+        schema: AGENT_TASK_GATE_DIAGNOSTIC_RECORD_SCHEMA.to_string(),
+        identity,
+        summary,
+        source_location,
+        suggested_actions,
+        producer: mapping.producer.clone(),
+        full_evidence_ref: full_evidence_ref.to_string(),
+    })
+}
+
+fn bounded_diagnostic_text(value: &str) -> String {
+    let mut result = String::new();
+    for character in value.chars() {
+        if result.len() + character.len_utf8() > MAX_GATE_DIAGNOSTIC_FIELD_BYTES {
+            break;
+        }
+        result.push(character);
+    }
+    result
 }
 
 fn gate_diagnostic_record_schema() -> String {
@@ -1086,6 +1213,58 @@ mod tests {
             HomeboyGateStatus::from(AgentTaskGateStatus::Failed),
             HomeboyGateStatus::Failed
         );
+    }
+
+    #[test]
+    fn declared_opaque_sidecar_is_normalized_with_durable_evidence_reference() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fixture = include_str!(
+            "../../../tests/fixtures/agent_task_gate_feedback/opaque-producer-diagnostics.json"
+        );
+        fs::write(temp.path().join("diagnostics.json"), fixture).expect("write sidecar");
+        let mut report = run_gate_command(temp.path(), 1, "exit 1").expect("failed gate");
+        ingest_gate_diagnostic_sidecars(
+            temp.path(),
+            &[AgentTaskGateDiagnosticSidecarMapping {
+                source_schema: "example/producer-diagnostic/v1".to_string(),
+                target_schema: AGENT_TASK_GATE_DIAGNOSTIC_RECORD_SCHEMA.to_string(),
+                path: "diagnostics.json".to_string(),
+                producer: AgentTaskGateDiagnosticProducer {
+                    id: "opaque-producer".to_string(),
+                    schema: "example/producer-output/v1".to_string(),
+                },
+            }],
+            &mut report,
+            "homeboy://agent-task/run/run-1/promotion/gates/gate-1",
+        );
+        let diagnostic = &report.failure_evidence.unwrap().diagnostics[0];
+        assert_eq!(diagnostic.schema, AGENT_TASK_GATE_DIAGNOSTIC_RECORD_SCHEMA);
+        assert_eq!(diagnostic.identity, "opaque:stable-identity");
+        assert_eq!(diagnostic.producer.id, "opaque-producer");
+        assert_eq!(
+            diagnostic.full_evidence_ref,
+            "homeboy://agent-task/run/run-1/promotion/gates/gate-1"
+        );
+    }
+
+    #[test]
+    fn absent_or_malformed_declared_sidecars_preserve_gate_failure() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut report = run_gate_command(temp.path(), 1, "exit 1").expect("failed gate");
+        let mapping = AgentTaskGateDiagnosticSidecarMapping {
+            source_schema: "example/producer-diagnostic/v1".to_string(),
+            target_schema: AGENT_TASK_GATE_DIAGNOSTIC_RECORD_SCHEMA.to_string(),
+            path: "diagnostics.json".to_string(),
+            producer: AgentTaskGateDiagnosticProducer {
+                id: "opaque-producer".to_string(),
+                schema: "example/producer-output/v1".to_string(),
+            },
+        };
+        ingest_gate_diagnostic_sidecars(temp.path(), &[mapping.clone()], &mut report, "evidence");
+        fs::write(temp.path().join("diagnostics.json"), "not json")
+            .expect("write malformed sidecar");
+        ingest_gate_diagnostic_sidecars(temp.path(), &[mapping], &mut report, "evidence");
+        assert!(report.failure_evidence.unwrap().diagnostics.is_empty());
     }
 
     #[test]

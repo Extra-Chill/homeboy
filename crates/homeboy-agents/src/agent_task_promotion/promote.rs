@@ -1648,6 +1648,19 @@ fn run_promotion_gate(
             &options.gates.gate_environment,
         )
     };
+    let mut result = result;
+    if let Ok(report) = &mut result {
+        let full_evidence_ref = format!(
+            "homeboy://agent-task/run/{run_id}/promotion/gates/{}",
+            report.id
+        );
+        crate::agent_task_gate::ingest_gate_diagnostic_sidecars(
+            worktree_path,
+            &options.gates.gate_diagnostic_sidecars,
+            report,
+            &full_evidence_ref,
+        );
+    }
     let evidence = match &result {
         Ok(report) => serde_json::json!({
             "gate_id": report.id,
