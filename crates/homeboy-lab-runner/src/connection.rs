@@ -38,6 +38,9 @@ use homeboy_core::broker_auth;
 const REVERSE_RUNNER_HEARTBEAT_TTL: Duration = Duration::from_secs(90);
 const REMOTE_LEASELESS_RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const REMOTE_LEASELESS_RECOVERY_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+// A reader may wait for an in-flight reconnect, but never indefinitely behind a
+// controller-local tunnel that disappeared during a link flap.
+const DIRECT_TUNNEL_RECOVERY_WAIT: Duration = Duration::from_secs(30);
 #[path = "connection_daemon.rs"]
 mod connection_daemon;
 pub(crate) use connection_daemon::versions_match;
@@ -1095,10 +1098,18 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     // direct SSH tunnel. Reuse that still-live tunnel rather than treating the
     // controller-local record lookup as a daemon disconnect.
     let mut session = read_session_or_live_peer(runner_id)?;
+    let reconnect_error = recover_dead_direct_tunnel(runner_id, session.as_ref()).err();
+    if reconnect_error.is_none() {
+        session = read_session_or_live_peer(runner_id)?;
+    }
     let state = session_state(session.as_ref());
     let connected = state == RunnerSessionState::Connected;
     reconcile_session_metadata_with_observed_daemon(&runner, &mut session, connected)?;
-    super::generation_store::reconcile(runner_id, session.as_ref())?;
+    // A dead controller tunnel must be reattached or reported as disconnected
+    // before polling every draining local projection.
+    if connected {
+        super::generation_store::reconcile(runner_id, session.as_ref())?;
+    }
     let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected)?;
     let local_daemon_freshness = runner_daemon_freshness(&runner, session.as_ref(), connected)?;
     // A direct tunnel health response proves this session is safe for new
@@ -1179,9 +1190,16 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
         freshness.active_jobs = active_jobs;
     }
     let active_job_count = direct_daemon_active_jobs.unwrap_or(active_jobs.len());
-    let active_job_error = match (active_job_error, direct_daemon_active_jobs) {
-        (Some(error), _) => Some(error),
-        (None, Some(authoritative_count)) if authoritative_count != active_jobs.len() => {
+    let active_job_error = match (active_job_error, reconnect_error, direct_daemon_active_jobs) {
+        (None, Some(error), _) => Some(RunnerActiveJobError {
+            code: "direct_tunnel_reconnect_failed".to_string(),
+            message: format!(
+                "direct SSH tunnel reconnect did not complete; the runner remains disconnected and no remote daemon or lease was replaced: {}. Retry `homeboy runner connect {runner_id}`",
+                error.message
+            ),
+        }),
+        (Some(error), _, _) => Some(error),
+        (None, None, Some(authoritative_count)) if authoritative_count != active_jobs.len() => {
             Some(RunnerActiveJobError {
                 code: "active_job_view_inconsistent".to_string(),
                 message: format!(
@@ -1190,7 +1208,7 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
                 ),
             })
         }
-        (None, _) => None,
+        (None, None, _) => None,
     };
     let stale_runner_job_count = stale_jobs.len();
     let active_runner_jobs = active_jobs.iter().map(Into::into).collect();
@@ -1213,6 +1231,47 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
         active_job_recovery_evidence,
         session_path: session_path.display().to_string(),
     })
+}
+
+/// Recover only this controller's lost direct SSH projection. The remote daemon
+/// selection remains in `connect`: it revalidates the persisted lease and PID
+/// before opening a fresh tunnel, and refuses every unproven replacement.
+fn recover_dead_direct_tunnel(runner_id: &str, session: Option<&RunnerSession>) -> Result<()> {
+    let Some(session) = session else {
+        return Ok(());
+    };
+    if session.mode != RunnerTunnelMode::DirectSsh || session_is_live(session) {
+        return Ok(());
+    }
+
+    // Share one reconnect across concurrent readers. The winner rechecks the
+    // persisted projection while holding the compatible writer lease; waiters
+    // then observe that projection instead of opening another tunnel.
+    let _lease = homeboy_core::runtime_promotion::acquire_waiting_for_compatible(
+        "runner direct SSH tunnel recovery",
+        runner_id.to_string(),
+        DIRECT_TUNNEL_RECOVERY_WAIT,
+        |_| {},
+    )?;
+    if read_session_or_live_peer(runner_id)?
+        .as_ref()
+        .is_some_and(session_is_live)
+    {
+        return Ok(());
+    }
+
+    let (report, exit_code) = connect(runner_id)?;
+    if report.connected && exit_code == 0 {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "reconnect",
+        report
+            .failure_message
+            .unwrap_or_else(|| "tunnel-only recovery returned no ready session".to_string()),
+        Some(runner_id.to_string()),
+        None,
+    ))
 }
 
 /// Reopen a tunnel to the durable generation which owns `job_id`.
@@ -2284,7 +2343,10 @@ pub fn statuses() -> Result<Vec<RunnerStatusReport>> {
 pub fn statuses_indexed() -> Result<Vec<RunnerActiveJobsSnapshot>> {
     let mut snapshots = Vec::new();
     for runner in super::list()? {
-        let session = read_session_or_live_peer(&runner.id)?;
+        let mut session = read_session_or_live_peer(&runner.id)?;
+        if recover_dead_direct_tunnel(&runner.id, session.as_ref()).is_ok() {
+            session = read_session_or_live_peer(&runner.id)?;
+        }
         let connected = session_state(session.as_ref()) == RunnerSessionState::Connected;
         let active_jobs = if connected {
             match session.as_ref() {
