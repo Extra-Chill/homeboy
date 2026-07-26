@@ -16,6 +16,7 @@ macro_rules! ops_command_descriptors {
             (logs, Logs, crate::commands::logs::LogsArgs, command_spec("logs", CommandJsonFamily::Ops), crate::commands::logs::run),
             (triage, Triage, crate::commands::triage::TriageArgs, command_spec_with_safety("triage", CommandJsonFamily::Ops, operator_safety(None, TRIAGE_DANGEROUS_FLAGS)), crate::commands::triage::run),
             (deploy, Deploy, crate::commands::deploy::DeployArgs, command_spec_with_safety("deploy", CommandJsonFamily::Ops, operator_safety(Some("--dry-run"), DEPLOY_DANGEROUS_FLAGS)), crate::commands::deploy::run),
+            (harvest, Harvest, crate::commands::harvest::HarvestArgs, command_spec_with_safety("harvest", CommandJsonFamily::Ops, operator_safety(Some("--dry-run"), &["--apply"])), crate::commands::harvest::run),
             (daemon, Daemon, crate::commands::daemon::DaemonArgs, command_spec("daemon", CommandJsonFamily::Ops), crate::commands::daemon::run),
             (status, Status, crate::commands::status::StatusArgs, command_spec("status", CommandJsonFamily::Ops), crate::commands::status::run),
             (git, Git, crate::commands::git::GitArgs, command_spec("git", CommandJsonFamily::Ops), crate::commands::git::run),
@@ -42,6 +43,7 @@ macro_rules! ops_command_spec {
     (logs) => { command_spec("logs", CommandJsonFamily::Ops) };
     (triage) => { command_spec_with_safety("triage", CommandJsonFamily::Ops, operator_safety(None, TRIAGE_DANGEROUS_FLAGS)) };
     (deploy) => { command_spec_with_safety("deploy", CommandJsonFamily::Ops, operator_safety(Some("--dry-run"), DEPLOY_DANGEROUS_FLAGS)) };
+    (harvest) => { command_spec_with_safety("harvest", CommandJsonFamily::Ops, operator_safety(Some("--dry-run"), &["--apply"])) };
     (daemon) => { command_spec("daemon", CommandJsonFamily::Ops) };
     (status) => { command_spec("status", CommandJsonFamily::Ops) };
     (git) => { command_spec("git", CommandJsonFamily::Ops) };

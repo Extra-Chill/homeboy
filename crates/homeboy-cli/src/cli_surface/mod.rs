@@ -5,9 +5,9 @@ use std::path::PathBuf;
 
 use crate::commands::{
     activity, agent_task, api, bench, cleanup, component, config, contract, daemon, db, deploy,
-    extension, file, fleet, fuzz, git, logs, observe, project, refactor, release, report, review,
-    rig, runner, runs, runtime, self_cmd, server, ssh, stack, status, trace, triage, tunnel,
-    upgrade, worktree,
+    extension, file, fleet, fuzz, git, harvest, logs, observe, project, refactor, release, report,
+    review, rig, runner, runs, runtime, self_cmd, server, ssh, stack, status, trace, triage,
+    tunnel, upgrade, worktree,
 };
 
 const VERSION: &str = homeboy_product_identity::product_version();
@@ -167,6 +167,8 @@ pub enum Commands {
     Triage(triage::TriageArgs),
     /// Deploy components to remote server
     Deploy(deploy::DeployArgs),
+    /// Recover remote component content into local Git history
+    Harvest(harvest::HarvestArgs),
     /// Manage standalone component configurations
     Component(component::ComponentArgs),
     /// Manage global Homeboy configuration
