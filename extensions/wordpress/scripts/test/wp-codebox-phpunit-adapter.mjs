@@ -242,18 +242,17 @@ function clean(value) { return Object.fromEntries(Object.entries(value).filter((
 async function dependencyPaths(configuration, primarySources) {
   const configured = Array.isArray(configuration.validation_dependencies) ? configuration.validation_dependencies : [];
   const canonical = (process.env.HOMEBOY_WORDPRESS_DEPENDENCY_PATHS || '').split('\n');
-  const declared = configured.map((value) => {
+  // The shell resolver owns slug-to-path resolution and exports its final paths
+  // here. Settings can still contribute explicit paths when this adapter is run
+  // directly, but metadata slugs must not be resolved or rejected a second time.
+  const explicit = configured.map((value) => {
     if (typeof value === 'string') { return value; }
     if (isObject(value)) { return value.path || value.local_path || value.source || ''; }
     return '';
-  }).filter(Boolean);
-  const unresolved = declared.filter((value) => !path.isAbsolute(value));
-  if (unresolved.length > 0) {
-    throw new Error(`Declared WordPress validation dependencies were not resolved to source paths: ${unresolved.join(', ')}`);
-  }
+  }).filter((value) => path.isAbsolute(value));
   // Preserve explicitly declared paths in recipe provenance while canonicalizing
   // aliases solely for identity and duplicate detection.
-  const sources = [...new Set([...declared, ...canonical].filter((value) => typeof value === 'string' && path.isAbsolute(value)))];
+  const sources = [...new Set([...explicit, ...canonical].filter((value) => typeof value === 'string' && path.isAbsolute(value)))];
   const resolved = await Promise.all(sources.map(async (source) => {
     try { return { source, canonicalSource: await realpath(source) }; } catch { throw new Error(`Declared WordPress validation dependency sources are unavailable: ${source}`); }
   }));
