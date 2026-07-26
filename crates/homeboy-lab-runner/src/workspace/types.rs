@@ -341,11 +341,17 @@ pub struct RunnerWorkspacePruneOutput {
     pub candidates: Vec<RunnerWorkspacePruneEntry>,
     pub removed: Vec<RunnerWorkspacePruneEntry>,
     pub skipped: Vec<RunnerWorkspacePruneSkippedEntry>,
+    /// Number of workspace directories inspected during this invocation.
+    pub scanned_workspace_count: usize,
+    /// Whether the inspected window reached the end of the workspace root.
+    pub scan_complete: bool,
+    /// Candidate totals are limited to the first bounded scan window.
     pub total_candidate_count: usize,
     pub total_candidate_bytes: u64,
     pub total_removed_bytes: u64,
     pub remaining_candidate_count: usize,
     pub remaining_candidate_bytes: u64,
+    /// `has_more` includes an incomplete scan, so remaining totals can be partial.
     pub has_more: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_command: Option<String>,
