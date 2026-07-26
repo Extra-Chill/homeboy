@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.29.3] - 2026-07-26
+
+### Fixed
+- produce Cargo gate diagnostics
+
 ## [1.29.0] - 2026-07-21
 
 ### Added
