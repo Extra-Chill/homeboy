@@ -124,6 +124,7 @@ impl HermeticTestContext {
             // never to fixture subprocesses unless a test explicitly injects it.
             .env_remove(crate::observation::SOURCE_SNAPSHOT_METADATA_ENV)
             .env_remove(crate::observation::LAB_OFFLOAD_METADATA_ENV)
+            .env_remove(crate::runtime_promotion::SUBPROCESS_LEASE_ENV)
             .env("HOMEBOY_NO_UPDATE_CHECK", "1");
         command
     }
@@ -169,6 +170,7 @@ pub struct HomeGuard {
     prior_daemon_binary_sha: Option<String>,
     prior_controller_runtime_executable: Option<String>,
     prior_controller_runtime_identity: Option<String>,
+    _runtime_promotion_suppression: crate::runtime_promotion::SubprocessCapabilitySuppressionGuard,
     context: HermeticTestContext,
     _guard: MutexGuard<'static, ()>,
 }
@@ -284,6 +286,8 @@ impl AuditHomeGuard {
 impl HomeGuard {
     pub fn new() -> Self {
         let guard = home_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let runtime_promotion_suppression =
+            crate::runtime_promotion::suppress_subprocess_capability_from_env();
         reset_cached_test_state();
         let prior = std::env::var("HOME").ok();
         let prior_xdg_config_home = std::env::var("XDG_CONFIG_HOME").ok();
@@ -357,6 +361,7 @@ impl HomeGuard {
             prior_daemon_binary_sha,
             prior_controller_runtime_executable,
             prior_controller_runtime_identity,
+            _runtime_promotion_suppression: runtime_promotion_suppression,
             context,
             _guard: guard,
         }

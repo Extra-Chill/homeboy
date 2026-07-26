@@ -176,9 +176,13 @@ impl CliRuntime {
         // can reconcile and resume runs dispatched to a remote runner without
         // core depending on runner behavior.
         crate::runner::register_runner_continuation_provider();
-        // Recover completed generic runner-exec jobs before this invocation can
-        // open a daemon store whose retention policy might evict their evidence.
-        let _ = crate::runner::reconcile_terminal_runner_exec_runs();
+        // Recover completed generic runner-exec jobs before a mutating invocation
+        // can open a daemon store whose retention policy might evict evidence.
+        // Read-only startup must not mutate, and promotion contention owns all
+        // mutation until absence of its lease can be proven.
+        if should_reconcile_terminal_runner_exec_runs(&normalized) {
+            let _ = crate::runner::reconcile_terminal_runner_exec_runs();
+        }
         // Register the runner daemon-exec driver so the daemon's /exec endpoint
         // can prepare and run a runner job as a local child without core
         // depending on runner process-execution behavior.
@@ -634,6 +638,11 @@ fn marker_context_before_run_command() -> &'static std::sync::Mutex<Option<bool>
 
 fn is_top_level_version_request(args: &[String]) -> bool {
     matches!(args, [_, flag] if flag == "--version" || flag == "-V")
+}
+
+fn should_reconcile_terminal_runner_exec_runs(args: &[String]) -> bool {
+    classify_command_capability(args) == CommandCapability::Mutation
+        && !crate::core::runtime_promotion::lease_may_be_present()
 }
 
 fn startup_fast_path(args: &[String]) -> Option<StartupFastPath> {
