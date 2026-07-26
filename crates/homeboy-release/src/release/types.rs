@@ -298,6 +298,9 @@ pub struct ReleaseState {
     pub tag: Option<String>,
     pub notes: Option<String>,
     pub artifacts: Vec<ReleaseArtifact>,
+    /// Component-relative checkout paths proven absent before packaging and
+    /// created by the current package invocation.
+    pub package_owned_paths: Vec<String>,
     pub changelog_validation: Option<crate::release::version::ChangelogValidationResult>,
 }
 

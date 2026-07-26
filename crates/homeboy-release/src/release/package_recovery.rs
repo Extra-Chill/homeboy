@@ -110,6 +110,10 @@ pub fn package_existing_tag(
         )
     })?;
 
+    // The durable recovery directory now owns the deliverables. Remove only
+    // checkout paths proven to have been created by this package invocation.
+    super::executor::run_cleanup(&component, &state)?;
+
     homeboy_core::log_status!(
         "release",
         "Release package artifacts written to {}",

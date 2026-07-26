@@ -9,6 +9,7 @@ use homeboy_core::error::{Error, Result};
 use homeboy_extension as extension;
 use homeboy_extension::ExtensionCapability;
 use homeboy_extension::{self, ExtensionManifest};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use super::super::types::{ReleaseArtifact, ReleaseState, ReleaseStepResult};
@@ -35,6 +36,7 @@ pub(crate) fn run_package(
     declared_build_artifact: Option<&str>,
     skip_build_validation: bool,
 ) -> Result<ReleaseStepResult> {
+    let cleanup_before = package_cleanup_snapshot(component)?;
     let package_extensions: Vec<&ExtensionManifest> = extensions
         .iter()
         .filter(|m| m.actions.iter().any(|a| a.id == "release.package"))
@@ -53,12 +55,14 @@ pub(crate) fn run_package(
 
     if package_extensions.is_empty() {
         if declared_artifact_built {
+            record_package_owned_paths(state, component, &cleanup_before)?;
             return Ok(step_success(
                 "package",
                 "package",
                 Some(serde_json::json!({
                     "action": "scripts.build",
                     "artifact": declared_build_artifact,
+                    "package_owned_paths": state.package_owned_paths,
                 })),
                 Vec::new(),
             ));
@@ -107,22 +111,77 @@ pub(crate) fn run_package(
         )?;
     }
 
+    record_package_owned_paths(state, component, &cleanup_before)?;
+
     let data = if responses.len() == 1 {
         let response = responses.pop().expect("single package response");
         serde_json::json!({
             "extension": response["extension"],
             "action": "release.package",
             "response": response["response"],
+            "package_owned_paths": state.package_owned_paths,
         })
     } else {
         serde_json::json!({
             "action": "release.package",
             "extensions": responses.iter().map(|response| response["extension"].clone()).collect::<Vec<_>>(),
             "responses": responses,
+            "package_owned_paths": state.package_owned_paths,
         })
     };
 
     Ok(step_success("package", "package", Some(data), Vec::new()))
+}
+
+fn record_package_owned_paths(
+    state: &mut ReleaseState,
+    component: &Component,
+    before: &BTreeSet<String>,
+) -> Result<()> {
+    let after = package_cleanup_snapshot(component)?;
+    state
+        .package_owned_paths
+        .extend(after.difference(before).cloned());
+    state.package_owned_paths.sort();
+    state.package_owned_paths.dedup();
+    Ok(())
+}
+
+/// Snapshot only checkout paths that can later be removed without guessing.
+/// Git supplies untracked outputs while component/extension declarations cover
+/// ignored build paths. Paths that existed before packaging never enter the
+/// ownership delta, even when their names match generated outputs.
+fn package_cleanup_snapshot(component: &Component) -> Result<BTreeSet<String>> {
+    let component_path = Path::new(&component.local_path);
+    let mut paths = BTreeSet::new();
+
+    if homeboy_core::git::is_git_repo(&component.local_path) {
+        let changes = homeboy_core::git::get_uncommitted_changes(&component.local_path)?;
+        for path in changes.untracked {
+            record_existing_cleanup_path(component_path, &path, &mut paths);
+        }
+    }
+
+    for path in homeboy_core::component::declared_cleanup_artifact_paths(component)? {
+        record_existing_cleanup_path(component_path, &path, &mut paths);
+    }
+
+    Ok(paths)
+}
+
+fn record_existing_cleanup_path(component_path: &Path, path: &str, paths: &mut BTreeSet<String>) {
+    let normalized = path.trim().trim_end_matches('/').replace('\\', "/");
+    let relative = Path::new(&normalized);
+    if normalized.is_empty()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        || !component_path.join(relative).exists()
+    {
+        return;
+    }
+    paths.insert(normalized);
 }
 
 /// Run the component-owned build contract before package providers when it is

@@ -335,14 +335,14 @@ pub(crate) fn run_cleanup(
     component: &Component,
     state: &ReleaseState,
 ) -> Result<ReleaseStepResult> {
-    let cleanup_paths = release_cleanup_paths(&component.local_path, &state.artifacts);
+    let cleanup_paths = release_cleanup_paths(&component.local_path, &state.package_owned_paths);
     let mut removed_paths = Vec::new();
 
     for path in &cleanup_paths {
         if !path.exists() {
             continue;
         }
-        std::fs::remove_dir_all(path).map_err(|e| {
+        remove_release_cleanup_path(path).map_err(|e| {
             Error::internal_io(
                 format!("Failed to clean up {}: {}", path.display(), e),
                 Some(path.display().to_string()),
@@ -351,10 +351,9 @@ pub(crate) fn run_cleanup(
         removed_paths.push(path.display().to_string());
     }
 
-    let distrib_path = std::path::Path::new(&component.local_path).join("target/distrib");
     let data = serde_json::json!({
         "action": "cleanup",
-        "path": distrib_path.display().to_string(),
+        "path": cleanup_paths.first().map(|path| path.display().to_string()),
         "paths": cleanup_paths
             .iter()
             .map(|path| path.display().to_string())
@@ -368,28 +367,24 @@ pub(crate) fn run_cleanup(
 
 pub(crate) fn release_cleanup_paths(
     local_path: &str,
-    artifacts: &[ReleaseArtifact],
+    package_owned_paths: &[String],
 ) -> Vec<std::path::PathBuf> {
     let component_path = std::path::Path::new(local_path);
-    let mut paths = vec![component_path.join("target/distrib")];
+    package_owned_paths
+        .iter()
+        .filter(|path| homeboy_core::cleanup::is_safe_artifact_path(path))
+        .filter(|path| !homeboy_core::git::is_tracked_path(component_path, path))
+        .map(|path| component_path.join(path))
+        .collect()
+}
 
-    let build_path = component_path.join("build");
-    let has_build_artifact = artifacts.iter().any(|artifact| {
-        let artifact_path = std::path::Path::new(&artifact.path);
-        let artifact_path = if artifact_path.is_absolute() {
-            artifact_path.to_path_buf()
-        } else {
-            component_path.join(artifact_path)
-        };
-
-        artifact_path.starts_with(&build_path)
-    });
-
-    if has_build_artifact {
-        paths.push(build_path);
+fn remove_release_cleanup_path(path: &std::path::Path) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
     }
-
-    paths
 }
 
 /// Run the component's `post_release` hook commands. Failures are non-fatal —
@@ -655,14 +650,14 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_removes_build_dir_when_release_artifact_is_inside_build() {
+    fn cleanup_removes_only_release_owned_directory_and_file() {
         let temp = tempfile::tempdir().expect("tempdir");
         let build_dir = temp.path().join("build");
-        let distrib_dir = temp.path().join("target/distrib");
         std::fs::create_dir_all(&build_dir).expect("build dir");
-        std::fs::create_dir_all(&distrib_dir).expect("distrib dir");
         let artifact_path = build_dir.join("fixture.zip");
         std::fs::write(&artifact_path, "artifact").expect("artifact");
+        let package_path = temp.path().join("fixture-1.2.3.tgz");
+        std::fs::write(&package_path, "package").expect("package");
 
         let component = Component {
             id: "fixture".to_string(),
@@ -676,6 +671,7 @@ mod tests {
                 artifact_type: None,
                 platform: None,
             }],
+            package_owned_paths: vec!["build".to_string(), "fixture-1.2.3.tgz".to_string()],
             ..ReleaseState::default()
         };
 
@@ -683,7 +679,7 @@ mod tests {
 
         assert_eq!(result.status, ReleaseStepStatus::Success);
         assert!(!build_dir.exists());
-        assert!(!distrib_dir.exists());
+        assert!(!package_path.exists());
     }
 
     #[test]
@@ -704,6 +700,24 @@ mod tests {
 
         assert_eq!(result.status, ReleaseStepStatus::Success);
         assert!(build_dir.exists());
+    }
+
+    #[test]
+    fn cleanup_preserves_preexisting_matching_paths_not_owned_by_release() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(temp.path().join("build")).expect("build dir");
+        std::fs::write(temp.path().join("build/user.txt"), "user").expect("user file");
+        std::fs::write(temp.path().join("fixture-1.2.3.tgz"), "user").expect("user package");
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: temp.path().to_string_lossy().to_string(),
+            ..Component::default()
+        };
+
+        run_cleanup(&component, &ReleaseState::default()).expect("cleanup");
+
+        assert!(temp.path().join("build/user.txt").is_file());
+        assert!(temp.path().join("fixture-1.2.3.tgz").is_file());
     }
 
     #[test]
@@ -850,6 +864,16 @@ mod tests {
                 "mkdir -p build; printf artifact > build/fixture.zip; printf '[{\"path\":\"build/fixture.zip\",\"type\":\"archive\"}]'",
             );
             homeboy_extension::save_manifest(&package).expect("save package extension");
+            let component_config = Component {
+                id: "fixture".to_string(),
+                local_path: component.path().to_string_lossy().to_string(),
+                cleanup_artifacts: vec![homeboy_core::component::CleanupArtifactDeclaration {
+                    label: "package build".to_string(),
+                    path: Some("build".to_string()),
+                    glob: None,
+                }],
+                ..Component::default()
+            };
 
             let mut state = crate::release::types::ReleaseState {
                 version: Some("1.2.3".to_string()),
@@ -858,7 +882,7 @@ mod tests {
             let result = run_package(
                 &[package],
                 &mut state,
-                &Component::default(),
+                &component_config,
                 "fixture",
                 &component.path().to_string_lossy(),
                 None,
@@ -888,12 +912,7 @@ mod tests {
             assert!(repair.create_command.contains(durable_path));
 
             let build_dir = component.path().join("build");
-            let component = Component {
-                id: "fixture".to_string(),
-                local_path: component.path().to_string_lossy().to_string(),
-                ..Component::default()
-            };
-            run_cleanup(&component, &state).expect("cleanup");
+            run_cleanup(&component_config, &state).expect("cleanup");
 
             assert!(!build_dir.exists());
             assert!(std::path::Path::new(durable_path).is_file());

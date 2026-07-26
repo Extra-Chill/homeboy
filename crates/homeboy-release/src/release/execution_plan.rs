@@ -146,6 +146,7 @@ fn initial_release_state(
         tag: Some(tag),
         notes,
         artifacts: Vec::new(),
+        package_owned_paths: Vec::new(),
         changelog_validation: None,
     })
 }

@@ -433,87 +433,91 @@ fn test_build_release_steps() {
 
 #[test]
 fn release_plan_runs_package_preflight_before_mutating_release_steps() {
-    let mut component = fixture_component();
-    component.extensions = Some(std::collections::HashMap::from([(
-        "fixture-packager".to_string(),
-        ScopedExtensionConfig::default(),
-    )]));
-    let mut extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
-        "name": "Fixture Packager",
-        "version": "1.0.0",
-        "actions": [
-            {
-                "id": "release.package",
-                "label": "Package release",
-                "type": "command",
-                "command": "true"
-            },
-            {
-                "id": "release.publish",
-                "label": "Publish release",
-                "type": "command",
-                "command": "true"
-            }
-        ]
-    }))
-    .expect("extension manifest");
-    extension.id = "fixture-packager".to_string();
-    let mut warnings = Vec::new();
-    let mut hints = Vec::new();
-    let release_scope = ReleaseScope::resolve(&component, &component.id).expect("release scope");
-    let options = ReleaseOptions {
-        bump_type: "patch".to_string(),
-        ..Default::default()
-    };
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut component = fixture_component();
+        component.extensions = Some(std::collections::HashMap::from([(
+            "fixture-packager".to_string(),
+            ScopedExtensionConfig::default(),
+        )]));
+        let mut extension: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "Fixture Packager",
+            "version": "1.0.0",
+            "actions": [
+                {
+                    "id": "release.package",
+                    "label": "Package release",
+                    "type": "command",
+                    "command": "true"
+                },
+                {
+                    "id": "release.publish",
+                    "label": "Publish release",
+                    "type": "command",
+                    "command": "true"
+                }
+            ]
+        }))
+        .expect("extension manifest");
+        extension.id = "fixture-packager".to_string();
+        homeboy_extension::save_manifest(&extension).expect("save extension manifest");
+        let mut warnings = Vec::new();
+        let mut hints = Vec::new();
+        let release_scope =
+            ReleaseScope::resolve(&component, &component.id).expect("release scope");
+        let options = ReleaseOptions {
+            bump_type: "patch".to_string(),
+            ..Default::default()
+        };
 
-    let steps = build_release_steps(
-        &component,
-        &[extension],
-        "1.0.0",
-        "1.0.1",
-        &fixture_changelog_plan(),
-        &options,
-        &release_scope,
-        &mut warnings,
-        &mut hints,
-    )
-    .expect("steps");
+        let steps = build_release_steps(
+            &component,
+            &[extension],
+            "1.0.0",
+            "1.0.1",
+            &fixture_changelog_plan(),
+            &options,
+            &release_scope,
+            &mut warnings,
+            &mut hints,
+        )
+        .expect("steps");
 
-    let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
-    let package_preflight_index = step_index(&ids, "preflight.package");
-    let tag_preflight_index = step_index(&ids, "preflight.tag_availability");
-    let changelog_finalize_index = step_index(&ids, "changelog.finalize");
-    let version_index = step_index(&ids, "version");
-    let commit_index = step_index(&ids, "git.commit");
+        let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
+        let package_preflight_index = step_index(&ids, "preflight.package");
+        let tag_preflight_index = step_index(&ids, "preflight.tag_availability");
+        let changelog_finalize_index = step_index(&ids, "changelog.finalize");
+        let version_index = step_index(&ids, "version");
+        let commit_index = step_index(&ids, "git.commit");
 
-    assert!(package_preflight_index < changelog_finalize_index);
-    assert!(tag_preflight_index < changelog_finalize_index);
-    assert!(package_preflight_index < version_index);
-    assert!(tag_preflight_index < version_index);
-    assert!(package_preflight_index < commit_index);
-    assert!(tag_preflight_index < commit_index);
+        assert!(package_preflight_index < changelog_finalize_index);
+        assert!(tag_preflight_index < changelog_finalize_index);
+        assert!(package_preflight_index < version_index);
+        assert!(tag_preflight_index < version_index);
+        assert!(package_preflight_index < commit_index);
+        assert!(tag_preflight_index < commit_index);
 
-    let package_preflight = &steps[package_preflight_index];
-    assert_eq!(
-        package_preflight.needs,
-        vec!["preflight.changelog_bootstrap"]
-    );
+        let package_preflight = &steps[package_preflight_index];
+        assert_eq!(
+            package_preflight.needs,
+            vec!["preflight.changelog_bootstrap"]
+        );
 
-    let changelog_policy = steps
-        .iter()
-        .find(|step| step.id == "changelog.policy")
-        .expect("changelog policy step");
-    assert_eq!(changelog_policy.needs, vec!["preflight.tag_availability"]);
+        let changelog_policy = steps
+            .iter()
+            .find(|step| step.id == "changelog.policy")
+            .expect("changelog policy step");
+        assert_eq!(changelog_policy.needs, vec!["preflight.tag_availability"]);
 
-    let tag_preflight = &steps[tag_preflight_index];
-    assert_eq!(tag_preflight.needs, vec!["preflight.package"]);
-    assert_eq!(
-        tag_preflight
-            .inputs
-            .get("name")
-            .and_then(|value| value.as_str()),
-        Some("v1.0.1")
-    );
+        let tag_preflight = &steps[tag_preflight_index];
+        assert_eq!(tag_preflight.needs, vec!["preflight.package"]);
+        assert_eq!(
+            tag_preflight
+                .inputs
+                .get("name")
+                .and_then(|value| value.as_str()),
+            Some("v1.0.1")
+        );
+    });
 }
 
 #[test]
@@ -556,7 +560,10 @@ fn skip_publish_with_package_provider_still_packages_before_github_release() {
     assert_eq!(steps[step_index(&ids, "git.tag")].needs, vec!["package"]);
     assert_eq!(steps[github_release_index].needs, vec!["git.push"]);
     assert!(!ids.contains(&"publish.artifact-packager"));
-    assert!(!ids.contains(&"cleanup"));
+    assert_eq!(
+        steps[step_index(&ids, "cleanup")].needs,
+        vec!["github.release"]
+    );
 }
 
 #[test]
@@ -628,8 +635,9 @@ fn head_skip_publish_with_package_provider_still_packages_before_github_release(
     .expect("steps");
 
     let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
-    assert_eq!(ids, vec!["package", "github.release"]);
+    assert_eq!(ids, vec!["package", "github.release", "cleanup"]);
     assert_eq!(steps[1].needs, vec!["package"]);
+    assert_eq!(steps[2].needs, vec!["github.release"]);
 }
 
 #[test]
@@ -665,6 +673,10 @@ fn component_build_artifact_packages_before_github_release_without_extension() {
     assert!(step_index(&ids, "preflight.package") < step_index(&ids, "package"));
     assert!(step_index(&ids, "package") < step_index(&ids, "github.release"));
     assert_eq!(steps[step_index(&ids, "git.tag")].needs, vec!["package"]);
+    assert_eq!(
+        steps[step_index(&ids, "cleanup")].needs,
+        vec!["github.release"]
+    );
 }
 
 #[test]
@@ -701,8 +713,9 @@ fn head_component_build_artifact_packages_before_github_release_without_extensio
     .expect("steps");
 
     let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
-    assert_eq!(ids, vec!["package", "github.release"]);
+    assert_eq!(ids, vec!["package", "github.release", "cleanup"]);
     assert_eq!(steps[1].needs, vec!["package"]);
+    assert_eq!(steps[2].needs, vec!["github.release"]);
 }
 
 #[test]
@@ -868,12 +881,7 @@ fn head_release_plan_skips_mutation_steps_and_uses_existing_artifacts() {
     assert!(!ids.contains(&"git.push"));
     assert_eq!(
         ids,
-        vec![
-            "artifacts.inventory",
-            "github.release",
-            "publish.wordpress",
-            "cleanup"
-        ]
+        vec!["artifacts.inventory", "github.release", "publish.wordpress"]
     );
     assert_eq!(
         steps[0].inputs.get("dir").and_then(|value| value.as_str()),
