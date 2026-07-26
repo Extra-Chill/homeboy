@@ -224,6 +224,8 @@ pub struct AgentTaskGateSetupEvidence {
     pub output: String,
 }
 
+const MAX_GATE_DEPENDENCY_ROOTS: usize = 64;
+
 /// Discover only the checkout root and direct child roots. Provider resolution,
 /// package-manager detection, and install commands remain outside Homeboy core.
 pub(crate) fn hydrate_gate_dependency_roots(
@@ -240,24 +242,52 @@ pub(crate) fn hydrate_gate_dependency_roots(
             Some("read candidate dependency roots".to_string()),
         )
     })? {
-        let path = entry
-            .map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some("read candidate dependency root".to_string()),
-                )
-            })?
-            .path();
-        if path.is_dir() && path.file_name().is_none_or(|name| name != ".git") {
+        let entry = entry.map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read candidate dependency root".to_string()),
+            )
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read candidate dependency root type".to_string()),
+            )
+        })?;
+        // A linked directory can escape the detached candidate checkout. Setup
+        // is allowed only in the candidate root or a real direct child.
+        if file_type.is_dir() && path.file_name().is_none_or(|name| name != ".git") {
             roots.push(path);
         }
     }
     roots.sort();
+    if roots.len() > MAX_GATE_DEPENDENCY_ROOTS {
+        return Err(Error::validation_invalid_argument(
+            "promotion.gate_setup",
+            format!(
+                "candidate declares more than {MAX_GATE_DEPENDENCY_ROOTS} dependency roots at the supported depth"
+            ),
+            Some(checkout.display().to_string()),
+            None,
+        ));
+    }
     let mut evidence = Vec::new();
     for root in roots {
+        // The identity is an input to setup, not a post-setup cache key. A
+        // provider that rewrites it has not verified the declared candidate.
+        let lock_identity = dependency_root_identity(&root)?;
         let started = std::time::Instant::now();
         if !homeboy_core::hygiene::materialize_worktree_dependencies(&root)? {
             continue;
+        }
+        if dependency_root_identity(&root)? != lock_identity {
+            return Err(Error::validation_invalid_argument(
+                "promotion.gate_setup",
+                "dependency setup changed its declared lock identity",
+                Some(root.display().to_string()),
+                None,
+            ));
         }
         let relative = root
             .strip_prefix(checkout)
@@ -271,7 +301,7 @@ pub(crate) fn hydrate_gate_dependency_roots(
             } else {
                 relative
             },
-            lock_identity: dependency_root_identity(&root)?,
+            lock_identity,
             setup_capability: "dependency.install".to_string(),
             duration_ms: started.elapsed().as_millis(),
             status: "succeeded".to_string(),

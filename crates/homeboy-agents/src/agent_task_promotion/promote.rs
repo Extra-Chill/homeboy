@@ -1397,6 +1397,17 @@ fn run_promotion_gates(
         options.gates.hydrate_dependencies,
     )
     .map_err(|error| {
+        let mut cause = serde_json::json!({
+            "classification": "candidate_setup",
+            "code": error.code.as_str(),
+            "message": bounded_setup_error_text(&error.message),
+        });
+        if let Some(details) = cause.as_object_mut() {
+            details.insert(
+                "details".to_string(),
+                serde_json::Value::String(bounded_setup_error_text(&error.details.to_string())),
+            );
+        }
         Error::dependency_step_failed(
             "promotion.gate_setup",
             "candidate_checkout".to_string(),
@@ -1404,10 +1415,7 @@ fn run_promotion_gates(
             Vec::new(),
             Vec::new(),
             None,
-            Some(serde_json::json!({
-                "classification": "infrastructure",
-                "message": error.message,
-            })),
+            Some(cause),
         )
     })?;
     let declared_gates = options
@@ -1481,6 +1489,18 @@ fn run_promotion_gates(
         setup,
         candidate_checkout,
     })
+}
+
+fn bounded_setup_error_text(value: &str) -> String {
+    const MAX_BYTES: usize = 4096;
+    let mut result = String::new();
+    for character in value.chars() {
+        if result.len() + character.len_utf8() > MAX_BYTES {
+            break;
+        }
+        result.push(character);
+    }
+    result
 }
 
 /// A run-scoped detached worktree whose commit tree is exactly the promoted
