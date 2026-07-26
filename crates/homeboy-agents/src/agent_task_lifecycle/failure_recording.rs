@@ -206,6 +206,9 @@ fn candidate_adoption_recovery(phase: &str) -> Option<serde_json::Value> {
 }
 
 fn pre_execution_failure_classification(error: &Error) -> AgentTaskFailureClassification {
+    if error.details["pre_execution_phase"] == "gate_toolchain_preflight" {
+        return AgentTaskFailureClassification::CapabilityMissing;
+    }
     if error.retryable == Some(true) {
         AgentTaskFailureClassification::Transient
     } else {

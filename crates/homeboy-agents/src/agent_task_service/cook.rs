@@ -1600,6 +1600,28 @@ where
     validate_cook_workspace(&options)?;
     validate_cook_candidate_group(&options.initial_plan)?;
     materialize_initial_cook_attempt(&options)?;
+    let gate_workspace = options.source_worktree_path.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "workspace",
+            "Cook requires a workspace before gate toolchain preflight",
+            Some(options.to_worktree.clone()),
+            None,
+        )
+    })?;
+    if let Err(error) = crate::agent_task_gate::preflight_gate_toolchains(
+        gate_workspace,
+        &options.gates.gate_environment,
+        &options.gates.gate_toolchains,
+    ) {
+        let error = with_pre_execution_phase(error, "gate_toolchain_preflight");
+        record_pre_execution_failure(
+            &options.initial_plan,
+            &options.initial_run_id,
+            &error,
+            "gate_toolchain_preflight",
+        )?;
+        return Err(error);
+    }
     if let Some(latest_attempt) = recipe.attempts.last() {
         materialize_cook_attempt(
             &recipe.cook_id,

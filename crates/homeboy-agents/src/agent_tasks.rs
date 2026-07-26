@@ -245,8 +245,8 @@ pub mod gate {
         AgentTaskGateEnvironment, AgentTaskGateEnvironmentMode, AgentTaskGateEnvironmentPolicy,
         AgentTaskGateEnvironmentVariable, AgentTaskGateExecutionPolicy,
         AgentTaskGateFailureEvidence, AgentTaskGateReport, AgentTaskGateRevealPolicy,
-        AgentTaskGateStatus, AgentTaskGateVisibility, VerifyGateOptions,
-        AGENT_TASK_GATE_REPORT_SCHEMA,
+        AgentTaskGateStatus, AgentTaskGateToolchainRequirement, AgentTaskGateVisibility,
+        VerifyGateOptions, AGENT_TASK_GATE_REPORT_SCHEMA,
     };
 }
 

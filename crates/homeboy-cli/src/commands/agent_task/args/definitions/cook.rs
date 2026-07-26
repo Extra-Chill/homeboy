@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use homeboy::agents::agent_task_scheduler::AgentTaskCandidateCompletionPolicy;
 use homeboy::agents::agent_tasks::gate::{
     AgentTaskGateEnvironmentMode, AgentTaskGateEnvironmentPolicy, AgentTaskGateExecutionPolicy,
-    AgentTaskGateRevealPolicy, VerifyGateOptions,
+    AgentTaskGateRevealPolicy, AgentTaskGateToolchainRequirement, VerifyGateOptions,
 };
 
 use super::super::super::super::agent_task_dispatch::DispatchArgs;
@@ -68,6 +68,14 @@ pub struct VerifyGateArgs {
     /// Extra environment variable for gate commands, as `NAME=VALUE`. Repeatable.
     #[arg(long = "gate-env", value_name = "NAME=VALUE", value_parser = parse_gate_environment)]
     pub gate_environment: Vec<(String, String)>,
+    /// Preserve a required toolchain setting from the host as `NAME=SOURCE` or
+    /// `NAME=SOURCE/relative/path`. The mapping is retained in gate evidence.
+    #[arg(long = "gate-env-from", value_name = "NAME=SOURCE[/PATH]", value_parser = parse_gate_environment)]
+    pub gate_environment_preserve: Vec<(String, String)>,
+    /// Required executable to initialize before provider execution. Its probe is
+    /// `COMMAND --version` in the final isolated gate environment. Repeatable.
+    #[arg(long = "gate-toolchain", value_name = "COMMAND")]
+    pub gate_toolchains: Vec<String>,
     /// Run gates with an isolated `$HOME` so gate side effects do not touch the
     /// operator's home directory (default true).
     #[arg(
@@ -112,9 +120,21 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
                     .gate_environment
                     .into_iter()
                     .collect::<BTreeMap<_, _>>(),
+                preserve: args
+                    .gate_environment_preserve
+                    .into_iter()
+                    .collect::<BTreeMap<_, _>>(),
                 isolate_home: args.isolate_gate_home,
                 isolate_xdg: args.isolate_gate_xdg,
             },
+            gate_toolchains: args
+                .gate_toolchains
+                .into_iter()
+                .map(|command| AgentTaskGateToolchainRequirement {
+                    command,
+                    probe_arguments: vec!["--version".to_string()],
+                })
+                .collect(),
             gate_diagnostic_sidecars: Vec::new(),
         }
     }
