@@ -2063,7 +2063,9 @@ where
             max_attempts,
             source_run_id: Some(run_id.clone()),
             current_diff: gate_feedback_current_diff(&promotion),
-            require_review_form: true,
+            // The form is publication evidence. A no-finalize Cook preserves
+            // the verified patch for review without entering finalization.
+            require_review_form: !options.no_finalize,
             review_form,
             metadata: Value::Null,
         });

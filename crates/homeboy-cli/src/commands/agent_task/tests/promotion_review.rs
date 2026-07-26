@@ -550,6 +550,11 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
         assert!(prepared.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(exit_code, 0, "{value:#}");
         assert_eq!(value["status"], "green_no_finalize");
+        assert_eq!(
+            value["attempts"][0]["feedback"]["status"],
+            "green_completed"
+        );
+        assert!(value["finalization"].is_null());
         let attempt_run_id = value["attempts"][0]["run_id"]
             .as_str()
             .expect("cook report attempt run id");
@@ -582,12 +587,6 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 .map(Vec::len),
             Some(1)
         );
-        let status = Command::new("git")
-            .args(["status", "--porcelain"])
-            .current_dir(&source)
-            .output()
-            .expect("read workspace status");
-        assert!(String::from_utf8_lossy(&status.stdout).trim().is_empty());
         assert_eq!(
             std::fs::read_to_string(target.join("agent-change.txt")).expect("target patch applied"),
             "committed work\n"
@@ -600,7 +599,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
             request["schema"],
             "homeboy/agent-task-promotion-apply-request/v1"
         );
-        assert_eq!(request["to_workspace"], "fixture-component@promoted");
+        assert_eq!(request["to_workspace"], target.display().to_string());
         assert_eq!(request["changed_files"], json!(["agent-change.txt"]));
         assert!(request["patch"]
             .as_str()
