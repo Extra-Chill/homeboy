@@ -7,7 +7,7 @@ use std::sync::{Mutex, OnceLock};
 use crate::cli_surface::Commands;
 use crate::command_contract::CommandOutputFileMode;
 
-use crate::commands::utils::response as output;
+use crate::commands::utils::response::{self as output, CommandIdentity};
 use crate::commands::{review, trace, GlobalArgs};
 
 #[derive(Debug)]
@@ -56,13 +56,13 @@ impl CookOutputLease {
         &self,
         result: &homeboy::core::Result<Value>,
         exit_code: i32,
-        command: &str,
+        identity: &CommandIdentity,
         presentation: Option<output::CommandPresentationEnvelope>,
     ) -> homeboy::core::Result<()> {
-        let response = output::cli_response_for_json_result_for_command(
+        let response = output::cli_response_for_json_result_for_identity(
             result,
             exit_code,
-            command,
+            identity,
             presentation,
         );
         let contents = serde_json::to_string_pretty(&response).map_err(|error| {
@@ -280,6 +280,7 @@ fn output_io_error(path: &Path, error: std::io::Error) -> homeboy::core::Error {
 
 pub struct CommandRun {
     pub command: String,
+    pub operation: Option<String>,
     pub stdout_result: homeboy::core::Result<Value>,
     pub exit_code: i32,
     pub output_file_result: Option<homeboy::core::Result<Value>>,
@@ -306,6 +307,7 @@ impl CommandRun {
     ) -> Self {
         Self {
             command: command.into(),
+            operation: None,
             stdout_result,
             exit_code,
             output_file_result: None,
@@ -322,6 +324,12 @@ impl CommandRun {
 
     pub fn with_command(mut self, command: impl Into<String>) -> Self {
         self.command = command.into();
+        self
+    }
+
+    pub fn with_identity(mut self, identity: &CommandIdentity) -> Self {
+        self.command = identity.command.clone();
+        self.operation = identity.operation.clone();
         self
     }
 
@@ -346,6 +354,7 @@ impl CommandRun {
 
         Self {
             command: command.into(),
+            operation: None,
             stdout_result,
             exit_code,
             output_file_result,
@@ -379,8 +388,21 @@ impl<'a> OutputService<'a> {
     }
 
     pub fn emit_json_result(&self, result: homeboy::core::Result<Value>, exit_code: i32) {
+        self.emit_json_result_for_identity(
+            result,
+            exit_code,
+            &CommandIdentity::top_level("unknown"),
+        );
+    }
+
+    pub fn emit_json_result_for_identity(
+        &self,
+        result: homeboy::core::Result<Value>,
+        exit_code: i32,
+        identity: &CommandIdentity,
+    ) {
         self.emit_run(
-            CommandRun::from_stdout_result(result, exit_code),
+            CommandRun::from_stdout_result(result, exit_code).with_identity(identity),
             CommandOutputFileMode::GenericEnvelope,
         );
     }
@@ -391,10 +413,13 @@ impl<'a> OutputService<'a> {
             match raw_stdout {
                 Ok(content) => print!("{}", content),
                 Err(err) => {
-                    output::print_json_result_for_command(
+                    output::print_json_result_for_identity(
                         Err(err),
                         run.exit_code,
-                        &run.command,
+                        &CommandIdentity {
+                            command: run.command.clone(),
+                            operation: run.operation.clone(),
+                        },
                         None,
                     )
                     .ok();
@@ -407,10 +432,13 @@ impl<'a> OutputService<'a> {
         if let Some(stderr) = &run.presentation.stderr {
             eprint!("{}", stderr);
         }
-        output::print_json_result_for_command(
+        output::print_json_result_for_identity(
             run.stdout_result,
             run.exit_code,
-            &run.command,
+            &CommandIdentity {
+                command: run.command.clone(),
+                operation: run.operation.clone(),
+            },
             presentation_envelope(run.presentation),
         )
         .ok();
@@ -430,6 +458,7 @@ pub fn run_command(
     spec: &'static crate::command_contract::CommandSpec,
     global: &GlobalArgs,
     requested_output_file: Option<&str>,
+    identity: &CommandIdentity,
 ) -> i32 {
     let output_file = command_runtime_output_file(&command, requested_output_file);
     let plan = command.response_plan(spec, output_file.is_some());
@@ -439,13 +468,14 @@ pub fn run_command(
         crate::commands::raw_output::CommandRunPreparation::Handled(exit_code) => return exit_code,
         crate::commands::raw_output::CommandRunPreparation::Json(command) => {
             return output_service.emit_run(
-                run_json(*command, spec, global, plan.output_file, output_file),
+                run_json(*command, spec, global, plan.output_file, output_file)
+                    .with_identity(identity),
                 plan.output_file,
             );
         }
         crate::commands::raw_output::CommandRunPreparation::Raw(run) => run,
     };
-    output_service.emit_run(run, plan.output_file)
+    output_service.emit_run(run.with_identity(identity), plan.output_file)
 }
 
 pub fn emit_json_result(
@@ -454,6 +484,15 @@ pub fn emit_json_result(
     exit_code: i32,
 ) {
     OutputService::new(output_file).emit_json_result(result, exit_code);
+}
+
+pub fn emit_json_result_for_identity(
+    result: homeboy::core::Result<Value>,
+    output_file: Option<&str>,
+    exit_code: i32,
+    identity: &CommandIdentity,
+) {
+    OutputService::new(output_file).emit_json_result_for_identity(result, exit_code, identity);
 }
 
 pub fn validate_output_file_path(path: &str) -> Option<homeboy::core::Error> {
@@ -506,6 +545,7 @@ pub fn run_json(
 
             CommandRun {
                 command: "trace".to_string(),
+                operation: None,
                 stdout_result,
                 exit_code,
                 output_file_result,
@@ -534,11 +574,14 @@ pub fn write_output_file(run: &CommandRun, mode: CommandOutputFileMode, path: Op
         }
         CommandOutputFileMode::TraceJsonSummaryArtifact
         | CommandOutputFileMode::GenericEnvelope => {
-            output::write_json_to_file_for_command(
+            output::write_json_to_file_for_identity(
                 run.output_file_result(mode),
                 path,
                 run.exit_code,
-                &run.command,
+                &CommandIdentity {
+                    command: run.command.clone(),
+                    operation: run.operation.clone(),
+                },
                 presentation_envelope(run.presentation.clone()),
             );
         }
@@ -568,6 +611,7 @@ mod tests {
     ) -> CommandRun {
         CommandRun {
             command: "test".to_string(),
+            operation: None,
             stdout_result: Ok(json!({ "kind": "stdout" })),
             exit_code: 0,
             output_file_result,
@@ -761,7 +805,7 @@ mod tests {
             .finish(
                 &Ok(json!({ "status": "green_no_finalize", "latest_run_id": "run-current" })),
                 0,
-                "agent-task",
+                &CommandIdentity::with_operation("agent-task", "cook"),
                 None,
             )
             .expect("write terminal envelope");

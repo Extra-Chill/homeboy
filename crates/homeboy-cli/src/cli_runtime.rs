@@ -331,6 +331,7 @@ impl CliRuntime {
 
     fn run_matches(&self, matches: ArgMatches, normalized: Vec<String>) -> std::process::ExitCode {
         let global = GlobalArgs {};
+        let command_identity = command_identity_from_matches(&matches);
 
         // Extract --output early so it's available for all code paths (including
         // extension CLI commands which exit before Cli::from_arg_matches).
@@ -349,7 +350,7 @@ impl CliRuntime {
 
         if let Some(extension_cmd) = self.try_parse_extension_cli_command(&matches) {
             if let Some(path) = output_file.as_deref() {
-                if let Some(exit) = output_file_path_exit_code(path) {
+                if let Some(exit) = output_file_path_exit_code(path, &command_identity) {
                     return exit;
                 }
             }
@@ -362,7 +363,12 @@ impl CliRuntime {
             let result = cli::run(cli_args, &global);
 
             let (json_result, exit_code) = output::map_cmd_result_to_json(result);
-            output_runtime::emit_json_result(json_result, output_file.as_deref(), exit_code);
+            output_runtime::emit_json_result_for_identity(
+                json_result,
+                output_file.as_deref(),
+                exit_code,
+                &command_identity,
+            );
             return std::process::ExitCode::from(exit_code_to_u8(exit_code));
         }
 
@@ -376,7 +382,12 @@ impl CliRuntime {
         ) {
             Ok(route) => route,
             Err(err) => {
-                output_runtime::emit_json_result(Err(err), output_file.as_deref(), 2);
+                output_runtime::emit_json_result_for_identity(
+                    Err(err),
+                    output_file.as_deref(),
+                    2,
+                    &command_identity,
+                );
                 return std::process::ExitCode::from(2);
             }
         };
@@ -387,7 +398,12 @@ impl CliRuntime {
             match args.absorb_planning_runner(cli.runner.take()) {
                 Ok(runner) => cli.runner = runner,
                 Err(err) => {
-                    output_runtime::emit_json_result(Err(err), output_file.as_deref(), 2);
+                    output_runtime::emit_json_result_for_identity(
+                        Err(err),
+                        output_file.as_deref(),
+                        2,
+                        &command_identity,
+                    );
                     return std::process::ExitCode::from(2);
                 }
             }
@@ -401,7 +417,7 @@ impl CliRuntime {
             // This command owns `--output/-o`; it is not the global JSON envelope.
             output_file = None;
         } else if let Some(path) = output_file.as_deref() {
-            if let Some(exit) = output_file_path_exit_code(path) {
+            if let Some(exit) = output_file_path_exit_code(path, &command_identity) {
                 return exit;
             }
         }
@@ -409,7 +425,12 @@ impl CliRuntime {
         if let Commands::AgentTask(agent_task) = &cli.command {
             if let crate::commands::agent_task::AgentTaskCommand::Cook(cook) = &agent_task.command {
                 if let Err(err) = crate::commands::agent_task::run::validate_cook_request(cook) {
-                    output_runtime::emit_json_result(Err(err), output_file.as_deref(), 2);
+                    output_runtime::emit_json_result_for_identity(
+                        Err(err),
+                        output_file.as_deref(),
+                        2,
+                        &command_identity,
+                    );
                     return std::process::ExitCode::from(2);
                 }
             }
@@ -419,7 +440,12 @@ impl CliRuntime {
             Ok(Some(exit_code)) => return std::process::ExitCode::from(exit_code_to_u8(exit_code)),
             Ok(None) => {}
             Err(err) => {
-                output_runtime::emit_json_result(Err(err), output_file.as_deref(), 2);
+                output_runtime::emit_json_result_for_identity(
+                    Err(err),
+                    output_file.as_deref(),
+                    2,
+                    &command_identity,
+                );
                 return std::process::ExitCode::from(2);
             }
         }
@@ -428,7 +454,12 @@ impl CliRuntime {
             Ok(Some(exit_code)) => return std::process::ExitCode::from(exit_code_to_u8(exit_code)),
             Ok(None) => {}
             Err(err) => {
-                output_runtime::emit_json_result(Err(err), output_file.as_deref(), 2);
+                output_runtime::emit_json_result_for_identity(
+                    Err(err),
+                    output_file.as_deref(),
+                    2,
+                    &command_identity,
+                );
                 return std::process::ExitCode::from(2);
             }
         }
@@ -437,7 +468,9 @@ impl CliRuntime {
         // and persisted evidence reuse this preflight decision rather than
         // probing the host a second time.
         let managed_runner_placement = resource_policy::is_managed_runner_placement_context();
-        if let Some(exit_code) = preflight_hot_command(&cli, output_file.as_deref()) {
+        if let Some(exit_code) =
+            preflight_hot_command(&cli, output_file.as_deref(), &command_identity)
+        {
             if managed_runner_placement {
                 resource_policy::clear_managed_runner_placement_context();
             }
@@ -459,7 +492,12 @@ impl CliRuntime {
                 return std::process::ExitCode::from(exit_code_to_u8(exit_code));
             }
             Err(err) => {
-                output_runtime::emit_json_result(Err(err), output_file.as_deref(), 2);
+                output_runtime::emit_json_result_for_identity(
+                    Err(err),
+                    output_file.as_deref(),
+                    2,
+                    &command_identity,
+                );
                 return std::process::ExitCode::from(exit_code_to_u8(2));
             }
         }
@@ -482,6 +520,7 @@ impl CliRuntime {
                 command_spec,
                 &global,
                 output_file.as_deref(),
+                &command_identity,
             )
         });
         std::process::ExitCode::from(exit_code_to_u8(exit_code))
@@ -916,7 +955,11 @@ fn is_builtin_subcommand(name: &str) -> bool {
     crate::command_contract::registered_command(name).is_some()
 }
 
-fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
+fn preflight_hot_command(
+    cli: &Cli,
+    output_file: Option<&str>,
+    command_identity: &output::CommandIdentity,
+) -> Option<i32> {
     if let Some(hot_command) = resource_policy::hot_command(&cli.command) {
         if let Ok((resources, _)) = crate::commands::resources::run_preflight() {
             let lab_readiness = if hot_command.lab_offload_supported {
@@ -1000,7 +1043,12 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
                     ),
                     runner_admits_offload,
                 ) {
-                    output_runtime::emit_json_result(Err(err), output_file, 2);
+                    output_runtime::emit_json_result_for_identity(
+                        Err(err),
+                        output_file,
+                        2,
+                        command_identity,
+                    );
                     return Some(2);
                 }
             }
@@ -1031,12 +1079,34 @@ fn run_startup_update_checks(command: &Commands) {
 /// Validate the JSON-envelope output-file path. When the path is invalid,
 /// emit the error envelope and return the process `ExitCode` the caller
 /// should return; otherwise return `None` to continue.
-fn output_file_path_exit_code(path: &str) -> Option<std::process::ExitCode> {
+fn output_file_path_exit_code(
+    path: &str,
+    command_identity: &output::CommandIdentity,
+) -> Option<std::process::ExitCode> {
     if let Some(err) = output_runtime::validate_output_file_path(path) {
-        output_runtime::emit_json_result(Err(err), None, 2);
+        output_runtime::emit_json_result_for_identity(Err(err), None, 2, command_identity);
         return Some(std::process::ExitCode::from(exit_code_to_u8(2)));
     }
     None
+}
+
+fn command_identity_from_matches(matches: &ArgMatches) -> output::CommandIdentity {
+    let mut current = matches;
+    let mut path = Vec::new();
+    while let Some((name, subcommand)) = current.subcommand() {
+        path.push(name.to_string());
+        current = subcommand;
+    }
+
+    let Some(command) = path.first() else {
+        return output::CommandIdentity::top_level("unknown");
+    };
+    let operation = path[1..].join(" ");
+    if operation.is_empty() {
+        output::CommandIdentity::top_level(command)
+    } else {
+        output::CommandIdentity::with_operation(command, operation)
+    }
 }
 
 fn exit_code_to_u8(code: i32) -> u8 {
@@ -1311,6 +1381,25 @@ mod tests {
     use super::*;
     use clap::Parser;
     use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    #[test]
+    fn command_identity_uses_the_resolved_top_level_and_nested_path() {
+        let matches = Cli::command_with_scoped_lab_args()
+            .try_get_matches_from(["homeboy", "agent-task", "cook", "--to-worktree", "fixture"])
+            .expect("parse nested command");
+        assert_eq!(
+            command_identity_from_matches(&matches),
+            output::CommandIdentity::with_operation("agent-task", "cook")
+        );
+
+        let matches = Cli::command_with_scoped_lab_args()
+            .try_get_matches_from(["homeboy", "runner", "status", "local"])
+            .expect("parse another nested command");
+        assert_eq!(
+            command_identity_from_matches(&matches),
+            output::CommandIdentity::with_operation("runner", "status")
+        );
+    }
 
     struct EnvGuard {
         name: &'static str,

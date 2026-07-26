@@ -56,7 +56,15 @@ pub fn run_command_output(
                     let (result, exit_code) = map(
                         crate::commands::agent_task::run_with_cook_progress(args, Some(&progress)),
                     );
-                    if let Err(error) = lease.finish(&result, exit_code, "agent-task", None) {
+                    if let Err(error) = lease.finish(
+                        &result,
+                        exit_code,
+                        &crate::commands::utils::response::CommandIdentity::with_operation(
+                            "agent-task",
+                            "cook",
+                        ),
+                        None,
+                    ) {
                         return CommandRun::from_stdout_result(Err(error), 2)
                             .with_command(spec.name);
                     }
