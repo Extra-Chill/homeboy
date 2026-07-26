@@ -73,9 +73,20 @@ pub fn run(project_id: &str, options: &HarvestOptions) -> Result<HarvestResult> 
             Some(vec!["Apply each reviewed component separately.".to_string()]),
         ));
     }
+    let components = ids
+        .iter()
+        .map(|id| project::resolve_project_component(&context.project, id))
+        .collect::<Result<Vec<_>>>()?;
+    let resolved_project = project::project_with_detected_path_roots(
+        &context.project,
+        &components,
+        &base_path,
+        &context.client,
+        "harvest",
+    );
     let mut results = Vec::new();
-    for id in ids {
-        let component = project::resolve_project_component(&context.project, &id)?;
+    for component in components {
+        let id = component.id.clone();
         if component.remote_path.trim().is_empty() {
             return Err(Error::validation_invalid_argument(
                 "remote_path",
@@ -84,7 +95,8 @@ pub fn run(project_id: &str, options: &HarvestOptions) -> Result<HarvestResult> 
                 None,
             ));
         }
-        let remote_path = crate::join_remote_path(Some(&base_path), &component.remote_path)?;
+        let remote_path =
+            project::resolve_effective_remote_path(&resolved_project, &component, &base_path)?;
         let local_path = PathBuf::from(&component.local_path);
         let mut excludes = crate::source_snapshot::policy_for_path(&local_path).sync_excludes;
         excludes.extend(options.excludes.clone());
@@ -254,9 +266,13 @@ fn materialize_remote(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::ScopedExtensionConfig;
     use crate::project::{Project, ProjectComponentAttachment};
     use crate::server::Server;
     use crate::test_support::with_isolated_home;
+    use homeboy_extension_contract::manifest_capabilities::DeployCapability;
+    use homeboy_extension_contract::{ExtensionManifest, RemotePathRootRule};
+    use std::collections::HashMap;
     use std::process::Command;
 
     fn git(path: &Path, args: &[&str]) {
@@ -268,20 +284,57 @@ mod tests {
         assert!(status.success(), "git {args:?}");
     }
 
+    fn install_managed_root_extension(root: &Path) {
+        crate::extension_store::save_manifest(&ExtensionManifest {
+            id: "managed-host".to_string(),
+            name: "Managed Host".to_string(),
+            version: "1.0.0".to_string(),
+            deploy: Some(DeployCapability {
+                verifications: Vec::new(),
+                overrides: Vec::new(),
+                protected_path_suffixes: Vec::new(),
+                owner_hints: Vec::new(),
+                archive_install: Vec::new(),
+                remote_path_inference: Vec::new(),
+                path_roots: vec![RemotePathRootRule {
+                    path_prefix: "managed".to_string(),
+                    root: "managed_root".to_string(),
+                    strip_prefix: true,
+                    detect_command: Some(format!(
+                        "printf %s {}",
+                        shell::quote_path(&root.to_string_lossy())
+                    )),
+                }],
+                version_patterns: Vec::new(),
+                since_tag: None,
+            }),
+            ..serde_json::from_value(serde_json::json!({
+                "name": "Managed Host",
+                "version": "1.0.0"
+            }))
+            .expect("manifest")
+        })
+        .expect("save extension");
+    }
+
     #[test]
     fn check_dry_run_apply_and_conflict_are_safe_for_local_transport() {
         with_isolated_home(|_| {
             let temp = tempfile::tempdir().expect("temp");
             let local = temp.path().join("local");
             let remote_root = temp.path().join("remote");
-            let remote = remote_root.join("component");
+            let managed_root = temp.path().join("relocated-managed-root");
+            let remote = managed_root.join("component");
             fs::create_dir_all(&local).expect("local");
+            fs::create_dir_all(&remote_root).expect("remote root");
             fs::create_dir_all(&remote).expect("remote");
-            fs::write(local.join("homeboy.json"), r#"{"id":"component"}"#).expect("config");
+            install_managed_root_extension(&managed_root);
+            let component_config = r#"{"id":"component","extensions":{"managed-host":{}}}"#;
+            fs::write(local.join("homeboy.json"), component_config).expect("config");
             fs::write(local.join("same"), "same").expect("same");
             fs::write(local.join("changed"), "local").expect("changed");
             fs::write(local.join("deleted"), "local only").expect("deleted");
-            fs::write(remote.join("homeboy.json"), r#"{"id":"component"}"#).expect("config");
+            fs::write(remote.join("homeboy.json"), component_config).expect("config");
             fs::write(remote.join("same"), "same").expect("same");
             fs::write(remote.join("changed"), "remote").expect("changed");
             fs::write(remote.join("added"), [0, 1, 255]).expect("added");
@@ -312,8 +365,12 @@ mod tests {
                 components: vec![ProjectComponentAttachment {
                     id: "component".to_string(),
                     local_path: local.display().to_string(),
-                    remote_path: Some("component".to_string()),
+                    remote_path: Some("managed/component".to_string()),
                 }],
+                extensions: Some(HashMap::from([(
+                    "managed-host".to_string(),
+                    ScopedExtensionConfig::default(),
+                )])),
                 ..Project::default()
             })
             .expect("project");
@@ -326,6 +383,7 @@ mod tests {
             let report = run("project", &options).expect("check");
             assert_eq!(report.results[0].status, "drift");
             assert_eq!(report.results[0].changes.len(), 3);
+            assert_eq!(report.results[0].remote_path, remote.display().to_string());
             assert_eq!(
                 fs::read_to_string(local.join("changed")).expect("unchanged"),
                 "local"

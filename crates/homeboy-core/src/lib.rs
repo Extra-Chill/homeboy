@@ -9,7 +9,7 @@
 macro_rules! log_status {
     ($prefix:expr, $($arg:tt)*) => {
         if ::std::io::IsTerminal::is_terminal(&::std::io::stderr()) {
-            eprintln!(concat!("[", $prefix, "] {}"), format_args!($($arg)*));
+            eprintln!("[{}] {}", $prefix, format_args!($($arg)*));
         }
     };
 }
