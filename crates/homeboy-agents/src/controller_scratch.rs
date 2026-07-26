@@ -520,19 +520,16 @@ fn finalize_run_unlocked(run_id: &str) -> Result<()> {
                 resource.finalized_at = Some(now.clone());
                 changed = true;
             }
-            let recovery_state = resource
-                .terminal_evidence
-                .as_ref()
-                .and_then(|evidence| evidence.pointer("/workspace_recovery/state"))
-                .and_then(serde_json::Value::as_str);
-            let needs_recovery = matches!(
-                resource.lifecycle_state.as_str(),
-                "active" | "provider_registered"
-            ) || (resource.lifecycle_state == "interrupted"
-                && !matches!(
-                    recovery_state,
-                    Some("recovered" | "explicitly_ephemeral" | "authoritative_checkout_absent")
-                ));
+            let has_recovery_evidence = recovery_evidence_is_current(resource);
+            let stale_dirty_workspace = !resource.ephemeral
+                && git_safety_path(resource, Path::new(&resource.path))
+                    .is_some_and(|workspace| git_dirty_or_unpushed(&workspace));
+            let needs_recovery = !has_recovery_evidence
+                && (matches!(
+                    resource.lifecycle_state.as_str(),
+                    "active" | "provider_registered"
+                ) || resource.lifecycle_state == "interrupted"
+                    || stale_dirty_workspace);
             if needs_recovery {
                 let workspace_recovery = recover_authoritative_workspace(resource);
                 resource.lifecycle_state = "interrupted".to_string();
@@ -921,7 +918,13 @@ fn cleanup_command(options: ControllerScratchCleanupOptions) -> String {
 }
 
 fn git_dirty_or_unpushed(path: &Path) -> bool {
-    let status = git::run_git(path, &["status", "--porcelain=v1"], "git status");
+    // Include ignored files. They are still local source state and therefore
+    // must be retained unless the terminal recovery path has preserved it.
+    let status = git::run_git(
+        path,
+        &["status", "--porcelain=v1", "--ignored"],
+        "git status",
+    );
     let Ok(status) = status else {
         return true;
     };
@@ -955,6 +958,26 @@ fn git_safety_path(resource: &ControllerScratchResource, path: &Path) -> Option<
     None
 }
 
+fn recovery_evidence_is_current(resource: &ControllerScratchResource) -> bool {
+    let recovery = resource
+        .terminal_evidence
+        .as_ref()
+        .and_then(|evidence| evidence.get("workspace_recovery"));
+    match recovery
+        .and_then(|recovery| recovery.get("state"))
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("recovered") => git_safety_path(resource, Path::new(&resource.path))
+            .is_some_and(|workspace| recovered_workspace_matches(resource, &workspace)),
+        Some("explicitly_ephemeral") => resource.ephemeral,
+        Some("authoritative_checkout_absent") => {
+            !resource.plan_id.is_empty()
+                && git_safety_path(resource, Path::new(&resource.path)).is_none()
+        }
+        _ => false,
+    }
+}
+
 fn recover_authoritative_workspace(resource: &ControllerScratchResource) -> serde_json::Value {
     recover_authoritative_workspace_inner(resource).unwrap_or_else(|error| {
         serde_json::json!({
@@ -980,8 +1003,15 @@ fn recover_authoritative_workspace_inner(
             },
         }));
     };
-    let status = git::run_git(&workspace, &["status", "--porcelain=v1"], "git status")?;
-    if status.lines().any(|line| line.starts_with("??")) {
+    let status = git::run_git(
+        &workspace,
+        &["status", "--porcelain=v1", "--ignored"],
+        "git status",
+    )?;
+    if status
+        .lines()
+        .any(|line| line.starts_with("??") || line.starts_with("!!"))
+    {
         return Ok(serde_json::json!({
             "state": "untracked_changes_retained",
             "workspace": workspace,
@@ -1090,7 +1120,12 @@ fn recovered_workspace_matches(resource: &ControllerScratchResource, workspace: 
     let expected_head = recovery.get("head").and_then(serde_json::Value::as_str);
     let expected_status = recovery.get("status").and_then(serde_json::Value::as_str);
     let current_head = git::run_git(workspace, &["rev-parse", "HEAD"], "git rev-parse HEAD").ok();
-    let current_status = git::run_git(workspace, &["status", "--porcelain=v1"], "git status").ok();
+    let current_status = git::run_git(
+        workspace,
+        &["status", "--porcelain=v1", "--ignored"],
+        "git status",
+    )
+    .ok();
     let current_patch = git::run_git(
         workspace,
         &[
@@ -1994,6 +2029,43 @@ mod tests {
                 output.skipped[0].reason,
                 "git checkout has dirty or unpushed state"
             );
+        });
+    }
+
+    #[test]
+    fn ignored_untracked_workspace_state_fails_closed_during_recovery() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let allocation =
+                allocate_attempt("ignored-run", "scheduler-plan", "task", 1).expect("allocate");
+            let workspace = allocation.path.join("workspace");
+            fs::create_dir(&workspace).expect("workspace");
+            run_git(&workspace, &["init", "-b", "main"]);
+            fs::write(workspace.join(".gitignore"), "local-source\n").expect("ignore rule");
+            fs::write(workspace.join("tracked.txt"), "base\n").expect("base file");
+            run_git(&workspace, &["add", "."]);
+            run_git(
+                &workspace,
+                &[
+                    "-c",
+                    "user.name=Homeboy",
+                    "-c",
+                    "user.email=homeboy@example.test",
+                    "commit",
+                    "-m",
+                    "base",
+                ],
+            );
+            fs::write(workspace.join("local-source"), "preserve\n").expect("local source");
+
+            let resource = read_index()
+                .expect("index")
+                .resources
+                .into_iter()
+                .find(|resource| resource.lease_id == allocation.lease_id)
+                .expect("resource");
+            let recovery = recover_authoritative_workspace_inner(&resource).expect("recover");
+
+            assert_eq!(recovery["state"], "untracked_changes_retained");
         });
     }
 
