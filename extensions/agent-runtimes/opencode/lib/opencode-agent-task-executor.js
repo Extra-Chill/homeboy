@@ -62,6 +62,8 @@ const OPENCODE_GIT_CAPTURE_OPTIONS = {
 	encoding: 'utf8',
 	maxBuffer: 16 * 1024 * 1024,
 };
+const MAX_STRUCTURED_OUTPUT_BYTES = 64 * 1024;
+const MAX_STRUCTURED_ANSWER_BYTES = MAX_STRUCTURED_OUTPUT_BYTES + 16 * 1024;
 
 const OPENCODE_CAPABILITIES = [
 	'cli_runtime',
@@ -500,7 +502,7 @@ function opencodeSuccessOutcome(context) {
 }
 
 function structuredOpenCodeReviewOutput(context = {}) {
-	if (context.request?.inputs?.cook_loop?.review_form_required !== true) {
+	if (!requiresReviewForm(context.request)) {
 		return {};
 	}
 	const textEvents = parseJsonObjectsFromText(context.spawnResult?.stdout)
@@ -509,24 +511,69 @@ function structuredOpenCodeReviewOutput(context = {}) {
 	const candidates = finalAnswers.length > 0 ? finalAnswers : textEvents.slice(-1);
 	for (const event of candidates.reverse()) {
 		const envelope = parseStructuredAnswer(event.text);
-		if (!envelope || !Object.hasOwn(envelope, 'review_form')) {
+		const reviewForm = structuredReviewFormValue(envelope);
+		if (reviewForm === undefined) {
 			continue;
 		}
-		if (validReviewForm(envelope.review_form)) {
+		if (!boundedStructuredOutput(reviewForm)) {
+			return reviewFormOutputDiagnostic(
+				'invalid',
+				'OpenCode emitted a review_form that exceeded the structured output size limit.'
+			);
+		}
+		if (validReviewForm(reviewForm)) {
 			return {
-				outputs: { review_form: envelope.review_form },
+				outputs: { review_form: reviewForm },
 				review_form_status: 'harvested',
 			};
 		}
-		return reviewFormOutputDiagnostic(
-			'invalid',
-			'OpenCode emitted a review_form with an invalid schema.'
-		);
+		return {
+			outputs: { review_form: reviewForm },
+			...reviewFormOutputDiagnostic(
+				'invalid',
+				'OpenCode emitted a review_form with an invalid schema.'
+			),
+		};
 	}
 	return reviewFormOutputDiagnostic(
 		'missing',
 		'OpenCode completed without a structured review_form in its final answer.'
 	);
+}
+
+function structuredReviewFormValue(envelope) {
+	if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) {
+		return undefined;
+	}
+	// The canonical adapter contract places values under `outputs`. Accept the
+	// direct form emitted by earlier Cook prompts while their persisted recipes age out.
+	if (envelope.outputs && typeof envelope.outputs === 'object' && !Array.isArray(envelope.outputs)
+		&& Object.hasOwn(envelope.outputs, 'review_form')) {
+		return envelope.outputs.review_form;
+	}
+	return Object.hasOwn(envelope, 'review_form') ? envelope.review_form : undefined;
+}
+
+function boundedStructuredOutput(value) {
+	try {
+		return Buffer.byteLength(JSON.stringify(value)) <= MAX_STRUCTURED_OUTPUT_BYTES;
+	} catch {
+		return false;
+	}
+}
+
+function requiresReviewForm(request = {}) {
+	const requiredOutputs = request.inputs?.required_outputs;
+	if (Array.isArray(requiredOutputs)) {
+		return requiredOutputs.some((output) => (
+			output
+			&& output.name === 'review_form'
+			&& output.required === true
+			&& output.schema === 'homeboy/agent-task-review-form/v1'
+		));
+	}
+	// Retain compatibility for Cook recipes persisted before the typed contract.
+	return request.inputs?.cook_loop?.review_form_required === true;
 }
 
 function openCodeTextParts(frame = {}) {
@@ -547,6 +594,9 @@ function parseStructuredAnswer(text = '') {
 		candidates.unshift(match[1].trim());
 	}
 	for (const candidate of candidates) {
+		if (Buffer.byteLength(candidate) > MAX_STRUCTURED_ANSWER_BYTES) {
+			continue;
+		}
 		try {
 			const parsed = JSON.parse(candidate);
 			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
@@ -1003,8 +1053,16 @@ function opencodeRunArgs(request = {}, config = {}, commandSpec = {}) {
 		...(config.agent ? ['--agent', config.agent] : []),
 		...(config.variant ? ['--variant', config.variant] : []),
 		...(config.title ? ['--title', config.title] : []),
-		request.instructions,
+		`${request.instructions}${requiredOutputInstructions(request)}`,
 	];
+}
+
+function requiredOutputInstructions(request = {}) {
+	const outputs = request.inputs?.required_outputs;
+	if (!Array.isArray(outputs) || outputs.length === 0) {
+		return '';
+	}
+	return `\n\nReturn the required outputs as JSON using an \`outputs\` object. The OpenCode adapter parses the response against this contract: ${JSON.stringify(outputs)}.`;
 }
 
 function resolveOpenCodeCwd(request = {}, config = {}) {

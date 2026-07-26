@@ -1039,15 +1039,22 @@ process.stdout.write(JSON.stringify({ type: 'result', result: { summary: 'Review
 	const structuredReviewCliPath = path.join(root, 'mock-opencode-structured-review.cjs');
 	fs.writeFileSync(structuredReviewCliPath, `#!/usr/bin/env node
 const mode = process.env.REVIEW_FORM_MODE;
+const prompt = process.argv.at(-1);
+const contract = JSON.parse(prompt.match(/against this contract: (\\[.*\\])\\.$/s)?.[1] || 'null');
+if (contract?.[0]?.name !== 'review_form' || contract[0].required !== true || contract[0].schema !== 'homeboy/agent-task-review-form/v1') {
+  throw new Error('OpenCode did not receive the required-output schema.');
+}
 const text = mode === 'valid'
-	? ${JSON.stringify(`\`\`\`json\n${JSON.stringify({ review_form: {
+	? ${JSON.stringify(`\`\`\`json\n${JSON.stringify({ outputs: { review_form: {
 		summary: 'Preserve the reviewed cleanup scope in the apply command.',
 		what_changed: ['Added the scoped apply command to cleanup output.'],
 		compatibility: 'The output change is additive.',
 		used_for: 'Inspected the candidate and summarized its verified behavior.',
-	} }, null, 2)}\n\`\`\``)}
+	} } }, null, 2)}\n\`\`\``)}
 	: mode === 'invalid'
-		? ${JSON.stringify('```json\n{"review_form":{"summary":[]}}\n```')}
+		? ${JSON.stringify('```json\n{"outputs":{"review_form":{"summary":[]}}}\n```')}
+		: mode === 'oversized'
+			? JSON.stringify({ outputs: { review_form: { summary: 'x'.repeat(70 * 1024) } } })
 		: 'Review completed without structured output.';
 process.stdout.write(JSON.stringify({
 	type: 'text',
@@ -1057,7 +1064,18 @@ process.stdout.write(JSON.stringify({
 	const structuredReviewRequest = {
 		...request,
 		task_id: 'opencode-structured-review',
-		inputs: { cook_loop: { review_form_required: true } },
+	inputs: {
+		cook_loop: { review_form_required: true },
+		required_outputs: [{
+			name: 'review_form',
+			required: true,
+			schema: 'homeboy/agent-task-review-form/v1',
+			json_schema: {
+				type: 'object',
+				required: ['summary', 'what_changed', 'compatibility', 'used_for'],
+			},
+		}],
+	},
 		workspace: { root: reviewWorkspace },
 		executor: {
 			...request.executor,
@@ -1070,9 +1088,10 @@ process.stdout.write(JSON.stringify({
 		},
 	};
 	const structuredReviewResult = await executeOpenCodeAgentTask(structuredReviewRequest, { env: fixtureEnv });
-	assert.equal(structuredReviewResult.status, 'no_op');
+	assert.equal(structuredReviewResult.status, 'no_op', JSON.stringify(structuredReviewResult.diagnostics));
 	assert.deepEqual(structuredReviewResult.outputs.review_form, structuredReviewForm);
 	assert.equal(structuredReviewResult.metadata.review_form_status, 'harvested');
+	assert.equal(structuredReviewResult.metadata.opencode_session.status, 'not_discovered');
 	const structuredAgentResult = structuredReviewResult.artifacts.find((artifact) => artifact.name === 'agent_result');
 	const structuredAgentResultPayload = JSON.parse(fs.readFileSync(structuredAgentResult.path, 'utf8'));
 	assert.equal(structuredAgentResultPayload.status, 'no_op');
@@ -1081,6 +1100,7 @@ process.stdout.write(JSON.stringify({
 	for (const [mode, diagnosticClass] of [
 		['missing', 'opencode.review_form_missing'],
 		['invalid', 'opencode.review_form_invalid'],
+		['oversized', 'opencode.review_form_invalid'],
 	]) {
 		const incompleteReviewResult = await executeOpenCodeAgentTask({
 			...structuredReviewRequest,
@@ -1093,8 +1113,11 @@ process.stdout.write(JSON.stringify({
 				},
 			},
 		}, { env: fixtureEnv });
-		assert.equal(incompleteReviewResult.status, 'succeeded');
-		assert.deepEqual(incompleteReviewResult.outputs, {});
+		assert.equal(incompleteReviewResult.status, mode === 'invalid' ? 'no_op' : 'succeeded');
+		assert.deepEqual(
+			incompleteReviewResult.outputs,
+			mode === 'invalid' ? { review_form: { summary: [] } } : {}
+		);
 		assert.equal(incompleteReviewResult.diagnostics.some((diagnostic) => diagnostic.class === diagnosticClass), true);
 	}
 } finally {
