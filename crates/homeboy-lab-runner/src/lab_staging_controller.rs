@@ -276,7 +276,10 @@ impl LabStagingRecipe {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct LabHandoffHomeboyIdentity {
-    controller_build_identity: String,
+    /// Absent only on handoff evidence persisted before controller provenance
+    /// became part of the durable protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    controller_build_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     latest_allowed_stable: Option<String>,
     requested_build_identity: String,
@@ -290,6 +293,7 @@ struct LabHandoffHomeboyIdentity {
     /// This is populated only when the command execution itself reports it.
     /// Session and configured-binary identities are pre-dispatch evidence.
     executed_command_build_identity: Option<String>,
+    #[serde(default)]
     compatibility: RuntimeSetCompatibility,
 }
 
@@ -298,9 +302,17 @@ struct LabHandoffHomeboyIdentity {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum RuntimeSetCompatibility {
+    /// A record persisted before runtime-set compatibility was declared.
+    UnknownLegacy,
     Exact,
     CompatiblePatchDrift,
     WireOrLifecycleIncompatible,
+}
+
+impl Default for RuntimeSetCompatibility {
+    fn default() -> Self {
+        Self::UnknownLegacy
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -314,6 +326,7 @@ enum RuntimeSetAdmission {
     Ready(RuntimeSetCompatibility),
     Converge,
     RefuseControllerUpgrade,
+    RefuseControllerRuntime,
     RefuseRuntime,
 }
 
@@ -386,6 +399,12 @@ fn runtime_set_admission(
         && latest_allowed_stable.is_some_and(|latest| runtime_version_is_newer(latest, controller))
     {
         return RuntimeSetAdmission::RefuseControllerUpgrade;
+    }
+    if matches!(
+        runtime_set_compatibility(requested, Some(controller)),
+        RuntimeSetCompatibility::WireOrLifecycleIncompatible
+    ) {
+        return RuntimeSetAdmission::RefuseControllerRuntime;
     }
     let compatibility = runtime_set_compatibility(requested, daemon);
     let command_matches = configured.is_some_and(|identity| {
@@ -536,6 +555,30 @@ fn controller_runtime_set_error(
     error
 }
 
+fn controller_runtime_identity_error(runner_id: &str, controller: &str, requested: &str) -> Error {
+    // The controller is already a distinct immutable build, so upgrading it
+    // cannot restore the pinned recipe. Reissue the preserved invocation to
+    // construct a new recipe for the current controller runtime.
+    let recovery = preserved_invocation();
+    let mut error = Error::validation_invalid_argument(
+        "runtime_set",
+        format!(
+            "Durable orchestration refused before dispatch because controller `{controller}` is not wire/lifecycle-compatible with pinned runtime `{requested}`"
+        ),
+        Some(runner_id.to_string()),
+        Some(vec![recovery.clone()]),
+    );
+    error.details["runtime_set"] = json!({
+        "controller": controller,
+        "requested_runtime": requested,
+        "daemon_runtime": serde_json::Value::Null,
+        "executed_job_runtime": serde_json::Value::Null,
+        "recovery_command": recovery,
+        "preserved_invocation": preserved_invocation(),
+    });
+    error
+}
+
 fn controller_homeboy_upgrade_command() -> String {
     // Keep source-built controllers on their explicit source workflow.
     crate::lab::offload::metadata::controller_homeboy_recovery_command()
@@ -628,9 +671,9 @@ fn handoff_convergence_action(
         },
     ) {
         RuntimeSetAdmission::Ready(_) => HandoffConvergenceAction::Ready,
-        RuntimeSetAdmission::RefuseControllerUpgrade | RuntimeSetAdmission::RefuseRuntime => {
-            HandoffConvergenceAction::Refuse
-        }
+        RuntimeSetAdmission::RefuseControllerUpgrade
+        | RuntimeSetAdmission::RefuseControllerRuntime
+        | RuntimeSetAdmission::RefuseRuntime => HandoffConvergenceAction::Refuse,
         RuntimeSetAdmission::Converge => HandoffConvergenceAction::Refresh(
             if configured.is_some_and(|identity| {
                 matches!(
@@ -662,26 +705,35 @@ pub(crate) fn converge_lab_handoff_runtime(
         path.ancestors()
             .any(|ancestor| ancestor.join("Cargo.toml").is_file())
     });
-    if matches!(
-        runtime_set_admission(
-            &controller.display,
-            latest_allowed_stable.as_deref(),
-            requested,
-            None,
-            None,
-            RuntimeSetPolicy {
-                enforce_latest_stable: true,
-                controller_is_source_build,
-                allow_convergence: false,
-            },
-        ),
-        RuntimeSetAdmission::RefuseControllerUpgrade
+    match runtime_set_admission(
+        &controller.display,
+        latest_allowed_stable.as_deref(),
+        requested,
+        None,
+        None,
+        RuntimeSetPolicy {
+            enforce_latest_stable: true,
+            controller_is_source_build,
+            allow_convergence: false,
+        },
     ) {
-        return Err(controller_runtime_set_error(
-            runner_id,
-            &controller.display,
-            latest_allowed_stable.as_deref().expect("checked stable"),
-        ));
+        RuntimeSetAdmission::RefuseControllerUpgrade => {
+            return Err(controller_runtime_set_error(
+                runner_id,
+                &controller.display,
+                latest_allowed_stable.as_deref().expect("checked stable"),
+            ))
+        }
+        RuntimeSetAdmission::RefuseControllerRuntime => {
+            return Err(controller_runtime_identity_error(
+                runner_id,
+                &controller.display,
+                requested,
+            ))
+        }
+        RuntimeSetAdmission::Ready(_)
+        | RuntimeSetAdmission::Converge
+        | RuntimeSetAdmission::RefuseRuntime => {}
     }
     for _ in 0..2 {
         let runner = crate::load(runner_id)?;
@@ -1992,7 +2044,7 @@ impl ProductionLabStagingOperations {
         }
         let compatibility = runtime_set_compatibility(requested, daemon.as_deref());
         Ok(Some(LabHandoffHomeboyIdentity {
-            controller_build_identity: homeboy_product_identity::build_identity().display,
+            controller_build_identity: Some(homeboy_product_identity::build_identity().display),
             latest_allowed_stable: homeboy_upgrade::update_check::latest_allowed_stable(),
             requested_build_identity: requested.to_string(),
             configured_command_build_identity: configured
@@ -4171,7 +4223,7 @@ mod tests {
     #[test]
     fn handoff_identity_keeps_execution_identity_null_before_dispatch() {
         let identity = LabHandoffHomeboyIdentity {
-            controller_build_identity: "homeboy 1.2.3+required".to_string(),
+            controller_build_identity: Some("homeboy 1.2.3+required".to_string()),
             latest_allowed_stable: Some("1.2.3".to_string()),
             requested_build_identity: "homeboy 1.2.3+required".to_string(),
             configured_command_build_identity: "homeboy 1.2.3+required".to_string(),
@@ -4183,6 +4235,23 @@ mod tests {
         assert_eq!(
             serde_json::to_value(identity).expect("serialize")["executed_command_build_identity"],
             serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn legacy_handoff_identity_evidence_remains_readable() {
+        let identity: LabHandoffHomeboyIdentity = serde_json::from_value(json!({
+            "requested_build_identity": "homeboy 1.2.3+required",
+            "configured_command_build_identity": "homeboy 1.2.3+required",
+            "daemon_build_identity": "homeboy 1.2.3+required",
+            "executed_command_build_identity": null,
+        }))
+        .expect("legacy handoff identity");
+
+        assert_eq!(identity.controller_build_identity, None);
+        assert_eq!(
+            identity.compatibility,
+            RuntimeSetCompatibility::UnknownLegacy
         );
     }
 
@@ -4258,6 +4327,67 @@ mod tests {
     }
 
     #[test]
+    fn source_controller_and_offline_controller_do_not_guess_a_stable_upgrade() {
+        for controller_is_source_build in [true, false] {
+            let admission = runtime_set_admission(
+                "homeboy 1.2.2+source",
+                None,
+                "homeboy 1.2.2+source",
+                Some("homeboy 1.2.2+source"),
+                Some("homeboy 1.2.2+source"),
+                RuntimeSetPolicy {
+                    enforce_latest_stable: true,
+                    controller_is_source_build,
+                    allow_convergence: false,
+                },
+            );
+            assert!(matches!(
+                admission,
+                RuntimeSetAdmission::Ready(RuntimeSetCompatibility::Exact)
+            ));
+        }
+    }
+
+    #[test]
+    fn resumed_controller_with_distinct_build_is_refused_before_runner_convergence() {
+        let admission = runtime_set_admission(
+            "homeboy 1.2.3+resumed-controller",
+            None,
+            "homeboy 1.2.3+pinned-controller",
+            Some("homeboy 1.2.3+pinned-controller"),
+            Some("homeboy 1.2.3+pinned-controller"),
+            RuntimeSetPolicy {
+                enforce_latest_stable: true,
+                controller_is_source_build: true,
+                allow_convergence: true,
+            },
+        );
+
+        assert!(matches!(
+            admission,
+            RuntimeSetAdmission::RefuseControllerRuntime
+        ));
+    }
+
+    #[test]
+    fn incompatible_daemon_refuses_even_when_controller_and_command_match() {
+        let admission = runtime_set_admission(
+            "homeboy 1.2.3+controller",
+            None,
+            "homeboy 1.2.3+controller",
+            Some("homeboy 1.2.3+controller"),
+            Some("homeboy 1.2.3+stale-daemon"),
+            RuntimeSetPolicy {
+                enforce_latest_stable: true,
+                controller_is_source_build: true,
+                allow_convergence: false,
+            },
+        );
+
+        assert!(matches!(admission, RuntimeSetAdmission::RefuseRuntime));
+    }
+
+    #[test]
     fn compatible_patch_daemon_is_admitted_without_dispatch_mutation() {
         let admission = runtime_set_admission(
             "homeboy 1.2.2",
@@ -4286,7 +4416,7 @@ mod tests {
         };
         assert!(matches!(
             runtime_set_admission(
-                "homeboy 1.2.2",
+                "homeboy 1.2.2+requested",
                 Some("1.2.2"),
                 "homeboy 1.2.2+requested",
                 Some("homeboy 1.1.9+runner"),
@@ -4297,7 +4427,7 @@ mod tests {
         ));
         assert!(matches!(
             runtime_set_admission(
-                "homeboy 1.2.2",
+                "homeboy 1.2.2+requested",
                 Some("1.2.2"),
                 "homeboy 1.2.2+requested",
                 Some("homeboy 1.1.9+runner"),
