@@ -18,6 +18,7 @@ macro_rules! ops_command_descriptors {
             (deploy, Deploy, crate::commands::deploy::DeployArgs, command_spec_with_safety("deploy", CommandJsonFamily::Ops, operator_safety(Some("--dry-run"), DEPLOY_DANGEROUS_FLAGS)), crate::commands::deploy::run),
             (harvest, Harvest, crate::commands::harvest::HarvestArgs, command_spec_with_safety("harvest", CommandJsonFamily::Ops, operator_safety(Some("--dry-run"), &["--apply"])), crate::commands::harvest::run),
             (daemon, Daemon, crate::commands::daemon::DaemonArgs, command_spec("daemon", CommandJsonFamily::Ops), crate::commands::daemon::run),
+            (schedule, Schedule, crate::commands::schedule::ScheduleArgs, command_spec("schedule", CommandJsonFamily::Ops), crate::commands::schedule::run),
             (status, Status, crate::commands::status::StatusArgs, command_spec("status", CommandJsonFamily::Ops), crate::commands::status::run),
             (git, Git, crate::commands::git::GitArgs, command_spec("git", CommandJsonFamily::Ops), crate::commands::git::run),
             (self_cmd, SelfCmd, crate::commands::self_cmd::SelfArgs, command_spec_with_output_notes("self", CommandJsonFamily::Ops, "inspects the active Homeboy runtime and renders built-in CLI documentation"), crate::commands::self_cmd::run),
@@ -45,6 +46,7 @@ macro_rules! ops_command_spec {
     (deploy) => { command_spec_with_safety("deploy", CommandJsonFamily::Ops, operator_safety(Some("--dry-run"), DEPLOY_DANGEROUS_FLAGS)) };
     (harvest) => { command_spec_with_safety("harvest", CommandJsonFamily::Ops, operator_safety(Some("--dry-run"), &["--apply"])) };
     (daemon) => { command_spec("daemon", CommandJsonFamily::Ops) };
+    (schedule) => { command_spec("schedule", CommandJsonFamily::Ops) };
     (status) => { command_spec("status", CommandJsonFamily::Ops) };
     (git) => { command_spec("git", CommandJsonFamily::Ops) };
     (self_cmd) => { command_spec_with_output_notes("self", CommandJsonFamily::Ops, "inspects the active Homeboy runtime and renders built-in CLI documentation") };

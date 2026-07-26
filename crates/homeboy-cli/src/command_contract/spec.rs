@@ -678,6 +678,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         "lists, shows, exports constants, exports schemas, validates, normalizes, and emits Homeboy-owned contract metadata and command manifests through the central contract surface",
     ),
     crate::ops_command_spec!(daemon),
+    crate::ops_command_spec!(schedule),
     command_spec_with_representative_argv(
         &["homeboy", "extension", "refresh", "."],
         lab_command_spec_with_summary(

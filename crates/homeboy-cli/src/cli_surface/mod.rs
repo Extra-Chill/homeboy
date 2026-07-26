@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use crate::commands::{
     activity, agent_task, api, bench, cleanup, component, config, contract, daemon, db, deploy,
     extension, file, fleet, fuzz, git, harvest, logs, observe, project, refactor, release, report,
-    review, rig, runner, runs, runtime, self_cmd, server, ssh, stack, status, trace, triage,
-    tunnel, upgrade, worktree,
+    review, rig, runner, runs, runtime, schedule, self_cmd, server, ssh, stack, status, trace,
+    triage, tunnel, upgrade, worktree,
 };
 
 const VERSION: &str = homeboy_product_identity::product_version();
@@ -179,6 +179,8 @@ pub enum Commands {
     Daemon(daemon::DaemonArgs),
     /// Execute CLI-compatible extensions
     Extension(extension::ExtensionArgs),
+    /// Declare homeboy commands that run on a cadence
+    Schedule(schedule::ScheduleArgs),
     /// Actionable component status overview
     Status(status::StatusArgs),
     /// Remove declared reconstructable artifacts from managed worktrees

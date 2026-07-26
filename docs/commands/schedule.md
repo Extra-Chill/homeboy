@@ -1,0 +1,84 @@
+# `homeboy schedule`
+
+```text
+homeboy schedule add <id> --command <argv> --every <interval> [--notify-on <policy>] [--on-overlap <policy>]
+                         [--notification-transport <id> --notification-route <route>]
+                         [--jitter-seconds <n>] [--description <text>] [--force]
+homeboy schedule list
+homeboy schedule show <id>
+homeboy schedule run <id>
+homeboy schedule enable|disable <id>
+homeboy schedule remove <id>
+homeboy schedule tick [--dry-run]
+```
+
+`schedule` declares homeboy commands that run on a cadence. Homeboy already owned durable jobs, typed notification transports, and a structured result envelope; what it lacked was a time trigger, so periodic work had to be bolted onto external cron or systemd timers that each re-solved notification wiring, overlap, and change detection ([issue #10073](https://github.com/Extra-Chill/homeboy/issues/10073)).
+
+A schedule is stored in two parts:
+
+- the **declaration** is reviewable configuration at `~/.config/homeboy/schedules/<id>.json`
+- the **runtime record** — last status, last result fingerprint, in-flight marker — lives separately under the data directory, so the declaration stays diffable
+
+## Cadence
+
+`--every` takes a compact interval: `45s`, `30m`, `24h`, `1h30m`, `7d`. A bare number is rejected rather than guessed, because `--every 30` is ambiguous between seconds and minutes and guessing wrong runs a command sixty times more often than intended.
+
+Cadence is measured from the previous run's **start**, so a slow run does not push every later run out by its own duration.
+
+## Reporting
+
+`--notify-on` decides when a completed run is worth interrupting a human for:
+
+| Policy | Notifies |
+|---|---|
+| `change` (default) | when the result differs from the previous run, **and** on every failure |
+| `failure` | only when the run fails |
+| `always` | every run |
+
+`change` is the default because the useful behavior for a periodic check is silence while healthy and a ping when something drifts — a notification should mean something needs attention.
+
+Change detection fingerprints the result envelope with volatile fields (timestamps, durations, run ids) removed. Without that, every run would look like a change and `change` would be indistinguishable from `always`.
+
+A repeated **identical failure** still notifies. An ongoing outage that goes quiet because it is "unchanged" is the worst available outcome.
+
+Notifications are delivered through the same installed transports as `--notification-transport` / `--notification-route`, stored on the schedule so a triggered run does not need them passed again.
+
+## Overlap and jitter
+
+`--on-overlap skip` (default) declines to start a run while the previous one is still in flight, so a slow check cannot stack copies of itself. `--on-overlap allow` starts it anyway.
+
+`--jitter-seconds` spreads runs across a window so that many schedules sharing a cadence do not all fire on the hour. The offset is derived from the schedule id, so a given schedule always lands at the same point in the window rather than walking across it on every restart.
+
+## Running
+
+`homeboy schedule run <id>` runs one schedule immediately, whether or not it is due. `homeboy schedule tick` runs everything currently due, and `--dry-run` reports what would run without running it.
+
+Both exit non-zero when a scheduled run fails, so an external trigger can react without parsing the payload.
+
+Scheduled commands execute as a subprocess of the homeboy binary and are read back through their `homeboy/command-result/v3` envelope. A scheduled command therefore cannot take its caller down with it.
+
+Scheduling the `schedule` command itself is refused.
+
+```sh
+homeboy schedule add nightly-harvest \
+  --command 'harvest production --check' \
+  --every 24h \
+  --notification-transport discord.run-completion \
+  --notification-route 'discord:v1:channel:123456789012345678'
+
+homeboy schedule add fleet-drift --command 'fleet check prod' --every 1h --jitter-seconds 300
+
+homeboy schedule list
+homeboy schedule tick --dry-run
+```
+
+## Triggering
+
+`schedule tick` is the trigger surface. Point any external timer at it:
+
+```sh
+# systemd timer, cron, or any supervisor
+homeboy schedule tick
+```
+
+Running the tick more often than the shortest cadence is safe — a schedule that is not due is skipped, and `--on-overlap skip` prevents pile-up.
