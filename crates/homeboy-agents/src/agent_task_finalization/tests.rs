@@ -1026,6 +1026,26 @@ fn durable_finalization_requires_successful_provider_run_and_hydrates_model() {
     mismatched_options.manual_finalization = false;
     assert!(finalize_pr_with_backend(mismatched_options, &mut backend).is_err());
 
+    let mut follow_up = successful_gate_proof();
+    follow_up.run_id = "cook-review-form".to_string();
+    follow_up.promotion.source.run_id = Some("cook-review-form".to_string());
+    follow_up.promotion.provenance = json!({
+        "cook_follow_up": {
+            "kind": "review_form_only",
+            "source_run_id": "cook-3678"
+        }
+    });
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        lifecycle: Some(successful_lifecycle("openai/gpt-5.6-terra")),
+        gate_proof: Some(follow_up),
+        ..Default::default()
+    };
+    let mut follow_up_options = options();
+    follow_up_options.manual_finalization = false;
+    finalize_pr_with_backend(follow_up_options, &mut backend)
+        .expect("authenticated review-form continuation finalizes");
+
     let mut failed = successful_lifecycle("openai/gpt-5.6-terra");
     failed.execution.state = RunExecutionState::Failed;
     let mut backend = MockBackend {
