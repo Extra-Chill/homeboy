@@ -478,13 +478,13 @@ function findArtifact(artifacts, declaration) {
 }
 
 function opencodeSuccessOutcome(context) {
-	const structured = structuredOpenCodeReviewOutput(context);
+	const structured = structuredOpenCodeOutputs(context);
 	const evidence = collectOpenCodeArtifacts(context, structured);
 	const emptyPatch = evidence.artifacts?.some((artifact) => artifact.name === 'patch' && artifact.bytes === 0);
 	return withPolicyDeniedOutcome(context, {
 		status: structured.outputs && emptyPatch ? 'no_op' : 'succeeded',
 		summary: structured.outputs && emptyPatch
-			? 'OpenCode completed the requested review form without workspace changes.'
+			? 'OpenCode completed without workspace changes.'
 			: 'OpenCode completed successfully.',
 		diagnostics: [
 			{ classification: 'provider', message: 'OpenCode CLI exited with status 0.' },
@@ -494,15 +494,15 @@ function opencodeSuccessOutcome(context) {
 			exit_code: 0,
 			opencode_session: sessionMetadata(context),
 			opencode_progress: progressMetadata(context),
-			...(structured.review_form_status ? { review_form_status: structured.review_form_status } : {}),
 		},
 		...(structured.outputs ? { outputs: structured.outputs } : {}),
 		...evidence,
 	});
 }
 
-function structuredOpenCodeReviewOutput(context = {}) {
-	if (!requiresReviewForm(context.request)) {
+function structuredOpenCodeOutputs(context = {}) {
+	const declarations = outputDeclarations(context.request);
+	if (declarations.length === 0) {
 		return {};
 	}
 	const textEvents = parseJsonObjectsFromText(context.spawnResult?.stdout)
@@ -511,47 +511,46 @@ function structuredOpenCodeReviewOutput(context = {}) {
 	const candidates = finalAnswers.length > 0 ? finalAnswers : textEvents.slice(-1);
 	for (const event of candidates.reverse()) {
 		const envelope = parseStructuredAnswer(event.text);
-		const reviewForm = structuredReviewFormValue(envelope);
-		if (reviewForm === undefined) {
+		const values = declaredOutputValues(envelope, declarations);
+		if (!values) {
 			continue;
 		}
-		if (!boundedStructuredOutput(reviewForm)) {
-			return reviewFormOutputDiagnostic(
-				'invalid',
-				'OpenCode emitted a review_form that exceeded the structured output size limit.'
-			);
+		const outputs = {};
+		const oversized = [];
+		for (const declaration of declarations) {
+			if (!Object.hasOwn(values, declaration.name)) {
+				continue;
+			}
+			if (boundedStructuredOutput(values[declaration.name])) {
+				// Core owns declaration-schema validation; retain bounded provider values.
+				outputs[declaration.name] = values[declaration.name];
+			} else {
+				oversized.push(declaration.name);
+			}
 		}
-		if (validReviewForm(reviewForm)) {
-			return {
-				outputs: { review_form: reviewForm },
-				review_form_status: 'harvested',
-			};
-		}
+		const missing = declarations.filter((declaration) => declaration.required && !Object.hasOwn(outputs, declaration.name));
 		return {
-			outputs: { review_form: reviewForm },
-			...reviewFormOutputDiagnostic(
-				'invalid',
-				'OpenCode emitted a review_form with an invalid schema.'
-			),
+			...(Object.keys(outputs).length > 0 ? { outputs } : {}),
+			diagnostics: outputDiagnostics(missing, oversized),
 		};
 	}
-	return reviewFormOutputDiagnostic(
-		'missing',
-		'OpenCode completed without a structured review_form in its final answer.'
-	);
+	return { diagnostics: outputDiagnostics(declarations.filter((declaration) => declaration.required), []) };
 }
 
-function structuredReviewFormValue(envelope) {
+function declaredOutputValues(envelope, declarations) {
 	if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) {
-		return undefined;
+		return null;
 	}
-	// The canonical adapter contract places values under `outputs`. Accept the
-	// direct form emitted by earlier Cook prompts while their persisted recipes age out.
+	// OpenCode's current prompt contract is the canonical `outputs` envelope.
 	if (envelope.outputs && typeof envelope.outputs === 'object' && !Array.isArray(envelope.outputs)
-		&& Object.hasOwn(envelope.outputs, 'review_form')) {
-		return envelope.outputs.review_form;
+		&& declarations.some((declaration) => Object.hasOwn(envelope.outputs, declaration.name))) {
+		return envelope.outputs;
 	}
-	return Object.hasOwn(envelope, 'review_form') ? envelope.review_form : undefined;
+	// Persisted pre-envelope recipes can only expose their explicitly declared names.
+	const legacy = Object.fromEntries(declarations
+		.filter((declaration) => Object.hasOwn(envelope, declaration.name))
+		.map((declaration) => [declaration.name, envelope[declaration.name]]));
+	return Object.keys(legacy).length > 0 ? legacy : null;
 }
 
 function boundedStructuredOutput(value) {
@@ -560,20 +559,6 @@ function boundedStructuredOutput(value) {
 	} catch {
 		return false;
 	}
-}
-
-function requiresReviewForm(request = {}) {
-	const requiredOutputs = request.inputs?.required_outputs;
-	if (Array.isArray(requiredOutputs)) {
-		return requiredOutputs.some((output) => (
-			output
-			&& output.name === 'review_form'
-			&& output.required === true
-			&& output.schema === 'homeboy/agent-task-review-form/v1'
-		));
-	}
-	// Retain compatibility for Cook recipes persisted before the typed contract.
-	return request.inputs?.cook_loop?.review_form_required === true;
 }
 
 function openCodeTextParts(frame = {}) {
@@ -609,24 +594,28 @@ function parseStructuredAnswer(text = '') {
 	return null;
 }
 
-function validReviewForm(form) {
-	return form && typeof form === 'object' && !Array.isArray(form)
-		&& typeof form.summary === 'string'
-		&& Array.isArray(form.what_changed)
-		&& form.what_changed.every((item) => typeof item === 'string')
-		&& typeof form.compatibility === 'string'
-		&& typeof form.used_for === 'string';
+function outputDeclarations(request = {}) {
+	return arrayValue(request.inputs?.required_outputs)
+		.filter((declaration) => declaration && typeof declaration === 'object'
+			&& typeof declaration.name === 'string' && declaration.name.trim() !== '')
+		.map((declaration) => ({ ...declaration, name: declaration.name.trim(), required: declaration.required === true }));
 }
 
-function reviewFormOutputDiagnostic(status, message) {
-	return {
-		review_form_status: status,
-		diagnostics: [{
-			class: `opencode.review_form_${status}`,
+function outputDiagnostics(missing, oversized) {
+	return [
+		...(missing.length > 0 ? [{
+			class: 'opencode.required_outputs_missing',
 			classification: 'provider',
-			message,
-		}],
-	};
+			message: `OpenCode completed without required structured output(s): ${missing.map((declaration) => declaration.name).join(', ')}.`,
+			data: { missing_outputs: missing.map((declaration) => declaration.name) },
+		}] : []),
+		...(oversized.length > 0 ? [{
+			class: 'opencode.declared_outputs_oversized',
+			classification: 'provider',
+			message: `OpenCode emitted structured output(s) exceeding the size limit: ${oversized.join(', ')}.`,
+			data: { oversized_outputs: oversized },
+		}] : []),
+	];
 }
 
 function opencodeFailureOutcome(context) {
@@ -1058,11 +1047,11 @@ function opencodeRunArgs(request = {}, config = {}, commandSpec = {}) {
 }
 
 function requiredOutputInstructions(request = {}) {
-	const outputs = request.inputs?.required_outputs;
-	if (!Array.isArray(outputs) || outputs.length === 0) {
+	const declarations = outputDeclarations(request);
+	if (declarations.length === 0) {
 		return '';
 	}
-	return `\n\nReturn the required outputs as JSON using an \`outputs\` object. The OpenCode adapter parses the response against this contract: ${JSON.stringify(outputs)}.`;
+	return `\n\nReturn one JSON object in your final answer with declared values under \`outputs\`. Include every required declaration and any optional declaration you produced. Output declarations: ${JSON.stringify(declarations)}.`;
 }
 
 function resolveOpenCodeCwd(request = {}, config = {}) {

@@ -1030,96 +1030,102 @@ process.stdout.write(JSON.stringify({ type: 'result', result: { summary: 'Review
 	assert.equal(reviewConfig.permission.read['../*'], 'deny');
 	assert.equal(reviewConfig.permission.read['*.env'], 'deny');
 
-	const structuredReviewForm = {
-		summary: 'Preserve the reviewed cleanup scope in the apply command.',
-		what_changed: ['Added the scoped apply command to cleanup output.'],
-		compatibility: 'The output change is additive.',
-		used_for: 'Inspected the candidate and summarized its verified behavior.',
-	};
-	const structuredReviewCliPath = path.join(root, 'mock-opencode-structured-review.cjs');
-	fs.writeFileSync(structuredReviewCliPath, `#!/usr/bin/env node
-const mode = process.env.REVIEW_FORM_MODE;
+	const structuredOutputCliPath = path.join(root, 'mock-opencode-structured-outputs.cjs');
+	fs.writeFileSync(structuredOutputCliPath, `#!/usr/bin/env node
+const mode = process.env.OUTPUT_MODE;
 const prompt = process.argv.at(-1);
-const contract = JSON.parse(prompt.match(/against this contract: (\\[.*\\])\\.$/s)?.[1] || 'null');
-if (contract?.[0]?.name !== 'review_form' || contract[0].required !== true || contract[0].schema !== 'homeboy/agent-task-review-form/v1') {
-  throw new Error('OpenCode did not receive the required-output schema.');
+const declarations = JSON.parse(prompt.match(/Output declarations: (\\[.*\\])\\.$/s)?.[1] || 'null');
+if (declarations?.[0]?.name !== 'release_notes' || declarations[0].required !== true || declarations?.[1]?.name !== 'verification' || declarations[1].required !== false) {
+  throw new Error('OpenCode did not receive generic output declarations.');
 }
 const text = mode === 'valid'
-	? ${JSON.stringify(`\`\`\`json\n${JSON.stringify({ outputs: { review_form: {
-		summary: 'Preserve the reviewed cleanup scope in the apply command.',
-		what_changed: ['Added the scoped apply command to cleanup output.'],
-		compatibility: 'The output change is additive.',
-		used_for: 'Inspected the candidate and summarized its verified behavior.',
-	} } }, null, 2)}\n\`\`\``)}
-	: mode === 'invalid'
-		? ${JSON.stringify('```json\n{"outputs":{"review_form":{"summary":[]}}}\n```')}
-		: mode === 'oversized'
-			? JSON.stringify({ outputs: { review_form: { summary: 'x'.repeat(70 * 1024) } } })
-		: 'Review completed without structured output.';
+	? ${JSON.stringify(`\`\`\`json\n${JSON.stringify({ outputs: { release_notes: ['Added generic output handling.'], verification: { passed: true } } }, null, 2)}\n\`\`\``)}
+	: mode === 'malformed'
+		? ${JSON.stringify('```json\n{"outputs":{"release_notes":{"unexpected":[]},"verification":false}}\n```')}
+	: mode === 'oversized'
+			? JSON.stringify({ outputs: { release_notes: 'x'.repeat(70 * 1024) } })
+			: mode === 'optional-absent'
+				? ${JSON.stringify('```json\n{"outputs":{"release_notes":["Optional output omitted"]}}\n```')}
+			: mode === 'legacy'
+				? ${JSON.stringify('```json\n{"release_notes":["Legacy declaration mapping"],"ignored":"not declared"}\n```')}
+				: 'Completed without structured output.';
 process.stdout.write(JSON.stringify({
 	type: 'text',
 	part: { type: 'text', text, metadata: { openai: { phase: 'final_answer' } } },
 }) + '\\n');
 `);
-	const structuredReviewRequest = {
+	const structuredOutputRequest = {
 		...request,
-		task_id: 'opencode-structured-review',
-	inputs: {
-		cook_loop: { review_form_required: true },
-		required_outputs: [{
-			name: 'review_form',
-			required: true,
-			schema: 'homeboy/agent-task-review-form/v1',
-			json_schema: {
-				type: 'object',
-				required: ['summary', 'what_changed', 'compatibility', 'used_for'],
-			},
-		}],
-	},
+		task_id: 'opencode-structured-outputs',
+		inputs: {
+			required_outputs: [
+				{ name: 'release_notes', required: true, json_schema: { type: 'array', items: { type: 'string' } } },
+				{ name: 'verification', required: false, json_schema: { type: 'object' } },
+			],
+		},
 		workspace: { root: reviewWorkspace },
 		executor: {
 			...request.executor,
 			config: {
 				...request.executor.config,
-				command_args: [structuredReviewCliPath],
+				command_args: [structuredOutputCliPath],
 				cwd: reviewWorkspace,
-				runtime_env: { REVIEW_FORM_MODE: 'valid' },
+				runtime_env: { OUTPUT_MODE: 'valid' },
 			},
 		},
 	};
-	const structuredReviewResult = await executeOpenCodeAgentTask(structuredReviewRequest, { env: fixtureEnv });
-	assert.equal(structuredReviewResult.status, 'no_op', JSON.stringify(structuredReviewResult.diagnostics));
-	assert.deepEqual(structuredReviewResult.outputs.review_form, structuredReviewForm);
-	assert.equal(structuredReviewResult.metadata.review_form_status, 'harvested');
-	assert.equal(structuredReviewResult.metadata.opencode_session.status, 'not_discovered');
-	const structuredAgentResult = structuredReviewResult.artifacts.find((artifact) => artifact.name === 'agent_result');
+	const structuredOutputResult = await executeOpenCodeAgentTask(structuredOutputRequest, { env: fixtureEnv });
+	assert.equal(structuredOutputResult.status, 'no_op', JSON.stringify(structuredOutputResult.diagnostics));
+	assert.deepEqual(structuredOutputResult.outputs, { release_notes: ['Added generic output handling.'], verification: { passed: true } });
+	assert.equal(structuredOutputResult.metadata.opencode_session.status, 'not_discovered');
+	const structuredAgentResult = structuredOutputResult.artifacts.find((artifact) => artifact.name === 'agent_result');
 	const structuredAgentResultPayload = JSON.parse(fs.readFileSync(structuredAgentResult.path, 'utf8'));
 	assert.equal(structuredAgentResultPayload.status, 'no_op');
-	assert.deepEqual(structuredAgentResultPayload.outputs.review_form, structuredReviewForm);
+	assert.deepEqual(structuredAgentResultPayload.outputs, structuredOutputResult.outputs);
 
-	for (const [mode, diagnosticClass] of [
-		['missing', 'opencode.review_form_missing'],
-		['invalid', 'opencode.review_form_invalid'],
-		['oversized', 'opencode.review_form_invalid'],
+	for (const [mode, outputs, diagnosticClass] of [
+		['missing', {}, 'opencode.required_outputs_missing'],
+		['malformed', { release_notes: { unexpected: [] }, verification: false }, undefined],
+		['oversized', {}, 'opencode.declared_outputs_oversized'],
 	]) {
-		const incompleteReviewResult = await executeOpenCodeAgentTask({
-			...structuredReviewRequest,
-			task_id: `opencode-structured-review-${mode}`,
+		const incompleteOutputResult = await executeOpenCodeAgentTask({
+			...structuredOutputRequest,
+			task_id: `opencode-structured-outputs-${mode}`,
 			executor: {
-				...structuredReviewRequest.executor,
+				...structuredOutputRequest.executor,
 				config: {
-					...structuredReviewRequest.executor.config,
-					runtime_env: { REVIEW_FORM_MODE: mode },
+					...structuredOutputRequest.executor.config,
+					runtime_env: { OUTPUT_MODE: mode },
 				},
 			},
 		}, { env: fixtureEnv });
-		assert.equal(incompleteReviewResult.status, mode === 'invalid' ? 'no_op' : 'succeeded');
-		assert.deepEqual(
-			incompleteReviewResult.outputs,
-			mode === 'invalid' ? { review_form: { summary: [] } } : {}
-		);
-		assert.equal(incompleteReviewResult.diagnostics.some((diagnostic) => diagnostic.class === diagnosticClass), true);
+		assert.equal(incompleteOutputResult.status, mode === 'malformed' ? 'no_op' : 'succeeded');
+		assert.deepEqual(incompleteOutputResult.outputs, outputs);
+		assert.equal(incompleteOutputResult.diagnostics.some((diagnostic) => diagnostic.class === diagnosticClass), diagnosticClass !== undefined);
 	}
+
+	const optionalAbsentResult = await executeOpenCodeAgentTask({
+		...structuredOutputRequest,
+		task_id: 'opencode-structured-outputs-optional-absent',
+		executor: {
+			...structuredOutputRequest.executor,
+			config: { ...structuredOutputRequest.executor.config, runtime_env: { OUTPUT_MODE: 'optional-absent' } },
+		},
+	}, { env: fixtureEnv });
+	assert.equal(optionalAbsentResult.status, 'no_op');
+	assert.deepEqual(optionalAbsentResult.outputs, { release_notes: ['Optional output omitted'] });
+	assert.equal(optionalAbsentResult.diagnostics.some((diagnostic) => diagnostic.class === 'opencode.required_outputs_missing'), false);
+
+	const legacyOutputResult = await executeOpenCodeAgentTask({
+		...structuredOutputRequest,
+		task_id: 'opencode-structured-outputs-legacy',
+		executor: {
+			...structuredOutputRequest.executor,
+			config: { ...structuredOutputRequest.executor.config, runtime_env: { OUTPUT_MODE: 'legacy' } },
+		},
+	}, { env: fixtureEnv });
+	assert.deepEqual(legacyOutputResult.outputs, { release_notes: ['Legacy declaration mapping'] });
+	assert.equal(legacyOutputResult.outputs.ignored, undefined);
 } finally {
 	fs.rmSync(root, { recursive: true, force: true });
 }
