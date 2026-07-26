@@ -797,7 +797,7 @@ changed files, patch artifact ref, current diff context, and source run/task
 refs. When a gate producer supplies versioned diagnostic records in its
 structured sidecar evidence, Homeboy carries their stable identities, bounded
 summaries, opaque locations/actions, and resolvable evidence refs without
-parsing raw framework output. Follow-up attempts retain and compare compact
+parsing raw command output. Follow-up attempts retain and compare compact
 failure sets, prioritizing new failures and shared unchanged failures without
 expanding default output. Red gates with exhausted budget return
 `status: "retries_exhausted"`.
