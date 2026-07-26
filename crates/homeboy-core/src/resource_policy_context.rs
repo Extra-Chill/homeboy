@@ -83,6 +83,10 @@ pub struct ResourcePolicyHostSnapshot {
     /// Memory available in MB if memory data was collected.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_available_mb: Option<u64>,
+    /// Total physical memory in MB if memory data was collected. This is the
+    /// capacity basis for relative process RSS classification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_total_mb: Option<u64>,
     /// Number of Homeboy-adjacent processes already active.
     pub relevant_process_count: usize,
     /// Severity classification of the active process set.
@@ -91,6 +95,10 @@ pub struct ResourcePolicyHostSnapshot {
     pub active_rig_lease_count: usize,
     /// Severity classification of the active rig lease set.
     pub rig_lease_severity: String,
+    /// Configured local runner concurrency used to classify rig leases, when
+    /// available. Absent values use the legacy count-based fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rig_lease_concurrency_limit: Option<usize>,
 }
 
 fn captured_storage() -> &'static RwLock<Option<ResourcePolicyContext>> {

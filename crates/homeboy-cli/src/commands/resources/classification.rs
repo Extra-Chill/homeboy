@@ -34,27 +34,62 @@ pub(super) fn classify_memory(total_bytes: u64, available_bytes: u64) -> Resourc
     }
 }
 
-pub(super) fn classify_processes(rows: &[ProcessRow]) -> ResourceRecommendation {
-    if rows
-        .iter()
-        .any(|row| row.cpu_percent >= 200.0 || row.rss_mb >= 4096)
-    {
+const PROCESS_WARM_CPU_PER_CORE_PERCENT: f64 = 12.5;
+const PROCESS_HOT_CPU_PER_CORE_PERCENT: f64 = 25.0;
+const PROCESS_WARM_CPU_FLOOR_PERCENT: f64 = 50.0;
+const PROCESS_HOT_CPU_FLOOR_PERCENT: f64 = 100.0;
+const PROCESS_WARM_RSS_RATIO: f64 = 0.125;
+const PROCESS_HOT_RSS_RATIO: f64 = 0.25;
+const PROCESS_WARM_RSS_FLOOR_MB: u64 = 512;
+const PROCESS_HOT_RSS_FLOOR_MB: u64 = 1024;
+
+pub(super) fn classify_processes(
+    rows: &[ProcessRow],
+    cpu_count: usize,
+    total_memory_mb: Option<u64>,
+) -> ResourceRecommendation {
+    let warm_cpu_percent = (cpu_count.max(1) as f64 * PROCESS_WARM_CPU_PER_CORE_PERCENT)
+        .max(PROCESS_WARM_CPU_FLOOR_PERCENT);
+    let hot_cpu_percent = (cpu_count.max(1) as f64 * PROCESS_HOT_CPU_PER_CORE_PERCENT)
+        .max(PROCESS_HOT_CPU_FLOOR_PERCENT);
+    let warm_rss_mb = total_memory_mb.map(|total| (total as f64 * PROCESS_WARM_RSS_RATIO) as u64);
+    let hot_rss_mb = total_memory_mb.map(|total| (total as f64 * PROCESS_HOT_RSS_RATIO) as u64);
+
+    if rows.iter().any(|row| {
+        row.cpu_percent >= hot_cpu_percent
+            || hot_rss_mb
+                .is_some_and(|threshold| row.rss_mb >= threshold.max(PROCESS_HOT_RSS_FLOOR_MB))
+    }) {
         ResourceRecommendation::Hot
-    } else if rows
-        .iter()
-        .any(|row| row.cpu_percent >= 100.0 || row.rss_mb >= 2048)
-    {
+    } else if rows.iter().any(|row| {
+        row.cpu_percent >= warm_cpu_percent
+            || warm_rss_mb
+                .is_some_and(|threshold| row.rss_mb >= threshold.max(PROCESS_WARM_RSS_FLOOR_MB))
+    }) {
         ResourceRecommendation::Warm
     } else {
         ResourceRecommendation::Ok
     }
 }
 
-pub(super) fn classify_rig_leases(active_count: usize) -> ResourceRecommendation {
-    match active_count {
-        0 => ResourceRecommendation::Ok,
-        1 => ResourceRecommendation::Warm,
-        _ => ResourceRecommendation::Hot,
+pub(super) fn classify_rig_leases(
+    active_count: usize,
+    concurrency_limit: Option<usize>,
+) -> ResourceRecommendation {
+    let Some(limit) = concurrency_limit.filter(|limit| *limit > 0) else {
+        return match active_count {
+            0 => ResourceRecommendation::Ok,
+            1 => ResourceRecommendation::Warm,
+            _ => ResourceRecommendation::Hot,
+        };
+    };
+
+    if active_count >= limit {
+        ResourceRecommendation::Hot
+    } else if active_count.saturating_mul(4) >= limit.saturating_mul(3) {
+        ResourceRecommendation::Warm
+    } else {
+        ResourceRecommendation::Ok
     }
 }
 
@@ -94,7 +129,7 @@ mod tests {
     }
 
     #[test]
-    fn classifies_processes_by_hot_cpu_or_rss_rows() {
+    fn classifies_processes_by_capacity_relative_cpu_and_rss() {
         let rows = vec![ProcessRow {
             pid: 1,
             cpu_percent: 25.0,
@@ -102,26 +137,59 @@ mod tests {
             command: "homeboy".to_string(),
             args: "homeboy bench".to_string(),
         }];
-        assert_eq!(classify_processes(&rows), ResourceRecommendation::Ok);
+        assert_eq!(
+            classify_processes(&rows, 4, Some(8 * 1024)),
+            ResourceRecommendation::Ok
+        );
+
+        let rows = vec![ProcessRow {
+            cpu_percent: 51.0,
+            ..rows[0].clone()
+        }];
+        assert_eq!(
+            classify_processes(&rows, 4, Some(8 * 1024)),
+            ResourceRecommendation::Warm
+        );
 
         let rows = vec![ProcessRow {
             cpu_percent: 101.0,
             ..rows[0].clone()
         }];
-        assert_eq!(classify_processes(&rows), ResourceRecommendation::Warm);
+        assert_eq!(
+            classify_processes(&rows, 4, Some(8 * 1024)),
+            ResourceRecommendation::Hot
+        );
 
         let rows = vec![ProcessRow {
-            cpu_percent: 201.0,
+            rss_mb: 2 * 1024,
             ..rows[0].clone()
         }];
-        assert_eq!(classify_processes(&rows), ResourceRecommendation::Hot);
+        assert_eq!(
+            classify_processes(&rows, 4, Some(8 * 1024)),
+            ResourceRecommendation::Hot
+        );
+
+        let rows = vec![ProcessRow {
+            rss_mb: 4 * 1024,
+            ..rows[0].clone()
+        }];
+        assert_eq!(
+            classify_processes(&rows, 16, Some(128 * 1024)),
+            ResourceRecommendation::Ok
+        );
     }
 
     #[test]
-    fn classifies_rig_leases_by_active_count() {
-        assert_eq!(classify_rig_leases(0), ResourceRecommendation::Ok);
-        assert_eq!(classify_rig_leases(1), ResourceRecommendation::Warm);
-        assert_eq!(classify_rig_leases(2), ResourceRecommendation::Hot);
+    fn classifies_rig_leases_by_configured_concurrency_with_legacy_fallback() {
+        assert_eq!(classify_rig_leases(2, Some(8)), ResourceRecommendation::Ok);
+        assert_eq!(
+            classify_rig_leases(6, Some(8)),
+            ResourceRecommendation::Warm
+        );
+        assert_eq!(classify_rig_leases(8, Some(8)), ResourceRecommendation::Hot);
+        assert_eq!(classify_rig_leases(0, None), ResourceRecommendation::Ok);
+        assert_eq!(classify_rig_leases(1, None), ResourceRecommendation::Warm);
+        assert_eq!(classify_rig_leases(2, None), ResourceRecommendation::Hot);
     }
 
     #[test]

@@ -9,6 +9,7 @@ mod classification;
 mod load;
 mod memory;
 
+use crate::runner::runners::{self as runner, RunnerKind};
 use classification::{classify_processes, classify_rig_leases, overall_recommendation};
 
 const RELEVANT_PROCESS_EXECUTABLES: &[&str] = &["homeboy"];
@@ -78,6 +79,8 @@ pub struct ProcessRow {
 #[derive(Debug, Serialize)]
 pub struct RigLeaseSummary {
     pub active_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub concurrency_limit: Option<usize>,
     pub leases: Vec<RigLeaseRow>,
     pub recommendation: ResourceRecommendation,
 }
@@ -120,7 +123,10 @@ fn run_with_mode(mode: ResourceProbeMode) -> CmdResult<DoctorOutput> {
     };
 
     let processes = match mode {
-        ResourceProbeMode::Full => match collect_process_summary() {
+        ResourceProbeMode::Full => match collect_process_summary(
+            load.cpu_count,
+            memory.as_ref().map(|summary| summary.total_mb),
+        ) {
             Ok(summary) => summary,
             Err(note) => {
                 notes.push(note);
@@ -177,12 +183,16 @@ fn empty_process_summary() -> ProcessSummary {
 fn empty_rig_lease_summary() -> RigLeaseSummary {
     RigLeaseSummary {
         active_count: 0,
+        concurrency_limit: None,
         leases: Vec::new(),
         recommendation: ResourceRecommendation::Ok,
     }
 }
 
-fn collect_process_summary() -> Result<ProcessSummary, String> {
+fn collect_process_summary(
+    cpu_count: usize,
+    total_memory_mb: Option<u64>,
+) -> Result<ProcessSummary, String> {
     let output = Command::new("ps")
         .args(["-axo", "pid=,pcpu=,rss=,comm=,args="])
         .output()
@@ -197,7 +207,7 @@ fn collect_process_summary() -> Result<ProcessSummary, String> {
         .filter_map(parse_process_row)
         .filter(is_relevant_process)
         .collect();
-    let recommendation = classify_processes(&rows);
+    let recommendation = classify_processes(&rows, cpu_count, total_memory_mb);
     let relevant_count = rows.len();
 
     let mut top_cpu = rows.clone();
@@ -298,13 +308,24 @@ fn collect_rig_leases() -> Result<RigLeaseSummary, String> {
             started_at: lease.started_at,
         })
         .collect();
-    let recommendation = classify_rig_leases(rows.len());
+    let concurrency_limit = local_runner_concurrency_limit();
+    let recommendation = classify_rig_leases(rows.len(), concurrency_limit);
 
     Ok(RigLeaseSummary {
         active_count: rows.len(),
+        concurrency_limit,
         leases: rows,
         recommendation,
     })
+}
+
+fn local_runner_concurrency_limit() -> Option<usize> {
+    runner::list()
+        .ok()?
+        .into_iter()
+        .filter(|runner| runner.kind == RunnerKind::Local)
+        .filter_map(|runner| runner.settings.concurrency_limit)
+        .min()
 }
 
 fn round1(value: f64) -> f64 {
