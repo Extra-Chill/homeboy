@@ -94,6 +94,10 @@ pub(crate) fn run_package(
         let artifact_start = state.artifacts.len();
         store_artifacts_from_output(state, &response)
             .map_err(|err| package_provider_error(&extension.id, err))?;
+        for artifact in &mut state.artifacts[artifact_start..] {
+            artifact.phase = "final".to_string();
+            artifact.producer = format!("extension:{}", extension.id);
+        }
         persist_package_artifacts(state, artifact_start, component_id, component_local_path)
             .map_err(|err| package_provider_error(&extension.id, err))?;
         responses.push(serde_json::json!({
@@ -263,6 +267,10 @@ fn collect_declared_build_artifact(
         durable_path: None,
         artifact_type: None,
         platform: None,
+        phase: "final".to_string(),
+        producer: "scripts.build".to_string(),
+        sha256: None,
+        publication_authority: false,
     });
     persist_package_artifacts(state, artifact_start, component_id, component_local_path)
 }

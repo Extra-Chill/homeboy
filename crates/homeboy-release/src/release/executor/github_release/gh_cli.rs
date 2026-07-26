@@ -79,9 +79,14 @@ pub(crate) fn gh_release_exists(
 }
 
 pub(crate) fn github_release_artifact_paths(state: &ReleaseState) -> Vec<String> {
+    let authority_established = state
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.publication_authority);
     state
         .artifacts
         .iter()
+        .filter(|artifact| !authority_established || artifact.publication_authority)
         .filter_map(|artifact| {
             artifact
                 .durable_path
@@ -102,7 +107,15 @@ pub(crate) fn github_release_publications(
 ) -> Result<Vec<ReleaseAssetPublication>, String> {
     let mut publications: BTreeMap<String, ReleaseAssetPublication> = BTreeMap::new();
     let mut direct_sources = HashSet::new();
-    for artifact in &state.artifacts {
+    let authority_established = state
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.publication_authority);
+    for artifact in state
+        .artifacts
+        .iter()
+        .filter(|artifact| !authority_established || artifact.publication_authority)
+    {
         let source_path = artifact
             .durable_path
             .as_deref()
@@ -687,6 +700,10 @@ mod tests {
                 durable_path: Some(durable.display().to_string()),
                 artifact_type: None,
                 platform: None,
+                phase: "final".to_string(),
+                producer: "test".to_string(),
+                sha256: None,
+                publication_authority: false,
             }],
             ..ReleaseState::default()
         };
@@ -712,6 +729,10 @@ mod tests {
                 durable_path: None,
                 artifact_type: None,
                 platform: None,
+                phase: "final".to_string(),
+                producer: "test".to_string(),
+                sha256: None,
+                publication_authority: false,
             }],
             ..ReleaseState::default()
         };
@@ -738,6 +759,10 @@ mod tests {
                 durable_path: None,
                 artifact_type: None,
                 platform: None,
+                phase: "final".to_string(),
+                producer: "test".to_string(),
+                sha256: None,
+                publication_authority: false,
             }],
             ..ReleaseState::default()
         };
@@ -762,6 +787,10 @@ mod tests {
                 durable_path: None,
                 artifact_type: None,
                 platform: None,
+                phase: "final".to_string(),
+                producer: "test".to_string(),
+                sha256: None,
+                publication_authority: false,
             }],
             ..ReleaseState::default()
         };
@@ -805,6 +834,10 @@ mod tests {
             durable_path: durable_path.map(|path| path.display().to_string()),
             artifact_type: None,
             platform: None,
+            phase: "final".to_string(),
+            producer: "test".to_string(),
+            sha256: None,
+            publication_authority: false,
         }
     }
 

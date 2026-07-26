@@ -408,6 +408,10 @@ mod tests {
             durable_path: None,
             artifact_type: Some("archive".to_string()),
             platform: None,
+            phase: "final".to_string(),
+            producer: "test".to_string(),
+            sha256: None,
+            publication_authority: false,
         }];
         let error = validate_package_completeness(&component, repo.path(), &artifacts)
             .expect_err("missing tracked runtime file should fail");
@@ -442,6 +446,10 @@ mod tests {
             durable_path: None,
             artifact_type: Some("archive".to_string()),
             platform: None,
+            phase: "final".to_string(),
+            producer: "test".to_string(),
+            sha256: None,
+            publication_authority: false,
         }];
         validate_package_completeness(&component, repo.path(), &artifacts)
             .expect("excluded runtime file should not fail");
@@ -702,6 +710,10 @@ mod tests {
             durable_path: None,
             artifact_type: Some("archive".to_string()),
             platform: None,
+            phase: "final".to_string(),
+            producer: "test".to_string(),
+            sha256: None,
+            publication_authority: false,
         }]
     }
 

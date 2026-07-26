@@ -66,6 +66,7 @@ pub fn package_existing_tag(
             "release.package completed without producing any artifacts",
         ));
     }
+    super::executor::artifacts::establish_publication_authority(&mut state)?;
 
     let artifact_dir = release_package_dir(component_id, tag)?;
     fs::create_dir_all(&artifact_dir).map_err(|error| {
@@ -123,6 +124,25 @@ pub fn package_existing_tag(
         "release",
         "Release package manifest written to {}",
         manifest_path.display()
+    );
+    for artifact in result
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.publication_authority)
+    {
+        homeboy_core::log_status!(
+            "release",
+            "Authoritative release asset: {} sha256 {} ({})",
+            artifact.path,
+            artifact.sha256.as_deref().unwrap_or("unavailable"),
+            artifact.producer
+        );
+    }
+    homeboy_core::log_status!(
+        "release",
+        "Resume publication: homeboy release {} --head --from-artifacts {}",
+        component_id,
+        artifact_dir.display()
     );
 
     Ok(result)
@@ -210,6 +230,10 @@ fn copy_release_artifacts(
             durable_path: Some(destination.display().to_string()),
             artifact_type: artifact.artifact_type.clone(),
             platform: artifact.platform.clone(),
+            phase: artifact.phase.clone(),
+            producer: artifact.producer.clone(),
+            sha256: artifact.sha256.clone(),
+            publication_authority: artifact.publication_authority,
         });
     }
     Ok(copied)
@@ -250,6 +274,10 @@ mod tests {
                 durable_path: None,
                 artifact_type: Some("archive".to_string()),
                 platform: None,
+                phase: "final".to_string(),
+                producer: "test".to_string(),
+                sha256: None,
+                publication_authority: false,
             }],
         )
         .expect("copy artifacts");

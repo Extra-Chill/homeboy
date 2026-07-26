@@ -557,7 +557,11 @@ fn skip_publish_with_package_provider_still_packages_before_github_release() {
     assert!(package_preflight_index < package_index);
     assert!(package_index < github_release_index);
     assert_eq!(steps[package_index].needs, vec!["git.commit"]);
-    assert_eq!(steps[step_index(&ids, "git.tag")].needs, vec!["package"]);
+    assert!(step_index(&ids, "package") < step_index(&ids, "artifacts.authority"));
+    assert_eq!(
+        steps[step_index(&ids, "git.tag")].needs,
+        vec!["artifacts.authority"]
+    );
     assert_eq!(steps[github_release_index].needs, vec!["git.push"]);
     assert!(!ids.contains(&"publish.artifact-packager"));
     assert_eq!(
@@ -635,9 +639,18 @@ fn head_skip_publish_with_package_provider_still_packages_before_github_release(
     .expect("steps");
 
     let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
-    assert_eq!(ids, vec!["package", "github.release", "cleanup"]);
+    assert_eq!(
+        ids,
+        vec![
+            "package",
+            "artifacts.authority",
+            "github.release",
+            "cleanup"
+        ]
+    );
     assert_eq!(steps[1].needs, vec!["package"]);
-    assert_eq!(steps[2].needs, vec!["github.release"]);
+    assert_eq!(steps[2].needs, vec!["artifacts.authority"]);
+    assert_eq!(steps[3].needs, vec!["github.release"]);
 }
 
 #[test]
@@ -672,7 +685,10 @@ fn component_build_artifact_packages_before_github_release_without_extension() {
     let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
     assert!(step_index(&ids, "preflight.package") < step_index(&ids, "package"));
     assert!(step_index(&ids, "package") < step_index(&ids, "github.release"));
-    assert_eq!(steps[step_index(&ids, "git.tag")].needs, vec!["package"]);
+    assert_eq!(
+        steps[step_index(&ids, "git.tag")].needs,
+        vec!["artifacts.authority"]
+    );
     assert_eq!(
         steps[step_index(&ids, "cleanup")].needs,
         vec!["github.release"]
@@ -713,9 +729,18 @@ fn head_component_build_artifact_packages_before_github_release_without_extensio
     .expect("steps");
 
     let ids: Vec<&str> = steps.iter().map(|step| step.id.as_str()).collect();
-    assert_eq!(ids, vec!["package", "github.release", "cleanup"]);
+    assert_eq!(
+        ids,
+        vec![
+            "package",
+            "artifacts.authority",
+            "github.release",
+            "cleanup"
+        ]
+    );
     assert_eq!(steps[1].needs, vec!["package"]);
-    assert_eq!(steps[2].needs, vec!["github.release"]);
+    assert_eq!(steps[2].needs, vec!["artifacts.authority"]);
+    assert_eq!(steps[3].needs, vec!["github.release"]);
 }
 
 #[test]

@@ -56,6 +56,10 @@ pub fn parse_release_artifacts(value: &serde_json::Value) -> Result<Vec<ReleaseA
                 durable_path: None,
                 artifact_type: None,
                 platform: None,
+                phase: "final".to_string(),
+                producer: "unknown".to_string(),
+                sha256: None,
+                publication_authority: false,
             },
             serde_json::Value::Object(map) => {
                 let path = validation::require(
@@ -77,6 +81,10 @@ pub fn parse_release_artifacts(value: &serde_json::Value) -> Result<Vec<ReleaseA
                     durable_path: None,
                     artifact_type,
                     platform,
+                    phase: "final".to_string(),
+                    producer: "unknown".to_string(),
+                    sha256: None,
+                    publication_authority: false,
                 }
             }
             _ => {

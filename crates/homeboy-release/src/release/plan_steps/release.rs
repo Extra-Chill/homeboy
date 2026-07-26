@@ -134,7 +134,14 @@ pub(in crate::release) fn build_release_steps(
             vec!["git.commit".to_string()],
             StepConfig::new(),
         ));
-        vec!["package".to_string()]
+        steps.push(ready_step(
+            "artifacts.authority",
+            "artifacts.authority",
+            "Establish authoritative release assets",
+            vec!["package".to_string()],
+            StepConfig::new(),
+        ));
+        vec!["artifacts.authority".to_string()]
     } else {
         vec!["git.commit".to_string()]
     };
@@ -295,7 +302,14 @@ fn build_head_release_steps(
             vec![artifact_need.clone()],
             StepConfig::new(),
         ));
-        artifact_need = "package".to_string();
+        steps.push(ready_step(
+            "artifacts.authority",
+            "artifacts.authority",
+            "Establish authoritative release assets",
+            vec!["package".to_string()],
+            StepConfig::new(),
+        ));
+        artifact_need = "artifacts.authority".to_string();
     }
 
     if options.pipeline.skip_publish && !publish_targets.is_empty() {

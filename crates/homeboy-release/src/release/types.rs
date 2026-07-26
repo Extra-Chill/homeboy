@@ -283,6 +283,28 @@ pub struct ReleaseArtifact {
     pub artifact_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    /// Lifecycle phase that produced these bytes. Final package output has
+    /// precedence over validation/preflight output with the same target name.
+    #[serde(default = "default_artifact_phase")]
+    pub phase: String,
+    /// Producer responsible for the artifact (component build, extension, or
+    /// externally supplied recovery inventory).
+    #[serde(default = "default_artifact_producer")]
+    pub producer: String,
+    /// Content identity persisted with the durable inventory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    /// Exactly one artifact per target name is allowed to publish.
+    #[serde(default)]
+    pub publication_authority: bool,
+}
+
+fn default_artifact_phase() -> String {
+    "final".to_string()
+}
+
+fn default_artifact_producer() -> String {
+    "unknown".to_string()
 }
 
 /// Mutable state threaded through sequential release execution.
