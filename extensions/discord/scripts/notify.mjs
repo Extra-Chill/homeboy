@@ -64,7 +64,11 @@ async function main() {
 
 function parseArgs(tokens) {
   const args = { dryRun: false };
-  const names = new Set(['run-id', 'status', 'title', 'body', 'route']);
+  // Homeboy appends --transport alongside --route whenever the caller
+  // selected a transport explicitly. This extension was already chosen by that
+  // id, so the value carries no new information — but rejecting the flag makes
+  // every explicitly-routed notification fail.
+  const names = new Set(['run-id', 'status', 'title', 'body', 'route', 'transport']);
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (token === '--dry-run') {
@@ -72,12 +76,12 @@ function parseArgs(tokens) {
       continue;
     }
     if (!token.startsWith('--')) {
-      args.error = 'Expected --run-id, --status, --title, and --body; --route and --dry-run are optional.';
+      args.error = 'Expected --run-id, --status, --title, and --body; --transport, --route and --dry-run are optional.';
       return args;
     }
     const [flag, inlineValue] = token.slice(2).split(/=(.*)/s, 2);
     if (!names.has(flag) || (inlineValue === undefined && index + 1 >= tokens.length)) {
-      args.error = 'Expected --run-id, --status, --title, and --body; --route and --dry-run are optional.';
+      args.error = 'Expected --run-id, --status, --title, and --body; --transport, --route and --dry-run are optional.';
       return args;
     }
     const name = flag.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());

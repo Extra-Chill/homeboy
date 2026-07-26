@@ -27,7 +27,33 @@ await testCrossModeRouteBeforeNetwork();
 await testAuthFailureClassification();
 await testTruncation();
 await testRedactionAndDryRun();
+await testTransportFlagIsAccepted();
 console.log('discord notification tests passed');
+
+// Homeboy appends --transport alongside --route whenever a caller selects a
+// transport explicitly, so rejecting the flag broke every explicitly-routed
+// notification. Nothing exercised it before, which is why that shipped.
+async function testTransportFlagIsAccepted() {
+  await withServer(async ({ baseUrl, requests }) => {
+    const result = await notify(
+      { DISCORD_BOT_TOKEN: secretToken, DISCORD_API_BASE_URL: `${baseUrl}/api/v10` },
+      { transport: 'discord.run-completion', route: channelRoute(channelId) },
+    );
+    assert.equal(result.status, 'delivered');
+    assert.equal(result.delivery.route_kind, 'channel');
+    assert.equal(requests[0].url, `/api/v10/channels/${channelId}/messages`);
+  });
+
+  // An unknown flag must still be refused, so accepting --transport does not
+  // turn the parser permissive.
+  const run = await notifyRaw(
+    { DISCORD_BOT_TOKEN: secretToken },
+    { route: channelRoute(channelId) },
+    ['--totally-unknown', 'x'],
+  );
+  assert.equal(run.code, 1);
+  assert.match(run.stdout, /input_error/);
+}
 
 async function testConcurrentThreadRoutesDoNotCrossDeliver() {
   await withServer(async ({ baseUrl, requests }) => {
@@ -208,10 +234,12 @@ function notify(env, overrides = {}) {
   });
 }
 
-function notifyRaw(env, overrides = {}) {
+function notifyRaw(env, overrides = {}, extraArgs = []) {
   const args = ['--run-id', overrides.runId || 'run-123', '--status', 'pass', '--title', 'homeboy run pass', '--body', overrides.body || 'Run completed'];
+  if (overrides.transport !== undefined) args.push('--transport', overrides.transport);
   if (overrides.route !== undefined) args.push('--route', overrides.route);
   if (overrides.dryRun) args.push('--dry-run');
+  args.push(...extraArgs);
   return new Promise((resolve, reject) => {
     const childEnv = { ...process.env };
     for (const name of ['DISCORD_BOT_TOKEN', 'DISCORD_WEBHOOK_URL', 'DISCORD_OPERATIONS_CHANNEL_ID', 'DISCORD_API_BASE_URL']) delete childEnv[name];
