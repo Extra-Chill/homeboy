@@ -52,20 +52,26 @@ pub(super) fn classify_processes(
         .max(PROCESS_WARM_CPU_FLOOR_PERCENT);
     let hot_cpu_percent = (cpu_count.max(1) as f64 * PROCESS_HOT_CPU_PER_CORE_PERCENT)
         .max(PROCESS_HOT_CPU_FLOOR_PERCENT);
-    let warm_rss_mb = total_memory_mb.map(|total| (total as f64 * PROCESS_WARM_RSS_RATIO) as u64);
-    let hot_rss_mb = total_memory_mb.map(|total| (total as f64 * PROCESS_HOT_RSS_RATIO) as u64);
+    // Keep the absolute floors when memory capacity is unavailable: skipping
+    // RSS classification would make a failed probe hide real pressure.
+    let warm_rss_mb = total_memory_mb
+        .map(|total| (total as f64 * PROCESS_WARM_RSS_RATIO) as u64)
+        .unwrap_or(PROCESS_WARM_RSS_FLOOR_MB)
+        .max(PROCESS_WARM_RSS_FLOOR_MB);
+    let hot_rss_mb = total_memory_mb
+        .map(|total| (total as f64 * PROCESS_HOT_RSS_RATIO) as u64)
+        .unwrap_or(PROCESS_HOT_RSS_FLOOR_MB)
+        .max(PROCESS_HOT_RSS_FLOOR_MB);
 
-    if rows.iter().any(|row| {
-        row.cpu_percent >= hot_cpu_percent
-            || hot_rss_mb
-                .is_some_and(|threshold| row.rss_mb >= threshold.max(PROCESS_HOT_RSS_FLOOR_MB))
-    }) {
+    if rows
+        .iter()
+        .any(|row| row.cpu_percent >= hot_cpu_percent || row.rss_mb >= hot_rss_mb)
+    {
         ResourceRecommendation::Hot
-    } else if rows.iter().any(|row| {
-        row.cpu_percent >= warm_cpu_percent
-            || warm_rss_mb
-                .is_some_and(|threshold| row.rss_mb >= threshold.max(PROCESS_WARM_RSS_FLOOR_MB))
-    }) {
+    } else if rows
+        .iter()
+        .any(|row| row.cpu_percent >= warm_cpu_percent || row.rss_mb >= warm_rss_mb)
+    {
         ResourceRecommendation::Warm
     } else {
         ResourceRecommendation::Ok
@@ -176,6 +182,15 @@ mod tests {
         assert_eq!(
             classify_processes(&rows, 16, Some(128 * 1024)),
             ResourceRecommendation::Ok
+        );
+
+        let rows = vec![ProcessRow {
+            rss_mb: 1024,
+            ..rows[0].clone()
+        }];
+        assert_eq!(
+            classify_processes(&rows, 0, None),
+            ResourceRecommendation::Hot
         );
     }
 

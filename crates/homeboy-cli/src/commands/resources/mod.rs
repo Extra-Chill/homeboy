@@ -9,7 +9,7 @@ mod classification;
 mod load;
 mod memory;
 
-use crate::runner::runners::{self as runner, RunnerKind};
+use crate::runner::runners::{self as runner, Runner};
 use classification::{classify_processes, classify_rig_leases, overall_recommendation};
 
 const RELEVANT_PROCESS_EXECUTABLES: &[&str] = &["homeboy"];
@@ -320,12 +320,18 @@ fn collect_rig_leases() -> Result<RigLeaseSummary, String> {
 }
 
 fn local_runner_concurrency_limit() -> Option<usize> {
-    runner::list()
-        .ok()?
+    let runner_id = homeboy::core::resource_policy_context::is_runner_hosted_exec()
+        .then(|| std::env::var(crate::runner::RUNNER_ID_ENV).ok())
+        .flatten();
+    runner_concurrency_limit(runner_id.as_deref(), runner::list().ok()?)
+}
+
+fn runner_concurrency_limit(runner_id: Option<&str>, runners: Vec<Runner>) -> Option<usize> {
+    let runner_id = runner_id?;
+    runners
         .into_iter()
-        .filter(|runner| runner.kind == RunnerKind::Local)
-        .filter_map(|runner| runner.settings.concurrency_limit)
-        .min()
+        .find(|runner| runner.id == runner_id)
+        .and_then(|runner| runner.settings.concurrency_limit)
 }
 
 fn round1(value: f64) -> f64 {
@@ -385,5 +391,33 @@ mod tests {
         assert!(output.processes.top_rss.is_empty());
         assert_eq!(output.rig_leases.active_count, 0);
         assert!(output.rig_leases.leases.is_empty());
+    }
+
+    #[test]
+    fn uses_only_the_hosted_runner_capacity() {
+        let configured = |id: &str, concurrency_limit| Runner {
+            id: id.to_string(),
+            kind: runner::RunnerKind::Local,
+            server_id: None,
+            workspace_root: None,
+            settings: homeboy::core::server::RunnerSettings {
+                concurrency_limit,
+                ..Default::default()
+            },
+            env: Default::default(),
+            secret_env: Default::default(),
+            resources: Default::default(),
+            policy: Default::default(),
+        };
+        let runners = vec![
+            configured("controller-local", Some(2)),
+            configured("lab-local", Some(8)),
+        ];
+
+        assert_eq!(runner_concurrency_limit(None, runners.clone()), None);
+        assert_eq!(
+            runner_concurrency_limit(Some("lab-local"), runners),
+            Some(8)
+        );
     }
 }

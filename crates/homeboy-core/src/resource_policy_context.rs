@@ -101,6 +101,27 @@ pub struct ResourcePolicyHostSnapshot {
     pub rig_lease_concurrency_limit: Option<usize>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_snapshot_accepts_observations_written_before_capacity_metadata() {
+        let snapshot: ResourcePolicyHostSnapshot = serde_json::from_value(serde_json::json!({
+            "load_severity": "ok",
+            "cpu_count": 4,
+            "relevant_process_count": 0,
+            "process_severity": "ok",
+            "active_rig_lease_count": 0,
+            "rig_lease_severity": "ok"
+        }))
+        .expect("older resource-policy host snapshots remain readable");
+
+        assert_eq!(snapshot.memory_total_mb, None);
+        assert_eq!(snapshot.rig_lease_concurrency_limit, None);
+    }
+}
+
 fn captured_storage() -> &'static RwLock<Option<ResourcePolicyContext>> {
     static STORAGE: OnceLock<RwLock<Option<ResourcePolicyContext>>> = OnceLock::new();
     STORAGE.get_or_init(|| RwLock::new(None))
