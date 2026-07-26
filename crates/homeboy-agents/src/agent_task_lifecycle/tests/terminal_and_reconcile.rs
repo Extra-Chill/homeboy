@@ -2022,6 +2022,139 @@ fn replaying_cancel_repairs_stale_provider_execution() {
 }
 
 #[test]
+fn replaying_cancel_recovers_stale_released_and_orphaned_scratch_before_bounded_cleanup() {
+    with_isolated_home(|_| {
+        let run_id = "run-cancel-scratch-replay";
+        let plan = test_plan();
+        submit_plan(&plan, Some(run_id)).expect("submitted");
+        reserve_provider_execution(run_id, &plan.tasks[0], 1).expect("provider execution reserved");
+
+        let released = crate::controller_scratch::allocate_attempt(
+            run_id,
+            &plan.plan_id,
+            &plan.tasks[0].task_id,
+            1,
+        )
+        .expect("released scratch");
+        let orphaned = crate::controller_scratch::allocate_attempt(
+            run_id,
+            &plan.plan_id,
+            &plan.tasks[0].task_id,
+            2,
+        )
+        .expect("orphaned scratch");
+        prepare_dirty_scheduler_workspace(&released.path);
+        prepare_dirty_scheduler_workspace(&orphaned.path);
+        crate::controller_scratch::abandon_attempt_for_test(&released)
+            .expect("dead released owner");
+        crate::controller_scratch::abandon_attempt_for_test(&orphaned).expect("dead orphan owner");
+        crate::controller_scratch::release_attempt(
+            &released,
+            "legacy_provider_release",
+            json!({ "legacy": true }),
+        )
+        .expect("record stale released resource");
+
+        let mut record = store::read_record(run_id).expect("record");
+        record.state = AgentTaskRunState::Cancelled;
+        record.tasks[0].state = AgentTaskState::Cancelled;
+        store::write_record(&record).expect("legacy cancelled record");
+
+        // A terminal cleanup pass made this dead allocation look orphaned before
+        // cancellation replay could project its tracked source state.
+        let orphaned_preview = crate::controller_scratch::cleanup(
+            crate::controller_scratch::ControllerScratchCleanupOptions {
+                apply: false,
+                limit: 1,
+                retention_override_seconds: Some(0),
+            },
+        )
+        .expect("orphan stale resource");
+        assert_eq!(orphaned_preview.candidate_count, 0);
+
+        let repaired = cancel_run(run_id, None).expect("replayed cancellation");
+        assert_eq!(
+            repaired.metadata["provider_executions"][0]["state"],
+            "cancelled"
+        );
+
+        let preview = crate::controller_scratch::cleanup(
+            crate::controller_scratch::ControllerScratchCleanupOptions {
+                apply: false,
+                limit: 1,
+                retention_override_seconds: Some(0),
+            },
+        )
+        .expect("recovery-backed cleanup preview");
+        assert_eq!(preview.candidate_count, 2);
+        assert_eq!(preview.candidates.len(), 1);
+        assert_eq!(preview.remaining_candidate_count, 1);
+        assert!(preview.estimated_bytes > 0);
+
+        let first = crate::controller_scratch::cleanup(
+            crate::controller_scratch::ControllerScratchCleanupOptions {
+                apply: true,
+                limit: 1,
+                retention_override_seconds: Some(0),
+            },
+        )
+        .expect("first bounded cleanup");
+        assert_eq!(first.applied_count, 1);
+        let second = crate::controller_scratch::cleanup(
+            crate::controller_scratch::ControllerScratchCleanupOptions {
+                apply: true,
+                limit: 1,
+                retention_override_seconds: Some(0),
+            },
+        )
+        .expect("second bounded cleanup");
+        assert_eq!(second.applied_count, 1);
+        assert!(!released.path.exists());
+        assert!(!orphaned.path.exists());
+    });
+}
+
+fn prepare_dirty_scheduler_workspace(scratch: &std::path::Path) {
+    let workspace = scratch.join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    run_git(&workspace, &["init", "-b", "main"]);
+    std::fs::write(workspace.join("tracked.txt"), "base\n").expect("base file");
+    run_git(&workspace, &["add", "."]);
+    run_git(
+        &workspace,
+        &[
+            "-c",
+            "user.name=Homeboy",
+            "-c",
+            "user.email=homeboy@example.test",
+            "commit",
+            "-m",
+            "base",
+        ],
+    );
+    std::fs::write(workspace.join("tracked.txt"), "candidate\n").expect("tracked candidate");
+
+    let fixture = scratch.join("hb-test-generated-fixture");
+    std::fs::create_dir(&fixture).expect("generated fixture");
+    run_git(&fixture, &["init", "-b", "main"]);
+    std::fs::write(fixture.join("untracked.txt"), "generated\n").expect("fixture state");
+}
+
+fn run_git(cwd: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn local_provider_reservation_persists_reusable_owner_identity_before_execution() {
     with_isolated_home(|_| {
         let plan = test_plan();

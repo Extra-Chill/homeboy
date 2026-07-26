@@ -520,19 +520,23 @@ fn finalize_run_unlocked(run_id: &str) -> Result<()> {
                 resource.finalized_at = Some(now.clone());
                 changed = true;
             }
-            let recovery_state = resource
-                .terminal_evidence
-                .as_ref()
-                .and_then(|evidence| evidence.pointer("/workspace_recovery/state"))
-                .and_then(serde_json::Value::as_str);
-            let needs_recovery = matches!(
-                resource.lifecycle_state.as_str(),
-                "active" | "provider_registered"
-            ) || (resource.lifecycle_state == "interrupted"
-                && !matches!(
-                    recovery_state,
-                    Some("recovered" | "explicitly_ephemeral" | "authoritative_checkout_absent")
-                ));
+            let has_recovery_evidence = matches!(
+                resource
+                    .terminal_evidence
+                    .as_ref()
+                    .and_then(|evidence| evidence.pointer("/workspace_recovery/state"))
+                    .and_then(serde_json::Value::as_str),
+                Some("recovered" | "explicitly_ephemeral" | "authoritative_checkout_absent")
+            );
+            let stale_dirty_workspace = !resource.ephemeral
+                && git_safety_path(resource, Path::new(&resource.path))
+                    .is_some_and(|workspace| git_dirty_or_unpushed(&workspace));
+            let needs_recovery = !has_recovery_evidence
+                && (matches!(
+                    resource.lifecycle_state.as_str(),
+                    "active" | "provider_registered"
+                ) || resource.lifecycle_state == "interrupted"
+                    || stale_dirty_workspace);
             if needs_recovery {
                 let workspace_recovery = recover_authoritative_workspace(resource);
                 resource.lifecycle_state = "interrupted".to_string();
