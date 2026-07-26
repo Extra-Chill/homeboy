@@ -19,7 +19,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 mkdir -p "$(dirname "${output}")"
-printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"review test","success":false,"status":"failed","exit_code":1,"data":{"test_counts":{"failed":2,"passed":41,"total":43}}}' > "${output}"
+printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"review","success":false,"status":"failed","exit_code":1,"data":{"test_counts":{"failed":2,"passed":41,"total":43}}}' > "${output}"
 exit 1
 SH
 chmod +x "${TMP_DIR}/bin/homeboy"
@@ -92,8 +92,8 @@ done
 mkdir -p "$(dirname "${output}")"
 case "${FAKE_ENVELOPE_MODE}" in
   empty) printf '%s\n' '{}' > "${output}" ;;
-  wrong-command) printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"review audit","success":true,"status":"succeeded","exit_code":0,"data":{}}' > "${output}" ;;
-  inconsistent) printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"review test","success":true,"status":"succeeded","exit_code":1,"data":{}}' > "${output}" ;;
+  wrong-command) printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"deploy","success":true,"status":"succeeded","exit_code":0,"data":{}}' > "${output}" ;;
+  inconsistent) printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"review","success":true,"status":"succeeded","exit_code":1,"data":{}}' > "${output}" ;;
 esac
 exit 0
 SH
@@ -108,6 +108,44 @@ SH
   fi
 done
 printf 'PASS: empty, wrong-command, and inconsistent envelopes fail closed\n'
+
+# Regression: real homeboy reports the top-level command (`review`) in the
+# envelope, never the full CI command string (`review lint`). Asserting the
+# full string turned every passing review gate into a red release run.
+cat > "${TMP_DIR}/bin/homeboy" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+output=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --output) output="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+mkdir -p "$(dirname "${output}")"
+printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"review","success":true,"status":"succeeded","exit_code":0,"data":{"status":"passed","findings":[]}}' > "${output}"
+exit 0
+SH
+chmod +x "${TMP_DIR}/bin/homeboy"
+
+set +e
+PATH="${TMP_DIR}/bin:${PATH}" \
+GITHUB_ACTION_PATH="${ROOT_DIR}" \
+GITHUB_WORKSPACE="${TMP_DIR}/workspace" \
+GITHUB_OUTPUT="${TMP_DIR}/root-command-output" \
+GITHUB_ENV="${TMP_DIR}/root-command-env" \
+RESOLVED_COMMANDS='review lint' \
+COMPONENT_NAME='homeboy-action' \
+bash "${ROOT_DIR}/scripts/core/run-homeboy-commands.sh" >"${TMP_DIR}/root-command.log" 2>&1
+exit_code=$?
+set -e
+
+if [ "${exit_code}" -ne 0 ] || ! grep -q '^results={"review lint":"pass"}$' "${TMP_DIR}/root-command-output"; then
+  printf 'FAIL: subcommand gate rejects the top-level command reported by real homeboy\n'
+  cat "${TMP_DIR}/root-command.log"
+  exit 1
+fi
+printf 'PASS: subcommand gate accepts the top-level command homeboy actually reports\n'
 
 cat > "${TMP_DIR}/bin/homeboy" <<'SH'
 #!/usr/bin/env bash

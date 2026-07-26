@@ -19,12 +19,14 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 mkdir -p "$(dirname "${output}")"
-command_string="${command[*]}"
+# Real homeboy reports only the top-level command in the envelope, so the fake
+# mirrors that contract instead of echoing the full command string back.
+command_root="${command[0]}"
 case "${FAKE_OPERATION_MODE:-valid}" in
-  valid) printf '{"schema":"homeboy/command-result/v3","command":"%s","success":true,"status":"succeeded","exit_code":0,"data":{}}\n' "${command_string}" > "${output}" ;;
+  valid) printf '{"schema":"homeboy/command-result/v3","command":"%s","success":true,"status":"succeeded","exit_code":0,"data":{}}\n' "${command_root}" > "${output}" ;;
   missing) : ;;
   malformed) printf '%s\n' '{}' > "${output}" ;;
-  wrong-command) printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"fleet wrong","success":true,"status":"succeeded","exit_code":0,"data":{}}' > "${output}" ;;
+  wrong-command) printf '%s\n' '{"schema":"homeboy/command-result/v3","command":"deploy","success":true,"status":"succeeded","exit_code":0,"data":{}}' > "${output}" ;;
   timeout)
     trap '' TERM
     (trap '' TERM; while :; do sleep 1; done) &
