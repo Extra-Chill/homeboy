@@ -675,6 +675,14 @@ fn apply_immutable_candidate_to_base(
             None,
         ));
     }
+    if &candidate_fingerprint(path)? != candidate {
+        return Err(Error::validation_invalid_argument(
+            "path",
+            "moving-base recovery destination changed while projecting the authenticated candidate",
+            Some(path.to_string()),
+            None,
+        ));
+    }
 
     git(path, &["reset", "--hard", fresh_base])?;
     remove_untracked_candidate_paths(path, &candidate_files)?;
