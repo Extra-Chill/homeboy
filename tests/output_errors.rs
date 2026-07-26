@@ -103,12 +103,45 @@ fn command_owned_output_path_is_not_rejected_as_global_format() {
 }
 
 #[test]
-fn runner_status_includes_lab_diagnostics() {
+fn compact_runner_status_includes_summary_and_full_continuation() {
     let dir = tempfile::tempdir().expect("tempdir");
     register_local_runner(dir.path());
 
     let output = homeboy_command()
         .args(["runner", "status", "lab-local"])
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .output()
+        .expect("run homeboy");
+
+    assert!(
+        output.status.success(),
+        "runner status should succeed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout_json: Value = serde_json::from_slice(&output.stdout).expect("stdout json");
+    assert_eq!(stdout_json["success"], true);
+    assert_eq!(stdout_json["data"]["command"], "runner.status");
+    assert_eq!(
+        stdout_json["data"]["operator_summary"]["identity"],
+        "lab-local"
+    );
+    assert_eq!(
+        stdout_json["data"]["truncation"]["full_command"],
+        "homeboy runner status lab-local --full"
+    );
+    assert!(stdout_json["data"].get("selected_lab_runner").is_none());
+}
+
+#[test]
+fn full_runner_status_includes_lab_diagnostics() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    register_local_runner(dir.path());
+
+    let output = homeboy_command()
+        .args(["runner", "status", "lab-local", "--full"])
         .current_dir(dir.path())
         .env("HOME", dir.path())
         .output()
