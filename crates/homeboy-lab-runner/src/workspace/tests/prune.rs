@@ -3,8 +3,8 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::workspace::sync::{
-    prune_scan_command, prune_workspaces, ssh_process_liveness_command, sync_workspace,
-    update_workspace_resource_lifecycle, WORKSPACE_METADATA_FILE,
+    prune_scan_command, prune_workspaces, ssh_process_liveness_command, ssh_prune_delete_command,
+    sync_workspace, update_workspace_resource_lifecycle, WORKSPACE_METADATA_FILE,
 };
 use crate::workspace::types::{
     RunnerWorkspacePruneOptions, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
@@ -743,6 +743,51 @@ fn ssh_shaped_liveness_probe_detects_process_cwd_ownership() {
     child.wait().expect("reap held process");
     assert!(output.status.success(), "{:?}", output);
     assert_eq!(String::from_utf8_lossy(&output.stdout), "live");
+}
+
+#[test]
+fn ssh_shaped_prune_delete_revalidates_lifecycle_and_deletes_atomically() {
+    let root = tempfile::tempdir().expect("workspace root");
+    let workspace = root.path().join("_lab_workspaces/orphan");
+    write_orphan_workspace(&workspace);
+
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(ssh_prune_delete_command(
+            &root.path().join("_lab_workspaces").display().to_string(),
+            &workspace.display().to_string(),
+        ))
+        .output()
+        .expect("run atomic SSH-shaped prune delete");
+
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "removed");
+    assert!(!workspace.exists());
+
+    let active = root.path().join("_lab_workspaces/active");
+    write_orphan_workspace(&active);
+    let metadata_path = active.join(WORKSPACE_METADATA_FILE);
+    let mut metadata: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
+            .expect("metadata json");
+    metadata["resource_lifecycle"] = serde_json::json!({ "status": "active" });
+    fs::write(&metadata_path, metadata.to_string()).expect("write active metadata");
+
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(ssh_prune_delete_command(
+            &root.path().join("_lab_workspaces").display().to_string(),
+            &active.display().to_string(),
+        ))
+        .output()
+        .expect("run active lease SSH-shaped prune delete");
+
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "live:active_resource_lifecycle_lease"
+    );
+    assert!(active.exists());
 }
 
 fn sync_options(path: String) -> RunnerWorkspaceSyncOptions {

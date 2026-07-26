@@ -1200,8 +1200,16 @@ pub fn prune_workspaces(
             // The scan is only a snapshot. Recheck ownership at the destructive boundary.
             match revalidate_candidate_liveness(&runner, &candidate) {
                 Ok(liveness) if liveness.state == "inactive" => {
-                    match remove_workspace(&runner, &lab_workspaces_root, &candidate.remote_path) {
-                        Ok(()) => removed.push(candidate),
+                    match remove_prune_candidate(&runner, &lab_workspaces_root, &candidate) {
+                        Ok(None) => removed.push(candidate),
+                        Ok(Some(liveness)) => skipped.push(RunnerWorkspacePruneSkippedEntry {
+                            remote_path: candidate.remote_path,
+                            reason: format!(
+                                "workspace liveness changed to {}; {}",
+                                liveness.state,
+                                liveness.observations.join(", ")
+                            ),
+                        }),
                         Err(err) => skipped.push(RunnerWorkspacePruneSkippedEntry {
                             remote_path: candidate.remote_path,
                             reason: err.to_string(),
@@ -2200,16 +2208,44 @@ fn revalidate_candidate_liveness(
                 Error::internal_json(err.to_string(), Some(path.display().to_string()))
             })?
         }
-        RunnerKind::Ssh => serde_json::json!({
-            "job_id": candidate.job_id,
-            "run_id": candidate.run_id,
-        }),
+        // Remote metadata and process ownership are revalidated atomically with
+        // deletion below. Runner job state is controller-owned and checked here.
+        RunnerKind::Ssh => return runner_job_liveness(runner, candidate.job_id.as_deref()),
     };
     Ok(workspace_liveness(
         runner,
         &metadata,
         Path::new(&candidate.remote_path),
     ))
+}
+
+fn runner_job_liveness(
+    runner: &super::super::Runner,
+    job_id: Option<&str>,
+) -> Result<RunnerWorkspaceLivenessEvidence> {
+    let Some(job_id) = job_id else {
+        return Ok(liveness("inactive", Vec::new()));
+    };
+    match super::super::status(&runner.id) {
+        Ok(report) if report.active_job_state == super::super::RunnerActiveJobState::Available => {
+            if report.active_jobs.iter().any(|job| job.job_id == job_id) {
+                Ok(liveness(
+                    "live",
+                    vec![format!("active_runner_job:{job_id}")],
+                ))
+            } else {
+                Ok(liveness("inactive", Vec::new()))
+            }
+        }
+        Ok(_) => Ok(liveness(
+            "unknown",
+            vec!["runner_job_probe_unavailable".to_string()],
+        )),
+        Err(_) => Ok(liveness(
+            "unknown",
+            vec!["runner_job_probe_failed".to_string()],
+        )),
+    }
 }
 
 fn liveness(state: &str, observations: Vec<String>) -> RunnerWorkspaceLivenessEvidence {
@@ -2323,7 +2359,7 @@ fn ssh_process_liveness(
 
 pub(crate) fn ssh_process_liveness_command(path: &str) -> String {
     format!(
-        "p={}; command -v ps >/dev/null 2>&1 && command -v lsof >/dev/null 2>&1 || {{ printf unknown; exit 0; }}; if ps -eo pid=,ppid=,args= | awk -v p=\"$p\" -v self=\"$$\" -v parent=\"$PPID\" '$1 != self && $1 != parent && index($0, p) {{ found=1 }} END {{ exit !found }}' || lsof -Fn -a -d cwd +D \"$p\" 2>/dev/null | grep -q . || lsof -Fn +D \"$p\" 2>/dev/null | grep -q .; then printf live; else printf inactive; fi",
+        "p={}; command -v ps >/dev/null 2>&1 && command -v lsof >/dev/null 2>&1 || {{ printf unknown; exit 0; }}; if ps -eo pid=,ppid=,args= | awk -v p=\"$p\" -v self=\"$$\" -v parent=\"$PPID\" '$1 != self && $1 != parent && $2 != self && index($0, p) {{ found=1 }} END {{ exit !found }}' || lsof -Fn -a -d cwd +D \"$p\" 2>/dev/null | grep -q . || lsof -Fn +D \"$p\" 2>/dev/null | grep -q .; then printf live; else printf inactive; fi",
         shell::quote_arg(path)
     )
 }
@@ -2480,6 +2516,67 @@ pub(crate) fn prune_scan_command(root: &str, min_age: u64, scan_limit: usize) ->
         meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
         min_age = shell::quote_arg(&min_age.to_string()),
         scan_limit = scan_limit,
+    )
+}
+
+fn remove_prune_candidate(
+    runner: &super::super::Runner,
+    root: &str,
+    candidate: &RunnerWorkspacePruneEntry,
+) -> Result<Option<RunnerWorkspaceLivenessEvidence>> {
+    match runner.kind {
+        RunnerKind::Local => {
+            remove_workspace(runner, root, &candidate.remote_path)?;
+            Ok(None)
+        }
+        RunnerKind::Ssh => remove_ssh_prune_candidate(runner, root, &candidate.remote_path),
+    }
+}
+
+fn remove_ssh_prune_candidate(
+    runner: &super::super::Runner,
+    root: &str,
+    remote_path: &str,
+) -> Result<Option<RunnerWorkspaceLivenessEvidence>> {
+    let (_server, mut client) = ssh_client_for_runner(runner)?;
+    client.env.extend(runner.env.clone());
+    let output = client.execute_with_timeout(
+        &ssh_prune_delete_command(root, remote_path),
+        WORKSPACE_PRUNE_TIMEOUT,
+    );
+    if !output.success {
+        return Err(Error::internal_unexpected(format!(
+            "remove runner workspace failed: {}",
+            output.stderr.trim()
+        )));
+    }
+    match output.stdout.trim() {
+        "removed" => Ok(None),
+        "live:active_resource_lifecycle_lease" => Ok(Some(liveness(
+            "live",
+            vec!["active_resource_lifecycle_lease".to_string()],
+        ))),
+        "live:remote_process_ownership" => Ok(Some(liveness(
+            "live",
+            vec!["remote_process_ownership".to_string()],
+        ))),
+        state if state.starts_with("unknown:") => Ok(Some(liveness(
+            "unknown",
+            vec![state.trim_start_matches("unknown:").to_string()],
+        ))),
+        _ => Ok(Some(liveness(
+            "unknown",
+            vec!["remote_process_probe_failed".to_string()],
+        ))),
+    }
+}
+
+pub(crate) fn ssh_prune_delete_command(root: &str, remote_path: &str) -> String {
+    format!(
+        "root={root}; p={path}; meta_rel={meta}; case \"$p\" in \"$root\"/*) ;; *) printf unknown:workspace_path; exit 0 ;; esac; meta=\"$p/$meta_rel\"; [ -f \"$meta\" ] && grep -Eq '\"schema\"[[:space:]]*:[[:space:]]*\"homeboy/runner-workspace/v1\"' \"$meta\" || {{ printf unknown:metadata; exit 0; }}; if grep -Eq '\"status\"[[:space:]]*:[[:space:]]*\"active\"' \"$meta\"; then printf live:active_resource_lifecycle_lease; exit 0; fi; command -v ps >/dev/null 2>&1 && command -v lsof >/dev/null 2>&1 || {{ printf unknown:process_probe_unavailable; exit 0; }}; ps_output=$(ps -eo pid=,ppid=,args=) || {{ printf unknown:process_probe_failed; exit 0; }}; printf '%s\\n' \"$ps_output\" | awk -v p=\"$p\" -v self=\"$$\" -v parent=\"$PPID\" '$1 != self && $1 != parent && $2 != self && index($0, p) {{ found=1 }} END {{ exit !found }}'; state=$?; [ \"$state\" -eq 0 ] && {{ printf live:remote_process_ownership; exit 0; }}; [ \"$state\" -eq 1 ] || {{ printf unknown:process_probe_failed; exit 0; }}; cwd=$(lsof -Fn -a -d cwd +D \"$p\" 2>&1); state=$?; [ \"$state\" -eq 0 ] && [ -n \"$cwd\" ] && {{ printf live:remote_process_ownership; exit 0; }}; {{ [ \"$state\" -eq 1 ] && [ -z \"$cwd\" ]; }} || {{ printf unknown:process_probe_failed; exit 0; }}; open=$(lsof -Fn +D \"$p\" 2>&1); state=$?; [ \"$state\" -eq 0 ] && [ -n \"$open\" ] && {{ printf live:remote_process_ownership; exit 0; }}; {{ [ \"$state\" -eq 1 ] && [ -z \"$open\" ]; }} || {{ printf unknown:process_probe_failed; exit 0; }}; rm -rf -- \"$p\" && printf removed || printf unknown:delete_failed",
+        root = shell::quote_arg(root),
+        path = shell::quote_arg(remote_path),
+        meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
     )
 }
 
