@@ -186,6 +186,7 @@ impl CliRuntime {
         // Lab owns its durable staging/dispatch controller-job interpretation;
         // core only owns the generic daemon lifecycle.
         crate::runner::register_lab_staging_controller_driver();
+        crate::agents::agent_task_service::register_promotion_job_driver();
         crate::runner::enable_production_lab_staging();
         // Register the runner workspace-root provider so the daemon file API can
         // resolve a runner's configured workspace_root without core depending on
@@ -995,6 +996,13 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
                     ),
                     runner_admits_offload,
                 ) {
+                    // Durable promotion has a controller-owned continuation:
+                    // allow its command handler to submit the immutable payload
+                    // to the controller job instead of emitting a dead-end local
+                    // placement override.
+                    if is_durable_promotion(&cli.command) {
+                        return None;
+                    }
                     output_runtime::emit_json_result(Err(err), output_file, 2);
                     return Some(2);
                 }
@@ -1003,6 +1011,15 @@ fn preflight_hot_command(cli: &Cli, output_file: Option<&str>) -> Option<i32> {
     }
 
     None
+}
+
+fn is_durable_promotion(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+            command: crate::commands::agent_task::AgentTaskCommand::Promote(args),
+        }) if crate::agents::agent_task_lifecycle::status(&args.source).is_ok()
+    )
 }
 
 fn resource_policy_runner_hint<'a>(

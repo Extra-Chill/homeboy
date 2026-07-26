@@ -8,8 +8,8 @@ use homeboy::agents::agent_tasks::finalization::{
 };
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::agents::agent_tasks::promotion::{
-    canonical_recoverable_patch_artifacts, promote_with_checkpoint, resume_promoted_patch,
-    AgentTaskPromotionOptions, AgentTaskPromotionReport, AgentTaskPromotionStatus,
+    canonical_recoverable_patch_artifacts, AgentTaskPromotionOptions, AgentTaskPromotionReport,
+    AgentTaskPromotionStatus,
 };
 use homeboy::agents::agent_tasks::provider::{
     AgentTaskExecutorProvider, AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
@@ -287,7 +287,7 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
             artifact_id.as_deref(),
         )?;
     }
-    let promotion_options = AgentTaskPromotionOptions {
+    let promotion_request = agent_task_service::AgentTaskPromotionRequest {
         source: raw,
         source_run_id: source_run_id.clone(),
         source_path,
@@ -306,47 +306,25 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
             ..Default::default()
         }),
     };
-    let previous_promotion = source_run_id.as_ref().and_then(|run_id| {
-        agent_task_lifecycle::status(run_id)
-            .ok()
-            .and_then(|record| record.metadata.get("latest_promotion").cloned())
-    });
-    let report = if let Some(previous) = previous_promotion.filter(|previous| {
-        promotion_is_resumable(previous, promotion_options.gates.rerun_completed_gates)
-    }) {
-        let target_path = previous
-            .pointer("/target/path")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                homeboy::core::Error::validation_invalid_argument(
-                    "promotion",
-                    "gate-failed promotion has no materialized target path to resume",
-                    None,
-                    None,
-                )
-            })?;
-        resume_promoted_patch(
-            promotion_options,
-            std::path::Path::new(target_path),
-            &previous,
-        )?
-    } else {
-        let checkpoint_run_id = (!args.dry_run).then(|| source_run_id.clone()).flatten();
-        promote_with_checkpoint(promotion_options, |checkpoint| {
-            if let Some(run_id) = checkpoint_run_id.as_deref() {
-                agent_task_lifecycle::record_promotion(
-                    run_id,
-                    serde_json::to_value(checkpoint).map_err(|error| {
-                        homeboy::core::Error::internal_json(
-                            error.to_string(),
-                            Some("serialize pending agent-task promotion report".to_string()),
-                        )
-                    })?,
-                )?;
-            }
-            Ok(())
-        })?
-    };
+    if crate::commands::utils::resource_policy::captured_context()
+        .is_some_and(|context| context.warned && !context.local_override)
+        && source_run_id.is_some()
+        && !args.dry_run
+    {
+        let submission = agent_task_service::submit_promotion_job(promotion_request)?;
+        return Ok((
+            serde_json::json!({
+                "schema": "homeboy/agent-task-promotion-queue/v1",
+                "status": "queued",
+                "job_id": submission.job_id,
+                "status_command": submission.status_command,
+                "watch_command": submission.watch_command,
+                "cancel_command": submission.cancel_command,
+            }),
+            0,
+        ));
+    }
+    let report = agent_task_service::execute_promotion(promotion_request)?;
     let exit_code = if report.status == AgentTaskPromotionStatus::GateFailed {
         1
     } else {
@@ -355,17 +333,7 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
     let mut value = serde_json::to_value(&report).unwrap_or(Value::Null);
     value["handoff"] = promotion_handoff(&report, &to_worktree);
     if let Some(run_id) = source_run_id.filter(|_| !args.dry_run) {
-        // Finalization consumes the complete report as its durable gate proof.
-        // A status-only projection cannot prove the candidate or its gates.
-        let record = agent_task_lifecycle::record_promotion(
-            &run_id,
-            serde_json::to_value(&report).map_err(|error| {
-                homeboy::core::Error::internal_json(
-                    error.to_string(),
-                    Some("serialize agent-task promotion report".to_string()),
-                )
-            })?,
-        )?;
+        let record = agent_task_lifecycle::status(&run_id)?;
         value["recorded_on_run"] = serde_json::json!({
             "run_id": record.run_id,
             "metadata_key": "latest_promotion",
@@ -377,11 +345,7 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
 }
 
 pub(crate) fn promotion_is_resumable(previous: &Value, rerun_completed_gates: bool) -> bool {
-    matches!(
-        previous.get("status").and_then(Value::as_str),
-        Some("gate_failed" | "verification_pending")
-    ) || (rerun_completed_gates
-        && previous.get("status").and_then(Value::as_str) == Some("applied"))
+    agent_task_service::promotion_is_resumable(previous, rerun_completed_gates)
 }
 
 pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {
