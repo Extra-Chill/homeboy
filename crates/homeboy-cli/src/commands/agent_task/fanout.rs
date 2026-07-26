@@ -678,6 +678,8 @@ struct BatchCookSpec {
     rerun_completed_gates: bool,
     #[serde(default)]
     gate_environment: AgentTaskGateEnvironmentPolicy,
+    #[serde(default)]
+    gate_toolchains: Vec<homeboy::agents::agent_tasks::gate::AgentTaskGateToolchainRequirement>,
     #[serde(default = "default_max_attempts")]
     max_attempts: u32,
     #[serde(default)]
@@ -822,6 +824,7 @@ impl BatchCookSpec {
                     gate_heartbeat_interval_seconds: self.gate_heartbeat_interval_seconds,
                     rerun_completed_gates: self.rerun_completed_gates,
                     gate_environment: self.gate_environment.clone(),
+                    gate_toolchains: self.gate_toolchains.clone(),
                     gate_diagnostic_sidecars: Vec::new(),
                 },
                 max_attempts: self.max_attempts,
@@ -979,6 +982,7 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
             gate_heartbeat_interval_seconds: args.gates.gate_heartbeat_interval_seconds,
             rerun_completed_gates: args.gates.rerun_completed_gates,
             gate_environment: VerifyGateOptions::from(args.gates.clone()).gate_environment,
+            gate_toolchains: VerifyGateOptions::from(args.gates.clone()).gate_toolchains,
             max_attempts: default_max_attempts(),
             no_finalize: false,
             base: args.base.clone(),

@@ -1655,7 +1655,16 @@ fn run_promotion_gate(
         }
     };
     let supervision = GATE_SUPERVISION.with(|slot| slot.borrow().clone());
-    let result = if let Some(supervision) = supervision.as_deref() {
+    // Pre-dispatch validation protects provider budget. Recheck in this exact
+    // runtime because every gate receives its own isolated HOME/XDG directory.
+    let result = if let Err(error) = crate::agent_task_gate::preflight_gate_toolchains(
+        worktree_path,
+        &options.gates.gate_environment,
+        &options.gates.required_toolchains(),
+        Some(&runtime_tmpdir.context().tmp_dir),
+    ) {
+        Err(error)
+    } else if let Some(supervision) = supervision.as_deref() {
         crate::agent_task_gate::run_gate_command_with_supervision(
             worktree_path,
             index,

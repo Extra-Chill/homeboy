@@ -72,6 +72,10 @@ pub struct VerifyGateOptions {
     /// Declarative, non-secret process environment policy for every gate.
     #[serde(default)]
     pub gate_environment: AgentTaskGateEnvironmentPolicy,
+    /// Required tools initialized in the final isolated environment before a
+    /// provider can spend an execution budget.
+    #[serde(default)]
+    pub gate_toolchains: Vec<AgentTaskGateToolchainRequirement>,
     /// Explicit mappings for producer-owned diagnostic sidecars. Homeboy only
     /// consumes declared schemas and paths; producer semantics remain opaque.
     #[serde(default)]
@@ -106,10 +110,26 @@ pub struct AgentTaskGateEnvironmentPolicy {
     pub mode: AgentTaskGateEnvironmentMode,
     #[serde(default)]
     pub variables: BTreeMap<String, String>,
+    /// Explicit host environment sources retained for a required toolchain.
+    /// A source may include a relative suffix, for example `HOME/.toolchain`.
+    #[serde(default)]
+    pub preserve: BTreeMap<String, String>,
     #[serde(default)]
     pub isolate_home: bool,
     #[serde(default)]
     pub isolate_xdg: bool,
+}
+
+/// A required executable and its non-mutating initialization probe.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateToolchainRequirement {
+    pub command: String,
+    #[serde(default = "default_toolchain_probe_arguments")]
+    pub probe_arguments: Vec<String>,
+}
+
+fn default_toolchain_probe_arguments() -> Vec<String> {
+    vec!["--version".to_string()]
 }
 
 impl Default for AgentTaskGateEnvironmentPolicy {
@@ -117,6 +137,7 @@ impl Default for AgentTaskGateEnvironmentPolicy {
         Self {
             mode: AgentTaskGateEnvironmentMode::Inherit,
             variables: BTreeMap::new(),
+            preserve: BTreeMap::new(),
             isolate_home: true,
             isolate_xdg: true,
         }
@@ -142,6 +163,27 @@ impl VerifyGateOptions {
     pub fn gate_heartbeat_interval(&self) -> Duration {
         Duration::from_secs(self.gate_heartbeat_interval_seconds.max(1))
     }
+
+    /// Commands already declared as gates are toolchain requirements too. This
+    /// protects existing Cook invocations without duplicate CLI ceremony.
+    pub(crate) fn required_toolchains(&self) -> Vec<AgentTaskGateToolchainRequirement> {
+        let mut requirements = self.gate_toolchains.clone();
+        for gate in self.verify.iter().chain(&self.private_verify) {
+            let Some(command) = gate.split_whitespace().next() else {
+                continue;
+            };
+            if !requirements
+                .iter()
+                .any(|requirement| requirement.command == command)
+            {
+                requirements.push(AgentTaskGateToolchainRequirement {
+                    command: command.to_string(),
+                    probe_arguments: default_toolchain_probe_arguments(),
+                });
+            }
+        }
+        requirements
+    }
 }
 
 impl Default for VerifyGateOptions {
@@ -155,6 +197,7 @@ impl Default for VerifyGateOptions {
             gate_heartbeat_interval_seconds: default_gate_heartbeat_interval_seconds(),
             rerun_completed_gates: false,
             gate_environment: AgentTaskGateEnvironmentPolicy::default(),
+            gate_toolchains: Vec::new(),
             gate_diagnostic_sidecars: Vec::new(),
         }
     }
@@ -218,6 +261,9 @@ pub struct AgentTaskGateEnvironment {
     pub mode: AgentTaskGateEnvironmentMode,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inherited: Vec<AgentTaskGateEnvironmentVariable>,
+    /// Explicit source mappings retained from the host for required tools.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub preserved: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sanitized: Vec<AgentTaskGateEnvironmentVariable>,
 }
@@ -232,6 +278,7 @@ impl AgentTaskGateEnvironment {
     fn is_empty(&self) -> bool {
         self.mode == AgentTaskGateEnvironmentMode::Inherit
             && self.inherited.is_empty()
+            && self.preserved.is_empty()
             && self.sanitized.is_empty()
     }
 
@@ -244,6 +291,7 @@ impl AgentTaskGateEnvironment {
         AgentTaskGateEnvironmentPolicy {
             mode: self.mode,
             variables,
+            preserve: self.preserved.clone(),
             isolate_home: self
                 .sanitized
                 .iter()
@@ -957,6 +1005,11 @@ fn selected_gate_environment(
             value: value.clone(),
         });
     }
+    for (name, source) in &policy.preserve {
+        let value = preserved_environment_value(source)?;
+        values.insert(name.clone(), value);
+        report.preserved.insert(name.clone(), source.clone());
+    }
 
     let needs_scratch = policy.isolate_home || policy.isolate_xdg;
     let scratch = if needs_scratch && runtime_tmpdir.is_none() {
@@ -999,6 +1052,71 @@ fn selected_gate_environment(
         values,
         _scratch: scratch,
     })
+}
+
+fn preserved_environment_value(source: &str) -> Result<String> {
+    let (source_name, suffix) = source.split_once('/').unwrap_or((source, ""));
+    let value = std::env::var(source_name).map_err(|_| {
+        Error::validation_invalid_argument(
+            "gate_environment.preserve",
+            format!("declared gate environment source {source_name} is unavailable"),
+            Some(source.to_string()),
+            Some(vec![format!(
+                "Set {source_name} before Cook or replace this mapping with an available toolchain home."
+            )]),
+        )
+    })?;
+    Ok(if suffix.is_empty() {
+        value
+    } else {
+        PathBuf::from(value).join(suffix).display().to_string()
+    })
+}
+
+/// Validate declared tools in the exact environment candidate gates will use.
+/// This is deliberately generic: callers declare executables and environment
+/// mappings while extensions own language-specific discovery.
+pub(crate) fn preflight_gate_toolchains(
+    cwd: &Path,
+    policy: &AgentTaskGateEnvironmentPolicy,
+    requirements: &[AgentTaskGateToolchainRequirement],
+    runtime_tmpdir: Option<&Path>,
+) -> Result<()> {
+    let selected_environment = selected_gate_environment(policy, runtime_tmpdir)?;
+    for requirement in requirements {
+        let mut process = Command::new(&requirement.command);
+        process
+            .args(&requirement.probe_arguments)
+            .current_dir(cwd)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        selected_environment.apply(&mut process);
+        let output = process.output().map_err(|error| {
+            Error::validation_invalid_argument(
+                "gate_toolchains",
+                format!(
+                    "gate toolchain preflight could not resolve or initialize `{}`: {error}",
+                    requirement.command
+                ),
+                Some(requirement.command.clone()),
+                Some(vec!["Declare the required toolchain environment with --gate-env-from NAME=SOURCE[/suffix], then retry Cook.".to_string()]),
+            )
+        })?;
+        if !output.status.success() {
+            return Err(Error::validation_invalid_argument(
+                "gate_toolchains",
+                format!(
+                    "gate toolchain preflight could not initialize `{}` (exit {}): {}",
+                    requirement.command,
+                    output.status.code().unwrap_or(1),
+                    text_tail(&String::from_utf8_lossy(&output.stderr), 5),
+                ),
+                Some(requirement.command.clone()),
+                Some(vec!["Declare the required toolchain environment with --gate-env-from NAME=SOURCE[/suffix], then retry Cook.".to_string()]),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn set_isolated_environment_variable(
@@ -1644,6 +1762,7 @@ mod tests {
         let policy = AgentTaskGateEnvironmentPolicy {
             mode: AgentTaskGateEnvironmentMode::Replace,
             variables: BTreeMap::from([("DECLARED_INPUT".to_string(), "kept".to_string())]),
+            preserve: BTreeMap::new(),
             isolate_home: false,
             isolate_xdg: false,
         };
@@ -1666,5 +1785,123 @@ mod tests {
         assert_eq!(report.environment.inherited.len(), 1);
         assert_eq!(report.environment.inherited[0].name, "DECLARED_INPUT");
         assert_eq!(report.environment.inherited[0].value, "kept");
+    }
+
+    #[test]
+    fn existing_gate_commands_are_automatic_toolchain_requirements() {
+        let options = VerifyGateOptions {
+            verify: vec!["cargo test --lib".to_string()],
+            private_verify: vec!["npm test".to_string()],
+            gate_toolchains: vec![AgentTaskGateToolchainRequirement {
+                command: "cargo".to_string(),
+                probe_arguments: vec!["metadata".to_string()],
+            }],
+            ..VerifyGateOptions::default()
+        };
+
+        assert_eq!(
+            options.required_toolchains(),
+            vec![
+                AgentTaskGateToolchainRequirement {
+                    command: "cargo".to_string(),
+                    probe_arguments: vec!["metadata".to_string()],
+                },
+                AgentTaskGateToolchainRequirement {
+                    command: "npm".to_string(),
+                    probe_arguments: vec!["--version".to_string()],
+                },
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn toolchain_preflight_preserves_only_declared_homes_for_cargo_on_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = ENV_MUTEX.lock().expect("env lock");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let original_home = tempfile::tempdir().expect("original home");
+        let cargo_bin = original_home.path().join(".cargo/bin");
+        fs::create_dir_all(&cargo_bin).expect("cargo bin");
+        let cargo = cargo_bin.join("cargo");
+        fs::write(
+            &cargo,
+            format!(
+                "#!/bin/sh\ntest \"$RUSTUP_HOME\" = \"{}/.rustup\" && test \"$CARGO_HOME\" = \"{}/.cargo\"\n",
+                original_home.path().display(),
+                original_home.path().display(),
+            ),
+        )
+        .expect("cargo probe");
+        let mut permissions = fs::metadata(&cargo).expect("cargo metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&cargo, permissions).expect("cargo executable");
+        let prior_home = std::env::var_os("HOME");
+        let prior_path = std::env::var_os("PATH");
+        std::env::set_var("HOME", original_home.path());
+        std::env::set_var("PATH", &cargo_bin);
+
+        let policy = AgentTaskGateEnvironmentPolicy {
+            preserve: BTreeMap::from([
+                ("RUSTUP_HOME".to_string(), "HOME/.rustup".to_string()),
+                ("CARGO_HOME".to_string(), "HOME/.cargo".to_string()),
+            ]),
+            ..AgentTaskGateEnvironmentPolicy::default()
+        };
+        let result = preflight_gate_toolchains(
+            workspace.path(),
+            &policy,
+            &[AgentTaskGateToolchainRequirement {
+                command: "cargo".to_string(),
+                probe_arguments: vec!["--version".to_string()],
+            }],
+            None,
+        );
+
+        match prior_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match prior_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        result.expect("declared cargo homes initialize the toolchain");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn toolchain_preflight_reports_generic_initialization_failures_without_code_feedback() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = ENV_MUTEX.lock().expect("env lock");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let bin = tempfile::tempdir().expect("bin");
+        let tool = bin.path().join("other-tool");
+        fs::write(&tool, "#!/bin/sh\necho unavailable >&2\nexit 7\n").expect("tool");
+        let mut permissions = fs::metadata(&tool).expect("tool metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&tool, permissions).expect("tool executable");
+        let prior_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", bin.path());
+
+        let error = preflight_gate_toolchains(
+            workspace.path(),
+            &AgentTaskGateEnvironmentPolicy::default(),
+            &[AgentTaskGateToolchainRequirement {
+                command: "other-tool".to_string(),
+                probe_arguments: vec!["initialize".to_string()],
+            }],
+            None,
+        )
+        .expect_err("unusable declared toolchain fails preflight");
+
+        match prior_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+        assert!(error.message.contains("gate toolchain preflight"));
+        assert!(!error.message.contains("Fix the code"));
     }
 }
