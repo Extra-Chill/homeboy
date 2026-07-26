@@ -2022,6 +2022,116 @@ fn replaying_cancel_repairs_stale_provider_execution() {
 }
 
 #[test]
+fn local_provider_reservation_persists_reusable_owner_identity_before_execution() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("owner-identity")).expect("submitted");
+        reserve_provider_execution("owner-identity", &plan.tasks[0], 1).expect("reserved");
+
+        let record = store::read_record("owner-identity").expect("record");
+        let execution = &record.metadata["provider_executions"][0];
+        assert_eq!(execution["owner_pid"], json!(std::process::id()));
+        assert_eq!(
+            execution["owner_identity"],
+            json!("owner-identity:task-a:1")
+        );
+        assert_eq!(execution["state"], json!("running"));
+    });
+}
+
+#[test]
+fn status_keeps_live_local_provider_owner_running_idempotently() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("owner-live")).expect("submitted");
+        mark_running("owner-live").expect("running");
+        reserve_provider_execution("owner-live", &plan.tasks[0], 1).expect("reserved");
+
+        let first = status("owner-live").expect("first status");
+        let second = status("owner-live").expect("second status");
+        assert_eq!(first.state, AgentTaskRunState::Running);
+        assert_eq!(second.state, AgentTaskRunState::Running);
+        assert_eq!(
+            second.metadata["provider_executions"][0]["owner_state"],
+            json!("live")
+        );
+    });
+}
+
+#[test]
+fn dead_local_provider_owner_terminalizes_running_reservation_once() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("owner-dead")).expect("submitted");
+        mark_running("owner-dead").expect("running");
+        reserve_provider_execution("owner-dead", &plan.tasks[0], 1).expect("reserved");
+        rewrite_record_for_test("owner-dead", |record| {
+            record.metadata["provider_executions"][0]["owner_pid"] = json!(u32::MAX);
+        })
+        .expect("dead owner fixture");
+
+        let terminal = status("owner-dead").expect("reconciled status");
+        let replay = status("owner-dead").expect("idempotent status");
+        assert_eq!(terminal.state, AgentTaskRunState::Cancelled);
+        assert_eq!(replay.state, AgentTaskRunState::Cancelled);
+        assert_eq!(
+            replay.metadata["provider_executions"][0]["state"],
+            json!("cancelled")
+        );
+        assert_eq!(
+            replay.metadata["local_provider_ownership"]["state"],
+            json!("owner_dead")
+        );
+    });
+}
+
+#[test]
+fn dead_owner_preserves_late_provider_success_as_recoverable_candidate() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("owner-late-success")).expect("submitted");
+        mark_running("owner-late-success").expect("running");
+        reserve_provider_execution("owner-late-success", &plan.tasks[0], 1).expect("reserved");
+        record_provider_execution_terminal("owner-late-success", "task-a", 1, "succeeded")
+            .expect("provider success recorded");
+        rewrite_record_for_test("owner-late-success", |record| {
+            record.metadata["provider_executions"][0]["owner_pid"] = json!(u32::MAX);
+        })
+        .expect("dead owner fixture");
+
+        let recovered = status("owner-late-success").expect("recovered status");
+        assert_eq!(recovered.state, AgentTaskRunState::CandidateRecoverable);
+        assert_eq!(
+            recovered.metadata["provider_executions"][0]["state"],
+            json!("succeeded")
+        );
+    });
+}
+
+#[test]
+fn cancellation_race_defers_to_a_durable_provider_success() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("cancel-race")).expect("submitted");
+        mark_running("cancel-race").expect("running");
+        reserve_provider_execution("cancel-race", &plan.tasks[0], 1).expect("reserved");
+        record_provider_execution_terminal("cancel-race", "task-a", 1, "succeeded")
+            .expect("provider success recorded");
+
+        let deferred = cancel_run("cancel-race", Some("operator cancel"))
+            .expect("cancellation defers to terminal provider");
+        let replay = cancel_run("cancel-race", Some("operator cancel"))
+            .expect("idempotent cancellation deferral");
+        assert_eq!(deferred.state, AgentTaskRunState::Running);
+        assert_eq!(replay.state, AgentTaskRunState::Running);
+        assert_eq!(
+            replay.metadata["provider_executions"][0]["state"],
+            json!("succeeded")
+        );
+    });
+}
+
+#[test]
 fn record_health_reconciles_plan_backed_missing_metadata_idempotently() {
     with_isolated_home(|_| {
         let plan = test_plan();

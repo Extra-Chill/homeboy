@@ -103,6 +103,29 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
         ));
     }
 
+    // A provider can return in the narrow window before its scheduler persists
+    // the aggregate. Its terminal reservation is durable proof that cancelling
+    // now would overwrite completed work; leave the run joinable so the late
+    // aggregate import is authoritative.
+    if record.state == AgentTaskRunState::Running
+        && !record.is_runner_backed()
+        && record.metadata["provider_executions"]
+            .as_array()
+            .is_some_and(|executions| {
+                executions
+                    .iter()
+                    .any(|execution| execution["state"] == json!("succeeded"))
+            })
+    {
+        let now = now_timestamp();
+        record.ensure_metadata_object().insert(
+            "cancellation_deferred_for_terminal_provider".to_string(),
+            json!({ "requested_at": now, "reason": reason.unwrap_or("cancel requested") }),
+        );
+        store::write_record(&record)?;
+        return Ok(record);
+    }
+
     // Staging is controller-local work, not a runner child. Its terminal
     // confirmation is required before this parent can become Cancelled.
     let controller_cancelled = if let Some(controller_job_id) = record
