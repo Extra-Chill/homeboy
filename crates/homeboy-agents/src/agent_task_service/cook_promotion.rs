@@ -364,7 +364,8 @@ pub struct MovingBaseCookRecovery {
 }
 
 pub(crate) fn moving_base_recovery_for_run(run_id: &str) -> Result<Option<MovingBaseCookRecovery>> {
-    agent_task_lifecycle::status(run_id)?
+    let record = agent_task_lifecycle::exact_record(run_id)?;
+    record
         .metadata
         .get("cook_moving_base_recovery")
         .cloned()
@@ -377,6 +378,40 @@ pub(crate) fn moving_base_recovery_for_run(run_id: &str) -> Result<Option<Moving
                 Some(run_id.to_string()),
                 None,
             )
+        })
+        .and_then(|recovery: Option<MovingBaseCookRecovery>| {
+            let Some(mut recovery) = recovery else {
+                return Ok(None);
+            };
+            if recovery.run_id != run_id
+                || record.metadata.get("cook_id").and_then(Value::as_str)
+                    != Some(recovery.cook_id.as_str())
+            {
+                return Err(Error::validation_invalid_argument(
+                    "cook_moving_base_recovery",
+                    "durable moving-base recovery does not match its immutable Cook attempt",
+                    Some(run_id.to_string()),
+                    None,
+                ));
+            }
+            let recipe = super::load_recipe(&recovery.cook_id)?;
+            if !recipe
+                .attempts
+                .iter()
+                .any(|attempt| attempt.run_id == run_id)
+            {
+                return Err(Error::validation_invalid_argument(
+                    "cook_moving_base_recovery",
+                    "durable moving-base recovery run is not declared by its Cook recipe",
+                    Some(run_id.to_string()),
+                    None,
+                ));
+            }
+            // Recoveries written before scoped continuation used `run-next`.
+            // The run ID remains authoritative, so expose the safe command
+            // without requiring an unsafe migration of historical records.
+            recovery.continuation = format!("homeboy agent-task cook-continue {run_id}");
+            Ok(Some(recovery))
         })
 }
 
@@ -411,7 +446,9 @@ pub(crate) fn moving_base_recovery_from_promotion(
         passed_gates: serde_json::to_value(&promotion.gate_results).unwrap_or(Value::Null),
         promotion,
         blocker: String::new(),
-        continuation: "homeboy agent-task run-next".to_string(),
+        // This recovery belongs to one immutable Cook attempt. `run-next` is a
+        // global scheduler operation and must never be offered as its recovery.
+        continuation: format!("homeboy agent-task cook-continue {run_id}"),
         base_movements: 0,
     }
 }
@@ -1762,7 +1799,7 @@ fn cook_failure_context(
                 },
                 super::AgentTaskCookRecoveryAction {
                     action: "resume".to_string(),
-                    command: format!("homeboy agent-task cook-continue {cook_id}"),
+                    command: format!("homeboy agent-task cook-continue {latest_run_id}"),
                 },
             ]
         })

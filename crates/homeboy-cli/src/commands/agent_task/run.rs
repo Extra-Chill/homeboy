@@ -68,9 +68,32 @@ pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
         agent_task_lifecycle::cook_index(&recipe.cook_id)
             .ok()
             .map(|index| index.latest_run_id)
-            .unwrap_or_else(|| recipe.attempts[0].run_id.clone())
+            .filter(|run_id| {
+                recipe
+                    .attempts
+                    .iter()
+                    .any(|attempt| attempt.run_id == *run_id)
+            })
+            .unwrap_or_else(|| {
+                recipe
+                    .attempts
+                    .last()
+                    .expect("validated recipe has an attempt")
+                    .run_id
+                    .clone()
+            })
     };
     let record = agent_task_lifecycle::status(&run_id)?;
+    if record.run_id != run_id
+        || record.metadata.get("cook_id").and_then(Value::as_str) != Some(recipe.cook_id.as_str())
+    {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "cook_or_attempt_id",
+            "durable lifecycle record does not match its immutable Cook recipe",
+            Some(run_id),
+            None,
+        ));
+    }
     if !matches!(
         record.state,
         agent_task_lifecycle::AgentTaskRunState::Succeeded
@@ -168,7 +191,7 @@ fn cook_continuation_pending(cook_id: &str, run_id: &str, provider_state: &str) 
         "status": "continuation_pending",
         "provider": { "state": provider_state, "run_id": run_id },
         "remaining_phases": ["harvest", "review", "gates", "promotion", "finalization"],
-        "continuation_command": format!("homeboy agent-task cook-continue {cook_id}"),
+        "continuation_command": format!("homeboy agent-task cook-continue {run_id}"),
     })
 }
 
@@ -180,7 +203,7 @@ fn cook_continuation_status(cook_id: &str, run_id: &str, provider_state: &str) -
         "status": "in_flight",
         "provider": { "state": provider_state, "run_id": run_id },
         "remaining_phases": ["harvest", "review", "gates", "promotion", "finalization"],
-        "continuation_command": format!("homeboy agent-task cook-continue {cook_id}"),
+        "continuation_command": format!("homeboy agent-task cook-continue {run_id}"),
     })
 }
 
@@ -188,11 +211,6 @@ fn cook_report_with_continuation(mut value: Value) -> Value {
     if value.get("status").and_then(Value::as_str) != Some("in_flight") {
         return value;
     }
-    let cook_id = value
-        .get("cook_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
     let run_id = value
         .get("latest_run_id")
         .and_then(Value::as_str)
@@ -216,7 +234,7 @@ fn cook_report_with_continuation(mut value: Value) -> Value {
         );
         report.insert(
             "continuation_command".to_string(),
-            serde_json::json!(format!("homeboy agent-task cook-continue {cook_id}")),
+            serde_json::json!(format!("homeboy agent-task cook-continue {run_id}")),
         );
     }
     value
@@ -903,7 +921,7 @@ mod tests {
         );
         assert_eq!(
             report["continuation_command"],
-            "homeboy agent-task cook-continue cook-1"
+            "homeboy agent-task cook-continue cook-1-attempt-1"
         );
     }
 }

@@ -492,7 +492,7 @@ fn moving_base_recovery_report_retains_typed_evidence_and_exact_continuation() {
         prior_verified_base: "a".repeat(40),
         passed_gates: serde_json::json!([{"status": "passed"}]),
         blocker: "HEAD is behind or diverged from resolved base".to_string(),
-        continuation: "homeboy agent-task run-next".to_string(),
+        continuation: "homeboy agent-task cook-continue run-9267".to_string(),
         base_movements: 0,
     };
     let report =
@@ -504,7 +504,10 @@ fn moving_base_recovery_report_retains_typed_evidence_and_exact_continuation() {
         .moving_base_recovery
         .expect("typed recovery state");
     assert_eq!(recovery.run_id, "run-9267");
-    assert_eq!(recovery.continuation, "homeboy agent-task run-next");
+    assert_eq!(
+        recovery.continuation,
+        "homeboy agent-task cook-continue run-9267"
+    );
     assert_eq!(recovery.prior_verified_base, "a".repeat(40));
     assert!(report
         .value
@@ -517,14 +520,20 @@ fn moving_base_recovery_report_retains_typed_evidence_and_exact_continuation() {
 fn moving_base_recovery_persists_across_restart_without_provider_replay() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "moving-base-restart";
-        let plan = AgentTaskPlan::new("moving-base-restart", Vec::new());
-        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+        let mut options =
+            batch_cook_options("cook-restart", Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = run_id.to_string();
+        persist_initial_recipe(&options).unwrap();
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(run_id)).unwrap();
+        agent_task_lifecycle::record_cook_attempt("cook-restart", 1, run_id).unwrap();
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
             record.metadata["provider_executions_consumed"] = serde_json::json!(1);
         })
         .unwrap();
-        let recovery =
+        let mut recovery =
             moving_base_recovery_from_promotion("cook-restart", run_id, promotion(run_id));
+        // Historical recovery records emitted the global scheduler command.
+        recovery.continuation = "homeboy agent-task run-next".to_string();
 
         agent_task_lifecycle::record_cook_moving_base_recovery(
             run_id,
@@ -538,6 +547,10 @@ fn moving_base_recovery_persists_across_restart_without_provider_replay() {
         let record = agent_task_lifecycle::status(run_id).unwrap();
         assert_eq!(restarted.cook_id, "cook-restart");
         assert_eq!(restarted.run_id, run_id);
+        assert_eq!(
+            restarted.continuation,
+            format!("homeboy agent-task cook-continue {run_id}")
+        );
         assert_eq!(record.metadata["provider_executions_consumed"], 1);
     });
 }
@@ -5761,7 +5774,7 @@ fn post_materialization_failure_families_expose_only_durable_identity_and_legal_
                 serde_json::json!([
                     { "action": "status", "command": format!("homeboy agent-task status {} --full", options.initial_run_id) },
                     { "action": "diagnose", "command": format!("homeboy agent-task diagnose {}", options.initial_run_id) },
-                    { "action": "resume", "command": format!("homeboy agent-task cook-continue {cook_id}") },
+                    { "action": "resume", "command": format!("homeboy agent-task cook-continue {}", options.initial_run_id) },
                 ]),
                 "{status}"
             );
