@@ -105,6 +105,7 @@ impl CliRuntime {
 
     pub fn run_from_args(&self, args: Vec<String>) -> std::process::ExitCode {
         let normalized = args::normalize(args);
+        let command_capability = classify_command_capability(&normalized);
         if let Some(message) = args::runner_exec_option_boundary_error(&normalized) {
             eprintln!("error: {message}");
             return std::process::ExitCode::from(2);
@@ -176,9 +177,14 @@ impl CliRuntime {
         // can reconcile and resume runs dispatched to a remote runner without
         // core depending on runner behavior.
         crate::runner::register_runner_continuation_provider();
-        // Recover completed generic runner-exec jobs before this invocation can
-        // open a daemon store whose retention policy might evict their evidence.
-        let _ = crate::runner::reconcile_terminal_runner_exec_runs();
+        // Recover completed generic runner-exec jobs before a mutating invocation
+        // can evict their evidence. Read-only commands and a competing promotion
+        // must not perform this optional durable-state mutation.
+        if command_capability == CommandCapability::Mutation
+            && !crate::core::runtime_promotion::lease_is_present()
+        {
+            let _ = crate::runner::reconcile_terminal_runner_exec_runs();
+        }
         // Register the runner daemon-exec driver so the daemon's /exec endpoint
         // can prepare and run a runner job as a local child without core
         // depending on runner process-execution behavior.

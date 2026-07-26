@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
@@ -9,6 +10,8 @@ use std::time::{Duration, Instant};
 fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let repository = create_repository(home.path());
+        let promotion_namespace = home.path().join("nested-promotion-gate-data");
+        let _promotion_namespace = PromotionNamespaceGuard::new(&promotion_namespace);
         let git_before = git_metadata_snapshot(&repository);
         let _promotion = homeboy::core::runtime_promotion::acquire("test promotion", "test")
             .expect("hold runtime promotion lease");
@@ -27,7 +30,8 @@ fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
                 repository.to_str().expect("repository path"),
             ],
         ] {
-            let output = run_with_timeout(&args, home, Duration::from_secs(10));
+            let output =
+                run_with_timeout(&args, home, &promotion_namespace, Duration::from_secs(10));
             assert!(
                 output.status.success(),
                 "{} failed: {}",
@@ -61,6 +65,7 @@ fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
                 "--refresh",
             ],
             home,
+            &promotion_namespace,
             Duration::from_secs(10),
         );
         assert!(
@@ -85,6 +90,7 @@ fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
         let output = run_with_timeout(
             &["upgrade", "--method", "binary"],
             home,
+            &promotion_namespace,
             Duration::from_secs(10),
         );
         assert!(
@@ -99,10 +105,42 @@ fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
     });
 }
 
-fn run_with_timeout(args: &[&str], home: &std::path::Path, timeout: Duration) -> Output {
+#[test]
+fn production_promotion_lease_remains_visible_in_its_namespace() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let promotion_namespace = home.path().join("production-promotion-data");
+        let _promotion_namespace = PromotionNamespaceGuard::new(&promotion_namespace);
+        let _promotion = homeboy::core::runtime_promotion::acquire("production", "controller")
+            .expect("hold production promotion lease");
+
+        let output = run_with_timeout(
+            &["status", "--refresh"],
+            home.path(),
+            &promotion_namespace,
+            Duration::from_secs(10),
+        );
+        assert!(
+            !output.status.success(),
+            "production lease must block refresh"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("runtime_promotion.contended"),
+            "production lease contention must remain typed: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    });
+}
+
+fn run_with_timeout(
+    args: &[&str],
+    home: &std::path::Path,
+    promotion_namespace: &std::path::Path,
+    timeout: Duration,
+) -> Output {
     let child = Command::new(homeboy_bin())
         .args(args)
         .env("HOME", home)
+        .env("HOMEBOY_DATA_DIR", promotion_namespace)
         .env("HOMEBOY_NO_UPDATE_CHECK", "1")
         .current_dir(home)
         .stdout(Stdio::piped())
@@ -110,6 +148,27 @@ fn run_with_timeout(args: &[&str], home: &std::path::Path, timeout: Duration) ->
         .spawn()
         .expect("start Homeboy child");
     wait_for_output(child, timeout)
+}
+
+struct PromotionNamespaceGuard {
+    previous: Option<OsString>,
+}
+
+impl PromotionNamespaceGuard {
+    fn new(path: &std::path::Path) -> Self {
+        let previous = std::env::var_os("HOMEBOY_DATA_DIR");
+        std::env::set_var("HOMEBOY_DATA_DIR", path);
+        Self { previous }
+    }
+}
+
+impl Drop for PromotionNamespaceGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(path) => std::env::set_var("HOMEBOY_DATA_DIR", path),
+            None => std::env::remove_var("HOMEBOY_DATA_DIR"),
+        }
+    }
 }
 
 fn wait_for_output(mut child: Child, timeout: Duration) -> Output {

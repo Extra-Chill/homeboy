@@ -710,6 +710,16 @@ pub fn is_contention_error(error: &Error) -> bool {
     error.code == ErrorCode::RuntimePromotionContended
 }
 
+/// Report whether a writer lease is published without creating promotion state.
+/// Inspection failures are treated as a present lease so optional mutations fail
+/// closed; lease ownership continues to be enforced by [`acquire`].
+pub fn lease_is_present() -> bool {
+    let Ok(root) = paths::runtime_promotion_dir() else {
+        return true;
+    };
+    root.join(LEASE_DIR).try_exists().unwrap_or(true)
+}
+
 fn reclaimable(record: &RuntimePromotionLeaseRecord) -> bool {
     reclaimable_with(record, crate::process::process_identity_state)
 }
@@ -798,6 +808,18 @@ fn io(context: &'static str) -> impl FnOnce(std::io::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lease_presence_tracks_a_published_writer_without_creating_one() {
+        crate::test_support::with_isolated_home(|_| {
+            assert!(!lease_is_present());
+            let lease = acquire("test presence", "test").expect("acquire lease");
+            assert!(lease_is_present());
+            drop(lease);
+            assert!(!lease_is_present());
+        });
+    }
+
     #[test]
     fn stale_owner_is_bounded_by_liveness_or_expiry() {
         let dead = RuntimePromotionLeaseRecord {
