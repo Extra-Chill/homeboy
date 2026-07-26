@@ -32,6 +32,7 @@
 - [runtime](runtime.md) — narrow lookup for bundled core runtime helpers
 - [runs](runs.md) — persisted observation runs, artifacts, postprocessing, and findings
 - [server](server.md)
+- [schedule](schedule.md) — declare homeboy commands that run on a cadence
 - [self](self.md) — active binary, install-signal, runtime drift, host resource inspection, and embedded docs
 - [ssh](ssh.md)
 - [stack](stack.md) — combined-fixes branches from base refs plus cherry-picked PRs

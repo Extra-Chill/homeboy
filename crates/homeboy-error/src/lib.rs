@@ -35,6 +35,7 @@ pub enum ErrorCode {
     RunnerPolicyDenied,
     RunnerCapabilityMissing,
     BrokerAuthDenied,
+    ScheduleNotFound,
     ServiceTunnelNotFound,
     RigPipelineFailed,
     RigServiceFailed,
@@ -95,6 +96,7 @@ impl ErrorCode {
             ErrorCode::RunnerPolicyDenied => "runner.policy_denied",
             ErrorCode::RunnerCapabilityMissing => "runner.capability_missing",
             ErrorCode::BrokerAuthDenied => "broker.auth_denied",
+            ErrorCode::ScheduleNotFound => "schedule.not_found",
             ErrorCode::ServiceTunnelNotFound => "service_tunnel.not_found",
             ErrorCode::RigPipelineFailed => "rig.pipeline_failed",
             ErrorCode::RigServiceFailed => "rig.service_failed",
@@ -804,6 +806,10 @@ impl Error {
             error = error.with_hint(hint);
         }
         error
+    }
+
+    pub fn schedule_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {
+        Self::entity_not_found(ErrorCode::ScheduleNotFound, "Schedule", id, suggestions)
     }
 
     pub fn service_tunnel_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {
