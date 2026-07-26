@@ -2103,6 +2103,29 @@ fn legacy_provider_reservation_without_owner_proof_remains_joinable() {
     });
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn pid_starttime_mismatch_reclaims_a_reused_provider_pid_without_signalling_it() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        submit_plan(&plan, Some("owner-pid-reused")).expect("submitted");
+        mark_running("owner-pid-reused").expect("running");
+        reserve_provider_execution("owner-pid-reused", &plan.tasks[0], 1).expect("reserved");
+        rewrite_record_for_test("owner-pid-reused", |record| {
+            record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] = json!(0);
+        })
+        .expect("reused PID fixture");
+
+        let record = status("owner-pid-reused").expect("reconcile PID reuse");
+        assert_eq!(record.state, AgentTaskRunState::Cancelled);
+        assert_eq!(
+            record.metadata["provider_executions"][0]["owner_state"],
+            json!("identity_mismatch")
+        );
+        assert!(homeboy_core::process::pid_is_running(std::process::id()));
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn dead_local_provider_owner_terminalizes_running_reservation_once() {
