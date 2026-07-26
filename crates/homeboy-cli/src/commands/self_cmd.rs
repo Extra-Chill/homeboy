@@ -2,6 +2,7 @@ use clap::{Args, Subcommand};
 use homeboy::cli_surface::current_command_surface_doctor_report;
 use homeboy::core::build_identity;
 use homeboy::core::engine;
+use homeboy::core::{api_jobs::JobStore, paths};
 use homeboy::runner::runners::{self as runner, Runner, RunnerKind, RunnerStatusReport};
 use homeboy_upgrade::self_status::{self, ControllerRuntimeInput, RunnerRuntimeInput};
 use serde_json::Value;
@@ -116,6 +117,13 @@ pub fn run(args: SelfArgs, _global: &GlobalArgs) -> CmdResult<Value> {
                     serde_json::to_value(host_resources)
                         .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?,
                 );
+                let daemon_memory_owners = paths::daemon_jobs_file()
+                    .and_then(JobStore::retained_owner_report_at_path)
+                    .unwrap_or_else(|error| serde_json::json!({
+                        "error": error.to_string(),
+                        "guidance": "Inspect the daemon job store before restarting the controller."
+                    }));
+                object.insert("daemon_memory_owners".to_string(), daemon_memory_owners);
             }
             Ok((json, exit_code))
         }

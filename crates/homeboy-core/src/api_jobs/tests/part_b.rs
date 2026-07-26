@@ -1356,15 +1356,17 @@ fn compacted_submission_key_expires_without_creating_a_duplicate() {
         requests.push((key.to_string(), request));
     }
     store.persist().expect("compact terminal jobs");
-    let expired_key = store
-        .inner
-        .lock()
-        .expect("store")
-        .expired_submission_keys
-        .keys()
-        .next()
-        .cloned()
-        .expect("compacted submission tombstone");
+    let expired_key = "agent-task:v1:compact-one".to_string();
+    assert!(super::super::persistence::tombstone_path(&path).exists());
+    assert!(
+        store
+            .inner
+            .lock()
+            .expect("store")
+            .expired_submission_keys
+            .is_empty(),
+        "expired identities are not daemon-resident"
+    );
     let request = requests
         .into_iter()
         .find_map(|(key, request)| (key == expired_key).then_some(request))
@@ -1377,6 +1379,102 @@ fn compacted_submission_key_expires_without_creating_a_duplicate() {
         json!("homeboy/remote-runner-submission-expired/v1")
     );
     assert_eq!(store.list().len(), 1);
+}
+
+#[test]
+fn replay_tombstones_keep_terminal_payload_memory_bounded_across_restart() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open_with_retention(&path, 3, 1).expect("durable store");
+    let mut first = None;
+    for index in 0..128 {
+        let key = format!("agent-task:v1:soak-{index}");
+        let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+        request.metadata = Some(json!({ "submission_key": key }));
+        request.command.push("x".repeat(32_000));
+        let job = store
+            .submit_remote_runner_job(request.clone())
+            .expect("submit");
+        store
+            .inner
+            .lock()
+            .expect("store")
+            .jobs
+            .get_mut(&job.id)
+            .expect("job")
+            .job
+            .status = JobStatus::Succeeded;
+        store.persist().expect("compact terminal job");
+        if index == 0 {
+            first = Some(request);
+        }
+    }
+    assert_eq!(
+        store.list().len(),
+        1,
+        "only the retained payload stays resident"
+    );
+    assert!(store
+        .inner
+        .lock()
+        .expect("store")
+        .expired_submission_keys
+        .is_empty());
+    assert!(fs::metadata(&path).expect("jobs metadata").len() < 40_000);
+
+    let restarted = JobStore::open_with_retention(&path, 3, 1).expect("restart");
+    assert_eq!(restarted.list().len(), 1);
+    let error = restarted
+        .submit_remote_runner_job(first.expect("first request"))
+        .expect_err("compacted accepted key stays rejected after restart");
+    assert_eq!(
+        error.details["schema"],
+        json!("homeboy/remote-runner-submission-expired/v1")
+    );
+}
+
+#[test]
+fn corrupt_replay_tombstone_journal_fails_closed() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open_with_retention(&path, 3, 1).expect("durable store");
+    let mut first = remote_runner_request("homeboy-lab", Some("extrachill"));
+    first.metadata = Some(json!({ "submission_key": "agent-task:v1:corrupt-one" }));
+    let job = store.submit_remote_runner_job(first).expect("submit");
+    store
+        .inner
+        .lock()
+        .expect("store")
+        .jobs
+        .get_mut(&job.id)
+        .expect("job")
+        .job
+        .status = JobStatus::Succeeded;
+    store.persist().expect("persist first");
+    let mut second = remote_runner_request("homeboy-lab", Some("extrachill"));
+    second.metadata = Some(json!({ "submission_key": "agent-task:v1:corrupt-two" }));
+    let second_job = store
+        .submit_remote_runner_job(second)
+        .expect("submit second");
+    store
+        .inner
+        .lock()
+        .expect("store")
+        .jobs
+        .get_mut(&second_job.id)
+        .expect("job")
+        .job
+        .status = JobStatus::Succeeded;
+    store.persist().expect("compact first");
+    fs::write(
+        super::super::persistence::tombstone_path(&path),
+        "not json\n",
+    )
+    .expect("corrupt journal");
+    let restarted = JobStore::open_with_retention(&path, 3, 1).expect("restart");
+    let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+    request.metadata = Some(json!({ "submission_key": "agent-task:v1:any-key" }));
+    assert!(restarted.submit_remote_runner_job(request).is_err());
 }
 
 #[test]
