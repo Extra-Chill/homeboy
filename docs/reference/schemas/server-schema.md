@@ -117,7 +117,7 @@ Use `runner.secret_env` for values that must be read at execution time instead o
 }
 ```
 
-Homeboy command output redacts sensitive names in `env` and keeps `secret_env` as references only. Secret file contents and referenced environment variable values are not printed by runner config/status diagnostics.
+Homeboy rejects likely credential names in newly persisted `runner.env` entries. Use `secret_env` for those values; it is also the explicit sensitivity declaration for non-obvious names. Existing legacy entries can be inspected without values using `homeboy runner doctor <id> --scope secret-env` and migrated into OS keychain-backed references with `--repair`. Homeboy command output redacts sensitive names in `env` and keeps `secret_env` as references only. Secret file contents and referenced environment variable values are not printed by runner config/status diagnostics.
 
 ## Managed SSH Sessions
 

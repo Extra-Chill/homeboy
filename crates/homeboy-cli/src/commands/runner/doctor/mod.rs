@@ -44,6 +44,7 @@ pub enum RunnerDoctorScope {
     #[default]
     General,
     LabOffload,
+    SecretEnv,
 }
 
 pub fn run(runner_id: &str) -> CmdResult<RunnerDoctorOutput> {
@@ -64,6 +65,9 @@ pub fn run_with_options(
             client,
         } => remote::report(id, runner, server, client, &options),
     };
+
+    let migration = runner::secret_env_migration_plan(runner_id)?;
+    report.secret_env_migration = (!migration.is_empty()).then_some(migration);
 
     if options.repair {
         repair::apply(&target, &options, &mut report);

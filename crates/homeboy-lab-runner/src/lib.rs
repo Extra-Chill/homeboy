@@ -275,6 +275,28 @@ pub struct RunnerSpec {
     pub security: server::RunnerSecurityConfig,
 }
 
+/// A value-free migration plan for legacy credential-shaped runner env entries.
+/// It is safe to show in diagnostics and records the durable secret reference
+/// that an apply operation will create.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerSecretEnvMigrationPlan {
+    pub runner_id: String,
+    pub entries: Vec<RunnerSecretEnvMigrationEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerSecretEnvMigrationEntry {
+    pub key: String,
+    pub location: String,
+    pub secret: String,
+}
+
+impl RunnerSecretEnvMigrationPlan {
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 impl RunnerSpec {
     pub fn from_runner(runner: &Runner) -> Self {
         Self {
@@ -401,6 +423,7 @@ impl ConfigEntity for Runner {
         }
 
         server::validate_runner_settings(&self.settings, "concurrency_limit", None)?;
+        server::validate_runner_env(&self.env, "env")?;
 
         Ok(())
     }
@@ -859,6 +882,106 @@ pub fn create(json_spec: &str, skip_existing: bool) -> Result<CreateOutput<Runne
     }
 
     Ok(CreateOutput::Single(create_single_value(value)?))
+}
+
+/// Inspect a legacy runner configuration without resolving or rendering values.
+pub fn secret_env_migration_plan(id: &str) -> Result<RunnerSecretEnvMigrationPlan> {
+    let runner = load(id)?;
+    Ok(secret_env_migration_plan_for_runner(&runner))
+}
+
+fn secret_env_migration_plan_for_runner(runner: &Runner) -> RunnerSecretEnvMigrationPlan {
+    let location = if runner.kind == RunnerKind::Ssh {
+        "server.runner.env"
+    } else {
+        "runner.env"
+    };
+    let mut entries = runner
+        .env
+        .keys()
+        .filter(|key| server::is_likely_secret_env_key(key))
+        .map(|key| RunnerSecretEnvMigrationEntry {
+            key: key.clone(),
+            location: location.to_string(),
+            secret: runner_secret_name(&runner.id, key),
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.key.cmp(&right.key));
+    RunnerSecretEnvMigrationPlan {
+        runner_id: runner.id.clone(),
+        entries,
+    }
+}
+
+/// Move legacy plaintext env values into the OS keychain and atomically replace
+/// each persisted value with a `secret_env` reference. Existing mappings are
+/// never overwritten; any newly created mappings are removed if config save
+/// fails, leaving the legacy config unchanged.
+pub fn apply_secret_env_migration(id: &str) -> Result<RunnerSecretEnvMigrationPlan> {
+    let plan = secret_env_migration_plan(id)?;
+    if plan.is_empty() {
+        return Ok(plan);
+    }
+    let mut runner = load(id)?;
+    let mut created: Vec<String> = Vec::new();
+    for entry in &plan.entries {
+        if homeboy_core::keychain::get("runner", &entry.secret)?.is_some() {
+            return Err(Error::validation_invalid_argument(
+                "secret_env",
+                format!("migration secret reference `{}` already exists", entry.secret),
+                Some(entry.key.clone()),
+                Some(vec!["Choose a different secret reference or remove the existing mapping before applying this migration.".to_string()]),
+            ));
+        }
+        let value = runner
+            .env
+            .get(&entry.key)
+            .expect("plan key exists in runner env");
+        if let Err(error) = agent_task_secrets::set_keychain_secret(
+            &entry.secret,
+            value,
+            Some("runner"),
+            Some(&entry.secret),
+        ) {
+            for secret in created {
+                let _ = agent_task_secrets::remove_secret_mapping(&secret, true);
+            }
+            return Err(error);
+        }
+        created.push(entry.secret.clone());
+    }
+
+    for entry in &plan.entries {
+        runner.env.remove(&entry.key);
+        runner.secret_env.insert(
+            entry.key.clone(),
+            RunnerSecretEnvRef {
+                env: None,
+                file: None,
+                secret: Some(entry.secret.clone()),
+            },
+        );
+    }
+
+    let saved = match runner.kind {
+        RunnerKind::Local => config::save(&runner),
+        RunnerKind::Ssh => {
+            let mut server = server::load(&runner.id)?;
+            server.runner = Some(RunnerSpec::from_runner(&runner).into_server_runner());
+            server::save(&server)
+        }
+    };
+    if let Err(error) = saved {
+        for secret in created {
+            let _ = agent_task_secrets::remove_secret_mapping(&secret, true);
+        }
+        return Err(error);
+    }
+    Ok(plan)
+}
+
+fn runner_secret_name(runner_id: &str, key: &str) -> String {
+    format!("runner/{runner_id}/{key}")
 }
 
 pub fn merge(id: Option<&str>, json_spec: &str, replace_fields: &[String]) -> Result<MergeOutput> {
@@ -1612,6 +1735,100 @@ mod tests {
             assert_eq!(ssh_err.code.as_str(), "validation.invalid_argument");
             assert!(ssh_err.message.contains("concurrency_limit"));
         });
+    }
+
+    #[test]
+    fn runner_create_update_and_bulk_import_reject_printable_secret_env() {
+        test_support::with_isolated_home(|_| {
+            let create_error = create(
+                r#"{"id":"secret-local","kind":"local","env":{"OPENCODE_API_KEY":"secret-value"}}"#,
+                false,
+            )
+            .expect_err("create must reject likely secret env");
+            assert!(create_error.message.contains("secret_env.OPENCODE_API_KEY"));
+            assert!(!create_error.message.contains("secret-value"));
+
+            create(r#"{"id":"public-local","kind":"local"}"#, false).expect("create public runner");
+            let update_error = merge(
+                Some("public-local"),
+                r#"{"env":{"SERVICE_TOKEN":"secret-value"}}"#,
+                &[],
+            )
+            .expect_err("update must reject likely secret env");
+            assert!(update_error.message.contains("SERVICE_TOKEN"));
+            assert!(!update_error.message.contains("secret-value"));
+
+            let imported = create(
+                r#"[{"id":"bulk-secret","kind":"local","env":{"ACCESS_TOKEN":"secret-value"}}]"#,
+                false,
+            )
+            .expect("bulk import returns summary");
+            let CreateOutput::Bulk(summary) = imported else {
+                panic!("expected bulk summary");
+            };
+            assert_eq!(summary.errors, 1);
+            assert!(load("bulk-secret").is_err());
+
+            server::create(
+                r#"{"id":"server-lab","host":"example.test","user":"runner"}"#,
+                false,
+            )
+            .expect("create server");
+            let server_runner_error = create(
+                r#"{"id":"server-lab","kind":"ssh","env":{"SERVICE_TOKEN":"secret-value"}}"#,
+                false,
+            )
+            .expect_err("server-backed runner must reject likely secret env");
+            assert!(server_runner_error.message.contains("SERVICE_TOKEN"));
+            assert!(!server_runner_error.message.contains("secret-value"));
+        });
+    }
+
+    #[test]
+    fn config_save_enforces_runner_secret_env_invariant_and_allows_false_positive() {
+        test_support::with_isolated_home(|_| {
+            let mut runner = Runner {
+                id: "local".to_string(),
+                kind: RunnerKind::Local,
+                server_id: None,
+                workspace_root: None,
+                settings: RunnerSettings::default(),
+                env: HashMap::from([("OPENCODE_API_KEY".to_string(), "secret-value".to_string())]),
+                secret_env: HashMap::new(),
+                resources: HashMap::new(),
+                policy: RunnerPolicy::default(),
+            };
+            let error = config::save(&runner).expect_err("direct config write must validate");
+            assert!(!error.message.contains("secret-value"));
+
+            runner.env = HashMap::from([("MONKEY".to_string(), "public-value".to_string())]);
+            config::save(&runner).expect("unrelated public name remains allowed");
+        });
+    }
+
+    #[test]
+    fn migration_plan_is_value_free_and_uses_generic_keychain_references() {
+        let runner = Runner {
+            id: "lab".to_string(),
+            kind: RunnerKind::Local,
+            server_id: None,
+            workspace_root: None,
+            settings: RunnerSettings::default(),
+            env: HashMap::from([
+                ("OPENCODE_API_KEY".to_string(), "secret-value".to_string()),
+                ("MONKEY".to_string(), "public-value".to_string()),
+            ]),
+            secret_env: HashMap::new(),
+            resources: HashMap::new(),
+            policy: RunnerPolicy::default(),
+        };
+        let plan = secret_env_migration_plan_for_runner(&runner);
+        let rendered = serde_json::to_string(&plan).expect("serialize plan");
+        assert_eq!(plan.entries.len(), 1);
+        assert_eq!(plan.entries[0].key, "OPENCODE_API_KEY");
+        assert_eq!(plan.entries[0].secret, "runner/lab/OPENCODE_API_KEY");
+        assert!(!rendered.contains("secret-value"));
+        assert!(!rendered.contains("public-value"));
     }
 
     #[test]

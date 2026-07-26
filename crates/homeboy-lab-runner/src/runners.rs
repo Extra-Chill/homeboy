@@ -66,14 +66,15 @@ pub use crate::{
     RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecStructuredSummary, RunnerFailureKind,
     RunnerJob, RunnerKind, RunnerLifecycleOwner, RunnerMutationArtifacts,
     RunnerNamedWorkspaceLease, RunnerRecoveryState, RunnerRequiredTool, RunnerResourceMetrics,
-    RunnerResult, RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerSpec,
-    RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport, RunnerToolRegistry,
-    RunnerToolSpec, RunnerTunnelMode, RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput,
-    RunnerWorkspaceApplyStatus, RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
-    RunnerWorkspaceListEntry, RunnerWorkspaceListOutput, RunnerWorkspaceMaterializationPlan,
-    RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
-    RunnerWorkspacePruneSkippedEntry, RunnerWorkspacePullOptions, RunnerWorkspacePullOutput,
-    RunnerWorkspacePullPlan, RunnerWorkspaceSnapshotAppliedFilters, RunnerWorkspaceSnapshotEntry,
+    RunnerResult, RunnerSecretEnvMigrationPlan, RunnerSession, RunnerSessionRole,
+    RunnerSessionState, RunnerSpec, RunnerStaleDaemonWarning, RunnerStaleRuntimePath,
+    RunnerStatusReport, RunnerToolRegistry, RunnerToolSpec, RunnerTunnelMode,
+    RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput, RunnerWorkspaceApplyStatus,
+    RunnerWorkspaceLease, RunnerWorkspaceLeaseSet, RunnerWorkspaceListEntry,
+    RunnerWorkspaceListOutput, RunnerWorkspaceMaterializationPlan, RunnerWorkspacePruneEntry,
+    RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry,
+    RunnerWorkspacePullOptions, RunnerWorkspacePullOutput, RunnerWorkspacePullPlan,
+    RunnerWorkspaceSnapshotAppliedFilters, RunnerWorkspaceSnapshotEntry,
     RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode,
     RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, RunnerWorkspaceUpdateOptions,
     RunnerWorkspaceUpdateOutput, RuntimeMaterializationStatus,
@@ -82,7 +83,8 @@ pub use crate::{
 // Registry CRUD entry points (re-exported at the root for ergonomics; also
 // available via the explicit `registry` group below).
 pub use crate::{
-    create, delete_safe, effective_env, enable_server_runner, exists, list, load, merge,
+    apply_secret_env_migration, create, delete_safe, effective_env, enable_server_runner, exists,
+    list, load, merge, secret_env_migration_plan,
 };
 
 // Crate-internal helpers that historically flowed through the wildcard
@@ -98,8 +100,9 @@ pub use crate::daemon_api_get;
 /// CRUD helpers over the runner config registry.
 pub mod registry {
     pub use crate::{
-        create, delete_safe, effective_env, enable_server_runner, exists, list, load, merge,
-        resolve_default_lab_runner, Runner, RunnerKind, RunnerSpec,
+        apply_secret_env_migration, create, delete_safe, effective_env, enable_server_runner,
+        exists, list, load, merge, resolve_default_lab_runner, secret_env_migration_plan, Runner,
+        RunnerKind, RunnerSpec,
     };
 }
 

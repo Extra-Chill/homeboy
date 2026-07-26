@@ -644,6 +644,7 @@ pub(super) enum RunnerKindArg {
 pub(super) enum RunnerDoctorScopeArg {
     General,
     LabOffload,
+    SecretEnv,
 }
 
 impl From<RunnerDoctorScopeArg> for doctor::RunnerDoctorScope {
@@ -651,6 +652,7 @@ impl From<RunnerDoctorScopeArg> for doctor::RunnerDoctorScope {
         match value {
             RunnerDoctorScopeArg::General => doctor::RunnerDoctorScope::General,
             RunnerDoctorScopeArg::LabOffload => doctor::RunnerDoctorScope::LabOffload,
+            RunnerDoctorScopeArg::SecretEnv => doctor::RunnerDoctorScope::SecretEnv,
         }
     }
 }

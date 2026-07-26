@@ -241,6 +241,55 @@ pub fn validate_runner_settings(
     Ok(())
 }
 
+/// Refuse likely credentials in durable, printable runner environment maps.
+/// `secret_env` is the explicit sensitivity metadata for names that cannot be
+/// safely inferred from their spelling.
+pub fn validate_runner_env(env: &HashMap<String, String>, field: &str) -> Result<()> {
+    for key in env.keys() {
+        if is_likely_secret_env_key(key) {
+            return Err(Error::validation_invalid_argument(
+                format!("{field}.{key}"),
+                format!(
+                    "likely secret `{key}` cannot be persisted in printable runner env; use secret_env.{key} with an env, file, or keychain reference"
+                ),
+                None,
+                Some(vec![format!(
+                    "For a non-obvious secret name, add an explicit secret_env.{key} reference."
+                )]),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The redaction policy is deliberately broad for output safety (for example,
+/// it redacts `monkey`). Persistence rejection needs narrower token boundaries
+/// so public names are not false positives.
+pub fn is_likely_secret_env_key(key: &str) -> bool {
+    let normalized = key.trim().to_ascii_lowercase().replace('-', "_");
+    let segments = normalized.split('_').collect::<Vec<_>>();
+    matches!(
+        normalized.as_str(),
+        "apikey" | "api_key" | "access_token" | "refresh_token" | "client_secret"
+    ) || segments.iter().any(|segment| {
+        matches!(
+            *segment,
+            "auth"
+                | "authorization"
+                | "bearer"
+                | "cookie"
+                | "credential"
+                | "nonce"
+                | "passwd"
+                | "password"
+                | "secret"
+                | "session"
+                | "sid"
+                | "token"
+        )
+    }) || normalized.ends_with("_key")
+}
+
 impl ConfigEntity for Server {
     const ENTITY_TYPE: &'static str = "server";
     const DIR_NAME: &'static str = "servers";
@@ -269,6 +318,7 @@ impl ConfigEntity for Server {
     fn validate(&self) -> Result<()> {
         if let Some(runner) = self.runner.as_ref() {
             validate_runner_settings(&runner.settings, "runner.concurrency_limit", None)?;
+            validate_runner_env(&runner.env, "runner.env")?;
         }
 
         Ok(())
