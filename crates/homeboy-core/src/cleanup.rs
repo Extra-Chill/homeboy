@@ -401,6 +401,15 @@ fn collect_worktree_candidates(
             ));
             continue;
         }
+        if tracks_files_under(&worktree.path, &declaration.relative_path) {
+            skipped.push(skip_row(
+                worktree,
+                &declaration,
+                display_path,
+                "artifact path contains files tracked by Git",
+            ));
+            continue;
+        }
         if declaration.liveness_protected
             && !options.include_active_worktrees
             && liveness == LIVENESS_ACTIVE
@@ -1073,6 +1082,27 @@ fn has_tracked_changes_under(dirty_paths: &[String], relative_path: &str) -> boo
     dirty_paths
         .iter()
         .any(|path| path == relative_path || path.starts_with(&prefix))
+}
+
+/// Whether Git tracks anything inside the artifact path.
+///
+/// A committed artifact tree is content of record, not reconstructable output,
+/// even when it is clean — a clean tree produces no status entry, so the
+/// dirty-path guard alone would happily delete it. Declarations that match a
+/// path some repository commits (generated output checked in on purpose) are
+/// left alone instead of quietly rewriting that repository's working tree.
+///
+/// Scoped to one pathspec and evaluated only for paths that already passed the
+/// cheaper gates, so this stays a small number of calls per checkout.
+fn tracks_files_under(worktree: &Path, relative_path: &str) -> bool {
+    match git::run_git(
+        worktree,
+        &["ls-files", "--", relative_path],
+        "git ls-files tracked",
+    ) {
+        Ok(listing) => !listing.trim().is_empty(),
+        Err(_) => false,
+    }
 }
 
 /// Whether untracked, non-ignored work sits at, inside, or above the artifact
@@ -3135,6 +3165,34 @@ mod tests {
             assert!(output.skipped.iter().any(|row| row.relative_path == "deps"
                 && row.reason.contains("tracked or staged source changes")));
             assert!(repo.path().join("deps/generated.txt").exists());
+        });
+    }
+
+    #[test]
+    fn committed_artifact_content_is_protected_even_when_clean() {
+        crate::test_support::with_isolated_home(|_| {
+            install_artifact_cleanup_extension("fixture", dependency_tree_declaration(false));
+            let repo = TempDir::new().expect("repo tempdir");
+            git(repo.path(), &["init", "-b", "main"]);
+            write_file(&repo.path().join("src/lib.rs"), "source");
+            write_file(&repo.path().join("scope.marker"), "{}");
+            // A repository that commits its generated tree on purpose. The
+            // working tree is clean, so no status entry reports it.
+            write_file(&repo.path().join("deps/index.txt"), "committed output");
+            commit_all(repo.path());
+
+            let output = cleanup_artifacts(ArtifactCleanupOptions {
+                apply: true,
+                ..dry_run_options(repo.path())
+            })
+            .expect("apply");
+
+            assert!(output.candidates.is_empty());
+            assert!(output
+                .skipped
+                .iter()
+                .any(|row| row.relative_path == "deps" && row.reason.contains("tracked by Git")));
+            assert!(repo.path().join("deps/index.txt").exists());
         });
     }
 
