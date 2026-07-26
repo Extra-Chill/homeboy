@@ -14,6 +14,7 @@ mod cook_promotion;
 mod cook_recipe;
 mod discovery;
 mod execution;
+mod promotion_service;
 mod reconcile;
 mod status_support;
 
@@ -26,6 +27,7 @@ pub use cook_promotion::*;
 pub use cook_recipe::*;
 pub use discovery::*;
 pub use execution::*;
+pub use promotion_service::*;
 pub use reconcile::*;
 pub use status_support::*;
 
