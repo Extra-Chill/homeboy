@@ -1,0 +1,12 @@
+{
+  "schema": "example/diagnostic/v7",
+  "identity": "rule:stable-identity",
+  "summary": "The producer-defined check did not pass.",
+  "source_location": "opaque://source/42",
+  "suggested_actions": ["Apply the producer's remediation."],
+  "producer": {
+    "id": "example-producer",
+    "schema": "example/producer-output/v7"
+  },
+  "full_evidence_ref": "homeboy://agent-task/run/run-1/gates#gate=gate-1"
+}

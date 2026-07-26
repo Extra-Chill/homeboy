@@ -800,7 +800,7 @@ mod tests {
                     "schema": "homeboy/agent-task-gate-report/v1",
                     "id": "gate-1",
                     "status": "failed",
-                    "command": ["sh", "-lc", "cargo test"],
+                    "command": ["sh", "-lc", "opaque-gate"],
                     "exit_code": 101,
                     "stdout": "complete stdout, not a tail",
                     "stderr": "complete stderr, not a tail"

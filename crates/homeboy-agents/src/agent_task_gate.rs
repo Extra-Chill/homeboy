@@ -263,6 +263,36 @@ pub struct AgentTaskGateFailureEvidence {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stderr_tail: String,
     pub agent_feedback: String,
+    /// Producer-owned structured diagnostics carried in the gate sidecar.
+    /// Homeboy treats their locations and suggested actions as opaque data.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<AgentTaskGateDiagnosticRecord>,
+}
+
+pub const AGENT_TASK_GATE_DIAGNOSTIC_RECORD_SCHEMA: &str = "homeboy/gate-diagnostic-record/v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateDiagnosticRecord {
+    #[serde(default = "gate_diagnostic_record_schema")]
+    pub schema: String,
+    pub identity: String,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_location: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggested_actions: Vec<String>,
+    pub producer: AgentTaskGateDiagnosticProducer,
+    pub full_evidence_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateDiagnosticProducer {
+    pub id: String,
+    pub schema: String,
+}
+
+fn gate_diagnostic_record_schema() -> String {
+    AGENT_TASK_GATE_DIAGNOSTIC_RECORD_SCHEMA.to_string()
 }
 
 impl AgentTaskGateReport {
@@ -805,6 +835,7 @@ fn gate_failure_evidence(
         stdout_tail,
         stderr_tail,
         agent_feedback,
+        diagnostics: Vec::new(),
     }
 }
 

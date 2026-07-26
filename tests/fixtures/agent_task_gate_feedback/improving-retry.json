@@ -1,4 +1,4 @@
 {
-  "previous_failure_set": ["gate-1:crate::tests::fixed", "gate-1:crate::tests::remaining"],
-  "current_failure_set": ["gate-1:crate::tests::remaining"]
+  "previous_failure_set": ["gate-1:policy:fixed", "gate-1:policy:remaining"],
+  "current_failure_set": ["gate-1:policy:remaining"]
 }

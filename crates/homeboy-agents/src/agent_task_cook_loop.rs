@@ -6,8 +6,8 @@ use crate::agent_task::{
     AgentTaskRequest, AgentTaskSourceRef, AgentTaskWorkspaceMode, AGENT_TASK_REQUEST_SCHEMA,
 };
 use crate::agent_task_gate::{
-    text_tail, AgentTaskGateReport, AgentTaskGateRevealPolicy, AgentTaskGateStatus,
-    AgentTaskGateVisibility,
+    text_tail, AgentTaskGateDiagnosticProducer, AgentTaskGateDiagnosticRecord, AgentTaskGateReport,
+    AgentTaskGateRevealPolicy, AgentTaskGateStatus, AgentTaskGateVisibility,
 };
 use crate::agent_task_promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
 use crate::agent_task_review_dossier::AiFilledReviewForm;
@@ -18,8 +18,8 @@ pub const AGENT_TASK_COOK_FEEDBACK_REPORT_SCHEMA: &str =
 const RISKY_CHANGED_FILE_THRESHOLD: usize = 20;
 const MAX_FAILURE_DIAGNOSTICS: usize = 8;
 const MAX_FAILURE_DELTA_IDENTITIES: usize = 8;
-const MAX_RUST_DIAGNOSTIC_OUTPUT_BYTES: usize = 64 * 1024;
-const MAX_RUST_DIAGNOSTIC_FIELD_BYTES: usize = 512;
+const MAX_DIAGNOSTIC_FIELD_BYTES: usize = 512;
+const MAX_DIAGNOSTIC_ACTIONS: usize = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskCookLoopOptions {
@@ -147,11 +147,15 @@ pub struct AgentTaskCookLoopGateFailure {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskCookLoopFailureDiagnostic {
-    pub test_identity: String,
+    pub schema: String,
+    pub identity: String,
+    pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub location: Option<String>,
-    pub message: String,
-    pub rerun_command: String,
+    pub source_location: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggested_actions: Vec<String>,
+    pub producer: AgentTaskGateDiagnosticProducer,
+    pub full_evidence_ref: String,
 }
 
 pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoopReport {
@@ -494,7 +498,11 @@ fn gate_failure(
             )
         });
 
-    let diagnostics = rust_failure_diagnostics(&command, &gate.stdout, &gate.stderr);
+    let diagnostics = gate
+        .failure_evidence
+        .as_ref()
+        .map(|evidence| bounded_diagnostics(&evidence.diagnostics))
+        .unwrap_or_default();
     let full_evidence_ref = source_run_id.map(|run_id| gate_evidence_ref(run_id, &gate.id));
     AgentTaskCookLoopGateFailure {
         gate_id: gate.id.clone(),
@@ -613,7 +621,7 @@ fn follow_up_instructions(
             "The failure set improved. Preserve resolved failures while fixing the remaining shared failures.".to_string()
         }
         AgentTaskCookLoopFailureProgressionStatus::Initial => {
-            "Start with the distilled test diagnostics and rerun commands below.".to_string()
+            "Start with the producer-provided diagnostics and suggested actions.".to_string()
         }
     };
 
@@ -633,7 +641,7 @@ fn retry_policy(progression: &AgentTaskCookLoopFailureProgression) -> &'static s
         AgentTaskCookLoopFailureProgressionStatus::Regressing => "new_failures_first",
         AgentTaskCookLoopFailureProgressionStatus::Stagnating => "shared_root_cause",
         AgentTaskCookLoopFailureProgressionStatus::Improving => "preserve_resolved_failures",
-        AgentTaskCookLoopFailureProgressionStatus::Initial => "distilled_diagnostics",
+        AgentTaskCookLoopFailureProgressionStatus::Initial => "producer_diagnostics",
     }
 }
 
@@ -647,7 +655,7 @@ fn failure_set(failed_gates: &[AgentTaskCookLoopGateFailure]) -> Vec<String> {
                 failure
                     .diagnostics
                     .iter()
-                    .map(|diagnostic| format!("{}:{}", failure.gate_id, diagnostic.test_identity))
+                    .map(|diagnostic| format!("{}:{}", failure.gate_id, diagnostic.identity))
                     .collect()
             }
         })
@@ -739,87 +747,44 @@ fn apply_failure_progression_to_quality(
     quality.failure_progression = Some(progression.clone());
 }
 
-fn rust_failure_diagnostics(
-    command: &str,
-    stdout: &str,
-    stderr: &str,
+fn bounded_diagnostics(
+    records: &[AgentTaskGateDiagnosticRecord],
 ) -> Vec<AgentTaskCookLoopFailureDiagnostic> {
-    if !command.contains("cargo test") {
-        return Vec::new();
-    }
-    let mut diagnostics = Vec::new();
-    let mut seen = BTreeSet::new();
-    for output in [stdout, stderr] {
-        let bounded = bounded_text(output, MAX_RUST_DIAGNOSTIC_OUTPUT_BYTES);
-        let mut lines = bounded.lines();
-        while let Some(line) = lines.next() {
-            let line = line.trim();
-            let Some(identity) = line
-                .trim()
-                .strip_prefix("thread '")
-                .and_then(|value| value.split_once("' panicked at "))
-            else {
-                if let Some(test_identity) = line
-                    .strip_prefix("test ")
-                    .and_then(|value| value.strip_suffix(" ... FAILED"))
-                {
-                    push_rust_failure_diagnostic(
-                        &mut diagnostics,
-                        &mut seen,
-                        test_identity,
-                        None,
-                        "Rust test failed; inspect the persisted full gate output.",
-                    );
-                }
-                continue;
-            };
-            let message = lines
-                .by_ref()
-                .map(str::trim)
-                .find(|line| !line.is_empty() && !line.starts_with("note:"))
-                .unwrap_or("Rust test panicked");
-            push_rust_failure_diagnostic(
-                &mut diagnostics,
-                &mut seen,
-                identity.0,
-                (!identity.1.trim_end_matches(':').is_empty())
-                    .then(|| identity.1.trim_end_matches(':')),
-                message,
-            );
-        }
-    }
-    diagnostics
+    let mut identities = BTreeSet::new();
+    records
+        .iter()
+        .filter(|record| record_is_complete(record) && identities.insert(record.identity.clone()))
+        .take(MAX_FAILURE_DIAGNOSTICS)
+        .map(|record| AgentTaskCookLoopFailureDiagnostic {
+            schema: bounded_text(&record.schema, MAX_DIAGNOSTIC_FIELD_BYTES),
+            identity: bounded_text(&record.identity, MAX_DIAGNOSTIC_FIELD_BYTES),
+            summary: bounded_text(&record.summary, MAX_DIAGNOSTIC_FIELD_BYTES),
+            source_location: record
+                .source_location
+                .as_deref()
+                .map(|value| bounded_text(value, MAX_DIAGNOSTIC_FIELD_BYTES)),
+            suggested_actions: record
+                .suggested_actions
+                .iter()
+                .take(MAX_DIAGNOSTIC_ACTIONS)
+                .map(|action| bounded_text(action, MAX_DIAGNOSTIC_FIELD_BYTES))
+                .collect(),
+            producer: AgentTaskGateDiagnosticProducer {
+                id: bounded_text(&record.producer.id, MAX_DIAGNOSTIC_FIELD_BYTES),
+                schema: bounded_text(&record.producer.schema, MAX_DIAGNOSTIC_FIELD_BYTES),
+            },
+            full_evidence_ref: bounded_text(&record.full_evidence_ref, MAX_DIAGNOSTIC_FIELD_BYTES),
+        })
+        .collect()
 }
 
-fn push_rust_failure_diagnostic(
-    diagnostics: &mut Vec<AgentTaskCookLoopFailureDiagnostic>,
-    seen: &mut BTreeSet<String>,
-    identity: &str,
-    location: Option<&str>,
-    message: &str,
-) {
-    let identity = bounded_text(identity, MAX_RUST_DIAGNOSTIC_FIELD_BYTES);
-    let location = location.map(|value| bounded_text(value, MAX_RUST_DIAGNOSTIC_FIELD_BYTES));
-    let message = bounded_text(message, MAX_RUST_DIAGNOSTIC_FIELD_BYTES);
-    if !seen.insert(identity.clone()) {
-        if let Some(diagnostic) = diagnostics
-            .iter_mut()
-            .find(|diagnostic| diagnostic.test_identity == identity)
-        {
-            diagnostic.location = location;
-            diagnostic.message = message;
-        }
-        return;
-    }
-    if diagnostics.len() == MAX_FAILURE_DIAGNOSTICS {
-        return;
-    }
-    diagnostics.push(AgentTaskCookLoopFailureDiagnostic {
-        rerun_command: format!("cargo test {identity}"),
-        test_identity: identity,
-        location,
-        message,
-    });
+fn record_is_complete(record: &AgentTaskGateDiagnosticRecord) -> bool {
+    !record.schema.is_empty()
+        && !record.identity.is_empty()
+        && !record.summary.is_empty()
+        && !record.producer.id.is_empty()
+        && !record.producer.schema.is_empty()
+        && !record.full_evidence_ref.is_empty()
 }
 
 fn bounded_text(text: &str, max_bytes: usize) -> String {
@@ -885,7 +850,7 @@ mod tests {
         let request = report.follow_up_request.expect("follow-up request");
         assert_eq!(request.task_id, "cook-homeboy-gate-fix-2");
         assert!(request.instructions.contains("Deterministic gates failed"));
-        assert!(request.instructions.contains("cargo test agent_task_gate"));
+        assert!(request.instructions.contains("opaque-gate"));
         assert_eq!(
             request.inputs["cook_loop"]["failed_gates"][0]["exit_code"],
             101
@@ -1106,27 +1071,32 @@ mod tests {
 
         let request = report.follow_up_request.expect("follow-up request");
         let feedback = request.inputs.to_string();
-        assert!(feedback.contains("cargo test agent_task_gate"));
+        assert!(feedback.contains("opaque-gate"));
         assert!(feedback.contains("boom"));
-        assert!(request.instructions.contains("cargo test agent_task_gate"));
+        assert!(request.instructions.contains("opaque-gate"));
     }
 
     #[test]
-    fn rust_panic_before_final_failure_list_is_distilled_from_complete_output() {
-        let output = include_str!(
-            "../../../tests/fixtures/agent_task_gate_feedback/rust-panic-before-failure-list.txt"
-        );
+    fn producer_diagnostic_record_is_bounded_without_interpreting_its_contents() {
+        let diagnostic: AgentTaskGateDiagnosticRecord = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/agent_task_gate_feedback/producer-diagnostic-record.json"
+        ))
+        .expect("producer diagnostic fixture");
         let gate = AgentTaskGateReport::new(
             "gate-1",
-            vec![
-                "sh".to_string(),
-                "-lc".to_string(),
-                "cargo test --workspace".to_string(),
-            ],
-            101,
-            output,
+            vec!["opaque-gate".to_string()],
+            1,
+            "producer output is opaque",
             String::new(),
-            None,
+            Some(AgentTaskGateFailureEvidence {
+                summary: "producer reported a failure".to_string(),
+                command: "opaque-gate".to_string(),
+                exit_code: 1,
+                stdout_tail: String::new(),
+                stderr_tail: String::new(),
+                agent_feedback: "Use the structured diagnostic.".to_string(),
+                diagnostics: vec![diagnostic],
+            }),
             AgentTaskGateVisibility::Visible,
             AgentTaskGateRevealPolicy::FullEvidence,
             AgentTaskGateEnvironment::default(),
@@ -1135,20 +1105,14 @@ mod tests {
         let failure = gate_failure(&gate, Some("run-1"));
 
         assert_eq!(failure.diagnostics.len(), 1);
+        assert_eq!(failure.diagnostics[0].identity, "rule:stable-identity");
         assert_eq!(
-            failure.diagnostics[0].test_identity,
-            "agent_task::tests::keeps_context"
+            failure.diagnostics[0].source_location.as_deref(),
+            Some("opaque://source/42")
         );
         assert_eq!(
-            failure.diagnostics[0].location.as_deref(),
-            Some("crates/homeboy-agents/src/agent_task.rs:42:9")
-        );
-        assert!(failure.diagnostics[0]
-            .message
-            .contains("expected provider execution count 1"));
-        assert_eq!(
-            failure.diagnostics[0].rerun_command,
-            "cargo test agent_task::tests::keeps_context"
+            failure.diagnostics[0].suggested_actions,
+            vec!["Apply the producer's remediation."]
         );
         assert_eq!(
             failure.full_evidence_ref.as_deref(),
@@ -1193,17 +1157,23 @@ mod tests {
             gate_id: "gate-1".to_string(),
             visibility: AgentTaskGateVisibility::Visible,
             reveal_policy: AgentTaskGateRevealPolicy::FullEvidence,
-            command: "cargo test --workspace".to_string(),
+            command: "opaque-gate".to_string(),
             exit_code: 101,
             stdout_tail: String::new(),
             stderr_tail: String::new(),
             summary: String::new(),
             agent_feedback: String::new(),
             diagnostics: vec![AgentTaskCookLoopFailureDiagnostic {
-                test_identity: identity.to_string(),
-                location: None,
-                message: String::new(),
-                rerun_command: format!("cargo test {identity}"),
+                schema: "example/diagnostic/v7".to_string(),
+                identity: identity.to_string(),
+                summary: String::new(),
+                source_location: None,
+                suggested_actions: Vec::new(),
+                producer: AgentTaskGateDiagnosticProducer {
+                    id: "example-producer".to_string(),
+                    schema: "example/producer-output/v7".to_string(),
+                },
+                full_evidence_ref: "homeboy://agent-task/run/run-1/gates#gate=gate-1".to_string(),
             }],
             full_evidence_ref: None,
         };
@@ -1224,10 +1194,7 @@ mod tests {
 
         let regression = failure_progression(
             &options(regressing["previous_failure_set"].clone()),
-            &[
-                failure("crate::tests::existing"),
-                failure("crate::tests::new"),
-            ],
+            &[failure("policy:existing"), failure("policy:new")],
         );
         assert_eq!(
             regression.status,
@@ -1240,7 +1207,7 @@ mod tests {
 
         let improvement = failure_progression(
             &options(improving["previous_failure_set"].clone()),
-            &[failure("crate::tests::remaining")],
+            &[failure("policy:remaining")],
         );
         assert_eq!(
             improvement.status,
@@ -1277,21 +1244,48 @@ mod tests {
     }
 
     #[test]
-    fn rust_failure_diagnostics_accepts_failed_test_variants_and_bounds_fields() {
-        let output = format!(
-            "test crate::tests::failed_only ... FAILED\nthread 'crate::tests::panic' panicked at src/lib.rs:7:3:\n{}",
-            "x".repeat(MAX_RUST_DIAGNOSTIC_FIELD_BYTES * 2)
-        );
-        let diagnostics = rust_failure_diagnostics("cargo test", &output, "");
+    fn producer_diagnostics_are_deduplicated_and_bounded() {
+        let record = |identity: &str| AgentTaskGateDiagnosticRecord {
+            schema: "example/diagnostic/v7".to_string(),
+            identity: identity.to_string(),
+            summary: "x".repeat(MAX_DIAGNOSTIC_FIELD_BYTES * 2),
+            source_location: None,
+            suggested_actions: (0..MAX_DIAGNOSTIC_ACTIONS + 1)
+                .map(|_| "action".to_string())
+                .collect(),
+            producer: AgentTaskGateDiagnosticProducer {
+                id: "example-producer".to_string(),
+                schema: "example/producer-output/v7".to_string(),
+            },
+            full_evidence_ref: "homeboy://agent-task/run/run-1/gates#gate=gate-1".to_string(),
+        };
+        let diagnostics = bounded_diagnostics(&[record("policy:one"), record("policy:one")]);
 
-        assert_eq!(diagnostics.len(), 2);
-        assert_eq!(diagnostics[0].test_identity, "crate::tests::failed_only");
-        assert_eq!(diagnostics[1].test_identity, "crate::tests::panic");
-        assert_eq!(diagnostics[1].location.as_deref(), Some("src/lib.rs:7:3"));
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].identity, "policy:one");
+        assert_eq!(diagnostics[0].summary.len(), MAX_DIAGNOSTIC_FIELD_BYTES);
         assert_eq!(
-            diagnostics[1].message.len(),
-            MAX_RUST_DIAGNOSTIC_FIELD_BYTES
+            diagnostics[0].suggested_actions.len(),
+            MAX_DIAGNOSTIC_ACTIONS
         );
+    }
+
+    #[test]
+    fn incomplete_producer_diagnostics_are_not_consumed() {
+        let diagnostics = bounded_diagnostics(&[AgentTaskGateDiagnosticRecord {
+            schema: "example/diagnostic/v7".to_string(),
+            identity: "policy:missing-evidence".to_string(),
+            summary: "The producer did not provide an evidence ref.".to_string(),
+            source_location: None,
+            suggested_actions: Vec::new(),
+            producer: AgentTaskGateDiagnosticProducer {
+                id: "example-producer".to_string(),
+                schema: "example/producer-output/v7".to_string(),
+            },
+            full_evidence_ref: String::new(),
+        }]);
+
+        assert!(diagnostics.is_empty());
     }
 
     #[test]
@@ -1570,19 +1564,19 @@ mod tests {
             vec![
                 "sh".to_string(),
                 "-lc".to_string(),
-                "cargo test agent_task_gate".to_string(),
+                "opaque-gate".to_string(),
             ],
             101,
             "running tests",
             "boom",
             Some(AgentTaskGateFailureEvidence {
-                summary: "agent_task_gate failed".to_string(),
-                command: "cargo test agent_task_gate".to_string(),
+                summary: "opaque gate failed".to_string(),
+                command: "opaque-gate".to_string(),
                 exit_code: 101,
                 stdout_tail: "running tests".to_string(),
                 stderr_tail: "boom".to_string(),
-                agent_feedback: "Update the patch so cargo test agent_task_gate passes."
-                    .to_string(),
+                agent_feedback: "Update the patch so opaque-gate passes.".to_string(),
+                diagnostics: Vec::new(),
             }),
             AgentTaskGateVisibility::Visible,
             AgentTaskGateRevealPolicy::FullEvidence,
@@ -1596,7 +1590,7 @@ mod tests {
             vec![
                 "sh".to_string(),
                 "-lc".to_string(),
-                "cargo test".to_string(),
+                "opaque-gate".to_string(),
             ],
             0,
             "ok",
@@ -1626,6 +1620,7 @@ mod tests {
                 stdout_tail: "secret fixture mismatch".to_string(),
                 stderr_tail: "private evaluator stack trace".to_string(),
                 agent_feedback: "Fix the randomized secret fixture mismatch.".to_string(),
+                diagnostics: Vec::new(),
             }),
             AgentTaskGateVisibility::Private,
             reveal_policy,
