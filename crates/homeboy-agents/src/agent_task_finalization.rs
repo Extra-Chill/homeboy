@@ -65,7 +65,16 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     if !options.manual_finalization {
         let lifecycle = backend.hydrate_run(&options.run_id)?;
         let gate_proof = backend.hydrate_gate_proof(&options.run_id)?;
-        if gate_proof.run_id != options.run_id {
+        let review_form_only_follow_up =
+            is_review_form_only_follow_up(&gate_proof.promotion, &gate_proof.run_id);
+        let authenticated_follow_up = review_form_only_follow_up
+            && gate_proof
+                .promotion
+                .provenance
+                .pointer("/cook_follow_up/source_run_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(options.run_id.as_str());
+        if gate_proof.run_id != options.run_id && !authenticated_follow_up {
             return Err(Error::validation_invalid_argument(
                 "run_id",
                 "durable gate proof belongs to a different run",
@@ -76,8 +85,6 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         validate_gate_proof_binding(&gate_proof, &options)?;
         let eligibility =
             validate_durable_publication_eligibility(&lifecycle, &gate_proof.promotion)?;
-        let review_form_only_follow_up =
-            is_review_form_only_follow_up(&gate_proof.promotion, &options.run_id);
         durable_changed_files = normalize_changed_files(&gate_proof.promotion.changed_files);
         if normalize_changed_files(&options.changed_files) != durable_changed_files {
             return Err(changed_files_mismatch_error(
@@ -419,7 +426,7 @@ fn validate_gate_proof_binding(
             None,
         ));
     }
-    if gate_proof.promotion.source.run_id.as_deref() != Some(options.run_id.as_str()) {
+    if gate_proof.promotion.source.run_id.as_deref() != Some(gate_proof.run_id.as_str()) {
         return Err(Error::validation_invalid_argument(
             "run_id",
             "durable gate proof promotion source belongs to a different run",
