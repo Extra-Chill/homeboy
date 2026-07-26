@@ -366,7 +366,7 @@ pub struct AgentTaskCookArgs {
     pub ai_used_for: String,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Clone, Debug)]
 pub struct PromotionProviderArgs {
     #[arg(long, value_name = "PATH")]
     pub workspace: String,

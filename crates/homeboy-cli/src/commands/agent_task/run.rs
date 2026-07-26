@@ -364,7 +364,7 @@ pub(crate) fn validate_cook_request(args: &AgentTaskCookArgs) -> homeboy::core::
     Ok(())
 }
 
-pub(super) fn promotion_provider(args: PromotionProviderArgs) -> CmdResult<Value> {
+pub(crate) fn promotion_provider(args: PromotionProviderArgs) -> CmdResult<Value> {
     let mut request = Vec::new();
     std::io::stdin()
         .take(MAX_PROMOTION_PROVIDER_REQUEST_BYTES + 1)
