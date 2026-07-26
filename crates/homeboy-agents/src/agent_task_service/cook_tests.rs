@@ -492,7 +492,7 @@ fn moving_base_recovery_report_retains_typed_evidence_and_exact_continuation() {
         prior_verified_base: "a".repeat(40),
         passed_gates: serde_json::json!([{"status": "passed"}]),
         blocker: "HEAD is behind or diverged from resolved base".to_string(),
-        continuation: "homeboy agent-task run-next".to_string(),
+        continuation: "homeboy agent-task cook-continue run-9267".to_string(),
         base_movements: 0,
     };
     let report =
@@ -504,7 +504,10 @@ fn moving_base_recovery_report_retains_typed_evidence_and_exact_continuation() {
         .moving_base_recovery
         .expect("typed recovery state");
     assert_eq!(recovery.run_id, "run-9267");
-    assert_eq!(recovery.continuation, "homeboy agent-task run-next");
+    assert_eq!(
+        recovery.continuation,
+        "homeboy agent-task cook-continue run-9267"
+    );
     assert_eq!(recovery.prior_verified_base, "a".repeat(40));
     assert!(report
         .value
@@ -5761,7 +5764,7 @@ fn post_materialization_failure_families_expose_only_durable_identity_and_legal_
                 serde_json::json!([
                     { "action": "status", "command": format!("homeboy agent-task status {} --full", options.initial_run_id) },
                     { "action": "diagnose", "command": format!("homeboy agent-task diagnose {}", options.initial_run_id) },
-                    { "action": "resume", "command": format!("homeboy agent-task cook-continue {cook_id}") },
+                    { "action": "resume", "command": format!("homeboy agent-task cook-continue {}", options.initial_run_id) },
                 ]),
                 "{status}"
             );

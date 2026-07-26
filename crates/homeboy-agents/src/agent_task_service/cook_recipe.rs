@@ -1705,6 +1705,45 @@ mod tests {
     }
 
     #[test]
+    fn mismatched_targeted_continuation_fails_closed_without_consuming_other_cook() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut other = recipe();
+            other.cook_id = "other".to_string();
+            other.attempts[0].run_id = "other-run".to_string();
+            write_recipe(&recipe()).unwrap();
+            write_recipe(&other).unwrap();
+            enqueue_terminal_continuation("cook", "run").unwrap();
+            enqueue_terminal_continuation("other", "other-run").unwrap();
+
+            let key = "cook:run";
+            let hash = format!("{:x}", sha2::Sha256::digest(key.as_bytes()));
+            fs::write(
+                queue_root().unwrap().join(format!("{hash}.pending")),
+                serde_json::to_vec(&AgentTaskCookContinuation {
+                    schema: CONTINUATION_SCHEMA.to_string(),
+                    key: "other:other-run".to_string(),
+                    cook_id: "other".to_string(),
+                    run_id: "other-run".to_string(),
+                    retries: 0,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+
+            let error = claim_continuation_for("cook", "run").unwrap_err();
+            assert!(error.message.contains("does not match"));
+            assert_eq!(
+                claim_continuation_for("other", "other-run")
+                    .unwrap()
+                    .expect("unrelated continuation remains pending")
+                    .continuation()
+                    .key,
+                "other:other-run"
+            );
+        });
+    }
+
+    #[test]
     fn consumer_reconstructs_options_once_and_completed_work_never_replays() {
         homeboy_core::test_support::with_isolated_home(|_| {
             write_recipe(&recipe()).unwrap();

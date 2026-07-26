@@ -411,7 +411,9 @@ pub(crate) fn moving_base_recovery_from_promotion(
         passed_gates: serde_json::to_value(&promotion.gate_results).unwrap_or(Value::Null),
         promotion,
         blocker: String::new(),
-        continuation: "homeboy agent-task run-next".to_string(),
+        // This recovery belongs to one immutable Cook attempt. `run-next` is a
+        // global scheduler operation and must never be offered as its recovery.
+        continuation: format!("homeboy agent-task cook-continue {run_id}"),
         base_movements: 0,
     }
 }
@@ -1762,7 +1764,7 @@ fn cook_failure_context(
                 },
                 super::AgentTaskCookRecoveryAction {
                     action: "resume".to_string(),
-                    command: format!("homeboy agent-task cook-continue {cook_id}"),
+                    command: format!("homeboy agent-task cook-continue {latest_run_id}"),
                 },
             ]
         })
