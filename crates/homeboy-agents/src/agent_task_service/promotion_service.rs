@@ -7,7 +7,6 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::time::Duration;
 
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::daemon::controller_job_driver::{
@@ -44,6 +43,7 @@ pub struct AgentTaskPromotionRequest {
 
 pub const AGENT_TASK_PROMOTION_JOB_TYPE: &str = "agent-task-promotion";
 pub const AGENT_TASK_PROMOTION_JOB_VERSION: u32 = 1;
+const AGENT_TASK_PROMOTION_JOB_SCHEMA: &str = "homeboy/agent-task-promotion-job/v1";
 
 /// Durable controller-job request. `request` is a fully resolved promotion
 /// input, including the source artifact and destination identity; a recovered
@@ -53,23 +53,95 @@ pub struct AgentTaskPromotionJob {
     pub schema: String,
     pub idempotency_key: String,
     pub request: AgentTaskPromotionRequest,
-    #[serde(default = "promotion_job_phase_queued")]
-    pub phase: String,
+    #[serde(default)]
+    pub phase: AgentTaskPromotionJobPhase,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentTaskPromotionJobSubmission {
-    pub job_id: String,
-    pub status_command: String,
-    pub watch_command: String,
-    pub cancel_command: String,
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskPromotionJobPhase {
+    #[default]
+    Queued,
+    MutatingAndVerifying,
+    Completed,
 }
 
-fn promotion_job_phase_queued() -> String {
-    "queued".to_string()
+impl AgentTaskPromotionJob {
+    pub fn new(request: AgentTaskPromotionRequest) -> Result<Self> {
+        let source_run_id = required_job_field(&request.source_run_id, "source_run_id")?;
+        let artifact_id = required_job_field(&request.artifact_id, "artifact_id")?;
+        if request.to_worktree.trim().is_empty() {
+            return Err(invalid_promotion_job(
+                "promotion jobs require a destination worktree",
+            ));
+        }
+        if request.provider_command.is_some() || request.provider_invocation.is_some() {
+            return Err(invalid_promotion_job(
+                "promotion jobs require controller-owned provider references, not inline commands",
+            ));
+        }
+
+        Ok(Self {
+            schema: AGENT_TASK_PROMOTION_JOB_SCHEMA.to_string(),
+            idempotency_key: format!(
+                "promotion:{source_run_id}:{artifact_id}:{}",
+                request.to_worktree
+            ),
+            request,
+            phase: AgentTaskPromotionJobPhase::Queued,
+        })
+    }
+
+    fn parse(value: Value) -> Result<Self> {
+        let job: Self = serde_json::from_value(value).map_err(|error| {
+            invalid_promotion_job(&format!("invalid durable promotion job: {error}"))
+        })?;
+        job.validate()?;
+        Ok(job)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.schema != AGENT_TASK_PROMOTION_JOB_SCHEMA || self.idempotency_key.trim().is_empty()
+        {
+            return Err(invalid_promotion_job(
+                "promotion jobs require a recognized schema and idempotency key",
+            ));
+        }
+        let expected = Self::new(self.request.clone())?;
+        if self.idempotency_key != expected.idempotency_key {
+            return Err(invalid_promotion_job(
+                "promotion job idempotency key does not match its immutable request",
+            ));
+        }
+        Ok(())
+    }
+
+    fn public_projection(&self) -> Value {
+        serde_json::json!({
+            "schema": self.schema,
+            "idempotency_key": self.idempotency_key,
+            "phase": self.phase,
+            "source_run_id": self.request.source_run_id,
+            "task_id": self.request.task_id,
+            "artifact_id": self.request.artifact_id,
+            "to_worktree": self.request.to_worktree,
+            "base_ref": self.request.base_ref,
+        })
+    }
 }
 
-struct AgentTaskPromotionJobDriver;
+fn required_job_field<'a>(value: &'a Option<String>, name: &str) -> Result<&'a str> {
+    value
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| invalid_promotion_job(&format!("promotion jobs require {name}")))
+}
+
+fn invalid_promotion_job(message: &str) -> homeboy_core::Error {
+    homeboy_core::Error::validation_invalid_argument("promotion_job", message, None, None)
+}
+
+pub struct AgentTaskPromotionJobDriver;
 
 impl ControllerJobDriver for AgentTaskPromotionJobDriver {
     fn job_type(&self) -> &'static str {
@@ -81,92 +153,63 @@ impl ControllerJobDriver for AgentTaskPromotionJobDriver {
     }
 
     fn public_request(&self, request: &Value) -> Result<Value> {
-        let job: AgentTaskPromotionJob =
-            serde_json::from_value(request.clone()).map_err(|error| {
-                homeboy_core::Error::validation_invalid_argument(
-                    "promotion_job",
-                    format!("invalid durable promotion job: {error}"),
-                    None,
-                    None,
-                )
-            })?;
-        Ok(serde_json::json!({
-            "schema": job.schema,
-            "idempotency_key": job.idempotency_key,
-            "phase": job.phase,
-            "source_run_id": job.request.source_run_id,
-            "task_id": job.request.task_id,
-            "artifact_id": job.request.artifact_id,
-            "to_worktree": job.request.to_worktree,
-            "base_ref": job.request.base_ref,
-        }))
+        Ok(AgentTaskPromotionJob::parse(request.clone())?.public_projection())
     }
 
     fn public_progress(&self, progress: &Value) -> Result<Value> {
-        Ok(progress.clone())
+        let phase: AgentTaskPromotionJobPhase = serde_json::from_value(
+            progress.get("phase").cloned().unwrap_or(Value::Null),
+        )
+        .map_err(|error| invalid_promotion_job(&format!("invalid promotion progress: {error}")))?;
+        Ok(serde_json::json!({ "phase": phase }))
     }
 
     fn public_result(&self, result: &Value) -> Result<Value> {
-        Ok(result.clone())
+        Ok(serde_json::json!({
+            "phase": result.get("phase").cloned().unwrap_or(Value::Null),
+        }))
     }
 
     fn public_error(&self, error: &homeboy_core::Error) -> ControllerJobPublicError {
         ControllerJobPublicError {
-            message: error.message.clone(),
-            data: error.details.clone(),
+            message: "controller-owned promotion failed".to_string(),
+            data: serde_json::json!({ "code": format!("{:?}", error.code) }),
         }
     }
 
     fn validate_secret_references(&self, request: &Value) -> Result<()> {
-        let job: AgentTaskPromotionJob =
-            serde_json::from_value(request.clone()).map_err(|error| {
-                homeboy_core::Error::validation_invalid_argument(
-                    "promotion_job",
-                    error.to_string(),
-                    None,
-                    None,
-                )
-            })?;
-        if job.schema != "homeboy/agent-task-promotion-job/v1"
-            || job.idempotency_key.trim().is_empty()
-            || job
-                .request
-                .source_run_id
-                .as_deref()
-                .is_none_or(str::is_empty)
-            || job.request.artifact_id.as_deref().is_none_or(str::is_empty)
-        {
-            return Err(homeboy_core::Error::validation_invalid_argument(
-                "promotion_job",
-                "promotion jobs require a schema, idempotency key, durable source run, and exact patch artifact",
-                None,
-                None,
-            ));
-        }
-        Ok(())
+        AgentTaskPromotionJob::parse(request.clone()).map(|_| ())
     }
 
     fn execute(&self, prepared: Value, handle: ControllerJobHandle) -> Result<Value> {
-        let mut job: AgentTaskPromotionJob = serde_json::from_value(prepared).map_err(|error| {
+        let mut job = AgentTaskPromotionJob::parse(prepared)?;
+        job.phase = AgentTaskPromotionJobPhase::MutatingAndVerifying;
+        handle.checkpoint(serde_json::to_value(&job).map_err(|error| {
             homeboy_core::Error::internal_json(
                 error.to_string(),
-                Some("parse promotion job checkpoint".to_string()),
+                Some("serialize promotion checkpoint".to_string()),
             )
-        })?;
-        if handle.is_cancelled() {
-            return Ok(serde_json::json!({ "phase": "cancelled" }));
-        }
-        job.phase = "mutating_and_verifying".to_string();
-        handle.checkpoint(serde_json::to_value(&job).unwrap_or(Value::Null))?;
+        })?)?;
         handle.progress(serde_json::json!({ "phase": job.phase }))?;
         let report = execute_promotion(job.request.clone())?;
-        job.phase = "completed".to_string();
-        handle.checkpoint(serde_json::to_value(&job).unwrap_or(Value::Null))?;
+        job.phase = AgentTaskPromotionJobPhase::Completed;
+        handle.checkpoint(serde_json::to_value(&job).map_err(|error| {
+            homeboy_core::Error::internal_json(
+                error.to_string(),
+                Some("serialize promotion checkpoint".to_string()),
+            )
+        })?)?;
         Ok(serde_json::json!({ "phase": job.phase, "promotion": report }))
     }
 
+    fn resume(&self, checkpoint: Value, handle: ControllerJobHandle) -> Result<Value> {
+        self.execute(checkpoint, handle)
+    }
+
     fn cancel(&self, _prepared: &Value) -> Result<()> {
-        Ok(())
+        Err(invalid_promotion_job(
+            "promotion jobs cannot be cancelled after execution starts",
+        ))
     }
 }
 
@@ -174,97 +217,13 @@ impl ControllerJobDriver for AgentTaskPromotionJobDriver {
 /// Registration is idempotent because CLI startup can run in test processes
 /// that initialize the command runtime more than once.
 pub fn register_promotion_job_driver() {
-    let _ = controller_job_driver::register_controller_job_driver(std::sync::Arc::new(
-        AgentTaskPromotionJobDriver,
-    ));
-}
-
-/// Submit a fully resolved promotion to the generic controller-job lifecycle.
-/// The operation key binds the durable source artifact to its declared target,
-/// preventing duplicate apply after a lost client response or daemon restart.
-pub fn submit_promotion_job(
-    request: AgentTaskPromotionRequest,
-) -> Result<AgentTaskPromotionJobSubmission> {
-    let run_id = request.source_run_id.clone().ok_or_else(|| {
-        homeboy_core::Error::validation_invalid_argument(
-            "source",
-            "durable promotion queueing requires a controller-owned source run",
-            None,
-            None,
-        )
-    })?;
-    let artifact_id = request.artifact_id.clone().ok_or_else(|| {
-        homeboy_core::Error::validation_invalid_argument(
-            "artifact_id",
-            "durable promotion queueing requires an exact patch artifact",
-            None,
-            None,
-        )
-    })?;
-    let idempotency_key = format!("promotion:{run_id}:{artifact_id}:{}", request.to_worktree);
-    let job = AgentTaskPromotionJob {
-        schema: "homeboy/agent-task-promotion-job/v1".to_string(),
-        idempotency_key: idempotency_key.clone(),
-        request,
-        phase: promotion_job_phase_queued(),
-    };
-    let daemon = homeboy_core::daemon::ensure_running(homeboy_core::daemon::DEFAULT_ADDR)?;
-    let client = reqwest::blocking::Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|error| homeboy_core::Error::internal_unexpected(error.to_string()))?;
-    let response: Value = client
-        .post(format!("http://{}/controller/jobs", daemon.address))
-        .json(&serde_json::json!({
-            "type": AGENT_TASK_PROMOTION_JOB_TYPE,
-            "version": AGENT_TASK_PROMOTION_JOB_VERSION,
-            "request": job,
-            "idempotency_key": idempotency_key,
-        }))
-        .send()
-        .map_err(|error| homeboy_core::Error::internal_unexpected(error.to_string()))?
-        .json()
-        .map_err(|error| {
-            homeboy_core::Error::internal_json(
-                error.to_string(),
-                Some("parse promotion job submission".to_string()),
-            )
-        })?;
-    let job_id = response
-        .pointer("/data/body/job/id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            homeboy_core::Error::internal_unexpected(
-                "controller daemon did not return a promotion job id",
-            )
-        })?
-        .to_string();
-    let start: Value = client
-        .post(format!(
-            "http://{}/controller/jobs/{job_id}/start",
-            daemon.address
+    static REGISTERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    REGISTERED.get_or_init(|| {
+        controller_job_driver::register_controller_job_driver(std::sync::Arc::new(
+            AgentTaskPromotionJobDriver,
         ))
-        .send()
-        .map_err(|error| homeboy_core::Error::internal_unexpected(error.to_string()))?
-        .json()
-        .map_err(|error| {
-            homeboy_core::Error::internal_json(
-                error.to_string(),
-                Some("start promotion job".to_string()),
-            )
-        })?;
-    if start.get("success").and_then(Value::as_bool) != Some(true) {
-        return Err(homeboy_core::Error::internal_unexpected(
-            "controller daemon rejected promotion job start",
-        ));
-    }
-    Ok(AgentTaskPromotionJobSubmission {
-        status_command: format!("homeboy activity show {job_id}"),
-        watch_command: format!("homeboy activity watch {job_id}"),
-        cancel_command: format!("homeboy activity cancel {job_id}"),
-        job_id,
-    })
+        .expect("register promotion controller job driver");
+    });
 }
 
 impl AgentTaskPromotionRequest {
@@ -350,4 +309,84 @@ pub fn promotion_is_resumable(previous: &Value, rerun_completed_gates: bool) -> 
     let status = previous.get("status").and_then(Value::as_str);
     matches!(status, Some("gate_failed") | Some("verification_pending"))
         || (rerun_completed_gates && status == Some("applied"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request() -> AgentTaskPromotionRequest {
+        AgentTaskPromotionRequest {
+            source: "private aggregate content".to_string(),
+            source_run_id: Some("run-123".to_string()),
+            source_path: Some("/private/source.json".into()),
+            source_worktree_path: Some("/private/worktree".into()),
+            to_worktree: "homeboy@promotion".to_string(),
+            base_ref: Some("main".to_string()),
+            task_base_sha: Some("base-sha".to_string()),
+            candidate_ref: None,
+            task_id: Some("task-1".to_string()),
+            artifact_id: Some("patch-1".to_string()),
+            dry_run: false,
+            gates: VerifyGateOptions::default(),
+            provider_command: None,
+            provider_invocation: None,
+        }
+    }
+
+    #[test]
+    fn durable_job_uses_a_deterministic_key_and_preserves_its_checkpoint_phase() {
+        let job = AgentTaskPromotionJob::new(request()).expect("valid durable job");
+        let same_job = AgentTaskPromotionJob::new(request()).expect("same durable job");
+
+        assert_eq!(job.idempotency_key, same_job.idempotency_key);
+        assert_eq!(job.phase, AgentTaskPromotionJobPhase::Queued);
+
+        let mut checkpoint = job.clone();
+        checkpoint.phase = AgentTaskPromotionJobPhase::MutatingAndVerifying;
+        let recovered = AgentTaskPromotionJob::parse(
+            serde_json::to_value(checkpoint).expect("serialize checkpoint"),
+        )
+        .expect("recover checkpoint");
+        assert_eq!(
+            recovered.phase,
+            AgentTaskPromotionJobPhase::MutatingAndVerifying
+        );
+        assert_eq!(recovered.idempotency_key, job.idempotency_key);
+    }
+
+    #[test]
+    fn durable_job_rejects_missing_or_inline_provider_inputs() {
+        let mut missing_artifact = request();
+        missing_artifact.artifact_id = None;
+        assert!(AgentTaskPromotionJob::new(missing_artifact).is_err());
+
+        let mut inline_provider = request();
+        inline_provider.provider_command = Some("provider --token private".to_string());
+        assert!(AgentTaskPromotionJob::new(inline_provider).is_err());
+    }
+
+    #[test]
+    fn driver_redacts_private_request_fields_and_accepts_its_typed_payload() {
+        let job = AgentTaskPromotionJob::new(request()).expect("valid durable job");
+        let value = serde_json::to_value(job).expect("serialize job");
+        let driver = AgentTaskPromotionJobDriver;
+
+        driver
+            .validate_secret_references(&value)
+            .expect("validate typed job");
+        let public = driver.public_request(&value).expect("public projection");
+        let public_text = public.to_string();
+        assert!(!public_text.contains("private aggregate content"));
+        assert!(!public_text.contains("/private/source.json"));
+        assert!(!public_text.contains("base-sha"));
+        assert_eq!(public["source_run_id"], "run-123");
+        assert_eq!(public["phase"], "queued");
+    }
+
+    #[test]
+    fn driver_registration_is_idempotent() {
+        register_promotion_job_driver();
+        register_promotion_job_driver();
+    }
 }

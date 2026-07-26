@@ -306,24 +306,6 @@ pub(crate) fn promote_artifact(args: PromoteArgs) -> CmdResult<Value> {
             ..Default::default()
         }),
     };
-    if crate::commands::utils::resource_policy::captured_context()
-        .is_some_and(|context| context.warned && !context.local_override)
-        && source_run_id.is_some()
-        && !args.dry_run
-    {
-        let submission = agent_task_service::submit_promotion_job(promotion_request)?;
-        return Ok((
-            serde_json::json!({
-                "schema": "homeboy/agent-task-promotion-queue/v1",
-                "status": "queued",
-                "job_id": submission.job_id,
-                "status_command": submission.status_command,
-                "watch_command": submission.watch_command,
-                "cancel_command": submission.cancel_command,
-            }),
-            0,
-        ));
-    }
     let report = agent_task_service::execute_promotion(promotion_request)?;
     let exit_code = if report.status == AgentTaskPromotionStatus::GateFailed {
         1

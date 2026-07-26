@@ -50,6 +50,25 @@ fn applied_promotion_resume_requires_explicit_gate_rerun() {
 }
 
 #[test]
+fn cli_promotion_resume_policy_matches_the_shared_service() {
+    for (previous, rerun_completed_gates) in [
+        (json!({ "status": "applied" }), false),
+        (json!({ "status": "applied" }), true),
+        (json!({ "status": "gate_failed" }), false),
+        (json!({ "status": "verification_pending" }), false),
+        (json!({ "status": "completed" }), true),
+    ] {
+        assert_eq!(
+            review::promotion_is_resumable(&previous, rerun_completed_gates),
+            homeboy::agents::agent_task_service::promotion_is_resumable(
+                &previous,
+                rerun_completed_gates,
+            ),
+        );
+    }
+}
+
+#[test]
 fn review_reports_queued_run_without_chat_state() {
     with_temp_home(|| {
         agent_task_lifecycle::submit_plan(&test_plan(), Some("run-review-queued"))
