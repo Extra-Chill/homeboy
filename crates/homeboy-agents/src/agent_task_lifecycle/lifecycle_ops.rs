@@ -757,6 +757,11 @@ pub fn reserve_provider_execution(
                 "model": task.executor.model(),
                 "state": "running",
                 "started_at": started_at.clone(),
+                // This is the process that owns the synchronous local provider
+                // boundary, captured before the scheduler can block on it.
+                "owner_pid": std::process::id(),
+                "owner_linux_starttime_ticks": homeboy_core::process::linux_process_starttime_ticks(std::process::id()).ok().flatten(),
+                "owner_identity": format!("{run_id}:{execution_key}"),
             }));
             let consumed = executions.len();
             metadata.insert("provider_executions_consumed".to_string(), json!(consumed));
@@ -822,6 +827,7 @@ pub fn record_provider_execution_terminal(
     let execution_key = format!("{task_id}:{attempt}");
     let mut found = false;
     let record = store::mutate_record(&run_id, |record| {
+        let cancelled = record.state == AgentTaskRunState::Cancelled;
         let Some(execution) = record
             .ensure_metadata_object()
             .get_mut("provider_executions")
@@ -834,6 +840,18 @@ pub fn record_provider_execution_terminal(
         else {
             return false;
         };
+        // A confirmed cancellation wins over a provider return that raced with
+        // it. Conversely, cancellation observes a terminal provider state
+        // before it mutates the run, allowing an already-completed result to be
+        // imported instead of being discarded.
+        if cancelled {
+            found = true;
+            return false;
+        }
+        if execution["state"] != json!("running") {
+            found = true;
+            return false;
+        }
         execution["state"] = json!(state);
         execution["finished_at"] = json!(now_timestamp());
         found = true;
@@ -858,6 +876,114 @@ where
     rewrite(&mut record);
     store::write_record(&record)?;
     Ok(record)
+}
+
+/// Reconcile the ownership captured at the local provider boundary. A local
+/// provider has no opaque remote handle, so its reserving process is the only
+/// durable authority that can prove the reservation is still executing.
+fn reconcile_local_provider_ownership(record: &mut AgentTaskRunRecord) -> bool {
+    if record.state != AgentTaskRunState::Running || record.is_runner_backed() {
+        return false;
+    }
+    let Some(executions) = record
+        .metadata
+        .get_mut("provider_executions")
+        .and_then(Value::as_array_mut)
+    else {
+        return false;
+    };
+
+    let mut has_running = false;
+    let mut has_live_owner = false;
+    let mut has_succeeded = false;
+    let mut recovery_identity = Vec::new();
+    for execution in executions.iter_mut() {
+        match execution["state"].as_str() {
+            Some("running") => {
+                has_running = true;
+                recovery_identity.push(execution["owner_identity"].clone());
+                let identity_state = execution
+                    .get("owner_pid")
+                    .and_then(Value::as_u64)
+                    .and_then(|pid| u32::try_from(pid).ok())
+                    .map(|pid| {
+                        homeboy_core::process::process_identity_state(
+                            pid,
+                            execution
+                                .get("owner_linux_starttime_ticks")
+                                .and_then(Value::as_u64),
+                        )
+                    });
+                let live = matches!(
+                    identity_state,
+                    Some(homeboy_core::process::ProcessIdentityState::Live)
+                );
+                execution["owner_state"] = json!(match identity_state {
+                    Some(homeboy_core::process::ProcessIdentityState::Live) => "live",
+                    Some(homeboy_core::process::ProcessIdentityState::Dead) => "dead",
+                    Some(homeboy_core::process::ProcessIdentityState::IdentityMismatch) =>
+                        "identity_mismatch",
+                    _ => "unverifiable",
+                });
+                has_live_owner |= live;
+            }
+            Some("succeeded") => has_succeeded = true,
+            _ => {}
+        }
+    }
+    if has_live_owner {
+        return true;
+    }
+    if !has_running && !has_succeeded {
+        return false;
+    }
+
+    let now = now_timestamp();
+    let metadata = record.ensure_metadata_object();
+    metadata.insert(
+        "local_provider_ownership".to_string(),
+        json!({
+            "state": "owner_dead",
+            "recovery_identity": recovery_identity,
+            "reconciled_at": now,
+        }),
+    );
+    if has_succeeded {
+        // The provider reported completion before the foreground owner died,
+        // but the aggregate was not yet persisted. Preserve that fact and the
+        // workspace as a recoverable candidate instead of erasing it.
+        record.updated_at = Some(now);
+        set_run_state(record, AgentTaskRunState::CandidateRecoverable);
+        for task in &mut record.tasks {
+            if task.state == AgentTaskState::Running {
+                task.state = AgentTaskState::CandidateRecoverable;
+            }
+        }
+    } else {
+        let executions = record
+            .ensure_metadata_object()
+            .get_mut("provider_executions")
+            .and_then(Value::as_array_mut)
+            .expect("provider executions were checked above");
+        for execution in executions.iter_mut() {
+            if execution["state"] == json!("running") {
+                execution["state"] = json!("cancelled");
+                execution["finished_at"] = json!(now.clone());
+            }
+        }
+        record.updated_at = Some(now.clone());
+        set_run_state(record, AgentTaskRunState::Cancelled);
+        for task in &mut record.tasks {
+            if matches!(task.state, AgentTaskState::Queued | AgentTaskState::Running) {
+                task.state = AgentTaskState::Cancelled;
+            }
+        }
+        record.ensure_metadata_object().insert(
+            "cancel_reason".to_string(),
+            json!("local provider owner process is not running"),
+        );
+    }
+    true
 }
 
 pub fn claim_next_queued_run() -> Result<Option<AgentTaskRunRecord>> {
@@ -971,6 +1097,9 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
                 record = reconciled;
             }
         }
+    }
+    if reconcile_local_provider_ownership(&mut record) {
+        store::write_record(&record)?;
     }
     let before_liveness_reconciliation = record.clone();
     reconcile_runner_job_state(&mut record)?;

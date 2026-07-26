@@ -1616,6 +1616,7 @@ fn liveness_summary(record: &Value, run_id: &str) -> Value {
     let has_active_provider_execution = !active_provider_executions.is_empty();
     let provider_boundary_recorded =
         provider_handle_count > 0 || runner_job_id.is_some() || has_active_provider_execution;
+    let local_provider_ownership = metadata.get("local_provider_ownership");
 
     json!({
         "status": if terminal { "terminal" } else if stale { "stale" } else if waiting_for_capacity { "waiting_for_capacity" } else { "active" },
@@ -1628,6 +1629,7 @@ fn liveness_summary(record: &Value, run_id: &str) -> Value {
             "runner_job_id": runner_job_id,
             "active_execution_count": active_provider_executions.len(),
             "active_executions": active_provider_executions,
+            "local_owner": local_provider_ownership,
         },
         "stale_reason": metadata.get("stale_running_reason"),
         "runner_queue": metadata.get("runner_queue"),
