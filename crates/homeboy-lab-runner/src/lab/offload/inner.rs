@@ -2499,25 +2499,8 @@ mod tests {
         let root = "/runner/app-homeboy-artifacts/rig-registry".to_string();
         let args = Vec::new();
         let request = LabOffloadRequest {
-            command: None,
             normalized_args: &args,
-            explicit_runner: None,
-            placement: homeboy_cli_contract::Placement::Auto,
             allow_local_fallback: true,
-            allow_dirty_lab_workspace: false,
-            skip_deps_hydration: false,
-            preserve_workspace_on_failure: false,
-            capture_patch: false,
-            mutation_flag: None,
-            detach_after_handoff: false,
-            output_file_requested: false,
-            read_only_polling: false,
-            local_output_file: None,
-            durable_agent_task_plan: None,
-            source_path: None,
-            verified_cook_baseline: None,
-            require_controller_git_bundle: false,
-            reuse_compatible_snapshot: false,
             job_overrides: LabJobOverrides {
                 env: std::collections::HashMap::from([
                     (
@@ -2532,6 +2515,7 @@ mod tests {
                 ]),
                 ..Default::default()
             },
+            ..LabOffloadRequest::for_test(&args)
         };
         let selection = LabRunnerSelection {
             runner_id: "homeboy-lab".to_string(),
