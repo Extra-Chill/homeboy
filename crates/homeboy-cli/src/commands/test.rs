@@ -371,6 +371,8 @@ fn finish_test_observation(
         return;
     };
 
+    let child_supervision = child_supervision_metadata_from_observation(&observation);
+    let interrupted = child_supervision["child_supervision"]["status"] == "interrupted";
     let metadata = merge_metadata(
         merge_metadata(
             observation.active.initial_metadata().clone(),
@@ -386,15 +388,29 @@ fn finish_test_observation(
             "summary": workflow.summary,
             }),
         ),
-        validation_progress_metadata_from_observation(&observation),
+        merge_metadata(
+            validation_progress_metadata_from_observation(&observation),
+            child_supervision,
+        ),
     );
-    let status = if workflow.exit_code == 0 {
+    let metadata = if interrupted {
+        merge_metadata(
+            metadata,
+            serde_json::json!({ "observation_status": "interrupted" }),
+        )
+    } else {
+        metadata
+    };
+    let status = if interrupted {
+        RunStatus::Error
+    } else if workflow.exit_code == 0 {
         RunStatus::Pass
     } else {
         RunStatus::Fail
     };
     persist_test_findings(&observation, workflow);
     persist_validation_progress_artifacts(&observation);
+    persist_child_supervision_artifact(&observation);
     observation.active.finish(status, Some(metadata));
 }
 
@@ -488,8 +504,12 @@ fn finish_test_observation_error(
             "error": error.to_string(),
             }),
         ),
-        validation_progress_metadata_from_observation(&observation),
+        merge_metadata(
+            validation_progress_metadata_from_observation(&observation),
+            child_supervision_metadata_from_observation(&observation),
+        ),
     );
+    persist_child_supervision_artifact(&observation);
     observation.active.finish_error(Some(metadata));
 }
 
@@ -502,6 +522,36 @@ fn validation_progress_metadata_from_observation(
         .and_then(|path| RunDir::from_existing(path.clone()).ok())
         .map(|run_dir| validation_progress_metadata(&run_dir))
         .unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn child_supervision_metadata_from_observation(observation: &TestObservation) -> serde_json::Value {
+    observation
+        .run_dir
+        .as_ref()
+        .and_then(|path| RunDir::from_existing(path.clone()).ok())
+        .and_then(|run_dir| {
+            std::fs::read_to_string(
+                run_dir.step_file(homeboy::core::engine::run_dir::files::CHILD_SUPERVISION),
+            )
+            .ok()
+        })
+        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
+        .map(|supervision| serde_json::json!({ "child_supervision": supervision }))
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn persist_child_supervision_artifact(observation: &TestObservation) {
+    let Some(run_dir) = observation
+        .run_dir
+        .as_ref()
+        .and_then(|path| RunDir::from_existing(path.clone()).ok())
+    else {
+        return;
+    };
+    observation.active.record_artifact_if_file(
+        "child_supervision",
+        &run_dir.step_file(homeboy::core::engine::run_dir::files::CHILD_SUPERVISION),
+    );
 }
 
 fn test_observation_command(component_id: &str, args: &TestArgs) -> String {
@@ -886,6 +936,73 @@ mod tests {
             assert!(artifacts
                 .iter()
                 .any(|artifact| artifact.kind == "validation_command_1_stderr"));
+            run_dir.cleanup();
+        });
+    }
+
+    #[test]
+    fn interrupted_test_observation_persists_parseable_partial_child_evidence() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let args = sample_args();
+            let run_dir = RunDir::create().expect("run dir");
+            std::fs::write(
+                run_dir.step_file(homeboy::core::engine::run_dir::files::CHILD_SUPERVISION),
+                r#"{
+                  "schema":"homeboy.child_supervision.v1",
+                  "status":"interrupted",
+                  "phase":"child",
+                  "command":"silent child",
+                  "child_pid":42,
+                  "started_at":"2026-01-01T00:00:00Z",
+                  "heartbeat_at":"2026-01-01T00:00:01Z",
+                  "finished_at":"2026-01-01T00:00:02Z",
+                  "timeout_ms":null,
+                  "cancellation_reason":"signal:15",
+                  "exit_code":143,
+                  "stdout_tail":"",
+                  "stderr_tail":""
+                }"#,
+            )
+            .expect("write child supervision");
+            let observation =
+                start_test_observation("homeboy", home.path(), &args, "test", Some(&run_dir))
+                    .expect("observation");
+            let run_id = observation.active.run_id().to_string();
+
+            finish_test_observation(
+                Some(observation),
+                &extension_test::TestRunWorkflowResult {
+                    status: "failed".to_string(),
+                    component: "homeboy".to_string(),
+                    exit_code: 143,
+                    test_counts: None,
+                    findings: None,
+                    failure_analysis_input: None,
+                    coverage: None,
+                    baseline_comparison: None,
+                    analysis: None,
+                    autofix: None,
+                    hints: None,
+                    test_scope: None,
+                    summary: None,
+                    raw_output: None,
+                    extension_phase_timings: Vec::new(),
+                },
+            );
+
+            let store = ObservationStore::open_initialized().expect("store");
+            let record = store.get_run(&run_id).expect("read").expect("record");
+            assert_eq!(record.status, "error");
+            assert_eq!(record.metadata_json["observation_status"], "interrupted");
+            assert_eq!(
+                record.metadata_json["child_supervision"]["cancellation_reason"],
+                "signal:15"
+            );
+            let artifacts = store.list_artifacts(&run_id).expect("artifacts");
+            assert!(artifacts
+                .iter()
+                .any(|artifact| artifact.kind == "child_supervision"));
             run_dir.cleanup();
         });
     }

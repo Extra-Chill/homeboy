@@ -25,6 +25,7 @@ use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
 use std::path::Path;
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct TestRunWorkflowArgs {
@@ -53,6 +54,16 @@ const NO_TESTS_APPLICABLE_FILE_ENV: &str = "HOMEBOY_NO_TESTS_APPLICABLE_FILE";
 const NO_TESTS_APPLICABLE_NONCE_ENV: &str = "HOMEBOY_NO_TESTS_APPLICABLE_NONCE";
 const NO_TESTS_APPLICABLE_EXTENSION_ENV: &str = "HOMEBOY_NO_TESTS_APPLICABLE_EXTENSION_ID";
 const NO_TESTS_APPLICABLE_STEP: &str = "test";
+const DEFAULT_TEST_TIMEOUT_SECONDS: u64 = 25 * 60;
+
+fn test_timeout() -> Duration {
+    std::env::var("HOMEBOY_TEST_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(DEFAULT_TEST_TIMEOUT_SECONDS))
+}
 
 #[derive(Deserialize)]
 struct NoTestsApplicableEvidence {
@@ -318,6 +329,12 @@ fn run_main_test_workflow_inner(
         vec![("test runner".to_string(), args.component_label.clone())],
     )?;
     progress.start(0)?;
+    let timeout = test_timeout();
+    homeboy_core::log_status!(
+        "test",
+        "phase=child command=test runner timeout={}s; streaming bounded child supervision",
+        timeout.as_secs()
+    );
     let output = runner
         .env_if(args.changed_since.is_some(), "SCOPE_MODE", "changed")
         .env_if(
@@ -331,6 +348,7 @@ fn run_main_test_workflow_inner(
             "1",
         )
         .script_args(&passthrough_args)
+        .timeout(Some(timeout))
         .run()?;
     let stdout_artifact = write_command_artifact(run_dir, 0, "stdout", &output.stdout)?;
     let stderr_artifact = write_command_artifact(run_dir, 0, "stderr", &output.stderr)?;
