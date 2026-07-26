@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use homeboy_core::gate::{
     HomeboyGateKind, HomeboyGateResult, HomeboyGateRevealPolicy, HomeboyGateStatus,
@@ -80,6 +81,14 @@ pub struct VerifyGateOptions {
     /// consumes declared schemas and paths; producer semantics remain opaque.
     #[serde(default)]
     pub gate_diagnostic_sidecars: Vec<AgentTaskGateDiagnosticSidecarMapping>,
+    /// Hydrate provider-declared dependency roots in the isolated candidate
+    /// checkout before deterministic verification.
+    #[serde(default = "default_hydrate_dependencies")]
+    pub hydrate_dependencies: bool,
+}
+
+fn default_hydrate_dependencies() -> bool {
+    true
 }
 
 /// Scheduling policy for a declared sequence of deterministic gates.
@@ -199,8 +208,145 @@ impl Default for VerifyGateOptions {
             gate_environment: AgentTaskGateEnvironmentPolicy::default(),
             gate_toolchains: Vec::new(),
             gate_diagnostic_sidecars: Vec::new(),
+            hydrate_dependencies: default_hydrate_dependencies(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateSetupEvidence {
+    pub schema: String,
+    pub package_root: String,
+    pub lock_identity: String,
+    pub setup_capability: String,
+    pub duration_ms: u128,
+    pub status: String,
+    pub output: String,
+}
+
+const MAX_GATE_DEPENDENCY_ROOTS: usize = 64;
+
+/// Discover only the checkout root and direct child roots. Provider resolution,
+/// package-manager detection, and install commands remain outside Homeboy core.
+pub(crate) fn hydrate_gate_dependency_roots(
+    checkout: &Path,
+    enabled: bool,
+) -> Result<Vec<AgentTaskGateSetupEvidence>> {
+    if !enabled {
+        return Ok(Vec::new());
+    }
+    let mut roots = vec![checkout.to_path_buf()];
+    for entry in fs::read_dir(checkout).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("read candidate dependency roots".to_string()),
+        )
+    })? {
+        let entry = entry.map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read candidate dependency root".to_string()),
+            )
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read candidate dependency root type".to_string()),
+            )
+        })?;
+        // A linked directory can escape the detached candidate checkout. Setup
+        // is allowed only in the candidate root or a real direct child.
+        if file_type.is_dir() && path.file_name().is_none_or(|name| name != ".git") {
+            roots.push(path);
+        }
+    }
+    roots.sort();
+    if roots.len() > MAX_GATE_DEPENDENCY_ROOTS {
+        return Err(Error::validation_invalid_argument(
+            "promotion.gate_setup",
+            format!(
+                "candidate declares more than {MAX_GATE_DEPENDENCY_ROOTS} dependency roots at the supported depth"
+            ),
+            Some(checkout.display().to_string()),
+            None,
+        ));
+    }
+    let mut evidence = Vec::new();
+    for root in roots {
+        // The identity is an input to setup, not a post-setup cache key. A
+        // provider that rewrites it has not verified the declared candidate.
+        let lock_identity = dependency_root_identity(&root)?;
+        let started = std::time::Instant::now();
+        if !homeboy_core::hygiene::materialize_worktree_dependencies(&root)? {
+            continue;
+        }
+        if dependency_root_identity(&root)? != lock_identity {
+            return Err(Error::validation_invalid_argument(
+                "promotion.gate_setup",
+                "dependency setup changed its declared lock identity",
+                Some(root.display().to_string()),
+                None,
+            ));
+        }
+        let relative = root
+            .strip_prefix(checkout)
+            .unwrap_or(&root)
+            .display()
+            .to_string();
+        evidence.push(AgentTaskGateSetupEvidence {
+            schema: "homeboy/agent-task-gate-setup/v1".to_string(),
+            package_root: if relative.is_empty() {
+                ".".to_string()
+            } else {
+                relative
+            },
+            lock_identity,
+            setup_capability: "dependency.install".to_string(),
+            duration_ms: started.elapsed().as_millis(),
+            status: "succeeded".to_string(),
+            output: "provider-declared dependency setup completed".to_string(),
+        });
+    }
+    Ok(evidence)
+}
+
+fn dependency_root_identity(root: &Path) -> Result<String> {
+    let mut inputs = Vec::new();
+    for entry in fs::read_dir(root).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("read dependency root identity".to_string()),
+        )
+    })? {
+        let path = entry
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("read dependency root identity entry".to_string()),
+                )
+            })?
+            .path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if path.is_file() && (name.ends_with(".lock") || name == "homeboy-deps.json") {
+            inputs.push((
+                name.to_string(),
+                fs::read(&path).map_err(|error| {
+                    Error::internal_io(error.to_string(), Some(path.display().to_string()))
+                })?,
+            ));
+        }
+    }
+    inputs.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut hasher = Sha256::new();
+    for (name, bytes) in inputs {
+        hasher.update(name.as_bytes());
+        hasher.update([0]);
+        hasher.update(bytes);
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

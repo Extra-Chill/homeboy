@@ -193,6 +193,7 @@ pub fn resume_promoted_patch(
             "artifact_metadata": artifact.metadata,
             "worktree_path": target_path,
             "dependencies_materialized": gates.dependencies_materialized,
+            "gate_setup": gates.setup,
             "candidate_checkout": gates.candidate_checkout,
             "candidate": candidate,
             "resumed_post_apply_promotion": true,
@@ -621,6 +622,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
                 "worktree_path": worktree_path,
                 "verified_revision": verified_revision,
                 "dependencies_materialized": gates.dependencies_materialized,
+                "gate_setup": gates.setup,
                 "candidate_checkout": gates.candidate_checkout,
                 "candidate": candidate,
             }),
@@ -777,6 +779,7 @@ pub(super) fn promote_with_provider_and_checkpoint(
             "artifact_metadata": artifact.metadata,
             "worktree_path": applied_worktree_path,
             "dependencies_materialized": gates.dependencies_materialized,
+            "gate_setup": gates.setup,
             "candidate_checkout": gates.candidate_checkout,
             "candidate": candidate,
             "destination_baseline": candidate,
@@ -1348,6 +1351,7 @@ fn promote_committed_changes(
             "artifact_metadata": artifact.map(|artifact| artifact.metadata.clone()).unwrap_or(Value::Null),
             "worktree_path": applied_worktree_path,
             "dependencies_materialized": gates.dependencies_materialized,
+            "gate_setup": gates.setup,
             "candidate_checkout": gates.candidate_checkout,
             "change_source": "local_commits",
             "base_ref": committed_patch.base_ref,
@@ -1389,7 +1393,32 @@ fn run_promotion_gates(
     // Materialize dependencies in the immutable checkout so repository-owned
     // verification sees the candidate as committed content, never the dirty
     // promotion target that finalization still owns.
-    homeboy_core::hygiene::materialize_worktree_dependencies(gate_path)?;
+    let setup = crate::agent_task_gate::hydrate_gate_dependency_roots(
+        gate_path,
+        options.gates.hydrate_dependencies,
+    )
+    .map_err(|error| {
+        let mut cause = serde_json::json!({
+            "classification": "candidate_setup",
+            "code": error.code.as_str(),
+            "message": bounded_setup_error_text(&error.message),
+        });
+        if let Some(details) = cause.as_object_mut() {
+            details.insert(
+                "details".to_string(),
+                serde_json::Value::String(bounded_setup_error_text(&error.details.to_string())),
+            );
+        }
+        Error::dependency_step_failed(
+            "promotion.gate_setup",
+            "candidate_checkout".to_string(),
+            None,
+            Vec::new(),
+            Vec::new(),
+            None,
+            Some(cause),
+        )
+    })?;
     let declared_gates = options
         .gates
         .verify
@@ -1457,9 +1486,22 @@ fn run_promotion_gates(
         status: status_for_report(options.dry_run, has_gate_failure),
         deterministic_gates,
         gate_results,
-        dependencies_materialized: true,
+        dependencies_materialized: !setup.is_empty(),
+        setup,
         candidate_checkout,
     })
+}
+
+fn bounded_setup_error_text(value: &str) -> String {
+    const MAX_BYTES: usize = 4096;
+    let mut result = String::new();
+    for character in value.chars() {
+        if result.len() + character.len_utf8() > MAX_BYTES {
+            break;
+        }
+        result.push(character);
+    }
+    result
 }
 
 /// A run-scoped detached worktree whose commit tree is exactly the promoted
