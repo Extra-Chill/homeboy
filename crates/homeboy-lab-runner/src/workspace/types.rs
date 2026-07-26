@@ -526,6 +526,8 @@ pub(crate) struct RunnerWorkspaceTerminalEvidence {
     pub final_outcome: String,
     pub lifecycle_owner: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup_trigger: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub retained_location: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reclaim_command: Option<String>,

@@ -1248,13 +1248,17 @@ pub(crate) fn run_lab_offload_inner(
         messages.push(warning);
     }
     let source_checkout = lab_source_checkout_metadata(&source_path);
-    let run_isolation_token = agent_task_dispatch_run_isolation_token(request.normalized_args);
+    // Every non-resident execution owns a mutable checkout. Durable agent-task
+    // attempts provide their own stable identity; ordinary commands get a fresh
+    // job identity so concurrent same-ref reviews cannot share a reapable cwd.
+    let run_isolation_token = agent_task_dispatch_run_isolation_token(request.normalized_args)
+        .unwrap_or_else(|| format!("lab-job:{}", uuid::Uuid::new_v4()));
     // Cook's public run id identifies the retry series. Persist pre-acceptance
     // Lab progress under its first attempt id so daemon acceptance advances the
     // same canonical lifecycle record instead of leaving a queued proxy behind.
     let pre_acceptance_lifecycle = ensure_agent_task_lifecycle_identity_with(
         request.normalized_args,
-        run_isolation_token.as_deref(),
+        Some(&run_isolation_token),
         None,
     );
     let pre_acceptance_run_id = pre_acceptance_lifecycle
@@ -1596,7 +1600,7 @@ pub(crate) fn run_lab_offload_inner(
         &source_path,
         &command_prefix.argv,
         Some(&runner_workspace_root),
-        run_isolation_token,
+        Some(run_isolation_token),
         pre_acceptance_lifecycle
             .as_ref()
             .map(|(args, _)| args.as_slice())

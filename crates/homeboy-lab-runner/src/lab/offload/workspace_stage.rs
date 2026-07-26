@@ -259,7 +259,10 @@ fn prepare_lab_offload_workspace_stage_inner(
         allow_dirty_lab_workspace: request.allow_dirty_lab_workspace,
         run_isolation_token: run_isolation_token.clone(),
     };
-    let synced = if request.reuse_compatible_snapshot {
+    // Compatible snapshots are mutable runner workspaces, not shared immutable
+    // source objects. A job-owned execution view must therefore materialize its
+    // own checkout instead of borrowing a snapshot another job may reap.
+    let synced = if request.reuse_compatible_snapshot && run_isolation_token.is_none() {
         reuse_compatible_snapshot_workspace(runner_id, &sync_options)?
             .map(|snapshot| (snapshot, 0))
             .unwrap_or(sync_workspace(runner_id, sync_options)?)

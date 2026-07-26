@@ -5,6 +5,8 @@ use crate::workspace::sync::{reap_run_workspace, sync_workspace, WORKSPACE_METAD
 use crate::workspace::types::{RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions};
 use crate::{MaterializedWorkspace, WorkspaceCleanupPolicy, WorkspaceTerminalOutcome};
 
+use super::git;
+
 fn sync_options(path: String) -> RunnerWorkspaceSyncOptions {
     RunnerWorkspaceSyncOptions {
         path,
@@ -399,5 +401,77 @@ fn job_runtime_cleanup_reaps_success_failure_and_cancellation_without_touching_r
                 "runner default"
             );
         }
+    });
+}
+
+#[test]
+fn concurrent_same_ref_jobs_keep_the_remaining_job_workspace_after_peer_reap() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        let source_parent = tempfile::tempdir().expect("source parent");
+        let source = source_parent.path().join("same-ref-source");
+        fs::create_dir_all(&source).expect("source dir");
+        fs::write(source.join("file.txt"), "same source revision\n").expect("source file");
+        git(&source, &["init"]);
+        git(&source, &["config", "user.email", "test@example.com"]);
+        git(&source, &["config", "user.name", "Test User"]);
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "-m", "same source revision"]);
+        git(
+            &source,
+            &["remote", "add", "origin", &source.display().to_string()],
+        );
+        create_local_runner("lab-local-concurrent-ownership", runner_root.path());
+
+        let mut first_options = sync_options(source.display().to_string());
+        first_options.mode = RunnerWorkspaceSyncMode::Git;
+        first_options.run_isolation_token = Some("job-lint".to_string());
+        let mut second_options = sync_options(source.display().to_string());
+        second_options.mode = RunnerWorkspaceSyncMode::Git;
+        second_options.run_isolation_token = Some("job-test".to_string());
+        let (first, _) = sync_workspace("lab-local-concurrent-ownership", first_options)
+            .expect("materialize lint workspace");
+        let (second, _) = sync_workspace("lab-local-concurrent-ownership", second_options)
+            .expect("materialize test workspace");
+
+        assert_ne!(first.remote_path, second.remote_path);
+        assert!(Path::new(&first.remote_path).join("file.txt").is_file());
+        assert!(Path::new(&second.remote_path).join("file.txt").is_file());
+        let metadata: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(Path::new(&second.remote_path).join(WORKSPACE_METADATA_FILE))
+                .expect("second metadata"),
+        )
+        .expect("metadata json");
+        assert_eq!(metadata["run_id"], "job-test");
+        assert!(metadata["workspace_lease"].as_str().is_some());
+
+        {
+            let mut first_handle = MaterializedWorkspace::new(
+                "lab-local-concurrent-ownership".to_string(),
+                first.remote_path.clone(),
+                None,
+                WorkspaceCleanupPolicy::DeleteAlways,
+            );
+            first_handle.set_terminal_outcome(WorkspaceTerminalOutcome::Success);
+        }
+
+        assert!(!Path::new(&first.remote_path).exists());
+        assert!(Path::new(&second.remote_path).is_dir());
+        assert_eq!(
+            fs::read_to_string(Path::new(&second.remote_path).join("file.txt"))
+                .expect("second job cwd remains readable"),
+            "same source revision\n"
+        );
+
+        {
+            let mut second_handle = MaterializedWorkspace::new(
+                "lab-local-concurrent-ownership".to_string(),
+                second.remote_path.clone(),
+                None,
+                WorkspaceCleanupPolicy::DeleteAlways,
+            );
+            second_handle.set_terminal_outcome(WorkspaceTerminalOutcome::Success);
+        }
+        assert!(!Path::new(&second.remote_path).exists());
     });
 }
