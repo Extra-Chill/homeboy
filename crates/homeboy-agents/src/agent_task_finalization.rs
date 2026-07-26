@@ -76,6 +76,8 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         validate_gate_proof_binding(&gate_proof, &options)?;
         let eligibility =
             validate_durable_publication_eligibility(&lifecycle, &gate_proof.promotion)?;
+        let review_form_only_follow_up =
+            is_review_form_only_follow_up(&gate_proof.promotion, &options.run_id);
         durable_changed_files = normalize_changed_files(&gate_proof.promotion.changed_files);
         if normalize_changed_files(&options.changed_files) != durable_changed_files {
             return Err(changed_files_mismatch_error(
@@ -93,12 +95,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
                 None,
             ));
         }
-        if eligibility == DurablePublicationEligibility::ProviderRun
-            && !options
-                .review_dossier
-                .ai_assistance
-                .model
-                .contains("; review form:")
+        if eligibility == DurablePublicationEligibility::ProviderRun && !review_form_only_follow_up
         {
             options.review_dossier.ai_assistance.model = durable_model(&lifecycle)?;
         }
@@ -439,6 +436,22 @@ fn validate_gate_proof_binding(
         ));
     }
     Ok(())
+}
+
+/// A form-only continuation has two authenticated provider executions to
+/// disclose. Its terminal promotion is the durable boundary that preserves the
+/// composed model attribution rather than replacing it with the form provider.
+fn is_review_form_only_follow_up(promotion: &AgentTaskPromotionReport, run_id: &str) -> bool {
+    promotion
+        .provenance
+        .pointer("/cook_follow_up/kind")
+        .and_then(serde_json::Value::as_str)
+        == Some("review_form_only")
+        && promotion
+            .provenance
+            .pointer("/cook_follow_up/source_run_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|source_run_id| !source_run_id.is_empty() && source_run_id != run_id)
 }
 
 fn validate_green_gates(gates: &[HomeboyGateResult]) -> Result<()> {

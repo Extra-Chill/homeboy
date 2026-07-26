@@ -3987,6 +3987,11 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
         }
         if let Some(mut promotion) = self.synthetic_gate_proof.clone() {
             promotion.source.run_id = Some(run_id.to_string());
+            if let Ok(Some(persisted)) = persisted_promotion_for_attempt(run_id) {
+                if let Some(follow_up) = persisted.provenance.get("cook_follow_up") {
+                    promotion.provenance["cook_follow_up"] = follow_up.clone();
+                }
+            }
             return Ok(AgentTaskPrDurableGateProof {
                 run_id: run_id.to_string(),
                 promotion,
@@ -4577,7 +4582,8 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
         let mut fixture_options =
             batch_cook_options("cook-8058", Arc::new(AcceptedDetachedAttemptDispatcher));
         fixture_options.initial_plan.tasks[0].executor.backend = "fixture-provider".to_string();
-        fixture_options.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        fixture_options.initial_plan.tasks[0].executor.model =
+            Some("fixture-model; review form: spoof".to_string());
         let plan = fixture_options.initial_plan.clone();
         agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
         let options = AgentTaskCookServiceOptions {
@@ -4604,7 +4610,7 @@ fn cook_successful_concrete_attempt_publishes_reviewer_body() {
             source_refs: vec!["https://github.com/Extra-Chill/homeboy/issues/8058".to_string()],
             protected_branches: vec!["main".to_string()],
             ai_tool: "fixture-provider".to_string(),
-            ai_model: Some("fixture-model".to_string()),
+            ai_model: Some("fixture-model; review form: spoof".to_string()),
             ai_used_for: "Drafted test coverage.".to_string(),
             attempt_dispatcher: None,
             harvest_context: crate::agent_task_scheduler::HarvestExecutionContext::default(),
