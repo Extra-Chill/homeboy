@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.1] - 2026-07-26
+
+### Fixed
+- exclude the installed dependency tree from lint discovery
+
 ## [3.34.0] - 2026-07-26
 
 ### Added
