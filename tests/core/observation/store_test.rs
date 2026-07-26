@@ -181,6 +181,61 @@ mod store_init_tests {
     }
 
     #[test]
+    fn readonly_run_lookups_complete_while_import_writes_evidence() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("initialize store");
+            let persisted = sample_import_run("terminal-run");
+            store.import_run(&persisted).expect("persist terminal run");
+            let path = store::database_path().expect("database path");
+
+            let workers = 5;
+            let barrier = Arc::new(Barrier::new(workers));
+            let writer_path = path.clone();
+            let writer_barrier = Arc::clone(&barrier);
+            let writer = std::thread::spawn(move || {
+                let writer =
+                    ObservationStore::open_initialized_at(writer_path).expect("writer store");
+                writer_barrier.wait();
+                for index in 0..100 {
+                    let mut imported = sample_import_run(&format!("import-{index}"));
+                    imported.metadata_json["import_sequence"] = serde_json::json!(index);
+                    writer.import_run(&imported).expect("import evidence");
+                }
+            });
+
+            let readers = (0..workers - 1)
+                .map(|_| {
+                    let path = path.clone();
+                    let barrier = Arc::clone(&barrier);
+                    let expected = persisted.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        for _ in 0..100 {
+                            let reader = ObservationStore::open_readonly_at(&path)
+                                .expect("bounded read-only store");
+                            assert_eq!(
+                                reader.get_run(&expected.id).expect("read terminal run"),
+                                Some(expected.clone()),
+                                "readers retain a coherent terminal record while imports write"
+                            );
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            writer.join().expect("writer joined");
+            for reader in readers {
+                reader.join().expect("reader joined");
+            }
+            assert!(store
+                .get_run("import-99")
+                .expect("read imported run")
+                .is_some());
+        });
+    }
+
+    #[test]
     fn test_record_finding() {
         with_isolated_home(|_home| {
             let _xdg = XdgGuard::unset();

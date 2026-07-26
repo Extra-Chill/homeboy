@@ -99,9 +99,7 @@ pub struct RunsDossierCommandHint {
 }
 
 pub fn runs_dossier(run_id: &str) -> CmdResult<RunsOutput> {
-    let store = ObservationStore::open_initialized()?;
-    reconcile::reconcile_owned_stale_running_runs(&store, 1000)?;
-    runs_service::refresh_mirrored_daemon_evidence_best_effort(run_id);
+    let store = ObservationStore::open_readonly()?;
     let run = runs_service::require_run(&store, run_id)?;
     let artifacts = runs_service::list_artifacts_for_run(&store, run_id)?;
     let artifact_index = evidence_report::evidence_artifact_index(&artifacts);

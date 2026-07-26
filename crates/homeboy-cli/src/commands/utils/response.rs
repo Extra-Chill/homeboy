@@ -425,6 +425,8 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         | ErrorCode::DeployUploadFailed
         | ErrorCode::GitCommandFailed => 20,
 
+        ErrorCode::ObservationStoreBusy => 20,
+
         // A contended runtime promotion (another owner holds the lease) is a
         // transient "busy" condition, not a hard failure — map it to the
         // general error code alongside the other internal/unexpected states.

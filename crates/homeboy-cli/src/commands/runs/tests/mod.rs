@@ -475,7 +475,7 @@ fn runs_dossier_aggregates_failure_env_refs_artifacts_and_commands() {
 }
 
 #[test]
-fn run_show_reconciles_owned_dead_running_run_before_displaying() {
+fn run_show_reads_owned_dead_running_run_without_mutating_it() {
     with_isolated_home(|_home| {
         let _xdg = XdgGuard::unset();
         let store = ObservationStore::open_initialized().expect("store");
@@ -486,11 +486,8 @@ fn run_show_reconciles_owned_dead_running_run_before_displaying() {
         let RunsOutput::Show(output) = output else {
             panic!("expected show output");
         };
-        assert_eq!(output.run.summary.status, "stale");
-        assert_eq!(
-            output.run.metadata["homeboy_reconciled"]["reason"],
-            "owner_process_not_running"
-        );
+        assert_eq!(output.run.summary.status, "running");
+        assert!(output.run.metadata.get("homeboy_reconciled").is_none());
     });
 }
 

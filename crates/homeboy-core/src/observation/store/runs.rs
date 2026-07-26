@@ -27,6 +27,31 @@ impl ObservationStore {
         Ok(Self { connection, path })
     }
 
+    /// Open an existing observation database without any initialization work.
+    /// Metadata readers use this so they never contend for the global writer
+    /// lock merely to inspect a persisted run.
+    pub fn open_readonly() -> Result<Self> {
+        Self::open_readonly_at(database_path()?)
+    }
+
+    pub fn open_readonly_at(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        if !path.exists() {
+            // Preserve the normal "run not found" contract without creating a
+            // database merely because a metadata reader was invoked first.
+            let connection = rusqlite::Connection::open_in_memory()
+                .map_err(sqlite_error("open empty read-only observation store"))?;
+            connection
+                .execute_batch(
+                    "CREATE TABLE runs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, component_id TEXT, started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL, command TEXT, cwd TEXT, homeboy_version TEXT, git_sha TEXT, rig_id TEXT, metadata_json TEXT NOT NULL DEFAULT '{}');",
+                )
+                .map_err(sqlite_error("create empty read-only observation store"))?;
+            return Ok(Self { connection, path });
+        }
+        let connection = schema::open_readonly_connection(&path)?;
+        Ok(Self { connection, path })
+    }
+
     pub fn status(&self) -> Result<ObservationDbStatus> {
         schema::status_for_open_connection(&self.connection, self.path.clone(), true)
     }
@@ -207,7 +232,17 @@ impl ObservationStore {
                 row_to_run_record,
             )
             .optional()
-            .map_err(sqlite_error("read run record"))
+            .map_err(|error| {
+                if is_transient_lock_error(&error) {
+                    Error::observation_store_busy(
+                        self.path.to_string_lossy(),
+                        "read run record",
+                        750,
+                    )
+                } else {
+                    sqlite_error("read run record")(error)
+                }
+            })
     }
 
     pub fn list_runs(&self, filter: RunListFilter) -> Result<Vec<RunRecord>> {
