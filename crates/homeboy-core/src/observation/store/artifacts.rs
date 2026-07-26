@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -543,22 +543,70 @@ impl ObservationStore {
 
     pub fn list_artifacts(&self, run_id: &str) -> Result<Vec<ArtifactRecord>> {
         validate_required("run_id", run_id)?;
+        let columns = self.artifact_columns_for_read()?;
+        let artifact_type = columns
+            .contains("artifact_type")
+            .then_some("artifact_type")
+            .unwrap_or("'file'");
+        let url = columns.contains("url").then_some("url").unwrap_or("NULL");
+        let public_url = columns
+            .contains("public_url")
+            .then_some("public_url")
+            .unwrap_or("NULL");
+        let viewer_url = columns
+            .contains("viewer_url")
+            .then_some("viewer_url")
+            .unwrap_or("NULL");
+        let viewer_links = columns
+            .contains("viewer_links_json")
+            .then_some("viewer_links_json")
+            .unwrap_or("'[]'");
+        let metadata = columns
+            .contains("metadata_json")
+            .then_some("metadata_json")
+            .unwrap_or("'{}'");
         let mut statement = self
             .connection
-            .prepare(
+            .prepare(&format!(
                 r#"
-                SELECT id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at
+                SELECT id, run_id, kind, {}, path, {}, {}, {}, {}, sha256, size_bytes, mime, {}, created_at
                 FROM artifacts
                 WHERE run_id = ?1
                 ORDER BY created_at ASC
                 "#,
-            )
-            .map_err(sqlite_error("prepare list artifact records"))?;
+                artifact_type,
+                url,
+                public_url,
+                viewer_url,
+                viewer_links,
+                metadata,
+            ))
+            .map_err(|error| self.read_error("prepare list artifact records", error))?;
         let rows = statement
             .query_map([run_id], row_to_artifact_record)
-            .map_err(sqlite_error("list artifact records"))?;
+            .map_err(|error| self.read_error("list artifact records", error))?;
 
-        collect_rows(rows, "collect artifact records")
+        let mut artifacts = Vec::new();
+        for row in rows {
+            artifacts
+                .push(row.map_err(|error| self.read_error("collect artifact records", error))?);
+        }
+        Ok(artifacts)
+    }
+
+    fn artifact_columns_for_read(&self) -> Result<HashSet<String>> {
+        let mut statement = self
+            .connection
+            .prepare("PRAGMA table_info(artifacts)")
+            .map_err(|error| self.read_error("prepare artifact schema inspection", error))?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|error| self.read_error("inspect artifact schema", error))?;
+        let mut columns = HashSet::new();
+        for row in rows {
+            columns.insert(row.map_err(|error| self.read_error("collect artifact schema", error))?);
+        }
+        Ok(columns)
     }
 
     pub fn update_artifact_metadata(

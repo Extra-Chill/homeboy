@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 use super::{sqlite_error, ObservationDbStatus};
 use crate::{paths, Result};
@@ -278,6 +278,27 @@ pub(crate) fn open_connection(path: &Path) -> Result<Connection> {
     let _ = connection.pragma_update(None, "journal_mode", "WAL");
     let _ = connection.pragma_update(None, "synchronous", "NORMAL");
     Ok(connection)
+}
+
+/// Open an existing observation store for a bounded metadata read.
+///
+/// This deliberately skips migrations and journal-mode configuration: both can
+/// acquire writer locks even though the caller only needs persisted metadata.
+pub(crate) fn open_readonly_connection(path: &Path) -> Result<Connection> {
+    const READ_TIMEOUT: Duration = Duration::from_millis(750);
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| read_store_error(path, "open read-only observation store", error))?;
+    connection
+        .busy_timeout(READ_TIMEOUT)
+        .map_err(|error| read_store_error(path, "configure read-only observation store", error))?;
+    Ok(connection)
+}
+
+fn read_store_error(path: &Path, operation: &str, error: rusqlite::Error) -> crate::Error {
+    if super::is_transient_lock_error(&error) {
+        return crate::Error::observation_store_busy(path.to_string_lossy(), operation, 750);
+    }
+    sqlite_error(format!("{operation} {}", path.display()))(error)
 }
 
 fn apply_migration_sql(connection: &Connection, migration: &Migration) -> Result<()> {

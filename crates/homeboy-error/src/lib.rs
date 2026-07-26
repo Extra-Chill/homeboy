@@ -65,6 +65,8 @@ pub enum ErrorCode {
 
     GitCommandFailed,
 
+    ObservationStoreBusy,
+
     InternalIoError,
     InternalJsonError,
     InternalUnexpected,
@@ -126,6 +128,8 @@ impl ErrorCode {
             ErrorCode::DeployUploadFailed => "deploy.upload_failed",
 
             ErrorCode::GitCommandFailed => "git.command_failed",
+
+            ErrorCode::ObservationStoreBusy => "observation_store.busy",
 
             ErrorCode::InternalIoError => "internal.io_error",
             ErrorCode::InternalJsonError => "internal.json_error",
@@ -329,6 +333,17 @@ pub struct InternalIoErrorDetails {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ObservationStoreBusyDetails {
+    pub path: String,
+    pub operation: String,
+    pub timeout_ms: u64,
+    /// SQLite does not expose the process owning its advisory lock.
+    pub lock_owner: String,
+    /// SQLite does not expose lock acquisition time.
+    pub lock_age_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
 
 pub struct InternalJsonErrorDetails {
     pub error: String,
@@ -415,6 +430,30 @@ impl Error {
             hints: Vec::new(),
             retryable: None,
         }
+    }
+
+    pub fn observation_store_busy(
+        path: impl Into<String>,
+        operation: impl Into<String>,
+        timeout_ms: u64,
+    ) -> Self {
+        let path = path.into();
+        let operation = operation.into();
+        Self::new(
+            ErrorCode::ObservationStoreBusy,
+            format!("Observation store remained locked while attempting {operation}"),
+            to_details(ObservationStoreBusyDetails {
+                path,
+                operation,
+                timeout_ms,
+                lock_owner: "unknown (SQLite does not expose lock ownership)".to_string(),
+                lock_age_ms: None,
+            }),
+        )
+        .with_retryable(true)
+        .with_hint(
+            "Retry `homeboy runs show <run-id>` after the active import or writer completes.",
+        )
     }
 
     pub fn validation_missing_argument(args: Vec<String>) -> Self {

@@ -46,6 +46,7 @@ pub struct RunArtifactRecord {
 pub struct ObservationStore {
     connection: Connection,
     path: PathBuf,
+    readonly: bool,
 }
 
 pub fn database_path() -> Result<PathBuf> {

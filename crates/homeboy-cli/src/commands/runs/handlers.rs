@@ -240,12 +240,8 @@ fn active_runner_job_run_summary_if_durable(
 }
 
 pub fn show_run(run_id: &str) -> CmdResult<RunsOutput> {
-    let store = ObservationStore::open_initialized()?;
+    let store = ObservationStore::open_readonly()?;
     let run = runs_service::require_run(&store, run_id)?;
-    runs_service::refresh_selected_mirrored_daemon_evidence_best_effort(&store, &run);
-    let run = runs_service::require_run(&store, &run.id)?;
-    reconcile::reconcile_owned_stale_running_runs(&store, 1000)?;
-    let run = runs_service::require_run(&store, &run.id)?;
     let run = run_detail(&store, run)?;
     let actionable = actionable_for_run_detail(&run);
     Ok((
