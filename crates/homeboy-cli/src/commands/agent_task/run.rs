@@ -283,20 +283,28 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
         );
     }
 
-    if let Ok(resolution) =
-        homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
-            &args.to_worktree,
-            &defaults::load_config(),
-            None,
-        )
-    {
-        homeboy::core::worktree_providers::validate_task_worktree_root(
-            Path::new(&resolution.worktree.path),
-            &args.to_worktree,
-        )?;
-        return Ok(
-            serde_json::json!({ "action": "existing", "kind": "provider", "provider": resolution.provider_id, "handle": resolution.worktree.handle, "path": resolution.worktree.path, "branch": resolution.worktree.branch }),
-        );
+    let config = defaults::load_config();
+    match homeboy::core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
+        &args.to_worktree,
+        &config,
+        None,
+    ) {
+        Ok(resolution) => {
+            homeboy::core::worktree_providers::validate_task_worktree_root(
+                Path::new(&resolution.worktree.path),
+                &args.to_worktree,
+            )?;
+            return Ok(
+                serde_json::json!({ "action": "existing", "kind": "provider", "provider": resolution.provider_id, "handle": resolution.worktree.handle, "path": resolution.worktree.path, "branch": resolution.worktree.branch }),
+            );
+        }
+        Err(error)
+            if error
+                .details
+                .get("worktree_provider_lookup")
+                .and_then(Value::as_str)
+                == Some("not_found") => {}
+        Err(error) => return Err(error),
     }
 
     let repo = args.dispatch.repo.clone().ok_or_else(|| {
@@ -323,7 +331,7 @@ pub(crate) fn provision_cook_destination(args: &AgentTaskCookArgs) -> homeboy::c
             head,
             task_url,
         },
-        &defaults::load_config(),
+        &config,
     )
     .map(|provision| {
         serde_json::json!({
