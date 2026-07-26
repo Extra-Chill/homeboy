@@ -1648,6 +1648,8 @@ mod tests {
                 rerun_completed_gates: false,
                 gate_environment_mode: "inherit".to_string(),
                 gate_environment: Vec::new(),
+                gate_environment_preserve: Vec::new(),
+                gate_toolchains: Vec::new(),
                 isolate_gate_home: true,
                 isolate_gate_xdg: true,
             },
