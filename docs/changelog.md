@@ -4,6 +4,148 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.315.0] - 2026-07-26
+
+### Added
+- add component harvest
+
+### Changed
+- extract durable promotion job service
+- confine offload request fixtures
+- cover bounded cache tool probes
+- close candidate policy contracts
+- prove retained workspace ttl reaping
+- unsafe candidate concurrency
+- cover compact and full status
+- initialize extension env requests
+- cover deploy recovery checkpoint
+- cover log follow transport recovery
+- cover linked worktree metadata swaps
+- format no-test policy
+
+### Fixed
+- point failed gates at a command that runs them
+- deploy the tag the release actually created
+- preserve green no-finalize results
+- make controller recovery idempotent
+- extract controller job service
+- harden workspace attestations
+- scope promotion lock isolation
+- reject ambiguous runner artifact identities
+- retain artifacts before workspace reap
+- isolate promotion lock gate state
+- attest isolated provider workspaces
+- default offload test requests
+- share effective remote path resolution
+- retain selected candidate on resume
+- scope cache restore rollback
+- expose candidate completion policy
+- persist cache lifecycle evidence
+- keep uncertain handoffs fail-closed
+- make runner terminal recovery idempotent
+- preserve deferred candidate recovery
+- select isolated candidate attempts
+- persist terminal workspace evidence
+- recover evicted runner terminal evidence
+- complete dependency cache lifecycle
+- wire nested crate harnesses
+- preserve materialized rig component paths
+- retain planner runner for dry runs
+- prefer runner cancellation authority
+- harden materialization cache restores
+- scan crate test harness wiring
+- select concurrent candidates
+- retain failure workspaces through ttl
+- reconcile accepted runner terminal races
+- cache dependency materialization outputs
+- make planned Lab commands executable
+- bind fuzz paths to component checkout
+- classify Cook continuation workload
+- project new fleet drift states
+- redact extension env secrets
+- inject extension env on selected runner
+- bind disconnect to authoritative daemon
+- keep canonical status read-only
+- validate cook sources before runtime pinning
+- harden content drift manifests
+- reconcile missing aggregate resumes
+- report remote discovery truthfully
+- upload durable assets under canonical names
+- preflight cook prompt sources
+- verify daemon endpoint before disconnect
+- keep rig list local
+- resume terminal attempts without aggregates
+- canonicalize patch candidate status
+- detect remote content drift
+- dedupe canonical GitHub assets
+- align metadata read routing docs
+- claim managed cook continuations
+- retain artifact run identity in inspect
+- tighten provider discovery bounds
+- persist adopted gate reconciliation
+- make provider migration example runnable
+- retain promoted dirty safety refusal
+- capture resolved provenance
+- finalize adopted baseline gate evidence
+- diagnose legacy cook provider flags
+- add managed cook continuation command
+- exempt bounded metadata reads from resource policy
+- preserve execution placement provenance
+- bound provider and runner discovery output
+- summarize failed run root causes
+- preserve dirty provider diagnostics
+- initialize prepared projection
+- resume failed deploy targets
+- prevent provider output deadlocks
+- project terminal foreground progress
+- route reconciliation to owning runner
+- accept token-scoped daemon lease
+- recover initial log snapshot
+- revalidate finalization identity on resume
+- preserve deploy recovery intent
+- preserve changed-since reference semantics
+- run changed-scope detector once
+- scope stale reconciliation
+- report foreground lifecycle progress
+- resume job log follow after tunnel loss
+- bind finalization publication identity
+- bound provider liveness
+- retry tokenless daemon startup
+- preserve deploy source projection
+- preserve escaped declaration replay keys
+- attest linked git metadata
+- resume directory artifact promotion
+- finalize synchronous exec evidence
+- attest follow-up baseline transitions
+- make artifact promotion replay-safe
+- attest baseline workspace transitions
+- checkpoint evidence before retirement
+- attest provider workspace identity
+- bind no-test evidence to invocation
+- recover terminal exec evidence
+- bind payloads to effective run id
+- bind workspace identity before spawn
+- make lock-bypassing probes read-only
+- validate no-test evidence markers
+- scope bounded payload artifacts
+- fence nested promotion leases
+- support direct task worktree paths
+- validate terminal exec bindings
+- fail closed on missing execution evidence
+- recover interrupted promotion leases
+- keep diagnostics responsive during runtime promotion
+- bound persisted evidence payloads
+- reject primary workspace dispatch
+- project terminal exec runs
+- fail dependency preflight on installer errors
+- resolve managed worktrees to their registered component
+- resolve managed task worktrees like git status
+- repair initial attempt alias after restart
+- publish output after lifecycle materialization
+- delay output run identity until durable
+- harden output lease ownership
+- claim output files before dispatch
+
 ## [0.314.2] - 2026-07-25
 
 ### Changed
