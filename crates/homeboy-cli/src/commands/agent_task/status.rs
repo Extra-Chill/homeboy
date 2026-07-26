@@ -7,6 +7,7 @@
 
 use serde::Serialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 use homeboy::agents::agent_task_service as agent_task_service_direct;
@@ -36,6 +37,7 @@ use crate::commands::utils::response::{
 const COMPACT_REF_LIMIT: usize = 12;
 const COMPACT_TASK_LIMIT: usize = 12;
 const COMPACT_TEXT_LIMIT: usize = 512;
+const FULL_TEXT_LIMIT: usize = 4 * 1024;
 
 pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     if args.bridge {
@@ -71,6 +73,7 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     enrich_with_diagnostic_summary(&mut value, &args.run_id)?;
     attach_transport_proxy_recovery_guidance(&mut value, &args.run_id);
     if args.full {
+        bound_full_reader_payload(&mut value);
         attach_agent_task_status_actionable(&mut value, &args.run_id);
         return Ok((value, 0));
     }
@@ -78,6 +81,28 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     let mut summary = summary;
     attach_agent_task_status_actionable(&mut summary, &args.run_id);
     Ok((summary, 0))
+}
+
+/// Full recovery output remains a local reader: retain a stable digest for a
+/// large value instead of repeating multi-attempt patches in every projection.
+fn bound_full_reader_payload(value: &mut Value) {
+    match value {
+        Value::String(text) if text.len() > FULL_TEXT_LIMIT => {
+            let digest = Sha256::digest(text.as_bytes());
+            *text = format!("[omitted {} bytes; sha256={:x}]", text.len(), digest);
+        }
+        Value::Array(items) => {
+            for item in items {
+                bound_full_reader_payload(item);
+            }
+        }
+        Value::Object(fields) => {
+            for item in fields.values_mut() {
+                bound_full_reader_payload(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn is_missing_agent_task_run_metadata_error(error: &homeboy::core::Error) -> bool {

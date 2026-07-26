@@ -1876,6 +1876,36 @@ fn provider_failure_surfaces_bounded_stdout_and_stderr_evidence() {
 }
 
 #[test]
+fn configured_provider_timeout_is_bounded_and_retains_command_evidence() {
+    let request = AgentTaskPromotionApplyRequest {
+        schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),
+        to_workspace: "target-workspace".to_string(),
+        patch: None,
+        patch_path: "changes.patch".to_string(),
+        changed_files: vec!["src/lib.rs".to_string()],
+        gate_feedback_baseline: None,
+        dry_run: false,
+        trusted_unpushed_candidate_destination: None,
+    };
+    let started = std::time::Instant::now();
+    let error = run_provider_command(
+        &CommandInvocation {
+            argv: vec!["sh".to_string(), "-c".to_string(), "sleep 2".to_string()],
+            ..Default::default()
+        },
+        &request,
+    )
+    .expect_err("silent provider must be terminated");
+
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert!(error.message.contains("timed out"));
+    assert_eq!(
+        error.details["command_evidence"]["command"],
+        "sh -c sleep 2"
+    );
+}
+
+#[test]
 fn provider_response_validation_distinguishes_json_schema_and_required_field_errors() {
     let request = AgentTaskPromotionApplyRequest {
         schema: AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA.to_string(),

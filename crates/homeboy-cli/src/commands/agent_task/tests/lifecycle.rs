@@ -1431,6 +1431,49 @@ fn evidence_command_truncates_large_file_evidence() {
     });
 }
 
+#[test]
+fn promotion_heavy_30kb_fixture_keeps_status_and_diagnose_bounded() {
+    with_isolated_home(|_| {
+        let run_id = "run-cli-promotion-heavy-reader";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("seed run");
+        let patch = "x".repeat(30 * 1024);
+        for attempt in 1..=3 {
+            agent_task_lifecycle::record_promotion(
+                run_id,
+                json!({
+                    "attempt": attempt,
+                    "provenance": { "gate_feedback_baseline": { "current_diff": patch } },
+                }),
+            )
+            .expect("persist multi-attempt promotion fixture");
+        }
+
+        let started = std::time::Instant::now();
+        let (status_value, _) = status(StatusArgs {
+            run_id: run_id.to_string(),
+            full: true,
+            bridge: false,
+            since_cursor: None,
+        })
+        .expect("read status without a runner");
+        let (diagnose_value, _) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: true,
+        })
+        .expect("diagnose without a runner");
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        let rendered = status_value.to_string();
+        assert!(
+            rendered.len() < 20 * 1024,
+            "full status must deduplicate large diff payloads"
+        );
+        assert!(!rendered.contains(&patch));
+        assert!(rendered.contains("sha256="));
+        assert_eq!(diagnose_value["schema"], "homeboy/agent-task-diagnose/v1");
+    });
+}
+
 struct EvidenceFixtureExecutor {
     run_id: String,
     file_uri: String,
