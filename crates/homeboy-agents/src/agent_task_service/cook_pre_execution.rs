@@ -31,15 +31,30 @@ use super::AgentTaskRunResult;
 pub(crate) fn materialize_initial_cook_attempt(
     options: &AgentTaskCookServiceOptions,
 ) -> Result<()> {
-    if agent_task_lifecycle::run_record_exists(&options.initial_run_id)? {
-        return ensure_initial_cook_attempt_index(options);
+    materialize_cook_attempt(
+        &options.cook_id,
+        &options.initial_run_id,
+        &options.initial_plan,
+    )
+}
+
+/// Complete recipe, run-record, and index registration for an attempt. Each
+/// write is independently durable, so replay must repair whichever suffix of
+/// the sequence was interrupted.
+pub(crate) fn materialize_cook_attempt(
+    cook_id: &str,
+    run_id: &str,
+    plan: &AgentTaskPlan,
+) -> Result<()> {
+    if agent_task_lifecycle::run_record_exists(run_id)? {
+        return ensure_cook_attempt_index(cook_id, run_id);
     }
-    match agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&options.initial_run_id)) {
-        Ok(_) => ensure_initial_cook_attempt_index(options),
+    match agent_task_lifecycle::submit_plan(plan, Some(run_id)) {
+        Ok(_) => ensure_cook_attempt_index(cook_id, run_id),
         Err(error) => {
             // `submit_plan` persists admission failures before returning them.
-            if agent_task_lifecycle::run_record_exists(&options.initial_run_id)? {
-                ensure_initial_cook_attempt_index(options)?;
+            if agent_task_lifecycle::run_record_exists(run_id)? {
+                ensure_cook_attempt_index(cook_id, run_id)?;
             }
             Err(error)
         }
@@ -49,27 +64,27 @@ pub(crate) fn materialize_initial_cook_attempt(
 /// Complete the second half of initial-attempt materialization after a crash.
 /// The recipe and run record are independent durable writes, so their exact
 /// identities must agree before repairing the alias/index projection.
-fn ensure_initial_cook_attempt_index(options: &AgentTaskCookServiceOptions) -> Result<()> {
-    let recipe = super::cook_recipe::load_recipe(&options.cook_id)?;
+fn ensure_cook_attempt_index(cook_id: &str, run_id: &str) -> Result<()> {
+    let recipe = super::cook_recipe::load_recipe(cook_id)?;
     let attempt = recipe
         .attempts
         .iter()
-        .find(|attempt| attempt.run_id == options.initial_run_id)
+        .find(|attempt| attempt.run_id == run_id)
         .ok_or_else(|| {
             Error::validation_invalid_argument(
                 "cook_recipe.attempts",
-                "durable cook recipe does not declare the initial run id",
-                Some(options.initial_run_id.clone()),
+                "durable cook recipe does not declare the run id",
+                Some(run_id.to_string()),
                 None,
             )
         })?;
-    let record = agent_task_lifecycle::exact_record(&options.initial_run_id)?;
+    let record = agent_task_lifecycle::exact_record(run_id)?;
     if let Some(cook_id) = record.metadata.get("cook_id").and_then(Value::as_str) {
         if cook_id != recipe.cook_id {
             return Err(Error::validation_invalid_argument(
                 "cook_id",
                 "durable run record belongs to a different Cook",
-                Some(options.initial_run_id.clone()),
+                Some(run_id.to_string()),
                 None,
             ));
         }
@@ -79,7 +94,7 @@ fn ensure_initial_cook_attempt_index(options: &AgentTaskCookServiceOptions) -> R
             return Err(Error::validation_invalid_argument(
                 "cook_attempt",
                 "durable run record belongs to a different Cook attempt",
-                Some(options.initial_run_id.clone()),
+                Some(run_id.to_string()),
                 None,
             ));
         }
