@@ -479,7 +479,7 @@ fn prepare_payload(
         let cleanup = GeneratedSourceArtifactCleanup::new(&component)?;
         let (build_exit_code, build_error) = homeboy_extension::build::build_component(&component);
         if let Some(message) = build_error {
-            return Err(Error::validation_invalid_argument(
+            let mut error = Error::validation_invalid_argument(
                 "build",
                 format!(
                     "Build failed (exit code {}): {message}",
@@ -487,7 +487,14 @@ fn prepare_payload(
                 ),
                 None,
                 None,
-            ));
+            );
+            // Carry the build exit code structurally. Consumers (deploy failure
+            // reporting) read `details.exit_code` instead of parsing the human
+            // message, so rewording the message above cannot lose the code.
+            if let (Some(code), Some(details)) = (build_exit_code, error.details.as_object_mut()) {
+                details.insert("exit_code".to_string(), serde_json::Value::from(code));
+            }
+            return Err(error);
         }
         generated_source_artifact = Some(cleanup);
     }
