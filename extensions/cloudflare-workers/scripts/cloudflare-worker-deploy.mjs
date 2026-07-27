@@ -1,35 +1,37 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 
 const SCHEMA = 'homeboy/cloudflare-worker-deploy-result/v1';
 const MAX_GATE_BODY_BYTES = 65536;
+const MAX_SECRET_INPUT_BYTES = 65536;
 
 async function main() {
   const contract = JSON.parse(await readFile(requiredArgument('--contract'), 'utf8'));
   validate(contract);
-  const root = resolve(contract.repository.worktree);
+  let root;
+  try { root = await realpath(resolve(contract.repository.worktree)); } catch { throw fail('invalid_contract', 'Declared repository worktree is unavailable.'); }
   const secretValues = [];
   const redact = (value) => secretValues.reduce((text, secret) => String(text).split(String(secret)).join('[REDACTED]'), String(value));
   const childEnvironment = { ...process.env };
-  for (const secret of contract.secrets) if (secret.env) delete childEnvironment[secret.env];
+  for (const secret of [...contract.secrets, ...contract.secret_inputs]) if (secret.env) delete childEnvironment[secret.env];
   const result = resultFor(contract);
   try {
-    const resolvedSecrets = await preflight(contract, root, result, redact, childEnvironment);
-    secretValues.push(...resolvedSecrets.map(({ value }) => value));
+    const { workerSecrets, commandSecretInputs } = await preflight(contract, root, result, redact, childEnvironment);
+    secretValues.push(...workerSecrets.map(({ value }) => value), ...commandSecretInputs.values());
     let prior = await deployedState(contract, root, redact, childEnvironment, contract.target.create_if_missing === true);
     const creating = !prior;
-    if (contract.predeploy_commands.length) await runPredeployCommands(contract, root, result, redact, childEnvironment);
+    if (contract.predeploy_commands.length) await runPredeployCommands(contract, root, result, redact, childEnvironment, commandSecretInputs);
     if (!prior) prior = await bootstrapWorker(contract, root, result, redact, childEnvironment);
-    if (resolvedSecrets.length) await provisionSecrets(contract, root, resolvedSecrets, prior, result, redact, childEnvironment);
-    if (creating && resolvedSecrets.length) prior = await deployedState(contract, root, redact, childEnvironment);
+    if (workerSecrets.length) await provisionSecrets(contract, root, workerSecrets, prior, result, redact, childEnvironment);
+    if (creating && workerSecrets.length) prior = await deployedState(contract, root, redact, childEnvironment);
     await deployAndGate(contract, root, prior, 'deploy', result, redact, childEnvironment);
     if (contract.durability?.redeploy_same_revision) {
       const durabilityPrior = await deployedState(contract, root, redact, childEnvironment);
-      if (contract.durability.rotate_secrets && resolvedSecrets.length) await provisionSecrets(contract, root, resolvedSecrets, durabilityPrior, result, redact, childEnvironment, 'durability_secret_rotation');
+      if (contract.durability.rotate_secrets && workerSecrets.length) await provisionSecrets(contract, root, workerSecrets, durabilityPrior, result, redact, childEnvironment, 'durability_secret_rotation');
       await deployAndGate(contract, root, durabilityPrior, 'durability_redeploy', result, redact, childEnvironment);
     }
     result.status = 'succeeded';
@@ -56,13 +58,14 @@ async function bootstrapWorker(contract, root, result, redact, env) {
   }
 }
 
-async function runPredeployCommands(contract, root, result, redact, env) {
+async function runPredeployCommands(contract, root, result, redact, env, secretInputs) {
   const stage = start(result, 'predeploy_commands'); const commands = [];
   try {
     for (const declared of contract.predeploy_commands) {
       const startedAt = performance.now();
-      const cwd = declared.cwd ? containedPath(root, declared.cwd) : root;
-      try { await command(declared.executable, declared.args, cwd, redact, env, declared.timeout_ms || contract.timeout_ms); }
+      const cwd = declared.cwd ? await commandCwd(root, declared.cwd) : root;
+      const input = declared.stdin_secret_input ? secretInputs.get(declared.stdin_secret_input) : undefined;
+      try { await command(declared.executable, declared.args, cwd, redact, env, declared.timeout_ms || contract.timeout_ms, input); }
       catch { throw fail('predeploy_command_failed', `Pre-deploy command ${declared.id} failed.`, 'predeploy_commands'); }
       commands.push({ id: declared.id, status: 'succeeded', elapsed_ms: Math.round(performance.now() - startedAt) });
     }
@@ -92,10 +95,12 @@ async function preflight(contract, root, result, redact, env) {
     const whoami = await command(contract.wrangler.binary, ['whoami', '--json', '--account', contract.target.account_id], root, redact, env, contract.timeout_ms);
     if (!authenticatedForAccount(whoami.stdout, contract.target.account_id)) throw fail('account_auth_failed', 'Wrangler authentication does not prove access to the declared account.');
     await command(contract.wrangler.binary, ['deploy', '--dry-run', '--config', resolvePath(root, contract.wrangler.config), '--name', contract.target.worker], root, redact, env, contract.timeout_ms);
-    const secrets = [];
-    for (const descriptor of contract.secrets) secrets.push({ name: descriptor.name, value: await readSecret(descriptor, root) });
-    finish(stage, 'succeeded', { source_revision: head.stdout.trim(), config_ref: contract.wrangler.config_ref || contract.wrangler.config, expected_bindings: [...contract.expected_bindings], required_secret_names: contract.secrets.map(({ name }) => name) });
-    return secrets;
+    const workerSecrets = [];
+    for (const descriptor of contract.secrets) workerSecrets.push({ name: descriptor.name, value: await readSecret(descriptor, root) });
+    const commandSecretInputs = new Map();
+    for (const descriptor of contract.secret_inputs) commandSecretInputs.set(descriptor.id, await readSecretInput(descriptor, root));
+    finish(stage, 'succeeded', { source_revision: head.stdout.trim(), config_ref: contract.wrangler.config_ref || contract.wrangler.config, expected_bindings: [...contract.expected_bindings], required_secret_names: contract.secrets.map(({ name }) => name), required_secret_input_ids: contract.secret_inputs.map(({ id }) => id) });
+    return { workerSecrets, commandSecretInputs };
   } catch (error) {
     error.stage ||= 'preflight'; finish(stage, 'failed', { code: error.code || 'preflight_failed', remediation: remediation(error.code) }); throw error;
   }
@@ -208,6 +213,8 @@ function delay(milliseconds) { return new Promise((resolveDelay) => setTimeout(r
 
 async function boundedBody(response, limit) { const reader = response.body?.getReader(); if (!reader) return ''; let size = 0; const chunks = []; while (true) { const { done, value } = await reader.read(); if (done) break; size += value.byteLength; if (size > limit) { await reader.cancel(); throw fail('http_gate_body_too_large', 'Gate response exceeded its declared body limit.'); } chunks.push(value); } return new TextDecoder().decode(Buffer.concat(chunks)); }
 async function readSecret(secret, root) { if (secret.env) { if (!process.env[secret.env]) throw fail('secret_unavailable', `Required secret ${secret.name} is unavailable.`); return process.env[secret.env]; } const path = resolvePath(root, secret.file); if (!(await stat(path)).isFile()) throw fail('secret_unavailable', `Required secret ${secret.name} is unavailable.`); return readFile(path, 'utf8'); }
+async function readSecretInput(secret, root) { let value; try { value = secret.env ? process.env[secret.env] : await readFile(containedPath(root, await realpath(containedPath(root, secret.file)))); } catch { throw fail('secret_unavailable', `Required secret input ${secret.id} is unavailable or outside its byte budget.`); } if (value === undefined || Buffer.byteLength(value) < 1 || Buffer.byteLength(value) > MAX_SECRET_INPUT_BYTES) throw fail('secret_unavailable', `Required secret input ${secret.id} is unavailable or outside its byte budget.`); return value; }
+async function commandCwd(root, value) { try { return containedPath(root, await realpath(containedPath(root, value))); } catch { throw fail('invalid_contract', 'Pre-deploy command cwd must remain inside the repository.', 'predeploy_commands'); } }
 async function readConfig(path) { const raw = await readFile(path, 'utf8'); if (path.endsWith('.json') || path.endsWith('.jsonc')) { const parsed = JSON.parse(stripJsonComments(raw).replace(/,\s*([}\]])/g, '$1')); return { account_id: parsed.account_id, bindings: new Set(collectJsonBindings(parsed)) }; } return { account_id: matchToml(raw, 'account_id'), bindings: new Set([...raw.matchAll(/^\s*binding\s*=\s*["']([^"']+)["']/gm)].map((match) => match[1])) }; }
 function stripJsonComments(value) { let output=''; let string=false; let escaped=false; let line=false; let block=false; for(let index=0;index<value.length;index+=1){const character=value[index];const next=value[index+1];if(line){if(character==='\n'){line=false;output+=character;}continue;}if(block){if(character==='*'&&next==='/'){block=false;index+=1;}else if(character==='\n')output+=character;continue;}if(string){output+=character;if(escaped)escaped=false;else if(character==='\\')escaped=true;else if(character==='"')string=false;continue;}if(character==='"'){string=true;output+=character;}else if(character==='/'&&next==='/'){line=true;index+=1;}else if(character==='/'&&next==='*'){block=true;index+=1;}else output+=character;}return output; }
 function collectJsonBindings(value) { if (!value || typeof value !== 'object') return []; const found = []; if (typeof value.binding === 'string') found.push(value.binding); if (Array.isArray(value.bindings)) for (const binding of value.bindings) if (typeof binding?.name === 'string') found.push(binding.name); for (const child of Object.values(value)) found.push(...collectJsonBindings(child)); return found; }
@@ -219,7 +226,7 @@ function start(result, id) { const stage = { id, status: 'running', evidence: nu
 function remediation(code) { return ({ ambiguous_deployment_versions: ['Use a single-version production deployment or declare a weighted-version selection policy.'], source_not_clean: ['Commit or discard source changes before deployment.'], source_revision_mismatch: ['Check out the declared immutable revision before deployment.'], http_gate_status_failed: ['Correct the deployed route or expected status before retrying the immutable revision.'] }[code] || ['Inspect redacted stage evidence and correct the deployment contract.']); }
 function resolvePath(root, value) { if (!value) throw fail('invalid_contract', 'Required path is missing.'); return isAbsolute(value) ? value : resolve(root, value); } function requiredArgument(name) { const index = process.argv.indexOf(name); if (index < 0 || !process.argv[index + 1]) throw new Error(`${name} is required`); return process.argv[index + 1]; }
 function containedPath(root, value) { const path = resolve(root, value); const fromRoot = relative(root, path); if (fromRoot === '..' || fromRoot.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) || isAbsolute(fromRoot)) throw fail('invalid_contract', 'Pre-deploy command cwd must remain inside the repository.'); return path; }
-function validate(contract) { if (contract.schema !== 'homeboy/cloudflare-worker-deploy-contract/v1') throw new Error('Unsupported deployment contract schema.'); for (const path of ['repository.worktree', 'repository.revision', 'wrangler.binary', 'wrangler.config', 'wrangler.config_ref', 'target.worker', 'target.account_id']) if (!path.split('.').reduce((value, key) => value?.[key], contract)) throw new Error(`Missing ${path}.`); contract.expected_bindings ||= []; contract.secrets ||= []; contract.gates ||= []; contract.predeploy_commands ||= []; contract.timeout_ms ||= 120000; if (!Array.isArray(contract.predeploy_commands) || contract.predeploy_commands.length > 16) throw new Error('predeploy_commands must be an array of at most 16 commands.'); for (const declared of contract.predeploy_commands) { const shell = basename(declared.executable || '').toLowerCase().replace(/\.exe$/, ''); if (!/^[a-z0-9]+(?:[-_.][a-z0-9]+)*$/.test(declared.id || '') || typeof declared.executable !== 'string' || !declared.executable || ['sh','bash','zsh','fish','cmd','powershell','pwsh'].includes(shell) || !Array.isArray(declared.args) || declared.args.length > 64 || declared.args.some((arg) => typeof arg !== 'string' || arg.length > 4096) || (declared.cwd !== undefined && (typeof declared.cwd !== 'string' || !declared.cwd)) || (declared.timeout_ms !== undefined && (!Number.isInteger(declared.timeout_ms) || declared.timeout_ms < 1))) throw new Error('Each pre-deploy command requires a safe ID, a non-shell executable, bounded string arguments, an optional repository-relative cwd, and an optional positive timeout_ms.'); }
+function validate(contract) { if (contract.schema !== 'homeboy/cloudflare-worker-deploy-contract/v1') throw new Error('Unsupported deployment contract schema.'); for (const path of ['repository.worktree', 'repository.revision', 'wrangler.binary', 'wrangler.config', 'wrangler.config_ref', 'target.worker', 'target.account_id']) if (!path.split('.').reduce((value, key) => value?.[key], contract)) throw new Error(`Missing ${path}.`); contract.expected_bindings ||= []; contract.secrets ||= []; contract.secret_inputs ||= []; contract.gates ||= []; contract.predeploy_commands ||= []; contract.timeout_ms ||= 120000; if (!Array.isArray(contract.predeploy_commands) || contract.predeploy_commands.length > 16) throw new Error('predeploy_commands must be an array of at most 16 commands.'); if (!Array.isArray(contract.secret_inputs) || contract.secret_inputs.length > 16) throw new Error('secret_inputs must be an array of at most 16 inputs.'); const secretInputIds = new Set(); for (const secret of contract.secret_inputs) { if (!/^[a-z0-9]+(?:[-_.][a-z0-9]+)*$/.test(secret.id || '') || Boolean(secret.env) === Boolean(secret.file) || (secret.env !== undefined && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(secret.env)) || (secret.file !== undefined && (typeof secret.file !== 'string' || !secret.file)) || secretInputIds.has(secret.id)) throw new Error('Each secret input requires a unique safe ID and exactly one environment or file descriptor.'); secretInputIds.add(secret.id); } for (const declared of contract.predeploy_commands) { const shell = basename(declared.executable || '').toLowerCase().replace(/\.exe$/, ''); if (!/^[a-z0-9]+(?:[-_.][a-z0-9]+)*$/.test(declared.id || '') || typeof declared.executable !== 'string' || !declared.executable || ['sh','bash','zsh','fish','cmd','powershell','pwsh'].includes(shell) || !Array.isArray(declared.args) || declared.args.length > 64 || declared.args.some((arg) => typeof arg !== 'string' || arg.length > 4096) || (declared.cwd !== undefined && (typeof declared.cwd !== 'string' || !declared.cwd)) || (declared.timeout_ms !== undefined && (!Number.isInteger(declared.timeout_ms) || declared.timeout_ms < 1)) || (declared.stdin_secret_input !== undefined && !secretInputIds.has(declared.stdin_secret_input))) throw new Error('Each pre-deploy command requires a safe ID, a non-shell executable, bounded string arguments, an optional repository-relative cwd, an optional declared stdin secret input, and an optional positive timeout_ms.'); }
 if (contract.target.create_if_missing !== undefined && typeof contract.target.create_if_missing !== 'boolean') throw new Error('target.create_if_missing must be boolean when declared.');
 for (const secret of contract.secrets) if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(secret.name || '') || Boolean(secret.env) === Boolean(secret.file)) throw new Error('Each secret requires a safe environment-style name and exactly one environment or file descriptor.'); for (const gate of contract.gates) if (gate.retry && (!Number.isInteger(gate.retry.attempts) || gate.retry.attempts < 2 || !Number.isInteger(gate.retry.retry_delay_ms) || gate.retry.retry_delay_ms < 0 || !Array.isArray(gate.retry.transient_statuses) || !gate.retry.transient_statuses.length || gate.retry.transient_statuses.some((status) => !Number.isInteger(status) || status < 100 || status > 599))) throw new Error('Each gate retry policy requires attempts of at least 2, a non-negative retry_delay_ms, and declared transient_statuses.'); }
 async function writeResult(root, contract, result) { if (contract.result_file) await writeFile(resolvePath(root, contract.result_file), `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 }); }
