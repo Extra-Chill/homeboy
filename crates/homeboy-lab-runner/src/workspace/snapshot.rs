@@ -756,6 +756,19 @@ pub(crate) fn materialize_snapshot(
     remote_path: &str,
     excludes: &[String],
 ) -> Result<()> {
+    materialize_snapshot_with_scratch(runner, local_path, remote_path, excludes, None)
+}
+
+/// Materialize with an explicitly admitted controller scratch filesystem.  The
+/// archive preparation happens on the controller, so this is intentionally an
+/// invocation-scoped shell environment rather than a process-global `TMPDIR`.
+pub(crate) fn materialize_snapshot_with_scratch(
+    runner: &Runner,
+    local_path: &Path,
+    remote_path: &str,
+    excludes: &[String],
+    scratch: Option<&Path>,
+) -> Result<()> {
     match runner.kind {
         RunnerKind::Local => materialize_snapshot_piped(
             local_path,
@@ -765,6 +778,7 @@ pub(crate) fn materialize_snapshot(
             ),
             excludes,
             "materialize local workspace snapshot",
+            scratch,
         ),
         RunnerKind::Ssh => {
             let (_server, client) = ssh_client_for_runner(runner)?;
@@ -777,6 +791,7 @@ pub(crate) fn materialize_snapshot(
                     ),
                     excludes,
                     "materialize local workspace snapshot",
+                    scratch,
                 )
             } else {
                 let remote = format!("{}@{}", client.user, client.host);
@@ -792,6 +807,7 @@ pub(crate) fn materialize_snapshot(
                     &target,
                     excludes,
                     "materialize SSH workspace snapshot",
+                    scratch,
                 )
             }
         }
@@ -1459,6 +1475,7 @@ pub(crate) fn materialize_snapshot_overlay(
             &target,
             excludes,
             "apply local Git workspace snapshot overlay",
+            None,
         ),
         RunnerKind::Ssh => {
             let (_server, client) = ssh_client_for_runner(runner)?;
@@ -1468,6 +1485,7 @@ pub(crate) fn materialize_snapshot_overlay(
                     &target,
                     excludes,
                     "apply local Git workspace snapshot overlay",
+                    None,
                 )
             } else {
                 let remote = format!("{}@{}", client.user, client.host);
@@ -1482,6 +1500,7 @@ pub(crate) fn materialize_snapshot_overlay(
                     ),
                     excludes,
                     "apply SSH Git workspace snapshot overlay",
+                    None,
                 )
             }
         }
@@ -1641,6 +1660,7 @@ pub(crate) fn copy_snapshot_to_directory(
         ),
         excludes,
         "prepare local workspace snapshot",
+        None,
     )
 }
 
@@ -1677,8 +1697,16 @@ fn materialize_snapshot_piped(
     target_command: &str,
     excludes: &[String],
     action: &str,
+    scratch: Option<&Path>,
 ) -> Result<()> {
-    let command = snapshot_archive_command(local_path, target_command, excludes);
+    let mut command = snapshot_archive_command(local_path, target_command, excludes);
+    if let Some(scratch) = scratch {
+        command = format!(
+            "TMPDIR={} {};",
+            shell::quote_arg(&scratch.display().to_string()),
+            command.trim_end_matches(';')
+        );
+    }
     run_shell_command(&command, action)
 }
 
