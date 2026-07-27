@@ -344,11 +344,11 @@ fn process_is_live(pid: u32) -> bool {
 
 #[cfg(windows)]
 fn process_is_live(pid: u32) -> bool {
+    // `STILL_ACTIVE` lives in `Foundation`, not `System::Threading`, in the
+    // windows-sys 0.61 this crate depends on.
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED},
-        System::Threading::{
-            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, STILL_ACTIVE,
-        },
+        Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED, STILL_ACTIVE},
+        System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
     };
 
     // Access denied establishes that a process owns this PID, matching Unix's
@@ -361,7 +361,9 @@ fn process_is_live(pid: u32) -> bool {
         let mut exit_code = 0;
         let queried = GetExitCodeProcess(process, &mut exit_code) != 0;
         let _ = CloseHandle(process);
-        queried && exit_code == STILL_ACTIVE
+        // `GetExitCodeProcess` writes a `u32`; `STILL_ACTIVE` is an `NTSTATUS`
+        // (`i32`). Both are the same 0x103 bit pattern.
+        queried && exit_code == STILL_ACTIVE as u32
     }
 }
 
