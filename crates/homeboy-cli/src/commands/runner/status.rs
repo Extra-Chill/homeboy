@@ -19,9 +19,9 @@ use super::types::{
     LabFollowup, LabRunnerHomeboyOutput, LabSelectedRunnerOutput, RunnerArtifactFeatureDiagnostics,
     RunnerConnectionOutput, RunnerExecutableRequirementDiagnostics, RunnerExtra,
     RunnerHomeboyBinaryRole, RunnerOperatorCommand, RunnerOperatorSummary, RunnerOutput,
-    RunnerRuntimeDiagnostics, RunnerRuntimePackageDiagnostics, RunnerToolDiagnostics,
-    RunnerTruncation, RunnerWorkflowBinaryGuidance, RuntimeDiagnostic, RuntimePackageOutput,
-    RuntimeProbeValue, SelectedRuntimeOutput,
+    RunnerRuntimeDiagnostics, RunnerRuntimePackageDiagnostics, RunnerStatusInspection,
+    RunnerStatusUnavailable, RunnerToolDiagnostics, RunnerTruncation, RunnerWorkflowBinaryGuidance,
+    RuntimeDiagnostic, RuntimePackageOutput, RuntimeProbeValue, SelectedRuntimeOutput,
 };
 
 const DEFAULT_STATUS_SESSION_LIMIT: usize = 20;
@@ -108,7 +108,7 @@ pub(super) fn status(
         ));
     }
 
-    let sessions = runner::statuses()?;
+    let sessions = runner::persisted_statuses()?;
     if !full {
         let omitted = sessions.len().saturating_sub(DEFAULT_STATUS_SESSION_LIMIT);
         let sessions = sessions
@@ -135,6 +135,7 @@ pub(super) fn status(
             0,
         ));
     }
+    let (sessions, inspection) = full_status_projections(sessions, runner::statuses_indexed());
     let mut operator_hints: Vec<String> = sessions
         .iter()
         .flat_map(runner_status_operator_hints)
@@ -143,8 +144,16 @@ pub(super) fn status(
         .iter()
         .flat_map(runner_status_operator_commands)
         .collect();
-    let selected_lab_runner = selected_lab_runner_status(preferred_lab_runner.as_deref(), None)?;
-    let managed_followups = runner_followups(preferred_lab_runner.as_deref(), None);
+    let selected_status = preferred_lab_runner.as_deref().and_then(|runner_id| {
+        sessions
+            .iter()
+            .find(|report| report.runner_id == runner_id)
+            .cloned()
+    });
+    let selected_lab_runner =
+        selected_lab_runner_status(preferred_lab_runner.as_deref(), selected_status.clone())?;
+    let managed_followups =
+        runner_followups(preferred_lab_runner.as_deref(), selected_status.as_ref());
     // Collected last so every bounded probe issued above is represented.
     operator_hints.extend(probe_degradation_hints());
     Ok((
@@ -152,6 +161,7 @@ pub(super) fn status(
             command: "runner.status".to_string(),
             extra: RunnerExtra {
                 sessions,
+                inspection: Some(inspection),
                 preferred_lab_runner,
                 selected_lab_runner,
                 managed_followups,
@@ -179,6 +189,71 @@ fn probe_degradation_hints() -> Vec<String> {
             )
         })
         .collect()
+}
+
+fn full_status_projections(
+    mut sessions: Vec<RunnerStatusReport>,
+    snapshots: homeboy::core::Result<Vec<runner::RunnerActiveJobsSnapshot>>,
+) -> (Vec<RunnerStatusReport>, RunnerStatusInspection) {
+    let snapshots = match snapshots {
+        Ok(snapshots) => snapshots
+            .into_iter()
+            .map(|snapshot| (snapshot.runner_id.clone(), snapshot))
+            .collect::<BTreeMap<_, _>>(),
+        Err(error) => {
+            let unavailable = RunnerStatusUnavailable {
+                runner_id: "controller".to_string(),
+                code: error.code.as_str().to_string(),
+                message: error.message,
+                refresh_command: "homeboy runner status --full".to_string(),
+            };
+            return (
+                sessions,
+                RunnerStatusInspection {
+                    status: "partial",
+                    partial: true,
+                    runner_unavailable: vec![unavailable],
+                    runner_unqueried: Vec::new(),
+                },
+            );
+        }
+    };
+    let mut unavailable = Vec::new();
+    let mut unqueried = Vec::new();
+    for report in &mut sessions {
+        let Some(snapshot) = snapshots.get(&report.runner_id) else {
+            unqueried.push(report.runner_id.clone());
+            continue;
+        };
+        report.active_job_count = snapshot.active_jobs.len();
+        report.active_runner_jobs = snapshot.active_jobs.iter().map(Into::into).collect();
+        report.active_jobs = snapshot.active_jobs.clone();
+        report.active_job_state = snapshot.active_job_state.clone();
+        report.active_job_error = snapshot.active_job_error.clone();
+        if let Some(error) = &snapshot.active_job_error {
+            unavailable.push(RunnerStatusUnavailable {
+                runner_id: report.runner_id.clone(),
+                code: error.code.clone(),
+                message: error.message.clone(),
+                refresh_command: format!(
+                    "homeboy runner status {} --full",
+                    shell_arg(&report.runner_id)
+                ),
+            });
+        } else if report.active_job_state == RunnerActiveJobState::NotQueried {
+            unqueried.push(report.runner_id.clone());
+        }
+    }
+    let partial = !unavailable.is_empty() || !unqueried.is_empty();
+    (
+        sessions,
+        RunnerStatusInspection {
+            status: if partial { "partial" } else { "complete" },
+            partial,
+            runner_unavailable: unavailable,
+            runner_unqueried: unqueried,
+        },
+    )
 }
 
 fn operator_summary(report: &RunnerStatusReport) -> RunnerOperatorSummary {
@@ -1387,6 +1462,34 @@ mod tests {
                 .expect("refresh followup")
                 .command,
             commands[0]
+        );
+    }
+
+    #[test]
+    fn no_id_full_status_uses_indexed_projections_without_remote_fallback() {
+        let source = include_str!("status.rs");
+        let start = source
+            .find("pub(super) fn status(")
+            .expect("status command");
+        let body = &source[start..source.find("fn operator_summary").expect("next helper")];
+
+        assert!(body.contains("full_status_projections(sessions, runner::statuses_indexed())"));
+        assert!(body.contains("selected_status.clone()"));
+        assert!(!body.contains("preferred_lab_runner.as_deref(), None"));
+
+        let (_sessions, inspection) = full_status_projections(
+            Vec::new(),
+            Err(homeboy::core::Error::internal_unexpected(
+                "indexed probe failed",
+            )),
+        );
+        assert_eq!(inspection.status, "partial");
+        assert!(inspection.partial);
+        assert_eq!(inspection.runner_unavailable.len(), 1);
+        assert_eq!(inspection.runner_unavailable[0].runner_id, "controller");
+        assert_eq!(
+            inspection.runner_unavailable[0].refresh_command,
+            "homeboy runner status --full"
         );
     }
 

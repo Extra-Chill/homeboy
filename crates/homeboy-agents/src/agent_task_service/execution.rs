@@ -696,6 +696,11 @@ pub fn status_with_options(
     agent_task_lifecycle::status_with_options(run_id, options)
 }
 
+/// Return the controller's durable record without runner liveness enrichment.
+pub fn persisted_status(run_id: &str) -> Result<AgentTaskRunRecord> {
+    agent_task_lifecycle::persisted_status(run_id)
+}
+
 pub fn run_status(run_id: &str, since_cursor: Option<u64>) -> Result<AgentTaskRunStatus> {
     agent_task_lifecycle::run_status(run_id, since_cursor)
 }

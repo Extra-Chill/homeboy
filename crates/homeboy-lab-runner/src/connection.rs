@@ -1197,6 +1197,32 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     })
 }
 
+/// Return the persisted controller-side session projection without reconnecting,
+/// probing a daemon, or reconciling generation state.
+pub fn persisted_status(runner_id: &str) -> Result<RunnerStatusReport> {
+    let session_path = session_path(runner_id)?;
+    let session = read_session_or_live_peer(runner_id)?;
+    let state = session_state(session.as_ref());
+    Ok(RunnerStatusReport {
+        runner_id: runner_id.to_string(),
+        connected: state == RunnerSessionState::Connected,
+        state,
+        session,
+        stale_daemon: None,
+        daemon_freshness: None,
+        active_jobs: Vec::new(),
+        active_runner_jobs: Vec::new(),
+        stale_runner_jobs: Vec::new(),
+        active_job_count: 0,
+        stale_runner_job_count: 0,
+        active_job_state: RunnerActiveJobState::NotQueried,
+        active_job_source: None,
+        active_job_error: None,
+        active_job_recovery_evidence: None,
+        session_path: session_path.display().to_string(),
+    })
+}
+
 /// Recover only this controller's lost direct SSH projection. The remote daemon
 /// selection remains in `connect`: it revalidates the persisted lease and PID
 /// before opening a fresh tunnel, and refuses every unproven replacement.
@@ -2295,6 +2321,13 @@ pub fn statuses() -> Result<Vec<RunnerStatusReport>> {
     Ok(reports)
 }
 
+pub fn persisted_statuses() -> Result<Vec<RunnerStatusReport>> {
+    super::list()?
+        .into_iter()
+        .map(|runner| persisted_status(&runner.id))
+        .collect()
+}
+
 /// A latency-bounded snapshot of each runner's active jobs — a single `/jobs`
 /// query on the current session, with **no generation reconcile**.
 ///
@@ -2309,25 +2342,34 @@ pub fn statuses() -> Result<Vec<RunnerStatusReport>> {
 pub fn statuses_indexed() -> Result<Vec<RunnerActiveJobsSnapshot>> {
     let mut snapshots = Vec::new();
     for runner in super::list()? {
-        let mut session = read_session_or_live_peer(&runner.id)?;
-        if recover_dead_direct_tunnel(&runner.id, session.as_ref()).is_ok() {
-            session = read_session_or_live_peer(&runner.id)?;
-        }
+        // Indexed inspection is read-only: reconnecting here can start SSH work
+        // and makes controller discovery depend on the unhealthy runner.
+        let session = read_session_or_live_peer(&runner.id)?;
         let connected = session_state(session.as_ref()) == RunnerSessionState::Connected;
-        let active_jobs = if connected {
+        let (active_jobs, active_job_state, active_job_error) = if connected {
             match session.as_ref() {
-                Some(session) => runner_jobs(&runner.id, session)
-                    .map(|(active, _stale)| active)
-                    .unwrap_or_default(),
-                None => Vec::new(),
+                Some(session) => match runner_jobs(&runner.id, session) {
+                    Ok((active, _stale)) => (active, RunnerActiveJobState::Available, None),
+                    Err(error) => (
+                        Vec::new(),
+                        RunnerActiveJobState::Unavailable,
+                        Some(RunnerActiveJobError {
+                            code: error.code.as_str().to_string(),
+                            message: error.message,
+                        }),
+                    ),
+                },
+                None => (Vec::new(), RunnerActiveJobState::NotQueried, None),
             }
         } else {
-            Vec::new()
+            (Vec::new(), RunnerActiveJobState::NotQueried, None)
         };
         snapshots.push(RunnerActiveJobsSnapshot {
             runner_id: runner.id,
             connected,
             active_jobs,
+            active_job_state,
+            active_job_error,
         });
     }
     Ok(snapshots)
@@ -2335,6 +2377,22 @@ pub fn statuses_indexed() -> Result<Vec<RunnerActiveJobsSnapshot>> {
 
 pub fn disconnect(runner_id: &str) -> Result<RunnerDisconnectReport> {
     stop_transport_recovery::disconnect_with_force(runner_id, false)
+}
+
+#[cfg(test)]
+mod indexed_inspection_tests {
+    #[test]
+    fn indexed_discovery_has_no_reconnect_or_ssh_path() {
+        let source = include_str!("connection.rs");
+        let start = source
+            .find("pub fn statuses_indexed()")
+            .expect("indexed discovery exists");
+        let body = &source[start..source.find("pub fn disconnect").expect("next function")];
+
+        assert!(!body.contains("recover_dead_direct_tunnel"));
+        assert!(!body.contains("connect("));
+        assert!(!body.contains("SshClient"));
+    }
 }
 
 mod remote_daemon;

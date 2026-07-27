@@ -1386,6 +1386,16 @@ pub fn status_with_options(
     })
 }
 
+/// Read the controller-owned lifecycle record without contacting its runner.
+///
+/// This is deliberately separate from [`status`]: runner reconciliation is
+/// authoritative when an operator explicitly asks to refresh liveness, but a
+/// wedged runner must never hide state already persisted by the controller.
+pub fn persisted_status(run_id: &str) -> Result<AgentTaskRunRecord> {
+    let resolved_run_id = resolve_run_id(run_id)?;
+    store::read_record(&resolved_run_id)
+}
+
 /// Refresh accepted runner handoffs and expire unbound controller handoffs before
 /// a read model (such as activity) projects lifecycle state. A controller wait
 /// expiry is not terminal after a runner job is recorded: the runner daemon

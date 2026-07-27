@@ -471,6 +471,8 @@ pub struct RunnerActiveJobsSnapshot {
     pub runner_id: String,
     pub connected: bool,
     pub active_jobs: Vec<ActiveRunnerJobSummary>,
+    pub active_job_state: RunnerActiveJobState,
+    pub active_job_error: Option<RunnerActiveJobError>,
 }
 
 #[derive(Debug, Clone)]
@@ -667,8 +669,12 @@ impl RunnerStatusReport {
         let connected = self.is_connected();
         let daemon_fresh = self.stale_daemon.is_none();
         let active_job_count = self.active_job_count;
-        let accepting_jobs = connected && daemon_fresh;
-        let safe_to_rotate = active_job_count == 0;
+        // A persisted session proves neither current daemon liveness nor its
+        // active-job count. Admission and rotation remain fail-closed until a
+        // current job view is available.
+        let active_jobs_available = self.active_job_state == RunnerActiveJobState::Available;
+        let accepting_jobs = connected && daemon_fresh && active_jobs_available;
+        let safe_to_rotate = active_jobs_available && active_job_count == 0;
         let daemon_build_identity = self
             .session
             .as_ref()
@@ -678,6 +684,8 @@ impl RunnerStatusReport {
             Some("homeboy runner connect".to_string())
         } else if !daemon_fresh {
             Some("homeboy runner refresh-homeboy --reconnect".to_string())
+        } else if !active_jobs_available {
+            Some("homeboy runner status --full".to_string())
         } else if active_job_count > 0 {
             None
         } else {
@@ -846,7 +854,9 @@ mod status_serialization_tests {
 
     #[test]
     fn admission_summary_fresh_idle_accepts_and_is_safe_to_rotate() {
-        let summary = base_report().admission_summary(0);
+        let mut report = base_report();
+        report.active_job_state = RunnerActiveJobState::Available;
+        let summary = report.admission_summary(0);
         assert!(summary.connected);
         assert!(summary.daemon_fresh);
         assert!(summary.accepting_jobs);
@@ -856,8 +866,21 @@ mod status_serialization_tests {
     }
 
     #[test]
+    fn admission_summary_unqueried_fails_closed_for_admission_and_rotation() {
+        let summary = base_report().admission_summary(0);
+
+        assert!(!summary.accepting_jobs);
+        assert!(!summary.safe_to_rotate);
+        assert_eq!(
+            summary.next_action.as_deref(),
+            Some("homeboy runner status --full")
+        );
+    }
+
+    #[test]
     fn admission_summary_busy_is_not_safe_to_rotate_but_still_accepting() {
         let mut report = base_report();
+        report.active_job_state = RunnerActiveJobState::Available;
         report.active_job_count = 3;
         let summary = report.admission_summary(0);
         assert!(
@@ -928,7 +951,9 @@ mod status_serialization_tests {
     fn admission_summary_summarizes_draining_generations_by_count_not_as_load() {
         // The historical draining generations are reported only as a count and
         // never contribute to active_job_count (the #9522 confusion).
-        let summary = base_report().admission_summary(7);
+        let mut report = base_report();
+        report.active_job_state = RunnerActiveJobState::Available;
+        let summary = report.admission_summary(7);
         assert_eq!(summary.draining_generation_count, 7);
         assert_eq!(
             summary.active_job_count, 0,

@@ -80,6 +80,7 @@ pub fn list_runner_runs(
             // collapsing is a controller-store concern and does not apply here.
             hidden_mirrors: 0,
             probe_degradations: homeboy::runner::readonly_probe::take_degradations(),
+            runner_enrichment: None,
             actionable,
         }),
         0,
