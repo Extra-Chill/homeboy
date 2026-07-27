@@ -266,31 +266,15 @@ pub fn run_multi(
     for project_id in &valid_project_ids {
         homeboy_core::log_status!("deploy", "Deploying to project '{}'...", project_id);
 
+        // Per-target config is the caller's config with exactly two deltas:
+        // the explicitly requested component set, and a cleared resume id so
+        // each project target starts its own lifecycle run. Everything else is
+        // carried by `..config.clone()` so a new `DeployConfig` field can never
+        // be silently dropped here.
         let project_config = DeployConfig {
             component_ids: component_ids.to_vec(),
-            all: config.all,
-            outdated: config.outdated,
-            behind_upstream: config.behind_upstream,
-            dry_run: config.dry_run,
-            check: config.check,
-            force: config.force,
-            skip_build: config.skip_build,
-            keep_deps: config.keep_deps,
-            skip_deps_hydration: config.skip_deps_hydration,
-            expected_version: config.expected_version.clone(),
-            no_pull: config.no_pull,
-            allow_stale_source: config.allow_stale_source,
-            allow_downgrade: config.allow_downgrade,
-            head: config.head,
-            requested_ref: config.requested_ref.clone(),
-            requested_refs: config.requested_refs.clone(),
-            resolved_refs: config.resolved_refs.clone(),
-            preflighted_source_paths: config.preflighted_source_paths.clone(),
-            preflighted_component_identities: config.preflighted_component_identities.clone(),
-            prepared_projection: config.prepared_projection.clone(),
-            tagged: config.tagged,
-            prepared_artifact: config.prepared_artifact.clone(),
             resume_run_id: None,
+            ..config.clone()
         };
 
         if lifecycle_run
