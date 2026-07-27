@@ -6,7 +6,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use homeboy::core::cleanup::{
     self, ArtifactCleanupOptions, ArtifactCleanupSort, ResourceCleanupOptions,
 };
-use homeboy::core::controller_runtime::{self, ControllerRuntimeCleanupOptions};
+use homeboy::core::controller_runtime::{self, ControllerRuntimeRetentionOverrides};
 use homeboy::core::defaults;
 use homeboy::core::engine;
 use homeboy::core::engine::shell::quote_arg;
@@ -682,8 +682,8 @@ const CONTROLLER_RUNTIMES_METADATA: CleanupInventoryCategoryMetadata =
     CleanupInventoryCategoryMetadata {
         category: "controller_runtimes",
         include_arg: "controller-runtimes",
-        dry_run_command: "homeboy cleanup --include controller-runtimes",
-        apply_command: "homeboy cleanup --include controller-runtimes --apply",
+        dry_run_command: "homeboy runtime controller-prune",
+        apply_command: "homeboy runtime controller-prune --apply",
     };
 
 fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
@@ -869,14 +869,15 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
         )?);
     }
     if selected.includes(CleanupCategoryArg::ControllerRuntimes) {
-        let output = controller_runtime::cleanup(ControllerRuntimeCleanupOptions {
+        // Policy is resolved by core so this path and `homeboy runtime
+        // controller-prune` cannot drift apart again (#10288).
+        let output = controller_runtime::cleanup(controller_runtime::resolve_cleanup_options(
             apply,
-            min_age: std::time::Duration::from_secs(
-                configured.controller_runtime_days.saturating_mul(86_400),
-            ),
-            max_total_bytes: configured.controller_runtime_max_bytes,
-            limit: usize::try_from(limit).unwrap_or(usize::MAX),
-        })?;
+            ControllerRuntimeRetentionOverrides {
+                limit: Some(limit),
+                ignore_retention: false,
+            },
+        ))?;
         let estimated_bytes = output
             .snapshots
             .iter()
@@ -2064,8 +2065,8 @@ mod tests {
                 CONTROLLER_RUNTIMES_METADATA,
                 "controller_runtimes",
                 "controller-runtimes",
-                "homeboy cleanup --include controller-runtimes",
-                "homeboy cleanup --include controller-runtimes --apply",
+                "homeboy runtime controller-prune",
+                "homeboy runtime controller-prune --apply",
             ),
         ];
 

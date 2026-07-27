@@ -38,3 +38,25 @@ Use `--plain` when a shell wrapper needs a sourceable path without parsing JSON:
 ```bash
 source "$(homeboy runtime helper path --plain runner-prelude.sh)"
 ```
+
+## Controller Runtime Pruning
+
+`homeboy runtime controller-prune` is the specialist command behind the
+`controller_runtimes` cleanup category. It removes only content-addressed
+controller pins that no nonterminal durable run and no active admission
+generation still reference.
+
+```bash
+homeboy runtime controller-prune
+homeboy runtime controller-prune --apply
+```
+
+Pruning honors the configured retention policy — `retention.controller_runtime_days`,
+`retention.controller_runtime_max_bytes`, and `retention.limit` — resolved from
+the same helper `homeboy cleanup --include controller-runtimes` uses, so the two
+entry points always apply the identical window. The resolved policy is echoed in
+the command output as `min_age_seconds`, `max_total_bytes`, and `limit`.
+
+`--ignore-retention` discards that window and purges every unreferenced pin. It
+is destructive and never the default; reference-based retention still applies,
+but the operator's age and size budget does not.
