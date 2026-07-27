@@ -86,6 +86,10 @@ SH
 cat > "$FAKE_EXTENSION/node_modules/.bin/eslint" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$ESLINT_ARGS_FILE"
+if [ "${ESLINT_FATAL:-}" = "1" ]; then
+    echo "simulated ESLint configuration failure" >&2
+    exit 2
+fi
 for arg in "$@"; do
     if [ "$arg" = "--format" ]; then
         printf '[{"filePath":"%s/assets/bad.js","errorCount":1,"warningCount":0,"fixableErrorCount":1,"fixableWarningCount":0,"messages":[{"ruleId":"no-undef","severity":2,"message":"bad is not defined","line":1,"column":7,"fix":{"range":[0,3],"text":"good"}}]}]\n' "$ESLINT_COMPONENT_DIR"
@@ -165,6 +169,27 @@ assert_contains "$TMP_DIR/js-success.out" "ESLint linting passed"
 assert_contains "$ESLINT_ARGS_FILE" "--config"
 assert_contains "$ESLINT_ARGS_FILE" "$FAKE_EXTENSION/eslint.config.mjs"
 assert_contains "$ESLINT_ARGS_FILE" "assets/admin.js"
+
+set +e
+HOMEBOY_EXTENSION_PATH="$FAKE_EXTENSION" \
+HOMEBOY_COMPONENT_PATH="$COMPONENT_DIR" \
+HOMEBOY_COMPONENT_ID="example-plugin" \
+HOMEBOY_RUNTIME_RESOLVE_CONTEXT="$RESOLVE_CONTEXT_HELPER" \
+ESLINT_ARGS_FILE="$ESLINT_ARGS_FILE" \
+ESLINT_COMPONENT_DIR="$COMPONENT_DIR" \
+ESLINT_FATAL=1 \
+HOMEBOY_LINT_FILE='assets/admin.js' \
+    bash "$RUNNER" > "$TMP_DIR/js-fatal.out" 2>&1
+fatal_status=$?
+set -e
+
+if [ "$fatal_status" -eq 0 ]; then
+    echo "Expected ESLint fatal failure to propagate" >&2
+    cat "$TMP_DIR/js-fatal.out" >&2
+    exit 1
+fi
+
+assert_contains "$TMP_DIR/js-fatal.out" "simulated ESLint configuration failure"
 
 cat > "$COMPONENT_DIR/assets/bad.js" <<'JS'
 const bad = true;

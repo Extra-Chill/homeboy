@@ -60,24 +60,27 @@ write_eslint_findings_sidecar() {
     HOMEBOY_LINT_FINDINGS_FILE="$previous_target"
 }
 
-# Check if component has JavaScript files.
-#
-# This count is a gate: zero means skip ESLint entirely. The installed
-# dependency tree must be excluded or any component with dependencies installed
-# looks like it has JavaScript of its own, defeating the skip.
-js_file_count=$(find "$PLUGIN_PATH" -type f \( -name "*.js" -o -name "*.jsx" -o -name "*.ts" -o -name "*.tsx" \) \
-    -not -path "*/node_modules/*" \
-    -not -path "*/vendor/*" \
-    -not -path "*/vendor_prefixed/*" \
-    -not -path "*/vendor-prefixed/*" \
-    -not -path "*/vendor_scoped/*" \
-    -not -path "*/vendor-scoped/*" \
-    -not -path "*/dist/*" \
-    -not -path "*/build/*" \
-    -not -name "*.min.js" \
-    2>/dev/null | wc -l | tr -d ' ')
+# Return false for dependency trees and generated assets. Repository-specific
+# ignores remain ESLint configuration policy; this prevents generated output
+# from becoming an explicit CLI target that can bypass that policy.
+is_lint_source_file() {
+    case "$1" in
+        */node_modules/*|*/vendor/*|*/vendor_prefixed/*|*/vendor-prefixed/*|*/vendor_scoped/*|*/vendor-scoped/*|*/dist/*|*/build/*|*.min.js)
+            return 1
+            ;;
+    esac
 
-if [ "$js_file_count" -eq 0 ]; then
+    return 0
+}
+
+SOURCE_FILES=()
+while IFS= read -r source_file; do
+    if is_lint_source_file "$source_file"; then
+        SOURCE_FILES+=("${source_file#"$PLUGIN_PATH"/}")
+    fi
+done < <(find "$PLUGIN_PATH" -type f \( -name "*.js" -o -name "*.jsx" -o -name "*.ts" -o -name "*.tsx" \) 2>/dev/null)
+
+if [ ${#SOURCE_FILES[@]} -eq 0 ]; then
     echo "No JavaScript files found, skipping ESLint."
     exit 0
 fi
@@ -104,6 +107,11 @@ if [ -n "${HOMEBOY_LINT_FILE:-}" ]; then
             exit 0
             ;;
     esac
+
+    if ! is_lint_source_file "${LINT_FILES[0]}"; then
+        echo "Skipping generated or dependency JavaScript file: ${HOMEBOY_LINT_FILE}"
+        exit 0
+    fi
 elif [ -n "${HOMEBOY_LINT_GLOB:-}" ]; then
     cd "$PLUGIN_PATH"
 
@@ -120,7 +128,9 @@ elif [ -n "${HOMEBOY_LINT_GLOB:-}" ]; then
     for matched_file in "${MATCHED_FILES[@]}"; do
         case "$matched_file" in
             *.js|*.jsx|*.ts|*.tsx)
-                JS_FILES+=("$matched_file")
+                if is_lint_source_file "$matched_file"; then
+                    JS_FILES+=("$matched_file")
+                fi
                 ;;
         esac
     done
@@ -135,6 +145,7 @@ elif [ -n "${HOMEBOY_LINT_GLOB:-}" ]; then
     cd - > /dev/null
 else
     echo "Running JavaScript linting..."
+    LINT_FILES=("${SOURCE_FILES[@]}")
 fi
 
 if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
@@ -204,10 +215,17 @@ if [[ "${HOMEBOY_FIX_ONLY:-}" == "1" ]]; then
 fi
 
 # Get JSON report for summary
+homeboy_runner_harness_temp ESLINT_JSON_STDERR "homeboy-eslint-stderr.XXXXXX"
 set +e
-json_output=$("$ESLINT_BIN" "${eslint_base_args[@]}" --format json "${LINT_FILES[@]}" 2>/dev/null)
+json_output=$("$ESLINT_BIN" "${eslint_base_args[@]}" --format json "${LINT_FILES[@]}" 2>"$ESLINT_JSON_STDERR")
 json_exit=$?
 set -e
+
+# ESLint normally writes its report to stdout. Keep fatal diagnostics visible
+# when it cannot produce JSON rather than discarding the only actionable error.
+if [ -z "$json_output" ] && [ -s "$ESLINT_JSON_STDERR" ]; then
+    cat "$ESLINT_JSON_STDERR" >&2
+fi
 
 # Write ESLint lint findings sidecar for homeboy baseline and drill-down.
 # The top-level lint runner passes a temp file here, then merges it with PHPCS
