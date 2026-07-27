@@ -758,7 +758,28 @@ pub fn compute_changed_test_files_for_files(
 ) -> homeboy_core::error::Result<Vec<String>> {
     let opts = resolve_drift_options(component, git_ref)?;
 
-    compute_changed_test_files_with_drift_options(component, changed_files, &opts)
+    let changed_files = component_relative_changed_files(component, changed_files);
+    compute_changed_test_files_with_drift_options(component, &changed_files, &opts)
+}
+
+/// Git reports paths relative to the repository root, while extension test
+/// contracts operate relative to the component root. Restrict a nested
+/// component's changed scope to its subtree and remove that shared prefix.
+fn component_relative_changed_files(component: &Component, files: &[String]) -> Vec<String> {
+    let Some(prefix) = git::get_component_path_prefix(&component.local_path) else {
+        return files.to_vec();
+    };
+    let prefix = Path::new(&prefix);
+
+    files
+        .iter()
+        .filter_map(|file| {
+            Path::new(file)
+                .strip_prefix(prefix)
+                .ok()
+                .map(|path| path.to_string_lossy().to_string())
+        })
+        .collect()
 }
 
 /// Return the subset of `changed_files` that are production or test source per
@@ -804,15 +825,16 @@ pub fn compute_changed_test_scope_for_files(
     changed_files: &[String],
 ) -> homeboy_core::error::Result<TestScopeOutput> {
     let opts = resolve_drift_options(component, git_ref)?;
+    let changed_files = component_relative_changed_files(component, changed_files);
     let selected_files =
-        compute_changed_test_files_with_drift_options(component, changed_files, &opts)?;
+        compute_changed_test_files_with_drift_options(component, &changed_files, &opts)?;
     let source_changes_without_tests = if selected_files.is_empty() {
         // A relocation refactor (symbol moved between files, unchanged name and
         // behavior) is coverage-neutral: it introduces no new untested surface,
         // so it must not force the changed-scope gate to fail closed. Exclude
         // files whose entire source change is a pure cross-file relocation
         // before flagging the rest as false-green. (#8927)
-        let relocation_only = drift::relocation_only_source_files(&opts, changed_files);
+        let relocation_only = drift::relocation_only_source_files(&opts, &changed_files);
 
         // Guard against silently-disabled source relevance. If the component's
         // drift config resolves no source/test glob patterns (e.g. a language
@@ -821,7 +843,7 @@ pub fn compute_changed_test_scope_for_files(
         // to a conservative docs/config heuristic so real source changes still
         // fail closed. (#8927)
         let relevant: Vec<String> = if opts.has_usable_patterns() {
-            source_relevant_changed_files(&opts, changed_files)
+            source_relevant_changed_files(&opts, &changed_files)
         } else {
             homeboy_core::log_status!(
                 "drift",

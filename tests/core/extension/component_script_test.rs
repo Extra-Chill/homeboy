@@ -454,6 +454,92 @@ fn changed_wordpress_php_smoke_test_executes_with_generic_result_adapter() {
 }
 
 #[test]
+fn changed_nested_extension_js_smokes_use_component_relative_exclusive_route() {
+    with_isolated_home(|home| {
+        let repo = tempfile::tempdir().expect("temp repo");
+        let extension_root = repo.path().join("wordpress");
+        let tests_dir = extension_root.join("tests");
+        fs::create_dir_all(&tests_dir).expect("tests dir should be created");
+        for name in [
+            "wp-codebox-database-service-smoke.mjs",
+            "wp-codebox-phpunit-aggregate-smoke.mjs",
+            "wp-codebox-phpunit-multisite-smoke.mjs",
+        ] {
+            fs::write(tests_dir.join(name), "// JS smoke fixture\n").expect("test fixture");
+        }
+        fs::write(
+            extension_root.join("homeboy.json"),
+            r#"{
+  "id": "fixture",
+  "extensions": { "fixture-js": {} }
+}"#,
+        )
+        .expect("homeboy.json should be written");
+
+        let extension_dir = home.path().join(".config/homeboy/extensions/fixture-js");
+        fs::create_dir_all(&extension_dir).expect("extension dir should be created");
+        fs::write(
+            extension_dir.join("fixture-js.json"),
+            r#"{
+  "name": "Fixture JavaScript extension",
+  "version": "1.0.0",
+  "test": {
+    "extension_script": "test.sh",
+    "changed_file_routing": {
+      "strategy": "exclusive_env",
+      "exclusive_env": {
+        "name": "HOMEBOY_JS_SMOKE_FILES",
+        "globs": ["tests/**/*-smoke.mjs"]
+      }
+    }
+  }
+}"#,
+        )
+        .expect("extension manifest should be written");
+        let extension_script = extension_dir.join("test.sh");
+        fs::write(
+            &extension_script,
+            "#!/bin/sh\n[ \"$HOMEBOY_TEST_SCOPE_KIND\" = exclusive_env ]\n[ \"$HOMEBOY_TEST_SCOPE_ENV_NAME\" = HOMEBOY_JS_SMOKE_FILES ]\nprintf '%s' \"$HOMEBOY_TEST_SCOPE_ENV_VALUE\" | cmp -s - \"$HOMEBOY_COMPONENT_PATH/expected-js-smokes\"\nprintf 'js smoke passed=3 failed=0\\n'\n",
+        )
+        .expect("extension script should be written");
+        let mut perms = fs::metadata(&extension_script)
+            .expect("extension script metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&extension_script, perms)
+            .expect("extension script should be executable");
+        fs::write(
+            extension_root.join("expected-js-smokes"),
+            "tests/wp-codebox-database-service-smoke.mjs\ntests/wp-codebox-phpunit-aggregate-smoke.mjs\ntests/wp-codebox-phpunit-multisite-smoke.mjs",
+        )
+        .expect("expected route should be written");
+        init_git_repo(repo.path());
+
+        let mut args = test_command_args(&extension_root);
+        args.changed_since = Some("HEAD".to_string());
+        args.precomputed_changed_files = Some(vec![
+            "wordpress/tests/wp-codebox-database-service-smoke.mjs".to_string(),
+            "wordpress/tests/wp-codebox-phpunit-aggregate-smoke.mjs".to_string(),
+            "wordpress/tests/wp-codebox-phpunit-multisite-smoke.mjs".to_string(),
+        ]);
+        let (output, exit_code) =
+            run_test(args, &GlobalArgs {}).expect("JS smoke route should run");
+
+        assert_eq!(exit_code, 0);
+        assert!(output.passed);
+        assert_eq!(output.test_counts.expect("test counts").passed, 3);
+        assert_eq!(
+            output.test_scope.expect("changed scope").selected_files,
+            vec![
+                "tests/wp-codebox-database-service-smoke.mjs",
+                "tests/wp-codebox-phpunit-aggregate-smoke.mjs",
+                "tests/wp-codebox-phpunit-multisite-smoke.mjs",
+            ]
+        );
+    });
+}
+
+#[test]
 fn successful_selected_test_without_result_evidence_fails_closed() {
     with_isolated_home(|home| {
         let dir = tempfile::tempdir().expect("temp dir");
