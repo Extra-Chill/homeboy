@@ -60,6 +60,10 @@ can declare optional `lifecycle` metadata using
 `seed`, `snapshot`, `reset`, `rollback`, and `teardown`; runtime implementations
 are extension hooks. See `docs/architecture/lifecycle-contracts.md`.
 
+The same contract is executable from a pipeline through the
+[`lifecycle`](#lifecycle) step, which is how a rig declares a disposable
+workload and gets back a reusable handle to it.
+
 ## Templates And Variants
 
 Rig package specs may declare `extends` to derive a concrete installed rig from one or more JSON templates in the same package source root. Homeboy resolves each parent relative to the declaring file, materializes the merged JSON during `homeboy rig install` / `rig sources update`, and writes the installed rig without the `extends` field. Runtime commands continue to load ordinary rig JSON. Package tools can consume the same canonical result with `homeboy rig materialize <rig.json>`; see [`rig materialize`](rig.md#materialize) for its machine-readable contract and source-root behavior.
@@ -272,7 +276,7 @@ Managed services are detached, tracked by PID in rig state, and logged under `~/
 | `ports` | array | TCP ports the rig binds or assumes ownership of. |
 | `process_patterns` | array | Process command-line substrings the rig may stop or inspect. |
 | `lifecycle` | object | Lifecycle retention defaults applied to every class above. Optional. |
-| `lifecycle_by_class` | object | Per-class retention overrides keyed by `exclusive`, `paths`, `ports`, `process_patterns`. Optional. |
+| `lifecycle_by_class` | object | Per-class retention overrides keyed by `exclusive`, `paths`, `ports`, `process_patterns`, `lifecycle_snapshots`. Optional. |
 
 ```jsonc
 {
@@ -325,6 +329,32 @@ records it produced before retention was declarable.
 `delete_after_ttl` requires a `ttl`. A policy declared without one is reported by
 `homeboy rig lint` and recorded as `manual`, so a misdeclaration never silently
 deletes anything or drops the run's lifecycle index.
+
+#### The `lifecycle_snapshots` class
+
+`lifecycle_snapshots` is the one class with no corresponding `resources` list.
+Its members are the live snapshot handles captured by [`lifecycle`](#lifecycle)
+pipeline steps, which exist only at run time. A rig declares retention for them,
+never the resources themselves.
+
+Its default also differs. The declared classes default to `manual` because an
+operator declared them and can reclaim them by hand. A snapshot handle names a
+disposable environment that nothing else will reclaim if the run dies before its
+`teardown` phase, so it defaults to `delete_after_ttl` with a `P1D` TTL.
+
+```jsonc
+{
+  "resources": {
+    "lifecycle_by_class": {
+      // Reap abandoned environments after 30 minutes instead of a day.
+      "lifecycle_snapshots": { "ttl": "PT30M", "cleanup_policy": "delete_after_ttl" }
+    }
+  }
+}
+```
+
+Declare `{ "cleanup_policy": "preserve" }` to opt out of reaping entirely. A rig
+that never captures a handle emits no `lifecycle_snapshot` records at all.
 
 ## `SymlinkSpec`
 
@@ -484,6 +514,81 @@ Consumes the generic `homeboy/host-mutation-lifecycle/v1` contract from rig pipe
 Supported mutation kinds are the contract kinds: `symlink`, `temp_dir`, `file_backup`, and `package_manifest_rewrite`. Revert runs mutations in reverse order using each record's `revert` plan. Path fields support normal rig expansion (`~`, `${env.NAME}`, `${components.<id>.path}`, `${package.root}`).
 
 Package manifest rewrites operate on JSON package manifests and update common dependency sections (`dependencies`, `devDependencies`, `peerDependencies`, `optionalDependencies`) using each change's `before`/`after` guard. Declare `revert.backup_path` with `strategy: "restore_package_manifest"` so `op: "revert"` can restore the original file.
+
+### `lifecycle`
+
+```jsonc
+{
+  "kind": "lifecycle",
+  "id": "provision",
+  "component": "app",
+  "op": "snapshot",
+  "label": "provision disposable workload",
+  "lifecycle": {
+    "schema": "homeboy/lifecycle-contract/v1",
+    "phases": [
+      { "id": "boot", "phase": "prepare", "extension_hook": "runtime.prepare" },
+      { "id": "fixture", "phase": "seed", "command": "./bin/seed", "required": false },
+      { "id": "capture", "phase": "snapshot", "extension_hook": "runtime.snapshot", "timeout_seconds": 120 },
+      { "id": "reap", "phase": "teardown", "extension_hook": "runtime.teardown" }
+    ]
+  }
+}
+```
+
+Executes one phase of the generic `homeboy/lifecycle-contract/v1` contract — the
+same contract `bench_workloads` / `trace_workloads` / `fuzz_workloads` already
+declare (see [Workload Lifecycle Contracts](#workload-lifecycle-contracts)).
+
+This is the disposable-workload primitive. Homeboy owns the vocabulary
+(`prepare`, `seed`, `snapshot`, `reset`, `rollback`, `teardown`) and the handle
+type; the runtime owns everything else. Nothing in the rig layer knows what an
+environment is, where it lives, or how it is created — which is the point: a
+runtime that can create and reap a throwaway environment becomes declarable
+without any orchestrator-side code.
+
+| Field | Type | Description |
+|---|---|---|
+| `lifecycle` | object | The `homeboy/lifecycle-contract/v1` payload. Required. |
+| `op` | string | Phase to execute. One of `prepare`, `seed`, `snapshot`, `reset`, `rollback`, `teardown`. Defaults to `prepare`. |
+| `component` | string | Optional component ID. Must exist in `components` when set; its resolved path becomes the phase working directory. |
+
+Every contract phase whose `phase` matches `op` runs, in declared order. A step
+whose contract declares no phase for its `op` fails before anything executes.
+
+**Phase invocation.** Each phase declares exactly one of:
+
+- `extension_hook` — an extension ability named `<extension-id>.<action-id>`,
+  dispatched through the normal extension action path.
+- `command` — a shell command, captured, honouring `timeout_seconds` and
+  inheriting the rig's [`toolchain`](#toolchain) PATH.
+
+`required` defaults to `true`. A `required: false` phase that fails is recorded
+as `skipped` and the step continues.
+
+**Handles.** A successful `snapshot` phase produces a `LifecycleSnapshotRef` —
+an opaque handle Homeboy stores and never interprets. A runtime can print a full
+ref as JSON, return one under a `snapshot` key in an extension action result, or
+just print a locator string; all three end up as a handle.
+
+Handles are persisted to rig state (`lifecycle_snapshots`), so a later pipeline
+step or `rig down` can address the environment the runtime created. A successful
+`teardown` step reaps the handles its own step id owns.
+
+**Phase environment.** Every phase sees:
+
+| Variable | Value |
+|---|---|
+| `HOMEBOY_RIG_ID` | The rig id. |
+| `HOMEBOY_LIFECYCLE_PHASE` | The executing phase kind. |
+| `HOMEBOY_LIFECYCLE_PHASE_ID` | The executing phase's `id`. |
+| `HOMEBOY_LIFECYCLE_COMPONENT` | The step's `component`, when declared. |
+| `HOMEBOY_LIFECYCLE_SNAPSHOT_ID` / `_KIND` / `_LOCATOR` | The most recent handle, when one has been captured. |
+
+Live handles are also recorded in the run's resource lifecycle index as
+`lifecycle_snapshot` resources so `homeboy runs resources --cleanup-plan` can
+reap an environment whose run died before its `teardown` phase. See
+[the `lifecycle_snapshots` class](#the-lifecycle_snapshots-class).
 
 ### `command`
 
@@ -767,6 +872,7 @@ Unknown `${...}` patterns are left literal so the eventual command or file check
 - `down` runs the `down` pipeline, then stops declared services and cleans rig-owned shared paths as a safety net.
 - Dependency edges from `depends_on` are resolved before execution; the executor still runs one ordered list, not parallel jobs.
 - Stack synchronization is explicit through `homeboy rig sync` or `kind: "stack"` steps. `rig up` does not sync stacks unless the spec author adds that step.
+- Lifecycle phases are explicit too: a `kind: "lifecycle"` step runs only the phase it declares. `rig down` does not tear down a captured environment unless the spec author adds a `teardown` step to the `down` pipeline.
 
 ## Future Work
 
