@@ -587,8 +587,10 @@ async function withInvocationArtifactLock(invocationRoot, action) {
   let lease;
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
+      const startToken = await processStartToken(process.pid);
+      if (!startToken) { throw new Error('Cannot establish WP Codebox publication lock process identity'); }
       await mkdir(lockPath, { mode: 0o700 });
-      const metadata = { schema: 'homeboy/wp-codebox-publication-lease/v1', pid: process.pid, hostname: hostname(), acquired_at: new Date().toISOString(), token: `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}` };
+      const metadata = { schema: 'homeboy/wp-codebox-publication-lease/v1', pid: process.pid, hostname: hostname(), start_token: startToken, acquired_at: new Date().toISOString(), token: `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}` };
       await atomicWrite(path.join(lockPath, 'owner.json'), `${JSON.stringify(metadata)}\n`);
       const readyFile = process.env.HOMEBOY_WP_CODEBOX_PUBLICATION_LOCK_READY_FILE;
       if (readyFile) { await atomicWrite(readyFile, `${JSON.stringify(metadata)}\n`); }
@@ -627,7 +629,7 @@ async function reclaimDeadInvocationArtifactLock(lockPath) {
   // atomic owner metadata publication. Wait out that short setup window; a
   // crashed owner without a lease remains fail-closed when the bounded wait ends.
   if (!metadata) { return false; }
-  const liveness = invocationArtifactLeaseLiveness(metadata);
+  const liveness = await invocationArtifactLeaseLiveness(metadata);
   if (liveness === 'live') { return false; }
   if (liveness !== 'dead') { throw new Error('WP Codebox publication lock has unknown ownership'); }
 
@@ -639,7 +641,7 @@ async function reclaimDeadInvocationArtifactLock(lockPath) {
     throw error;
   }
   const quarantinedMetadata = await readInvocationArtifactLease(path.join(quarantine, 'owner.json'));
-  if (invocationArtifactLeaseLiveness(quarantinedMetadata) !== 'dead') {
+  if (await invocationArtifactLeaseLiveness(quarantinedMetadata) !== 'dead') {
     throw new Error('WP Codebox publication lock ownership changed during reclaim');
   }
   await rm(quarantine, { recursive: true, force: true });
@@ -649,20 +651,39 @@ async function readInvocationArtifactLease(leasePath) {
   try {
     await assertRegularOrMissing(leasePath);
     const metadata = JSON.parse(await readFile(leasePath, 'utf8'));
-    return isObject(metadata) && metadata.schema === 'homeboy/wp-codebox-publication-lease/v1' && Number.isInteger(metadata.pid) && metadata.pid > 0 && typeof metadata.hostname === 'string' && metadata.hostname !== '' && typeof metadata.token === 'string' && metadata.token !== '' ? metadata : null;
+    return isObject(metadata) && metadata.schema === 'homeboy/wp-codebox-publication-lease/v1' && Number.isInteger(metadata.pid) && metadata.pid > 0 && typeof metadata.hostname === 'string' && metadata.hostname !== '' && typeof metadata.start_token === 'string' && metadata.start_token !== '' && typeof metadata.token === 'string' && metadata.token !== '' ? metadata : null;
   } catch {
     return null;
   }
 }
-function invocationArtifactLeaseLiveness(metadata) {
+async function invocationArtifactLeaseLiveness(metadata) {
   if (!metadata || metadata.hostname !== hostname()) { return 'unknown'; }
   try {
     process.kill(metadata.pid, 0);
-    return 'live';
   } catch (error) {
     if (error.code === 'ESRCH') { return 'dead'; }
     return 'unknown';
   }
+  const startToken = await processStartToken(metadata.pid);
+  if (!startToken) { return 'unknown'; }
+  return startToken === metadata.start_token ? 'live' : 'dead';
+}
+async function processStartToken(pid) {
+  if (process.platform === 'linux') {
+    try {
+      const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
+      const close = stat.lastIndexOf(')');
+      const fields = close === -1 ? [] : stat.slice(close + 1).trim().split(/\s+/);
+      const startTime = fields[19];
+      if (/^\d+$/.test(startTime || '')) { return `linux:${startTime}`; }
+    } catch {}
+  }
+  if (['darwin', 'linux', 'freebsd'].includes(process.platform)) {
+    const result = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 1000 });
+    const startTime = result.status === 0 ? result.stdout.trim().replace(/\s+/g, ' ') : '';
+    if (startTime) { return `ps:${startTime}`; }
+  }
+  return '';
 }
 async function assertDirectoryTree(directoryRoot, segments) {
   const rootStat = await lstat(directoryRoot);

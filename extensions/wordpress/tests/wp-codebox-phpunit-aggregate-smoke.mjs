@@ -219,6 +219,8 @@ printf '%s\\n' '${JSON.stringify({ data: { entity: { local_path: conflictingData
   await writeFile(path.join(crashedInvocation, 'unrelated.json'), '{}\n');
   const crashedOwner = spawn(runner, [], { env: { ...process.env, FIXTURE: JSON.stringify({ sidecar: unknownSidecar, output: green }), HOMEBOY_COMPONENT_PATH: component, COMPONENT_ID: 'component', HOMEBOY_WP_CODEBOX_BIN: cli, HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: path.join(root, 'crashed-owner-run'), HOMEBOY_INVOCATION_ARTIFACT_DIR: crashedInvocation, HOMEBOY_RUNTIME_WRITE_TEST_RESULTS: resultsWriter, HOMEBOY_TEST_RESULTS_FILE: path.join(root, 'crashed-owner-results.json'), HOMEBOY_WP_CODEBOX_PUBLICATION_LOCK_READY_FILE: crashedReady, HOMEBOY_WP_CODEBOX_PUBLICATION_LOCK_HOLD_MS: '5000', HOMEBOY_SETTINGS_JSON: '{}' }, stdio: 'ignore' });
   const ownerLease = JSON.parse(await waitForFile(crashedReady));
+  assert.equal(typeof ownerLease.start_token, 'string');
+  assert.notEqual(ownerLease.start_token, '');
   const liveContender = spawnSync(runner, [], { env: { ...process.env, FIXTURE: JSON.stringify({ sidecar: unknownSidecar, output: green }), HOMEBOY_COMPONENT_PATH: component, COMPONENT_ID: 'component', HOMEBOY_WP_CODEBOX_BIN: cli, HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: path.join(root, 'live-contender-run'), HOMEBOY_INVOCATION_ARTIFACT_DIR: crashedInvocation, HOMEBOY_RUNTIME_WRITE_TEST_RESULTS: resultsWriter, HOMEBOY_TEST_RESULTS_FILE: path.join(root, 'live-contender-results.json'), HOMEBOY_SETTINGS_JSON: '{}' }, encoding: 'utf8' });
   assert.notEqual(liveContender.status, 0);
   assert.match(liveContender.stderr, /Timed out waiting/);
@@ -236,6 +238,15 @@ printf '%s\\n' '${JSON.stringify({ data: { entity: { local_path: conflictingData
   const recoveredManifest = JSON.parse(await readFile(path.join(crashedInvocation, 'homeboy-artifact-manifest.json'), 'utf8'));
   assert.equal(recoveredManifest.artifacts.find((artifact) => artifact.id === 'unrelated').provenance.producer, 'fixture');
   assert.equal(recoveredManifest.artifacts.filter((artifact) => artifact.path === 'wp-codebox-phpunit/files/test-results.json').length, 1);
+
+  const reusedPidInvocation = path.join(root, 'reused-pid-invocation');
+  const reusedPidLock = path.join(reusedPidInvocation, '.wp-codebox-phpunit-publication.lock');
+  await mkdir(reusedPidLock, { recursive: true });
+  await writeFile(path.join(reusedPidInvocation, 'homeboy-artifact-manifest.json'), '{"schema":"homeboy/artifact-manifest/v1"}\n');
+  await writeFile(path.join(reusedPidLock, 'owner.json'), JSON.stringify({ schema: 'homeboy/wp-codebox-publication-lease/v1', pid: process.pid, hostname: ownerLease.hostname, start_token: 'reused-pid-token', token: 'stale-owner' }));
+  const reusedPidRun = spawnSync(runner, [], { env: { ...process.env, FIXTURE: JSON.stringify({ sidecar: unknownSidecar, output: green }), HOMEBOY_COMPONENT_PATH: component, COMPONENT_ID: 'component', HOMEBOY_WP_CODEBOX_BIN: cli, HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: path.join(root, 'reused-pid-run'), HOMEBOY_INVOCATION_ARTIFACT_DIR: reusedPidInvocation, HOMEBOY_RUNTIME_WRITE_TEST_RESULTS: resultsWriter, HOMEBOY_TEST_RESULTS_FILE: path.join(root, 'reused-pid-results.json'), HOMEBOY_SETTINGS_JSON: '{}' }, encoding: 'utf8' });
+  assert.equal(reusedPidRun.status, 0, reusedPidRun.stderr);
+  assert.deepEqual(JSON.parse(await readFile(path.join(root, 'reused-pid-results.json'), 'utf8')), { total: 3, passed: 3, failed: 0, skipped: 0 });
 } finally {
   await rm(root, { recursive: true, force: true });
 }
