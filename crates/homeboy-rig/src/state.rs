@@ -10,6 +10,7 @@ use std::fs;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::paths;
 
+use homeboy_lifecycle_contract::LifecycleSnapshotRef;
 pub use homeboy_lifecycle_contract::{ComponentSnapshot, RigStateSnapshot};
 
 use super::spec::RigResourcesSpec;
@@ -45,6 +46,36 @@ pub struct RigState {
     /// Effective component identities selected by the most recent invocation.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub last_effective_components: BTreeMap<String, ComponentSnapshot>,
+
+    /// Live lifecycle snapshot handles captured by `lifecycle` pipeline steps,
+    /// keyed by snapshot ref id.
+    ///
+    /// This is the missing sandbox handle. Without it a throwaway environment
+    /// exists only for the duration of the step that created it, and anything
+    /// downstream has to reverse-engineer its location. With it, a later step
+    /// or `rig down` addresses the environment by the id its own runtime
+    /// handed back. Homeboy never interprets the handle.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub lifecycle_snapshots: BTreeMap<String, LifecycleSnapshotState>,
+}
+
+/// One live lifecycle snapshot handle owned by this rig.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LifecycleSnapshotState {
+    /// Pipeline step that captured the handle — the step `id` when declared,
+    /// otherwise the component id, otherwise `lifecycle`. A successful
+    /// `teardown` step reaps the handles it owns by this key.
+    pub step: String,
+
+    /// Component the lifecycle contract was declared against, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
+
+    /// Timestamp when the handle was captured, RFC3339.
+    pub captured_at: String,
+
+    /// The opaque handle itself, exactly as the runtime returned it.
+    pub snapshot: LifecycleSnapshotRef,
 }
 
 /// Persistent record of what a successful `rig up` materialized.

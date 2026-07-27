@@ -131,7 +131,13 @@ The plan emits equivalent `homeboy runner exec <runner-id> ...` commands for eac
 symlinks, shared paths, or typed pipeline steps so local service stacks still stay
 on the local `rig up` path.
 
-The pipeline can start services, run typed `git` / `build` / `extension` / `stack` steps, apply idempotent local patches, create symlinks/shared paths, and run checks.
+The pipeline can start services, run typed `git` / `build` / `extension` / `stack` steps, apply idempotent local patches, create symlinks/shared paths, run declared `lifecycle` phases, and run checks.
+
+A `kind: "lifecycle"` step executes one phase of a declared
+`homeboy/lifecycle-contract/v1` — that is how a rig provisions a disposable
+workload and gets back a handle to it. Captured handles land in rig state, so a
+later step or a `teardown` step in the `down` pipeline can address the
+environment the runtime created. See [`lifecycle`](rig-spec.md#lifecycle).
 
 ### `check`
 

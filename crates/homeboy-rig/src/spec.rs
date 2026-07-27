@@ -10,7 +10,10 @@ use std::collections::{BTreeMap, HashMap};
 
 pub use homeboy_core::artifact_postprocess::ArtifactPostprocessAction as ArtifactPostprocessSpec;
 use homeboy_core::component::ScopedExtensionConfig;
-use homeboy_core::lifecycle::LifecycleContract;
+pub use homeboy_core::lifecycle::{
+    LifecycleContract, LifecyclePhaseContract, LifecyclePhaseKind, LifecyclePhaseResult,
+    LifecyclePhaseStatus, LifecycleResultMetadata, LifecycleSnapshotRef,
+};
 use homeboy_extension::bench::{BenchGate, BenchGateOp};
 
 mod check;
@@ -326,13 +329,21 @@ pub const RIG_RESOURCE_CLASS_PATHS: &str = "paths";
 pub const RIG_RESOURCE_CLASS_PORTS: &str = "ports";
 /// Resource class key for [`RigResourcesSpec::process_patterns`].
 pub const RIG_RESOURCE_CLASS_PROCESS_PATTERNS: &str = "process_patterns";
+/// Resource class key for live lifecycle snapshot handles.
+///
+/// Unlike the other classes this one is not declared as a list of resources —
+/// the handles are produced at run time by `lifecycle` pipeline steps. A rig
+/// declares only the *retention* for them, which is why it participates in
+/// `lifecycle_by_class` but has no corresponding `RigResourcesSpec` field.
+pub const RIG_RESOURCE_CLASS_LIFECYCLE_SNAPSHOTS: &str = "lifecycle_snapshots";
 
 /// Every resource class a rig can declare lifecycle retention for.
-pub const RIG_RESOURCE_CLASSES: [&str; 4] = [
+pub const RIG_RESOURCE_CLASSES: [&str; 5] = [
     RIG_RESOURCE_CLASS_EXCLUSIVE,
     RIG_RESOURCE_CLASS_PATHS,
     RIG_RESOURCE_CLASS_PORTS,
     RIG_RESOURCE_CLASS_PROCESS_PATTERNS,
+    RIG_RESOURCE_CLASS_LIFECYCLE_SNAPSHOTS,
 ];
 
 impl RigResourcesSpec {

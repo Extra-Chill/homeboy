@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use homeboy_core::host_mutation_lifecycle::HostMutationLifecycle;
+use homeboy_core::lifecycle::{LifecycleContract, LifecyclePhaseKind};
 
 use super::CheckSpec;
 
@@ -365,6 +366,46 @@ pub enum PipelineStep {
         label: Option<String>,
     },
 
+    /// Execute one phase of a declared `homeboy/lifecycle-contract/v1`.
+    ///
+    /// This is the generic disposable-workload primitive. The contract already
+    /// owns the vocabulary (`prepare`, `seed`, `snapshot`, `reset`,
+    /// `rollback`, `teardown`) and each phase names either an
+    /// `extension_hook` ability or a `command`. Homeboy executes the phase and
+    /// records the returned `LifecycleSnapshotRef` as an opaque handle — it
+    /// never learns what the workload is, where it lives, or how it is
+    /// materialized. A runtime that can create and reap a throwaway
+    /// environment becomes declarable with zero orchestrator-side knowledge:
+    /// `snapshot` returns the handle, `teardown` reaps it.
+    ///
+    /// Mirrors `host-mutation`: a below-core lifecycle contract embedded in a
+    /// rig step, validated then executed, with the same optional
+    /// `id`/`depends_on` ordering fields as every other step.
+    Lifecycle {
+        /// Optional stable node ID for dependency-aware pipeline ordering.
+        #[serde(default, rename = "id", skip_serializing_if = "Option::is_none")]
+        step_id: Option<String>,
+        /// Step IDs that must run before this step.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        depends_on: Vec<String>,
+        /// Optional component ID. When set it must exist in the rig's
+        /// `components` map; its resolved path becomes the phase working
+        /// directory and is exported as `HOMEBOY_LIFECYCLE_COMPONENT`. Absent
+        /// means the lifecycle is not bound to a checkout, which is the normal
+        /// shape for a runtime-owned throwaway environment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        component: Option<String>,
+        /// Lifecycle contract payload (`homeboy/lifecycle-contract/v1`).
+        lifecycle: LifecycleContract,
+        /// Phase to execute. Every contract phase of this kind runs, in
+        /// declared order. Defaults to `prepare`.
+        #[serde(default = "default_lifecycle_op")]
+        op: LifecyclePhaseKind,
+        /// Human-readable label shown during execution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+
     /// Pre-flight / health check. Non-fatal in `up` (warns), fatal in `check`.
     Check {
         /// Optional stable node ID for dependency-aware pipeline ordering.
@@ -393,6 +434,10 @@ fn default_patch_op() -> PatchOp {
 
 fn default_host_mutation_op() -> HostMutationOp {
     HostMutationOp::Validate
+}
+
+fn default_lifecycle_op() -> LifecyclePhaseKind {
+    LifecyclePhaseKind::Prepare
 }
 
 /// Git operation supported by a rig `git` step.

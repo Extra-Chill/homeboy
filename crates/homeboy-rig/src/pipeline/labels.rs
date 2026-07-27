@@ -2,8 +2,8 @@
 
 use super::super::expand::expand_vars;
 use super::super::spec::{
-    GitOp, HostMutationOp, PatchOp, PipelineStep, RigSpec, ServiceOp, SharedPathOp, StackOp,
-    SymlinkOp,
+    GitOp, HostMutationOp, LifecyclePhaseKind, PatchOp, PipelineStep, RigSpec, ServiceOp,
+    SharedPathOp, StackOp, SymlinkOp,
 };
 
 pub(super) fn step_kind(step: &PipelineStep) -> &'static str {
@@ -20,6 +20,7 @@ pub(super) fn step_kind(step: &PipelineStep) -> &'static str {
         PipelineStep::SharedPath { .. } => "shared-path",
         PipelineStep::Patch { .. } => "patch",
         PipelineStep::HostMutation { .. } => "host-mutation",
+        PipelineStep::Lifecycle { .. } => "lifecycle",
         PipelineStep::Check { .. } => "check",
     }
 }
@@ -128,6 +129,17 @@ pub(super) fn step_label(rig: &RigSpec, step: &PipelineStep, idx: usize) -> Stri
                 truncate(&lifecycle.run_id, 60)
             )
         }),
+        PipelineStep::Lifecycle {
+            component,
+            op,
+            label,
+            ..
+        } => label.clone().unwrap_or_else(|| match component {
+            Some(component) => {
+                format!("lifecycle {} {}", serialize_lifecycle_op(*op), component)
+            }
+            None => format!("lifecycle {}", serialize_lifecycle_op(*op)),
+        }),
         PipelineStep::Check { label, .. } => label
             .clone()
             .unwrap_or_else(|| format!("check #{}", idx + 1)),
@@ -188,6 +200,19 @@ fn serialize_host_mutation_op(op: HostMutationOp) -> &'static str {
         HostMutationOp::Validate => "validate",
         HostMutationOp::Apply => "apply",
         HostMutationOp::Revert => "revert",
+    }
+}
+
+/// Kebab-case rendering of a lifecycle phase, matching the contract's own
+/// snake_case wire values for the single-word phases it declares.
+pub(super) fn serialize_lifecycle_op(op: LifecyclePhaseKind) -> &'static str {
+    match op {
+        LifecyclePhaseKind::Prepare => "prepare",
+        LifecyclePhaseKind::Seed => "seed",
+        LifecyclePhaseKind::Snapshot => "snapshot",
+        LifecyclePhaseKind::Reset => "reset",
+        LifecyclePhaseKind::Rollback => "rollback",
+        LifecyclePhaseKind::Teardown => "teardown",
     }
 }
 

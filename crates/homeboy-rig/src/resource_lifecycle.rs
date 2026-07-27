@@ -6,8 +6,10 @@ use homeboy_core::resource_lifecycle_index::{
 
 use super::spec::{
     RigResourceRetentionSpec, RigResourcesSpec, RIG_RESOURCE_CLASS_EXCLUSIVE,
-    RIG_RESOURCE_CLASS_PATHS, RIG_RESOURCE_CLASS_PORTS, RIG_RESOURCE_CLASS_PROCESS_PATTERNS,
+    RIG_RESOURCE_CLASS_LIFECYCLE_SNAPSHOTS, RIG_RESOURCE_CLASS_PATHS, RIG_RESOURCE_CLASS_PORTS,
+    RIG_RESOURCE_CLASS_PROCESS_PATTERNS,
 };
+use super::state::LifecycleSnapshotState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RigResourceLifecycleOptions {
@@ -113,6 +115,91 @@ pub fn dependency_materialization_cache_lifecycle_record(
         )),
         status: options.status,
     }
+}
+
+/// Default retention for a live lifecycle snapshot handle.
+///
+/// A snapshot handle names a disposable environment. Nothing reclaims it if the
+/// run that created it dies before its `teardown` phase, so unlike the declared
+/// resource classes (which default to `manual`) the safe default here is a TTL
+/// reap. A rig tightens or loosens it through
+/// `resources.lifecycle_by_class.lifecycle_snapshots`.
+const LIFECYCLE_SNAPSHOT_DEFAULT_TTL: &str = "P1D";
+
+/// Resource kind recorded for a live lifecycle snapshot handle.
+pub const LIFECYCLE_SNAPSHOT_RESOURCE_KIND: &str = "lifecycle_snapshot";
+
+/// Lifecycle records for the snapshot handles a rig currently holds.
+///
+/// These are the leaked-sandbox reaping records: each live handle becomes a
+/// resource `homeboy runs resources --cleanup-plan` can see and act on. The
+/// handle's own `locator` is the resource path when the runtime supplied one,
+/// otherwise a rig-scoped URI, so the record is always addressable without
+/// Homeboy inventing knowledge about the environment.
+pub fn lifecycle_snapshot_lifecycle_records<'a>(
+    rig_id: &str,
+    resources: &RigResourcesSpec,
+    options: &RigResourceLifecycleOptions,
+    snapshots: impl IntoIterator<Item = (&'a String, &'a LifecycleSnapshotState)>,
+) -> Vec<ResourceLifecycleRecord> {
+    let retention = snapshot_retention(resources);
+
+    snapshots
+        .into_iter()
+        .map(|(id, entry)| {
+            let (cleanup_policy, ttl) = retention.clone();
+            ResourceLifecycleRecord {
+                owner: "homeboy.rig.lifecycle_snapshot".to_string(),
+                run_id: options.run_id.clone(),
+                runner_id: options.runner_id.clone(),
+                path: entry
+                    .snapshot
+                    .locator
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|locator| !locator.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("rig://{rig_id}/lifecycle-snapshot/{id}")),
+                root_bound: None,
+                kind: LIFECYCLE_SNAPSHOT_RESOURCE_KIND.to_string(),
+                ttl,
+                cleanup_policy,
+                evidence_retention: ResourceEvidenceRetention::Metadata,
+                cleanup_intent: options.cleanup_intent,
+                cleanup_command: Some(format!(
+                    "homeboy runs resources --run-id {} --cleanup-plan",
+                    options.run_id
+                )),
+                status: options.status,
+            }
+        })
+        .collect()
+}
+
+/// Retention for lifecycle snapshot handles: declared override, then the rig
+/// default, then the TTL-reap fallback.
+fn snapshot_retention(resources: &RigResourcesSpec) -> (ResourceCleanupPolicy, Option<String>) {
+    let declared = resources.retention_for_class(RIG_RESOURCE_CLASS_LIFECYCLE_SNAPSHOTS);
+    let ttl = declared
+        .ttl
+        .as_ref()
+        .map(|ttl| ttl.trim().to_string())
+        .filter(|ttl| !ttl.is_empty());
+    let policy = declared
+        .cleanup_policy
+        .unwrap_or(ResourceCleanupPolicy::DeleteAfterTtl);
+
+    // Same hardening as the declared resource classes: `delete_after_ttl`
+    // without a ttl is contract-invalid and would sink the whole index, so
+    // supply the default ttl rather than emitting an unvalidatable record.
+    if matches!(policy, ResourceCleanupPolicy::DeleteAfterTtl) && ttl.is_none() {
+        return (
+            ResourceCleanupPolicy::DeleteAfterTtl,
+            Some(LIFECYCLE_SNAPSHOT_DEFAULT_TTL.to_string()),
+        );
+    }
+
+    (policy, ttl)
 }
 
 fn record(
@@ -396,6 +483,137 @@ mod tests {
         let json = serde_json::to_string(&resources).expect("serialize");
         let parsed: RigResourcesSpec = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, resources);
+    }
+
+    fn snapshot_state(id: &str, locator: Option<&str>) -> LifecycleSnapshotState {
+        LifecycleSnapshotState {
+            step: "provision".to_string(),
+            component: None,
+            captured_at: "2026-07-27T13:00:00Z".to_string(),
+            snapshot: homeboy_lifecycle_contract::LifecycleSnapshotRef {
+                schema: "homeboy/lifecycle-snapshot-ref/v1".to_string(),
+                id: id.to_string(),
+                kind: "lifecycle_snapshot".to_string(),
+                phase_id: Some("capture".to_string()),
+                artifact_id: None,
+                artifact: None,
+                locator: locator.map(str::to_string),
+                created_at: Some("2026-07-27T13:00:00Z".to_string()),
+                metadata: Default::default(),
+            },
+        }
+    }
+
+    #[test]
+    fn live_snapshot_handles_become_ttl_reapable_resources() {
+        let mut snapshots = std::collections::BTreeMap::new();
+        snapshots.insert(
+            "sandbox-7f3".to_string(),
+            snapshot_state("sandbox-7f3", Some("opaque://sandbox/7f3")),
+        );
+
+        let records = lifecycle_snapshot_lifecycle_records(
+            "fixture-rig",
+            &RigResourcesSpec::default(),
+            &RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active),
+            snapshots.iter(),
+        );
+
+        assert_eq!(records.len(), 1);
+        records[0].validate(0).expect("valid snapshot record");
+        assert_eq!(records[0].kind, "lifecycle_snapshot");
+        assert_eq!(records[0].owner, "homeboy.rig.lifecycle_snapshot");
+        assert_eq!(records[0].path, "opaque://sandbox/7f3");
+        assert_eq!(
+            records[0].cleanup_policy,
+            ResourceCleanupPolicy::DeleteAfterTtl
+        );
+        assert_eq!(records[0].ttl.as_deref(), Some("P1D"));
+    }
+
+    #[test]
+    fn snapshot_handles_without_a_locator_get_an_addressable_rig_uri() {
+        let mut snapshots = std::collections::BTreeMap::new();
+        snapshots.insert("capture".to_string(), snapshot_state("capture", None));
+
+        let records = lifecycle_snapshot_lifecycle_records(
+            "fixture-rig",
+            &RigResourcesSpec::default(),
+            &RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active),
+            snapshots.iter(),
+        );
+
+        records[0].validate(0).expect("valid snapshot record");
+        assert_eq!(
+            records[0].path,
+            "rig://fixture-rig/lifecycle-snapshot/capture"
+        );
+    }
+
+    #[test]
+    fn declared_snapshot_retention_overrides_the_ttl_reap_default() {
+        let mut resources = RigResourcesSpec::default();
+        resources.lifecycle_by_class.insert(
+            crate::spec::RIG_RESOURCE_CLASS_LIFECYCLE_SNAPSHOTS.to_string(),
+            RigResourceRetentionSpec {
+                ttl: Some("PT30M".to_string()),
+                cleanup_policy: Some(ResourceCleanupPolicy::DeleteAfterTtl),
+            },
+        );
+        let mut snapshots = std::collections::BTreeMap::new();
+        snapshots.insert("capture".to_string(), snapshot_state("capture", None));
+
+        let records = lifecycle_snapshot_lifecycle_records(
+            "fixture-rig",
+            &resources,
+            &RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active),
+            snapshots.iter(),
+        );
+
+        assert_eq!(records[0].ttl.as_deref(), Some("PT30M"));
+    }
+
+    /// A rig that declares `preserve` for snapshot handles keeps them: the
+    /// TTL-reap posture is a default, not a policy homeboy imposes.
+    #[test]
+    fn declared_snapshot_policy_can_opt_out_of_reaping() {
+        let mut resources = RigResourcesSpec::default();
+        resources.lifecycle_by_class.insert(
+            crate::spec::RIG_RESOURCE_CLASS_LIFECYCLE_SNAPSHOTS.to_string(),
+            RigResourceRetentionSpec {
+                ttl: None,
+                cleanup_policy: Some(ResourceCleanupPolicy::Preserve),
+            },
+        );
+        let mut snapshots = std::collections::BTreeMap::new();
+        snapshots.insert("capture".to_string(), snapshot_state("capture", None));
+
+        let records = lifecycle_snapshot_lifecycle_records(
+            "fixture-rig",
+            &resources,
+            &RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active),
+            snapshots.iter(),
+        );
+
+        records[0].validate(0).expect("valid snapshot record");
+        assert_eq!(records[0].cleanup_policy, ResourceCleanupPolicy::Preserve);
+        assert_eq!(records[0].ttl, None);
+    }
+
+    /// Non-breaking guarantee: a rig with no lifecycle steps holds no handles,
+    /// so the emitted index is byte-identical to the pre-lifecycle behavior.
+    #[test]
+    fn rigs_without_snapshot_handles_emit_no_snapshot_records() {
+        let empty: std::collections::BTreeMap<String, LifecycleSnapshotState> =
+            std::collections::BTreeMap::new();
+        let records = lifecycle_snapshot_lifecycle_records(
+            "fixture-rig",
+            &fixture_resources(),
+            &RigResourceLifecycleOptions::new("run-1", ResourceLifecycleResourceStatus::Active),
+            empty.iter(),
+        );
+
+        assert!(records.is_empty());
     }
 
     #[test]

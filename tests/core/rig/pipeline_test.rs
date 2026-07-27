@@ -1551,3 +1551,11 @@ mod patch;
 // ---- Shared path step end-to-end -------------------------------------------
 #[path = "pipeline_test/shared_path.rs"]
 mod shared_path;
+
+// ---- Lifecycle step end-to-end ---------------------------------------------
+//
+// The lifecycle step is the sandbox primitive: it executes a declared
+// `homeboy/lifecycle-contract/v1` phase and carries the resulting handle
+// forward. Run real pipelines so dispatch + serde wiring are exercised.
+#[path = "pipeline_test/lifecycle.rs"]
+mod lifecycle;

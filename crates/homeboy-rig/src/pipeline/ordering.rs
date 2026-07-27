@@ -181,6 +181,7 @@ fn step_id(step: &PipelineStep) -> Option<&str> {
         | PipelineStep::SharedPath { step_id, .. }
         | PipelineStep::Patch { step_id, .. }
         | PipelineStep::HostMutation { step_id, .. }
+        | PipelineStep::Lifecycle { step_id, .. }
         | PipelineStep::Check { step_id, .. } => step_id.as_deref(),
     }
 }
@@ -199,6 +200,7 @@ fn step_dependencies(step: &PipelineStep) -> &[String] {
         | PipelineStep::SharedPath { depends_on, .. }
         | PipelineStep::Patch { depends_on, .. }
         | PipelineStep::HostMutation { depends_on, .. }
+        | PipelineStep::Lifecycle { depends_on, .. }
         | PipelineStep::Check { depends_on, .. } => depends_on,
     }
 }
