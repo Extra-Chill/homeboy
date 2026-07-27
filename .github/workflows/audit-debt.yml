@@ -14,12 +14,14 @@
 # workflow does — on a weekly cadence, decoupled from releases so a full audit
 # never taxes the release path — and files/refreshes one issue per finding kind.
 #
-# It is advisory only: it never blocks anything (there is no gate), it just
-# keeps the audit-debt issue set current.
+# Scheduled sweeps continue to maintain the debt roadmap. Pushes to `main` run
+# the same full profile as a blocking post-merge guard below.
 
 name: Audit Debt
 
 on:
+  push:
+    branches: [main]
   schedule:
     # Mondays 07:00 UTC — once a week is plenty for slow-moving structural debt.
     - cron: '0 7 * * 1'
@@ -39,8 +41,21 @@ permissions:
   issues: write
 
 jobs:
+  full-audit-gate:
+    name: Full-tree audit gate
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run blocking full-profile audit
+        run: cargo run --locked -- review audit homeboy --profile=full
+
   full-audit:
     name: Full-tree audit → tracking issues
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

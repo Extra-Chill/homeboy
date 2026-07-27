@@ -330,6 +330,15 @@ fn run_comparison_workflow(
     // Try file-based baseline
     if !args.baseline_flags.ignore_baseline {
         if let Some(existing_baseline) = baseline::load_baseline(Path::new(&result.source_path)) {
+            // Changed-scope PR reviews intentionally tolerate baseline rows outside
+            // their diff. Full audits fail closed so a crate move cannot leave the
+            // baseline inert until an unrelated file is touched.
+            if requires_full_baseline_path_validation(args.changed_since.as_deref()) {
+                baseline::validate_fingerprint_paths(
+                    Path::new(&result.source_path),
+                    &existing_baseline,
+                )?;
+            }
             return build_comparison_output(result, analysis, existing_baseline, args, timing);
         }
     }
@@ -378,6 +387,10 @@ fn run_comparison_workflow(
             timing,
         })
     }
+}
+
+fn requires_full_baseline_path_validation(changed_since: Option<&str>) -> bool {
+    changed_since.is_none()
 }
 
 /// Audit the selected base ref without modifying the caller's checkout.

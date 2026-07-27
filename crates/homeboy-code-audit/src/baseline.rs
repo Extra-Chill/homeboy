@@ -236,8 +236,67 @@ pub fn save_baseline_scoped(
 pub fn file_from_audit_fingerprint(fingerprint: &str) -> Option<String> {
     let first = fingerprint.find("::")?;
     let rest = &fingerprint[first + 2..];
-    let last = rest.rfind("::")?;
-    Some(rest[..last].to_string())
+    let next = rest.find("::")?;
+    Some(rest[..next].to_string())
+}
+
+/// Reject full-audit baselines that retain source-file fingerprints for paths
+/// removed by a tree move. Synthetic detector identities without a file
+/// extension (for example artifact portability rows) remain valid.
+pub fn validate_fingerprint_paths(
+    source_path: &Path,
+    baseline: &AuditBaseline,
+) -> homeboy_error::Result<()> {
+    let missing = baseline
+        .known_fingerprints
+        .iter()
+        .filter_map(|fingerprint| {
+            let file = file_from_audit_fingerprint(fingerprint)?;
+            is_source_file_path(&file).then_some((file, fingerprint))
+        })
+        .filter(|(file, _)| !source_path.join(file).is_file())
+        .map(|(_, fingerprint)| fingerprint.as_str())
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(homeboy_error::Error::validation_invalid_argument(
+        "baselines.audit.known_fingerprints",
+        format!(
+            "{} baseline fingerprint(s) reference source files that no longer exist: {}. Regenerate or prune the stale baseline rows.",
+            missing.len(),
+            missing.join(", ")
+        ),
+        None,
+        None,
+    ))
+}
+
+fn is_source_file_path(path: &str) -> bool {
+    matches!(
+        Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str()),
+        Some(
+            "rs" | "php"
+                | "js"
+                | "jsx"
+                | "ts"
+                | "tsx"
+                | "mjs"
+                | "py"
+                | "go"
+                | "java"
+                | "rb"
+                | "swift"
+                | "kt"
+                | "c"
+                | "cpp"
+                | "h"
+        )
+    )
 }
 
 /// Load a baseline if one exists for the given source path.
@@ -525,6 +584,38 @@ mod tests {
             findings,
             duplicate_groups: vec![],
         }
+    }
+
+    #[test]
+    fn rejects_stale_source_file_fingerprints_but_keeps_synthetic_rows() {
+        let result = make_result(Vec::new(), "stale_fingerprint_paths");
+        let root = Path::new(&result.source_path);
+        std::fs::create_dir_all(root.join("crates/example/src")).expect("source directory");
+        std::fs::write(root.join("crates/example/src/live.rs"), "fn live() {}")
+            .expect("source file");
+        let baseline = AuditBaseline {
+            created_at: "now".to_string(),
+            context_id: "test".to_string(),
+            item_count: 3,
+            known_fingerprints: vec![
+                "structural::crates/example/src/live.rs::GodFile".to_string(),
+                "structural::src/retired.rs::GodFile".to_string(),
+                "artifact_portability::artifact_portability/path::NonPortableArtifactPath"
+                    .to_string(),
+            ],
+            metadata: AuditBaselineMetadata {
+                outliers_count: 0,
+                alignment_score: None,
+                known_outliers: Vec::new(),
+                policy_sections: Vec::new(),
+            },
+        };
+
+        let error = validate_fingerprint_paths(root, &baseline)
+            .expect_err("removed source path must invalidate the baseline");
+
+        assert!(error.to_string().contains("src/retired.rs"));
+        assert!(!error.to_string().contains("artifact_portability/path"));
     }
 
     #[test]
