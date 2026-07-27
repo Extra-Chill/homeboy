@@ -721,6 +721,7 @@ dependencies = [
  "chrono",
  "homeboy-agents-contract",
  "homeboy-core",
+ "homeboy-engine-primitives",
  "homeboy-error",
  "homeboy-extension",
  "homeboy-lab-contract",
@@ -1295,6 +1296,7 @@ name = "homeboy-upgrade"
 version = "0.1.0"
 dependencies = [
  "homeboy-core",
+ "homeboy-engine-primitives",
  "homeboy-extension",
  "homeboy-product-identity",
  "libc",
