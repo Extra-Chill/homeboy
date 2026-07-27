@@ -7,6 +7,8 @@
 //! remote-runner boundary). Those plain-data contracts live here so core can
 //! reference them without a `core -> runner` edge.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::{Deserialize, Serialize};
 
 /// The kind of runner backing a homeboy runner definition.
@@ -450,5 +452,333 @@ impl RunnerSession {
             RunnerSessionRole::Controller => RunnerLifecycleOwner::Controller,
             RunnerSessionRole::Runner => RunnerLifecycleOwner::Runner,
         }
+    }
+}
+
+/// A versioned Lab contract required by a controller or advertised by an
+/// executing runner/daemon. Versions are explicit compatibility declarations,
+/// not inferred from a Homeboy semver or commit relationship.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LabCapabilityVersion {
+    pub id: String,
+    pub version: u32,
+}
+
+/// The complete set of Lab contracts every current handoff requires.
+///
+/// Keep these names protocol-focused. Product-specific capabilities belong in
+/// the caller's own contract, not in the generic Lab admission handshake.
+pub fn required_lab_handoff_capabilities() -> Vec<LabCapabilityVersion> {
+    [
+        "daemon-protocol",
+        "workspace-materialization",
+        "lifecycle-gate-execution",
+        "result-schema",
+        "artifact-transport",
+    ]
+    .into_iter()
+    .map(|id| LabCapabilityVersion {
+        id: id.to_string(),
+        version: 1,
+    })
+    .collect()
+}
+
+/// Immutable runtime provenance supplied by a controller, runner command, or
+/// active daemon. Dirty or incomplete provenance is never eligible for a
+/// compatibility admission.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LabRuntimeIdentity {
+    pub build_identity: String,
+    pub source_revision: String,
+    pub clean: bool,
+}
+
+/// The independently verified relationship between a requested controller
+/// source revision and the executing runner source revision.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LabRuntimeAncestry {
+    ExactSource,
+    VerifiedNewerDescendant,
+    Older,
+    Diverged,
+    Unknown,
+}
+
+/// The controller requirement and runner/daemon evidence that participate in a
+/// single Lab handoff admission decision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LabCapabilityHandshake {
+    pub controller: LabRuntimeIdentity,
+    pub required_capabilities: Vec<LabCapabilityVersion>,
+    pub runner_command: LabRuntimeIdentity,
+    pub runner_command_capabilities: Vec<LabCapabilityVersion>,
+    pub daemon: LabRuntimeIdentity,
+    pub daemon_capabilities: Vec<LabCapabilityVersion>,
+    pub ancestry: LabRuntimeAncestry,
+}
+
+/// Serialized record of a Lab capability negotiation. Persist this unchanged
+/// from preflight through reservation and execution so all phases use one
+/// decision rather than recomputing against drifting runtime state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LabCapabilityNegotiationProvenance {
+    pub schema: String,
+    pub controller_requirement: LabRuntimeIdentity,
+    pub executed_runner_command: LabRuntimeIdentity,
+    pub active_daemon: LabRuntimeIdentity,
+    pub ancestry: LabRuntimeAncestry,
+    pub negotiated_capabilities: Vec<LabCapabilityVersion>,
+    pub compatible: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rejection_reason: Option<String>,
+}
+
+/// Result of a fail-closed Lab capability admission decision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LabCapabilityAdmission {
+    pub compatible: bool,
+    pub provenance: LabCapabilityNegotiationProvenance,
+}
+
+/// Evaluate a controller-to-Lab handoff using only explicit compatibility and
+/// provenance evidence. A newer source revision is accepted only when its
+/// ancestry has already been verified and both the executing command and active
+/// daemon advertise every required capability version.
+pub fn negotiate_lab_capability_handshake(
+    handshake: &LabCapabilityHandshake,
+) -> LabCapabilityAdmission {
+    let mut rejection_reason = runtime_identity_reason("controller", &handshake.controller)
+        .or_else(|| runtime_identity_reason("runner command", &handshake.runner_command))
+        .or_else(|| runtime_identity_reason("active daemon", &handshake.daemon));
+
+    if rejection_reason.is_none()
+        && handshake.runner_command.source_revision != handshake.daemon.source_revision
+    {
+        rejection_reason =
+            Some("runner command and active daemon source revisions differ".to_string());
+    }
+
+    if rejection_reason.is_none()
+        && !matches!(
+            handshake.ancestry,
+            LabRuntimeAncestry::ExactSource | LabRuntimeAncestry::VerifiedNewerDescendant
+        )
+    {
+        rejection_reason = Some(format!(
+            "runner provenance is not an exact source or verified newer descendant ({:?})",
+            handshake.ancestry
+        ));
+    }
+
+    if rejection_reason.is_none()
+        && handshake.ancestry == LabRuntimeAncestry::ExactSource
+        && handshake.controller.source_revision != handshake.runner_command.source_revision
+    {
+        rejection_reason =
+            Some("exact-source ancestry does not match the controller source revision".to_string());
+    }
+
+    let required = capability_versions(&handshake.required_capabilities);
+    if rejection_reason.is_none()
+        && (handshake
+            .required_capabilities
+            .iter()
+            .any(|capability| capability.id.trim().is_empty())
+            || required.len()
+                != handshake
+                    .required_capabilities
+                    .iter()
+                    .map(|capability| capability.id.as_str())
+                    .collect::<BTreeSet<_>>()
+                    .len())
+    {
+        rejection_reason =
+            Some("controller capability requirements are incomplete or contradictory".to_string());
+    }
+    let command = advertised_capability_versions(&handshake.runner_command_capabilities);
+    let daemon = advertised_capability_versions(&handshake.daemon_capabilities);
+    let negotiated_capabilities = required
+        .iter()
+        .filter_map(|(id, version)| {
+            (command
+                .get(id)
+                .is_some_and(|versions| versions.contains(version))
+                && daemon
+                    .get(id)
+                    .is_some_and(|versions| versions.contains(version)))
+            .then(|| LabCapabilityVersion {
+                id: id.clone(),
+                version: *version,
+            })
+        })
+        .collect();
+
+    if rejection_reason.is_none() {
+        for (id, version) in &required {
+            if !command
+                .get(id)
+                .is_some_and(|versions| versions.contains(version))
+                || !daemon
+                    .get(id)
+                    .is_some_and(|versions| versions.contains(version))
+            {
+                rejection_reason = Some(format!(
+                    "required capability `{id}` version {version} is not advertised by both runner command and active daemon"
+                ));
+                break;
+            }
+        }
+    }
+
+    let compatible = rejection_reason.is_none();
+    LabCapabilityAdmission {
+        compatible,
+        provenance: LabCapabilityNegotiationProvenance {
+            schema: "homeboy/lab-capability-negotiation/v1".to_string(),
+            controller_requirement: handshake.controller.clone(),
+            executed_runner_command: handshake.runner_command.clone(),
+            active_daemon: handshake.daemon.clone(),
+            ancestry: handshake.ancestry,
+            negotiated_capabilities,
+            compatible,
+            rejection_reason,
+        },
+    }
+}
+
+fn runtime_identity_reason(role: &str, identity: &LabRuntimeIdentity) -> Option<String> {
+    if !identity.clean {
+        return Some(format!("{role} runtime provenance is dirty"));
+    }
+    if identity.build_identity.trim().is_empty() || identity.source_revision.trim().is_empty() {
+        return Some(format!("{role} runtime provenance is incomplete"));
+    }
+    None
+}
+
+fn capability_versions(capabilities: &[LabCapabilityVersion]) -> BTreeMap<String, u32> {
+    let mut versions = BTreeMap::new();
+    for capability in capabilities {
+        // Conflicting duplicate declarations are deliberately absent from the
+        // result, so they cannot accidentally satisfy a requirement.
+        match versions.get(&capability.id) {
+            Some(previous) if *previous != capability.version => {
+                versions.remove(&capability.id);
+            }
+            Some(_) => {}
+            None => {
+                versions.insert(capability.id.clone(), capability.version);
+            }
+        }
+    }
+    versions
+}
+
+fn advertised_capability_versions(
+    capabilities: &[LabCapabilityVersion],
+) -> BTreeMap<String, BTreeSet<u32>> {
+    let mut versions = BTreeMap::new();
+    for capability in capabilities {
+        versions
+            .entry(capability.id.clone())
+            .or_insert_with(BTreeSet::new)
+            .insert(capability.version);
+    }
+    versions
+}
+
+#[cfg(test)]
+mod capability_handshake_tests {
+    use super::*;
+
+    fn identity(build: &str, source: &str) -> LabRuntimeIdentity {
+        LabRuntimeIdentity {
+            build_identity: build.to_string(),
+            source_revision: source.to_string(),
+            clean: true,
+        }
+    }
+
+    fn handshake(ancestry: LabRuntimeAncestry) -> LabCapabilityHandshake {
+        let capabilities = required_lab_handoff_capabilities();
+        LabCapabilityHandshake {
+            controller: identity("homeboy 1.0.0+controller", "a"),
+            required_capabilities: capabilities.clone(),
+            runner_command: identity("homeboy 1.0.1+runner", "b"),
+            runner_command_capabilities: capabilities.clone(),
+            daemon: identity("homeboy 1.0.1+daemon", "b"),
+            daemon_capabilities: capabilities,
+            ancestry,
+        }
+    }
+
+    #[test]
+    fn admits_controller_n_with_verified_runner_n_plus_one_and_records_provenance() {
+        let admission = negotiate_lab_capability_handshake(&handshake(
+            LabRuntimeAncestry::VerifiedNewerDescendant,
+        ));
+        assert!(admission.compatible);
+        assert_eq!(
+            admission.provenance.schema,
+            "homeboy/lab-capability-negotiation/v1"
+        );
+        assert_eq!(admission.provenance.negotiated_capabilities.len(), 5);
+    }
+
+    #[test]
+    fn rejects_controller_n_plus_one_with_older_runner() {
+        let admission = negotiate_lab_capability_handshake(&handshake(LabRuntimeAncestry::Older));
+        assert!(!admission.compatible);
+    }
+
+    #[test]
+    fn admits_cross_platform_same_source_builds() {
+        let mut handshake = handshake(LabRuntimeAncestry::ExactSource);
+        handshake.runner_command = identity("homeboy 1.0.0+linux", "a");
+        handshake.daemon = identity("homeboy 1.0.0+macos", "a");
+        assert!(negotiate_lab_capability_handshake(&handshake).compatible);
+    }
+
+    #[test]
+    fn rejects_diverged_unknown_and_dirty_provenance() {
+        for ancestry in [LabRuntimeAncestry::Diverged, LabRuntimeAncestry::Unknown] {
+            assert!(!negotiate_lab_capability_handshake(&handshake(ancestry)).compatible);
+        }
+        let mut dirty = handshake(LabRuntimeAncestry::VerifiedNewerDescendant);
+        dirty.daemon.clean = false;
+        assert!(!negotiate_lab_capability_handshake(&dirty).compatible);
+    }
+
+    #[test]
+    fn rejects_capability_removal_schema_incompatibility_and_command_daemon_divergence() {
+        let mut removed = handshake(LabRuntimeAncestry::VerifiedNewerDescendant);
+        removed.daemon_capabilities.pop();
+        assert!(!negotiate_lab_capability_handshake(&removed).compatible);
+
+        let mut incompatible = handshake(LabRuntimeAncestry::VerifiedNewerDescendant);
+        incompatible.runner_command_capabilities[3].version = 2;
+        assert!(!negotiate_lab_capability_handshake(&incompatible).compatible);
+
+        let mut divergent = handshake(LabRuntimeAncestry::VerifiedNewerDescendant);
+        divergent.daemon.source_revision = "c".to_string();
+        assert!(!negotiate_lab_capability_handshake(&divergent).compatible);
+    }
+
+    #[test]
+    fn accepts_a_newer_capability_that_explicitly_advertises_the_required_version() {
+        let mut handshake = handshake(LabRuntimeAncestry::VerifiedNewerDescendant);
+        handshake
+            .runner_command_capabilities
+            .push(LabCapabilityVersion {
+                id: "result-schema".to_string(),
+                version: 2,
+            });
+        handshake.daemon_capabilities.push(LabCapabilityVersion {
+            id: "result-schema".to_string(),
+            version: 2,
+        });
+        assert!(negotiate_lab_capability_handshake(&handshake).compatible);
     }
 }
