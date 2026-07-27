@@ -58,15 +58,39 @@ pub fn run(args: AgentTaskArgs, _global: &GlobalArgs) -> CmdResult<Value> {
                 run::announce_durable_cook_identity(cook_id, run_id);
             }
         }
+        emit_cook_progress(phase, cook_id, run_id);
+        Ok(())
+    };
+    run_with_cook_progress(args, Some(&progress))
+}
+
+fn cook_progress_message(phase: &str, cook_id: Option<&str>, run_id: Option<&str>) -> String {
+    let identity = match (cook_id, run_id) {
+        (_, Some(run_id)) => format!(" [{run_id}]"),
+        (Some(cook_id), None) => format!(" [{cook_id}]"),
+        (None, None) => String::new(),
+    };
+    match run_id {
+        Some(run_id) => format!(
+            "Cook {phase}: durable run `{run_id}`. Status: `homeboy agent-task status {run_id}`. Evidence: `homeboy agent-task evidence {run_id} --full`."
+        ),
+        None => format!("Cook {phase}{identity}."),
+    }
+}
+
+/// Non-TTY callers need durable recovery coordinates in their captured stderr,
+/// not transient terminal-only status. TTY output stays compact.
+pub(crate) fn emit_cook_progress(phase: &str, cook_id: Option<&str>, run_id: Option<&str>) {
+    if crate::commands::utils::tty::is_stdout_tty() {
         let identity = match (cook_id, run_id) {
             (_, Some(run_id)) => format!(" [{run_id}]"),
             (Some(cook_id), None) => format!(" [{cook_id}]"),
             (None, None) => String::new(),
         };
         crate::commands::utils::tty::status(&format!("cook: {phase}{identity}"));
-        Ok(())
-    };
-    run_with_cook_progress(args, Some(&progress))
+    } else {
+        eprintln!("{}", cook_progress_message(phase, cook_id, run_id));
+    }
 }
 
 pub(crate) fn run_with_cook_progress(
@@ -153,6 +177,20 @@ pub(crate) fn run_with_cook_progress(
                 ))
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::cook_progress_message;
+
+    #[test]
+    fn non_tty_cook_progress_includes_durable_reconnect_commands() {
+        // The formatter is the non-TTY client contract: callers can reconnect
+        // after an interrupted observation without guessing the run identity.
+        let message = cook_progress_message("provider_ready", None, Some("run-123"));
+        assert!(message.contains("agent-task status run-123"));
+        assert!(message.contains("agent-task evidence run-123 --full"));
     }
 }
 
