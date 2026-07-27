@@ -623,10 +623,12 @@ fn delegate_agent_task_cook_to_pinned_runtime(
         }
     }
 
-    let pinned = crate::agents::agent_tasks::lifecycle::pin_current_controller_runtime(
-        &format!("seal-{}", Uuid::new_v4()),
-        || Ok(false),
-    )?;
+    let request_id = format!("seal-{}", Uuid::new_v4());
+    let pinned =
+        crate::agents::agent_tasks::lifecycle::pin_current_controller_runtime(&request_id, || {
+            Ok(false)
+        })
+        .map_err(|error| annotate_cook_seal_failure(error, &request_id, normalized_args))?;
     let status = ProcessCommand::new(&pinned)
         .args(&normalized_args[1..])
         .env(COOK_PINNED_RUNTIME_ENV, &pinned)
@@ -641,6 +643,31 @@ fn delegate_agent_task_cook_to_pinned_runtime(
             )
         })?;
     Ok(Some(status.code().unwrap_or(1)))
+}
+
+/// The runtime seal runs before a cook has any durable run record — controller
+/// admission is what creates one — so a failed seal leaves the error itself as
+/// the only evidence the operator gets.
+///
+/// Carry the admission request identity and the exact command to re-submit, so
+/// a contended parallel wave produces a resumable instruction instead of a bare
+/// retryable failure (#9373). Admission is FIFO, so re-running the identical
+/// command queues rather than races.
+fn annotate_cook_seal_failure(
+    mut error: homeboy::core::Error,
+    request_id: &str,
+    normalized_args: &[String],
+) -> homeboy::core::Error {
+    if !error.details.is_object() {
+        error.details = serde_json::json!({});
+    }
+    error.details["controller_admission_phase"] = serde_json::json!("cook_runtime_seal");
+    error.details["controller_admission_request_id"] = serde_json::json!(request_id);
+    error.details["next_actions"] =
+        serde_json::json!([homeboy::core::engine::shell::quote_args(normalized_args)]);
+    error.with_hint(
+        "Controller admission is FIFO: re-running the identical cook command queues behind the current owner instead of racing it.",
+    )
 }
 
 /// Durable lifecycle mutations remain owned by the runtime that admitted the
