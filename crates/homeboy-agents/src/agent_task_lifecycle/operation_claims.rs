@@ -319,10 +319,45 @@ fn claim_owner_is_live(claim: &Value) -> bool {
     if pid == 0 || pid > i32::MAX as u64 {
         return false;
     }
+    process_is_live(pid as u32)
+}
+
+#[cfg(unix)]
+fn process_is_live(pid: u32) -> bool {
     // kill(pid, 0) checks process existence without signalling it. EPERM is
     // still proof of a live process that this controller may not inspect.
     let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
     result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(windows)]
+fn process_is_live(pid: u32) -> bool {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED},
+        System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, STILL_ACTIVE,
+        },
+    };
+
+    // Access denied establishes that a process owns this PID, matching Unix's
+    // EPERM treatment. A queryable process is live only while STILL_ACTIVE.
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return GetLastError() == ERROR_ACCESS_DENIED;
+        }
+        let mut exit_code = 0;
+        let queried = GetExitCodeProcess(process, &mut exit_code) != 0;
+        let _ = CloseHandle(process);
+        queried && exit_code == STILL_ACTIVE
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_is_live(_pid: u32) -> bool {
+    // Without a supported liveness primitive, preserve the lease until its
+    // deterministic deadline rather than risk re-entering an external effect.
+    true
 }
 
 /// RFC3339 timestamp `lease` after `base`. Falls back to `base` when the base is
