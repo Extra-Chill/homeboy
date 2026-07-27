@@ -11,11 +11,13 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
 use homeboy::agents::agent_task_service as agent_task_service_direct;
-use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
+use homeboy::agents::agent_tasks::lifecycle::{self as agent_task_lifecycle, AgentTaskRunRecord};
 use homeboy::agents::agent_tasks::promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
 use homeboy::agents::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy::agents::agent_tasks::service as agent_task_service;
-use homeboy::agents::agent_tasks::{AgentTaskEvidenceRef, AgentTaskOutcomeStatus};
+use homeboy::agents::agent_tasks::{
+    AgentTaskEvidenceRef, AgentTaskFailureClassification, AgentTaskOutcomeStatus,
+};
 use homeboy::core::engine::shell::quote_arg;
 use homeboy::core::output::{budget_json_values, OutputBudget};
 use homeboy::runner::runners::{self as runner, RunnerKind};
@@ -27,8 +29,9 @@ use super::args::{
 };
 use super::candidate::{classify_candidates, CandidateState};
 use crate::commands::utils::response::{
-    CommandActionableMetadata, CommandAgentTaskRef, CommandNextAction, CommandNextActionKind,
-    CommandResultRefs, ACTIONABLE_METADATA_KEY,
+    CommandActionableMetadata, CommandAgentTaskRef, CommandArtifactRef, CommandEvidenceRef,
+    CommandNextAction, CommandNextActionKind, CommandResultRefs, CommandRunRef,
+    ACTIONABLE_METADATA_KEY,
 };
 
 /// Cap the number of detail refs rendered in the compact summary so a noisy
@@ -738,11 +741,11 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
 
     let mut value = json!({
         "schema": "homeboy/agent-task-diagnose/v1",
-        "run_id": record.run_id,
+        "run_id": record.run_id.clone(),
         "state": record.state,
         "root_cause": root_cause,
         "causal_chain": causal_chain,
-        "missing_artifacts": missing_artifacts,
+        "missing_artifacts": missing_artifacts.clone(),
         "hydrated_evidence": hydrated_evidence,
         "hydrated_evidence_total": total_hydrated_evidence,
         "next_commands": next_commands,
@@ -761,7 +764,724 @@ pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
             ),
         );
     }
+    // The diagnosis is only useful if it leaves the caller with the exact next
+    // command for THIS failure. Everything above is already computed; this
+    // projects it into the shared actionable envelope instead of discarding it.
+    attach_diagnose_actionable(
+        &mut value,
+        &record,
+        aggregate.as_ref(),
+        &missing_artifacts,
+        record.runner_id(),
+    );
     Ok((value, 0))
+}
+
+/// Basis marker for `next_actions`: the diagnosis mapped a typed failure
+/// classification (or a concrete missing-artifact set) to specific commands.
+const DIAGNOSE_ACTION_BASIS_DIAGNOSIS: &str = "diagnosis";
+/// Basis marker for `next_actions`: nothing in the diagnosis was specific
+/// enough to act on, so the generic recovery set is emitted as an explicit
+/// fallback rather than as the only behavior.
+const DIAGNOSE_ACTION_BASIS_FALLBACK: &str = "generic_fallback";
+
+/// One failed task and how its executor classified the failure. This is the
+/// typed input to the classification→action table: it is read from durable
+/// outcome state, never from provider prose, so an emitted action can always be
+/// substantiated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiagnosedFailure {
+    task_id: String,
+    classification: AgentTaskFailureClassification,
+}
+
+/// Collect the distinct failure classifications a run actually recorded, first
+/// implicated task wins. Successful and no-op outcomes are never a failure
+/// signal even if a stale classification survived on them.
+fn diagnosed_failures(aggregate: &AgentTaskAggregate) -> Vec<DiagnosedFailure> {
+    let mut failures: Vec<DiagnosedFailure> = Vec::new();
+    for outcome in &aggregate.outcomes {
+        if matches!(
+            outcome.status,
+            AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp
+        ) {
+            continue;
+        }
+        let Some(classification) = outcome.failure_classification else {
+            continue;
+        };
+        if failures
+            .iter()
+            .any(|failure| failure.classification == classification)
+        {
+            continue;
+        }
+        failures.push(DiagnosedFailure {
+            task_id: outcome.task_id.clone(),
+            classification,
+        });
+    }
+    failures
+}
+
+fn attach_diagnose_actionable(
+    value: &mut Value,
+    record: &AgentTaskRunRecord,
+    aggregate: Option<&AgentTaskAggregate>,
+    missing_artifacts: &[Value],
+    runner_id: Option<&str>,
+) {
+    let run_id = record.run_id.as_str();
+    let failures = aggregate.map(diagnosed_failures).unwrap_or_default();
+    let (next_actions, basis) =
+        diagnose_next_actions(run_id, &failures, missing_artifacts, runner_id);
+    if let Value::Object(map) = value {
+        map.insert(
+            "next_action_basis".to_string(),
+            Value::String(basis.to_string()),
+        );
+    }
+    let metadata = CommandActionableMetadata {
+        run: Some(diagnose_run_ref(record, runner_id)),
+        refs: CommandResultRefs {
+            agent_tasks: vec![agent_task_ref(run_id)],
+            ..Default::default()
+        },
+        next_actions,
+        artifacts: aggregate.map(diagnose_artifact_refs).unwrap_or_default(),
+        evidence: aggregate.map(diagnose_evidence_refs).unwrap_or_default(),
+    };
+    attach_actionable_metadata(value, metadata);
+}
+
+/// Derive the recovery commands for this exact failure. Returns the generic set
+/// ONLY when neither a classification nor a missing-artifact set produced a
+/// specific step, and labels which of the two happened.
+fn diagnose_next_actions(
+    run_id: &str,
+    failures: &[DiagnosedFailure],
+    missing_artifacts: &[Value],
+    runner_id: Option<&str>,
+) -> (Vec<CommandNextAction>, &'static str) {
+    let mut actions: Vec<CommandNextAction> = Vec::new();
+    for failure in failures {
+        for action in classification_next_actions(run_id, failure, runner_id) {
+            push_unique_next_action(&mut actions, action);
+        }
+    }
+    for action in missing_artifact_next_actions(run_id, missing_artifacts) {
+        push_unique_next_action(&mut actions, action);
+    }
+    if actions.is_empty() {
+        return (
+            generic_diagnose_next_actions(run_id),
+            DIAGNOSE_ACTION_BASIS_FALLBACK,
+        );
+    }
+    (actions, DIAGNOSE_ACTION_BASIS_DIAGNOSIS)
+}
+
+fn push_unique_next_action(actions: &mut Vec<CommandNextAction>, action: CommandNextAction) {
+    if actions
+        .iter()
+        .any(|existing| existing.command == action.command)
+    {
+        return;
+    }
+    actions.push(action);
+}
+
+/// The classification→action table. Each arm answers "what do I run next for
+/// THIS kind of failure?" with commands that exist in the CLI surface and are
+/// scoped to the run and task the diagnosis implicates.
+fn classification_next_actions(
+    run_id: &str,
+    failure: &DiagnosedFailure,
+    runner_id: Option<&str>,
+) -> Vec<CommandNextAction> {
+    let run = quote_arg(run_id);
+    let task = quote_arg(&failure.task_id);
+    let failure_evidence = CommandNextAction::new(
+        format!("show failure evidence for {}", failure.task_id),
+        format!("homeboy agent-task evidence {run} --task {task} --failure-only"),
+    )
+    .with_kind(CommandNextActionKind::Show);
+    let retry = CommandNextAction::new(
+        "retry the run from its plan",
+        format!("homeboy agent-task retry {run} --run"),
+    )
+    .with_kind(CommandNextActionKind::Repair);
+    let review = CommandNextAction::new(
+        "review the candidate this attempt left behind",
+        format!("homeboy agent-task review {run}"),
+    )
+    .with_kind(CommandNextActionKind::Show);
+    let list_providers = CommandNextAction::new(
+        "list registered providers",
+        "homeboy agent-task providers".to_string(),
+    )
+    .with_kind(CommandNextActionKind::Show);
+
+    match failure.classification {
+        // The provider itself errored or was not resolvable: prove which
+        // provider was asked for, and whether it is registered and ready.
+        AgentTaskFailureClassification::Provider => {
+            let mut actions = vec![failure_evidence, list_providers];
+            actions.extend(provider_readiness_actions(runner_id));
+            actions.push(retry);
+            actions
+        }
+        // Documented as safe to retry with bounded backoff: lead with the retry.
+        AgentTaskFailureClassification::Transient => vec![retry, failure_evidence],
+        // A wall-clock timeout can still have left a complete candidate patch,
+        // so review comes before spending another attempt.
+        AgentTaskFailureClassification::Timeout => vec![failure_evidence, review, retry],
+        // A silent hang: the durable record is likely still `running` and the
+        // owning runner is the thing to interrogate.
+        AgentTaskFailureClassification::Stalled => {
+            let mut actions = vec![CommandNextAction::new(
+                "reconcile the stalled run against authoritative state",
+                format!("homeboy agent-task reconcile {run} --dry-run"),
+            )
+            .with_kind(CommandNextActionKind::Repair)];
+            actions.extend(lost_runner_actions(runner_id));
+            actions.push(failure_evidence);
+            actions.push(retry);
+            actions
+        }
+        // Throttled: the evidence carries the retry-after hint, and another
+        // registered provider may be able to take the work now.
+        AgentTaskFailureClassification::RateLimited => {
+            vec![
+                failure_evidence,
+                CommandNextAction::new(
+                    "list registered providers to rotate to",
+                    "homeboy agent-task providers".to_string(),
+                )
+                .with_kind(CommandNextActionKind::Show),
+                retry,
+            ]
+        }
+        // Policy refused this request. Retrying an identical request is denied
+        // identically, so no retry action is emitted.
+        AgentTaskFailureClassification::PolicyDenied => vec![
+            failure_evidence,
+            CommandNextAction::new(
+                "show the full run record including the policy that denied it",
+                format!("homeboy agent-task status {run} --full"),
+            )
+            .with_kind(CommandNextActionKind::Show),
+        ],
+        // A required capability/tool was not resolvable: the readiness chain is
+        // the repair, not another attempt.
+        AgentTaskFailureClassification::CapabilityMissing => {
+            let mut actions = vec![
+                failure_evidence,
+                CommandNextAction::new(
+                    "show provider declarations and discovery diagnostics",
+                    "homeboy agent-task providers --full".to_string(),
+                )
+                .with_kind(CommandNextActionKind::Show),
+            ];
+            actions.extend(provider_readiness_actions(runner_id));
+            actions
+        }
+        // The request the provider received was malformed. Replaying the
+        // boundary shows the exact rejected input; a retry would resend it.
+        AgentTaskFailureClassification::InvalidInput => vec![
+            failure_evidence,
+            CommandNextAction::new(
+                format!("replay the provider boundary for {}", failure.task_id),
+                format!("homeboy agent-task replay-provider-boundary {run} --task {task}"),
+            )
+            .with_kind(CommandNextActionKind::Show),
+        ],
+        // The work ran and failed (gate/verify failure, harvest failure,
+        // required typed artifacts missing): show what the failing step
+        // recorded and what it produced before deciding to retry.
+        AgentTaskFailureClassification::ExecutionFailed => vec![
+            failure_evidence,
+            review,
+            CommandNextAction::new(
+                "list the artifacts the run produced",
+                format!("homeboy agent-task artifacts {run} --full"),
+            )
+            .with_kind(CommandNextActionKind::Artifacts),
+            retry,
+        ],
+        // Deliberately unmapped: an unclassified failure has no substantiable
+        // specific step, so the caller gets the explicit generic fallback.
+        AgentTaskFailureClassification::Unknown => Vec::new(),
+    }
+}
+
+/// Provider/runner readiness chain for the runner that owns the run. Emitted
+/// only when a runner id is known, because `agent-task doctor` requires one.
+fn provider_readiness_actions(runner_id: Option<&str>) -> Vec<CommandNextAction> {
+    let Some(runner_id) = runner_id else {
+        return Vec::new();
+    };
+    let runner = quote_arg(runner_id);
+    vec![
+        CommandNextAction::new(
+            format!("check provider and runner readiness on {runner_id}"),
+            format!("homeboy agent-task doctor --runner {runner}"),
+        )
+        .with_kind(CommandNextActionKind::Show),
+        CommandNextAction::new(
+            format!("repair provider and runner readiness on {runner_id}"),
+            format!("homeboy agent-task doctor --runner {runner} --repair"),
+        )
+        .with_kind(CommandNextActionKind::Repair),
+    ]
+}
+
+/// Runner session inspection and repair for a run whose runner went quiet.
+fn lost_runner_actions(runner_id: Option<&str>) -> Vec<CommandNextAction> {
+    let Some(runner_id) = runner_id else {
+        return Vec::new();
+    };
+    let runner = quote_arg(runner_id);
+    vec![
+        CommandNextAction::new(
+            format!("show runner session state for {runner_id}"),
+            format!("homeboy runner status {runner}"),
+        )
+        .with_kind(CommandNextActionKind::Show),
+        CommandNextAction::new(
+            format!("diagnose and repair runner {runner_id}"),
+            format!("homeboy runner doctor {runner} --repair"),
+        )
+        .with_kind(CommandNextActionKind::Repair),
+    ]
+}
+
+/// Actions for the specific artifacts a task declared and did not produce.
+fn missing_artifact_next_actions(
+    run_id: &str,
+    missing_artifacts: &[Value],
+) -> Vec<CommandNextAction> {
+    if missing_artifacts.is_empty() {
+        return Vec::new();
+    }
+    let run = quote_arg(run_id);
+    let mut actions = vec![CommandNextAction::new(
+        "list the artifacts the run actually produced",
+        format!("homeboy agent-task artifacts {run} --full"),
+    )
+    .with_kind(CommandNextActionKind::Artifacts)];
+    for entry in missing_artifacts.iter().take(COMPACT_REF_LIMIT) {
+        let Some(task_id) = entry.get("task_id").and_then(Value::as_str) else {
+            continue;
+        };
+        let names = entry
+            .get("missing")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        if names.is_empty() {
+            continue;
+        }
+        let task = quote_arg(task_id);
+        actions.push(
+            CommandNextAction::new(
+                format!("show the declarations {task_id} was given for {names}"),
+                format!("homeboy agent-task replay-provider-boundary {run} --task {task}"),
+            )
+            .with_kind(CommandNextActionKind::Show),
+        );
+        actions.push(
+            CommandNextAction::new(
+                format!("show failure evidence for {task_id}"),
+                format!("homeboy agent-task evidence {run} --task {task} --failure-only"),
+            )
+            .with_kind(CommandNextActionKind::Show),
+        );
+    }
+    actions
+}
+
+/// The pre-existing static set, retained as the explicit fallback for a failure
+/// the diagnosis could not classify.
+fn generic_diagnose_next_actions(run_id: &str) -> Vec<CommandNextAction> {
+    let run = quote_arg(run_id);
+    vec![
+        CommandNextAction::new(
+            "show the full run record",
+            format!("homeboy agent-task status {run} --full"),
+        )
+        .with_kind(CommandNextActionKind::Show),
+        CommandNextAction::new(
+            "list the artifacts the run produced",
+            format!("homeboy agent-task artifacts {run}"),
+        )
+        .with_kind(CommandNextActionKind::Artifacts),
+        CommandNextAction::new("review run", format!("homeboy agent-task review {run}"))
+            .with_kind(CommandNextActionKind::Show),
+        CommandNextAction::new(
+            "retry the run from its plan",
+            format!("homeboy agent-task retry {run} --run"),
+        )
+        .with_kind(CommandNextActionKind::Repair),
+    ]
+}
+
+fn diagnose_run_ref(record: &AgentTaskRunRecord, runner_id: Option<&str>) -> CommandRunRef {
+    let run = quote_arg(&record.run_id);
+    CommandRunRef {
+        id: record.run_id.clone(),
+        kind: "agent_task".to_string(),
+        source: "homeboy-agent-task-lifecycle".to_string(),
+        location: Some(
+            runner_id
+                .map(|runner_id| format!("runner:{runner_id}"))
+                .unwrap_or_else(|| "local".to_string()),
+        ),
+        started_at: Some(record.submitted_at.clone()),
+        updated_at: record.updated_at.clone(),
+        finished_at: None,
+        status_command: format!("homeboy agent-task status {run} --full"),
+        watch_command: format!("homeboy agent-task logs {run}"),
+    }
+}
+
+fn diagnose_artifact_refs(aggregate: &AgentTaskAggregate) -> Vec<CommandArtifactRef> {
+    aggregate
+        .outcomes
+        .iter()
+        .flat_map(|outcome| outcome.artifacts.iter())
+        .take(COMPACT_REF_LIMIT)
+        .map(|artifact| CommandArtifactRef {
+            id: artifact.id.clone(),
+            kind: artifact.kind.clone(),
+            uri: artifact
+                .url
+                .clone()
+                .or_else(|| artifact.path.clone())
+                .unwrap_or_default(),
+            semantic_key: artifact.semantic_key.clone(),
+        })
+        .collect()
+}
+
+fn diagnose_evidence_refs(aggregate: &AgentTaskAggregate) -> Vec<CommandEvidenceRef> {
+    aggregate
+        .outcomes
+        .iter()
+        .flat_map(|outcome| {
+            outcome
+                .evidence_refs
+                .iter()
+                .map(move |evidence| (outcome.task_id.as_str(), evidence))
+        })
+        .take(COMPACT_REF_LIMIT)
+        .map(|(task_id, evidence)| CommandEvidenceRef {
+            id: format!("{task_id}:{}", evidence.kind),
+            kind: evidence.kind.clone(),
+            uri: evidence.uri.clone(),
+            semantic_key: None,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod diagnose_actionable_tests {
+    use super::*;
+
+    fn failure(classification: AgentTaskFailureClassification) -> DiagnosedFailure {
+        DiagnosedFailure {
+            task_id: "task-a".to_string(),
+            classification,
+        }
+    }
+
+    fn commands(actions: &[CommandNextAction]) -> Vec<&str> {
+        actions
+            .iter()
+            .map(|action| action.command.as_str())
+            .collect()
+    }
+
+    fn repair_commands(actions: &[CommandNextAction]) -> Vec<&str> {
+        actions
+            .iter()
+            .filter(|action| matches!(action.kind, Some(CommandNextActionKind::Repair)))
+            .map(|action| action.command.as_str())
+            .collect()
+    }
+
+    fn actions_for(
+        classification: AgentTaskFailureClassification,
+        runner_id: Option<&str>,
+    ) -> Vec<CommandNextAction> {
+        let (actions, basis) =
+            diagnose_next_actions("run-1", &[failure(classification)], &[], runner_id);
+        assert_eq!(basis, DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
+        actions
+    }
+
+    #[test]
+    fn a_provider_failure_asks_which_provider_was_registered_before_retrying() {
+        let actions = actions_for(AgentTaskFailureClassification::Provider, None);
+
+        assert_eq!(
+            commands(&actions),
+            vec![
+                "homeboy agent-task evidence run-1 --task task-a --failure-only",
+                "homeboy agent-task providers",
+                "homeboy agent-task retry run-1 --run",
+            ]
+        );
+        assert_eq!(
+            repair_commands(&actions),
+            vec!["homeboy agent-task retry run-1 --run"]
+        );
+    }
+
+    #[test]
+    fn a_transient_failure_leads_with_the_retry_it_is_documented_to_survive() {
+        let actions = actions_for(AgentTaskFailureClassification::Transient, None);
+
+        assert_eq!(
+            commands(&actions),
+            vec![
+                "homeboy agent-task retry run-1 --run",
+                "homeboy agent-task evidence run-1 --task task-a --failure-only",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_timeout_reviews_the_candidate_before_spending_another_attempt() {
+        let actions = actions_for(AgentTaskFailureClassification::Timeout, None);
+
+        assert_eq!(
+            commands(&actions),
+            vec![
+                "homeboy agent-task evidence run-1 --task task-a --failure-only",
+                "homeboy agent-task review run-1",
+                "homeboy agent-task retry run-1 --run",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_stalled_run_reconciles_and_repairs_the_runner_that_went_quiet() {
+        let actions = actions_for(AgentTaskFailureClassification::Stalled, Some("homeboy-lab"));
+
+        assert_eq!(
+            commands(&actions),
+            vec![
+                "homeboy agent-task reconcile run-1 --dry-run",
+                "homeboy runner status homeboy-lab",
+                "homeboy runner doctor homeboy-lab --repair",
+                "homeboy agent-task evidence run-1 --task task-a --failure-only",
+                "homeboy agent-task retry run-1 --run",
+            ]
+        );
+        assert_eq!(
+            repair_commands(&actions),
+            vec![
+                "homeboy agent-task reconcile run-1 --dry-run",
+                "homeboy runner doctor homeboy-lab --repair",
+                "homeboy agent-task retry run-1 --run",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_stalled_run_without_a_known_runner_never_names_one() {
+        let actions = actions_for(AgentTaskFailureClassification::Stalled, None);
+
+        assert!(!commands(&actions)
+            .iter()
+            .any(|command| command.starts_with("homeboy runner ")));
+    }
+
+    #[test]
+    fn a_rate_limited_failure_offers_provider_rotation() {
+        let actions = actions_for(AgentTaskFailureClassification::RateLimited, None);
+
+        assert_eq!(
+            commands(&actions),
+            vec![
+                "homeboy agent-task evidence run-1 --task task-a --failure-only",
+                "homeboy agent-task providers",
+                "homeboy agent-task retry run-1 --run",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_policy_denial_never_suggests_replaying_the_denied_request() {
+        let actions = actions_for(AgentTaskFailureClassification::PolicyDenied, None);
+
+        assert_eq!(
+            commands(&actions),
+            vec![
+                "homeboy agent-task evidence run-1 --task task-a --failure-only",
+                "homeboy agent-task status run-1 --full",
+            ]
+        );
+        assert!(repair_commands(&actions).is_empty());
+    }
+
+    #[test]
+    fn a_missing_capability_runs_the_readiness_repair_chain_not_another_attempt() {
+        let actions = actions_for(
+            AgentTaskFailureClassification::CapabilityMissing,
+            Some("homeboy-lab"),
+        );
+
+        assert_eq!(
+            commands(&actions),
+            vec![
+                "homeboy agent-task evidence run-1 --task task-a --failure-only",
+                "homeboy agent-task providers --full",
+                "homeboy agent-task doctor --runner homeboy-lab",
+                "homeboy agent-task doctor --runner homeboy-lab --repair",
+            ]
+        );
+        assert_eq!(
+            repair_commands(&actions),
+            vec!["homeboy agent-task doctor --runner homeboy-lab --repair"]
+        );
+    }
+
+    #[test]
+    fn invalid_input_replays_the_rejected_boundary_instead_of_resending_it() {
+        let actions = actions_for(AgentTaskFailureClassification::InvalidInput, None);
+
+        assert_eq!(
+            commands(&actions),
+            vec![
+                "homeboy agent-task evidence run-1 --task task-a --failure-only",
+                "homeboy agent-task replay-provider-boundary run-1 --task task-a",
+            ]
+        );
+        assert!(repair_commands(&actions).is_empty());
+    }
+
+    #[test]
+    fn an_execution_failure_shows_the_failing_step_and_what_it_produced() {
+        let actions = actions_for(AgentTaskFailureClassification::ExecutionFailed, None);
+
+        assert_eq!(
+            commands(&actions),
+            vec![
+                "homeboy agent-task evidence run-1 --task task-a --failure-only",
+                "homeboy agent-task review run-1",
+                "homeboy agent-task artifacts run-1 --full",
+                "homeboy agent-task retry run-1 --run",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unclassifiable_failure_falls_back_to_the_generic_set() {
+        let (actions, basis) = diagnose_next_actions(
+            "run-1",
+            &[failure(AgentTaskFailureClassification::Unknown)],
+            &[],
+            None,
+        );
+
+        assert_eq!(basis, DIAGNOSE_ACTION_BASIS_FALLBACK);
+        assert_eq!(
+            commands(&actions),
+            vec![
+                "homeboy agent-task status run-1 --full",
+                "homeboy agent-task artifacts run-1",
+                "homeboy agent-task review run-1",
+                "homeboy agent-task retry run-1 --run",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_diagnosis_at_all_falls_back_to_the_generic_set() {
+        let (actions, basis) = diagnose_next_actions("run-1", &[], &[], None);
+
+        assert_eq!(basis, DIAGNOSE_ACTION_BASIS_FALLBACK);
+        assert_eq!(actions.len(), 4);
+    }
+
+    #[test]
+    fn missing_artifacts_name_the_task_and_the_artifacts_that_were_not_produced() {
+        let missing = vec![json!({
+            "task_id": "task-b",
+            "missing": ["concept_packet", "design_packet"],
+        })];
+
+        let (actions, basis) = diagnose_next_actions("run-1", &[], &missing, None);
+
+        assert_eq!(basis, DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
+        assert_eq!(
+            commands(&actions),
+            vec![
+                "homeboy agent-task artifacts run-1 --full",
+                "homeboy agent-task replay-provider-boundary run-1 --task task-b",
+                "homeboy agent-task evidence run-1 --task task-b --failure-only",
+            ]
+        );
+        assert!(actions[1].label.contains("concept_packet, design_packet"));
+    }
+
+    #[test]
+    fn classification_and_missing_artifact_actions_are_merged_without_duplicates() {
+        let missing = vec![json!({ "task_id": "task-a", "missing": ["patch"] })];
+
+        let (actions, _) = diagnose_next_actions(
+            "run-1",
+            &[failure(AgentTaskFailureClassification::ExecutionFailed)],
+            &missing,
+            None,
+        );
+
+        let commands = commands(&actions);
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| **command
+                    == "homeboy agent-task evidence run-1 --task task-a --failure-only")
+                .count(),
+            1
+        );
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| **command == "homeboy agent-task artifacts run-1 --full")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn run_and_task_ids_are_shell_quoted_in_every_emitted_command() {
+        let (actions, _) = diagnose_next_actions(
+            "run with spaces",
+            &[DiagnosedFailure {
+                task_id: "task with spaces".to_string(),
+                classification: AgentTaskFailureClassification::InvalidInput,
+            }],
+            &[],
+            None,
+        );
+
+        assert_eq!(
+            commands(&actions),
+            vec![
+                "homeboy agent-task evidence 'run with spaces' --task 'task with spaces' --failure-only",
+                "homeboy agent-task replay-provider-boundary 'run with spaces' --task 'task with spaces'",
+            ]
+        );
+    }
 }
 
 /// Apply the shared output primitive to a JSON collection while retaining every

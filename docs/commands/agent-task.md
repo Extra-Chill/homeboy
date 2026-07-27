@@ -1207,3 +1207,35 @@ The deterministic smoke and existing provider path expose these failure classes:
 | missing secrets/preflight | `agent_task.secret_env_missing`, `failure_classification: "invalid_input"` |
 | empty runtime bundle | `agent_task.fixture_empty_runtime_bundle` |
 | stale/non-terminal status | `status` annotates running records with `metadata.stale_running` and `metadata.stale_running_reason` |
+
+### Diagnose derives its next actions from the classification
+
+`agent-task diagnose` computes a root cause, a causal chain, the recorded
+failure classification, and the declared artifacts that were not produced. It
+projects that diagnosis into the shared `_homeboy_actionable` envelope (`run`,
+`refs`, `next_actions`, `artifacts`, `evidence`) instead of returning only
+prose. The existing `next_commands` field is unchanged.
+
+`next_action_basis` reports how `next_actions` was produced: `diagnosis` when a
+classification or a concrete missing-artifact set mapped to specific commands,
+`generic_fallback` when nothing in the diagnosis was specific enough to act on.
+
+| `failure_classification` | Derived next actions |
+| --- | --- |
+| `provider` | failure evidence for the task, `agent-task providers`, the runner readiness chain when a runner owns the run, then retry |
+| `transient` | retry first (documented as safe to retry), then failure evidence |
+| `timeout` | failure evidence, `agent-task review` (a timeout can still leave a candidate patch), then retry |
+| `stalled` | `agent-task reconcile --dry-run`, `runner status`/`runner doctor --repair` for the owning runner, failure evidence, then retry |
+| `rate_limited` | failure evidence (retry-after hint), `agent-task providers` to rotate to, then retry |
+| `policy_denied` | failure evidence and the full run record. No retry: an identical request is denied identically |
+| `capability_missing` | failure evidence, `agent-task providers --full`, and `agent-task doctor --runner <id>` with its `--repair` form |
+| `invalid_input` | failure evidence and `agent-task replay-provider-boundary` for the rejected input. No retry: the same input fails the same way |
+| `execution_failed` | failure evidence for the failing step (gate/verify, harvest, required typed artifacts), `agent-task review`, `agent-task artifacts --full`, then retry |
+| `unknown` | no specific step is substantiable; the generic fallback set is emitted |
+
+Declared-but-missing artifacts add their own actions regardless of
+classification: `agent-task artifacts --full`, plus a task-scoped
+`agent-task replay-provider-boundary` and failure-evidence command naming the
+artifacts that were not produced. Repair-class actions carry
+`kind: "repair"`; runner-scoped actions are emitted only when the run records a
+runner id.

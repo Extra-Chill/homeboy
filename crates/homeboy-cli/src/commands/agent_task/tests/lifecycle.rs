@@ -830,6 +830,174 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
 }
 
 #[test]
+fn diagnose_derives_next_actions_from_the_failure_classification() {
+    with_temp_home(|| {
+        let run_id = "run-cli-diagnose-actionable-timeout";
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            ClassifiedFailureExecutor {
+                classification: AgentTaskFailureClassification::Timeout,
+            },
+        )
+        .expect("run completed with a classified failure");
+
+        let (value, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose loaded");
+
+        assert_eq!(exit_code, 0);
+        // Pre-existing fields are unchanged: the actionable envelope is additive.
+        assert_eq!(value["schema"], "homeboy/agent-task-diagnose/v1");
+        assert_eq!(value["run_id"], run_id);
+        assert_eq!(
+            value["causal_chain"][0]["failure_classification"],
+            "timeout"
+        );
+        assert_eq!(
+            value["next_commands"],
+            json!([
+                format!("homeboy agent-task status {run_id} --full"),
+                format!("homeboy agent-task artifacts {run_id}"),
+                format!("homeboy agent-task review {run_id}"),
+                format!("homeboy agent-task retry {run_id} --run"),
+            ])
+        );
+
+        assert_eq!(value["next_action_basis"], "diagnosis");
+        let actionable = &value["_homeboy_actionable"];
+        assert_eq!(actionable["run"]["id"], run_id);
+        assert_eq!(actionable["run"]["kind"], "agent_task");
+        assert_eq!(actionable["run"]["location"], "local");
+        assert_eq!(
+            actionable["run"]["status_command"],
+            format!("homeboy agent-task status {run_id} --full")
+        );
+        assert_eq!(actionable["refs"]["agent_tasks"][0]["id"], run_id);
+        assert!(actionable["evidence"]
+            .as_array()
+            .expect("evidence refs")
+            .iter()
+            .any(|evidence| {
+                evidence["uri"] == "target/agent-task-review/transcript.log"
+                    && evidence["id"] == "task-a:transcript"
+            }));
+
+        let commands: Vec<&str> = actionable["next_actions"]
+            .as_array()
+            .expect("next actions")
+            .iter()
+            .map(|action| action["command"].as_str().expect("command"))
+            .collect();
+        assert_eq!(
+            commands,
+            vec![
+                format!("homeboy agent-task evidence {run_id} --task task-a --failure-only"),
+                format!("homeboy agent-task review {run_id}"),
+                format!("homeboy agent-task retry {run_id} --run"),
+            ]
+        );
+        assert_eq!(actionable["next_actions"][2]["kind"], "repair");
+    });
+}
+
+#[test]
+fn diagnose_falls_back_to_the_generic_set_for_an_unclassified_failure() {
+    with_temp_home(|| {
+        let run_id = "run-cli-diagnose-actionable-unknown";
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            ClassifiedFailureExecutor {
+                classification: AgentTaskFailureClassification::Unknown,
+            },
+        )
+        .expect("run completed with an unclassified failure");
+
+        let (value, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose loaded");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(value["next_action_basis"], "generic_fallback");
+        let commands: Vec<&str> = value["_homeboy_actionable"]["next_actions"]
+            .as_array()
+            .expect("next actions")
+            .iter()
+            .map(|action| action["command"].as_str().expect("command"))
+            .collect();
+        assert_eq!(
+            commands,
+            vec![
+                format!("homeboy agent-task status {run_id} --full"),
+                format!("homeboy agent-task artifacts {run_id}"),
+                format!("homeboy agent-task review {run_id}"),
+                format!("homeboy agent-task retry {run_id} --run"),
+            ]
+        );
+    });
+}
+
+#[test]
+fn diagnose_next_actions_name_the_artifacts_that_were_not_produced() {
+    with_temp_home(|| {
+        let evidence_dir = tempfile::tempdir().expect("evidence dir");
+        let evidence_path = evidence_dir.path().join("executor-result.json");
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_string(&json!({ "status": "provider_error" })).expect("evidence json"),
+        )
+        .expect("write evidence");
+
+        let run_id = "run-cli-diagnose-actionable-missing-artifacts";
+        run_loaded_plan(
+            test_plan(),
+            Some(run_id),
+            ExecutorResultEvidenceFailureExecutor {
+                evidence_uri: format!("file://{}", evidence_path.display()),
+            },
+        )
+        .expect("run completed with missing declared artifacts");
+
+        let (value, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose loaded");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(
+            value["missing_artifacts"][0]["missing"],
+            json!(["concept_packet", "design_packet"])
+        );
+        assert_eq!(value["next_action_basis"], "diagnosis");
+
+        let actions = value["_homeboy_actionable"]["next_actions"]
+            .as_array()
+            .expect("next actions")
+            .clone();
+        assert!(actions.iter().any(|action| {
+            action["command"]
+                == json!(format!(
+                    "homeboy agent-task replay-provider-boundary {run_id} --task task-a"
+                ))
+                && action["label"]
+                    .as_str()
+                    .expect("label")
+                    .contains("concept_packet, design_packet")
+        }));
+        assert!(actions.iter().any(|action| {
+            action["command"] == json!(format!("homeboy agent-task artifacts {run_id} --full"))
+                && action["kind"] == "artifacts"
+        }));
+    });
+}
+
+#[test]
 fn replay_provider_boundary_projects_latest_executor_input() {
     with_temp_home(|| {
         let evidence_dir = tempfile::tempdir().expect("evidence dir");
