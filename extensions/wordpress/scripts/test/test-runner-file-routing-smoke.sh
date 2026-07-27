@@ -28,6 +28,15 @@ assert_not_contains() {
 
 component="${TMPDIR}/component"
 mkdir -p "${component}/tests/Unit" "${component}/wordpress/tests" "${component}/tools" "${component}/bin/tests/i18n-tools" "${TMPDIR}/stubs"
+runner_prelude="${TMPDIR}/runner-prelude.sh"
+cat > "${runner_prelude}" <<'SH'
+homeboy_runner_init() {
+    COMPONENT_PATH="${HOMEBOY_COMPONENT_PATH:?HOMEBOY_COMPONENT_PATH is required}"
+    PLUGIN_PATH="$COMPONENT_PATH"
+    EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH:?HOMEBOY_EXTENSION_PATH is required}"
+}
+SH
+export HOMEBOY_RUNTIME_RUNNER_PRELUDE="$runner_prelude"
 
 # Simulate a caller with a managed Codebox installation whose CLI and core module
 # are incompatible with this fixture. The smoke owns its runtime inputs below.
@@ -245,6 +254,7 @@ SH
 chmod +x "${TMPDIR}/stubs/npm"
 
 HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$runner_prelude" \
 HOMEBOY_COMPONENT_ID="component" \
 HOMEBOY_COMPONENT_PATH="$component" \
 HOMEBOY_COMPONENT_SHAPE="plugin" \
@@ -297,6 +307,21 @@ assert_contains "${TMPDIR}/node-test-file.out" "NODE_TEST_BEGIN:tools/fixture-ma
 assert_contains "${TMPDIR}/node-test-file.out" "NODE_TEST_OK:tools/fixture-matrix.test.mjs"
 assert_contains "${TMPDIR}/node-test-file.out" "NODE_TEST_SUMMARY:passed=1 failed=0"
 assert_not_contains "${TMPDIR}/node-test-file.out" "WP_CODEBOX_STUB"
+
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_RUNTIME_RUNNER_PRELUDE="$runner_prelude" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_CHANGED_TEST_FILES=$'tools/fixture-matrix.test.mjs\ntests/Unit/ImportAgentAbilityTest.php' \
+HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="${TMPDIR}/stubs/wp-codebox.sh" \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/mixed-test-files.out"
+
+assert_contains "${TMPDIR}/mixed-test-files.out" "NODE_TEST_BEGIN:tools/fixture-matrix.test.mjs"
+assert_contains "${TMPDIR}/mixed-test-files.out" "NODE_TEST_OK:tools/fixture-matrix.test.mjs"
+assert_contains "${TMPDIR}/mixed-test-files.out" "WP_CODEBOX_STUB"
+assert_contains "${TMPDIR}/mixed-test-files.out" "CHANGED=tools/fixture-matrix.test.mjs"
+assert_contains "${TMPDIR}/mixed-test-files.out" "tests/Unit/ImportAgentAbilityTest.php"
 assert_contains "${TMPDIR}/changed-smoke-files.out" "HOST_SMOKE_BEGIN:tests/queue-routing-smoke.php"
 assert_contains "${TMPDIR}/changed-smoke-files.out" "HOST_SMOKE_SUMMARY:passed=1 failed=0"
 assert_not_contains "${TMPDIR}/changed-smoke-files.out" "HOST_SMOKE_BEGIN:tests/import-agent-ability-smoke.php"

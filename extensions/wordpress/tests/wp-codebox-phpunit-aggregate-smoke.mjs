@@ -51,12 +51,15 @@ await chmod(cli, 0o755);
 
 try {
   const unknownSidecar = { schema: 'wp-codebox/test-results/v1', status: 'unknown', summary: { total: 0, passed: 0, failed: 0, skipped: 0 } };
+  const tenPassingSidecar = { schema: 'wp-codebox/test-results/v1', status: 'passed', summary: { total: 10, passed: 10, failed: 0, skipped: 0 }, suites: [], rawLogReferences: [] };
   const passedSidecar = { schema: 'wp-codebox/test-results/v1', status: 'passed', summary: { total: 3, passed: 3, failed: 0, skipped: 0 }, suites: [], rawLogReferences: [] };
   const failedSidecar = { schema: 'wp-codebox/test-results/v1', status: 'failed', summary: { total: 3, passed: 3, failed: 0, skipped: 0 } };
   const green = 'OK (3 tests, 76 assertions)\n';
+  const tenGreen = 'OK (10 tests, 10 assertions)\n';
   const failures = 'ERRORS!\nTests: 281, Assertions: 329, Errors: 46, Failures: 100.\n';
   const testCases = [
     { name: 'unknown-green', fixture: { sidecar: unknownSidecar, output: green }, status: 0, artifactStatus: 'passed', expected: { total: 3, passed: 3, failed: 0, skipped: 0 } },
+    { name: 'ten-passing-tests', fixture: { sidecar: tenPassingSidecar, output: tenGreen }, status: 0, artifactStatus: 'passed', expected: { total: 10, passed: 10, failed: 0, skipped: 0 } },
     { name: 'failed-green', fixture: { sidecar: failedSidecar, output: green }, status: 1, artifactStatus: 'failed', expected: { total: 3, passed: 3, failed: 0, skipped: 0 } },
     { name: 'nonzero-green', fixture: { sidecar: unknownSidecar, output: green, exitCode: 2 }, status: 2, artifactStatus: 'failed', expected: { total: 3, passed: 3, failed: 0, skipped: 0 } },
     { name: 'zero-tests', fixture: { sidecar: unknownSidecar, output: 'OK (0 tests, 0 assertions)\n' }, settings: { phpunit_no_tests: 'fail' }, status: 1, artifactStatus: 'failed', expected: { total: 0, passed: 0, failed: 0, skipped: 0 } },
@@ -71,13 +74,28 @@ try {
   for (const testCase of testCases) {
     const artifacts = path.join(root, `${testCase.name}-artifacts`);
     const results = path.join(root, `${testCase.name}-results.json`);
-    const run = spawnSync(runner, [], { env: { ...process.env, FIXTURE: JSON.stringify(testCase.fixture), HOMEBOY_COMPONENT_PATH: component, COMPONENT_ID: 'component', HOMEBOY_WP_CODEBOX_BIN: cli, HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: artifacts, HOMEBOY_RUNTIME_WRITE_TEST_RESULTS: resultsWriter, HOMEBOY_TEST_RESULTS_FILE: results, HOMEBOY_SETTINGS_JSON: JSON.stringify({ validation_dependencies: [dependency], ...testCase.settings }) }, encoding: 'utf8' });
+    const invocationArtifacts = path.join(root, `${testCase.name}-invocation-artifacts`);
+    await mkdir(invocationArtifacts, { recursive: true });
+    await writeFile(path.join(invocationArtifacts, 'homeboy-artifact-manifest.json'), '{"schema":"homeboy/artifact-manifest/v1"}\n');
+    const run = spawnSync(runner, [], { env: { ...process.env, FIXTURE: JSON.stringify(testCase.fixture), HOMEBOY_COMPONENT_PATH: component, COMPONENT_ID: 'component', HOMEBOY_WP_CODEBOX_BIN: cli, HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: artifacts, HOMEBOY_INVOCATION_ARTIFACT_DIR: invocationArtifacts, HOMEBOY_RUNTIME_WRITE_TEST_RESULTS: resultsWriter, HOMEBOY_TEST_RESULTS_FILE: results, HOMEBOY_SETTINGS_JSON: JSON.stringify({ validation_dependencies: [dependency], ...testCase.settings }) }, encoding: 'utf8' });
     assert.equal(run.status, testCase.status, `${testCase.name}: ${run.stderr}`);
     assert.deepEqual(JSON.parse(await readFile(results, 'utf8')), testCase.expected, testCase.name);
     const runArtifact = path.join(artifacts, (await readdir(artifacts)).find((entry) => entry.startsWith('wp-codebox-phpunit.')));
     const artifactDirectory = testCase.fixture.crash || testCase.fixture.pointer === 'malformed' ? runArtifact : path.join(runArtifact, 'runtime-fixture');
     const artifactResults = JSON.parse(await readFile(path.join(artifactDirectory, 'files', 'test-results.json'), 'utf8'));
     assert.equal(artifactResults.status, testCase.artifactStatus, testCase.name);
+    const manifest = JSON.parse(await readFile(path.join(invocationArtifacts, 'homeboy-artifact-manifest.json'), 'utf8'));
+    assert.deepEqual(manifest.artifacts.map(({ path: artifactPath }) => artifactPath), [
+      'wp-codebox-phpunit/files/test-results.json',
+      'wp-codebox-phpunit/files/phpunit-output.log',
+      'wp-codebox-phpunit/files/test-failures.json',
+    ], testCase.name);
+    const durableSummary = JSON.parse(await readFile(path.join(invocationArtifacts, 'wp-codebox-phpunit/files/test-results.json'), 'utf8')).summary;
+    assert.deepEqual(
+      Object.fromEntries(['total', 'passed', 'failed', 'skipped'].map((key) => [key, durableSummary[key]])),
+      testCase.expected,
+      testCase.name,
+    );
     const options = JSON.parse(await readFile(path.join(runArtifact, 'wp-codebox-phpunit-recipe-options.json'), 'utf8'));
     const profile = JSON.parse(await readFile(path.join(runArtifact, 'wp-codebox-phpunit-profile.json'), 'utf8'));
     const provenance = JSON.parse(await readFile(path.join(runArtifact, 'wp-codebox-phpunit-provenance.json'), 'utf8'));

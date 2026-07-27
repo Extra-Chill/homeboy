@@ -14,10 +14,13 @@ const cli = path.join(root, 'wp-codebox');
 const resultsFile = path.join(root, 'test-results.json');
 const failuresFile = path.join(root, 'test-failures.json');
 const expectedOutputFile = path.join(root, 'expected-output.log');
+const invocationArtifacts = path.join(root, 'invocation-artifacts');
 const writeResults = path.join(root, 'write-test-results.sh');
 const extension = path.resolve(import.meta.dirname, '..');
 
 await mkdir(component, { recursive: true });
+await mkdir(invocationArtifacts, { recursive: true });
+await writeFile(path.join(invocationArtifacts, 'homeboy-artifact-manifest.json'), '{"schema":"homeboy/artifact-manifest/v1"}\n');
 await writeFile(path.join(component, 'sample-plugin.php'), '<?php\n/* Plugin Name: Sample Plugin */\n');
 await writeFile(writeResults, `homeboy_write_test_results() { printf '{"total":%s,"passed":%s,"failed":%s,"skipped":%s}\n' "$1" "$2" "$3" "$4" > "$HOMEBOY_TEST_RESULTS_FILE"; }
 `);
@@ -82,6 +85,7 @@ try {
       HOMEBOY_EXTENSION_PATH: extension,
       HOMEBOY_WP_CODEBOX_BIN: cli,
       HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: artifacts,
+      HOMEBOY_INVOCATION_ARTIFACT_DIR: invocationArtifacts,
       HOMEBOY_TEST_RESULTS_FILE: resultsFile,
       HOMEBOY_TEST_FAILURES_FILE: failuresFile,
       HOMEBOY_RUNTIME_WRITE_TEST_RESULTS: writeResults,
@@ -120,6 +124,13 @@ try {
     { kind: 'raw-phpunit-output', uri: 'artifact://files/phpunit-output.log' },
   ]);
   assert.deepEqual(JSON.parse(await readFile(resultsFile, 'utf8')), { total: 3, passed: 0, failed: 2, skipped: 1 });
+  const invocationManifest = JSON.parse(await readFile(path.join(invocationArtifacts, 'homeboy-artifact-manifest.json'), 'utf8'));
+  assert.deepEqual(invocationManifest.artifacts.map(({ path: artifactPath }) => artifactPath), [
+    'wp-codebox-phpunit/files/test-results.json',
+    'wp-codebox-phpunit/files/phpunit-output.log',
+    'wp-codebox-phpunit/files/test-failures.json',
+  ]);
+  assert.deepEqual(JSON.parse(await readFile(path.join(invocationArtifacts, 'wp-codebox-phpunit/files/test-failures.json'), 'utf8')).failures.length, 2);
 
   const analysisInput = JSON.parse(await readFile(failuresFile, 'utf8'));
   assert.equal(analysisInput.total, 3);

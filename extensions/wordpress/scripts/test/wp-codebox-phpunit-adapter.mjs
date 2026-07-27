@@ -482,36 +482,94 @@ async function handoffArtifacts(artifactRoot, execution) {
     // A crashed workload may never write a runtime pointer. Preserve and parse
     // the captured aggregate at the stable artifact root rather than reporting
     // a zero-test run.
-    const status = await preservePhpunitOutput(artifactRoot, execution, []);
-    if (process.env.HOMEBOY_TEST_RESULTS_FILE) {
-      runScript('parse-test-results.sh', [artifactRoot]);
-    }
-    if (process.env.HOMEBOY_TEST_FAILURES_FILE) {
-      runScript('parse-test-failures.sh', [artifactRoot, componentPath]);
-    }
-    return status;
+    return parsePublishedArtifacts(await publishPhpunitArtifacts(
+      artifactRoot,
+      await preservePhpunitOutput(artifactRoot, execution, []),
+    ));
   }
   const runtime = pointer?.paths?.runtimeDirectory;
   if (typeof runtime !== 'string' || !/^runtime-[A-Za-z0-9][A-Za-z0-9-]*$/.test(runtime)) {
-    const status = await preservePhpunitOutput(artifactRoot, execution, []);
-    if (process.env.HOMEBOY_TEST_RESULTS_FILE) {
-      runScript('parse-test-results.sh', [artifactRoot]);
-    }
-    if (process.env.HOMEBOY_TEST_FAILURES_FILE) {
-      runScript('parse-test-failures.sh', [artifactRoot, componentPath]);
-    }
-    return status;
+    return parsePublishedArtifacts(await publishPhpunitArtifacts(
+      artifactRoot,
+      await preservePhpunitOutput(artifactRoot, execution, []),
+    ));
   }
   const artifactDirectory = path.join(artifactRoot, runtime);
   const managedRuntimeServices = Array.isArray(pointer.managedRuntimeServices) ? pointer.managedRuntimeServices : [];
-  const status = await preservePhpunitOutput(artifactDirectory, execution, managedRuntimeServices);
+  return parsePublishedArtifacts(await publishPhpunitArtifacts(
+    artifactDirectory,
+    await preservePhpunitOutput(artifactDirectory, execution, managedRuntimeServices),
+  ));
+}
+async function publishPhpunitArtifacts(artifactDirectory, status) {
+  const invocationArtifacts = process.env.HOMEBOY_INVOCATION_ARTIFACT_DIR;
+  if (!invocationArtifacts) {
+    return { directory: artifactDirectory, status, failuresPath: '' };
+  }
+
+  const publishedFilesDirectory = path.join(invocationArtifacts, 'wp-codebox-phpunit', 'files');
+  const files = [
+    { name: 'test-results.json', kind: 'test-results', role: 'structured-test-results', semantic_key: 'test_results', content_type: 'application/json' },
+    { name: 'phpunit-output.log', kind: 'phpunit-output', role: 'raw-test-output', semantic_key: 'phpunit_output', content_type: 'text/plain' },
+  ];
+  await mkdir(publishedFilesDirectory, { recursive: true });
+  for (const file of files) {
+    await copyFile(path.join(artifactDirectory, 'files', file.name), path.join(publishedFilesDirectory, file.name));
+  }
+  await registerInvocationArtifacts(invocationArtifacts, files.map((file) => ({
+    ...file,
+    path: path.join('wp-codebox-phpunit', 'files', file.name).replaceAll(path.sep, '/'),
+  })));
+  return { directory: path.join(invocationArtifacts, 'wp-codebox-phpunit'), status, failuresPath: path.join(publishedFilesDirectory, 'test-failures.json') };
+}
+async function parsePublishedArtifacts(published) {
   if (process.env.HOMEBOY_TEST_RESULTS_FILE) {
-    runScript('parse-test-results.sh', [artifactDirectory]);
+    runScript('parse-test-results.sh', [published.directory]);
   }
-  if (process.env.HOMEBOY_TEST_FAILURES_FILE) {
-    runScript('parse-test-failures.sh', [artifactDirectory, componentPath]);
+  if (process.env.HOMEBOY_TEST_FAILURES_FILE || published.failuresPath) {
+    const requestedFailuresPath = process.env.HOMEBOY_TEST_FAILURES_FILE;
+    if (published.failuresPath) {
+      process.env.HOMEBOY_TEST_FAILURES_FILE = published.failuresPath;
+    }
+    runScript('parse-test-failures.sh', [published.directory, componentPath]);
+    if (published.failuresPath) {
+      await registerInvocationArtifacts(process.env.HOMEBOY_INVOCATION_ARTIFACT_DIR, [{
+        name: 'test-failures.json',
+        path: 'wp-codebox-phpunit/files/test-failures.json',
+        kind: 'test-failures',
+        role: 'structured-test-failures',
+        semantic_key: 'test_failures',
+        content_type: 'application/json',
+      }]);
+      if (requestedFailuresPath && requestedFailuresPath !== published.failuresPath) {
+        await copyFile(published.failuresPath, requestedFailuresPath);
+      }
+      if (requestedFailuresPath) {
+        process.env.HOMEBOY_TEST_FAILURES_FILE = requestedFailuresPath;
+      } else {
+        delete process.env.HOMEBOY_TEST_FAILURES_FILE;
+      }
+    }
   }
-  return status;
+  return published.status;
+}
+async function registerInvocationArtifacts(invocationRoot, publishedArtifacts) {
+  const manifestPath = path.join(invocationRoot, 'homeboy-artifact-manifest.json');
+  let manifest = { schema: 'homeboy/artifact-manifest/v1', artifacts: [] };
+  try {
+    manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  } catch (error) {
+    if (error.code !== 'ENOENT') { throw error; }
+  }
+  if (!isObject(manifest) || manifest.schema !== 'homeboy/artifact-manifest/v1') {
+    throw new Error('HOMEBOY_INVOCATION_ARTIFACT_DIR contains an invalid artifact manifest');
+  }
+  const existing = Array.isArray(manifest.artifacts) ? manifest.artifacts : [];
+  manifest.artifacts = [
+    ...existing.filter((entry) => !publishedArtifacts.some((artifact) => artifact.path === entry?.path)),
+    ...publishedArtifacts.map(({ name, ...artifact }) => ({ id: name, label: name, ...artifact })),
+  ];
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 async function preservePhpunitOutput(artifactDirectory, execution, managedRuntimeServices) {
   const filesDirectory = path.join(artifactDirectory, 'files');
