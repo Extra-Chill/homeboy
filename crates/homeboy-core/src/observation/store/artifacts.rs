@@ -165,7 +165,7 @@ impl ObservationStore {
         }
 
         let path = path.as_ref();
-        let metadata = fs::metadata(path).map_err(|e| {
+        let metadata = fs::symlink_metadata(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 return Error::validation_invalid_argument(
                     "path",
@@ -386,7 +386,7 @@ impl ObservationStore {
         }
 
         let path = path.as_ref();
-        let metadata = fs::metadata(path).map_err(|e| {
+        let metadata = fs::symlink_metadata(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 return Error::validation_invalid_argument(
                     "path",
@@ -439,19 +439,6 @@ impl ObservationStore {
         }
         let created_at = chrono::Utc::now().to_rfc3339();
         let stored_path = persisted_artifact_path(run_id, &id, path)?;
-        let stored_path_existed = match fs::symlink_metadata(&stored_path) {
-            Ok(_) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => {
-                return Err(Error::internal_io(
-                    error.to_string(),
-                    Some(format!(
-                        "inspect persisted artifact directory {}",
-                        stored_path.display()
-                    )),
-                ));
-            }
-        };
         copy_artifact_directory(path, &stored_path)?;
         let path_string = stored_path.to_string_lossy().to_string();
 
@@ -481,9 +468,7 @@ impl ObservationStore {
                 ],
             )
         }) {
-            if !stored_path_existed {
-                fs::remove_dir_all(&stored_path).ok();
-            }
+            fs::remove_dir_all(&stored_path).ok();
             return Err(error);
         }
 
@@ -1136,7 +1121,7 @@ fn collect_directory_tree_entries(
     children.sort_by_key(|entry| entry.file_name());
     for child in children {
         let child_relative = relative.join(child.file_name());
-        let metadata = child.metadata().map_err(|error| {
+        let metadata = child.file_type().map_err(|error| {
             Error::internal_io(
                 error.to_string(),
                 Some(format!("stat {}", child.path().display())),
@@ -1283,7 +1268,7 @@ mod tests {
                 ))
                 .expect("install insertion fault");
 
-            assert!(store
+            let error = store
                 .record_directory_artifact_with_id(
                     &run.id,
                     "evidence",
@@ -1291,7 +1276,10 @@ mod tests {
                     artifact_id,
                     serde_json::json!({}),
                 )
-                .is_err());
+                .expect_err("injected insert failure");
+            assert!(error
+                .to_string()
+                .contains("injected directory artifact insert failure"));
 
             assert!(
                 !stored_path.exists(),
@@ -1340,11 +1328,63 @@ mod tests {
                 fs::read(stored_path.join("stable.txt")).expect("read stable bytes"),
                 b"stable bytes"
             );
+            assert!(
+                !stored_path.join("copied.txt").exists(),
+                "an existing target must not be merged before a failed insert"
+            );
             assert!(store
                 .get_artifact(artifact_id)
                 .expect("lookup artifact")
                 .is_none());
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_copy_failure_removes_only_its_reserved_tree() {
+        use std::os::unix::fs::symlink;
+
+        with_isolated_home(|home| {
+            let source = home.path().join("directory-source");
+            fs::create_dir_all(&source).expect("create source");
+            fs::write(source.join("copied.txt"), b"copied bytes").expect("write source");
+            symlink("copied.txt", source.join("unsafe-link")).expect("create symlink");
+            let target = home.path().join("directory-target");
+
+            let error = copy_artifact_directory(&source, &target).expect_err("reject symlink");
+
+            assert!(error.to_string().contains("unsupported entry"));
+            assert!(!target.exists(), "partial copy must be rolled back");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_copy_rejects_a_symlinked_target_parent() {
+        use std::os::unix::fs::symlink;
+
+        with_isolated_home(|home| {
+            let source = home.path().join("directory-source");
+            fs::create_dir_all(&source).expect("create source");
+            fs::write(source.join("copied.txt"), b"copied bytes").expect("write source");
+            let outside = home.path().join("outside");
+            fs::create_dir(&outside).expect("create outside directory");
+            let linked_parent = home.path().join("linked-parent");
+            symlink(&outside, &linked_parent).expect("create parent symlink");
+
+            let error = copy_artifact_directory(&source, &linked_parent.join("target"))
+                .expect_err("reject symlinked target parent");
+
+            assert!(error.to_string().contains("parent is a symlink"));
+            assert!(!outside.join("target").exists());
+        });
+    }
+
+    #[test]
+    fn persisted_artifact_path_rejects_unsafe_identity_components() {
+        let source = Path::new("evidence");
+        assert!(persisted_artifact_path("../run", "artifact", source).is_err());
+        assert!(persisted_artifact_path("run", "../artifact", source).is_err());
     }
 
     #[test]
