@@ -14,6 +14,7 @@ path = "src/lib.rs"
 homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
 homeboy-extension = { version = "0.1.0", path = "../homeboy-extension" }
 homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
+homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
 homeboy-lab-contract = { version = "0.1.0", path = "../contracts/homeboy-lab-contract" }
 homeboy-lab-runner-contract = { version = "0.1.0", path = "../contracts/homeboy-lab-runner-contract" }
 homeboy-agents-contract = { version = "0.1.0", path = "../contracts/homeboy-agents-contract" }

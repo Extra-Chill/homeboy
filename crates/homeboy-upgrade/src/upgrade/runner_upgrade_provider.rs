@@ -9,7 +9,6 @@
 //! [`NoopRunnerUpgradeProvider`] reports no upgrades and no build identity.
 
 use std::path::Path;
-use std::sync::Mutex;
 
 use crate::upgrade::{ExtensionUpgradeEntry, InstallMethod, RunnerUpgradeEntry};
 use homeboy_core::error::Result;
@@ -59,25 +58,13 @@ impl RunnerUpgradeProvider for NoopRunnerUpgradeProvider {
     }
 }
 
-static PROVIDER: Mutex<Option<Box<dyn RunnerUpgradeProvider>>> = Mutex::new(None);
-
-/// Register the runner-upgrade provider. Called once at startup by the runner
-/// layer (via the CLI).
-pub fn register_runner_upgrade_provider(provider: Box<dyn RunnerUpgradeProvider>) {
-    let mut guard = PROVIDER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard = Some(provider);
-}
-
-/// Run `f` against the registered provider, or the no-op provider if none is
-/// registered.
-pub(crate) fn with_runner_upgrade<T>(f: impl FnOnce(&dyn RunnerUpgradeProvider) -> T) -> T {
-    let guard = PROVIDER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match guard.as_ref() {
-        Some(provider) => f(provider.as_ref()),
-        None => f(&NoopRunnerUpgradeProvider),
-    }
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn RunnerUpgradeProvider,
+    noop: NoopRunnerUpgradeProvider,
+    /// Register the runner-upgrade provider. Called once at startup by the runner
+    /// layer (via the CLI).
+    register: pub fn register_runner_upgrade_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none is
+    /// registered.
+    with: pub(crate) fn with_runner_upgrade,
 }

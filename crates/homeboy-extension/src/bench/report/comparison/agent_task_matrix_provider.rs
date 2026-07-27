@@ -10,7 +10,6 @@
 //! provider produces no matrix, and the comparison report simply omits it.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
 
 use serde_json::Value;
 
@@ -44,18 +43,15 @@ impl BenchAgentTaskMatrixProvider for NoopProvider {
     }
 }
 
-fn provider_slot() -> &'static Mutex<Option<Box<dyn BenchAgentTaskMatrixProvider>>> {
-    static PROVIDER: Mutex<Option<Box<dyn BenchAgentTaskMatrixProvider>>> = Mutex::new(None);
-    &PROVIDER
-}
-
-/// Register the bench agent-task matrix provider. Called once at startup by the
-/// agent-task layer.
-pub fn register_bench_agent_task_matrix_provider(provider: Box<dyn BenchAgentTaskMatrixProvider>) {
-    let mut slot = provider_slot()
-        .lock()
-        .expect("bench agent-task matrix provider lock");
-    *slot = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn BenchAgentTaskMatrixProvider,
+    noop: NoopProvider,
+    /// Register the bench agent-task matrix provider. Called once at startup by the
+    /// agent-task layer.
+    register: pub fn register_bench_agent_task_matrix_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none
+    /// is registered.
+    with: fn with_provider,
 }
 
 /// The agent-task matrix (plan + aggregate as JSON) for a bench comparison, via
@@ -66,13 +62,5 @@ pub(crate) fn bench_agent_task_matrix(
     entries: &[RigBenchEntry],
     axes_by_rig: &BTreeMap<String, BTreeMap<String, String>>,
 ) -> Option<(Value, Value)> {
-    let slot = provider_slot()
-        .lock()
-        .expect("bench agent-task matrix provider lock");
-    match slot.as_deref() {
-        Some(provider) => {
-            provider.bench_agent_task_matrix(component, iterations, entries, axes_by_rig)
-        }
-        None => NoopProvider.bench_agent_task_matrix(component, iterations, entries, axes_by_rig),
-    }
+    with_provider(|p| p.bench_agent_task_matrix(component, iterations, entries, axes_by_rig))
 }

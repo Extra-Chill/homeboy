@@ -10,8 +10,6 @@
 //! reports the runner unavailable — the controller loop only reaches this check
 //! for a runner-targeted action.
 
-use std::sync::Mutex;
-
 use crate::agent_task_loop_runner_policy::AgentTaskLoopRunnerAvailability;
 
 /// Computes whether a runner is available for controller action execution.
@@ -31,28 +29,19 @@ impl RunnerAvailabilityProvider for NoopProvider {
     }
 }
 
-fn provider_slot() -> &'static Mutex<Option<Box<dyn RunnerAvailabilityProvider>>> {
-    static PROVIDER: Mutex<Option<Box<dyn RunnerAvailabilityProvider>>> = Mutex::new(None);
-    &PROVIDER
-}
-
-/// Register the runner-availability provider. Called once at startup by the
-/// runner layer.
-pub fn register_runner_availability_provider(provider: Box<dyn RunnerAvailabilityProvider>) {
-    let mut slot = provider_slot()
-        .lock()
-        .expect("runner availability provider lock");
-    *slot = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn RunnerAvailabilityProvider,
+    noop: NoopProvider,
+    /// Register the runner-availability provider. Called once at startup by the
+    /// runner layer.
+    register: pub fn register_runner_availability_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none
+    /// is registered.
+    with: fn with_provider,
 }
 
 /// The controller-action availability verdict for a runner, via the registered
 /// provider (or the no-op provider when the runner subsystem is absent).
 pub(crate) fn controller_runner_availability(runner_id: &str) -> AgentTaskLoopRunnerAvailability {
-    let slot = provider_slot()
-        .lock()
-        .expect("runner availability provider lock");
-    match slot.as_deref() {
-        Some(provider) => provider.controller_runner_availability(runner_id),
-        None => NoopProvider.controller_runner_availability(runner_id),
-    }
+    with_provider(|p| p.controller_runner_availability(runner_id))
 }
