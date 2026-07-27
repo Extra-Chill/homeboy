@@ -262,6 +262,10 @@ fn run_correlates_with(run: &RunRecord, correlation: &str) -> bool {
 /// snapshot answers the only question this listing asks ("what is running right
 /// now") with one bounded `/jobs` query per runner.
 fn active_runner_job_summaries(status: Option<&str>) -> Vec<RunSummary> {
+    // This view deliberately avoids `runner::status()`: that path reconciles
+    // every draining generation and can block local run discovery behind a
+    // wedged runner. The indexed snapshot makes one bounded current-session
+    // request per runner instead of scanning its historical generations.
     runner::statuses_indexed()
         .unwrap_or_default()
         .into_iter()
