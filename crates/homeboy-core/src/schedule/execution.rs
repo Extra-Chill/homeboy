@@ -1,5 +1,6 @@
 //! Running a schedule and deciding whether the result is worth reporting.
 
+use homeboy_engine_primitives::content_hash;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -303,8 +304,7 @@ pub fn sequence_digest(step_digests: &[String]) -> String {
         return step_digests[0].clone();
     }
     let joined = step_digests.join("\u{1e}");
-    let digest = <sha2::Sha256 as sha2::Digest>::digest(joined.as_bytes());
-    format!("{digest:x}")
+    content_hash::sha256_hex(joined.as_bytes())
 }
 
 /// Reduce a command result to the fields the scheduler reasons about.
@@ -349,8 +349,7 @@ fn summarize(result: &ScheduleCommandResult) -> (String, i32, String, Option<Str
 /// Fingerprint an external command's output and exit code.
 pub fn raw_digest(exit_code: i32, output: &str) -> String {
     let rendered = format!("{exit_code}\u{1e}{output}");
-    let digest = <sha2::Sha256 as sha2::Digest>::digest(rendered.as_bytes());
-    format!("{digest:x}")
+    content_hash::sha256_hex(rendered.as_bytes())
 }
 
 /// The tail of a command's output, bounded for a notification.
@@ -377,8 +376,7 @@ pub fn result_digest(value: &serde_json::Value) -> String {
     let mut normalized = value.clone();
     strip_volatile(&mut normalized);
     let rendered = serde_json::to_string(&normalized).unwrap_or_default();
-    let digest = <sha2::Sha256 as sha2::Digest>::digest(rendered.as_bytes());
-    format!("{digest:x}")
+    content_hash::sha256_hex(rendered.as_bytes())
 }
 
 const VOLATILE_KEYS: &[&str] = &[

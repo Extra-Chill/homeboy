@@ -1,8 +1,8 @@
 //! Immutable controller executable provenance for durable orchestration work.
 
 use fs4::fs_std::FileExt;
+use homeboy_engine_primitives::content_hash;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::fs::OpenOptions;
@@ -2014,7 +2014,7 @@ fn executable_digest(path: &Path) -> Result<String> {
             Some("hash pinned controller executable".to_string()),
         )
     })?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(content_hash::sha256_hex(&bytes))
 }
 
 fn make_executable_read_only(path: &Path) -> Result<()> {

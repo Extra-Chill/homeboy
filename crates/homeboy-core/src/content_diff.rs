@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -148,18 +148,7 @@ fn contained(root: &Path, relative: &str) -> crate::Result<PathBuf> {
 }
 
 fn digest(path: &Path) -> crate::Result<String> {
-    use std::io::Read;
-    let mut file = fs::File::open(path).map_err(io_error)?;
-    let mut hash = Sha256::new();
-    let mut buffer = [0; 65536];
-    loop {
-        let read = file.read(&mut buffer).map_err(io_error)?;
-        if read == 0 {
-            break;
-        }
-        hash.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", hash.finalize()))
+    content_hash::sha256_file(path)
 }
 
 fn io_error(error: impl std::fmt::Display) -> crate::Error {

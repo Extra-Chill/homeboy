@@ -34,8 +34,8 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+use homeboy_engine_primitives::content_hash;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 use crate::paths;
@@ -419,8 +419,7 @@ pub fn store_path() -> Result<PathBuf> {
 }
 
 fn sha256_hex(token: &str) -> String {
-    let digest = Sha256::digest(token.as_bytes());
-    format!("{digest:x}")
+    content_hash::sha256_hex(token.as_bytes())
 }
 
 /// Length-independent constant-time string compare for hashes to avoid leaking

@@ -1,3 +1,4 @@
+use homeboy_engine_primitives::content_hash;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -548,9 +549,8 @@ fn runtime_generation_identity(
     sources: &[AgentRuntimeMaterializationSource],
     preparation: &[AgentRuntimePreparationAction],
 ) -> String {
-    use sha2::{Digest, Sha256};
     let encoded = serde_json::to_vec(&(runtime_id, sources, preparation)).unwrap_or_default();
-    format!("sha256:{:x}", Sha256::digest(encoded))
+    format!("sha256:{}", content_hash::sha256_hex(&encoded))
 }
 
 fn runtime_source_revision(path: &Path) -> Option<String> {

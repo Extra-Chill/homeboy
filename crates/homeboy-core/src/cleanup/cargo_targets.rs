@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fs4::fs_std::FileExt;
+use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use crate::{Error, Result};
 
@@ -91,9 +91,10 @@ fn acquire_shared_cargo_target_in(
     owner: &str,
     now: SystemTime,
 ) -> Result<SharedCargoTargetLease> {
-    let mut digest = Sha256::new();
-    digest.update(owner.as_bytes());
-    let target_dir = root.join(format!("homeboy-{:x}", digest.finalize()));
+    let target_dir = root.join(format!(
+        "homeboy-{}",
+        content_hash::sha256_hex(owner.as_bytes())
+    ));
     fs::create_dir_all(&target_dir)
         .map_err(|error| io_error(error, "create shared Cargo target"))?;
     let lock = OpenOptions::new()

@@ -1,5 +1,5 @@
+use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 pub const SOURCE_SNAPSHOT_METADATA_ENV: &str = "HOMEBOY_SOURCE_SNAPSHOT_JSON";
 pub const LAB_OFFLOAD_METADATA_ENV: &str = "HOMEBOY_LAB_OFFLOAD_JSON";
@@ -100,7 +100,7 @@ pub fn resolve_json_value(raw: &str) -> Option<serde_json::Value> {
     let path = value.get("path")?.as_str()?;
     let expected_hash = value.get("sha256")?.as_str()?;
     let contents = std::fs::read(path).ok()?;
-    let actual_hash = format!("{:x}", Sha256::digest(&contents));
+    let actual_hash = content_hash::sha256_hex(&contents);
     (actual_hash == expected_hash)
         .then(|| serde_json::from_slice::<serde_json::Value>(&contents).ok())
         .flatten()
@@ -126,7 +126,7 @@ mod tests {
         resolve_json_value, RunContext, PREVIEW_METADATA_ENV, PREVIEW_PUBLIC_URL_ENV,
         PROVENANCE_REFERENCE_SCHEMA,
     };
-    use sha2::{Digest, Sha256};
+    use homeboy_engine_primitives::content_hash;
 
     #[test]
     fn subprocess_context_reads_generic_preview_metadata_with_public_url_overlay() {
@@ -170,7 +170,7 @@ mod tests {
         let reference = serde_json::json!({
             "schema": PROVENANCE_REFERENCE_SCHEMA,
             "path": path,
-            "sha256": format!("{:x}", Sha256::digest(payload)),
+            "sha256": content_hash::sha256_hex(payload),
         })
         .to_string();
 

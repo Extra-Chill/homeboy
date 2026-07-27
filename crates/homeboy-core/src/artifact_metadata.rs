@@ -1,30 +1,13 @@
-use crate::error::{Error, Result};
-use sha2::{Digest, Sha256};
-use std::io::Read;
+use crate::error::Result;
 use std::path::Path;
 
+/// SHA-256 of a file's bytes as lowercase hex.
+///
+/// Retained as the historical entry point for artifact hashing; the streaming
+/// implementation lives in `homeboy_engine_primitives::content_hash` so every
+/// crate produces byte-identical artifact identities.
 pub fn sha256_file(path: &Path) -> Result<String> {
-    let mut file = std::fs::File::open(path).map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some(format!("open artifact bytes {}", path.display())),
-        )
-    })?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).map_err(|e| {
-            Error::internal_io(
-                e.to_string(),
-                Some(format!("read artifact bytes {}", path.display())),
-            )
-        })?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+    homeboy_engine_primitives::content_hash::sha256_file(path)
 }
 
 pub fn content_type_from_path(path: &Path) -> Option<String> {

@@ -5,8 +5,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use homeboy_engine_primitives::content_hash;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 pub const RELEASE_SET_SCHEMA: &str = "homeboy/release-set/v1";
 
@@ -88,7 +88,7 @@ impl ReleaseSetManifest {
         components.sort_by(|left, right| left.id.cmp(&right.id));
         let canonical = serde_json::to_vec(&(RELEASE_SET_SCHEMA, &components))
             .map_err(|error| error.to_string())?;
-        let identity = format!("sha256:{:x}", Sha256::digest(canonical));
+        let identity = format!("sha256:{}", content_hash::sha256_hex(&canonical));
         Ok(NormalizedReleaseSet {
             schema: RELEASE_SET_SCHEMA.to_string(),
             identity,

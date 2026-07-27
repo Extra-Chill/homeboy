@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 
-use sha2::{Digest, Sha256};
+use homeboy_engine_primitives::content_hash;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -141,7 +141,7 @@ impl RemoteRunnerJobRequest {
                 Some("fingerprint runner submission".to_string()),
             )
         })?;
-        Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+        Ok(format!("sha256:{}", content_hash::sha256_hex(&bytes)))
     }
 
     pub(crate) fn normalize(&mut self) -> SecretEnvPlan {
