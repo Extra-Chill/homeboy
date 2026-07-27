@@ -2072,6 +2072,7 @@ fn replaying_cancel_recovers_stale_released_and_orphaned_scratch_before_bounded_
             crate::controller_scratch::ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
+                full: false,
                 retention_override_seconds: Some(0),
             },
         )
@@ -2088,6 +2089,7 @@ fn replaying_cancel_recovers_stale_released_and_orphaned_scratch_before_bounded_
             crate::controller_scratch::ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
+                full: false,
                 retention_override_seconds: Some(0),
             },
         )
@@ -2101,6 +2103,7 @@ fn replaying_cancel_recovers_stale_released_and_orphaned_scratch_before_bounded_
             crate::controller_scratch::ControllerScratchCleanupOptions {
                 apply: true,
                 limit: 1,
+                full: false,
                 retention_override_seconds: Some(0),
             },
         )
@@ -2110,6 +2113,7 @@ fn replaying_cancel_recovers_stale_released_and_orphaned_scratch_before_bounded_
             crate::controller_scratch::ControllerScratchCleanupOptions {
                 apply: true,
                 limit: 1,
+                full: false,
                 retention_override_seconds: Some(0),
             },
         )

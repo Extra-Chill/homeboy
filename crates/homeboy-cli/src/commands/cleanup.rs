@@ -48,6 +48,11 @@ pub struct CleanupArgs {
     #[arg(long, value_name = "N")]
     pub limit: Option<i64>,
 
+    /// Include every controller-scratch candidate and retained-resource detail.
+    /// Default output keeps representative detail within the shared response budget.
+    #[arg(long)]
+    pub full: bool,
+
     /// Continue a bounded shared-store cleanup inventory from this cursor.
     #[arg(long, value_name = "CURSOR")]
     pub cursor: Option<String>,
@@ -840,6 +845,7 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
             homeboy::agents::controller_scratch::ControllerScratchCleanupOptions {
                 apply,
                 limit: usize::try_from(limit).unwrap_or(usize::MAX),
+                full: args.full,
                 // Thread the operator's explicit `--older-than-days` override
                 // into the retention eligibility decision so released, clean,
                 // terminal scratch can converge under disk pressure. When the
