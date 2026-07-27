@@ -540,6 +540,37 @@ fn agent_task_providers_supports_explicit_runner_discovery() {
     assert!(!command.routing_policy.requires_extension_parity);
     assert!(command.required_extensions.is_empty());
     assert!(!command.routing_policy.infer_source_path_tools);
+    // The runner catalog answers from the runner's own installation. Nothing
+    // about a provider read needs the controller's working tree, and building
+    // one is exactly the materialization ceremony that outran the caller's
+    // timeout (#9763).
+    assert_eq!(
+        command.source_path_mode,
+        runners::LabOffloadSourcePathMode::RunnerResident
+    );
+    assert_eq!(
+        command.workspace_mode_policy,
+        runners::LabOffloadWorkspaceModePolicy::RunnerResident
+    );
+}
+
+#[test]
+fn unscoped_provider_discovery_does_not_offload() {
+    // Controller and runner have different extensions, runtime defaults,
+    // secrets, and provider readiness, so relocating an unscoped read changes
+    // the meaning of its answer. Offload stays opt-in (#9763).
+    let cli = Cli::parse_from(["homeboy", "agent-task", "providers"]);
+
+    let command = lab_offload_command(&cli.command).unwrap().unwrap();
+
+    assert_eq!(cli.runner, None);
+    assert_eq!(cli.placement, crate::cli_surface::Placement::Auto);
+    assert!(!command.routing_policy.default_lab_offload);
+    assert_eq!(
+        command.source_path_mode,
+        runners::LabOffloadSourcePathMode::RunnerResident,
+        "runner-resident source mode is what exempts this read from warm-controller offload promotion"
+    );
 }
 
 #[test]

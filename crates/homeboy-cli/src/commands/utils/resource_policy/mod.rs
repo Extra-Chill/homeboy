@@ -728,6 +728,56 @@ mod tests {
     }
 
     #[test]
+    fn unscoped_provider_discovery_never_interacts_with_a_runner() {
+        // Provider discovery reads controller-local manifests. Treating it as
+        // an admitted workload made a warm controller capture a resource
+        // context, probe Lab readiness, and relocate an unscoped diagnostic
+        // read onto a runner whose provider readiness is a different answer
+        // (#9763). No pressure level may engage resource admission for it.
+        let cli = Cli::parse_from(["homeboy", "agent-task", "providers"]);
+
+        assert!(
+            hot_command(&cli.command).is_none(),
+            "unscoped provider discovery must not enter resource admission"
+        );
+        for recommendation in [
+            ResourceRecommendation::Ok,
+            ResourceRecommendation::Warm,
+            ResourceRecommendation::Hot,
+        ] {
+            let warning = hot_command(&cli.command)
+                .and_then(|command| evaluate(command, &resources(recommendation)));
+            assert!(
+                warning.is_none(),
+                "a {recommendation:?} controller must not steer provider discovery to Lab"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_runner_provider_discovery_keeps_its_lab_contract() {
+        // Staying out of resource admission must not remove the explicit
+        // runner-scoped probe: `--runner <id>` is still the way to ask what a
+        // runner's catalog looks like (#9763).
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--runner",
+            "homeboy-lab",
+            "agent-task",
+            "providers",
+        ]);
+
+        assert!(cli
+            .command
+            .portability_contract()
+            .lab_command()
+            .is_some_and(|contract| matches!(
+                contract.portability,
+                LabCommandPortability::Portable
+            )));
+    }
+
+    #[test]
     fn agent_task_mutating_recovery_commands_remain_resource_managed() {
         // Bounded readers are exempt above; replay and promotion still execute
         // provider or worktree operations and retain resource admission.

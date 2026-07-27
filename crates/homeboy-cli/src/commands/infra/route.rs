@@ -919,6 +919,18 @@ fn lab_route_dispatch_timeout(command: &Commands) -> Option<std::time::Duration>
     if matches!(command, Commands::Trace(_)) {
         return Some(lab_routing::lab_trace_dispatch_timeout());
     }
+    // An explicitly runner-scoped provider catalog read is still a diagnostic
+    // read. Bound its dispatch so `--runner <id>` degrades to a labelled
+    // dispatch-timeout error, with durable runner/job identity to follow, well
+    // inside a caller's patience (#9763).
+    if matches!(
+        command,
+        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
+            command: crate::commands::agent_task::AgentTaskCommand::Providers(_),
+        })
+    ) {
+        return Some(lab_routing::lab_provider_discovery_dispatch_timeout());
+    }
     None
 }
 

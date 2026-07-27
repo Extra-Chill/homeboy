@@ -19,6 +19,18 @@ pub const DEFAULT_LAB_DISPATCH_TIMEOUT_SECS: u64 = 9 * 60;
 pub const LAB_DISPATCH_TIMEOUT_ENV: &str = "HOMEBOY_LAB_DISPATCH_TIMEOUT_SECS";
 pub const LAB_TRACE_DISPATCH_TIMEOUT_ENV: &str = "HOMEBOY_LAB_TRACE_DISPATCH_TIMEOUT_SECS";
 
+/// Dispatch budget for an explicitly runner-scoped provider catalog read.
+///
+/// Provider discovery is a diagnostic read used to *choose* a backend before
+/// dispatching real work, so it must answer inside a caller's patience rather
+/// than inherit the generic multi-minute workload dispatch budget. 90s keeps it
+/// under the 120s caller timeout that first surfaced the hang, and expiry
+/// yields the labelled dispatch-timeout error (with runner and run-inspection
+/// guidance) instead of an unbounded wait (#9763).
+pub const DEFAULT_LAB_PROVIDER_DISCOVERY_DISPATCH_TIMEOUT_SECS: u64 = 90;
+pub const LAB_PROVIDER_DISCOVERY_DISPATCH_TIMEOUT_ENV: &str =
+    "HOMEBOY_LAB_PROVIDER_DISCOVERY_DISPATCH_TIMEOUT_SECS";
+
 /// Phase tag used for Lab trace dispatch observation metadata payloads. Kept in
 /// core so the routing service owns the observation envelope shape rather than
 /// the CLI adapter.
@@ -485,6 +497,21 @@ pub fn lab_route_plan_from_route_contract(route_contract: LabCommandRouteContrac
 
 pub fn lab_trace_dispatch_timeout() -> Duration {
     lab_dispatch_timeout()
+}
+
+/// The bounded dispatch budget for an explicitly runner-scoped provider
+/// catalog read. Operators may widen or narrow it with
+/// [`LAB_PROVIDER_DISCOVERY_DISPATCH_TIMEOUT_ENV`]; it never inherits the
+/// generic workload dispatch budget, which is far longer than a diagnostic
+/// read's caller is willing to wait (#9763).
+pub fn lab_provider_discovery_dispatch_timeout() -> Duration {
+    std::env::var(LAB_PROVIDER_DISCOVERY_DISPATCH_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| {
+            Duration::from_secs(DEFAULT_LAB_PROVIDER_DISCOVERY_DISPATCH_TIMEOUT_SECS)
+        })
 }
 
 fn lab_dispatch_timeout() -> Duration {
