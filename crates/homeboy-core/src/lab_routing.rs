@@ -19,6 +19,10 @@ pub const DEFAULT_LAB_DISPATCH_TIMEOUT_SECS: u64 = 9 * 60;
 pub const LAB_DISPATCH_TIMEOUT_ENV: &str = "HOMEBOY_LAB_DISPATCH_TIMEOUT_SECS";
 pub const LAB_TRACE_DISPATCH_TIMEOUT_ENV: &str = "HOMEBOY_LAB_TRACE_DISPATCH_TIMEOUT_SECS";
 
+/// Bound terminal projections so nested command envelopes cannot consume an
+/// operator's terminal context. The complete envelope remains in `--output`.
+pub const COMPACT_COMMAND_RESULT_LIMIT_BYTES: usize = 2_048;
+
 /// Dispatch budget for an explicitly runner-scoped provider catalog read.
 ///
 /// Provider discovery is a diagnostic read used to *choose* a backend before
@@ -254,7 +258,13 @@ fn lab_offload_outcome_to_route_outcome(
                 },
                 lab_dispatch_metadata(runner_id, "offloaded_complete", finish_metadata),
             );
-            let stdout = stdout_with_persisted_run_retrieval(&stdout, retrieval.as_ref());
+            let (stdout, stderr) = compact_lab_terminal_output(
+                &stdout,
+                &stderr,
+                runner_id,
+                exit_code,
+                retrieval.as_ref(),
+            );
             Ok(LabRouteOutcome::Offloaded(LabRouteOutput {
                 stdout,
                 stderr,
@@ -283,6 +293,118 @@ fn lab_offload_outcome_to_route_outcome(
             }))
         }
     }
+}
+
+/// Projects a nested command-result envelope into concise terminal output.
+/// The remote envelope is intentionally left untouched for explicit readers.
+pub fn compact_command_result_output(stream: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(stream).ok()?;
+    if value.get("schema").and_then(serde_json::Value::as_str) != Some("homeboy/command-result/v3")
+    {
+        return None;
+    }
+
+    let mut lines = Vec::new();
+    let command = value
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("remote command");
+    let operation = value.get("operation").and_then(serde_json::Value::as_str);
+    lines.push(match operation {
+        Some(operation) => format!("Command: {command} {operation}"),
+        None => format!("Command: {command}"),
+    });
+    if let Some(status) = value.get("status").and_then(serde_json::Value::as_str) {
+        lines.push(format!("Status: {status}"));
+    }
+    if let Some(run_id) = metadata_path_string(&value, &["run", "id"]) {
+        lines.push(format!("Run: {run_id}"));
+    }
+    if let Some(job_id) = value
+        .get("refs")
+        .and_then(|refs| refs.get("jobs"))
+        .and_then(serde_json::Value::as_array)
+        .and_then(|jobs| jobs.first())
+        .and_then(|job| job.get("id"))
+        .and_then(serde_json::Value::as_str)
+    {
+        lines.push(format!("Job: {job_id}"));
+    }
+    if let Some(summary) = value.get("summary").and_then(serde_json::Value::as_str) {
+        lines.push(format!("Summary: {}", compact_line(summary)));
+    }
+    if value.get("success").and_then(serde_json::Value::as_bool) == Some(false) {
+        if let Some(cause) = command_result_root_cause(&value) {
+            lines.push(format!("Root cause: {}", compact_line(&cause)));
+        }
+    }
+    Some(bound_terminal_output(lines.join("\n")))
+}
+
+fn compact_lab_terminal_output(
+    stdout: &str,
+    stderr: &str,
+    runner_id: Option<&str>,
+    exit_code: i32,
+    retrieval: Option<&PersistedRunRetrieval>,
+) -> (String, String) {
+    let Some(mut rendered) = compact_command_result_output(stdout) else {
+        return (
+            stdout_with_persisted_run_retrieval(stdout, retrieval),
+            stderr.to_string(),
+        );
+    };
+
+    if let Some(runner_id) = runner_id {
+        rendered = format!("Lab runner: {runner_id}\n{rendered}");
+    }
+    rendered.push_str(&format!("\nExit status: {exit_code}"));
+    if let Some(retrieval) = retrieval {
+        rendered.push_str(&format!(
+            "\nEvidence: homeboy runs show {}",
+            retrieval.run_id
+        ));
+    }
+    rendered.push('\n');
+
+    // The runner's failure prose repeats staging and transport details already
+    // retained in the durable event stream. A nested result carries the useful
+    // command failure, so avoid printing that transcript a second time.
+    let _ = stderr;
+    (bound_terminal_output(rendered), String::new())
+}
+
+fn command_result_root_cause(value: &serde_json::Value) -> Option<String> {
+    for path in [
+        &["error", "message"][..],
+        &["diagnostics", "message"][..],
+        &["data", "diagnostic", "message"][..],
+        &["data", "diagnostic", "summary"][..],
+        &["data", "execution", "stderr"][..],
+    ] {
+        if let Some(cause) = metadata_path_string(value, path) {
+            return Some(cause);
+        }
+    }
+    None
+}
+
+fn compact_line(value: &str) -> String {
+    value
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(value)
+        .trim()
+        .to_string()
+}
+
+fn bound_terminal_output(mut value: String) -> String {
+    if value.len() > COMPACT_COMMAND_RESULT_LIMIT_BYTES {
+        const SUFFIX: &str = "\n[terminal output truncated; inspect --output or runs show --full]";
+        value.truncate(COMPACT_COMMAND_RESULT_LIMIT_BYTES - SUFFIX.len());
+        value.push_str(SUFFIX);
+    }
+    value
 }
 
 fn stdout_with_in_flight_status(stdout: &str, retrieval: Option<&PersistedRunRetrieval>) -> String {
@@ -855,6 +977,63 @@ mod tests {
             json["homeboy_persisted_run"]["id_scope"],
             "persisted_homeboy_run"
         );
+    }
+
+    #[test]
+    fn automatic_lab_success_projects_nested_result_with_bounded_terminal_output() {
+        let nested = format!(
+            r#"{{"schema":"homeboy/command-result/v3","command":"fuzz","operation":"run","success":true,"status":"passed","run":{{"id":"fuzz-1"}},"refs":{{"jobs":[{{"id":"job-1"}}]}},"summary":"campaign passed","data":{{"campaign":"{}"}}}}"#,
+            "x".repeat(10_000)
+        );
+        let (stdout, stderr) = compact_lab_terminal_output(
+            &nested,
+            "verbose transport diagnostics",
+            Some("homeboy-lab"),
+            0,
+            Some(&PersistedRunRetrieval::for_run("fuzz-1")),
+        );
+
+        assert!(stdout.contains("Lab runner: homeboy-lab"));
+        assert!(stdout.contains("Run: fuzz-1"));
+        assert!(stdout.contains("Job: job-1"));
+        assert!(stdout.contains("Summary: campaign passed"));
+        assert!(stdout.contains("Evidence: homeboy runs show fuzz-1"));
+        assert!(stdout.len() <= COMPACT_COMMAND_RESULT_LIMIT_BYTES);
+        assert!(!stdout.contains("\"campaign\""));
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn automatic_lab_workspace_failure_reports_one_root_cause() {
+        let nested = r#"{"schema":"homeboy/command-result/v3","command":"fuzz","operation":"run","success":false,"status":"failed","error":{"message":"workspace staging failed: dependency install failed"}}"#;
+        let (stdout, stderr) = compact_lab_terminal_output(
+            nested,
+            "workspace setup prose\nworkspace setup prose\n",
+            Some("homeboy-lab"),
+            1,
+            None,
+        );
+
+        assert!(stdout.contains("Root cause: workspace staging failed: dependency install failed"));
+        assert_eq!(stdout.matches("workspace staging failed").count(), 1);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn automatic_lab_fuzz_failure_uses_execution_stderr_once() {
+        let nested = r#"{"schema":"homeboy/command-result/v3","command":"fuzz","operation":"run","success":false,"status":"failed","data":{"execution":{"stderr":"Error: Cannot find module 'tar'\n    at resolve"}}}"#;
+        let (stdout, stderr) = compact_lab_terminal_output(
+            nested,
+            "raw Node stack trace\nraw Node stack trace\n",
+            Some("homeboy-lab"),
+            1,
+            Some(&PersistedRunRetrieval::for_run("fuzz-fail")),
+        );
+
+        assert!(stdout.contains("Root cause: Error: Cannot find module 'tar'"));
+        assert_eq!(stdout.matches("Cannot find module 'tar'").count(), 1);
+        assert!(stdout.len() <= COMPACT_COMMAND_RESULT_LIMIT_BYTES);
+        assert!(stderr.is_empty());
     }
 
     #[test]

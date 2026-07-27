@@ -750,6 +750,9 @@ pub(super) fn render_compact_exec_output(output: &RunnerExecOutput) -> String {
 }
 
 fn render_stream(stream: &str) -> String {
+    if let Some(compact) = homeboy::core::lab_routing::compact_command_result_output(stream) {
+        return compact;
+    }
     serde_json::from_str::<Value>(stream)
         .ok()
         .and_then(|value| serde_json::to_string_pretty(&value).ok())
