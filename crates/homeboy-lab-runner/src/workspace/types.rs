@@ -327,6 +327,8 @@ pub struct RunnerWorkspacePruneOptions {
     pub min_age_hours: u64,
     pub limit: usize,
     pub passes: usize,
+    /// Opaque cursor returned by a prior incomplete workspace-prune scan.
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -352,6 +354,9 @@ pub struct RunnerWorkspacePruneOutput {
     pub scanned_workspace_count: usize,
     /// Whether the inspected window reached the end of the workspace root.
     pub scan_complete: bool,
+    /// Opaque cursor for resuming strictly after the last inspected workspace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation_cursor: Option<String>,
     /// Candidate totals are limited to the first bounded scan window.
     pub total_candidate_count: usize,
     pub total_candidate_bytes: u64,
