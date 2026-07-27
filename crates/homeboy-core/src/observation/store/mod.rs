@@ -26,7 +26,7 @@ pub use artifacts::directory_tree_sha256;
 
 pub(crate) use helpers::*;
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 8;
+pub const CURRENT_SCHEMA_VERSION: i64 = 9;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ObservationDbStatus {

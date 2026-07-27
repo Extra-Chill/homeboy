@@ -173,6 +173,17 @@ const MIGRATIONS: &[Migration] = &[
             ON runs(status, finished_at ASC, id ASC);
         "#,
     },
+    Migration {
+        version: 9,
+        sql: r#"
+        -- Artifact reads are ordered within a run, while retention walks the
+        -- global creation order. Keep both traversals index-backed.
+        CREATE INDEX IF NOT EXISTS idx_artifacts_run_created
+            ON artifacts(run_id, created_at ASC, id ASC);
+        CREATE INDEX IF NOT EXISTS idx_artifacts_created_at
+            ON artifacts(created_at ASC, id ASC);
+        "#,
+    },
 ];
 
 static MIGRATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
