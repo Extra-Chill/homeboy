@@ -1,8 +1,10 @@
 //! `homeboy stack apply` — rebuild the target branch from base + cherry-picked PRs.
 //!
-//! Algorithm (Phase 1 MVP):
+//! Algorithm:
 //!
-//! 1. Resolve `component_path`, fetch `base.remote/base.branch`.
+//! 0. Resolve `component_path` and refuse to run while a cherry-pick from an
+//!    earlier (preserved) conflict is still paused in that checkout.
+//! 1. Fetch `base.remote/base.branch`.
 //! 2. Best-effort fetch `target.remote/target.branch` so existing local
 //!    history is up-to-date for diffing later. Failure here is non-fatal:
 //!    a fresh stack may not have pushed `target` yet.
@@ -14,13 +16,16 @@
 //!    - `git cherry-pick <sha>`.
 //!    - On `--allow-empty`-style "nothing to commit" outcome (the PR is
 //!      already in base), skip cleanly.
-//!    - On any other conflict, abort the in-progress cherry-pick and
-//!      return [`Error::stack_apply_conflict`] with a clear pause message.
+//!    - On any other conflict, return [`Error::stack_apply_conflict`] with a
+//!      pause message. The conflicted index and working tree are left in
+//!      place so the operator can actually resolve them; pass
+//!      [`ConflictPolicy::Abort`] (`--abort-on-conflict`) to have the
+//!      in-progress pick aborted instead.
 //!
-//! `apply` does NOT push to `target.remote`. That's `stack push` (Phase 2).
+//! `apply` does NOT push to `target.remote`. That's `stack push`.
 //!
-//! Conflict resume primitives (`--continue` / `--reset`) are deferred to
-//! Phase 2 — `apply` just prints what to run and exits non-zero.
+//! `apply` has no resume primitive of its own: it pauses on conflict and
+//! hands the operator raw `git cherry-pick --continue` / `--abort`.
 
 use serde::Serialize;
 use std::collections::HashSet;
@@ -52,10 +57,37 @@ pub enum PickOutcome {
     Picked,
     /// Cherry-pick was empty — the PR's head SHA is already in base.
     SkippedEmpty,
-    /// Cherry-pick conflicted. `apply` stops at this PR; the caller resolves
-    /// manually with standard git tools and reruns `apply` (Phase 2 will add
-    /// `--continue`).
+    /// Cherry-pick conflicted. `apply` stops at this PR; unless
+    /// [`ConflictPolicy::Abort`] was requested the conflicted state is left
+    /// in the checkout for the operator to resolve with standard git tools.
     Conflict,
+}
+
+/// What to do with the in-progress cherry-pick when a pick conflicts.
+///
+/// The default is [`ConflictPolicy::Preserve`]: aborting would delete the
+/// conflict markers, the index state, and `CHERRY_PICK_HEAD` that the error
+/// message tells the operator to resolve.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ConflictPolicy {
+    /// Leave the conflicted index and working tree exactly as git left them
+    /// so `git cherry-pick --continue` (or `--abort`) is available.
+    #[default]
+    Preserve,
+    /// Run `git cherry-pick --abort`, restoring a clean working tree and
+    /// discarding the conflicted state.
+    Abort,
+}
+
+impl ConflictPolicy {
+    /// Map the `--abort-on-conflict` CLI flag onto a policy.
+    pub fn from_abort_flag(abort_on_conflict: bool) -> Self {
+        if abort_on_conflict {
+            Self::Abort
+        } else {
+            Self::Preserve
+        }
+    }
 }
 
 /// Output envelope for `homeboy stack apply`.
@@ -82,18 +114,26 @@ pub struct ApplyOutput {
 pub type RebaseOutput = ApplyOutput;
 
 /// Apply a stack spec: build `target` from `base + prs`.
-pub fn apply(spec: &StackSpec) -> Result<ApplyOutput> {
-    rebuild(spec, "apply")
+pub fn apply(spec: &StackSpec, conflict_policy: ConflictPolicy) -> Result<ApplyOutput> {
+    rebuild(spec, "apply", conflict_policy)
 }
 
 /// Rebase a stack spec: rebuild `target` from `base + prs` without editing the
 /// stack spec, even when some listed PRs have merged upstream.
-pub fn rebase(spec: &StackSpec) -> Result<RebaseOutput> {
-    rebuild(spec, "rebase")
+pub fn rebase(spec: &StackSpec, conflict_policy: ConflictPolicy) -> Result<RebaseOutput> {
+    rebuild(spec, "rebase", conflict_policy)
 }
 
-fn rebuild(spec: &StackSpec, rerun_verb: &str) -> Result<ApplyOutput> {
+fn rebuild(
+    spec: &StackSpec,
+    rerun_verb: &str,
+    conflict_policy: ConflictPolicy,
+) -> Result<ApplyOutput> {
     let path = resolve_existing_component_path(spec)?;
+
+    // A preserved conflict from an earlier run is a reachable entry state —
+    // refuse to clobber it with the force-checkout below.
+    ensure_no_cherry_pick_in_progress(&path, &format!("homeboy stack {} {}", rerun_verb, spec.id))?;
 
     // 2. Fetch base — must succeed.
     fetch_remote_branch(&path, &spec.base.remote, &spec.base.branch)?;
@@ -145,10 +185,9 @@ fn rebuild(spec: &StackSpec, rerun_verb: &str) -> Result<ApplyOutput> {
                 });
             }
             CherryPickResult::Conflict(message) => {
-                // Abort the in-progress cherry-pick so the working tree is
-                // left clean. Phase 2 `--continue` will skip this abort.
-                let _ = run_git(&path, &["cherry-pick", "--abort"]);
-
+                // By default the conflicted state stays exactly where git
+                // left it — the error message below tells the operator to
+                // resolve it, so destroying it here would be a lie.
                 applied.push(AppliedPr {
                     repo: pr.repo.clone(),
                     number: pr.number,
@@ -157,15 +196,16 @@ fn rebuild(spec: &StackSpec, rerun_verb: &str) -> Result<ApplyOutput> {
                     note: Some(message.clone()),
                 });
 
-                return Err(Error::stack_apply_conflict(
-                    &spec.id,
-                    pr.number,
-                    &pr.repo,
-                    format!(
-                        "{}\n  Resolve manually with standard git tools, then re-run \
-                         `homeboy stack {} {}`. (Phase 3 will add `--continue`.)",
-                        message, rerun_verb, spec.id
-                    ),
+                return Err(conflict_error(
+                    ConflictContext {
+                        path: &path,
+                        stack_id: &spec.id,
+                        pr,
+                        sha: &head.sha,
+                        rerun_command: &format!("homeboy stack {} {}", rerun_verb, spec.id),
+                        policy: conflict_policy,
+                    },
+                    &message,
                 ));
             }
         }
@@ -195,6 +235,95 @@ pub(crate) enum CherryPickResult {
     Picked,
     Empty,
     Conflict(String),
+}
+
+/// Everything the conflict path needs to explain itself to the operator.
+pub(crate) struct ConflictContext<'a> {
+    /// Checkout the cherry-pick is paused in.
+    pub path: &'a str,
+    pub stack_id: &'a str,
+    pub pr: &'a StackPrEntry,
+    /// Head SHA that failed to apply.
+    pub sha: &'a str,
+    /// Full homeboy command to re-run once the tree is clean again.
+    pub rerun_command: &'a str,
+    pub policy: ConflictPolicy,
+}
+
+/// Finish a conflicted cherry-pick according to `ctx.policy` and build the
+/// operator-facing error.
+///
+/// Under [`ConflictPolicy::Preserve`] (the default) nothing is run: the
+/// conflicted index, the working-tree markers, and `CHERRY_PICK_HEAD` are the
+/// exact state the message asks the operator to resolve.
+pub(crate) fn conflict_error(ctx: ConflictContext<'_>, message: &str) -> Error {
+    if ctx.policy == ConflictPolicy::Abort {
+        let _ = run_git(ctx.path, &["cherry-pick", "--abort"]);
+    }
+    Error::stack_apply_conflict(
+        ctx.stack_id,
+        ctx.pr.number,
+        &ctx.pr.repo,
+        conflict_guidance(&ctx, message),
+    )
+}
+
+/// `true` while `path` has a cherry-pick paused mid-flight (`CHERRY_PICK_HEAD`
+/// still present).
+pub(crate) fn cherry_pick_in_progress(path: &str) -> bool {
+    run_git(
+        path,
+        &["rev-parse", "--verify", "--quiet", "CHERRY_PICK_HEAD"],
+    )
+    .map(|output| output.status.success())
+    .unwrap_or(false)
+}
+
+/// Refuse to rebuild `target` while a cherry-pick is still paused.
+///
+/// Preserving conflicts (the default) makes a half-resolved pick a reachable
+/// state at command entry; `git checkout -B` would either fail cryptically or
+/// throw away the operator's in-progress resolution.
+pub(crate) fn ensure_no_cherry_pick_in_progress(path: &str, rerun_command: &str) -> Result<()> {
+    if !cherry_pick_in_progress(path) {
+        return Ok(());
+    }
+    Err(Error::git_command_failed(format!(
+        "a cherry-pick is still in progress in {path}; refusing to rebuild the stack target over \
+         it.\n  Finish it: resolve the conflicts, `git add` the files, then run\n    \
+         git -C {path} cherry-pick --continue\n  \
+         Or discard it: git -C {path} cherry-pick --abort\n  \
+         Then re-run `{rerun_command}`."
+    )))
+}
+
+/// Render the resolution instructions for a conflicted pick. Pure — it names
+/// only commands that actually work from the state `ctx.policy` leaves behind.
+pub(crate) fn conflict_guidance(ctx: &ConflictContext<'_>, message: &str) -> String {
+    match ctx.policy {
+        ConflictPolicy::Abort => format!(
+            "{message}\n  \
+             --abort-on-conflict: ran `git cherry-pick --abort` in {path}, so the checkout is \
+             clean and the conflicted state for {sha} is gone.\n  \
+             Re-run `{rerun}` once the PR applies cleanly, or omit --abort-on-conflict to pause \
+             with the conflict intact and resolve it in place.",
+            path = ctx.path,
+            sha = ctx.sha,
+            rerun = ctx.rerun_command,
+        ),
+        ConflictPolicy::Preserve => format!(
+            "{message}\n  \
+             The cherry-pick of {sha} is still in progress in {path} — resolve it there.\n  \
+             Resolve: fix the conflicts, `git add` the files, then run\n    \
+             git -C {path} cherry-pick --continue\n  \
+             and re-run `{rerun}`.\n  \
+             Bail out: git -C {path} cherry-pick --abort\n  \
+             Pass --abort-on-conflict to have homeboy run that abort for you.",
+            path = ctx.path,
+            sha = ctx.sha,
+            rerun = ctx.rerun_command,
+        ),
+    }
 }
 
 pub(super) fn fetch_remote_branch(path: &str, remote: &str, branch: &str) -> Result<()> {

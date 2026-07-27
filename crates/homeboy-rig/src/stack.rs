@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use super::spec::RigSpec;
 use homeboy_core::error::{ErrorCode, Result};
 use homeboy_core::plan::HomeboyPlan;
-use homeboy_stack::stack::{self, StackSpec, SyncOutput};
+use homeboy_stack::stack::{self, ConflictPolicy, StackSpec, SyncOutput};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RigStackPlanEntry {
@@ -202,7 +202,9 @@ fn sync_checked(
 ) -> Result<SyncOutput> {
     let mut spec = stack::load(stack_id)?;
     validate_component_stack_path(rig, component_id, &spec)?;
-    stack::sync(&mut spec, dry_run)
+    // Rig sync inherits the default conflict policy: pause with the
+    // conflicted pick intact so the operator can resolve it in the checkout.
+    stack::sync(&mut spec, dry_run, ConflictPolicy::default())
 }
 
 pub(crate) fn validate_component_stack_path(
