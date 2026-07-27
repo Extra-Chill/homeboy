@@ -132,14 +132,19 @@ fn hydrate_lab_workspace_dependencies_for_run(
     remote_path: &str,
     parent_run_id: Option<&str>,
 ) -> Result<LabWorkspaceHydrationOutput> {
-    if prepared_source_view_is_ready(runner_id, remote_path)? {
-        return Ok(LabWorkspaceHydrationOutput::reused_prepared_cache(
-            remote_path,
-        ));
-    }
     let plan = deps::dependency_install_plan(std::path::Path::new(local_path))?;
     if plan.is_empty() {
         return Ok(LabWorkspaceHydrationOutput::skipped_no_provider(
+            remote_path,
+        ));
+    }
+    // Probe only once there is install work the cache could actually replace.
+    // Asking first cost a remote round trip on every dependency-free workspace
+    // and — because the probe is a raw exec — made hydration fail outright on
+    // any runner not explicitly trusted with `allow_raw_exec`, even though
+    // those workspaces never needed to reach the runner at all.
+    if prepared_source_view_is_ready(runner_id, remote_path)? {
+        return Ok(LabWorkspaceHydrationOutput::reused_prepared_cache(
             remote_path,
         ));
     }
