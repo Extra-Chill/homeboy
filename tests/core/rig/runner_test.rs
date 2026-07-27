@@ -69,6 +69,7 @@ fn minimal_spec(id: &str) -> RigSpec {
         bench_profiles: HashMap::new(),
         fuzz_profiles: HashMap::new(),
         app_launcher: None,
+        toolchain: None,
     }
 }
 
@@ -707,6 +708,7 @@ fn test_run_down_cleans_state_owned_shared_paths() {
             bench_profiles: HashMap::new(),
             fuzz_profiles: HashMap::new(),
             app_launcher: None,
+            toolchain: None,
         };
 
         let up = crate::pipeline::run_pipeline(&rig, "up", true).expect("up pipeline");
@@ -769,6 +771,7 @@ fn test_run_status() {
             fuzz: None,
             trace: Default::default(),
             app_launcher: None,
+            toolchain: None,
             bench_workloads: HashMap::new(),
             trace_workloads: HashMap::new(),
             fuzz_workloads: Default::default(),
@@ -961,6 +964,7 @@ fn test_snapshot_state() {
         bench_profiles: HashMap::new(),
         fuzz_profiles: HashMap::new(),
         app_launcher: None,
+        toolchain: None,
     };
 
     let snapshot = snapshot_state(&rig);
@@ -1366,6 +1370,95 @@ fn dependency_materialization_cache_key_includes_resolved_tool_version() {
         assert_ne!(
             key_v1, key_v2,
             "a resolved tool version change invalidates the cache"
+        );
+    });
+}
+
+/// The cache must key on the *resolved tool*, not on the assembled toolchain
+/// PATH. Installing an unrelated version-managed toolchain changes the PATH
+/// string; before #10318 that changed `environment_sha256` and silently
+/// invalidated every cached materialization on the machine.
+#[cfg(unix)]
+#[test]
+fn dependency_materialization_cache_key_ignores_irrelevant_toolchain_path_entries() {
+    with_isolated_home(|root| {
+        let home = root.path();
+        let bin = home.join(".local/bin");
+        let workspace = home.join("workspace");
+        std::fs::create_dir_all(&bin).expect("bin");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::write(workspace.join("lock"), "same input\n").expect("lock");
+        let tool = bin.join("cache-tool");
+        std::fs::write(
+            &tool,
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo tool-v1; fi\n",
+        )
+        .expect("tool");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).expect("tool mode");
+        let rig = RigSpec {
+            id: "dependency-cache-path-noise".to_string(),
+            requirements: RigRequirementsSpec {
+                dependency_materialization: vec![DependencyMaterializationStepSpec {
+                    id: "install".to_string(),
+                    command: Some("cache-tool install".to_string()),
+                    cwd: Some(workspace.display().to_string()),
+                    cache_key_inputs: vec!["lock".to_string()],
+                    expected_outputs: vec![DependencyMaterializationOutputSpec {
+                        path: "output".to_string(),
+                        kind: DependencyMaterializationOutputKind::File,
+                        required: true,
+                    }],
+                    safety: DependencyMaterializationSafety::WritesCache,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..minimal_spec("dependency-cache-path-noise")
+        };
+        let key = || {
+            DependencyMaterializationCache::new(
+                &rig,
+                &rig.requirements.dependency_materialization[0],
+                &[],
+            )
+            .expect("cache")
+            .expect("enabled")
+            .key()
+            .to_string()
+        };
+
+        let baseline = key();
+        let baseline_path =
+            crate::toolchain::command_step_path(Some(&rig)).expect("toolchain path");
+
+        // An unrelated version-managed toolchain appears on the host. It is
+        // discovered into the command-step PATH but resolves nothing this step
+        // uses.
+        std::fs::create_dir_all(home.join(".nvm/versions/node/v24.13.1/bin")).expect("node bin");
+        let noisy_path = crate::toolchain::command_step_path(Some(&rig)).expect("toolchain path");
+
+        assert_ne!(
+            baseline_path, noisy_path,
+            "fixture precondition: the new directory must actually change the assembled PATH"
+        );
+        assert_eq!(
+            baseline,
+            key(),
+            "an irrelevant toolchain PATH entry must not change the cache key"
+        );
+
+        // Control: the tool this step actually resolves still moves the key.
+        std::fs::write(
+            &tool,
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo tool-v2; fi\n",
+        )
+        .expect("replace tool");
+
+        assert_ne!(
+            baseline,
+            key(),
+            "a resolved tool change must still invalidate the cache key"
         );
     });
 }

@@ -53,6 +53,7 @@ fn rig_with_components(components: HashMap<String, ComponentSpec>) -> RigSpec {
         bench_profiles: Default::default(),
         fuzz_profiles: Default::default(),
         app_launcher: None,
+        toolchain: None,
     }
 }
 

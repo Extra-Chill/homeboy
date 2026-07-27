@@ -208,6 +208,7 @@ mod tests {
                 bench_profiles: Default::default(),
                 fuzz_profiles: Default::default(),
                 app_launcher: None,
+                toolchain: None,
             },
             resources: RigResourcesSpec {
                 exclusive: vec!["studio-runtime".to_string()],

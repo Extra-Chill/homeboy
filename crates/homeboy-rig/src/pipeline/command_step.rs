@@ -26,7 +26,7 @@ pub(crate) fn run_command_step(
     }
 
     if !env.contains_key("PATH") {
-        if let Some(path) = toolchain::command_step_path() {
+        if let Some(path) = toolchain::command_step_path(Some(rig)) {
             command.env("PATH", path);
         }
     }

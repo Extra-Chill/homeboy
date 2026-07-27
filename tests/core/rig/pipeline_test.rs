@@ -858,6 +858,7 @@ mod dag {
             fuzz: None,
             trace: Default::default(),
             app_launcher: None,
+            toolchain: None,
             bench_workloads: Default::default(),
             trace_workloads: Default::default(),
             fuzz_workloads: Default::default(),
@@ -1171,6 +1172,7 @@ mod git_steps {
             fuzz: None,
             trace: Default::default(),
             app_launcher: None,
+            toolchain: None,
             bench_workloads: Default::default(),
             trace_workloads: Default::default(),
             fuzz_workloads: Default::default(),
@@ -1292,6 +1294,7 @@ mod extension_lifecycle {
             fuzz: None,
             trace: Default::default(),
             app_launcher: None,
+            toolchain: None,
             bench_workloads: Default::default(),
             trace_workloads: Default::default(),
             fuzz_workloads: Default::default(),
@@ -1442,6 +1445,7 @@ mod command_env {
             bench_profiles: Default::default(),
             fuzz_profiles: Default::default(),
             app_launcher: None,
+            toolchain: None,
         }
     }
 
@@ -1468,7 +1472,6 @@ mod command_env {
     #[test]
     fn test_command_step_uses_bootstrapped_toolchain_path() {
         let _guard = home_env_guard();
-        let expected = toolchain::command_step_path().expect("toolchain path");
         let tmp = tempfile::tempdir().expect("tmpdir");
         let path_file = tmp.path().join("path.txt");
 
@@ -1476,12 +1479,47 @@ mod command_env {
             format!("printf '%s' \"$PATH\" > {}", path_file.to_string_lossy()),
             HashMap::new(),
         );
+        assert!(
+            rig.toolchain.is_none(),
+            "fixture must exercise the built-in default"
+        );
+        let expected = toolchain::command_step_path(Some(&rig)).expect("toolchain path");
         let outcome = run_pipeline(&rig, "up", true).expect("pipeline");
 
         assert!(outcome.is_success(), "outcomes: {:?}", outcome.steps);
         assert_eq!(
             fs::read_to_string(path_file).expect("path file"),
             expected.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn test_command_step_uses_declared_toolchain_paths() {
+        let _guard = home_env_guard();
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path_file = tmp.path().join("path.txt");
+        let declared = tmp.path().join("declared-bin");
+        fs::create_dir_all(&declared).expect("declared bin");
+
+        let mut rig = rig_with_command(
+            format!("printf '%s' \"$PATH\" > {}", path_file.to_string_lossy()),
+            HashMap::new(),
+        );
+        rig.toolchain = Some(crate::spec::ToolchainSpec {
+            prepend_paths: vec![declared.to_string_lossy().into_owned()],
+            ..Default::default()
+        });
+
+        let outcome = run_pipeline(&rig, "up", true).expect("pipeline");
+
+        assert!(outcome.is_success(), "outcomes: {:?}", outcome.steps);
+        let observed = fs::read_to_string(path_file).expect("path file");
+        assert_eq!(
+            std::env::split_paths(&observed)
+                .next()
+                .expect("first entry"),
+            declared,
+            "a rig-declared toolchain path leads the command step PATH"
         );
     }
 

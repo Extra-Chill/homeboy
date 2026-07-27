@@ -81,8 +81,12 @@ impl RigProvider for RigProviderImpl {
 struct RigToolchainProviderImpl;
 
 impl RigToolchainProvider for RigToolchainProviderImpl {
-    fn command_step_path(&self) -> Option<std::ffi::OsString> {
-        crate::toolchain::command_step_path()
+    fn command_step_path(&self, rig_id: Option<&str>) -> Option<std::ffi::OsString> {
+        // A named rig contributes its own `toolchain` declaration. An unknown or
+        // unloadable id degrades to the built-in default rather than failing an
+        // exec-env build over PATH assembly.
+        let rig = rig_id.and_then(|rig_id| crate::load(rig_id).ok());
+        crate::toolchain::command_step_path(rig.as_ref())
     }
 }
 

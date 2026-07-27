@@ -62,6 +62,7 @@ fn rig_with_launcher(install_dir: &str) -> RigSpec {
             preflight: vec![AppLauncherPreflight::RigCheck],
             on_preflight_fail: Some("dialog-and-open-terminal".to_string()),
         }),
+        toolchain: None,
     }
 }
 

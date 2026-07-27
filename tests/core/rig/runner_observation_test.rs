@@ -44,6 +44,7 @@ fn observation_spec(id: &str) -> RigSpec {
         bench_profiles: HashMap::new(),
         fuzz_profiles: HashMap::new(),
         app_launcher: None,
+        toolchain: None,
     }
 }
 

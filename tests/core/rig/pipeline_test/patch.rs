@@ -54,6 +54,7 @@ fn rig_with_patch(component_path: &str, step: PipelineStep) -> RigSpec {
         bench_profiles: Default::default(),
         fuzz_profiles: Default::default(),
         app_launcher: None,
+        toolchain: None,
     }
 }
 

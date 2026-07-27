@@ -47,6 +47,7 @@ fn rig_with_shared_path(id: &str, shared: SharedPathSpec, op: SharedPathOp) -> R
         bench_profiles: Default::default(),
         fuzz_profiles: Default::default(),
         app_launcher: None,
+        toolchain: None,
     }
 }
 
