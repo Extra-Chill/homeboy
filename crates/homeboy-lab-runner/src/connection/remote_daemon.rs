@@ -849,8 +849,36 @@ pub(super) fn remote_daemon_status(
     client: &SshClient,
     homeboy: &str,
 ) -> std::result::Result<RemoteDaemonStatus, String> {
+    remote_daemon_status_with_timeout(client, homeboy, REMOTE_DAEMON_STATUS_TIMEOUT, None)
+}
+
+/// Read daemon state for a status path without allowing an unreachable SSH
+/// endpoint to hide the persisted disconnected session indefinitely.
+pub(super) fn bounded_remote_daemon_status(
+    client: &SshClient,
+    homeboy: &str,
+    runner_id: &str,
+) -> std::result::Result<RemoteDaemonStatus, String> {
+    let timeout = crate::readonly_probe::readonly_probe_timeout();
+    remote_daemon_status_with_timeout(client, homeboy, timeout, Some(runner_id))
+}
+
+fn remote_daemon_status_with_timeout(
+    client: &SshClient,
+    homeboy: &str,
+    timeout: Duration,
+    runner_id: Option<&str>,
+) -> std::result::Result<RemoteDaemonStatus, String> {
     let command = format!("{} daemon status", shell::quote_arg(homeboy));
-    let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
+    let output = client.execute_with_timeout(&command, timeout);
+    if let Some(runner_id) = runner_id {
+        crate::readonly_probe::record_probe_outcome(
+            "runner_remote_daemon_status",
+            Some(runner_id),
+            timeout,
+            &output,
+        );
+    }
     if !output.success {
         return Err(command_failure_message(
             "remote daemon status failed",
@@ -933,6 +961,56 @@ pub(super) fn remote_daemon_status(
         endpoint_probe_error: None,
         termination_evidence,
     })
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use homeboy_core::{server, test_support};
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Instant;
+
+    #[test]
+    fn bounded_status_records_a_timed_out_remote_daemon_probe() {
+        test_support::with_isolated_home(|home| {
+            let daemon = home.path().join("slow-homeboy");
+            std::fs::write(&daemon, "#!/bin/sh\nsleep 1\n")
+                .expect("write slow remote Homeboy shim");
+            let mut permissions = std::fs::metadata(&daemon)
+                .expect("read remote Homeboy shim metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&daemon, permissions)
+                .expect("make remote Homeboy shim executable");
+            server::create(
+                &serde_json::json!({ "id": "slow-runner", "host": "localhost", "user": "test" })
+                    .to_string(),
+                false,
+            )
+            .expect("create local server");
+            let server_config = server::load("slow-runner").expect("load local server");
+            let client = SshClient::from_server(&server_config, "slow-runner").expect("SSH client");
+
+            crate::readonly_probe::clear_degradations();
+            let started = Instant::now();
+            let result = remote_daemon_status_with_timeout(
+                &client,
+                daemon.to_str().expect("daemon path"),
+                Duration::from_millis(100),
+                Some("slow-runner"),
+            );
+
+            assert!(result.is_err());
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "bounded status probe exceeded its deadline"
+            );
+            let degradations = crate::readonly_probe::take_degradations();
+            assert_eq!(degradations.len(), 1);
+            assert_eq!(degradations[0].probe, "runner_remote_daemon_status");
+            assert_eq!(degradations[0].runner_id.as_deref(), Some("slow-runner"));
+        });
+    }
 }
 
 pub(super) fn probe_remote_daemon_endpoint(client: &SshClient, status: &mut RemoteDaemonStatus) {

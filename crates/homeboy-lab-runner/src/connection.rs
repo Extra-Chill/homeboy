@@ -1068,14 +1068,11 @@ fn register_reverse_session_with_broker(broker_url: &str, session: &RunnerSessio
 pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     let runner = load(runner_id)?;
     let session_path = session_path(runner_id)?;
-    // A Cook handoff can cross controller identities after readiness accepted a
-    // direct SSH tunnel. Reuse that still-live tunnel rather than treating the
-    // controller-local record lookup as a daemon disconnect.
+    // Status is an observation path. In particular, a stale direct-SSH record
+    // must be reported as disconnected rather than triggering tunnel recovery.
+    // Recovery can wait on shared control-plane state and may open a tunnel, so
+    // it belongs to explicit connect/admission operations instead.
     let mut session = read_session_or_live_peer(runner_id)?;
-    let reconnect_error = recover_dead_direct_tunnel(runner_id, session.as_ref()).err();
-    if reconnect_error.is_none() {
-        session = read_session_or_live_peer(runner_id)?;
-    }
     let state = session_state(session.as_ref());
     let connected = state == RunnerSessionState::Connected;
     reconcile_session_metadata_with_observed_daemon(&runner, &mut session, connected)?;
@@ -1164,16 +1161,9 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
         freshness.active_jobs = active_jobs;
     }
     let active_job_count = direct_daemon_active_jobs.unwrap_or(active_jobs.len());
-    let active_job_error = match (active_job_error, reconnect_error, direct_daemon_active_jobs) {
-        (None, Some(error), _) => Some(RunnerActiveJobError {
-            code: "direct_tunnel_reconnect_failed".to_string(),
-            message: format!(
-                "direct SSH tunnel reconnect did not complete; the runner remains disconnected and no remote daemon or lease was replaced: {}. Retry `homeboy runner connect {runner_id}`",
-                error.message
-            ),
-        }),
-        (Some(error), _, _) => Some(error),
-        (None, None, Some(authoritative_count)) if authoritative_count != active_jobs.len() => {
+    let active_job_error = match (active_job_error, direct_daemon_active_jobs) {
+        (Some(error), _) => Some(error),
+        (None, Some(authoritative_count)) if authoritative_count != active_jobs.len() => {
             Some(RunnerActiveJobError {
                 code: "active_job_view_inconsistent".to_string(),
                 message: format!(
@@ -1182,7 +1172,7 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
                 ),
             })
         }
-        (None, None, _) => None,
+        (None, _) => None,
     };
     let stale_runner_job_count = stale_jobs.len();
     let active_runner_jobs = active_jobs.iter().map(Into::into).collect();
@@ -1590,7 +1580,7 @@ fn remote_daemon_recovery_freshness(
         Ok(None) => return None,
         Err(error) => return Some(unavailable_recovery_freshness(error.message)),
     };
-    match remote_daemon_status(&client, homeboy) {
+    match bounded_remote_daemon_status(&client, homeboy, runner_id) {
         Ok(mut status) => {
             remote_daemon::probe_remote_daemon_endpoint(&client, &mut status);
             Some(remote_daemon_recovery_freshness_from_status(
