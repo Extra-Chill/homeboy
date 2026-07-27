@@ -316,10 +316,22 @@ fn claim_owner_is_live(claim: &Value) -> bool {
         // conservative compatibility boundary until it expires.
         return true;
     };
-    if pid == 0 || pid > i32::MAX as u64 {
+    if !owner_pid_is_valid(pid) {
         return false;
     }
     process_is_live(pid as u32)
+}
+
+fn owner_pid_is_valid(pid: u64) -> bool {
+    if pid == 0 || pid > u32::MAX as u64 {
+        return false;
+    }
+    // Unix `pid_t` is signed on the supported targets. Windows process IDs
+    // occupy the full unsigned DWORD range.
+    #[cfg(unix)]
+    return pid <= i32::MAX as u64;
+    #[cfg(not(unix))]
+    true
 }
 
 #[cfg(unix)]
