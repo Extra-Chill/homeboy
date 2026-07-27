@@ -1898,6 +1898,11 @@ fn cook_repairs_initial_alias_after_submit_before_index_interruption() {
             observed.lock().expect("observer records lock").as_slice(),
             &[
                 (
+                    "durable_identity".to_string(),
+                    cook_id.to_string(),
+                    run_id.to_string()
+                ),
+                (
                     "provider_ready".to_string(),
                     cook_id.to_string(),
                     run_id.to_string()
@@ -1934,6 +1939,119 @@ fn cook_repairs_initial_alias_after_submit_before_index_interruption() {
         assert!(agent_task_lifecycle::logs(cook_id).is_ok());
         assert!(
             agent_task_lifecycle::retry(cook_id, Some("cook-repair-initial-alias-retry")).is_ok()
+        );
+    });
+}
+
+/// Fails at the exact controller boundary where Lab materialization begins,
+/// after recording whether the durable run record was already addressable by
+/// id at that moment. Models the caller-timeout case in #9163/#10419.
+#[derive(Debug)]
+struct MaterializationInterruptingDispatcher {
+    run_id: String,
+    state_at_materialization: Arc<Mutex<Option<String>>>,
+}
+
+impl AgentTaskCookAttemptDispatcher for MaterializationInterruptingDispatcher {
+    fn durable_recipe(&self) -> Result<Value> {
+        Ok(serde_json::json!({ "kind": "test-materialization-interruption" }))
+    }
+
+    fn prepare_for_cook(&self) -> Result<()> {
+        // Controller-side Lab materialization starts here. The durable record
+        // must already resolve by id, or an interruption from this point on
+        // strands an unnamed reservation.
+        let record = agent_task_lifecycle::status(&self.run_id)?;
+        *self
+            .state_at_materialization
+            .lock()
+            .expect("materialization state") = Some(format!("{:?}", record.state));
+        Err(Error::internal_unexpected(
+            "fixture caller was interrupted during Lab materialization",
+        ))
+    }
+
+    fn dispatch_attempt(
+        &self,
+        _plan: AgentTaskPlan,
+        _run_id: &str,
+        _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    ) -> Result<()> {
+        panic!("an interrupted materialization must never reach provider dispatch")
+    }
+}
+
+#[test]
+fn cook_publishes_durable_identity_before_materialization_and_survives_interruption() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-durable-identity-first";
+        let run_id = "cook-durable-identity-first-run";
+        let state_at_materialization = Arc::new(Mutex::new(None));
+        let options = batch_cook_options(
+            cook_id,
+            Arc::new(MaterializationInterruptingDispatcher {
+                run_id: run_id.to_string(),
+                state_at_materialization: state_at_materialization.clone(),
+            }),
+        );
+
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observer_records = observed.clone();
+        let result =
+            run_cook_with_durable_observer(options, UnusedExecutor, &move |phase, cook, run| {
+                observer_records
+                    .lock()
+                    .expect("observer records lock")
+                    .push((phase.to_string(), run.to_string()));
+                // Every identity-bearing event must be immediately actionable:
+                // the caller can look the run up the moment it is told about it.
+                assert_eq!(
+                    agent_task_lifecycle::status(cook)
+                        .expect("Cook alias resolves in observer")
+                        .run_id,
+                    run
+                );
+                Ok(())
+            })
+            .expect("interrupted materialization returns a durable report");
+
+        // 1. Identity is published before any materialization work.
+        assert_eq!(
+            observed
+                .lock()
+                .expect("observer records lock")
+                .first()
+                .cloned(),
+            Some(("durable_identity".to_string(), run_id.to_string()))
+        );
+
+        // 2. The record was findable by id at the instant materialization began.
+        assert_eq!(
+            state_at_materialization
+                .lock()
+                .expect("materialization state")
+                .as_deref(),
+            Some("Queued")
+        );
+
+        // 3. The interruption left a named, recoverable record — not an
+        //    anonymous reservation an operator has to hunt for.
+        assert_eq!(result.value.status, "durable_failure");
+        let record = agent_task_lifecycle::status(run_id).expect("record survives interruption");
+        assert_eq!(
+            record.metadata["pre_execution_failure"]["phase"],
+            serde_json::json!("cook_pre_execution")
+        );
+        assert_eq!(
+            agent_task_lifecycle::status(cook_id)
+                .expect("Cook alias resolves after interruption")
+                .run_id,
+            run_id
+        );
+        assert!(agent_task_lifecycle::logs(run_id).is_ok());
+        // Recoverable, not merely observable: the operator can act on the id.
+        assert!(
+            agent_task_lifecycle::retry(cook_id, Some("cook-durable-identity-first-retry")).is_ok()
         );
     });
 }
