@@ -947,6 +947,76 @@ mod tests {
             .is_some_and(|hint| hint.contains("Remote execution was not started"))));
     }
 
+    /// End-to-end gate for Extra-Chill/homeboy#10287: a capability the controller
+    /// declared on the workload must reach the dispatch preflight and refuse a
+    /// runner that cannot satisfy it. Before the fix the workload's declared
+    /// capabilities were discarded and every runner passed.
+    #[test]
+    fn workload_declared_capability_refuses_a_runner_missing_the_tool() {
+        let plan = homeboy_core::plan::HomeboyPlan::builder_for_description(
+            homeboy_core::plan::PlanKind::LabOffload,
+            "capability gate",
+        )
+        .build();
+        let command = crate::LabOffloadCommand {
+            command: homeboy_core::lab_contract::LabCommandContract::portable(
+                "trace",
+                None,
+                false,
+                &[],
+            ),
+            required_extensions: Vec::new(),
+            required_capabilities: vec![homeboy_core::lab_contract::LabRunnerWorkloadCapability {
+                name: "playwright".to_string(),
+                required: true,
+            }],
+            workload: None,
+        };
+        let workload = crate::workload::build_lab_runner_workload(
+            crate::workload::LabRunnerWorkloadBuildInput {
+                plan: &plan,
+                command: &command,
+                capture_patch: false,
+                mutation_flag: None,
+                allow_dirty_lab_workspace: false,
+                runner_id: "lab",
+                runner_mode: "direct_ssh",
+                assignment_source: "explicit",
+                status: "offloaded",
+                remote_workspace: Some("/srv/homeboy/work"),
+                fallback_reason: None,
+                workspace_mapping_ref: None,
+                proof_id: None,
+            },
+        );
+
+        let preflight =
+            crate::workload::merge_lab_runner_workload_capability_preflight(None, Some(&workload))
+                .expect("workload capability reaches the dispatch preflight");
+
+        let capable = RunnerCapabilitySnapshot {
+            tools: [RunnerRequiredTool::new("playwright")]
+                .into_iter()
+                .collect(),
+            commands: BTreeSet::new(),
+            tool_capabilities: BTreeSet::new(),
+            components: BTreeSet::new(),
+        };
+        validate_runner_capability_preflight("lab", &preflight, &capable, &HashMap::new())
+            .expect("a runner providing the declared capability passes");
+
+        let err = validate_runner_capability_preflight(
+            "lab",
+            &preflight,
+            &RunnerCapabilitySnapshot::default(),
+            &HashMap::new(),
+        )
+        .expect_err("a runner missing the declared capability is refused");
+
+        assert_eq!(err.code.as_str(), "validation.invalid_argument");
+        assert!(err.message.contains("tools: playwright"));
+    }
+
     #[test]
     fn runner_capability_preflight_accepts_matching_requirements() {
         let preflight = RunnerCapabilityPreflight {
