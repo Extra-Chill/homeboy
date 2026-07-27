@@ -18,7 +18,7 @@ use super::super::spec::{
     LifecycleContract, LifecyclePhaseContract, LifecyclePhaseKind, LifecyclePhaseResult,
     LifecyclePhaseStatus, LifecycleResultMetadata, LifecycleSnapshotRef, RigSpec,
 };
-use super::super::state::now_rfc3339;
+use super::super::state::{now_rfc3339, LifecycleSnapshotState, RigState};
 use super::super::toolchain;
 use super::labels::serialize_lifecycle_op;
 use homeboy_core::error::{Error, Result};
@@ -37,23 +37,93 @@ const DEFAULT_SNAPSHOT_KIND: &str = "lifecycle_snapshot";
 
 pub(super) fn run_lifecycle_step(
     rig: &RigSpec,
+    step_id: Option<&str>,
     component: Option<&str>,
     contract: &LifecycleContract,
     op: LifecyclePhaseKind,
     settings: &[(String, String)],
 ) -> Result<()> {
-    execute_lifecycle_phases(rig, component, contract, op, settings).map(|_| ())
+    let (result, failure) = execute_lifecycle_phases(rig, component, contract, op, settings)?;
+
+    // Persist before propagating a phase failure: a handle captured before the
+    // failure is a live environment, and dropping it would leak exactly what
+    // this primitive exists to make reapable.
+    persist_snapshots(rig, &step_key(step_id, component), component, op, &result)?;
+
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Stable ownership key for the handles a step captures.
+fn step_key(step_id: Option<&str>, component: Option<&str>) -> String {
+    step_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(component)
+        .unwrap_or("lifecycle")
+        .to_string()
+}
+
+/// Record captured handles in rig state, and reap the ones this step owns when
+/// the op is `teardown`.
+fn persist_snapshots(
+    rig: &RigSpec,
+    step_key: &str,
+    component: Option<&str>,
+    op: LifecyclePhaseKind,
+    result: &LifecycleResultMetadata,
+) -> Result<()> {
+    let teardown = op == LifecyclePhaseKind::Teardown;
+    if result.snapshot_refs.is_empty() && !teardown {
+        return Ok(());
+    }
+
+    let mut state = RigState::load(&rig.id)?;
+    let mut changed = false;
+
+    if teardown {
+        let before = state.lifecycle_snapshots.len();
+        state
+            .lifecycle_snapshots
+            .retain(|_, entry| entry.step != step_key);
+        changed |= state.lifecycle_snapshots.len() != before;
+    }
+
+    for snapshot in &result.snapshot_refs {
+        state.lifecycle_snapshots.insert(
+            snapshot.id.clone(),
+            LifecycleSnapshotState {
+                step: step_key.to_string(),
+                component: component.map(str::to_string),
+                captured_at: snapshot.created_at.clone().unwrap_or_else(now_rfc3339),
+                snapshot: snapshot.clone(),
+            },
+        );
+        changed = true;
+    }
+
+    if changed {
+        state.save(&rig.id)?;
+    }
+    Ok(())
 }
 
 /// Execute every contract phase matching `op`, in declared order, and return
-/// the `homeboy/lifecycle-result/v1` metadata describing what happened.
+/// the `homeboy/lifecycle-result/v1` metadata describing what happened plus
+/// the failure that halted it, if any.
+///
+/// The outer `Err` is reserved for preflight problems (invalid contract,
+/// undeclared component, no phase for the op) where nothing ran and there is
+/// no state to record.
 pub(super) fn execute_lifecycle_phases(
     rig: &RigSpec,
     component: Option<&str>,
     contract: &LifecycleContract,
     op: LifecyclePhaseKind,
     settings: &[(String, String)],
-) -> Result<LifecycleResultMetadata> {
+) -> Result<(LifecycleResultMetadata, Option<Error>)> {
     let contract = expand_contract(rig, contract);
     validate_contract(rig, &contract)?;
 
@@ -140,10 +210,7 @@ pub(super) fn execute_lifecycle_phases(
         }
     }
 
-    match failure {
-        Some(error) => Err(error),
-        None => Ok(result),
-    }
+    Ok((result, failure))
 }
 
 /// Raw output of one executed phase.

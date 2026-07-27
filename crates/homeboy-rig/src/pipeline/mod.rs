@@ -336,13 +336,19 @@ fn run_step(
             ..
         } => host_mutation_step::run_host_mutation_step(rig, *op, *dry_run, lifecycle),
         PipelineStep::Lifecycle {
+            step_id,
             component,
             lifecycle,
             op,
             ..
-        } => {
-            lifecycle_step::run_lifecycle_step(rig, component.as_deref(), lifecycle, *op, settings)
-        }
+        } => lifecycle_step::run_lifecycle_step(
+            rig,
+            step_id.as_deref(),
+            component.as_deref(),
+            lifecycle,
+            *op,
+            settings,
+        ),
         PipelineStep::Check { spec, .. } => check::evaluate(rig, spec),
     }
 }

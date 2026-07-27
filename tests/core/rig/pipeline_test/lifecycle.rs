@@ -9,6 +9,8 @@ use std::fs;
 
 use crate::pipeline::run_pipeline;
 use crate::spec::RigSpec;
+use crate::state::RigState;
+use homeboy_core::test_support::with_isolated_home;
 
 fn rig_from_json(json: &str) -> RigSpec {
     serde_json::from_str(json).expect("parse rig")
@@ -86,39 +88,176 @@ fn test_lifecycle_step_exposes_phase_identity_to_commands() {
 
 #[test]
 fn test_lifecycle_snapshot_handle_is_visible_to_later_phases() {
-    let tmp = tempfile::tempdir().expect("tmpdir");
-    let marker = tmp.path().join("handle.txt");
-    let marker_arg = marker.to_string_lossy();
+    with_isolated_home(|_home| {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let marker = tmp.path().join("handle.txt");
+        let marker_arg = marker.to_string_lossy();
 
-    // The first snapshot phase prints a bare locator; the second sees it as an
-    // opaque handle. That is the whole sandbox contract — Homeboy carries the
-    // id forward without interpreting it.
-    let rig = rig_from_json(&format!(
-        r#"{{
-            "id": "lifecycle-handle",
-            "pipeline": {{
-                "up": [{{
-                    "kind": "lifecycle",
-                    "op": "snapshot",
-                    "lifecycle": {{
-                        "phases": [
-                            {{ "id": "capture", "phase": "snapshot", "command": "printf 'opaque-handle-1'" }},
-                            {{ "id": "observe", "phase": "snapshot", "command": "printf '%s|%s' \"$HOMEBOY_LIFECYCLE_SNAPSHOT_ID\" \"$HOMEBOY_LIFECYCLE_SNAPSHOT_LOCATOR\" > {marker}" }}
-                        ]
-                    }}
-                }}]
-            }}
-        }}"#,
-        marker = marker_arg
-    ));
+        // The first snapshot phase prints a bare locator; the second sees it as
+        // an opaque handle. That is the whole sandbox contract — Homeboy
+        // carries the id forward without interpreting it.
+        let rig = rig_from_json(&format!(
+            r#"{{
+                "id": "lifecycle-handle",
+                "pipeline": {{
+                    "up": [{{
+                        "kind": "lifecycle",
+                        "op": "snapshot",
+                        "lifecycle": {{
+                            "phases": [
+                                {{ "id": "capture", "phase": "snapshot", "command": "printf 'opaque-handle-1'" }},
+                                {{ "id": "observe", "phase": "snapshot", "command": "printf '%s|%s' \"$HOMEBOY_LIFECYCLE_SNAPSHOT_ID\" \"$HOMEBOY_LIFECYCLE_SNAPSHOT_LOCATOR\" > {marker}" }}
+                            ]
+                        }}
+                    }}]
+                }}
+            }}"#,
+            marker = marker_arg
+        ));
 
-    let out = run_pipeline(&rig, "up", true).expect("pipeline runs");
+        let out = run_pipeline(&rig, "up", true).expect("pipeline runs");
 
-    assert!(out.is_success(), "outcomes: {:?}", out.steps);
-    assert_eq!(
-        fs::read_to_string(&marker).expect("marker"),
-        "capture|opaque-handle-1"
-    );
+        assert!(out.is_success(), "outcomes: {:?}", out.steps);
+        assert_eq!(
+            fs::read_to_string(&marker).expect("marker"),
+            "capture|opaque-handle-1"
+        );
+    });
+}
+
+#[test]
+fn test_lifecycle_snapshot_handle_lands_in_rig_state() {
+    with_isolated_home(|_home| {
+        let rig = rig_from_json(
+            r#"{
+                "id": "lifecycle-state",
+                "pipeline": {
+                    "up": [{
+                        "kind": "lifecycle",
+                        "id": "provision",
+                        "op": "snapshot",
+                        "lifecycle": {
+                            "phases": [{
+                                "id": "capture",
+                                "phase": "snapshot",
+                                "command": "printf 'opaque://sandbox/7f3'"
+                            }]
+                        }
+                    }]
+                }
+            }"#,
+        );
+
+        let out = run_pipeline(&rig, "up", true).expect("pipeline runs");
+        assert!(out.is_success(), "outcomes: {:?}", out.steps);
+
+        let state = RigState::load(&rig.id).expect("state");
+        let entry = state
+            .lifecycle_snapshots
+            .get("capture")
+            .expect("captured handle");
+        assert_eq!(entry.step, "provision");
+        assert_eq!(entry.snapshot.kind, "lifecycle_snapshot");
+        assert_eq!(
+            entry.snapshot.locator.as_deref(),
+            Some("opaque://sandbox/7f3")
+        );
+        assert!(entry.snapshot.created_at.is_some());
+    });
+}
+
+#[test]
+fn test_lifecycle_snapshot_handle_can_be_a_full_contract_ref() {
+    with_isolated_home(|_home| {
+        // A runtime that already speaks the contract hands back a full ref.
+        let rig = rig_from_json(
+            r#"{
+                "id": "lifecycle-state-ref",
+                "pipeline": {
+                    "up": [{
+                        "kind": "lifecycle",
+                        "id": "provision",
+                        "op": "snapshot",
+                        "lifecycle": {
+                            "phases": [{
+                                "id": "capture",
+                                "phase": "snapshot",
+                                "command": "printf '{\"id\":\"sandbox-7f3\",\"kind\":\"workspace\",\"locator\":\"opaque://sandbox/7f3\"}'"
+                            }]
+                        }
+                    }]
+                }
+            }"#,
+        );
+
+        let out = run_pipeline(&rig, "up", true).expect("pipeline runs");
+        assert!(out.is_success(), "outcomes: {:?}", out.steps);
+
+        let state = RigState::load(&rig.id).expect("state");
+        let entry = state
+            .lifecycle_snapshots
+            .get("sandbox-7f3")
+            .expect("captured handle");
+        assert_eq!(entry.snapshot.kind, "workspace");
+        assert_eq!(entry.snapshot.phase_id.as_deref(), Some("capture"));
+    });
+}
+
+#[test]
+fn test_lifecycle_teardown_reaps_the_handles_its_step_owns() {
+    with_isolated_home(|_home| {
+        let rig = rig_from_json(
+            r#"{
+                "id": "lifecycle-teardown",
+                "pipeline": {
+                    "up": [{
+                        "kind": "lifecycle",
+                        "id": "provision",
+                        "op": "snapshot",
+                        "lifecycle": {
+                            "phases": [{
+                                "id": "capture",
+                                "phase": "snapshot",
+                                "command": "printf 'opaque://sandbox/7f3'"
+                            }]
+                        }
+                    }],
+                    "down": [{
+                        "kind": "lifecycle",
+                        "id": "provision",
+                        "op": "teardown",
+                        "lifecycle": {
+                            "phases": [{
+                                "id": "reap",
+                                "phase": "teardown",
+                                "command": "test -n \"$HOMEBOY_LIFECYCLE_PHASE_ID\""
+                            }]
+                        }
+                    }]
+                }
+            }"#,
+        );
+
+        let up = run_pipeline(&rig, "up", true).expect("up runs");
+        assert!(up.is_success(), "outcomes: {:?}", up.steps);
+        assert_eq!(
+            RigState::load(&rig.id)
+                .expect("state")
+                .lifecycle_snapshots
+                .len(),
+            1
+        );
+
+        let down = run_pipeline(&rig, "down", true).expect("down runs");
+        assert!(down.is_success(), "outcomes: {:?}", down.steps);
+        assert!(
+            RigState::load(&rig.id)
+                .expect("state")
+                .lifecycle_snapshots
+                .is_empty(),
+            "teardown reaps the handles its step owns"
+        );
+    });
 }
 
 #[test]

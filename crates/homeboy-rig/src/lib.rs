@@ -112,7 +112,8 @@ pub use stack::{
     RigStackSyncReport,
 };
 pub use state::{
-    ComponentSnapshot, MaterializedRigState, RigState, RigStateSnapshot, ServiceState,
+    ComponentSnapshot, LifecycleSnapshotState, MaterializedRigState, RigState, RigStateSnapshot,
+    ServiceState,
 };
 pub use workloads::{
     check_groups_for_bench_scenarios, check_groups_for_extension_workloads,

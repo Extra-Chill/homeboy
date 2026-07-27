@@ -6,10 +6,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::spec::RigResourcesSpec;
+use crate::spec::{LifecycleSnapshotRef, RigResourcesSpec};
 use crate::state::{
-    ComponentSnapshot, MaterializedRigState, RigState, RigStateSnapshot, ServiceState,
-    SharedPathState,
+    ComponentSnapshot, LifecycleSnapshotState, MaterializedRigState, RigState, RigStateSnapshot,
+    ServiceState, SharedPathState,
 };
 
 #[test]
@@ -32,6 +32,7 @@ fn test_state_round_trips_with_service() {
         shared_paths: Default::default(),
         materialized: None,
         last_effective_components: Default::default(),
+        lifecycle_snapshots: Default::default(),
     };
     state.services.insert(
         "tarball".to_string(),
@@ -98,6 +99,59 @@ fn test_state_round_trips_with_materialized_ownership() {
     assert_eq!(
         materialized.resources.process_patterns,
         vec!["app-server-child"]
+    );
+}
+
+#[test]
+fn test_state_round_trips_with_lifecycle_snapshot_handle() {
+    let mut state = RigState::default();
+    state.lifecycle_snapshots.insert(
+        "sandbox-7f3".to_string(),
+        LifecycleSnapshotState {
+            step: "provision".to_string(),
+            component: Some("app".to_string()),
+            captured_at: "2026-07-27T13:00:00Z".to_string(),
+            snapshot: LifecycleSnapshotRef {
+                schema: "homeboy/lifecycle-snapshot-ref/v1".to_string(),
+                id: "sandbox-7f3".to_string(),
+                kind: "lifecycle_snapshot".to_string(),
+                phase_id: Some("capture".to_string()),
+                artifact_id: None,
+                artifact: None,
+                locator: Some("opaque://sandbox/7f3".to_string()),
+                created_at: Some("2026-07-27T13:00:00Z".to_string()),
+                metadata: BTreeMap::new(),
+            },
+        },
+    );
+
+    let json = serde_json::to_string(&state).expect("serialize");
+    let parsed: RigState = serde_json::from_str(&json).expect("parse");
+    let entry = parsed
+        .lifecycle_snapshots
+        .get("sandbox-7f3")
+        .expect("handle");
+    assert_eq!(entry.step, "provision");
+    assert_eq!(entry.component.as_deref(), Some("app"));
+    assert_eq!(
+        entry.snapshot.locator.as_deref(),
+        Some("opaque://sandbox/7f3")
+    );
+    assert_eq!(entry.snapshot.kind, "lifecycle_snapshot");
+}
+
+/// Non-breaking guarantee: state written before lifecycle handles existed
+/// still loads, and state with no handles serializes without the key.
+#[test]
+fn test_state_without_lifecycle_snapshots_omits_the_key() {
+    let legacy = r#"{"last_up":"2026-04-24T13:00:00Z"}"#;
+    let parsed: RigState = serde_json::from_str(legacy).expect("parse legacy state");
+    assert!(parsed.lifecycle_snapshots.is_empty());
+
+    let json = serde_json::to_string(&parsed).expect("serialize");
+    assert!(
+        !json.contains("lifecycle_snapshots"),
+        "empty handle map must not appear on disk: {json}"
     );
 }
 
