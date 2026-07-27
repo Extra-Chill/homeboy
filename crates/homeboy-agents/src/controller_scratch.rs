@@ -561,6 +561,7 @@ fn cleanup_unlocked(
     // Only durably registered resources are cleanup candidates. In particular,
     // do not infer ownership by scanning a shared system temporary directory.
     let mut skipped = Vec::new();
+    let mut skipped_bytes = 0;
     // Complete, lightweight (reason, run_id) record of every skipped resource,
     // used to compute an accurate `skipped_count` and `retention_reasons`
     // summary even when the materialized `skipped` rows are capped.
@@ -585,18 +586,23 @@ fn cleanup_unlocked(
         reconciled |= resource.lifecycle_state != lifecycle_state
             || resource.interrupted_at != interrupted_at;
         if let Some(reason) = reason {
-            // Keep every row for an explicit `--full` inspection while the
-            // default response projects it through the independent detail budget.
-            // The aggregate remains exact in either presentation.
+            // Keep every row for an explicit `--full` inspection. The default
+            // response admits rows directly to its item/byte budget so a large
+            // retained index is not materialized before it is truncated.
             all_skips.push((reason.clone(), Some(resource.run_id.clone())));
-            skipped.push(ControllerScratchSkipped {
-                path: resource.path.clone(),
-                run_id: Some(resource.run_id.clone()),
-                owner_pid: Some(resource.owner_pid),
-                lifecycle_state: Some(resource.lifecycle_state.clone()),
-                recovery_command: scratch_recovery_command(resource),
-                reason,
-            });
+            append_skipped_detail(
+                &mut skipped,
+                &mut skipped_bytes,
+                options.full,
+                ControllerScratchSkipped {
+                    path: resource.path.clone(),
+                    run_id: Some(resource.run_id.clone()),
+                    owner_pid: Some(resource.owner_pid),
+                    lifecycle_state: Some(resource.lifecycle_state.clone()),
+                    recovery_command: scratch_recovery_command(resource),
+                    reason,
+                },
+            )?;
             continue;
         }
         let size_bytes = path_size(&path)?;
@@ -645,14 +651,19 @@ fn cleanup_unlocked(
                 None => {
                     let reason = "resource changed or disappeared before deletion".to_string();
                     all_skips.push((reason.clone(), Some(candidate.run_id.clone())));
-                    skipped.push(ControllerScratchSkipped {
-                        path: candidate.path.clone(),
-                        run_id: Some(candidate.run_id.clone()),
-                        owner_pid: Some(candidate.owner_pid),
-                        lifecycle_state: Some(candidate.lifecycle_state.clone()),
-                        recovery_command: None,
-                        reason,
-                    });
+                    append_skipped_detail(
+                        &mut skipped,
+                        &mut skipped_bytes,
+                        options.full,
+                        ControllerScratchSkipped {
+                            path: candidate.path.clone(),
+                            run_id: Some(candidate.run_id.clone()),
+                            owner_pid: Some(candidate.owner_pid),
+                            lifecycle_state: Some(candidate.lifecycle_state.clone()),
+                            recovery_command: None,
+                            reason,
+                        },
+                    )?;
                 }
             }
         }
@@ -664,12 +675,13 @@ fn cleanup_unlocked(
         format!("{} --full", cleanup_command(options)),
     )?;
     let skipped_count = all_skips.len();
-    let (skipped, skipped_detail) = present_detail(
-        skipped,
-        options.full,
+    let skipped_detail = skipped_detail_metadata(
+        &skipped,
         skipped_count,
-        "homeboy cleanup --include controller-scratch --full".to_string(),
-    )?;
+        skipped_bytes,
+        options.full,
+        format!("{} --full", cleanup_command(options)),
+    );
     Ok(ControllerScratchCleanupOutput {
         command: "cleanup.controller-scratch",
         mode: if options.apply { "apply" } else { "dry_run" },
@@ -696,6 +708,71 @@ fn cleanup_unlocked(
             retention_override_seconds: options.retention_override_seconds,
         }),
     })
+}
+
+fn append_skipped_detail(
+    skipped: &mut Vec<ControllerScratchSkipped>,
+    skipped_bytes: &mut usize,
+    full: bool,
+    detail: ControllerScratchSkipped,
+) -> Result<()> {
+    let detail_bytes = serde_json::to_vec(&detail)
+        .map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize cleanup detail".to_string()),
+            )
+        })?
+        .len();
+    if full
+        || (skipped.len() < OutputBudget::COLLECTION.max_items
+            && skipped_bytes.saturating_add(detail_bytes) <= OutputBudget::COLLECTION.max_bytes)
+    {
+        *skipped_bytes = skipped_bytes.saturating_add(detail_bytes);
+        skipped.push(detail);
+    }
+    Ok(())
+}
+
+fn skipped_detail_metadata(
+    skipped: &[ControllerScratchSkipped],
+    total_items: usize,
+    returned_bytes: usize,
+    full: bool,
+    export_command: String,
+) -> OutputTruncation {
+    let returned_items = skipped.len();
+    let truncated = returned_items < total_items;
+    if full {
+        return OutputTruncation {
+            presentation: OutputPresentation::LosslessExport,
+            total_items,
+            returned_items,
+            omitted_items: 0,
+            total_bytes: returned_bytes,
+            returned_bytes,
+            omitted_bytes: 0,
+            total_bytes_known: true,
+            truncated: false,
+            continue_command: export_command.clone(),
+            export_command,
+        };
+    }
+    OutputTruncation {
+        presentation: OutputPresentation::BoundedCollection,
+        total_items,
+        returned_items,
+        omitted_items: total_items.saturating_sub(returned_items),
+        // The default path does not serialize omitted rows solely to compute a
+        // byte total. Exact aggregate counts remain available above.
+        total_bytes: returned_bytes,
+        returned_bytes,
+        omitted_bytes: 0,
+        total_bytes_known: !truncated,
+        truncated,
+        continue_command: export_command.clone(),
+        export_command,
+    }
 }
 
 /// Bound response presentation separately from the ordered set admitted for
@@ -1006,6 +1083,11 @@ fn cleanup_command(options: ControllerScratchCleanupOptions) -> String {
     );
     if options.apply {
         command.push_str(" --apply");
+    }
+    if let Some(seconds) = options.retention_override_seconds {
+        // CLI input is integral days, and production callers preserve that
+        // representation as seconds in cleanup options.
+        command.push_str(&format!(" --older-than-days {}", seconds / 86_400));
     }
     command
 }
@@ -2335,6 +2417,7 @@ mod tests {
                 total - output.skipped.len()
             );
             assert!(output.skipped_detail.truncated);
+            assert!(!output.skipped_detail.total_bytes_known);
             // The aggregate summary still accounts for every retained resource.
             let summarized: usize = output
                 .retention_reasons
@@ -2697,6 +2780,31 @@ mod tests {
                 "homeboy cleanup --include controller-scratch --limit 10 --apply"
             );
         });
+    }
+
+    #[test]
+    fn cleanup_commands_preserve_retention_override_and_action() {
+        let options = ControllerScratchCleanupOptions {
+            apply: true,
+            limit: 3,
+            full: false,
+            retention_override_seconds: Some(2 * 86_400),
+        };
+        assert_eq!(
+            cleanup_command(options),
+            "homeboy cleanup --include controller-scratch --limit 3 --apply --older-than-days 2"
+        );
+        let detail = skipped_detail_metadata(
+            &[],
+            1,
+            0,
+            false,
+            format!("{} --full", cleanup_command(options)),
+        );
+        assert_eq!(
+            detail.export_command,
+            "homeboy cleanup --include controller-scratch --limit 3 --apply --older-than-days 2 --full"
+        );
     }
 
     fn clean_checkout(root: &Path, remote: &Path, name: &str) -> PathBuf {
