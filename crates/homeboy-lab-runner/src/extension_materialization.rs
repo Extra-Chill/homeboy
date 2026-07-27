@@ -139,17 +139,10 @@ fn materialize_lab_job_extension_overlay_snapshots(
                 Some(format!("resolve Lab extension source `{id}`")),
             )
         })?;
-        let source_root = resolved_source.parent().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "extensions",
-                format!("Lab extension `{id}` has no source root"),
-                Some(source_path.clone()),
-                None,
-            )
-        })?;
         let mut shared_assets = Vec::new();
-        for asset_path in homeboy_extension::lifecycle::shared_assets_for_root(source_root) {
-            let asset_source = source_root.join(&asset_path);
+        for (asset_path, asset_source) in
+            homeboy_extension::lifecycle::shared_assets_for_extension_source(&resolved_source)
+        {
             if !asset_source.is_dir() {
                 continue;
             }
@@ -1205,6 +1198,64 @@ mod tests {
                 "Node.js test runner did not reach project tests: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
+        });
+    }
+
+    #[test]
+    fn isolated_lab_overlay_stages_shared_assets_from_cloned_install_metadata() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let extensions_root = home.path().join(".config/homeboy/extensions");
+            let wordpress = extensions_root.join("wordpress");
+            let scripts_lib = extensions_root.join("scripts/lib");
+            fs::create_dir_all(&wordpress).expect("installed WordPress extension");
+            fs::create_dir_all(&scripts_lib).expect("installed shared scripts");
+            fs::write(
+                wordpress.join("wordpress.json"),
+                r#"{"id":"wordpress","name":"WordPress","version":"1.0.0"}"#,
+            )
+            .expect("WordPress manifest");
+            fs::write(
+                wordpress.join(".homeboy-extension-root.json"),
+                r#"{"shared_assets":["scripts/lib"]}"#,
+            )
+            .expect("persisted root manifest");
+            fs::write(
+                scripts_lib.join("settings.sh"),
+                "homeboy_setting() { :; }\n",
+            )
+            .expect("shared helper");
+
+            let runner_root = tempfile::tempdir().expect("runner root");
+            crate::create(
+                &format!(
+                    r#"{{"id":"lab-cloned-overlay","kind":"local","workspace_root":"{}"}}"#,
+                    runner_root.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+            let runner = crate::load("lab-cloned-overlay").expect("load runner");
+            let runtime_root = runner_root.path().join("extension-runtime");
+            let overlays = materialize_lab_job_extension_overlay_snapshots(
+                &runner,
+                &runtime_root.display().to_string(),
+                &["wordpress".to_string()],
+            )
+            .expect("stage cloned install overlay snapshots");
+            let status = Command::new("sh")
+                .arg("-c")
+                .arg(lab_job_extension_overlay_command(
+                    &runtime_root.display().to_string(),
+                    &overlays,
+                ))
+                .status()
+                .expect("link cloned install overlay");
+            assert!(status.success(), "link cloned install overlay");
+
+            assert_eq!(overlays[0].shared_assets.len(), 1);
+            assert!(runtime_root
+                .join("home/.config/homeboy/extensions/scripts/lib/settings.sh")
+                .exists());
         });
     }
 

@@ -321,6 +321,10 @@ use install_sources::{install_configured_extension, install_from_path, install_f
 pub fn shared_assets_for_root(source_root: &Path) -> Vec<String> {
     install_sources::shared_assets_for_root(source_root)
 }
+/// Resolves declared shared assets to their current controller-side sources.
+pub fn shared_assets_for_extension_source(source: &Path) -> Vec<(String, PathBuf)> {
+    install_sources::shared_assets_for_extension_source(source)
+}
 pub(crate) use install_sources::{
     install_linked_shared_assets, rename_dir, resolve_cloned_extension,
 };
@@ -368,7 +372,7 @@ mod tests {
 
     use super::{
         install, install_for_component, install_with_revision, is_extension_update_workdir_clean,
-        load_extension, refresh, source_metadata, update,
+        load_extension, refresh, shared_assets_for_extension_source, source_metadata, update,
     };
     use crate::update_all;
     use homeboy_core::component;
@@ -1108,7 +1112,8 @@ exec '{}' "$@"
             };
             let remote_url = remote.path().join("extension.git");
 
-            install(&remote_url.to_string_lossy(), Some("rust")).expect("install cloned extension");
+            let installed = install(&remote_url.to_string_lossy(), Some("rust"))
+                .expect("install cloned extension");
 
             assert!(home
                 .join(".config/homeboy/extensions/rust/rust.json")
@@ -1116,6 +1121,15 @@ exec '{}' "$@"
             assert!(home
                 .join(".config/homeboy/extensions/scripts/lib/test-result-adapters.sh")
                 .exists());
+            assert!(installed.path.join(".homeboy-extension-root.json").exists());
+            assert_eq!(
+                shared_assets_for_extension_source(&installed.path),
+                vec![(
+                    "scripts/lib".to_string(),
+                    home.join(".config/homeboy/extensions/scripts/lib")
+                )],
+                "cloned installs retain enough declaration metadata for Lab to resolve the installed shared asset"
+            );
         });
     }
 
@@ -1215,6 +1229,9 @@ exec '{}' "$@"
                 .exists());
             assert!(home
                 .join(".config/homeboy/extensions/dependency-adapters/examples/nodejs.json")
+                .exists());
+            assert!(home
+                .join(".config/homeboy/extensions/wordpress/.homeboy-extension-root.json")
                 .exists());
         });
     }

@@ -6,7 +6,7 @@
 //! the lifecycle root stays under the structural line/item thresholds (#5241).
 
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use homeboy_core::config::{self, from_str};
 use homeboy_core::error::{Error, Result};
@@ -44,8 +44,11 @@ impl SharedAssetDeclaration {
     }
 }
 
-pub(crate) fn shared_assets_for_root(source_root: &Path) -> Vec<String> {
-    std::fs::read_to_string(source_root.join("homeboy-extension-root.json"))
+const ROOT_MANIFEST: &str = "homeboy-extension-root.json";
+const INSTALLED_ROOT_MANIFEST: &str = ".homeboy-extension-root.json";
+
+fn shared_assets_for_manifest(manifest_path: &Path) -> Vec<String> {
+    std::fs::read_to_string(manifest_path)
         .ok()
         .and_then(|raw| serde_json::from_str::<ExtensionRootManifest>(&raw).ok())
         .map(|manifest| {
@@ -58,6 +61,45 @@ pub(crate) fn shared_assets_for_root(source_root: &Path) -> Vec<String> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
+}
+
+pub(crate) fn shared_assets_for_root(source_root: &Path) -> Vec<String> {
+    shared_assets_for_manifest(&source_root.join(ROOT_MANIFEST))
+}
+
+pub(crate) fn shared_assets_for_extension_source(source: &Path) -> Vec<(String, PathBuf)> {
+    if let Some(source_root) = source.parent() {
+        let declared = shared_assets_for_root(source_root);
+        if !declared.is_empty() {
+            return declared
+                .into_iter()
+                .map(|path| {
+                    let source = source_root.join(&path);
+                    (path, source)
+                })
+                .collect();
+        }
+    }
+
+    let declared = shared_assets_for_root(source);
+    if !declared.is_empty() {
+        return declared
+            .into_iter()
+            .map(|path| {
+                let asset_source = source.join(&path);
+                (path, asset_source)
+            })
+            .collect();
+    }
+
+    shared_assets_for_manifest(&source.join(INSTALLED_ROOT_MANIFEST))
+        .into_iter()
+        .filter_map(|path| {
+            installed_shared_asset_target(source, &path)
+                .ok()
+                .map(|asset_source| (path, asset_source))
+        })
+        .collect()
 }
 
 pub(super) fn install_configured_extension(
@@ -208,6 +250,7 @@ pub(crate) fn resolve_cloned_extension(
 
         // Move just the subdirectory to the final extension location.
         rename_dir(&subdir, extension_dir)?;
+        persist_installed_root_manifest(temp_dir, extension_dir)?;
         return Ok(extension_id.to_string());
     }
 
@@ -274,24 +317,13 @@ fn install_shared_assets_from_root(
     extension_dir: &Path,
     mode: SharedAssetMode,
 ) -> Result<()> {
-    let Some(extensions_dir) = extension_dir.parent() else {
-        return Ok(());
-    };
-
     for shared_dir in shared_assets_for_root(source_root) {
         let source = source_root.join(&shared_dir);
         if !source.is_dir() {
             continue;
         }
 
-        let target = match shared_dir.as_str() {
-            "agent-runtimes" => paths::agent_runtimes()?,
-            "runtime-agent-ci" | "agent-task-contracts" => paths::homeboy()?.join(&shared_dir),
-            "dependency-adapters" => extensions_dir.join(&shared_dir),
-            // Shared extension libraries install under the extensions root so
-            // installed wrappers can source `../../../scripts/lib/...`.
-            _ => extensions_dir.join(&shared_dir),
-        };
+        let target = installed_shared_asset_target(extension_dir, &shared_dir)?;
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
                 Error::internal_io(
@@ -309,6 +341,37 @@ fn install_shared_assets_from_root(
     }
 
     Ok(())
+}
+
+fn persist_installed_root_manifest(source_root: &Path, extension_dir: &Path) -> Result<()> {
+    let source = source_root.join(ROOT_MANIFEST);
+    if !source.is_file() {
+        return Ok(());
+    }
+
+    std::fs::copy(source, extension_dir.join(INSTALLED_ROOT_MANIFEST)).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("persist installed extension root manifest".to_string()),
+        )
+    })?;
+    Ok(())
+}
+
+fn installed_shared_asset_target(extension_dir: &Path, shared_dir: &str) -> Result<PathBuf> {
+    let extensions_dir = extension_dir.parent().ok_or_else(|| {
+        Error::internal_io(
+            "installed extension has no parent directory",
+            Some("resolve installed shared extension asset".to_string()),
+        )
+    })?;
+    Ok(match shared_dir {
+        "agent-runtimes" => paths::agent_runtimes()?,
+        "runtime-agent-ci" | "agent-task-contracts" => paths::homeboy()?.join(shared_dir),
+        // Shared extension libraries install under the extensions root so
+        // installed wrappers can source `../../../scripts/lib/...`.
+        _ => extensions_dir.join(shared_dir),
+    })
 }
 
 /// Remove a shared-asset install target if present, handling both real
