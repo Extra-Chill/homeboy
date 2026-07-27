@@ -115,6 +115,18 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
         discover_stacks(&prepared.discovery_path)?
     };
 
+    // `--all` is atomic: validate every selected spec and every replaceable
+    // target before the registry directories or configs are changed.
+    if all {
+        preflight_all_install(&selected, &prepared.package_path)?;
+        for rig in &selected {
+            let target = paths::rig_config(&rig.id)?;
+            if target.exists() || fs::symlink_metadata(&target).is_ok() {
+                ensure_rig_refreshable(rig, &target)?;
+            }
+        }
+    }
+
     fs::create_dir_all(paths::rigs()?)
         .map_err(|e| Error::internal_io(e.to_string(), Some("create rigs dir".into())))?;
     fs::create_dir_all(paths::stacks()?)
@@ -134,7 +146,9 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
     let mut installed = Vec::new();
     for rig in selected {
         let target = paths::rig_config(&rig.id)?;
-        validate_rig_spec_file(&rig.rig_path, &prepared.package_path, &rig.id)?;
+        if !all {
+            validate_rig_spec_file(&rig.rig_path, &prepared.package_path, &rig.id)?;
+        }
         if target.exists() || fs::symlink_metadata(&target).is_ok() {
             ensure_rig_refreshable(&rig, &target)?;
             remove_existing_config(&target, "replace rig config link")?;
@@ -202,6 +216,49 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
         installed,
         installed_stacks,
     })
+}
+
+fn preflight_all_install(rigs: &[DiscoveredRig], source_root: &Path) -> Result<()> {
+    let mut outcomes = Vec::with_capacity(rigs.len());
+    for rig in rigs {
+        match validate_rig_spec_file(&rig.rig_path, source_root, &rig.id) {
+            Ok(()) => outcomes.push(serde_json::json!({
+                "id": rig.id,
+                "spec_path": rig.rig_path,
+                "status": "preflight_passed",
+            })),
+            Err(error) => outcomes.push(serde_json::json!({
+                "id": rig.id,
+                "spec_path": rig.rig_path,
+                "status": if error.code == homeboy_core::error::ErrorCode::RigSchemaUnsupported {
+                    "incompatible"
+                } else {
+                    "failed"
+                },
+                "schema_failure_path": error.details.get("context").cloned().unwrap_or_else(|| serde_json::json!("rig_spec")),
+                "error": error.message,
+                "active_homeboy_version": homeboy_product_identity::product_version(),
+                "upgrade_guidance": "Run `homeboy upgrade` to install a binary that supports this rig schema, then retry.",
+            })),
+        }
+    }
+
+    if outcomes
+        .iter()
+        .all(|outcome| outcome["status"] == "preflight_passed")
+    {
+        return Ok(());
+    }
+
+    Err(Error::new(
+        homeboy_core::error::ErrorCode::ValidationMultipleErrors,
+        "Rig package preflight failed; no rigs were installed",
+        serde_json::json!({
+            "atomic": true,
+            "active_homeboy_version": homeboy_product_identity::product_version(),
+            "outcomes": outcomes,
+        }),
+    ))
 }
 
 fn validate_rig_spec_file(path: &Path, source_root: &Path, rig_id: &str) -> Result<()> {

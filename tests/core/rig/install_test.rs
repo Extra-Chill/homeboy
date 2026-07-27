@@ -1306,6 +1306,39 @@ mod multi_rig {
         assert!(homeboy_core::paths::rig_config("alpha").unwrap().exists());
         assert!(homeboy_core::paths::rig_config("beta").unwrap().exists());
     }
+
+    #[test]
+    fn install_all_reports_every_incompatible_rig_without_partial_install() {
+        let _home = HomeGuard::new();
+        let package = tempfile::tempdir().expect("package");
+        write_rig(package.path(), "alpha", &minimal_rig("alpha"));
+        write_rig(package.path(), "beta", &minimal_rig("beta"));
+        write_rig(
+            package.path(),
+            "unsupported-cleanup",
+            r#"{"id":"unsupported-cleanup","lifecycle":{"cleanup":42}}"#,
+        );
+
+        let error = install(package.path().to_str().unwrap(), None, true)
+            .expect_err("package preflight should reject incompatible member");
+
+        assert_eq!(error.code, ErrorCode::ValidationMultipleErrors);
+        assert_eq!(error.details["atomic"], true);
+        assert_eq!(error.details["outcomes"].as_array().unwrap().len(), 3);
+        assert!(error.details["outcomes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|outcome| {
+                outcome["id"] == "unsupported-cleanup"
+                    && outcome["status"] == "incompatible"
+                    && outcome["spec_path"].as_str().is_some()
+                    && outcome["active_homeboy_version"]
+                        == homeboy_product_identity::product_version()
+            }));
+        assert!(!homeboy_core::paths::rig_config("alpha").unwrap().exists());
+        assert!(!homeboy_core::paths::rig_config("beta").unwrap().exists());
+    }
 }
 
 mod refresh_and_identity {
