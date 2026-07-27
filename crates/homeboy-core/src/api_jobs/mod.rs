@@ -13,7 +13,8 @@ use homeboy_api_jobs_contract::types;
 pub(crate) use persistence::timestamp_ms;
 pub use remote_runner::{
     JobArtifactMetadata, RemoteRunnerJobClaim, RemoteRunnerJobRequest, RemoteRunnerJobResult,
-    RemoteRunnerSubmissionLookup, RunnerJobLifecycleMetadata, RunnerJobProjectionCancelRequest,
+    RemoteRunnerObservationRunDetail, RemoteRunnerSubmissionLookup, RunnerJobLifecycleMetadata,
+    RunnerJobProjectionCancelRequest,
 };
 pub(crate) use runner_job_preparation::with_runner_job_preparation;
 pub use runner_job_preparation::{

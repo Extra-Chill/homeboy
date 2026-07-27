@@ -1801,7 +1801,7 @@ pub fn reverse_broker_reconcile(runner_id: &str) -> Result<Value> {
         &client,
         &broker_url,
         "/runner/jobs/reconcile",
-        Value::Null,
+        serde_json::json!({ "runner_id": runner_id }),
         "reconcile reverse runner broker jobs",
         broker_auth::broker_submit_token_for_runner(runner_id)?.as_deref(),
     )
@@ -1858,7 +1858,7 @@ pub fn lookup_reverse_broker_submission(
         &client,
         &broker_url,
         "/runner/jobs/submissions/lookup",
-        serde_json::json!({ "submission_key": submission_key }),
+        serde_json::json!({ "runner_id": runner_id, "submission_key": submission_key }),
         "look up reverse runner submission",
         broker_auth::broker_submit_token_for_runner(runner_id)?.as_deref(),
     )?;

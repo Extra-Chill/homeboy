@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use crate::{Runner, RunnerKind};
 use homeboy_core::api_jobs::{
-    Job, JobArtifactMetadata, JobEvent, JobEventKind, JobStatus, RunnerJobLifecycleMetadata,
-    RunnerJobProjection,
+    Job, JobArtifactMetadata, JobEvent, JobEventKind, JobStatus, RemoteRunnerObservationRunDetail,
+    RunnerJobLifecycleMetadata, RunnerJobProjection,
 };
 use homeboy_core::error::{Error, ErrorCode};
 use homeboy_core::observation::{ArtifactRecord, ObservationStore, RunRecord};
@@ -21,8 +21,9 @@ use super::download::{content_disposition_filename, download_remote_artifact};
 use super::mirror::{
     bounded_remote_events, import_mirrored_artifact_with_downloader, mirror_job_run,
     mirror_remote_observation_runs_by_id_with,
-    mirror_remote_observation_runs_by_id_with_downloader, mirror_terminal_job_artifacts_with,
-    mirrored_patch_result, primary_mirrored_run, MIRRORED_REMOTE_EVENT_LIMIT,
+    mirror_remote_observation_runs_by_id_with_downloader, mirror_reverse_broker_evidence,
+    mirror_terminal_job_artifacts_with, mirrored_patch_result, primary_mirrored_run,
+    refresh_mirrored_daemon_evidence_with, MIRRORED_REMOTE_EVENT_LIMIT,
     MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT,
 };
 use super::tokens::{
@@ -221,6 +222,44 @@ fn test_mirror_daemon_evidence_persists_runner_exec_observation() {
             run.metadata_json["notification_route"]["route"],
             "opaque-origin-route"
         );
+    });
+}
+
+#[test]
+fn synthetic_runner_run_identity_is_stable_across_repeated_progress_mirrors() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let runner = ssh_runner();
+        let job = terminal_runner_job();
+        let command = vec!["homeboy".to_string(), "test".to_string()];
+
+        let first = mirror_job_run(
+            &store,
+            &runner,
+            "/runner/project",
+            &command,
+            &job,
+            &[],
+            &json!({}),
+            None,
+            None,
+        )
+        .expect("first progress mirror");
+        let second = mirror_job_run(
+            &store,
+            &runner,
+            "/runner/project",
+            &command,
+            &job,
+            &[],
+            &json!({}),
+            None,
+            None,
+        )
+        .expect("repeated progress mirror");
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(store.list_artifacts(&first.id).expect("artifacts").len(), 0);
     });
 }
 
@@ -448,11 +487,11 @@ fn mirroring_lab_job_preserves_agent_task_lifecycle_metadata() {
 
 #[test]
 fn test_mirrored_patch_result_reports_accessible_artifact_token() {
-    homeboy_core::test_support::with_isolated_home(|_| {
+    homeboy_core::test_support::with_isolated_home(|home| {
         let store = ObservationStore::open_initialized().expect("store");
         let runner = ssh_runner();
         let job_id = Uuid::new_v4();
-        let job = Job {
+        let mut job = Job {
             id: job_id,
             operation: "exec".to_string(),
             status: JobStatus::Succeeded,
@@ -474,43 +513,39 @@ fn test_mirrored_patch_result_reports_accessible_artifact_token() {
             artifacts: Vec::new(),
             runner_job_projection: None,
         };
-        let run_id = format!("runner-exec-{job_id}");
         let artifact_id = format!("runner-fix-patch-{job_id}");
+        job.artifacts.push(JobArtifactMetadata {
+            id: artifact_id.clone(),
+            name: Some("patch.diff".to_string()),
+            path: None,
+            url: None,
+            mime: Some("text/x-diff".to_string()),
+            size_bytes: Some(12),
+            sha256: None,
+            content_base64: None,
+            metadata: None,
+        });
+        let run = mirror_job_run(
+            &store,
+            &runner,
+            "/srv/project",
+            &[
+                "homeboy".to_string(),
+                "runner".to_string(),
+                "exec".to_string(),
+            ],
+            &job,
+            &[],
+            &json!({}),
+            None,
+            None,
+        )
+        .expect("mirror job");
+        let source = home.path().join("patch.diff");
+        fs::write(&source, b"patch bytes!!").expect("patch bytes");
         store
-            .import_run(&RunRecord {
-                id: run_id.clone(),
-                kind: "runner-exec".to_string(),
-                component_id: None,
-                started_at: "2026-05-16T00:00:00Z".to_string(),
-                finished_at: Some("2026-05-16T00:00:01Z".to_string()),
-                status: "pass".to_string(),
-                command: Some("homeboy runner exec".to_string()),
-                cwd: Some("/srv/project".to_string()),
-                homeboy_version: None,
-                git_sha: None,
-                rig_id: None,
-                metadata_json: json!({}),
-            })
-            .expect("import run");
-        let token = runner_artifact_token(&runner.id, &run_id, &artifact_id);
-        store
-            .import_artifact(&ArtifactRecord {
-                id: artifact_id.clone(),
-                run_id: run_id.clone(),
-                kind: "lab_fix_patch".to_string(),
-                artifact_type: "remote_file".to_string(),
-                path: token.clone(),
-                url: None,
-                public_url: None,
-                viewer_url: None,
-                viewer_links: Vec::new(),
-                sha256: Some("abc".to_string()),
-                size_bytes: Some(12),
-                mime: Some("text/x-diff".to_string()),
-                metadata_json: json!({}),
-                created_at: "2026-05-16T00:00:01Z".to_string(),
-            })
-            .expect("import artifact");
+            .record_artifact_with_id(&run.id, "lab_fix_patch", &source, &artifact_id, json!({}))
+            .expect("record controller artifact");
 
         let patch = json!({
             "patch_artifact_id": artifact_id,
@@ -521,12 +556,9 @@ fn test_mirrored_patch_result_reports_accessible_artifact_token() {
             .expect("mirror patch")
             .expect("patch");
 
-        assert_eq!(mirrored["patch_artifact_path"], token);
-        assert!(is_retrievable_runner_artifact(
-            mirrored["patch_artifact_path"]
-                .as_str()
-                .expect("projected patch artifact token")
-        ));
+        assert!(mirrored["patch_artifact_path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("patch.diff")));
     });
 }
 
@@ -1079,6 +1111,76 @@ fn terminal_mirroring_persists_declared_run_and_artifact_for_controller_review()
 }
 
 #[test]
+fn reverse_broker_lookup_projects_only_embedded_typed_run_details() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let job = terminal_runner_job();
+        let run = RunRecord {
+            id: "embedded-run".to_string(),
+            kind: "bench".to_string(),
+            component_id: None,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            finished_at: Some("2026-01-01T00:01:00Z".to_string()),
+            status: "succeeded".to_string(),
+            command: None,
+            cwd: None,
+            homeboy_version: None,
+            git_sha: None,
+            rig_id: None,
+            metadata_json: json!({}),
+        };
+        let result = json!({
+            "exit_code": 0,
+            "observation_run_ids": [run.id.clone()],
+            "observation_run_details": [RemoteRunnerObservationRunDetail::v1(run, Vec::new())],
+        });
+
+        let mirrored = mirror_reverse_broker_evidence(
+            &ssh_runner(),
+            "http://127.0.0.1:1",
+            "/runner/project",
+            &["homeboy".to_string(), "bench".to_string()],
+            &job,
+            &[],
+            &result,
+            None,
+            None,
+        )
+        .expect("embedded terminal detail does not request a broker run endpoint")
+        .expect("terminal evidence is mirrored");
+        assert_eq!(mirrored.run.id, "embedded-run");
+
+        let legacy = json!({ "exit_code": 0, "observation_run_ids": ["legacy-run"] });
+        let mirrored = mirror_reverse_broker_evidence(
+            &ssh_runner(),
+            "http://127.0.0.1:1",
+            "/runner/project",
+            &["homeboy".to_string(), "bench".to_string()],
+            &job,
+            &[],
+            &legacy,
+            None,
+            None,
+        )
+        .expect("old worker terminal result retains controller-owned evidence")
+        .expect("terminal evidence is mirrored");
+        assert_ne!(mirrored.run.id, "legacy-run");
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .get_run(&mirrored.run.id)
+            .expect("run lookup")
+            .expect("controller synthetic run");
+        assert_eq!(
+            run.metadata_json["lab"]["reverse_broker"]["unresolved_run_refs"],
+            json!(["legacy-run"])
+        );
+        assert_eq!(
+            run.metadata_json["lab"]["reverse_broker"]["observation_run_details"],
+            json!("unavailable_legacy")
+        );
+    });
+}
+
+#[test]
 fn legacy_terminal_artifacts_use_the_controller_runner_run_and_survive_runner_disconnect() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let store = ObservationStore::open_initialized().expect("store");
@@ -1114,7 +1216,7 @@ fn legacy_terminal_artifacts_use_the_controller_runner_run_and_survive_runner_di
         })
         .expect("project all legacy terminal artifacts");
 
-        let artifacts = super::mirror::controller_artifact_metadata(&[run])
+        let artifacts = super::mirror::controller_artifact_metadata(&[run.run.clone()])
             .expect("controller artifact response");
         assert_eq!(artifacts.len(), 1);
         assert_ne!(
@@ -1228,6 +1330,88 @@ fn terminal_artifact_download_failure_rolls_back_every_artifact_and_retry_is_ide
         .expect("identical retry is idempotent");
         assert_eq!(first_projection, replay);
         assert_eq!(store.list_artifacts(&run.id).expect("artifacts").len(), 2);
+    });
+}
+
+#[test]
+fn failed_refresh_discards_its_synthetic_run_after_artifact_projection_error() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let mut job = terminal_runner_job();
+        job.artifacts = vec![JobArtifactMetadata {
+            id: "malformed".to_string(),
+            name: None,
+            path: None,
+            url: None,
+            mime: None,
+            size_bytes: Some(1),
+            sha256: None,
+            content_base64: None,
+            metadata: None,
+        }];
+        let command = vec!["homeboy".to_string(), "test".to_string()];
+        let synthetic_id = super::util::local_job_run_id("lab", &job.id.to_string(), "test");
+        refresh_mirrored_daemon_evidence_with(
+            &store,
+            &ssh_runner(),
+            "/runner",
+            &command,
+            &job,
+            &[],
+            &json!({}),
+            None,
+            || Ok(()),
+        )
+        .expect_err("malformed terminal artifact fails refresh");
+        assert!(store
+            .get_run(&synthetic_id)
+            .expect("synthetic lookup")
+            .is_none());
+    });
+}
+
+#[test]
+fn failed_refresh_preserves_a_concurrent_synthetic_winner() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let mut job = terminal_runner_job();
+        job.artifacts = vec![JobArtifactMetadata {
+            id: "malformed".to_string(),
+            name: None,
+            path: None,
+            url: None,
+            mime: None,
+            size_bytes: Some(1),
+            sha256: None,
+            content_base64: None,
+            metadata: None,
+        }];
+        let command = vec!["homeboy".to_string(), "test".to_string()];
+        let winner = mirror_job_run(
+            &store,
+            &ssh_runner(),
+            "/runner",
+            &command,
+            &job,
+            &[],
+            &json!({}),
+            None,
+            None,
+        )
+        .expect("concurrent winner");
+        refresh_mirrored_daemon_evidence_with(
+            &store,
+            &ssh_runner(),
+            "/runner",
+            &command,
+            &job,
+            &[],
+            &json!({}),
+            None,
+            || Ok(()),
+        )
+        .expect_err("malformed terminal artifact fails refresh");
+        assert!(store.get_run(&winner.id).expect("winner lookup").is_some());
     });
 }
 

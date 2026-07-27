@@ -1,7 +1,9 @@
 use std::io::Write;
+use std::ops::Deref;
 
 use base64::Engine;
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 use crate::agent_task_lifecycle_event::{
     agent_task_run_plan_lifecycle_event_from_job_events,
@@ -21,6 +23,7 @@ use super::super::{load, Runner};
 use super::detail::{
     explicit_observation_run_ids, remote_detail_artifacts, remote_detail_to_run_record,
 };
+use super::tokens::RemoteArtifactToken;
 use super::util::{
     job_status_as_run_status, local_job_run_id, ms_to_rfc3339, result_summary,
     runner_exec_run_label, runner_metadata, source_snapshot_from_result,
@@ -34,6 +37,34 @@ pub struct MirroredDaemonEvidence {
     pub run: RunRecord,
     pub runs: Vec<RunRecord>,
     pub patch: Option<Value>,
+}
+
+#[derive(Debug, Clone)]
+struct SyntheticRunOwnership {
+    run_id: String,
+    publication_token: String,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct MirroredJobRun {
+    pub(super) run: RunRecord,
+    synthetic_ownership: Option<SyntheticRunOwnership>,
+}
+
+impl Deref for MirroredJobRun {
+    type Target = RunRecord;
+
+    fn deref(&self) -> &Self::Target {
+        &self.run
+    }
+}
+
+fn discard_owned_synthetic_run(store: &ObservationStore, run: &MirroredJobRun) {
+    if let Some(ownership) = &run.synthetic_ownership {
+        store
+            .discard_synthetic_run(&ownership.run_id, &ownership.publication_token)
+            .ok();
+    }
 }
 
 /// Terminal responses expose only controller-owned records, never the runner's
@@ -89,36 +120,29 @@ pub fn mirror_daemon_evidence(
         run_id,
         notification_route,
     )?;
-    let remote_runs =
-        match mirror_remote_observation_runs(&store, runner, job, result, notification_route) {
-            Ok(runs) => runs,
-            Err(error) => {
-                if run_id.is_none() {
-                    store.discard_synthetic_run(&local_job_run.id).ok();
-                }
-                return Err(error);
-            }
-        };
-    if remote_runs.is_empty() {
-        if let Err(error) = mirror_terminal_job_artifacts(&store, runner, job, &local_job_run) {
-            if run_id.is_none() {
-                store.discard_synthetic_run(&local_job_run.id).ok();
-            }
-            return Err(error);
+    let result = (|| {
+        let remote_runs =
+            mirror_remote_observation_runs(&store, runner, job, result, notification_route)?;
+        if remote_runs.is_empty() {
+            mirror_terminal_job_artifacts(&store, runner, job, &local_job_run)?;
         }
+        let patch = mirrored_patch_result(&store, runner, job, result.get("patch"))?;
+        let runs = if remote_runs.is_empty() {
+            vec![local_job_run.run.clone()]
+        } else {
+            remote_runs
+        };
+        let primary_run = primary_mirrored_run(&runs).unwrap_or_else(|| runs[0].clone());
+        Ok(Some(MirroredDaemonEvidence {
+            run: primary_run,
+            runs,
+            patch,
+        }))
+    })();
+    if result.is_err() {
+        discard_owned_synthetic_run(&store, &local_job_run);
     }
-    let patch = mirrored_patch_result(&store, runner, job, result.get("patch"))?;
-    let runs = if remote_runs.is_empty() {
-        vec![local_job_run.clone()]
-    } else {
-        remote_runs
-    };
-    let primary_run = primary_mirrored_run(&runs).unwrap_or_else(|| runs[0].clone());
-    Ok(Some(MirroredDaemonEvidence {
-        run: primary_run,
-        runs,
-        patch,
-    }))
+    result
 }
 
 pub fn mirror_reverse_broker_evidence(
@@ -133,7 +157,7 @@ pub fn mirror_reverse_broker_evidence(
     notification_route: Option<&NotificationRoute>,
 ) -> Result<Option<MirroredDaemonEvidence>> {
     let store = ObservationStore::open_initialized()?;
-    let mut run = mirror_job_run(
+    let local_job_run = mirror_job_run(
         &store,
         runner,
         cwd,
@@ -144,7 +168,152 @@ pub fn mirror_reverse_broker_evidence(
         run_id,
         notification_route,
     )?;
-    let artifacts = mirror_terminal_job_artifacts_with(&store, runner, job, &run, |artifact_id| {
+    let result = (|| {
+        let declared_run_ids = explicit_observation_run_ids(result, job);
+        let terminal_result: homeboy_core::api_jobs::RemoteRunnerJobResult =
+            serde_json::from_value(result.clone()).map_err(|error| {
+                Error::validation_invalid_argument(
+                "result.observation_run_details",
+                "reverse runner terminal result is not a valid typed observation detail contract",
+                Some(error.to_string()),
+                None,
+            )
+            })?;
+        let runs;
+        if declared_run_ids.is_empty() {
+            let artifacts =
+                mirror_reverse_terminal_artifacts(&store, runner, broker_url, job, &local_job_run)?;
+            runs = vec![record_reverse_broker_metadata(
+                &store,
+                local_job_run.run.clone(),
+                runner,
+                broker_url,
+                job,
+                events,
+                result,
+                artifacts,
+                None,
+            )?];
+        } else if terminal_result.observation_run_details.is_empty() {
+            // Older workers declared remote run identities without retaining
+            // typed details. Their job artifacts remain durable controller
+            // evidence, while the declared identities are explicitly retained
+            // as unresolved provenance rather than fabricated run records.
+            let artifacts =
+                mirror_reverse_terminal_artifacts(&store, runner, broker_url, job, &local_job_run)?;
+            runs = vec![record_reverse_broker_metadata(
+                &store,
+                local_job_run.run.clone(),
+                runner,
+                broker_url,
+                job,
+                events,
+                result,
+                artifacts,
+                Some(&declared_run_ids),
+            )?];
+        } else {
+            terminal_result.validate_observation_run_details()?;
+            runs = mirror_remote_observation_runs_by_id_with_downloader(
+                &store,
+                runner,
+                job,
+                &declared_run_ids,
+                notification_route,
+                |declared_run_id| {
+                    terminal_result
+                        .observation_run_details
+                        .iter()
+                        .find(|detail| detail.run.id == declared_run_id)
+                        .map(|detail| {
+                            let mut run =
+                                serde_json::to_value(&detail.run).expect("run record serializes");
+                            run["artifacts"] = serde_json::to_value(&detail.artifacts)
+                                .expect("artifact records serialize");
+                            run
+                        })
+                        .map(Some)
+                        .ok_or_else(|| {
+                            missing_required_run_projection(runner, job, declared_run_id, None)
+                        })
+                },
+                |artifact_path| {
+                    let token = RemoteArtifactToken::parse(artifact_path).map_err(|_| {
+                        Error::validation_invalid_argument(
+                            "artifact.path",
+                            "reverse declared artifact is not a runner artifact token",
+                            Some(artifact_path.to_string()),
+                            None,
+                        )
+                    })?;
+                    if token.runner_id != runner.id || token.run_id != job.id.to_string() {
+                        return Err(Error::validation_invalid_argument(
+                            "artifact.path",
+                            "reverse declared artifact token is not bound to this runner job",
+                            Some(artifact_path.to_string()),
+                            None,
+                        ));
+                    }
+                    let bytes = terminal_artifact_bytes(
+                        crate::connection::reverse_broker_artifact_content_at(
+                            broker_url,
+                            &runner.id,
+                            &job.id.to_string(),
+                            &token.artifact_id,
+                        )?,
+                        &token.artifact_id,
+                    )?;
+                    let mut file = tempfile::NamedTempFile::new().map_err(|error| {
+                        Error::internal_io(
+                            error.to_string(),
+                            Some("stage reverse artifact".to_string()),
+                        )
+                    })?;
+                    file.write_all(&bytes).map_err(|error| {
+                        Error::internal_io(
+                            error.to_string(),
+                            Some("write reverse artifact".to_string()),
+                        )
+                    })?;
+                    let (_, path) = file.keep().map_err(|error| {
+                        Error::internal_io(
+                            error.error.to_string(),
+                            Some("persist reverse artifact stage".to_string()),
+                        )
+                    })?;
+                    Ok(path)
+                },
+            )?;
+        }
+        let patch = mirrored_patch_result(
+            &store,
+            runner,
+            job,
+            result
+                .get("patch")
+                .or_else(|| result.pointer("/data/patch")),
+        )?;
+        let primary_run = primary_mirrored_run(&runs).unwrap_or_else(|| runs[0].clone());
+        Ok(Some(MirroredDaemonEvidence {
+            run: primary_run,
+            runs,
+            patch,
+        }))
+    })();
+    if result.is_err() {
+        discard_owned_synthetic_run(&store, &local_job_run);
+    }
+    result
+}
+
+fn mirror_reverse_terminal_artifacts(
+    store: &ObservationStore,
+    runner: &Runner,
+    broker_url: &str,
+    job: &Job,
+    run: &RunRecord,
+) -> Result<Vec<ArtifactRecord>> {
+    mirror_terminal_job_artifacts_with(store, runner, job, run, |artifact_id| {
         terminal_artifact_bytes(
             crate::connection::reverse_broker_artifact_content_at(
                 broker_url,
@@ -154,33 +323,29 @@ pub fn mirror_reverse_broker_evidence(
             )?,
             artifact_id,
         )
-    })?;
+    })
+}
 
+fn record_reverse_broker_metadata(
+    store: &ObservationStore,
+    run: RunRecord,
+    runner: &Runner,
+    broker_url: &str,
+    job: &Job,
+    events: &[JobEvent],
+    result: &Value,
+    artifacts: Vec<ArtifactRecord>,
+    unresolved_run_refs: Option<&[String]>,
+) -> Result<RunRecord> {
     let mut metadata = run.metadata_json.clone();
     metadata["lab"]["reverse_broker"] = json!({
-        "runner_id": runner.id.clone(),
-        "job_id": job.id.to_string(),
-        "broker_url": broker_url,
-        "status": job.status,
-        "events": bounded_remote_events(events),
-        "event_count": events.len(),
-        "result_summary": result_summary(result),
-        "artifacts": artifacts,
+        "runner_id": runner.id.clone(), "job_id": job.id.to_string(), "broker_url": broker_url,
+        "status": job.status, "events": bounded_remote_events(events), "event_count": events.len(),
+        "result_summary": result_summary(result), "artifacts": artifacts,
+        "observation_run_details": if unresolved_run_refs.is_some() { json!("unavailable_legacy") } else { Value::Null },
+        "unresolved_run_refs": unresolved_run_refs,
     });
-    run = store.update_run_metadata(&run.id, metadata)?;
-
-    let patch = mirrored_reverse_patch_result(
-        &store,
-        &run.id,
-        result
-            .get("patch")
-            .or_else(|| result.pointer("/data/patch")),
-    )?;
-    Ok(Some(MirroredDaemonEvidence {
-        run: run.clone(),
-        runs: vec![run],
-        patch,
-    }))
+    store.update_run_metadata(&run.id, metadata)
 }
 
 pub fn mirror_daemon_job_progress(
@@ -203,6 +368,7 @@ pub fn mirror_daemon_job_progress(
         run_id,
         None,
     )
+    .map(|run| run.run)
 }
 
 /// Records that the controller can no longer observe an accepted runner job.
@@ -231,7 +397,7 @@ pub fn terminalize_mirrored_daemon_job(
         run_id,
         None,
     )?;
-    let mut metadata = run.metadata_json;
+    let mut metadata = run.metadata_json.clone();
     metadata["lab"]["controller_terminal"] = json!({
         "status": "failed",
         "reason": "runner_job_unobservable",
@@ -258,19 +424,63 @@ pub fn refresh_mirrored_daemon_evidence(run_id: &str) -> Result<Option<Vec<RunRe
         .as_ref()
         .map(|command| vec![command.clone()])
         .unwrap_or_default();
-    mirror_job_run(
-        &store, &runner, cwd, &command, &job, &events, &result, None, None,
+    refresh_mirrored_daemon_evidence_with(
+        &store,
+        &runner,
+        cwd,
+        &command,
+        &job,
+        &events,
+        &result,
+        (run.kind == "runner-exec").then_some(run_id),
+        || {
+            if matches!(
+                job.status,
+                JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
+            ) {
+                let report = super::super::status(&runner_id)?;
+                super::super::generation_store::reconcile(&runner_id, report.session.as_ref())?;
+            }
+            Ok(())
+        },
+    )
+}
+
+pub(super) fn refresh_mirrored_daemon_evidence_with<F>(
+    store: &ObservationStore,
+    runner: &Runner,
+    cwd: &str,
+    command: &[String],
+    job: &Job,
+    events: &[JobEvent],
+    result: &Value,
+    run_id: Option<&str>,
+    reconcile: F,
+) -> Result<Option<Vec<RunRecord>>>
+where
+    F: FnOnce() -> Result<()>,
+{
+    let local_job_run = mirror_job_run(
+        store, runner, cwd, command, job, events, result, run_id, None,
     )?;
-    if matches!(
-        job.status,
-        JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
-    ) {
-        let report = super::super::status(&runner_id)?;
-        super::super::generation_store::reconcile(&runner_id, report.session.as_ref())?;
+    let result = (|| {
+        reconcile()?;
+        let remote_runs = mirror_remote_observation_runs(store, runner, job, result, None)?;
+        if remote_runs.is_empty()
+            && matches!(
+                job.status,
+                JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
+            )
+        {
+            mirror_terminal_job_artifacts(store, runner, job, &local_job_run)?;
+            return Ok(Some(vec![local_job_run.run.clone()]));
+        }
+        Ok(Some(remote_runs))
+    })();
+    if result.is_err() {
+        discard_owned_synthetic_run(store, &local_job_run);
     }
-    Ok(Some(mirror_remote_observation_runs(
-        &store, &runner, &job, &result, None,
-    )?))
+    result
 }
 
 pub fn mirror_connected_runner_run(run_id: &str) -> Result<Option<RunRecord>> {
@@ -383,6 +593,31 @@ pub(super) fn mirrored_patch_result(
                 job.id
             ))
         })?;
+    let advertised = job
+        .artifacts
+        .iter()
+        .any(|candidate| candidate.id == artifact_id);
+    let owned_by_job = store.get_run(&artifact.run_id)?.is_some_and(|run| {
+        run.metadata_json
+            .pointer("/lab/runner/id")
+            .or_else(|| run.metadata_json.pointer("/lab/runner_id"))
+            .and_then(Value::as_str)
+            == Some(runner.id.as_str())
+            && run
+                .metadata_json
+                .pointer("/lab/remote_job/id")
+                .or_else(|| run.metadata_json.pointer("/lab/remote_job_id"))
+                .and_then(Value::as_str)
+                == Some(job.id.to_string().as_str())
+    });
+    if !advertised || !owned_by_job || artifact.artifact_type != "file" {
+        return Err(Error::validation_invalid_argument(
+            "patch.patch_artifact_id",
+            "patch artifact must be a controller-owned local file advertised by this exact runner job",
+            Some(artifact_id.to_string()),
+            None,
+        ));
+    }
 
     let mut patched = patch.clone();
     if let Some(object) = patched.as_object_mut() {
@@ -404,8 +639,22 @@ pub(super) fn mirror_job_run(
     result: &Value,
     run_id: Option<&str>,
     notification_route: Option<&NotificationRoute>,
-) -> Result<RunRecord> {
+) -> Result<MirroredJobRun> {
     let inferred_label = runner_exec_run_label(command);
+    let synthetic_token = if run_id.is_none() {
+        let synthetic_id = local_job_run_id(&runner.id, &job.id.to_string(), &inferred_label);
+        store
+            .get_run(&synthetic_id)?
+            .and_then(|run| {
+                run.metadata_json
+                    .pointer("/lab/synthetic_publication_token")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| Uuid::new_v4().to_string())
+    } else {
+        String::new()
+    };
     let agent_task_lifecycle_event = agent_task_run_plan_lifecycle_event_from_value(result)
         .or_else(|| agent_task_run_plan_lifecycle_event_from_job_events(Some(events)))
         .and_then(|event| serde_json::to_value(event).ok());
@@ -424,6 +673,9 @@ pub(super) fn mirror_job_run(
     });
     if let Some(event) = agent_task_lifecycle_event {
         lab["agent_task_lifecycle_event"] = event;
+    }
+    if run_id.is_none() {
+        lab["synthetic_publication_token"] = Value::String(synthetic_token.clone());
     }
     if let Some(run_id) = run_id {
         if store
@@ -451,7 +703,12 @@ pub(super) fn mirror_job_run(
             if let Some(notification_route) = notification_route {
                 notification_route.insert_into_metadata(&mut metadata_json);
             }
-            return store.update_run_metadata(run_id, metadata_json);
+            return store
+                .update_run_metadata(run_id, metadata_json)
+                .map(|run| MirroredJobRun {
+                    run,
+                    synthetic_ownership: None,
+                });
         }
     }
     let run = RunRecord {
@@ -474,13 +731,29 @@ pub(super) fn mirror_job_run(
     if let Some(notification_route) = notification_route {
         notification_route.insert_into_metadata(&mut run.metadata_json);
     }
-    import_run_if_absent(store, &run)?;
-    store.get_run(&run.id)?.ok_or_else(|| {
-        Error::internal_unexpected(format!(
-            "mirrored runner run {} but could not read it back",
-            run.id
-        ))
-    })
+    let synthetic_ownership = if run_id.is_none() {
+        store
+            .import_synthetic_run(&run, &synthetic_token)?
+            .then(|| SyntheticRunOwnership {
+                run_id: run.id.clone(),
+                publication_token: synthetic_token,
+            })
+    } else {
+        import_run_if_absent(store, &run)?;
+        None
+    };
+    store
+        .get_run(&run.id)?
+        .map(|run| MirroredJobRun {
+            run,
+            synthetic_ownership,
+        })
+        .ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "mirrored runner run {} but could not read it back",
+                run.id
+            ))
+        })
 }
 
 pub(super) fn bounded_remote_events(events: &[JobEvent]) -> Vec<Value> {
@@ -938,34 +1211,4 @@ where
 
 pub(super) fn primary_mirrored_run(remote_runs: &[RunRecord]) -> Option<RunRecord> {
     remote_runs.iter().find(|run| run.kind == "fuzz").cloned()
-}
-
-fn mirrored_reverse_patch_result(
-    store: &ObservationStore,
-    run_id: &str,
-    patch: Option<&Value>,
-) -> Result<Option<Value>> {
-    let Some(patch) = patch.filter(|patch| !patch.is_null()) else {
-        return Ok(None);
-    };
-    let Some(artifact_id) = patch.get("patch_artifact_id").and_then(Value::as_str) else {
-        return Ok(Some(patch.clone()));
-    };
-    if artifact_id.is_empty() {
-        return Ok(Some(patch.clone()));
-    }
-    let Some(artifact) = store
-        .get_artifact(artifact_id)?
-        .filter(|artifact| artifact.run_id == run_id)
-    else {
-        return Ok(Some(patch.clone()));
-    };
-    let mut patched = patch.clone();
-    if let Some(object) = patched.as_object_mut() {
-        object.insert(
-            "patch_artifact_path".to_string(),
-            Value::String(artifact.path),
-        );
-    }
-    Ok(Some(patched))
 }

@@ -43,6 +43,7 @@ impl ObservationStore {
         let lease_expires_at_ms = chrono::Utc::now().timestamp_millis() + PUBLICATION_LEASE_MS;
         let mut prepared = Vec::with_capacity(publications.len());
         let mut staged_paths = Vec::new();
+        let mut intent_count = 0usize;
 
         let result = (|| -> Result<()> {
             for publication in publications {
@@ -71,7 +72,11 @@ impl ObservationStore {
                         None,
                     ));
                 }
-                let stored_path = persisted_artifact_path(&run.id, &publication.id, source)?;
+                // A concurrent publisher may be preparing the same logical
+                // artifact before either SQLite transaction commits. Its final
+                // bytes must therefore be owned by this publication token.
+                let stored_path =
+                    publication_artifact_path(&run.id, &publication.id, source, &publication_id)?;
                 let size_bytes = i64::try_from(metadata.len()).ok();
                 let sha256 = crate::artifact_metadata::sha256_file(source)?;
                 if publication.expected_size_bytes.is_some()
@@ -142,7 +147,9 @@ impl ObservationStore {
                 crate::artifact_links::annotate_public_artifact_url_validation(&mut artifact);
                 prepared.push((artifact, Some(staged_path), Some(stored_path)));
             }
-            // Journal the owned staging paths before they can become final.
+            // Copying can be slow. Journal only after all staging completes so
+            // recovery never reaps an active copy that has not yet entered its
+            // finalization window.
             // Readers only consult `runs` and `artifacts`, neither of which is
             // written until the complete finalization transaction below.
             let tx = self
@@ -157,6 +164,7 @@ impl ObservationStore {
                     "INSERT INTO artifact_publication_intents(publication_id, artifact_id, staging_path, final_path, owner_token, lease_expires_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     params![publication_id, artifact.id, staged_path.display().to_string(), final_path.display().to_string(), owner_token, lease_expires_at_ms],
                 ).map_err(sqlite_error("journal artifact publication"))?;
+                intent_count += 1;
             }
             tx.commit()
                 .map_err(sqlite_error("commit artifact publication intent"))?;
@@ -165,6 +173,7 @@ impl ObservationStore {
                 let (Some(staged_path), Some(final_path)) = (staged_path, final_path) else {
                     continue;
                 };
+                self.renew_artifact_publication_lease(&publication_id, &owner_token, intent_count)?;
                 fs::rename(staged_path, final_path).map_err(|error| {
                     Error::internal_io(
                         error.to_string(),
@@ -173,10 +182,23 @@ impl ObservationStore {
                 })?;
             }
 
+            self.renew_artifact_publication_lease(&publication_id, &owner_token, intent_count)?;
             let tx = self
                 .connection
                 .unchecked_transaction()
                 .map_err(sqlite_error("begin artifact publication finalization"))?;
+            // Revoking the exact leased intents is the final ownership check.
+            // It happens before durable rows are inserted, so a reclaimer that
+            // won after the last renewal leaves no visible run or artifact rows.
+            let released = tx.execute(
+                "DELETE FROM artifact_publication_intents WHERE publication_id = ?1 AND owner_token = ?2 AND lease_expires_at_ms >= ?3",
+                params![publication_id, owner_token, chrono::Utc::now().timestamp_millis()],
+            ).map_err(sqlite_error("claim artifact publication finalization"))?;
+            if released != intent_count {
+                return Err(Error::internal_unexpected(
+                    "artifact publication lost its durable finalization lease",
+                ));
+            }
             let metadata_json = serialize_metadata(&run.metadata_json)?;
             tx.execute(
                 r#"INSERT INTO runs(id, kind, component_id, started_at, finished_at, status, command, cwd, homeboy_version, git_sha, rig_id, metadata_json)
@@ -193,11 +215,6 @@ impl ObservationStore {
                     params![artifact.id, artifact.run_id, artifact.kind, artifact.artifact_type, artifact.path, artifact.url, artifact.public_url, artifact.viewer_url, serialize_metadata(&serde_json::json!(artifact.viewer_links))?, artifact.sha256, artifact.size_bytes, artifact.mime, serialize_metadata(&artifact.metadata_json)?, artifact.created_at],
                 ).map_err(sqlite_error("publish observation artifact"))?;
             }
-            tx.execute(
-                "DELETE FROM artifact_publication_intents WHERE publication_id = ?1 AND owner_token = ?2",
-                params![publication_id, owner_token],
-            )
-            .map_err(sqlite_error("clear artifact publication intent"))?;
             tx.commit()
                 .map_err(sqlite_error("commit artifact publication finalization"))?;
             Ok(())
@@ -220,31 +237,49 @@ impl ObservationStore {
             .collect()
     }
 
-    /// Remove only abandoned journal entries. A second store opening while a
-    /// publisher holds a live lease must leave its staging and final paths
-    /// alone; recovery is bounded by the recorded expiry timestamp.
+    /// Remove only expired publication-token paths. Final paths are immutable
+    /// and token-scoped, so reclaiming an expired owner can never remove bytes
+    /// selected by a competing publisher for the same logical artifact.
     pub(super) fn reconcile_unfinished_artifact_publications(&self) -> Result<()> {
         let now = chrono::Utc::now().timestamp_millis();
         let mut statement = self
             .connection
-            .prepare("SELECT staging_path, final_path FROM artifact_publication_intents WHERE lease_expires_at_ms < ?1")
+            .prepare("SELECT publication_id, artifact_id, staging_path, final_path, owner_token, lease_expires_at_ms FROM artifact_publication_intents WHERE lease_expires_at_ms IS NULL OR lease_expires_at_ms < ?1")
             .map_err(sqlite_error("read unfinished artifact publications"))?;
         let paths = statement
             .query_map([now], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                ))
             })
             .map_err(sqlite_error("query unfinished artifact publications"))?;
         let paths = collect_rows(paths, "collect unfinished artifact publications")?;
-        for (staging_path, final_path) in paths {
-            fs::remove_file(staging_path).ok();
-            fs::remove_file(final_path).ok();
+        for (
+            publication_id,
+            artifact_id,
+            staging_path,
+            final_path,
+            owner_token,
+            lease_expires_at,
+        ) in paths
+        {
+            // Revocation is the ownership boundary: delete the exact snapshot
+            // first. A renewal that wins changes its lease and this CAS deletes
+            // nothing, so this recovery pass must not touch either path.
+            let claimed = self.connection.execute(
+                "DELETE FROM artifact_publication_intents WHERE publication_id = ?1 AND artifact_id = ?2 AND ((owner_token IS NULL AND ?3 IS NULL) OR owner_token = ?3) AND ((lease_expires_at_ms IS NULL AND ?4 IS NULL) OR lease_expires_at_ms = ?4) AND (lease_expires_at_ms IS NULL OR lease_expires_at_ms < ?5)",
+                params![publication_id, artifact_id, owner_token, lease_expires_at, now],
+            ).map_err(sqlite_error("claim expired artifact publication"))?;
+            if claimed == 1 {
+                fs::remove_file(staging_path).ok();
+                fs::remove_file(final_path).ok();
+            }
         }
-        self.connection
-            .execute(
-                "DELETE FROM artifact_publication_intents WHERE lease_expires_at_ms < ?1",
-                [now],
-            )
-            .map_err(sqlite_error("clear unfinished artifact publications"))?;
         Ok(())
     }
 
@@ -273,14 +308,41 @@ impl ObservationStore {
         Ok(())
     }
 
+    fn renew_artifact_publication_lease(
+        &self,
+        publication_id: &str,
+        owner_token: &str,
+        expected_intents: usize,
+    ) -> Result<()> {
+        let expires_at = chrono::Utc::now().timestamp_millis() + PUBLICATION_LEASE_MS;
+        let updated = self.connection.execute(
+            "UPDATE artifact_publication_intents SET lease_expires_at_ms = ?1 WHERE publication_id = ?2 AND owner_token = ?3",
+            params![expires_at, publication_id, owner_token],
+        ).map_err(sqlite_error("renew artifact publication lease"))?;
+        if updated != expected_intents {
+            return Err(Error::internal_unexpected(
+                "artifact publication lost its durable finalization lease",
+            ));
+        }
+        Ok(())
+    }
+
     /// Roll back a synthetic controller run when its terminal artifact
     /// publication cannot complete. Callers must never use this for a run
     /// identity owned by another lifecycle.
-    pub fn discard_synthetic_run(&self, run_id: &str) -> Result<()> {
+    pub fn discard_synthetic_run(&self, run_id: &str, publication_token: &str) -> Result<()> {
         let tx = self
             .connection
             .unchecked_transaction()
             .map_err(sqlite_error("begin synthetic run rollback"))?;
+        let owned: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runs WHERE id = ?1 AND json_extract(metadata_json, '$.lab.synthetic_publication_token') = ?2)",
+            params![run_id, publication_token],
+            |row| row.get(0),
+        ).map_err(sqlite_error("read synthetic run ownership"))?;
+        if !owned {
+            return Ok(());
+        }
         tx.execute("DELETE FROM artifacts WHERE run_id = ?1", [run_id])
             .map_err(sqlite_error("delete synthetic run artifacts"))?;
         tx.execute("DELETE FROM runs WHERE id = ?1", [run_id])
@@ -1359,6 +1421,20 @@ impl ObservationStore {
     }
 }
 
+fn publication_artifact_path(
+    run_id: &str,
+    artifact_id: &str,
+    source: &Path,
+    publication_id: &str,
+) -> Result<PathBuf> {
+    let canonical = persisted_artifact_path(run_id, artifact_id, source)?;
+    let file_name = canonical
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| Error::internal_unexpected("persisted artifact path has no filename"))?;
+    Ok(canonical.with_file_name(format!("{publication_id}-{file_name}")))
+}
+
 /// Hash a directory tree independent of traversal order. Paths and entry types
 /// are included so a rename or file/directory swap cannot reuse prior evidence.
 pub fn directory_tree_sha256(path: &Path) -> Result<String> {
@@ -1605,6 +1681,27 @@ mod tests {
     }
 
     #[test]
+    fn opening_store_reclaims_v10_null_lease_intent_as_stale() {
+        with_isolated_home(|home| {
+            let database = home.path().join("observation.sqlite");
+            let store = ObservationStore::open_initialized_at(&database).expect("store");
+            let staging = home.path().join("legacy.staging");
+            let final_path = home.path().join("legacy.final");
+            fs::write(&staging, b"staged").expect("staging bytes");
+            fs::write(&final_path, b"final").expect("final bytes");
+            store.connection.execute(
+                "INSERT INTO artifact_publication_intents(publication_id, artifact_id, staging_path, final_path, owner_token, lease_expires_at_ms) VALUES ('legacy', 'artifact', ?1, ?2, NULL, NULL)",
+                params![staging.display().to_string(), final_path.display().to_string()],
+            ).expect("legacy intent");
+            drop(store);
+
+            ObservationStore::open_initialized_at(&database).expect("reopen migrated store");
+            assert!(!staging.exists());
+            assert!(!final_path.exists());
+        });
+    }
+
+    #[test]
     fn opening_second_store_preserves_a_live_publication_lease() {
         with_isolated_home(|home| {
             let database = home.path().join("observation.sqlite");
@@ -1623,6 +1720,119 @@ mod tests {
                 "SELECT COUNT(*) FROM artifact_publication_intents WHERE publication_id = 'live'", [], |row| row.get(0),
             ).expect("count live intent");
             assert_eq!(intents, 1);
+        });
+    }
+
+    #[test]
+    fn finalization_after_lease_expiry_and_reclaim_never_advertises_files() {
+        with_isolated_home(|home| {
+            let database = home.path().join("observation.sqlite");
+            let store = ObservationStore::open_initialized_at(&database).expect("store");
+            let staging = home.path().join("paused.staging");
+            let final_path = home.path().join("paused.final");
+            fs::write(&staging, b"staged").expect("staging bytes");
+            fs::write(&final_path, b"renamed before pause").expect("final bytes");
+            store.connection.execute(
+                "INSERT INTO artifact_publication_intents(publication_id, artifact_id, staging_path, final_path, owner_token, lease_expires_at_ms) VALUES ('paused', 'artifact', ?1, ?2, 'owner', 0)",
+                params![staging.display().to_string(), final_path.display().to_string()],
+            ).expect("journal intent");
+
+            // Simulate a publisher paused past its lease while a second store
+            // reclaims its exact intent and the already-renamed bytes.
+            let reclaimer = ObservationStore::open_initialized_at(&database).expect("reclaimer");
+            assert!(!staging.exists());
+            assert!(!final_path.exists());
+            let tx = reclaimer
+                .connection
+                .unchecked_transaction()
+                .expect("begin delayed finalization");
+            let released = tx.execute(
+                "DELETE FROM artifact_publication_intents WHERE publication_id = ?1 AND owner_token = ?2 AND lease_expires_at_ms >= ?3",
+                params!["paused", "owner", chrono::Utc::now().timestamp_millis()],
+            ).expect("verify delayed ownership");
+            assert_eq!(released, 0, "reclaimed intent cannot finalize rows");
+            tx.rollback().expect("rollback delayed finalization");
+            assert!(reclaimer
+                .get_run("paused-run")
+                .expect("run lookup")
+                .is_none());
+            assert!(reclaimer
+                .get_artifact("artifact")
+                .expect("artifact lookup")
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn synthetic_cleanup_is_scoped_to_its_publication_token() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            for (id, token) in [("synthetic-a", "token-a"), ("synthetic-b", "token-b")] {
+                store
+                    .import_run(&RunRecord {
+                        id: id.to_string(),
+                        kind: "runner-exec".to_string(),
+                        component_id: None,
+                        started_at: "2026-01-01T00:00:00Z".to_string(),
+                        finished_at: None,
+                        status: "running".to_string(),
+                        command: None,
+                        cwd: Some(home.path().display().to_string()),
+                        homeboy_version: None,
+                        git_sha: None,
+                        rig_id: None,
+                        metadata_json: serde_json::json!({"lab": {"synthetic_publication_token": token}}),
+                    })
+                    .expect("synthetic run");
+            }
+
+            store
+                .discard_synthetic_run("synthetic-a", "token-a")
+                .expect("discard owned run");
+            assert!(store.get_run("synthetic-a").expect("first run").is_none());
+            assert!(store.get_run("synthetic-b").expect("second run").is_some());
+            store
+                .discard_synthetic_run("synthetic-b", "unrelated-token")
+                .expect("ignore unowned run");
+            assert!(store.get_run("synthetic-b").expect("second run").is_some());
+        });
+    }
+
+    #[test]
+    fn synthetic_run_claim_loser_cannot_discard_the_concurrent_winner() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let synthetic = |token: &str| RunRecord {
+                id: "synthetic-concurrent".to_string(),
+                kind: "runner-exec".to_string(),
+                component_id: None,
+                started_at: "2026-01-01T00:00:00Z".to_string(),
+                finished_at: None,
+                status: "running".to_string(),
+                command: None,
+                cwd: Some(home.path().display().to_string()),
+                homeboy_version: None,
+                git_sha: None,
+                rig_id: None,
+                metadata_json: serde_json::json!({"lab": {"synthetic_publication_token": token}}),
+            };
+            let winner = synthetic("winner-token");
+            let loser = synthetic("loser-token");
+
+            assert!(store
+                .import_synthetic_run(&winner, "winner-token")
+                .expect("winner claims synthetic run"));
+            assert!(!store
+                .import_synthetic_run(&loser, "loser-token")
+                .expect("loser observes winner"));
+            store
+                .discard_synthetic_run(&loser.id, "loser-token")
+                .expect("loser rollback is idempotent");
+            assert!(store.get_run(&winner.id).expect("winner run").is_some());
+            store
+                .discard_synthetic_run(&winner.id, "winner-token")
+                .expect("winner rollback");
+            assert!(store.get_run(&winner.id).expect("winner removed").is_none());
         });
     }
 

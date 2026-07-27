@@ -86,7 +86,12 @@ pub(super) fn remote_detail_artifacts(
         let mut mirrored_type = artifact_type.to_string();
         let path = if artifact_type == "file" {
             mirrored_type = "remote_file".to_string();
-            runner_artifact_token(&runner.id, remote_run_id, &id)
+            artifact
+                .get("path")
+                .and_then(Value::as_str)
+                .filter(|path| RemoteArtifactToken::parse(path).is_ok())
+                .map(str::to_string)
+                .unwrap_or_else(|| runner_artifact_token(&runner.id, remote_run_id, &id))
         } else {
             artifact
                 .get("url")
