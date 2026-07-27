@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::fs::OpenOptions;
 use std::hash::{Hash, Hasher};
@@ -1170,11 +1171,19 @@ pub fn prune_workspaces(
     let mut total_candidate_bytes = 0;
     let mut scanned_workspace_count = 0;
     let mut scan_complete = true;
+    let mut continuation_cursor = options.cursor.clone();
     let remaining_candidates: Vec<RunnerWorkspacePruneEntry> = Vec::new();
     for pass in 0..passes {
-        let scan = prune_candidates_for_runner(&runner, &lab_workspaces_root, &options, limit)?;
+        let scan = prune_candidates_for_runner(
+            &runner,
+            &lab_workspaces_root,
+            &options,
+            limit,
+            continuation_cursor.as_deref(),
+        )?;
         scanned_workspace_count += scan.scanned_workspace_count;
         scan_complete = scan.scan_complete;
+        continuation_cursor = scan.continuation_cursor;
         let candidates = scan.candidates;
         for withheld in scan.withheld {
             match withheld.liveness.state.as_str() {
@@ -1209,6 +1218,9 @@ pub fn prune_workspaces(
             total_candidate_bytes = candidates.iter().map(|entry| entry.bytes).sum();
         }
         if candidates.is_empty() {
+            if options.apply && !scan_complete {
+                continue;
+            }
             break;
         }
         for candidate in candidates {
@@ -1258,21 +1270,26 @@ pub fn prune_workspaces(
     let remaining_candidate_bytes = remaining_candidates.iter().map(|entry| entry.bytes).sum();
     let has_more = !scan_complete || remaining_candidate_count > 0 || !skipped.is_empty();
     let runner_arg = shell_arg(&runner.id);
+    let cursor_arg = (!scan_complete)
+        .then(|| continuation_cursor.as_deref())
+        .flatten()
+        .map(|cursor| format!(" --cursor {}", shell_arg(cursor)))
+        .unwrap_or_default();
     let next_command = has_more.then(|| {
         if options.apply {
             format!(
-                "homeboy runner workspace prune {runner_arg} --apply --min-age-hours {} --limit {limit} --passes {passes}",
+                "homeboy runner workspace prune {runner_arg} --apply --min-age-hours {} --limit {limit} --passes {passes}{cursor_arg}",
                 options.min_age_hours
             )
         } else {
             format!(
-                "homeboy runner workspace prune {runner_arg} --min-age-hours {} --limit {limit}",
+                "homeboy runner workspace prune {runner_arg} --min-age-hours {} --limit {limit}{cursor_arg}",
                 options.min_age_hours
             )
         }
     });
     let drain_command = format!(
-        "homeboy runner workspace prune {runner_arg} --apply --min-age-hours {} --limit {limit} --passes 10",
+        "homeboy runner workspace prune {runner_arg} --apply --min-age-hours {} --limit {limit} --passes 10{cursor_arg}",
         options.min_age_hours
     );
     let total_removed_bytes = removed.iter().map(|entry| entry.bytes).sum();
@@ -1299,6 +1316,7 @@ pub fn prune_workspaces(
             reconcile_command: format!("homeboy runner job reconcile {runner_arg}"),
             scanned_workspace_count,
             scan_complete,
+            continuation_cursor: (!scan_complete).then_some(continuation_cursor).flatten(),
             total_candidate_count,
             total_candidate_bytes,
             total_removed_bytes,
@@ -1317,12 +1335,19 @@ fn prune_candidates_for_runner(
     lab_workspaces_root: &str,
     options: &RunnerWorkspacePruneOptions,
     scan_limit: usize,
+    cursor: Option<&str>,
 ) -> Result<PruneCandidateScan> {
     match runner.kind {
-        RunnerKind::Local => {
-            prune_candidates_local(runner, Path::new(lab_workspaces_root), options, scan_limit)
+        RunnerKind::Local => prune_candidates_local(
+            runner,
+            Path::new(lab_workspaces_root),
+            options,
+            scan_limit,
+            cursor,
+        ),
+        RunnerKind::Ssh => {
+            prune_candidates_ssh(runner, lab_workspaces_root, options, scan_limit, cursor)
         }
-        RunnerKind::Ssh => prune_candidates_ssh(runner, lab_workspaces_root, options, scan_limit),
     }
 }
 
@@ -1331,6 +1356,7 @@ struct PruneCandidateScan {
     withheld: Vec<RunnerWorkspacePruneEntry>,
     scanned_workspace_count: usize,
     scan_complete: bool,
+    continuation_cursor: Option<String>,
 }
 
 /// Reap a single run-scoped materialized workspace (and its sibling Homeboy
@@ -2447,6 +2473,7 @@ fn prune_candidates_local(
     root: &Path,
     options: &RunnerWorkspacePruneOptions,
     scan_limit: usize,
+    cursor: Option<&str>,
 ) -> Result<PruneCandidateScan> {
     if !root.is_dir() {
         return Ok(PruneCandidateScan {
@@ -2454,34 +2481,51 @@ fn prune_candidates_local(
             withheld: Vec::new(),
             scanned_workspace_count: 0,
             scan_complete: true,
+            continuation_cursor: None,
         });
     }
+    let after = cursor
+        .map(|cursor| decode_prune_cursor(root, cursor))
+        .transpose()?;
     let mut candidates = Vec::new();
     let mut withheld = Vec::new();
-    let mut entries = fs::read_dir(root).map_err(|err| {
+    let entries = fs::read_dir(root).map_err(|err| {
         Error::internal_io(
             err.to_string(),
             Some("read runner workspace root".to_string()),
         )
     })?;
-    let mut scanned_workspace_count = 0;
-    let mut scan_complete = true;
-    while let Some(entry) = entries.next() {
+    let mut paths = BTreeSet::new();
+    for entry in entries {
         let entry = entry.map_err(|err| {
             Error::internal_io(
                 err.to_string(),
                 Some("read runner workspace entry".to_string()),
             )
         })?;
-        let path = entry.path();
         if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
             continue;
         }
-        if scanned_workspace_count == scan_limit {
-            scan_complete = false;
-            break;
+        let path = entry.path();
+        if after.as_ref().is_some_and(|after| path <= *after) {
+            continue;
         }
-        scanned_workspace_count += 1;
+        paths.insert(path);
+        if paths.len() > scan_limit.saturating_add(1) {
+            paths.pop_last();
+        }
+    }
+    let scan_complete = paths.len() <= scan_limit;
+    if !scan_complete {
+        paths.pop_last();
+    }
+    let inspected = paths.into_iter().collect::<Vec<_>>();
+    let scanned_workspace_count = inspected.len();
+    let continuation_cursor = (!scan_complete)
+        .then(|| inspected.last())
+        .flatten()
+        .map(|path| encode_prune_cursor(path));
+    for path in inspected {
         if let Some(candidate) = classify_local_candidate(runner, root, &path, options)? {
             if candidate.liveness.state == "inactive" {
                 candidates.push(candidate);
@@ -2501,6 +2545,7 @@ fn prune_candidates_local(
         withheld,
         scanned_workspace_count,
         scan_complete,
+        continuation_cursor,
     })
 }
 
@@ -2525,9 +2570,9 @@ fn classify_local_candidate(
         Ok(content) => content,
         Err(_) => return Ok(None),
     };
-    let metadata: serde_json::Value = serde_json::from_str(&metadata).map_err(|err| {
-        Error::internal_json(err.to_string(), Some(metadata_path.display().to_string()))
-    })?;
+    let Ok(metadata) = serde_json::from_str::<serde_json::Value>(&metadata) else {
+        return Ok(None);
+    };
     if metadata.get("schema").and_then(|value| value.as_str())
         != Some("homeboy/runner-workspace/v1")
     {
@@ -2824,11 +2869,15 @@ fn prune_candidates_ssh(
     root: &str,
     options: &RunnerWorkspacePruneOptions,
     scan_limit: usize,
+    cursor: Option<&str>,
 ) -> Result<PruneCandidateScan> {
     let (_server, mut client) = ssh_client_for_runner(runner)?;
     client.env.extend(runner.env.clone());
     let min_age = options.min_age_hours.saturating_mul(3600);
-    let command = prune_scan_command(root, min_age, scan_limit);
+    let after = cursor
+        .map(|cursor| decode_prune_cursor(Path::new(root), cursor))
+        .transpose()?;
+    let command = prune_scan_command(root, min_age, scan_limit, after.as_deref());
     let output = client.execute_with_timeout(&command, WORKSPACE_PRUNE_TIMEOUT);
     if !output.success {
         return Err(Error::internal_unexpected(format!(
@@ -2842,7 +2891,7 @@ fn prune_candidates_ssh(
     for line in output.stdout.lines() {
         if let Some(status) = line.strip_prefix("__homeboy_prune_scan__\t") {
             let parts = status.split('\t').collect::<Vec<_>>();
-            let [scanned_workspace_count, completion] = parts.as_slice() else {
+            let [scanned_workspace_count, completion, last_inspected] = parts.as_slice() else {
                 return Err(Error::internal_unexpected(
                     "runner workspace prune scan returned an invalid completion status".to_string(),
                 ));
@@ -2862,7 +2911,17 @@ fn prune_candidates_ssh(
                     ));
                 }
             };
-            scan_status = Some((scanned_workspace_count, scan_complete));
+            let continuation_cursor = match (*completion, *last_inspected) {
+                ("complete", "") => None,
+                ("partial", path) if !path.is_empty() => Some(encode_prune_cursor(Path::new(path))),
+                _ => {
+                    return Err(Error::internal_unexpected(
+                        "runner workspace prune scan returned an invalid continuation cursor"
+                            .to_string(),
+                    ))
+                }
+            };
+            scan_status = Some((scanned_workspace_count, scan_complete, continuation_cursor));
             continue;
         }
         let parts = line.splitn(4, '\t').collect::<Vec<_>>();
@@ -2872,11 +2931,12 @@ fn prune_candidates_ssh(
         let age_seconds = parts[0].parse::<u64>().unwrap_or(0);
         let bytes = parts[1].parse::<u64>().unwrap_or(0);
         let remote_path = parts[2].to_string();
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(parts[3])
-            .map_err(|err| Error::internal_json(err.to_string(), None))?;
-        let metadata: serde_json::Value = serde_json::from_slice(&decoded)
-            .map_err(|err| Error::internal_json(err.to_string(), Some(remote_path.clone())))?;
+        let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(parts[3]) else {
+            continue;
+        };
+        let Ok(metadata) = serde_json::from_slice::<serde_json::Value>(&decoded) else {
+            continue;
+        };
         if metadata.get("schema").and_then(|value| value.as_str())
             != Some("homeboy/runner-workspace/v1")
         {
@@ -2925,16 +2985,18 @@ fn prune_candidates_ssh(
             .then_with(|| b.age_seconds.cmp(&a.age_seconds))
             .then_with(|| a.remote_path.cmp(&b.remote_path))
     });
-    let (scanned_workspace_count, scan_complete) = scan_status.ok_or_else(|| {
-        Error::internal_unexpected(
-            "runner workspace prune scan did not return a completion status".to_string(),
-        )
-    })?;
+    let (scanned_workspace_count, scan_complete, continuation_cursor) =
+        scan_status.ok_or_else(|| {
+            Error::internal_unexpected(
+                "runner workspace prune scan did not return a completion status".to_string(),
+            )
+        })?;
     Ok(PruneCandidateScan {
         candidates,
         withheld,
         scanned_workspace_count,
         scan_complete,
+        continuation_cursor,
     })
 }
 
@@ -2964,13 +3026,51 @@ fn prune_candidate_reason_from_decoded_metadata(
     (!Path::new(source_path).exists()).then(|| "source_path_missing".to_string())
 }
 
-pub(crate) fn prune_scan_command(root: &str, min_age: u64, scan_limit: usize) -> String {
+pub(crate) fn prune_scan_command(
+    root: &str,
+    min_age: u64,
+    scan_limit: usize,
+    after: Option<&Path>,
+) -> String {
     format!(
-        "root={root}; meta_rel={meta}; min_age={min_age}; now=$(date +%s); if [ -d \"$root\" ]; then find \"$root\" -mindepth 1 -maxdepth 1 -type d -print | {{ scanned=0; complete=complete; while IFS= read -r dir; do if [ \"$scanned\" -ge {scan_limit} ]; then complete=partial; break; fi; scanned=$((scanned + 1)); meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; mtime=$(stat -c %Y \"$dir\" 2>/dev/null || stat -f %m \"$dir\" 2>/dev/null || echo 0); age=$((now-mtime)); [ \"$age\" -ge \"$min_age\" ] || continue; if find \"$dir/.homeboy\" -type f \\( -name \"*.patch\" -o -name \"*.diff\" -o -name \"*patch*\" \\) 2>/dev/null | grep -q .; then continue; fi; blocks=$(du -sk \"$dir\" 2>/dev/null); blocks=${{blocks%%[!0-9]*}}; bytes=$((blocks * 1024)); printf \"%s\\t%s\\t%s\\t\" \"$age\" \"${{bytes:-0}}\" \"$dir\"; base64 < \"$meta\" | tr -d \"\\n\"; printf \"\\n\"; done; printf \"__homeboy_prune_scan__\\t%s\\t%s\\n\" \"$scanned\" \"$complete\"; }}; else printf \"__homeboy_prune_scan__\\t0\\tcomplete\\n\"; fi",
+        "root={root}; after={after}; meta_rel={meta}; min_age={min_age}; now=$(date +%s); if [ -d \"$root\" ]; then LC_ALL=C find \"$root\" -mindepth 1 -maxdepth 1 -type d -print | LC_ALL=C sort | {{ scanned=0; complete=complete; last=; while IFS= read -r dir; do [ -z \"$after\" ] || [ \"$dir\" \\> \"$after\" ] || continue; if [ \"$scanned\" -ge {scan_limit} ]; then complete=partial; break; fi; scanned=$((scanned + 1)); last=$dir; meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; mtime=$(stat -c %Y \"$dir\" 2>/dev/null || stat -f %m \"$dir\" 2>/dev/null || echo 0); age=$((now-mtime)); [ \"$age\" -ge \"$min_age\" ] || continue; if find \"$dir/.homeboy\" -type f \\( -name \"*.patch\" -o -name \"*.diff\" -o -name \"*patch*\" \\) 2>/dev/null | grep -q .; then continue; fi; blocks=$(du -sk \"$dir\" 2>/dev/null); blocks=${{blocks%%[!0-9]*}}; bytes=$((blocks * 1024)); printf \"%s\\t%s\\t%s\\t\" \"$age\" \"${{bytes:-0}}\" \"$dir\"; base64 < \"$meta\" | tr -d \"\\n\"; printf \"\\n\"; done; printf \"__homeboy_prune_scan__\\t%s\\t%s\\t%s\\n\" \"$scanned\" \"$complete\" \"$last\"; }}; else printf \"__homeboy_prune_scan__\\t0\\tcomplete\\t\\n\"; fi",
         root = shell::quote_arg(root),
+        after = shell::quote_arg(after.and_then(Path::to_str).unwrap_or("")),
         meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
         min_age = shell::quote_arg(&min_age.to_string()),
         scan_limit = scan_limit,
+    )
+}
+
+const PRUNE_CURSOR_PREFIX: &str = "homeboy-workspace-prune/v1\0";
+
+fn encode_prune_cursor(path: &Path) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(format!("{PRUNE_CURSOR_PREFIX}{}", path.display()))
+}
+
+fn decode_prune_cursor(root: &Path, cursor: &str) -> Result<std::path::PathBuf> {
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|_| invalid_prune_cursor())?;
+    let decoded = String::from_utf8(decoded).map_err(|_| invalid_prune_cursor())?;
+    let path = decoded
+        .strip_prefix(PRUNE_CURSOR_PREFIX)
+        .filter(|path| !path.is_empty())
+        .map(Path::new)
+        .ok_or_else(invalid_prune_cursor)?;
+    if path.parent() != Some(root) || path.file_name().is_none() {
+        return Err(invalid_prune_cursor());
+    }
+    Ok(path.to_path_buf())
+}
+
+fn invalid_prune_cursor() -> Error {
+    Error::validation_invalid_argument(
+        "cursor",
+        "workspace prune cursor is invalid for this workspace root",
+        None,
+        None,
     )
 }
 

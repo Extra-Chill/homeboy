@@ -41,6 +41,7 @@ fn prune_workspaces_previews_orphans_without_deleting_by_default() {
                 min_age_hours: 0,
                 limit: 10,
                 passes: 1,
+                cursor: None,
             },
         )
         .expect("prune preview");
@@ -105,6 +106,7 @@ fn prune_workspaces_apply_removes_only_metadata_backed_orphans() {
                 min_age_hours: 0,
                 limit: 10,
                 passes: 1,
+                cursor: None,
             },
         )
         .expect("prune apply");
@@ -153,6 +155,7 @@ fn prune_preserves_process_owned_workspace_in_preview_and_apply() {
                     min_age_hours: 0,
                     limit: 10,
                     passes: 1,
+                    cursor: None,
                 },
             )
             .expect("prune process-owned workspace");
@@ -208,6 +211,7 @@ fn prune_preserves_active_job_lifecycle_lease() {
                 min_age_hours: 0,
                 limit: 10,
                 passes: 1,
+                cursor: None,
             },
         )
         .expect("prune active lease workspace");
@@ -255,6 +259,7 @@ fn prune_workspaces_reaps_ttl_expired_lifecycle_workspace_with_live_source() {
                 min_age_hours: 0,
                 limit: 10,
                 passes: 1,
+                cursor: None,
             },
         )
         .expect("prune preview");
@@ -329,6 +334,7 @@ fn preserved_failure_lifecycle_is_registered_for_ttl_pruning() {
                 min_age_hours: 0,
                 limit: 10,
                 passes: 1,
+                cursor: None,
             },
         )
         .expect("prune preview");
@@ -344,6 +350,7 @@ fn preserved_failure_lifecycle_is_registered_for_ttl_pruning() {
                 min_age_hours: 0,
                 limit: 10,
                 passes: 1,
+                cursor: None,
             },
         )
         .expect("apply ttl prune");
@@ -407,6 +414,7 @@ fn uncertain_handoff_disarms_ttl_pruning() {
                 min_age_hours: 0,
                 limit: 10,
                 passes: 1,
+                cursor: None,
             },
         )
         .expect("prune preview");
@@ -456,6 +464,7 @@ fn prune_workspaces_preview_reports_synthetic_odd_path_without_deleting() {
                 min_age_hours: 0,
                 limit: 10,
                 passes: 1,
+                cursor: None,
             },
         )
         .expect("prune preview");
@@ -515,6 +524,7 @@ fn prune_workspaces_reports_remaining_bytes_and_drain_command_when_limited() {
                 min_age_hours: 0,
                 limit: 1,
                 passes: 1,
+                cursor: None,
             },
         )
         .expect("prune preview");
@@ -528,14 +538,15 @@ fn prune_workspaces_reports_remaining_bytes_and_drain_command_when_limited() {
         assert_eq!(output.remaining_candidate_count, 0);
         assert_eq!(output.remaining_candidate_bytes, 0);
         assert!(output.has_more);
-        assert_eq!(
-            output.next_command.as_deref(),
-            Some("homeboy runner workspace prune lab-local-prune-limited --min-age-hours 0 --limit 1")
-        );
-        assert_eq!(
-            output.drain_command,
-            "homeboy runner workspace prune lab-local-prune-limited --apply --min-age-hours 0 --limit 1 --passes 10"
-        );
+        let cursor = output
+            .continuation_cursor
+            .as_deref()
+            .expect("continuation cursor");
+        assert!(output
+            .next_command
+            .as_deref()
+            .is_some_and(|command| command.contains(&format!("--cursor {cursor}"))));
+        assert!(output.drain_command.contains(&format!("--cursor {cursor}")));
     });
 }
 
@@ -578,6 +589,7 @@ fn prune_workspaces_apply_passes_drain_until_empty() {
                 min_age_hours: 0,
                 limit: 1,
                 passes: 10,
+                cursor: None,
             },
         )
         .expect("prune drain");
@@ -597,14 +609,24 @@ fn prune_workspaces_apply_passes_drain_until_empty() {
 }
 
 #[test]
-fn prune_workspaces_bounds_thousands_of_entries_per_pass_and_drains_stably() {
+fn prune_workspaces_advances_through_thousands_of_mixed_entries() {
     homeboy_core::test_support::with_isolated_home(|_| {
         const WORKSPACE_COUNT: usize = 5_214;
+        const ORPHAN_INDICES: [usize; 3] = [1_333, 2_607, 5_213];
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let workspaces_root = runner_root.path().join("_lab_workspaces");
         fs::create_dir_all(&workspaces_root).expect("workspaces root");
         for index in 0..WORKSPACE_COUNT {
-            write_orphan_workspace(&workspaces_root.join(format!("workspace-{index:05}")));
+            let workspace = workspaces_root.join(format!("workspace-{index:05}"));
+            if ORPHAN_INDICES.contains(&index) {
+                write_orphan_workspace(&workspace);
+            } else if index % 11 == 0 {
+                fs::create_dir_all(workspace.join(".homeboy")).expect("malformed workspace");
+                fs::write(workspace.join(WORKSPACE_METADATA_FILE), "{malformed")
+                    .expect("malformed metadata");
+            } else {
+                fs::create_dir_all(workspace).expect("metadata-free workspace");
+            }
         }
         crate::create(
             &format!(
@@ -615,33 +637,47 @@ fn prune_workspaces_bounds_thousands_of_entries_per_pass_and_drains_stably() {
         )
         .expect("create runner");
 
-        let options = RunnerWorkspacePruneOptions {
-            apply: true,
-            min_age_hours: 0,
-            limit: 5,
-            passes: 3,
-        };
-        let (first, _) = prune_workspaces("lab-local-prune-thousands", options.clone())
-            .expect("first bounded drain");
-        let (second, _) =
-            prune_workspaces("lab-local-prune-thousands", options).expect("second bounded drain");
+        let mut cursor = None;
+        let mut scanned = 0;
+        let mut removed = Vec::new();
+        for _ in 0..20 {
+            let (output, _) = prune_workspaces(
+                "lab-local-prune-thousands",
+                RunnerWorkspacePruneOptions {
+                    apply: true,
+                    min_age_hours: 0,
+                    limit: 127,
+                    passes: 3,
+                    cursor,
+                },
+            )
+            .expect("bounded mixed-entry drain");
+            assert!(output.scanned_workspace_count <= 127 * 3);
+            scanned += output.scanned_workspace_count;
+            removed.extend(output.removed);
+            if output.scan_complete {
+                assert!(output.continuation_cursor.is_none());
+                break;
+            }
+            cursor = Some(
+                output
+                    .continuation_cursor
+                    .expect("partial scan continuation cursor"),
+            );
+        }
 
-        assert_eq!(first.scanned_workspace_count, 15);
-        assert_eq!(first.removed.len(), 15);
-        assert_eq!(first.total_candidate_count, 5);
-        assert!(!first.scan_complete);
-        assert!(first.has_more);
-        assert_eq!(second.scanned_workspace_count, 15);
-        assert_eq!(second.removed.len(), 15);
-        assert!(first.removed.iter().all(|entry| !second
-            .removed
-            .iter()
-            .any(|next| next.remote_path == entry.remote_path)));
+        assert_eq!(scanned, WORKSPACE_COUNT);
+        assert_eq!(removed.len(), ORPHAN_INDICES.len());
+        for index in ORPHAN_INDICES {
+            assert!(!workspaces_root
+                .join(format!("workspace-{index:05}"))
+                .exists());
+        }
         assert_eq!(
             fs::read_dir(&workspaces_root)
                 .expect("remaining workspaces")
                 .count(),
-            WORKSPACE_COUNT - 30
+            WORKSPACE_COUNT - ORPHAN_INDICES.len()
         );
     });
 }
@@ -655,7 +691,12 @@ fn ssh_prune_scan_command_bounds_thousands_of_entries() {
 
     let output = Command::new("sh")
         .arg("-c")
-        .arg(prune_scan_command(&temp.path().display().to_string(), 0, 5))
+        .arg(prune_scan_command(
+            &temp.path().display().to_string(),
+            0,
+            5,
+            None,
+        ))
         .output()
         .expect("run generated prune scan command");
 
@@ -672,6 +713,27 @@ fn ssh_prune_scan_command_bounds_thousands_of_entries() {
     assert!(
         stdout.contains("__homeboy_prune_scan__\t5\tpartial"),
         "{stdout}"
+    );
+
+    let after = temp.path().join("workspace-00004");
+    let resumed = Command::new("sh")
+        .arg("-c")
+        .arg(prune_scan_command(
+            &temp.path().display().to_string(),
+            0,
+            5,
+            Some(&after),
+        ))
+        .output()
+        .expect("resume generated prune scan command");
+    assert!(resumed.status.success(), "{resumed:?}");
+    let resumed_stdout = String::from_utf8_lossy(&resumed.stdout);
+    assert!(!resumed_stdout.contains("workspace-00004\t"));
+    assert!(resumed_stdout.contains("workspace-00005\t"));
+    assert!(resumed_stdout.contains("workspace-00009\t"));
+    assert!(
+        resumed_stdout.contains("__homeboy_prune_scan__\t5\tpartial"),
+        "{resumed_stdout}"
     );
 }
 
@@ -699,7 +761,7 @@ fn ssh_prune_scan_command_handles_paths_that_need_shell_quoting() {
 
     let output = Command::new("sh")
         .arg("-c")
-        .arg(prune_scan_command(&root.display().to_string(), 0, 10))
+        .arg(prune_scan_command(&root.display().to_string(), 0, 10, None))
         .output()
         .expect("run generated prune scan command");
 

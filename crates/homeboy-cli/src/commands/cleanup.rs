@@ -1307,6 +1307,7 @@ fn remote_lab_workspace_categories(
                 min_age_hours: 24,
                 limit: 25,
                 passes: if apply { 10 } else { 1 },
+                cursor: None,
             },
         ) {
             Ok((output, _)) => output,
