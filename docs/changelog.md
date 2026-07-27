@@ -4,6 +4,36 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.321.1] - 2026-07-27
+
+### Changed
+- persist terminal evidence
+- cover bounded inspection
+- gate main on the full release-blocking suite after every merge
+
+### Fixed
+- make migration 12 idempotent
+- keep workspace prune below ARG_MAX
+- persist evidence before returning references
+- recover boundary migration crashes
+- bootstrap stable generation boundary
+- preserve stable generation boundary
+- atomically refresh dependency generations
+- reap stale materialized workspace leases
+- clarify Lab submission observation
+- preserve rebased inspection contracts
+- keep prune size accounting advisory
+- bound no-id full status
+- fail closed on unqueried jobs
+- preserve bounded inspection state
+- bound controller inspection
+- resolve draft releases by id so recovery can finish them
+- classify provider missing destinations
+- recover stranded release tags without depending on HEAD
+- derive agent-task diagnose next actions from the diagnosis
+- collapse the agent-task activity report to one durable-record pass
+- resolve agent-task activity ids through an indexed probe
+
 ## [0.321.0] - 2026-07-27
 
 ### Added
