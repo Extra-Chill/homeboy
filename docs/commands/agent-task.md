@@ -276,6 +276,22 @@ patch-producing `agent-task cook` waves that must not execute
 provider processes on the controller. If Lab routing cannot select or prepare a
 runner, Homeboy fails before local execution instead of falling back.
 
+`cook` and the batch fanout coordinators (`fanout run-plan`, `fanout cook-batch
+--run-plan`) use *split placement*: the coordinator always stays on the
+controller — it owns target resolution, the durable record, artifact ingestion,
+promotion, gates, and finalization — while each provider attempt is dispatched
+to the selected Lab runner. `--placement lab` and `--runner <runner-id>` select
+the runner for those attempts; neither offloads the coordinator itself. When no
+Lab runner is ready, these commands report the runner readiness verdict and its
+remediation commands rather than claiming Lab placement is unsupported. Use
+`--placement lab-or-local` to authorize controller execution as a fallback.
+
+Concurrent single-cook submissions do not race: controller-generation admission
+is a FIFO queue, so parallel cooks wait their turn and re-running an identical
+command after a contended attempt queues rather than collides. Admission
+diagnostics always name the current holder (PID, verified liveness, and the
+owning admission request) or the actionable lock state.
+
 Use global `--detach-after-handoff` with `--runner <runner-id>` when the Lab job is
 expected to outlive the local shell. Homeboy returns after the runner daemon
 accepts the job and prints follow/cancel commands instead of waiting for remote
