@@ -455,6 +455,16 @@ const fn with_dry_run(safety: CommandSafetySpec, dry_run_flag: &'static str) -> 
     }
 }
 
+const fn with_risk_exemption(
+    safety: CommandSafetySpec,
+    risk_exemption: &'static str,
+) -> CommandSafetySpec {
+    CommandSafetySpec {
+        risk_exemption: Some(risk_exemption),
+        ..safety
+    }
+}
+
 const fn paths_safety(
     paths: &'static [&'static str],
     safety: CommandSafetySpec,
@@ -648,6 +658,62 @@ const FUZZ_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
         FUZZ_MEASUREMENT_PATHS,
         guarded_safety(FUZZ_DANGEROUS_FLAGS),
         "read-only fuzz planning/execution contract by default; --allow-destructive infers isolated mode and attaches an auditable homeboy/isolation-proof/v1 unless one is supplied",
+    ),
+];
+
+const GIT_ISSUE_WRITE_PATHS: &[&str] =
+    &["issue create", "issue comment", "issue close", "issue edit"];
+const GIT_PR_WRITE_PATHS: &[&str] = &[
+    "pr create",
+    "pr edit",
+    "pr comment",
+    "pr refresh",
+    "pr policy open",
+];
+
+const GIT_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        GIT_ISSUE_WRITE_PATHS,
+        with_risk_exemption(
+            operator_safety(None, &[]),
+            "the issue subcommand is the explicit GitHub write action; no dry-run contract exists yet",
+        ),
+        "mutates GitHub issue state through the configured repository",
+    ),
+    paths_safety(
+        GIT_PR_WRITE_PATHS,
+        with_risk_exemption(
+            operator_safety(None, &[]),
+            "the PR subcommand is the explicit GitHub write action; no dry-run contract exists yet",
+        ),
+        "mutates GitHub pull request state or branch state",
+    ),
+    paths_safety(
+        &["pr fleet", "pr land"],
+        operator_safety(Some("--dry-run"), &["--apply", "--delete-branch"]),
+        "reports by default or with --dry-run; apply/merge flags mutate PR state",
+    ),
+];
+
+const REFACTOR_SOURCE_REWRITE_PATHS: &[&str] = &[
+    "rename",
+    "add",
+    "move",
+    "propagate",
+    "transform",
+    "decompose",
+];
+
+const REFACTOR_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        REFACTOR_SOURCE_REWRITE_PATHS,
+        guarded_mutating_safety(&["--write"]),
+        "reports a plan by default; pass --write to rewrite source files",
+    ),
+    paths_safety(
+        &["undo delete"],
+        mutating_safety(),
+        "deletes an undo snapshot without restoring it",
     ),
 ];
 
@@ -985,6 +1051,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             risk_exemption: None,
             dangerous_flags: REFACTOR_DANGEROUS_FLAGS,
         },
+        subcommand_safety: REFACTOR_SUBCOMMAND_SAFETY,
         ..command_spec_with_representative_argv(
             &["homeboy", "refactor", "--all"],
             lab_command_spec_with_output_notes_and_summary(

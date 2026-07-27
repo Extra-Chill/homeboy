@@ -206,42 +206,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
 
     let path = path.iter().map(String::as_str).collect::<Vec<_>>();
     match path.as_slice() {
-        ["git", "issue", "create"]
-        | ["git", "issue", "comment"]
-        | ["git", "issue", "close"]
-        | ["git", "issue", "edit"] => {
-            metadata
-                .operator_mutating("mutates GitHub issue state through the configured repository");
-            metadata.risk_exemption = Some(
-                "the issue subcommand is the explicit GitHub write action; no dry-run contract exists yet",
-            );
-        }
-        ["git", "pr", "create"]
-        | ["git", "pr", "edit"]
-        | ["git", "pr", "comment"]
-        | ["git", "pr", "refresh"]
-        | ["git", "pr", "policy", "open"] => {
-            metadata.operator_mutating("mutates GitHub pull request state or branch state");
-            metadata.risk_exemption = Some(
-                "the PR subcommand is the explicit GitHub write action; no dry-run contract exists yet",
-            );
-        }
-        ["git", "pr", "fleet"] | ["git", "pr", "land"] => {
-            metadata.operator_mutating(
-                "reports by default or with --dry-run; apply/merge flags mutate PR state",
-            );
-            metadata.dry_run_flag = Some("--dry-run");
-            metadata.dangerous_flags = vec!["--apply", "--delete-branch"];
-        }
-        ["refactor", "rename"]
-        | ["refactor", "add"]
-        | ["refactor", "move"]
-        | ["refactor", "propagate"]
-        | ["refactor", "transform"]
-        | ["refactor", "decompose"] => {
-            metadata.mutating("reports a plan by default; pass --write to rewrite source files");
-            metadata.dangerous_flags = vec!["--write"];
-        }
         ["runner", "add"]
         | ["runner", "enable"]
         | ["runner", "set"]
@@ -353,9 +317,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.risk_exemption = Some(
                 "push is the explicit remote publication action; no dry-run contract exists yet",
             );
-        }
-        ["refactor", "undo", "delete"] => {
-            metadata.mutating("deletes an undo snapshot without restoring it");
         }
         _ => {}
     }
