@@ -4,6 +4,44 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.321.0] - 2026-07-27
+
+### Added
+- add capability handshake contract
+- project typed repair actions
+
+### Changed
+- drop the Windows release target and its pre-tag build gate
+- retain Cook retry ownership
+- format capability handshake
+- Suppress lsof mount warnings during workspace prune
+- Reconcile terminal Lab workspace lifecycle leases
+- preserve hashless rig source fixture
+
+### Fixed
+- preserve cloned extension shared assets
+- select changed sources that carry their own inline tests
+- persist staging phase latency
+- preserve newer recovery runtime
+- validate prepared source outputs
+- clarify explicit runner resource guidance
+- compact nested command output
+- recognize monorepo member sources in changed-scope drift
+- leave a resumable command when a cook seal loses admission
+- make cook placement guidance and runtime behavior agree
+- name admission owners and queue uncoordinated callers
+- make Lab admission reservations self-reconciling and nameable
+- always emit the durable run id on detached handoff
+- announce Cook run identity to non-TTY callers
+- publish Cook identity before materialization
+- record linked rig content provenance
+- keep stale status reads bounded
+- preserve Lab recovery on hot controllers
+- preflight package installs
+- propagate caller cancellation into bounded remote probes
+- bound read-only remote probes and label partial results
+- answer controller-local status without the runner
+
 ## [0.320.0] - 2026-07-27
 
 ### Added
