@@ -97,12 +97,13 @@ pub use spec::{
     DependencyMaterializationStepSpec, DiscoverSpec, ExecutableRequirementSpec,
     FilesystemAssertionKind, FilesystemAssertionSpec, NewerThanSpec,
     NormalizedDependencyMaterializationStep, PatchOp, PipelineStep, RigRequirementsSpec,
-    RigResourcesSpec, RigSpec, RunnerToolRequirementSpec, ServiceKind, ServiceSpec, SharedPathOp,
-    SharedPathSpec, StackOp, SymlinkSpec, TimeSource, TraceConfig, TraceDependencySpec,
-    TraceExperimentArtifactSpec, TraceExperimentCommandSpec, TraceExperimentSpec,
-    TraceGuardrailSpec, TraceNativePublicPreviewSpec, TracePhaseTemplateSpec,
+    RigResourceRetentionSpec, RigResourcesSpec, RigSpec, RunnerToolRequirementSpec, ServiceKind,
+    ServiceSpec, SharedPathOp, SharedPathSpec, StackOp, SymlinkSpec, TimeSource, TraceConfig,
+    TraceDependencySpec, TraceExperimentArtifactSpec, TraceExperimentCommandSpec,
+    TraceExperimentSpec, TraceGuardrailSpec, TraceNativePublicPreviewSpec, TracePhaseTemplateSpec,
     TracePreviewAssetFanoutSpec, TraceProfileSpec, TracePublicPreviewMode, TracePublicPreviewSpec,
-    TraceVariantSpec, WorkloadSpec,
+    TraceVariantSpec, WorkloadSpec, RIG_RESOURCE_CLASSES, RIG_RESOURCE_CLASS_EXCLUSIVE,
+    RIG_RESOURCE_CLASS_PATHS, RIG_RESOURCE_CLASS_PORTS, RIG_RESOURCE_CLASS_PROCESS_PATTERNS,
 };
 pub use stack::{
     plan_stack_sync, run_component_sync, run_sync, RigStackPlanEntry, RigStackSyncEntry,

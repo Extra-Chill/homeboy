@@ -87,7 +87,7 @@ pub struct RigSourceSummary {
 pub struct RigShowOutput {
     pub command: &'static str,
     pub rig: RigSpec,
-    #[serde(skip_serializing_if = "RigResourcesSpec::is_empty")]
+    #[serde(skip_serializing_if = "RigResourcesSpec::is_unset")]
     pub resources: RigResourcesSpec,
 }
 
@@ -215,6 +215,7 @@ mod tests {
                 paths: vec!["/Users/user/Developer/studio".to_string()],
                 ports: vec![9724],
                 process_patterns: vec!["wordpress-server-child.mjs".to_string()],
+                ..Default::default()
             },
         };
 

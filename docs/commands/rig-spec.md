@@ -271,6 +271,8 @@ Managed services are detached, tracked by PID in rig state, and logged under `~/
 | `paths` | array | Filesystem paths the rig mutates or requires exclusively. |
 | `ports` | array | TCP ports the rig binds or assumes ownership of. |
 | `process_patterns` | array | Process command-line substrings the rig may stop or inspect. |
+| `lifecycle` | object | Lifecycle retention defaults applied to every class above. Optional. |
+| `lifecycle_by_class` | object | Per-class retention overrides keyed by `exclusive`, `paths`, `ports`, `process_patterns`. Optional. |
 
 ```jsonc
 {
@@ -286,6 +288,43 @@ Managed services are detached, tracked by PID in rig state, and logged under `~/
 Use `${env.NAME}` in `exclusive` tokens when a rig needs a namespace-scoped logical lock for parallel-safe runs. Unset environment variables expand to an empty string, matching other rig string expansion fields, and unknown token families remain literal.
 
 Leases guard concurrent active commands; they are not long-lived ownership records after the command exits.
+
+### Resource Retention (`lifecycle` / `lifecycle_by_class`)
+
+Every rig resource Homeboy records in a run's resource lifecycle index carries a
+cleanup policy. Without a declaration that policy is `manual` with no TTL — the
+operator reclaims the resource by hand. Declare retention to say otherwise.
+
+| Field | Type | Description |
+|---|---|---|
+| `ttl` | string | ISO-8601 duration after which the resource is reclaimable, e.g. `PT1H`, `P30D`. |
+| `cleanup_policy` | string | One of `preserve`, `manual`, `delete_after_ttl`, `delete_on_success`, `delete_on_terminal`. |
+
+```jsonc
+{
+  "resources": {
+    "paths": ["~/Sites/example/wp-content/plugins"],
+    "ports": [9724],
+    // Default for every class declared above.
+    "lifecycle": { "cleanup_policy": "delete_on_terminal" },
+    // This port lease expires after an hour; paths keep the default.
+    "lifecycle_by_class": {
+      "ports": { "ttl": "PT1H", "cleanup_policy": "delete_after_ttl" }
+    }
+  }
+}
+```
+
+Resolution order per class is `lifecycle_by_class.<class>` → `lifecycle` →
+`manual` with no TTL. Unset fields in an override inherit from `lifecycle`, so
+a class can override the policy while keeping the default TTL.
+
+Both fields are optional. A spec that omits them produces exactly the lifecycle
+records it produced before retention was declarable.
+
+`delete_after_ttl` requires a `ttl`. A policy declared without one is reported by
+`homeboy rig lint` and recorded as `manual`, so a misdeclaration never silently
+deletes anything or drops the run's lifecycle index.
 
 ## `SymlinkSpec`
 

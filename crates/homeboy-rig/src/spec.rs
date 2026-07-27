@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use homeboy_core::resource_cleanup_intent::ResourceCleanupIntent;
+use homeboy_core::resource_lifecycle_index::ResourceCleanupPolicy;
 use homeboy_extension::trace::TraceProbeConfig;
 use homeboy_extension::trace::TraceSpanMetadata;
 use std::collections::{BTreeMap, HashMap};
@@ -77,7 +78,7 @@ pub struct RigSpec {
     ///
     /// Phase 1 is declarative only: these are parsed, validated by serde, and
     /// displayed for operators. Runtime lock/conflict enforcement is deferred.
-    #[serde(default, skip_serializing_if = "RigResourcesSpec::is_empty")]
+    #[serde(default, skip_serializing_if = "RigResourcesSpec::is_unset")]
     pub resources: RigResourcesSpec,
 
     /// Rig-owned resource lifecycle defaults consumed when Homeboy emits
@@ -298,14 +299,95 @@ pub struct RigResourcesSpec {
     /// Process command-line substrings the rig may stop or inspect.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub process_patterns: Vec<String>,
+
+    /// Lifecycle retention defaults applied to every declared resource class
+    /// when Homeboy emits resource lifecycle index records.
+    ///
+    /// Absent fields keep the historical posture: no `ttl`, `manual` cleanup
+    /// policy, which means an operator reclaims the resource by hand.
+    #[serde(default, skip_serializing_if = "RigResourceRetentionSpec::is_empty")]
+    pub lifecycle: RigResourceRetentionSpec,
+
+    /// Per-class lifecycle overrides keyed by resource class: `exclusive`,
+    /// `paths`, `ports`, `process_patterns`.
+    ///
+    /// Resolution order is override → `lifecycle` default → historical
+    /// `manual`/no-ttl behavior, so a rig can declare "this port lease expires
+    /// after an hour" without changing how its paths are retained.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub lifecycle_by_class: BTreeMap<String, RigResourceRetentionSpec>,
 }
 
+/// Resource class key for [`RigResourcesSpec::exclusive`].
+pub const RIG_RESOURCE_CLASS_EXCLUSIVE: &str = "exclusive";
+/// Resource class key for [`RigResourcesSpec::paths`].
+pub const RIG_RESOURCE_CLASS_PATHS: &str = "paths";
+/// Resource class key for [`RigResourcesSpec::ports`].
+pub const RIG_RESOURCE_CLASS_PORTS: &str = "ports";
+/// Resource class key for [`RigResourcesSpec::process_patterns`].
+pub const RIG_RESOURCE_CLASS_PROCESS_PATTERNS: &str = "process_patterns";
+
+/// Every resource class a rig can declare lifecycle retention for.
+pub const RIG_RESOURCE_CLASSES: [&str; 4] = [
+    RIG_RESOURCE_CLASS_EXCLUSIVE,
+    RIG_RESOURCE_CLASS_PATHS,
+    RIG_RESOURCE_CLASS_PORTS,
+    RIG_RESOURCE_CLASS_PROCESS_PATTERNS,
+];
+
 impl RigResourcesSpec {
+    /// True when no resource is declared. Lease acquisition and lifecycle
+    /// emission both gate on this, so retention-only declarations must not
+    /// change the answer.
     pub fn is_empty(&self) -> bool {
         self.exclusive.is_empty()
             && self.paths.is_empty()
             && self.ports.is_empty()
             && self.process_patterns.is_empty()
+    }
+
+    /// True when the whole block carries no information — used as the serde
+    /// skip predicate so a retention-only block still round-trips to disk.
+    pub fn is_unset(&self) -> bool {
+        self.is_empty() && self.lifecycle.is_empty() && self.lifecycle_by_class.is_empty()
+    }
+
+    /// Effective retention for one resource class.
+    pub fn retention_for_class(&self, class: &str) -> RigResourceRetentionSpec {
+        match self.lifecycle_by_class.get(class) {
+            Some(override_spec) => override_spec.or(&self.lifecycle),
+            None => self.lifecycle.clone(),
+        }
+    }
+}
+
+/// Lifecycle retention a rig declares for a resource class.
+///
+/// Both fields are optional and both default to the historical behavior, so
+/// existing rig specs deserialize and behave exactly as before.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RigResourceRetentionSpec {
+    /// ISO-8601 duration after which the resource is reclaimable, e.g. `PT1H`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+
+    /// Cleanup policy recorded in the resource lifecycle index. Defaults to
+    /// `manual` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_policy: Option<ResourceCleanupPolicy>,
+}
+
+impl RigResourceRetentionSpec {
+    pub fn is_empty(&self) -> bool {
+        self.ttl.is_none() && self.cleanup_policy.is_none()
+    }
+
+    /// Fill unset fields from `fallback`.
+    pub fn or(&self, fallback: &Self) -> Self {
+        Self {
+            ttl: self.ttl.clone().or_else(|| fallback.ttl.clone()),
+            cleanup_policy: self.cleanup_policy.or(fallback.cleanup_policy),
+        }
     }
 }
 

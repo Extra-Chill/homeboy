@@ -179,6 +179,32 @@ as safe and declared by the rig spec, and it refuses broader environment
 materialization. `check` remains read-only; `repair` is the middle path for safe
 state correction; `up` is the full mutating setup pipeline.
 
+Every repair is ownership-checked. Repair never removes a file, directory, or
+symlink this rig did not create, and never signals a process it did not start.
+
+| Declared class | Coverage |
+|---|---|
+| `symlinks` | **Repaired.** Creates missing links and relinks drifted ones. A real file or directory at the link path is reported `blocked`, never removed. |
+| `shared_paths` | **Repaired** through the declared `ensure` / `cleanup` ops. Recreates a missing link, relinks or removes a link this rig owns, drops stale ownership records. A symlink this rig does not own, or a missing shared target, is reported `blocked`. |
+| `services` | **Repaired** for stale state only — a PID this rig recorded that is no longer alive. Running services are left alone. Repair does not start services (that is `up`), and adopted `external` services are reported, never signalled. |
+| `resources.paths` | Reported. Present paths are `unchanged`; missing ones are `skipped` — repair does not create paths whose shape the rig never described. |
+| `resources.ports` | Reported `skipped`. Port ownership is declarative; repair does not bind, probe, or reclaim ports. |
+| `resources.process_patterns` | Reported `skipped`. Repair does not signal matched processes. |
+| `resources.exclusive` | Reported `skipped`. Exclusive tokens are lease-scoped; repair does not adjust rig leases. |
+
+Each entry in the report carries a status and a `detail` explaining what
+happened:
+
+| Status | Meaning | Exit code |
+|---|---|---|
+| `repaired` | Drift this rig owned and corrected. | 0 |
+| `unchanged` | Already healthy. | 0 |
+| `skipped` | Declared, but outside what repair manages. The `detail` says what to run instead. | 0 |
+| `blocked` | Drift that needs manual attention — repair refuses to act. | 1 |
+
+The report totals each status (`repaired`, `unchanged`, `skipped`, `blocked`).
+`success` is false, and the command exits 1, only when something is `blocked`.
+
 ### `status`
 
 ```sh

@@ -83,6 +83,7 @@ fn test_state_round_trips_with_materialized_ownership() {
                 paths: vec!["/tmp/studio".to_string()],
                 ports: vec![9724],
                 process_patterns: vec!["app-server-child".to_string()],
+                ..Default::default()
             },
             components: Default::default(),
         }),

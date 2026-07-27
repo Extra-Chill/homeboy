@@ -140,6 +140,8 @@ pub fn cleanup_shared_paths(rig: &RigSpec) -> Result<()> {
     fs_step::cleanup_shared_paths(rig)
 }
 
+pub(super) use fs_step::{repair_shared_paths, SharedPathRepair, SharedPathRepairStatus};
+
 fn run_ordered_steps(
     rig: &RigSpec,
     name: &str,

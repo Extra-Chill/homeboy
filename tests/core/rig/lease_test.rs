@@ -68,15 +68,14 @@ fn resources() -> RigResourcesSpec {
         paths: vec!["~/Developer/studio".to_string()],
         ports: vec![9724],
         process_patterns: vec!["app-server-child.mjs".to_string()],
+        ..Default::default()
     }
 }
 
 fn namespaced_resources(namespace_env: &str) -> RigResourcesSpec {
     RigResourcesSpec {
         exclusive: vec![format!("studio-runtime:${{env.{}}}", namespace_env)],
-        paths: Vec::new(),
-        ports: Vec::new(),
-        process_patterns: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -169,8 +168,7 @@ fn test_acquire_active_run_lease_expands_settings_in_resources() {
         let resources = RigResourcesSpec {
             exclusive: vec!["fixture:${env.HOMEBOY_SETTINGS_FIXTURE_NAMESPACE}".to_string()],
             paths: vec!["/tmp/fixture-${env.HOMEBOY_SETTINGS_FIXTURE_NAMESPACE}".to_string()],
-            ports: Vec::new(),
-            process_patterns: Vec::new(),
+            ..Default::default()
         };
         let studio = rig("studio", resources.clone());
         let studio_bfb = rig("studio-bfb", resources);

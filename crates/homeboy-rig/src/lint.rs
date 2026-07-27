@@ -521,6 +521,7 @@ fn portability_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
             continue;
         };
         failures.extend(shared_path_failures(root, file, &value));
+        failures.extend(resource_retention_failures(root, file, &value));
     }
 
     Ok(failures)
@@ -581,6 +582,66 @@ fn shared_path_failures(root: &Path, file: &Path, rig: &serde_json::Value) -> Ve
         }
     }
     failures
+}
+
+/// `delete_after_ttl` without a `ttl` is contract-invalid: the lifecycle record
+/// would fail validation and the run's whole lifecycle index would be dropped.
+/// Catch it at lint time instead of losing the artifact at runtime.
+fn resource_retention_failures(root: &Path, file: &Path, rig: &serde_json::Value) -> Vec<String> {
+    let rel = display_relative(root, file);
+    let Some(resources) = rig.get("resources").and_then(|value| value.as_object()) else {
+        return Vec::new();
+    };
+
+    let mut failures = Vec::new();
+
+    if let Some(lifecycle) = resources.get("lifecycle") {
+        failures.extend(retention_failure(&rel, "resources.lifecycle", lifecycle));
+    }
+    if let Some(by_class) = resources.get("lifecycle_by_class") {
+        match by_class.as_object() {
+            Some(classes) => {
+                for (class, retention) in classes {
+                    if !crate::spec::RIG_RESOURCE_CLASSES.contains(&class.as_str()) {
+                        failures.push(format!(
+                            "{rel}: resources.lifecycle_by_class has unknown resource class '{class}'"
+                        ));
+                        continue;
+                    }
+                    failures.extend(retention_failure(
+                        &rel,
+                        &format!("resources.lifecycle_by_class.{class}"),
+                        retention,
+                    ));
+                }
+            }
+            None => failures.push(format!(
+                "{rel}: resources.lifecycle_by_class must be an object"
+            )),
+        }
+    }
+
+    failures
+}
+
+fn retention_failure(rel: &str, label: &str, retention: &serde_json::Value) -> Option<String> {
+    let Some(object) = retention.as_object() else {
+        return Some(format!("{rel}: {label} must be an object"));
+    };
+    let policy = object
+        .get("cleanup_policy")
+        .and_then(|value| value.as_str());
+    let ttl = object
+        .get("ttl")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|ttl| !ttl.is_empty());
+    if policy == Some("delete_after_ttl") && ttl.is_none() {
+        return Some(format!(
+            "{rel}: {label} declares delete_after_ttl without a ttl"
+        ));
+    }
+    None
 }
 
 fn workload_reference_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
@@ -1228,6 +1289,69 @@ mod tests {
         let error = portability_step.error.as_ref().expect("error");
         assert!(error.contains("~/Developer"));
         assert!(error.contains("shared_paths[0]"));
+    }
+
+    #[test]
+    fn package_lint_reports_delete_after_ttl_without_ttl() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("retention");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "retention",
+                "resources": {
+                    "ports": [9724],
+                    "lifecycle_by_class": {
+                        "ports": {"cleanup_policy": "delete_after_ttl"},
+                        "sockets": {"ttl": "PT1H"}
+                    }
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = portability_step(&outcome);
+
+        assert_eq!(step.status, "fail");
+        let error = step.error.as_ref().expect("error");
+        assert!(error.contains("delete_after_ttl without a ttl"));
+        assert!(error.contains("unknown resource class 'sockets'"));
+    }
+
+    #[test]
+    fn package_lint_accepts_declared_resource_retention() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("retention");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "retention",
+                "resources": {
+                    "ports": [9724],
+                    "lifecycle": {"cleanup_policy": "delete_on_terminal"},
+                    "lifecycle_by_class": {
+                        "ports": {"ttl": "PT1H", "cleanup_policy": "delete_after_ttl"}
+                    }
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = portability_step(&outcome);
+
+        assert!(
+            !step
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("delete_after_ttl"),
+            "a ttl-backed delete_after_ttl declaration is valid: {:?}",
+            step.error
+        );
     }
 
     #[test]
