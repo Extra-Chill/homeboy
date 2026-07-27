@@ -34,6 +34,12 @@ const PROMOTION_PROVIDER_COMMAND_ENV: &str = "HOMEBOY_AGENT_TASK_PROMOTION_COMMA
 /// retained evidence cannot grow without bound (#5077).
 const PROMOTION_CAPTURE_LIMIT_BYTES: usize = 65_536;
 const PROMOTION_PROVIDER_RESPONSE_LIMIT_BYTES: usize = 1_048_576;
+/// A provider is a control-plane dependency. Bound a silent command so a Cook
+/// can persist its failure and release its exactly-once claim for recovery.
+#[cfg(not(test))]
+const PROMOTION_PROVIDER_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const PROMOTION_PROVIDER_TIMEOUT: Duration = Duration::from_millis(100);
 
 struct ProviderCapturedStream {
     response: Vec<u8>,
@@ -674,6 +680,8 @@ pub(crate) fn run_provider_command(
     let stderr_capture_thread =
         std::thread::spawn(move || capture_provider_stream(stderr, None, None));
     let mut response_overflow = false;
+    let started_at = std::time::Instant::now();
+    let mut timed_out = false;
     let status = loop {
         if overflow_receiver.try_recv().is_ok() {
             response_overflow = true;
@@ -705,6 +713,21 @@ pub(crate) fn run_provider_command(
             )
         })? {
             break status;
+        }
+        if started_at.elapsed() >= PROMOTION_PROVIDER_TIMEOUT {
+            timed_out = true;
+            process.kill().map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("terminate timed out agent-task promotion provider command".to_string()),
+                )
+            })?;
+            break process.wait().map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("wait for timed out agent-task promotion provider command".to_string()),
+                )
+            })?;
         }
         std::thread::sleep(Duration::from_millis(10));
     };
@@ -762,6 +785,27 @@ pub(crate) fn run_provider_command(
                 stdout: report.stdout.clone(),
                 stderr: report.stderr.clone(),
                 truncated: true,
+            }),
+        ));
+    }
+    if timed_out {
+        return Err(Error::validation_invalid_argument_with_evidence(
+            "promotion_provider.command",
+            format!(
+                "promotion provider command timed out after {} seconds: {}",
+                PROMOTION_PROVIDER_TIMEOUT.as_secs(),
+                display
+            ),
+            None,
+            None,
+            Some(homeboy_core::error::CommandEvidence {
+                command: display,
+                cwd: invocation.cwd.clone(),
+                location: Some("local".to_string()),
+                exit_code,
+                stdout: report.stdout.clone(),
+                stderr: report.stderr.clone(),
+                truncated: report.capture.stdout.truncated || report.capture.stderr.truncated,
             }),
         ));
     }

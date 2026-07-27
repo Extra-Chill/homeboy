@@ -688,6 +688,10 @@ mod tests {
             ["homeboy", "agent-task", "status", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "logs", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "artifacts", "agent-task-123"].as_slice(),
+            ["homeboy", "agent-task", "evidence", "agent-task-123"].as_slice(),
+            ["homeboy", "agent-task", "diagnose", "agent-task-123"].as_slice(),
+            ["homeboy", "agent-task", "review", "agent-task-123"].as_slice(),
+            ["homeboy", "agent-task", "reconcile", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "list"].as_slice(),
             ["homeboy", "agent-task", "active"].as_slice(),
             ["homeboy", "agent-task", "latest"].as_slice(),
@@ -724,12 +728,10 @@ mod tests {
     }
 
     #[test]
-    fn agent_task_hydration_and_review_remain_resource_managed() {
-        // Hydration and review can load full evidence or run promotion work, so
-        // unlike metadata inspection they retain their portability admission.
+    fn agent_task_mutating_recovery_commands_remain_resource_managed() {
+        // Bounded readers are exempt above; replay and promotion still execute
+        // provider or worktree operations and retain resource admission.
         for args in [
-            ["homeboy", "agent-task", "evidence", "agent-task-123"].as_slice(),
-            ["homeboy", "agent-task", "diagnose", "agent-task-123"].as_slice(),
             [
                 "homeboy",
                 "agent-task",
