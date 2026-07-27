@@ -448,7 +448,11 @@ where
                 record.metadata[key] = value.clone();
             }
         }
-        if execution_runner_id.as_deref() == existing.runner_id() {
+        if execution_runner_id.as_deref().is_some_and(|runner_id| {
+            existing
+                .runner_id()
+                .is_none_or(|existing_runner_id| existing_runner_id == runner_id)
+        }) {
             // A foreground daemon binds its job before launching runner-local
             // `run-plan`. Keep that transport identity when run-plan replaces
             // the staged record, or terminal projection cannot join its daemon
@@ -456,14 +460,20 @@ where
             if let Some(runner_job_id) = existing.runner_job_id() {
                 record.metadata["runner_job_id"] = json!(runner_job_id);
             }
+            // The runner can re-submit after its workspace has been reaped,
+            // including before the handoff acceptance projection is durable.
+            // Its local pin is execution evidence only; continuations remain
+            // owned by the controller seat that created this record. Fail closed
+            // if that controller pin is unavailable rather than replacing it
+            // with the runner's host-local executable.
+            preserved_controller_runtime = Some(controller_runtime_for_runner_execution(
+                &existing,
+                execution_runner_id.as_deref(),
+            )?);
             if existing.lab_handoff.as_ref().is_some_and(|handoff| {
                 handoff.state == AgentTaskLabHandoffState::Accepted
                     && handoff.authority == AgentTaskLabHandoffAuthority::RunnerDaemon
             }) {
-                preserved_controller_runtime = Some(controller_runtime_for_runner_execution(
-                    &existing,
-                    execution_runner_id.as_deref(),
-                )?);
                 record.lab_handoff = existing.lab_handoff;
             }
         }
@@ -524,14 +534,12 @@ pub(crate) fn controller_runtime_for_runner_execution(
     existing: &AgentTaskRunRecord,
     execution_runner_id: Option<&str>,
 ) -> Result<Value> {
-    if execution_runner_id != existing.runner_id()
-        || !existing.lab_handoff.as_ref().is_some_and(|handoff| {
-            handoff.state == AgentTaskLabHandoffState::Accepted
-                && handoff.authority == AgentTaskLabHandoffAuthority::RunnerDaemon
-        })
+    if existing
+        .runner_id()
+        .is_some_and(|runner_id| Some(runner_id) != execution_runner_id)
     {
         return Err(Error::internal_unexpected(
-            "runner execution identity was requested for a non-accepted Lab handoff",
+            "runner execution identity does not match the controller-owned Lab handoff",
         ));
     }
     existing

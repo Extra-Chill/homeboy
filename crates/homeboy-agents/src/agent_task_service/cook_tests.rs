@@ -5190,6 +5190,42 @@ fn finalization_operation_claim_revalidates_completed_publication() {
 }
 
 #[test]
+fn review_form_follow_up_finalization_replays_its_durable_claim_after_restart() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-review-form-restart";
+        let run_id = "cook-review-form-restart-attempt-2";
+        let plan = AgentTaskPlan::new(cook_id, Vec::new());
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+        agent_task_lifecycle::record_cook_attempt(cook_id, 2, run_id).unwrap();
+        let options = promotion_claim_options(cook_id, run_id);
+        let promotion = promotion(run_id);
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..2 {
+            let calls = Arc::clone(&calls);
+            let mut finalize =
+                move |_: &AgentTaskCookServiceOptions, _: &str, _: &AgentTaskPromotionReport| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(serde_json::json!({"status": "review_ready", "review_form": true}))
+                };
+            finalize_with_operation_claim(&options, run_id, &promotion, &mut finalize).unwrap();
+        }
+
+        let operation_key = finalization_operation_key(run_id, &promotion);
+        let claim = agent_task_lifecycle::operation_claim(run_id, &operation_key)
+            .unwrap()
+            .expect("review-form finalization claim");
+        assert_eq!(claim.state, agent_task_lifecycle::ClaimState::Completed);
+        assert_eq!(claim.result.unwrap()["review_form"], true);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "restart only revalidates publication"
+        );
+    });
+}
+
+#[test]
 fn duplicate_controller_passes_revalidate_one_promoted_candidate() {
     // #8357 acceptance (AC5 + AC7): duplicate/concurrent controller passes over
     // the same candidate must produce exactly one promotion checkpoint and
