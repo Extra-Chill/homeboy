@@ -298,6 +298,24 @@ pub struct DependencyInstallPlanStep {
     /// Portable install invocation the runner can execute without receiving a
     /// controller-local extension path.
     pub invocation: DependencyInstallInvocation,
+    /// Filesystem outputs that prove this provider's install/build preparation
+    /// is present in a materialized workspace.
+    pub outputs: Vec<DependencyInstallOutput>,
+}
+
+/// A provider-declared output required before a prepared source can be reused.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DependencyInstallOutput {
+    pub path: String,
+    pub kind: DependencyInstallOutputKind,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyInstallOutputKind {
+    Path,
+    File,
+    Directory,
 }
 
 /// An install command suitable for crossing a controller/runner boundary.
@@ -357,6 +375,7 @@ pub fn dependency_install_plan(path: &Path) -> Result<Vec<DependencyInstallPlanS
             steps.push(DependencyInstallPlanStep {
                 provider_id: status.package_manager,
                 invocation: dependency_install_invocation(command.argv())?,
+                outputs: provider.install_outputs()?,
             });
         }
     }
