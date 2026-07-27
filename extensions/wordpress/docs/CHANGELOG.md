@@ -2,6 +2,12 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.7] - 2026-07-27
+
+### Fixed
+- preserve authoritative PHPUnit failures
+- normalize PHPUnit sidecar status
+
 ## [3.34.6] - 2026-07-27
 
 ### Fixed
