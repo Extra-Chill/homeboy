@@ -1,24 +1,15 @@
 //! Stable facade for runner configuration, connection, execution, and lab
 //! offload APIs.
 //!
-//! New command and integration code MUST import runner APIs from this module
-//! instead of depending directly on `core::runner::*`. The runner module tree
-//! itself only exposes a hand-picked surface (most submodules are private),
-//! but routing every consumer through this facade keeps the contract explicit
-//! and lets the underlying module layout evolve without touching external
-//! callers.
+//! The runner module tree only exposes a hand-picked surface (most submodules
+//! are private). Routing consumers through this facade keeps that contract
+//! explicit and lets the underlying module layout evolve without touching
+//! external callers. Some in-tree callers still import from the crate root
+//! directly for names this facade does not re-export.
 //!
-//! The exports are organised into nested API groups by operation:
-//!
-//! - top-level: stable identity, registry, capability, and session contracts
-//!   that callers reach for most often.
-//! - [`registry`]: CRUD helpers over the runner config registry.
-//! - [`connection`]: connect/disconnect/status helpers for runner sessions.
-//! - [`execution`]: exec entry points and option/output contracts.
-//! - [`workspace`]: workspace sync and patch application contracts.
-//! - [`evidence`]: artifact evidence/mirroring helpers.
-//! - [`capabilities`]: lab runner capability evaluation contracts.
-//! - [`lab_offload`]: lab offload entry points and contracts.
+//! Exports are a single flat list covering stable identity, registry,
+//! connection, execution, workspace, evidence, capability, and lab offload
+//! contracts.
 
 // ----------------------------------------------------------------------------
 // Stable top-level contracts
@@ -79,8 +70,7 @@ pub use crate::{
     RunnerWorkspaceUpdateOutput, RuntimeMaterializationStatus,
 };
 
-// Registry CRUD entry points (re-exported at the root for ergonomics; also
-// available via the explicit `registry` group below).
+// Registry CRUD entry points.
 pub use crate::{
     apply_secret_env_migration, create, delete_safe, effective_env, enable_server_runner, exists,
     list, load, merge, secret_env_migration_plan,
@@ -91,87 +81,3 @@ pub use crate::{
 // (currently `commands::runs::remote`) compile, but do not expose them as
 // public API.
 pub use crate::daemon_api_get;
-
-// ----------------------------------------------------------------------------
-// Explicit API groups
-// ----------------------------------------------------------------------------
-
-/// CRUD helpers over the runner config registry.
-pub mod registry {
-    pub use crate::{
-        apply_secret_env_migration, create, delete_safe, effective_env, enable_server_runner,
-        exists, list, load, merge, resolve_default_lab_runner, secret_env_migration_plan, Runner,
-        RunnerKind, RunnerSpec,
-    };
-}
-
-/// Connect/disconnect/status helpers for runner sessions.
-pub mod connection {
-    pub use crate::{
-        connect, connect_reverse, connect_with_live_lease_adoption, connect_with_orphan_adoption,
-        disconnect, run_reverse_worker, status, statuses, ReverseRunnerConnectOptions,
-        ReverseRunnerWorkerOptions, ReverseRunnerWorkerOutput, RunnerAvailability,
-        RunnerChangedRuntimePath, RunnerConnectReport, RunnerDisconnectReport, RunnerFailureKind,
-        RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
-        RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode,
-    };
-}
-
-/// Exec entry points and option/output contracts.
-pub mod execution {
-    pub use crate::{
-        exec, promote_runner_exec_artifact_dirs, promote_runner_exec_artifacts,
-        promote_runner_exec_summaries, promoted_output, runner_exec_failure_error,
-        runner_exec_structured_summary, RunnerExecDiagnostics, RunnerExecMode, RunnerExecOptions,
-        RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecStructuredSummary,
-        RunnerResourceMetrics,
-    };
-}
-
-/// Workspace sync and patch application contracts.
-pub mod workspace {
-    pub use crate::{
-        apply_change_artifact, apply_workspace_patch, list_workspaces,
-        plan_managed_runner_source_sync, plan_managed_runner_source_syncs, plan_workspace_pull,
-        prune_workspaces, pull_workspace, sync_workspace, workspace_snapshots,
-        ManagedRunnerSourceSyncPlan, RunnerWorkspaceApplyOptions, RunnerWorkspaceApplyOutput,
-        RunnerWorkspaceApplyStatus, RunnerWorkspaceListEntry, RunnerWorkspaceListOutput,
-        RunnerWorkspaceMaterializationPlan, RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions,
-        RunnerWorkspacePruneOutput, RunnerWorkspacePruneSkippedEntry, RunnerWorkspacePullOptions,
-        RunnerWorkspacePullOutput, RunnerWorkspacePullPlan, RunnerWorkspaceSnapshotAppliedFilters,
-        RunnerWorkspaceSnapshotEntry, RunnerWorkspaceSnapshotFilters,
-        RunnerWorkspaceSnapshotsOutput, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
-        RunnerWorkspaceSyncOutput,
-    };
-}
-
-/// Artifact evidence and mirroring helpers.
-pub mod evidence {
-    pub use crate::{
-        download_remote_artifact, is_remote_runner_artifact_path,
-        is_reportable_artifact_evidence_path, is_retrievable_runner_artifact,
-        mirror_connected_runner_run, mirrored_runner_job_identity,
-        refresh_mirrored_daemon_evidence, reportable_artifact_evidence_path,
-        runner_artifact_store_token, runner_job_log_snapshot, RemoteArtifactDownload,
-    };
-}
-
-/// Lab runner capability evaluation contracts.
-pub mod capabilities {
-    pub use crate::{
-        evaluate_lab_runner_capabilities_for_runner, prepare_lab_runner_capability,
-        LabRunnerCapabilityContract, LabRunnerGateDecision, LabRunnerGateMode,
-        PreparedLabRunnerCapability, RunnerCapabilityPreflight, RunnerRequiredTool,
-    };
-}
-
-/// Lab offload entry points and contracts.
-pub mod lab_offload {
-    pub use crate::{
-        execute_lab_offload, lab_offload_changed_since_ref, lab_offload_metadata,
-        lab_offload_metadata_with_workspace_mapping, preflight_lab_offload_changed_since,
-        prepare_git_lab_offload_changed_since, LabJobOverrides, LabOffloadCommand,
-        LabOffloadOutcome, LabOffloadRequest, LabOffloadSourcePathMode,
-        LabOffloadWorkspaceModePolicy, LabRunnerSelectionSource,
-    };
-}
