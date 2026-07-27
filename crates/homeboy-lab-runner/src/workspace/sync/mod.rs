@@ -530,14 +530,13 @@ pub(crate) fn save_prepared_source_cache(
     remote_path: &str,
 ) -> Result<()> {
     let runner = load(runner_id)?;
-    let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "workspace_root",
-            "runner workspace cache requires workspace_root",
-            Some(runner.id.clone()),
-            None,
-        )
-    })?;
+    // The cache is a pure optimization: a hit lets the next same-commit job skip
+    // dependency hydration. A runner with no configured `workspace_root` has
+    // nowhere to keep it, which is a reason to skip caching — not to fail an
+    // otherwise-successful offload that has already hydrated its workspace.
+    let Some(workspace_root) = runner.workspace_root.as_deref() else {
+        return Ok(());
+    };
     let local_path = canonical_workspace_path(local_path)?;
     let commit = git_output(&local_path, &["rev-parse", "HEAD"])?;
     let cache = prepared_source_cache_path(workspace_root, &local_path, &commit);
