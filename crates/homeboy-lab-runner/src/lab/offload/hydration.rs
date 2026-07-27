@@ -143,7 +143,7 @@ fn hydrate_lab_workspace_dependencies_for_run(
     // and — because the probe is a raw exec — made hydration fail outright on
     // any runner not explicitly trusted with `allow_raw_exec`, even though
     // those workspaces never needed to reach the runner at all.
-    if prepared_source_view_is_ready(runner_id, remote_path)? {
+    if prepared_source_view_is_ready(runner_id, remote_path, &plan)? {
         return Ok(LabWorkspaceHydrationOutput::reused_prepared_cache(
             remote_path,
         ));
@@ -187,16 +187,35 @@ fn hydrate_lab_workspace_dependencies_for_run(
     })
 }
 
-fn prepared_source_view_is_ready(runner_id: &str, remote_path: &str) -> Result<bool> {
+fn prepared_source_view_is_ready(
+    runner_id: &str,
+    remote_path: &str,
+    plan: &[deps::DependencyInstallPlanStep],
+) -> Result<bool> {
+    let output_tests = plan
+        .iter()
+        .flat_map(|step| &step.outputs)
+        .map(|output| {
+            let path = format!("{}/{}", remote_path.trim_end_matches('/'), output.path);
+            let predicate = match output.kind {
+                deps::DependencyInstallOutputKind::Path => "-e",
+                deps::DependencyInstallOutputKind::File => "-f",
+                deps::DependencyInstallOutputKind::Directory => "-d",
+            };
+            format!("test {predicate} {}", shell::quote_arg(&path))
+        })
+        .collect::<Vec<_>>();
+    let mut checks = vec![format!(
+        "test -f {}/.homeboy/prepared-source-ready",
+        shell::quote_arg(remote_path)
+    )];
+    checks.extend(output_tests);
     let (output, exit_code) = exec(
         runner_id,
         RunnerExecOptions::raw_command(vec![
             "sh".to_string(),
             "-c".to_string(),
-            format!(
-                "test -f {}/.homeboy/prepared-source-ready",
-                shell::quote_arg(remote_path)
-            ),
+            checks.join(" && "),
         ])
         .with_cwd(remote_path)
         .without_evidence_mirror(),
@@ -719,6 +738,102 @@ mod tests {
                     .expect("provider command ran"),
                 "install\n--no-interaction\n--no-progress\n"
             );
+        });
+    }
+
+    #[test]
+    fn stale_prepared_marker_without_dependency_output_hydrates() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let path_guard = FakeBinGuard::install(
+                "fixture-tool",
+                "#!/bin/sh\nmkdir -p node_modules apps/cli/dist/cli\nprintf ready > apps/cli/dist/cli/main.mjs\n",
+            );
+            crate::create(&path_guard.local_runner_spec("lab-local"), false)
+                .expect("create local runner");
+            let project = tempfile::tempdir().expect("project");
+            let manifest = r#"{"provider":"fixture","commands":{"install":{"argv":["fixture-tool","install"]}},"outputs":[{"path":"node_modules","kind":"directory"},{"path":"apps/cli/dist/cli/main.mjs","kind":"file"}]}"#;
+            std::fs::write(project.path().join("homeboy-deps.json"), manifest).expect("manifest");
+            let remote = tempfile::tempdir().expect("remote");
+            std::fs::write(remote.path().join("homeboy-deps.json"), manifest)
+                .expect("remote manifest");
+            std::fs::create_dir_all(remote.path().join(".homeboy")).expect("marker directory");
+            std::fs::write(remote.path().join(".homeboy/prepared-source-ready"), "")
+                .expect("marker");
+
+            let output = hydrate_lab_workspace_dependencies(
+                "lab-local",
+                &project.path().display().to_string(),
+                &remote.path().display().to_string(),
+            )
+            .expect("stale marker runs hydration");
+
+            assert_eq!(output.status, "hydrated");
+            assert!(remote.path().join("node_modules").is_dir());
+            assert!(remote.path().join("apps/cli/dist/cli/main.mjs").is_file());
+        });
+    }
+
+    #[test]
+    fn prepared_marker_missing_declared_build_output_hydrates() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let path_guard = FakeBinGuard::install(
+                "fixture-tool",
+                "#!/bin/sh\nmkdir -p apps/cli/dist/cli\nprintf ready > apps/cli/dist/cli/main.mjs\n",
+            );
+            crate::create(&path_guard.local_runner_spec("lab-local"), false)
+                .expect("create local runner");
+            let project = tempfile::tempdir().expect("project");
+            let manifest = r#"{"provider":"fixture","commands":{"install":{"argv":["fixture-tool","install"]}},"outputs":[{"path":"node_modules","kind":"directory"},{"path":"apps/cli/dist/cli/main.mjs","kind":"file"}]}"#;
+            std::fs::write(project.path().join("homeboy-deps.json"), manifest).expect("manifest");
+            let remote = tempfile::tempdir().expect("remote");
+            std::fs::write(remote.path().join("homeboy-deps.json"), manifest)
+                .expect("remote manifest");
+            std::fs::create_dir_all(remote.path().join(".homeboy")).expect("marker directory");
+            std::fs::write(remote.path().join(".homeboy/prepared-source-ready"), "")
+                .expect("marker");
+            std::fs::create_dir(remote.path().join("node_modules")).expect("dependency output");
+
+            let output = hydrate_lab_workspace_dependencies(
+                "lab-local",
+                &project.path().display().to_string(),
+                &remote.path().display().to_string(),
+            )
+            .expect("missing build output runs hydration");
+
+            assert_eq!(output.status, "hydrated");
+            assert!(remote.path().join("apps/cli/dist/cli/main.mjs").is_file());
+        });
+    }
+
+    #[test]
+    fn prepared_marker_with_declared_outputs_reuses_cache() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let path_guard = FakeBinGuard::install("fixture-tool", "#!/bin/sh\nexit 99\n");
+            crate::create(&path_guard.local_runner_spec("lab-local"), false)
+                .expect("create local runner");
+            let project = tempfile::tempdir().expect("project");
+            let manifest = r#"{"provider":"fixture","commands":{"install":{"argv":["fixture-tool","install"]}},"outputs":[{"path":"node_modules","kind":"directory"},{"path":"apps/cli/dist/cli/main.mjs","kind":"file"}]}"#;
+            std::fs::write(project.path().join("homeboy-deps.json"), manifest).expect("manifest");
+            let remote = tempfile::tempdir().expect("remote");
+            std::fs::write(remote.path().join("homeboy-deps.json"), manifest)
+                .expect("remote manifest");
+            std::fs::create_dir_all(remote.path().join(".homeboy")).expect("marker directory");
+            std::fs::write(remote.path().join(".homeboy/prepared-source-ready"), "")
+                .expect("marker");
+            std::fs::create_dir_all(remote.path().join("node_modules")).expect("dependency output");
+            std::fs::create_dir_all(remote.path().join("apps/cli/dist/cli"))
+                .expect("build directory");
+            std::fs::write(remote.path().join("apps/cli/dist/cli/main.mjs"), "ready")
+                .expect("build output");
+
+            let output = hydrate_lab_workspace_dependencies(
+                "lab-local",
+                &project.path().display().to_string(),
+                &remote.path().display().to_string(),
+            )
+            .expect("validated cache avoids install");
+
+            assert_eq!(output.status, "reused_prepared_cache");
         });
     }
 

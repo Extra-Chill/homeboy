@@ -1,5 +1,8 @@
 use crate::component::Component;
-use crate::deps::{DependencyCommandResult, DependencyPackage, DependencyUpdateResult};
+use crate::deps::{
+    DependencyCommandResult, DependencyInstallOutput, DependencyInstallOutputKind,
+    DependencyPackage, DependencyUpdateResult,
+};
 use crate::extension_execution::ExtensionExecutionContext;
 use crate::{paths, Error, Result};
 use homeboy_extension_contract::ExtensionCapability;
@@ -159,6 +162,16 @@ impl DependencyProvider {
             DependencyProvider::Adapter(provider) => provider.install_command(context),
             DependencyProvider::ComponentScript(provider) => provider.install_command(context),
             DependencyProvider::Extension(provider) => provider.install_command(context),
+        }
+    }
+
+    pub(crate) fn install_outputs(&self) -> Result<Vec<DependencyInstallOutput>> {
+        match self {
+            DependencyProvider::Manifest(provider) => provider.install_outputs(),
+            DependencyProvider::Adapter(provider) => provider.install_outputs(),
+            DependencyProvider::Extension(_) | DependencyProvider::ComponentScript(_) => {
+                Ok(Vec::new())
+            }
         }
     }
 }
@@ -357,6 +370,10 @@ impl AdapterDependencyProvider {
             vec!["-c".to_string(), command.command.clone()],
             self.adapter.project_path.clone(),
         )
+    }
+
+    fn install_outputs(&self) -> Result<Vec<DependencyInstallOutput>> {
+        dependency_install_outputs(&self.adapter.package_manager().outputs)
     }
 
     fn run(&self, command: &AdapterCommand, operation: &str) -> Result<DependencyCommandResult> {
@@ -685,6 +702,24 @@ struct AdapterPackageManager {
     commands: AdapterCommands,
     #[serde(default)]
     package_identity: Option<AdapterPackageIdentity>,
+    #[serde(default)]
+    outputs: Vec<DependencyAdapterOutput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DependencyAdapterOutput {
+    path: PathBuf,
+    #[serde(default)]
+    kind: DependencyAdapterOutputKind,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+enum DependencyAdapterOutputKind {
+    #[default]
+    Path,
+    File,
+    Directory,
 }
 
 impl AdapterPackageManager {
@@ -779,6 +814,10 @@ impl ManifestDependencyProvider {
             .map(|cwd| context.path.join(cwd))
             .unwrap_or_else(|| context.path.to_path_buf());
         DependencyProviderCommand::new(program, args, cwd)
+    }
+
+    fn install_outputs(&self) -> Result<Vec<DependencyInstallOutput>> {
+        dependency_install_outputs(&self.manifest.outputs)
     }
 
     fn status_with_filter(&self, package_filter: Option<&str>) -> ProviderDependencyStatus {
@@ -892,6 +931,42 @@ struct DependencyAdapterManifest {
     packages: Vec<DependencyPackage>,
     #[serde(default)]
     commands: DependencyAdapterCommands,
+    #[serde(default)]
+    outputs: Vec<DependencyAdapterOutput>,
+}
+
+fn dependency_install_outputs(
+    outputs: &[DependencyAdapterOutput],
+) -> Result<Vec<DependencyInstallOutput>> {
+    outputs
+        .iter()
+        .map(|output| {
+            if output.path.as_os_str().is_empty()
+                || output.path.is_absolute()
+                || output
+                    .path
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+            {
+                return Err(Error::validation_invalid_argument(
+                    "dependency_provider.outputs",
+                    "dependency output paths must be non-empty and relative to the workspace",
+                    Some(output.path.display().to_string()),
+                    None,
+                ));
+            }
+            Ok(DependencyInstallOutput {
+                path: output.path.display().to_string(),
+                kind: match output.kind {
+                    DependencyAdapterOutputKind::Path => DependencyInstallOutputKind::Path,
+                    DependencyAdapterOutputKind::File => DependencyInstallOutputKind::File,
+                    DependencyAdapterOutputKind::Directory => {
+                        DependencyInstallOutputKind::Directory
+                    }
+                },
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
