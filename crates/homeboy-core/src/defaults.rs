@@ -323,6 +323,10 @@ pub struct WorktreeProviderCommands {
     /// requested handle. The result uses `list_result_mapping` and may contain one item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolve: Option<Vec<String>>,
+    /// Provider-native resolve exit statuses that mean the requested handle is
+    /// absent. All other non-zero statuses remain lookup failures.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolve_not_found_exit_codes: Vec<i32>,
     /// Discovery command and compatibility fallback for providers without
     /// `resolve`. Exact handle lookups prefer `resolve` when it is configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
