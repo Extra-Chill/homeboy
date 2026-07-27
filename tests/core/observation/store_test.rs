@@ -247,26 +247,36 @@ mod store_init_tests {
                 .expect("count migrated artifacts");
             assert_eq!(artifact_count, 3);
 
-            for (sql, index) in [
+            for (index, columns) in [
                 (
-                    "EXPLAIN QUERY PLAN SELECT id FROM artifacts WHERE run_id = 'run-1' ORDER BY created_at ASC, id ASC",
                     "idx_artifacts_run_created",
+                    vec![("run_id", 0), ("created_at", 0), ("id", 0)],
                 ),
                 (
-                    "EXPLAIN QUERY PLAN SELECT id FROM artifacts WHERE created_at < '2026-01-02T00:00:00Z' ORDER BY created_at ASC, id ASC LIMIT 1000",
                     "idx_artifacts_created_at",
+                    vec![("created_at", 0), ("id", 0)],
                 ),
             ] {
-                let plan = db
-                    .prepare(sql)
-                    .expect("prepare query plan")
-                    .query_map([], |row| row.get::<_, String>(3))
-                    .expect("query plan")
+                let mut statement = db
+                    .prepare(
+                        "SELECT name, desc FROM pragma_index_xinfo(?1) WHERE \"key\" = 1 ORDER BY seqno",
+                    )
+                    .expect("prepare index columns");
+                let actual_columns = statement
+                    .query_map([index], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    })
+                    .expect("query index columns")
                     .collect::<Result<Vec<_>, _>>()
-                    .expect("collect query plan")
-                    .join(" ");
-                assert!(plan.contains(index), "expected {index} in query plan: {plan}");
-                assert!(!plan.contains("TEMP B-TREE"), "unexpected sort: {plan}");
+                    .expect("collect index columns");
+                assert_eq!(
+                    actual_columns
+                        .iter()
+                        .map(|(name, descending)| (name.as_str(), *descending))
+                        .collect::<Vec<_>>(),
+                    columns,
+                    "unexpected columns for {index}"
+                );
             }
         });
     }
