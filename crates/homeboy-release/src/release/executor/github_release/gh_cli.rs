@@ -8,13 +8,15 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::collections::HashSet;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub(crate) const GITHUB_RELEASE_UPLOAD_TIMEOUT_ENV: &str =
     "HOMEBOY_GITHUB_RELEASE_UPLOAD_TIMEOUT_SECS";
 const DEFAULT_GITHUB_RELEASE_UPLOAD_TIMEOUT_SECS: u64 = 30 * 60;
+const GITHUB_RELEASE_DOWNLOAD_DIAGNOSTIC_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GhCommandOutput {
@@ -255,15 +257,15 @@ pub(crate) fn reconcile_release_publications(
     config: &GithubConfig,
     repo_flag: &str,
 ) -> Result<(Vec<ReleaseAssetPublication>, Vec<ReleaseAssetPublication>), String> {
-    reconcile_release_publications_with(publications, remote_assets, &mut |asset| {
-        download_release_asset_identity(github, config, repo_flag, asset)
+    reconcile_release_publications_with(publications, remote_assets, &mut |asset, expected_size| {
+        download_release_asset_identity(github, config, repo_flag, asset, expected_size)
     })
 }
 
 fn reconcile_release_publications_with(
     publications: &[ReleaseAssetPublication],
     remote_assets: &[GitHubReleaseAsset],
-    verify_digestless: &mut impl FnMut(&GitHubReleaseAsset) -> Result<(u64, String), String>,
+    verify_digestless: &mut impl FnMut(&GitHubReleaseAsset, u64) -> Result<(u64, String), String>,
 ) -> Result<(Vec<ReleaseAssetPublication>, Vec<ReleaseAssetPublication>), String> {
     let mut upload = Vec::new();
     let mut existing = Vec::new();
@@ -482,30 +484,27 @@ pub(crate) fn verify_release_publications(
     config: &GithubConfig,
     repo_flag: &str,
 ) -> Result<(), String> {
-    verify_release_publications_with(publications, assets, &mut |asset| {
-        download_release_asset_identity(github, config, repo_flag, asset)
+    verify_release_publications_with(publications, assets, &mut |asset, expected_size| {
+        download_release_asset_identity(github, config, repo_flag, asset, expected_size)
     })
 }
 
 fn verify_release_publications_with(
     publications: &[ReleaseAssetPublication],
     assets: &[GitHubReleaseAsset],
-    verify_digestless: &mut impl FnMut(&GitHubReleaseAsset) -> Result<(u64, String), String>,
+    verify_digestless: &mut impl FnMut(&GitHubReleaseAsset, u64) -> Result<(u64, String), String>,
 ) -> Result<(), String> {
     for publication in publications {
         let matches = assets
             .iter()
             .filter(|asset| asset.name == publication.target_name)
             .collect::<Vec<_>>();
-        let asset = matches
-            .first()
-            .copied()
-            .ok_or_else(|| {
-                format!(
-                    "GitHub Release is missing uploaded asset '{}'",
-                    publication.target_name
-                )
-            })?;
+        let asset = matches.first().copied().ok_or_else(|| {
+            format!(
+                "GitHub Release is missing uploaded asset '{}'",
+                publication.target_name
+            )
+        })?;
         if matches.len() != 1 {
             return Err(format!(
                 "GitHub Release has multiple assets named '{}'; canonical publication ownership is ambiguous",
@@ -525,7 +524,7 @@ fn verify_release_publications_with(
 fn verify_release_publication(
     publication: &ReleaseAssetPublication,
     asset: &GitHubReleaseAsset,
-    verify_digestless: &mut impl FnMut(&GitHubReleaseAsset) -> Result<(u64, String), String>,
+    verify_digestless: &mut impl FnMut(&GitHubReleaseAsset, u64) -> Result<(u64, String), String>,
 ) -> Result<bool, String> {
     if asset.size != publication.size {
         return Ok(false);
@@ -533,7 +532,7 @@ fn verify_release_publication(
     if let Some(digest) = canonical_remote_digest(asset)? {
         return Ok(digest == format!("sha256:{}", publication.sha256));
     }
-    let (downloaded_size, downloaded_sha256) = verify_digestless(asset)?;
+    let (downloaded_size, downloaded_sha256) = verify_digestless(asset, publication.size)?;
     Ok(downloaded_size == publication.size && downloaded_sha256 == publication.sha256)
 }
 
@@ -542,6 +541,7 @@ pub(crate) fn download_release_asset_identity(
     config: &GithubConfig,
     repo_flag: &str,
     asset: &GitHubReleaseAsset,
+    expected_size: u64,
 ) -> Result<(u64, String), String> {
     let asset_id = asset.id.ok_or_else(|| {
         format!(
@@ -549,73 +549,202 @@ pub(crate) fn download_release_asset_identity(
             asset.name
         )
     })?;
+    if asset.size != expected_size {
+        return Err(format!(
+            "GitHub Release asset '{}' has size {}, expected {}",
+            asset.name, asset.size, expected_size
+        ));
+    }
     let endpoint = format!("repos/{repo_flag}/releases/assets/{asset_id}");
     let mut command = gh_command(
         github,
         config,
         &["api", &endpoint, "-H", "Accept: application/octet-stream"],
     );
-    let download = tempfile::NamedTempFile::new().map_err(|error| {
+    run_bounded_asset_download(
+        &mut command,
+        &asset.name,
+        expected_size,
+        github_release_upload_timeout(),
+        None,
+    )
+}
+
+fn run_bounded_asset_download(
+    command: &mut Command,
+    asset_name: &str,
+    expected_size: u64,
+    timeout: Duration,
+    temp_dir: Option<&std::path::Path>,
+) -> Result<(u64, String), String> {
+    let download = match temp_dir {
+        Some(directory) => tempfile::NamedTempFile::new_in(directory),
+        None => tempfile::NamedTempFile::new(),
+    }
+    .map_err(|error| {
         format!(
             "could not create temporary file for GitHub Release asset '{}': {error}",
-            asset.name
+            asset_name
         )
     })?;
-    let stdout = download.reopen().map_err(|error| {
+    let output_file = download.reopen().map_err(|error| {
         format!(
             "could not open temporary file for GitHub Release asset '{}': {error}",
-            asset.name
+            asset_name
         )
     })?;
-    command.stdout(stdout).stderr(Stdio::piped());
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn().map_err(|error| {
         format!(
             "could not download GitHub Release asset '{}': {error}",
-            asset.name
+            asset_name
         )
     })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        format!(
+            "could not capture download stream for GitHub Release asset '{}'",
+            asset_name
+        )
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        format!(
+            "could not capture download diagnostics for GitHub Release asset '{}'",
+            asset_name
+        )
+    })?;
+    let (stream_tx, stream_rx) = mpsc::channel();
+    let output_handle = std::thread::spawn(move || {
+        let _ = stream_tx.send(stream_bounded_asset(stdout, output_file, expected_size));
+    });
+    let stderr_handle = std::thread::spawn(move || drain_bounded_diagnostics(stderr));
     let started = Instant::now();
-    let timeout = github_release_upload_timeout();
-    let (status, timed_out) = loop {
+    let mut stream_result = None;
+    let status = loop {
+        match stream_rx.try_recv() {
+            Ok(Ok(identity)) => stream_result = Some(identity),
+            Ok(Err(error)) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = output_handle.join();
+                let _ = stderr_handle.join();
+                return Err(format!(
+                    "could not download GitHub Release asset '{}': {error}",
+                    asset_name
+                ));
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = output_handle.join();
+                let _ = stderr_handle.join();
+                return Err(format!(
+                    "could not download GitHub Release asset '{}': download stream ended unexpectedly",
+                    asset_name
+                ));
+            }
+        }
         match child.try_wait() {
-            Ok(Some(status)) => break (Some(status), false),
+            Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() >= timeout => {
                 let _ = child.kill();
-                break (child.wait().ok(), true);
+                let _ = child.wait();
+                let _ = output_handle.join();
+                let _ = stderr_handle.join();
+                return Err(format!(
+                    "download of GitHub Release asset '{}' timed out",
+                    asset_name
+                ));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            Err(_) => break (None, false),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = output_handle.join();
+                let _ = stderr_handle.join();
+                return Err(format!(
+                    "could not monitor download of GitHub Release asset '{}': {error}",
+                    asset_name
+                ));
+            }
         }
     };
-    let mut stderr = String::new();
-    if let Some(mut stream) = child.stderr.take() {
-        let _ = stream.read_to_string(&mut stderr);
-    }
-    if timed_out {
-        return Err(format!(
-            "download of GitHub Release asset '{}' timed out",
-            asset.name
-        ));
-    }
-    if !status.is_some_and(|status| status.success()) {
+    let stream_result = match stream_result {
+        Some(identity) => Ok(identity),
+        None => stream_rx
+            .recv()
+            .map_err(|_| "download stream ended without reporting an asset identity".to_string())?,
+    };
+    let _ = output_handle.join();
+    let diagnostics = stderr_handle.join().unwrap_or_default();
+    if !status.success() {
         return Err(format!(
             "could not download GitHub Release asset '{}': {}",
-            asset.name,
-            stderr.trim()
+            asset_name,
+            diagnostics.trim()
         ));
     }
-    let path = download.path().display().to_string();
-    let size = download
-        .as_file()
-        .metadata()
-        .map_err(|error| {
-            format!(
-                "could not inspect downloaded GitHub Release asset '{}': {error}",
-                asset.name
-            )
-        })?
-        .len();
-    Ok((size, file_sha256(&path)?))
+    stream_result.map_err(|error| {
+        format!(
+            "could not download GitHub Release asset '{}': {error}",
+            asset_name
+        )
+    })
+}
+
+fn stream_bounded_asset(
+    mut input: impl Read,
+    mut output: impl Write,
+    expected_size: u64,
+) -> Result<(u64, String), String> {
+    let mut hasher = Sha256::new();
+    let mut size = 0_u64;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .map_err(|error| format!("could not read asset bytes: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        let remaining = expected_size.saturating_sub(size).min(buffer.len() as u64) as usize;
+        let accepted = read.min(remaining);
+        if accepted > 0 {
+            output
+                .write_all(&buffer[..accepted])
+                .map_err(|error| format!("could not write temporary asset bytes: {error}"))?;
+            hasher.update(&buffer[..accepted]);
+            size += accepted as u64;
+        }
+        if accepted != read {
+            return Err(format!(
+                "download exceeded expected byte length {expected_size}"
+            ));
+        }
+    }
+    Ok((size, format!("{:x}", hasher.finalize())))
+}
+
+fn drain_bounded_diagnostics(mut input: impl Read) -> String {
+    let mut diagnostics = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let Ok(read) = input.read(&mut buffer) else {
+            break;
+        };
+        if read == 0 {
+            break;
+        }
+        let remaining = GITHUB_RELEASE_DOWNLOAD_DIAGNOSTIC_BYTES.saturating_sub(diagnostics.len());
+        diagnostics.extend_from_slice(&buffer[..read.min(remaining)]);
+        truncated |= read > remaining;
+    }
+    let mut diagnostics = String::from_utf8_lossy(&diagnostics).to_string();
+    if truncated {
+        diagnostics.push_str("\n[diagnostics truncated]");
+    }
+    diagnostics
 }
 
 /// GitHub REST represents release asset checksums as `sha256:<hex>`. Preserve
@@ -806,7 +935,7 @@ mod tests {
         }
     }
 
-    fn unexpected_download(_: &GitHubReleaseAsset) -> Result<(u64, String), String> {
+    fn unexpected_download(_: &GitHubReleaseAsset, _: u64) -> Result<(u64, String), String> {
         panic!("digest-present asset must not be downloaded")
     }
 
@@ -827,6 +956,85 @@ mod tests {
         assert_eq!(output.exit_code, Some(7));
         assert!(output.stderr.is_empty());
         assert!(!output.timed_out);
+    }
+
+    #[test]
+    fn bounded_asset_download_drains_stderr_pressure() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "i=0; while [ $i -lt 20000 ]; do printf 'diagnostic pressure line\\n' >&2; i=$((i+1)); done; printf 'asset bytes'",
+        ]);
+
+        let identity = run_bounded_asset_download(
+            &mut command,
+            "asset.zip",
+            11,
+            Duration::from_secs(5),
+            Some(temp.path()),
+        )
+        .expect("stderr pressure must not deadlock the asset stream");
+
+        assert_eq!(identity.0, 11);
+        assert_eq!(identity.1, format!("{:x}", Sha256::digest(b"asset bytes")));
+        assert_eq!(
+            std::fs::read_dir(temp.path())
+                .expect("read tempdir")
+                .count(),
+            0,
+            "successful download must clean up its tempfile"
+        );
+    }
+
+    #[test]
+    fn bounded_asset_download_kills_oversized_output_and_cleans_tempfile() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf 'oversized'; while :; do :; done"]);
+
+        let error = run_bounded_asset_download(
+            &mut command,
+            "asset.zip",
+            4,
+            Duration::from_secs(5),
+            Some(temp.path()),
+        )
+        .expect_err("oversized output must fail closed");
+
+        assert!(error.contains("exceeded expected byte length 4"));
+        assert_eq!(
+            std::fs::read_dir(temp.path())
+                .expect("read tempdir")
+                .count(),
+            0,
+            "oversized download must clean up its tempfile"
+        );
+    }
+
+    #[test]
+    fn bounded_asset_download_times_out_and_cleans_tempfile() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut command = Command::new("sh");
+        command.args(["-c", "while :; do :; done"]);
+
+        let error = run_bounded_asset_download(
+            &mut command,
+            "asset.zip",
+            4,
+            Duration::from_millis(20),
+            Some(temp.path()),
+        )
+        .expect_err("stalled output must time out");
+
+        assert!(error.contains("timed out"));
+        assert_eq!(
+            std::fs::read_dir(temp.path())
+                .expect("read tempdir")
+                .count(),
+            0,
+            "timed-out download must clean up its tempfile"
+        );
     }
 
     #[test]
@@ -1055,12 +1263,9 @@ mod tests {
             Some(format!("sha256:{}", publications[0].sha256)),
         );
 
-        let (upload, existing) = reconcile_release_publications_with(
-            &publications,
-            &[remote],
-            &mut unexpected_download,
-        )
-        .expect("reconcile exact asset");
+        let (upload, existing) =
+            reconcile_release_publications_with(&publications, &[remote], &mut unexpected_download)
+                .expect("reconcile exact asset");
         assert!(upload.is_empty());
         assert_eq!(existing, publications);
     }
@@ -1186,7 +1391,7 @@ mod tests {
         let (uploads, existing) = reconcile_release_publications_with(
             &[publication.clone()],
             &[remote_asset("component.zip", 15, None)],
-            &mut |_| {
+            &mut |_, _| {
                 downloads += 1;
                 Ok((15, "a".repeat(64)))
             },
@@ -1209,7 +1414,7 @@ mod tests {
         let error = reconcile_release_publications_with(
             &[publication],
             &[remote_asset("component.zip", 15, None)],
-            &mut |_| Ok((15, "b".repeat(64))),
+            &mut |_, _| Ok((15, "b".repeat(64))),
         )
         .expect_err("different downloaded bytes must fail closed");
 
@@ -1227,7 +1432,7 @@ mod tests {
         let error = reconcile_release_publications_with(
             &[publication],
             &[remote_asset("component.zip", 15, None)],
-            &mut |_| Err("authenticated asset download failed".to_string()),
+            &mut |_, _| Err("authenticated asset download failed".to_string()),
         )
         .expect_err("download failure must fail closed");
 
@@ -1248,7 +1453,7 @@ mod tests {
                 remote_asset("component.zip", 15, None),
                 remote_asset("component.zip", 15, None),
             ],
-            &mut |_| panic!("ambiguous assets must not be downloaded"),
+            &mut |_, _| panic!("ambiguous assets must not be downloaded"),
         )
         .expect_err("duplicate canonical names must fail closed");
 
@@ -1266,7 +1471,7 @@ mod tests {
         let next_step = verify_release_publications_with(
             &[publication],
             &[remote_asset("component.zip", 15, None)],
-            &mut |_| Ok((15, "a".repeat(64))),
+            &mut |_, _| Ok((15, "a".repeat(64))),
         )
         .map(|()| "publish.nodejs")
         .expect("verified assets satisfy the publication gate");

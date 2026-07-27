@@ -172,9 +172,7 @@ pub(crate) fn run_github_release(
             &component.github,
             &repo_flag,
         )
-        .map_err(|error| {
-            Error::validation_invalid_argument("release assets", error, None, None)
-        })?;
+        .map_err(|error| Error::validation_invalid_argument("release assets", error, None, None))?;
         homeboy_core::log_status!(
             "release",
             "GitHub Release {} already exists for {} — uploading {} canonical artifact(s), reusing {} verified artifact(s)",
