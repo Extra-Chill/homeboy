@@ -17,7 +17,6 @@
 //! contribute no component-derived rules).
 
 use std::path::Path;
-use std::sync::Mutex;
 
 use homeboy_audit_contract::AuditConfig;
 
@@ -78,15 +77,15 @@ impl AuditComponentProvider for NoopProvider {
     }
 }
 
-static PROVIDER: Mutex<Option<Box<dyn AuditComponentProvider>>> = Mutex::new(None);
-
-/// Register the audit component provider. Called once at binary startup by the
-/// component layer (via the CLI). Replaces any previously registered provider.
-pub fn register_audit_component_provider(provider: Box<dyn AuditComponentProvider>) {
-    let mut guard = PROVIDER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn AuditComponentProvider,
+    noop: NoopProvider,
+    /// Register the audit component provider. Called once at binary startup by the
+    /// component layer (via the CLI). Replaces any previously registered provider.
+    register: pub fn register_audit_component_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none
+    /// is registered.
+    with: fn with_provider,
 }
 
 /// Resolve a registered component by id via the registered provider.
@@ -102,16 +101,6 @@ pub(crate) fn resolve_effective(component_id: &str) -> Result<AuditComponentInfo
 /// Discover a component from a portable config at `root` via the provider.
 pub(crate) fn discover_from_portable(root: &Path) -> Option<AuditComponentInfo> {
     with_provider(|p| p.discover_from_portable(root))
-}
-
-fn with_provider<T>(f: impl FnOnce(&dyn AuditComponentProvider) -> T) -> T {
-    let guard = PROVIDER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match guard.as_ref() {
-        Some(provider) => f(provider.as_ref()),
-        None => f(&NoopProvider),
-    }
 }
 
 #[cfg(test)]

@@ -16,8 +16,6 @@
 //! simply produces no fingerprint for files only an extension script could
 //! handle (exactly as it does when no such extension is installed).
 
-use std::sync::Mutex;
-
 use homeboy_audit_contract::FingerprintOutput;
 
 /// The fingerprint-script contract the audit engine depends on. Implemented by
@@ -51,16 +49,16 @@ impl FingerprintScriptProvider for NoopProvider {
     }
 }
 
-static PROVIDER: Mutex<Option<Box<dyn FingerprintScriptProvider>>> = Mutex::new(None);
-
-/// Register the fingerprint-script provider. Called once at binary startup by
-/// the extension layer (via the CLI). Replaces any previously registered
-/// provider.
-pub fn register_fingerprint_script_provider(provider: Box<dyn FingerprintScriptProvider>) {
-    let mut guard = PROVIDER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn FingerprintScriptProvider,
+    noop: NoopProvider,
+    /// Register the fingerprint-script provider. Called once at binary startup by
+    /// the extension layer (via the CLI). Replaces any previously registered
+    /// provider.
+    register: pub fn register_fingerprint_script_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none
+    /// is registered.
+    with: fn with_provider,
 }
 
 /// Fingerprint a file via the registered extension-script provider.
@@ -70,16 +68,6 @@ pub(crate) fn fingerprint_via_script(
     content: &str,
 ) -> Option<FingerprintOutput> {
     with_provider(|p| p.fingerprint(file_extension, relative_path, content))
-}
-
-fn with_provider<T>(f: impl FnOnce(&dyn FingerprintScriptProvider) -> T) -> T {
-    let guard = PROVIDER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match guard.as_ref() {
-        Some(provider) => f(provider.as_ref()),
-        None => f(&NoopProvider),
-    }
 }
 
 #[cfg(test)]
