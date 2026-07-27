@@ -173,6 +173,13 @@ fn dead_owner_claim_is_reclaimed_without_waiting_for_lease_expiry() {
     });
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_accepts_the_full_process_id_range() {
+    assert!(owner_pid_is_valid(u32::MAX as u64));
+    assert!(!owner_pid_is_valid(u32::MAX as u64 + 1));
+}
+
 #[test]
 fn live_owner_claim_remains_held_without_side_effect_reentry() {
     with_isolated_home(|_| {
