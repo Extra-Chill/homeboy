@@ -27,23 +27,21 @@ pub trait ActivityAgentTaskProvider: Send + Sync {
         Ok(None)
     }
 
-    /// Project every durable agent-task record into an activity item.
-    fn agent_task_activity_items(&self) -> Result<Vec<ActivityItem>>;
-
-    /// The agent-task record-health summary, serialized as JSON so core does not
-    /// depend on the agent-task health type.
-    fn agent_task_record_health(&self) -> Result<Value>;
+    /// Project every durable agent-task record into an activity item, together
+    /// with the record-health summary for the same records.
+    ///
+    /// Items and health are one call because they are one read of the same
+    /// durable records. Asking for them separately made the activity report
+    /// walk the corpus twice (#10308). The health summary is serialized as JSON
+    /// so core does not depend on the agent-task health type.
+    fn agent_task_activity(&self) -> Result<(Vec<ActivityItem>, Value)>;
 }
 
 struct NoopProvider;
 
 impl ActivityAgentTaskProvider for NoopProvider {
-    fn agent_task_activity_items(&self) -> Result<Vec<ActivityItem>> {
-        Ok(Vec::new())
-    }
-
-    fn agent_task_record_health(&self) -> Result<Value> {
-        Ok(Value::Null)
+    fn agent_task_activity(&self) -> Result<(Vec<ActivityItem>, Value)> {
+        Ok((Vec::new(), Value::Null))
     }
 }
 
@@ -64,14 +62,9 @@ pub(crate) fn probe_by_id(id: &str) -> Result<Option<ActivityItem>> {
     with_provider(|p| p.probe_by_id(id))
 }
 
-/// The agent-task activity items via the registered provider (or none when the
-/// agent-task subsystem is absent).
-pub(crate) fn agent_task_activity_items() -> Result<Vec<ActivityItem>> {
-    with_provider(|p| p.agent_task_activity_items())
-}
-
-/// The agent-task record-health summary (as JSON) via the registered provider
-/// (or an empty summary when the agent-task subsystem is absent).
-pub(crate) fn agent_task_record_health() -> Result<Value> {
-    with_provider(|p| p.agent_task_record_health())
+/// The agent-task activity items and record-health summary via the registered
+/// provider (or no items and an empty summary when the agent-task subsystem is
+/// absent).
+pub(crate) fn agent_task_activity() -> Result<(Vec<ActivityItem>, Value)> {
+    with_provider(|p| p.agent_task_activity())
 }

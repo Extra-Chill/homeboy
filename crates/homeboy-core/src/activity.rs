@@ -43,13 +43,16 @@ const RUNNING_HEARTBEAT_STALE_MINUTES: i64 = 30;
 pub fn activity_report(scope: ActivityScope, limit: usize) -> Result<ActivityReport> {
     let mut collector = ActivityCollector::default();
     observation::collect(&mut collector, limit)?;
-    for item in agent_task_provider::agent_task_activity_items()? {
+    // Items and record health come from one pass over the durable agent-task
+    // records. Reading them separately walked the corpus twice (#10308).
+    let (agent_task_items, agent_task_record_health) = agent_task_provider::agent_task_activity()?;
+    for item in agent_task_items {
         collector.insert(item);
     }
     daemon_jobs::collect(&mut collector)?;
     runner_sessions::collect(&mut collector);
     let mut report = report_from_items(collector.items(scope, limit), "activity");
-    report.agent_task_record_health = agent_task_provider::agent_task_record_health()?;
+    report.agent_task_record_health = agent_task_record_health;
     Ok(report)
 }
 
@@ -108,11 +111,11 @@ pub fn show_activity(id: &str) -> Result<ActivityReport> {
     let Some(item) = resolve_activity_item(id)? else {
         return Err(activity_item_not_found(id));
     };
-    let mut result = report_from_items(vec![item], "activity.show");
-    // Preserve the record-health field the full-report path attached. This is a
-    // single bounded provider probe, not a corpus scan.
-    result.agent_task_record_health = agent_task_provider::agent_task_record_health()?;
-    Ok(result)
+    // Record health is a full-corpus diagnostic owned by `activity list`.
+    // Attaching it here re-read every durable agent-task record just to answer
+    // one id, so it stays null — the report shape carries the field either way
+    // (#10308).
+    Ok(report_from_items(vec![item], "activity.show"))
 }
 
 pub fn resolve_activity(id: &str) -> Result<ActivityItem> {

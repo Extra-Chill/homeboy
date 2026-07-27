@@ -38,21 +38,19 @@ impl ActivityAgentTaskProvider for AgentTaskActivityProvider {
             .map(item_from_agent_task))
     }
 
-    fn agent_task_activity_items(&self) -> Result<Vec<ActivityItem>> {
-        Ok(agent_task_lifecycle::list_records()?
-            .into_iter()
-            .map(item_from_agent_task)
-            .collect())
-    }
-
-    fn agent_task_record_health(&self) -> Result<Value> {
-        let summary = agent_task_lifecycle::record_health_summary()?;
-        serde_json::to_value(summary).map_err(|error| {
+    /// One pass over the durable records yields both the projected items and
+    /// the health summary for the same read, through the single-pass
+    /// `list_records_with_health` (#10308).
+    fn agent_task_activity(&self) -> Result<(Vec<ActivityItem>, Value)> {
+        let (records, health) = agent_task_lifecycle::list_records_with_health()?;
+        let items = records.into_iter().map(item_from_agent_task).collect();
+        let health = serde_json::to_value(health).map_err(|error| {
             homeboy_core::Error::internal_json(
                 error.to_string(),
                 Some("serialize agent-task record health".to_string()),
             )
-        })
+        })?;
+        Ok((items, health))
     }
 }
 
@@ -168,6 +166,7 @@ pub fn register() {
 mod tests {
     use super::*;
     use crate::agent_task_lifecycle::tests::{succeeded_aggregate, test_plan};
+    use homeboy_core::activity::ActivityScope;
     use homeboy_core::observation::{NewRunRecord, ObservationStore};
     use homeboy_core::test_support::with_isolated_home;
 
@@ -230,6 +229,29 @@ mod tests {
             agent_task_lifecycle::list_records().expect("records listed");
             assert!(controller_admission_stamped(&target));
             assert!(controller_admission_stamped(&sibling));
+        });
+    }
+
+    #[test]
+    fn the_report_carries_record_health_from_the_same_pass_that_projects_items() {
+        // Report shape is unchanged: `list` still attaches the record-health
+        // summary — now from the single pass that also projects the items —
+        // and `show` carries the field as null rather than paying for a corpus
+        // scan to fill it (#10308).
+        with_isolated_home(|_| {
+            register();
+            let run_id = seed_record("run-report-health");
+
+            let report = homeboy_core::activity::activity_report(ActivityScope::All, 50)
+                .expect("activity report");
+
+            assert!(report.items.iter().any(|item| item.id == run_id));
+            assert_eq!(report.agent_task_record_health["healthy"], 1);
+
+            let shown = homeboy_core::activity::show_activity(&run_id).expect("show activity");
+
+            assert_eq!(shown.schema, report.schema);
+            assert!(shown.agent_task_record_health.is_null());
         });
     }
 
