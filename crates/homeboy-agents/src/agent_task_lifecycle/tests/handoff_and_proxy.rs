@@ -277,11 +277,17 @@ fn controller_runtime_retention_keeps_mutable_and_retained_terminal_runs() {
             homeboy_core::controller_runtime::retention_report().expect("retention report");
         assert!(report.retained.contains(&active_pin));
         assert!(report.retained.contains(&terminal_pin));
-        let dry_run = prune_controller_runtime_pins(false).expect("plan pin pruning");
+        // Opt out of the configured age/size window so this asserts reference
+        // retention specifically, not "nothing was old enough to delete".
+        let purge = homeboy_core::controller_runtime::ControllerRuntimeRetentionOverrides {
+            limit: None,
+            ignore_retention: true,
+        };
+        let dry_run = prune_controller_runtime_pins(false, purge).expect("plan pin pruning");
         assert!(dry_run.retained.contains(&active_pin));
         assert!(dry_run.retained.contains(&terminal_pin));
         assert!(dry_run.removed.is_empty());
-        let applied = prune_controller_runtime_pins(true).expect("prune unreferenced pins");
+        let applied = prune_controller_runtime_pins(true, purge).expect("prune unreferenced pins");
         assert!(!applied.removed.contains(&terminal_pin));
         assert!(active_pin.exists());
         assert!(terminal_pin.exists());

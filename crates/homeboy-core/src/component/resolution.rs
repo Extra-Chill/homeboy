@@ -4,7 +4,7 @@ use crate::component::{
 use crate::error::{Error, Result};
 use crate::git::run_git;
 use homeboy_extension_contract::ExtensionCapability;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Shared target-resolution input for component/path-oriented commands.
@@ -111,27 +111,86 @@ pub fn resolve_target_from_component(
     resolved_target_from_component(component, false)
 }
 
-pub fn resolve_artifact(component: &Component) -> Option<String> {
+/// Resolve the effective build artifact pattern for a component.
+///
+/// An explicit `build_artifact` always wins. Otherwise the pattern comes from
+/// the component's linked extensions.
+///
+/// `Component.extensions` is a `HashMap` with `RandomState`, so its iteration
+/// order differs on every process. A first-match-wins scan therefore resolved a
+/// *different* artifact path on different runs of the same binary whenever two
+/// linked extensions (e.g. `wordpress` + `nodejs`) both declared
+/// `build.artifact_pattern` — a silent wrong-artifact deploy (#10281). Every
+/// provider is collected instead, and the distinct rendered patterns decide:
+///
+/// - no provider → `Ok(None)`; the component is simply not artifact-producing
+/// - one distinct pattern → `Ok(Some(pattern))`, however many extensions
+///   declare it (agreeing extensions are not ambiguous)
+/// - conflicting patterns → [`crate::extension_execution::disambiguate_capability_owner`],
+///   the same ownership rule every other capability uses: explicit
+///   `capability_extensions.build`, then `composition.includes` primacy, then a
+///   hard ambiguity error the component author must resolve
+///
+/// Extensions that fail to load are skipped rather than failing resolution:
+/// a component may reference an extension that is not installed locally, and
+/// callers that require one (deploy planning) validate that separately.
+pub fn resolve_artifact(component: &Component) -> Result<Option<String>> {
     if let Some(ref artifact) = component.build_artifact {
-        return Some(artifact.clone());
+        return Ok(Some(artifact.clone()));
     }
 
-    if let Some(ref extensions) = component.extensions {
-        for extension_id in extensions.keys() {
-            if let Ok(manifest) = crate::extension_store::load_extension(extension_id) {
-                if let Some(ref build) = manifest.build {
-                    if let Some(ref pattern) = build.artifact_pattern {
-                        let resolved = pattern
-                            .replace("{component_id}", &component.id)
-                            .replace("{local_path}", &component.local_path);
-                        return Some(resolved);
-                    }
-                }
-            }
+    let providers = artifact_pattern_providers(component);
+    let distinct: BTreeSet<&str> = providers.values().map(String::as_str).collect();
+
+    match distinct.len() {
+        0 => Ok(None),
+        1 => Ok(distinct.into_iter().next().map(ToOwned::to_owned)),
+        _ => {
+            let candidates: Vec<String> = providers.keys().cloned().collect();
+            let owner = crate::extension_execution::disambiguate_capability_owner(
+                component,
+                ExtensionCapability::Build,
+                &candidates,
+            )?;
+            Ok(providers.get(&owner).cloned())
         }
     }
+}
 
-    None
+/// Linked extensions that declare a `build.artifact_pattern`, mapped to the
+/// pattern rendered for this component.
+///
+/// Keyed by extension ID in a `BTreeMap` so the candidate list handed to
+/// ambiguity resolution — and the error message listing it — is stable across
+/// runs, unlike the component's own `HashMap` iteration order.
+fn artifact_pattern_providers(component: &Component) -> BTreeMap<String, String> {
+    let mut providers = BTreeMap::new();
+
+    let Some(extensions) = component.extensions.as_ref() else {
+        return providers;
+    };
+
+    for extension_id in extensions.keys() {
+        let Ok(manifest) = crate::extension_store::load_extension(extension_id) else {
+            continue;
+        };
+        let Some(pattern) = manifest
+            .build
+            .as_ref()
+            .and_then(|build| build.artifact_pattern.as_ref())
+        else {
+            continue;
+        };
+
+        providers.insert(
+            extension_id.clone(),
+            pattern
+                .replace("{component_id}", &component.id)
+                .replace("{local_path}", &component.local_path),
+        );
+    }
+
+    providers
 }
 
 /// Validates component local_path is usable (absolute and exists).
@@ -989,7 +1048,7 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_artifact(&explicit),
+            resolve_artifact(&explicit).expect("explicit artifact resolves"),
             Some("dist/plugin.zip".to_string())
         );
 
@@ -1005,7 +1064,155 @@ mod tests {
             ..Component::default()
         };
 
-        assert_eq!(resolve_artifact(&missing_extension), None);
+        assert_eq!(
+            resolve_artifact(&missing_extension).expect("unloadable extensions are skipped"),
+            None
+        );
+    }
+
+    /// Write an extension manifest that declares `build.artifact_pattern`, and
+    /// optionally composes the given extensions via `composition.includes`.
+    fn write_build_extension(home: &Path, id: &str, artifact_pattern: &str, includes: &[&str]) {
+        let dir = home.join(".config/homeboy/extensions").join(id);
+        std::fs::create_dir_all(&dir).expect("extension dir");
+
+        let mut manifest = serde_json::json!({
+            "name": id,
+            "version": "1.0.0",
+            "build": { "artifact_pattern": artifact_pattern },
+        });
+        if !includes.is_empty() {
+            manifest["composition"] = serde_json::json!({ "includes": includes });
+        }
+
+        std::fs::write(dir.join(format!("{id}.json")), manifest.to_string())
+            .expect("extension manifest");
+    }
+
+    fn component_with_extensions(id: &str, extension_ids: &[&str]) -> Component {
+        Component {
+            id: id.to_string(),
+            local_path: format!("/tmp/{id}"),
+            extensions: Some(
+                extension_ids
+                    .iter()
+                    .map(|extension_id| {
+                        (
+                            (*extension_id).to_string(),
+                            ScopedExtensionConfig::default(),
+                        )
+                    })
+                    .collect(),
+            ),
+            ..Component::default()
+        }
+    }
+
+    /// Resolution repeated enough times that `HashMap` iteration order over the
+    /// component's linked extensions would have varied within the run. Every
+    /// call must agree — that is the whole point of #10281.
+    fn resolve_artifact_repeatedly(component: &Component) -> Vec<Result<Option<String>>> {
+        (0..32).map(|_| resolve_artifact(component)).collect()
+    }
+
+    #[test]
+    fn resolve_artifact_uses_single_extension_artifact_pattern() {
+        crate::test_support::with_isolated_home(|home| {
+            write_build_extension(home.path(), "wordpress", "build/{component_id}.zip", &[]);
+
+            let component = component_with_extensions("plugin", &["wordpress"]);
+
+            assert_eq!(
+                resolve_artifact(&component).expect("single provider resolves"),
+                Some("build/plugin.zip".to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn resolve_artifact_accepts_two_extensions_declaring_the_same_pattern() {
+        crate::test_support::with_isolated_home(|home| {
+            // Two providers that agree are not ambiguous: whichever one the
+            // HashMap yields first, the resolved artifact is identical.
+            write_build_extension(home.path(), "wordpress", "build/{component_id}.zip", &[]);
+            write_build_extension(home.path(), "nodejs", "build/{component_id}.zip", &[]);
+
+            let component = component_with_extensions("plugin", &["wordpress", "nodejs"]);
+
+            for resolved in resolve_artifact_repeatedly(&component) {
+                assert_eq!(
+                    resolved.expect("agreeing providers are unambiguous"),
+                    Some("build/plugin.zip".to_string())
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn resolve_artifact_conflicting_patterns_fail_deterministically() {
+        crate::test_support::with_isolated_home(|home| {
+            // Two providers that disagree used to be a coin flip decided by
+            // HashMap iteration order — the same binary could deploy
+            // `build/plugin.zip` on one run and `dist/plugin.tgz` on the next.
+            write_build_extension(home.path(), "wordpress", "build/{component_id}.zip", &[]);
+            write_build_extension(home.path(), "nodejs", "dist/{component_id}.tgz", &[]);
+
+            let component = component_with_extensions("plugin", &["wordpress", "nodejs"]);
+
+            for resolved in resolve_artifact_repeatedly(&component) {
+                let err = resolved.expect_err("conflicting artifact patterns must not be guessed");
+                assert_eq!(err.code.as_str(), "validation.invalid_argument");
+                // The exact message is stable too, including the provider list.
+                assert_eq!(
+                    err.message,
+                    "Component 'plugin' has multiple linked extensions with build support: nodejs, wordpress"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn resolve_artifact_conflict_is_resolved_by_capability_extensions() {
+        crate::test_support::with_isolated_home(|home| {
+            write_build_extension(home.path(), "wordpress", "build/{component_id}.zip", &[]);
+            write_build_extension(home.path(), "nodejs", "dist/{component_id}.tgz", &[]);
+
+            let mut component = component_with_extensions("plugin", &["wordpress", "nodejs"]);
+            component
+                .capability_extensions
+                .insert("build".to_string(), "nodejs".to_string());
+
+            for resolved in resolve_artifact_repeatedly(&component) {
+                assert_eq!(
+                    resolved.expect("explicit ownership resolves the conflict"),
+                    Some("dist/plugin.tgz".to_string())
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn resolve_artifact_conflict_is_resolved_by_composition_primary() {
+        crate::test_support::with_isolated_home(|home| {
+            // WordPress composes Node.js, so it owns the shared build
+            // capability — the same rule every other capability follows.
+            write_build_extension(
+                home.path(),
+                "wordpress",
+                "build/{component_id}.zip",
+                &["nodejs"],
+            );
+            write_build_extension(home.path(), "nodejs", "dist/{component_id}.tgz", &[]);
+
+            let component = component_with_extensions("plugin", &["wordpress", "nodejs"]);
+
+            for resolved in resolve_artifact_repeatedly(&component) {
+                assert_eq!(
+                    resolved.expect("composition primary resolves the conflict"),
+                    Some("build/plugin.zip".to_string())
+                );
+            }
+        });
     }
 
     #[test]

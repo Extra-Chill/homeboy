@@ -17,8 +17,10 @@
 //! - State directory at `~/.config/homeboy/stacks/{id}.json` (mirror of rig layout)
 //! - CLI verbs: `list`, `show`, `create`, `add-pr`, `remove-pr`, `apply`,
 //!   `rebase`, `sync`, `status`, `inspect`
-//! - Pause-and-resume on cherry-pick conflicts (apply exits non-zero with a
-//!   clear message; user resolves manually with raw git tools)
+//! - Pause-and-resume on cherry-pick conflicts (apply exits non-zero, leaves
+//!   the conflicted pick in the checkout, and tells the user which raw git
+//!   commands resolve it; `--abort-on-conflict` opts into a clean tree
+//!   instead)
 //!
 //! Deferred to Phase 2+ (Extra-Chill/homeboy#1462):
 //! - `push`, `diff`, `continue` / `--reset` resume primitives
@@ -34,7 +36,7 @@ pub mod spec;
 pub mod status;
 pub mod sync;
 
-pub use apply::{apply, rebase, AppliedPr, ApplyOutput, PickOutcome, RebaseOutput};
+pub use apply::{apply, rebase, AppliedPr, ApplyOutput, ConflictPolicy, PickOutcome, RebaseOutput};
 pub use inspect::{
     inspect, inspect_at, InspectCommit, InspectCommitDetails, InspectOptions, InspectOutput,
     InspectPr,

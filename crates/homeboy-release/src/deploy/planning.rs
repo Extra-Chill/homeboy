@@ -810,12 +810,44 @@ pub(super) fn load_project_components_with_projection(
             continue;
         }
 
-        // Resolve effective artifact (component value OR extension pattern)
-        let effective_artifact = component::resolve_artifact(&loaded);
-
         // Git-deploy and file-deploy components don't need a build artifact
         let is_git_deploy = loaded.deploy_strategy.as_deref() == Some("git");
         let is_file_deploy = loaded.deploy_strategy.as_deref() == Some("file");
+
+        // Resolve effective artifact (component value OR extension pattern).
+        //
+        // Skipped for git/file deploys, which ignore the artifact entirely — they
+        // must not be blocked by an artifact-ownership conflict they never
+        // consult. For everyone else, two linked extensions declaring different
+        // `artifact_pattern`s is now a hard error instead of a HashMap-order coin
+        // flip that deployed a different artifact on different runs (#10281).
+        // It is reported like a missing extension: fatal for a component the
+        // operator actually asked to deploy, skip-and-warn otherwise, so one
+        // misconfigured component cannot poison a whole project-wide pass (#4587).
+        let effective_artifact = if is_git_deploy || is_file_deploy {
+            None
+        } else {
+            match component::resolve_artifact(&loaded) {
+                Ok(artifact) => artifact,
+                Err(err) => {
+                    if is_requested && !check {
+                        return Err(err);
+                    }
+
+                    let reason = err.message.clone();
+                    homeboy_core::log_status!("deploy", "Skipping '{}': {}", loaded.id, reason);
+                    if check {
+                        extension_skipped.push(ExtensionSkippedComponent {
+                            id: loaded.id.clone(),
+                            reason,
+                        });
+                    } else {
+                        skipped.push(loaded.id.clone());
+                    }
+                    continue;
+                }
+            }
+        };
 
         match effective_artifact {
             Some(artifact) if !is_git_deploy && !is_file_deploy => {

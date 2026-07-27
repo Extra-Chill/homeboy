@@ -1,4 +1,5 @@
 use clap::{Args, Subcommand};
+use homeboy::core::controller_runtime::ControllerRuntimeRetentionOverrides;
 use serde::Serialize;
 
 use crate::commands::CmdResult;
@@ -36,6 +37,11 @@ enum RuntimeCommand {
         /// Delete pins not retained by nonterminal durable runs or the active generation.
         #[arg(long)]
         apply: bool,
+
+        /// Purge every unreferenced pin, ignoring the configured controller
+        /// runtime retention window. Destructive: prefer the configured window.
+        #[arg(long)]
+        ignore_retention: bool,
     },
 }
 
@@ -92,6 +98,12 @@ pub struct RuntimePromotionTakeoverOutput {
 pub struct ControllerRuntimePruneOutput {
     command: String,
     apply: bool,
+    /// Retention policy actually applied, so an operator can see the configured
+    /// window is honored instead of inferring it from what disappeared.
+    ignore_retention: bool,
+    min_age_seconds: u64,
+    max_total_bytes: u64,
+    limit: usize,
     retained: Vec<String>,
     eligible: Vec<String>,
     removed: Vec<String>,
@@ -108,7 +120,10 @@ pub fn run(args: RuntimeArgs, _global: &crate::commands::GlobalArgs) -> CmdResul
             revision,
         } => refresh_runtime_package(&runtime_id, &source, revision.as_deref()),
         RuntimeCommand::PromotionTakeover => promotion_takeover(),
-        RuntimeCommand::ControllerPrune { apply } => controller_prune(apply),
+        RuntimeCommand::ControllerPrune {
+            apply,
+            ignore_retention,
+        } => controller_prune(apply, ignore_retention),
     }
 }
 
@@ -145,8 +160,16 @@ pub fn run_plain_text(args: RuntimeArgs) -> homeboy::core::Result<(String, i32)>
     }
 }
 
-fn controller_prune(apply: bool) -> CmdResult<RuntimeOutput> {
-    let result = homeboy::agents::agent_tasks::lifecycle::prune_controller_runtime_pins(apply)?;
+fn controller_prune(apply: bool, ignore_retention: bool) -> CmdResult<RuntimeOutput> {
+    let overrides = ControllerRuntimeRetentionOverrides {
+        limit: None,
+        ignore_retention,
+    };
+    // Resolved by the same core helper the prune itself uses, so the reported
+    // policy cannot describe a window the deletion did not apply.
+    let policy = homeboy::core::controller_runtime::resolve_cleanup_options(apply, overrides);
+    let result =
+        homeboy::agents::agent_tasks::lifecycle::prune_controller_runtime_pins(apply, overrides)?;
     let stringify = |paths: Vec<std::path::PathBuf>| {
         paths
             .into_iter()
@@ -157,6 +180,10 @@ fn controller_prune(apply: bool) -> CmdResult<RuntimeOutput> {
         RuntimeOutput::ControllerPrune(ControllerRuntimePruneOutput {
             command: "runtime.controller_prune".to_string(),
             apply,
+            ignore_retention,
+            min_age_seconds: policy.min_age.as_secs(),
+            max_total_bytes: policy.max_total_bytes,
+            limit: policy.limit,
             retained: stringify(result.retained),
             eligible: stringify(result.eligible),
             removed: stringify(result.removed),

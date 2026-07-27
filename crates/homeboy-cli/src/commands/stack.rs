@@ -7,8 +7,8 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use homeboy_stack::stack::{
-    self, ApplyOutput, DiffOutput, GitRef, InspectOptions, InspectOutput, PushOutput, RebaseOutput,
-    StackPrEntry, StackSpec, StatusOutput, SyncOutput,
+    self, ApplyOutput, ConflictPolicy, DiffOutput, GitRef, InspectOptions, InspectOutput,
+    PushOutput, RebaseOutput, StackPrEntry, StackSpec, StatusOutput, SyncOutput,
 };
 
 use super::{CmdResult, CommandReport};
@@ -76,11 +76,15 @@ enum StackCommand {
     },
     /// Materialize a stack: cherry-pick `base + prs` onto `target`.
     ///
-    /// Stops on the first cherry-pick conflict and prints a manual-resolve
-    /// message. (Phase 2 will add `--continue`.)
+    /// Stops on the first cherry-pick conflict, leaves the conflicted pick in
+    /// the checkout, and prints the git commands that resolve or abandon it.
     Apply {
         /// Stack ID.
         stack_id: String,
+        /// Run `git cherry-pick --abort` on conflict instead of leaving the
+        /// conflicted pick in place for manual resolution.
+        #[arg(long)]
+        abort_on_conflict: bool,
     },
     /// Rebuild the target branch from fresh base + current spec PRs.
     ///
@@ -89,6 +93,10 @@ enum StackCommand {
     Rebase {
         /// Stack ID.
         stack_id: String,
+        /// Run `git cherry-pick --abort` on conflict instead of leaving the
+        /// conflicted pick in place for manual resolution.
+        #[arg(long)]
+        abort_on_conflict: bool,
     },
     /// Read-only status report — upstream PR state + local target state.
     Status {
@@ -102,7 +110,8 @@ enum StackCommand {
     /// PRs that have been merged upstream (and whose content is in base)
     /// are removed from the spec; everything else is cherry-picked onto
     /// a freshly-rebuilt target. On the first cherry-pick conflict, the
-    /// in-progress pick is aborted and a manual-resolve message printed.
+    /// in-progress pick is left in the checkout and a resolve message
+    /// printed.
     Sync {
         /// Stack ID.
         stack_id: String,
@@ -110,6 +119,10 @@ enum StackCommand {
         /// target branch.
         #[arg(long)]
         dry_run: bool,
+        /// Run `git cherry-pick --abort` on conflict instead of leaving the
+        /// conflicted pick in place for manual resolution.
+        #[arg(long)]
+        abort_on_conflict: bool,
     },
     /// Push the materialized target branch to its configured remote.
     Push {
@@ -227,10 +240,30 @@ pub fn run(args: StackArgs, _global: &super::GlobalArgs) -> CmdResult<StackComma
             number,
             repo,
         } => remove_pr(&stack_id, number, repo.as_deref()),
-        StackCommand::Apply { stack_id } => apply(&stack_id),
-        StackCommand::Rebase { stack_id } => rebase(&stack_id),
+        StackCommand::Apply {
+            stack_id,
+            abort_on_conflict,
+        } => apply(
+            &stack_id,
+            ConflictPolicy::from_abort_flag(abort_on_conflict),
+        ),
+        StackCommand::Rebase {
+            stack_id,
+            abort_on_conflict,
+        } => rebase(
+            &stack_id,
+            ConflictPolicy::from_abort_flag(abort_on_conflict),
+        ),
         StackCommand::Status { stack_id } => status(&stack_id),
-        StackCommand::Sync { stack_id, dry_run } => sync(&stack_id, dry_run),
+        StackCommand::Sync {
+            stack_id,
+            dry_run,
+            abort_on_conflict,
+        } => sync(
+            &stack_id,
+            dry_run,
+            ConflictPolicy::from_abort_flag(abort_on_conflict),
+        ),
         StackCommand::Push { stack_id } => push(&stack_id),
         StackCommand::Diff { stack_id } => diff(&stack_id),
         StackCommand::Inspect {
@@ -412,9 +445,9 @@ fn remove_pr(stack_id: &str, number: u64, repo: Option<&str>) -> CmdResult<Stack
     ))
 }
 
-fn apply(stack_id: &str) -> CmdResult<StackCommandOutput> {
+fn apply(stack_id: &str, conflict_policy: ConflictPolicy) -> CmdResult<StackCommandOutput> {
     let spec = stack::load(stack_id)?;
-    let report = stack::apply(&spec)?;
+    let report = stack::apply(&spec, conflict_policy)?;
     let exit_code = if report.success { 0 } else { 1 };
     Ok((
         StackCommandOutput::Apply(StackApplyOutput {
@@ -425,9 +458,9 @@ fn apply(stack_id: &str) -> CmdResult<StackCommandOutput> {
     ))
 }
 
-fn rebase(stack_id: &str) -> CmdResult<StackCommandOutput> {
+fn rebase(stack_id: &str, conflict_policy: ConflictPolicy) -> CmdResult<StackCommandOutput> {
     let spec = stack::load(stack_id)?;
-    let report = stack::rebase(&spec)?;
+    let report = stack::rebase(&spec, conflict_policy)?;
     let exit_code = if report.success { 0 } else { 1 };
     Ok((
         StackCommandOutput::Rebase(StackRebaseOutput {
@@ -450,9 +483,13 @@ fn status(stack_id: &str) -> CmdResult<StackCommandOutput> {
     ))
 }
 
-fn sync(stack_id: &str, dry_run: bool) -> CmdResult<StackCommandOutput> {
+fn sync(
+    stack_id: &str,
+    dry_run: bool,
+    conflict_policy: ConflictPolicy,
+) -> CmdResult<StackCommandOutput> {
     let mut spec = stack::load(stack_id)?;
-    let report = stack::sync(&mut spec, dry_run)?;
+    let report = stack::sync(&mut spec, dry_run, conflict_policy)?;
     let exit_code = if report.success { 0 } else { 1 };
     Ok((
         StackCommandOutput::Sync(StackSyncOutput {

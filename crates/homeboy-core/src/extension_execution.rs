@@ -265,20 +265,49 @@ fn resolve_extension_for_capability_if_available(
     match matching.len() {
         0 => Ok(None),
         1 => Ok(Some(matching.remove(0))),
-        _ => {
-            // The manifests can encode which linked extension is primary via
-            // `composition.includes`: a component that links WordPress + Node.js
-            // has WordPress declare `includes: ["nodejs"]`, so WordPress owns the
-            // shared capabilities and Node.js is the composed subordinate. When
-            // exactly one of the ambiguous extensions includes all the others,
-            // resolve to it instead of forcing a manual `capability_extensions`
-            // selection. Explicit selection (handled above) still wins.
-            if let Some(primary) = composition_primary_extension(&matching)? {
-                return Ok(Some(primary));
-            }
-            Err(capability_ambiguous_error(component, capability, &matching))
+        _ => disambiguate_capability_owner(component, capability, &matching).map(Some),
+    }
+}
+
+/// Pick the owning extension when several linked extensions provide the same
+/// capability.
+///
+/// This is the single ownership rule for multi-extension components, shared by
+/// capability execution resolution and by artifact-pattern resolution
+/// ([`crate::component::resolve_artifact`]) so both stay deterministic and
+/// agree on who owns a contested capability:
+///
+/// 1. explicit `capability_extensions.<capability>` selection, when it names
+///    one of the candidates;
+/// 2. `composition.includes` primacy — the manifests can encode which linked
+///    extension is primary: a component that links WordPress + Node.js has
+///    WordPress declare `includes: ["nodejs"]`, so WordPress owns the shared
+///    capabilities and Node.js is the composed subordinate. When exactly one
+///    of the candidates includes all the others, resolve to it instead of
+///    forcing a manual `capability_extensions` selection;
+/// 3. otherwise the ambiguity is genuine and the component author must resolve
+///    it, so this returns [`capability_ambiguous_error`].
+///
+/// `candidates` must be in a deterministic order (the error message lists
+/// them), and must never be empty.
+pub(crate) fn disambiguate_capability_owner(
+    component: &Component,
+    capability: ExtensionCapability,
+    candidates: &[String],
+) -> Result<String> {
+    if let Some(explicit) = explicit_capability_extension(component, capability) {
+        if let Some(selected) = candidates.iter().find(|id| id.as_str() == explicit) {
+            return Ok(selected.clone());
         }
     }
+
+    if let Some(primary) = composition_primary_extension(candidates)? {
+        return Ok(primary);
+    }
+
+    Err(capability_ambiguous_error(
+        component, capability, candidates,
+    ))
 }
 
 /// If exactly one of the ambiguous extensions composes all of the others via its

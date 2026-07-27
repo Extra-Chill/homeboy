@@ -757,7 +757,7 @@ fn apply_artifact_inputs(comp: &Component) -> Result<Vec<ResolvedArtifactInput>>
         return Ok(Vec::new());
     }
 
-    let artifact_pattern = component::resolve_artifact(comp).ok_or_else(|| {
+    let artifact_pattern = component::resolve_artifact(comp)?.ok_or_else(|| {
         Error::validation_invalid_argument(
             "build_artifact",
             format!(

@@ -81,9 +81,16 @@ Remove a PR entry. Use `--repo` when the same number appears for multiple repos 
 
 ```sh
 homeboy stack apply <stack-id>
+homeboy stack apply <stack-id> --abort-on-conflict
 ```
 
-Fetches the base, recreates the local target branch from the base, then cherry-picks every PR head in order. `apply` stops on the first conflict, aborts the in-progress pick, and prints a manual-resolution hint. It does not push.
+Fetches the base, recreates the local target branch from the base, then cherry-picks every PR head in order. It does not push.
+
+On the first conflict `apply` stops and **leaves the conflicted cherry-pick in the checkout** so it can actually be resolved. The error names the two commands that work from that state — `git -C <path> cherry-pick --continue` after staging the resolution, or `git -C <path> cherry-pick --abort` to bail out — plus the homeboy command to re-run afterwards.
+
+`--abort-on-conflict` opts into the old behaviour: homeboy runs `git cherry-pick --abort` for you and reports a clean tree. Use it for unattended runs where a dirty checkout is worse than a lost conflict.
+
+While a cherry-pick is still paused, `apply`, `rebase`, and `sync` refuse to rebuild the target branch rather than clobber an in-progress resolution.
 
 Safety manifest metadata marks `apply` and `rebase` as explicit branch-mutation
 actions. Use `status` for read-only inspection and `sync --dry-run` for the
@@ -102,9 +109,10 @@ Read-only report combining upstream PR state from GitHub with local target-branc
 ```sh
 homeboy stack sync <stack-id>
 homeboy stack sync <stack-id> --dry-run
+homeboy stack sync <stack-id> --abort-on-conflict
 ```
 
-Rebuilds the target branch from the fresh base and removes PRs whose content is already in the base. `--dry-run` reports what would be dropped and picked without mutating the spec or target branch.
+Rebuilds the target branch from the fresh base and removes PRs whose content is already in the base. `--dry-run` reports what would be dropped and picked without mutating the spec or target branch. Conflict handling — and `--abort-on-conflict` — match [`apply`](#apply).
 
 ### `inspect`
 

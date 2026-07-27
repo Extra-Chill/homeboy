@@ -766,18 +766,22 @@ pub fn compute_changed_test_files_for_files(
 /// contracts operate relative to the component root. Restrict a nested
 /// component's changed scope to its subtree and remove that shared prefix.
 fn component_relative_changed_files(component: &Component, files: &[String]) -> Vec<String> {
-    let Some(prefix) = git::get_component_path_prefix(&component.local_path) else {
-        return files.to_vec();
-    };
-    let prefix = Path::new(&prefix);
+    let prefix = git::get_component_path_prefix(&component.local_path)
+        .map(|prefix| prefix.replace('\\', "/").trim_matches('/').to_string());
 
     files
         .iter()
         .filter_map(|file| {
-            Path::new(file)
-                .strip_prefix(prefix)
-                .ok()
-                .map(|path| path.to_string_lossy().to_string())
+            let file = file.replace('\\', "/");
+            match prefix.as_deref() {
+                // The separator check avoids treating sibling paths such as
+                // `wordpress-tools/**` as belonging to `wordpress/**`.
+                Some(prefix) => file
+                    .strip_prefix(prefix)
+                    .and_then(|path| path.strip_prefix('/'))
+                    .map(str::to_string),
+                None => Some(file),
+            }
         })
         .collect()
 }
@@ -1465,6 +1469,51 @@ mod tests {
                 .iter()
                 .any(|f| f.ends_with("tests/scope_test.rs")),
             "expected changed test file to be included"
+        );
+    }
+
+    #[test]
+    fn component_relative_changed_files_normalizes_separators_and_excludes_siblings() {
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path();
+        let component_root = root.join("wordpress");
+        fs::create_dir_all(&component_root).expect("component dir");
+        Command::new("git")
+            .args(["init"])
+            .current_dir(root)
+            .output()
+            .expect("git init");
+
+        let nested_component = Component::new(
+            "wordpress".to_string(),
+            component_root.to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+        assert_eq!(
+            component_relative_changed_files(
+                &nested_component,
+                &[
+                    "wordpress\\tests\\selected-smoke.mjs".to_string(),
+                    "wordpress-tools\\tests\\sibling-smoke.mjs".to_string(),
+                    "outside\\tests\\outside-smoke.mjs".to_string(),
+                ],
+            ),
+            vec!["tests/selected-smoke.mjs"]
+        );
+
+        let root_component = Component::new(
+            "root".to_string(),
+            root.to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+        assert_eq!(
+            component_relative_changed_files(
+                &root_component,
+                &["tests\\root-smoke.mjs".to_string()],
+            ),
+            vec!["tests/root-smoke.mjs"]
         );
     }
 

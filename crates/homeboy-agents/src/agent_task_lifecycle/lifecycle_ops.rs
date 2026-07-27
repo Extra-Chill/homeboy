@@ -624,10 +624,14 @@ pub fn pin_current_controller_runtime(
 
 /// Prune immutable controller pins through the durable lifecycle ownership
 /// boundary so nonterminal records remain authoritative retention roots.
+///
+/// Retention policy is resolved by core from the operator's configuration; this
+/// boundary only forwards the overrides an operator typed.
 pub fn prune_controller_runtime_pins(
     apply: bool,
+    overrides: homeboy_core::controller_runtime::ControllerRuntimeRetentionOverrides,
 ) -> Result<homeboy_core::controller_runtime::ControllerRuntimePruneResult> {
-    homeboy_core::controller_runtime::prune_pins(apply)
+    homeboy_core::controller_runtime::prune_pins(apply, overrides)
 }
 
 fn migrate_record_controller_runtime(record: &mut AgentTaskRunRecord) -> Result<()> {
@@ -882,8 +886,8 @@ pub fn record_provider_execution_terminal(
     })
 }
 
-#[cfg(test)]
-pub(crate) fn rewrite_record_for_test<F>(run_id: &str, mut rewrite: F) -> Result<AgentTaskRunRecord>
+#[cfg(any(test, feature = "test-support"))]
+pub fn rewrite_record_for_test<F>(run_id: &str, mut rewrite: F) -> Result<AgentTaskRunRecord>
 where
     F: FnMut(&mut AgentTaskRunRecord),
 {

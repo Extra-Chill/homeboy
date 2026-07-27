@@ -53,7 +53,11 @@ pub fn calculate_deploy_readiness(project: &Project) -> (bool, Vec<String>) {
                 Some(&standalone_snapshot),
             ) {
                 let is_git = comp.deploy_strategy.as_deref() == Some("git");
-                let has_artifact = component::resolve_artifact(&comp).is_some();
+                // An ambiguous artifact owner is an authoring error, not a
+                // readiness signal, and this closure has no error channel. Treat
+                // it as "not deployable" here; `build`/`deploy` surface the
+                // actionable ambiguity error when the component is used.
+                let has_artifact = component::resolve_artifact(&comp).ok().flatten().is_some();
                 is_git || has_artifact
             } else {
                 false

@@ -127,6 +127,60 @@ pub struct ControllerRuntimeCleanupOptions {
     pub limit: usize,
 }
 
+/// Operator overrides layered on top of the configured controller runtime
+/// retention window.
+///
+/// Controller runtime cleanup has two supported entry points — `homeboy
+/// cleanup --include controller-runtimes` and `homeboy runtime
+/// controller-prune`. Both resolve their effective policy through
+/// [`resolve_cleanup_options`] so one command cannot honor the operator's
+/// configured window while the other silently deletes outside it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ControllerRuntimeRetentionOverrides {
+    /// Operator `--limit`. `None` uses the configured retention limit.
+    pub limit: Option<i64>,
+    /// Explicit opt-in to a policy-free purge. Deleting pins the configured
+    /// window still protects is destructive, so it is never the default.
+    pub ignore_retention: bool,
+}
+
+/// Resolve the effective cleanup policy from persisted configuration.
+///
+/// This is the single place controller runtime retention becomes concrete
+/// numbers. Call sites pass only what an operator typed; they never invent a
+/// window of their own.
+pub fn resolve_cleanup_options(
+    apply: bool,
+    overrides: ControllerRuntimeRetentionOverrides,
+) -> ControllerRuntimeCleanupOptions {
+    cleanup_options_from_retention(apply, overrides, &crate::defaults::load_config().retention)
+}
+
+fn cleanup_options_from_retention(
+    apply: bool,
+    overrides: ControllerRuntimeRetentionOverrides,
+    retention: &crate::defaults::RetentionConfig,
+) -> ControllerRuntimeCleanupOptions {
+    if overrides.ignore_retention {
+        // The historical unbounded purge, now reachable only by explicit
+        // operator opt-in: every eligible identity is expired and over budget.
+        return ControllerRuntimeCleanupOptions {
+            apply,
+            min_age: Duration::ZERO,
+            max_total_bytes: 0,
+            limit: usize::MAX,
+        };
+    }
+    ControllerRuntimeCleanupOptions {
+        apply,
+        min_age: Duration::from_secs(retention.controller_runtime_days.saturating_mul(86_400)),
+        max_total_bytes: retention.controller_runtime_max_bytes,
+        // A nonsensical negative limit fails closed at zero removals rather
+        // than widening into an unbounded delete.
+        limit: usize::try_from(overrides.limit.unwrap_or(retention.limit)).unwrap_or(0),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ControllerRuntimePruneResult {
     pub retained: Vec<PathBuf>,
@@ -246,22 +300,14 @@ fn retention_report_with_references_at(
 }
 
 /// Remove only content-addressed pins not referenced by a nonterminal durable
-/// record or the active generation. The caller chooses mutation explicitly.
-pub fn prune_pins(apply: bool) -> Result<ControllerRuntimePruneResult> {
-    let result = cleanup(ControllerRuntimeCleanupOptions {
-        apply,
-        min_age: Duration::ZERO,
-        max_total_bytes: 0,
-        limit: usize::MAX,
-    })?;
-    Ok(ControllerRuntimePruneResult {
-        retained: result.retained,
-        eligible: result.eligible,
-        removed: result.removed,
-        removed_identities: result.removed_identities,
-        reclaimed_bytes: result.reclaimed_bytes,
-        snapshots: result.snapshots,
-    })
+/// record or the active generation, and only those the configured retention
+/// window no longer protects. The caller chooses mutation explicitly, and may
+/// opt out of the window explicitly through the overrides.
+pub fn prune_pins(
+    apply: bool,
+    overrides: ControllerRuntimeRetentionOverrides,
+) -> Result<ControllerRuntimePruneResult> {
+    cleanup(resolve_cleanup_options(apply, overrides))
 }
 
 /// Inventory and reclaim immutable runtime identities. The admission lock makes
@@ -3239,6 +3285,137 @@ mod tests {
             assert!(applied.removed.contains(&stale_pin));
             assert!(current_pin.exists());
             assert!(!stale_pin.exists());
+        });
+    }
+
+    #[cfg(unix)]
+    fn save_retention_config(retention: crate::defaults::RetentionConfig) {
+        crate::defaults::save_config(&crate::defaults::HomeboyConfig {
+            retention,
+            ..crate::defaults::HomeboyConfig::default()
+        })
+        .expect("save retention config");
+    }
+
+    #[test]
+    fn resolved_prune_policy_reads_configuration_and_purges_only_on_opt_in() {
+        let retention = crate::defaults::RetentionConfig {
+            controller_runtime_days: 14,
+            controller_runtime_max_bytes: 4096,
+            limit: 7,
+            ..crate::defaults::RetentionConfig::default()
+        };
+
+        let configured = cleanup_options_from_retention(
+            true,
+            ControllerRuntimeRetentionOverrides::default(),
+            &retention,
+        );
+        assert_eq!(configured.min_age, Duration::from_secs(14 * 86_400));
+        assert_eq!(configured.max_total_bytes, 4096);
+        assert_eq!(configured.limit, 7);
+
+        let overridden = cleanup_options_from_retention(
+            true,
+            ControllerRuntimeRetentionOverrides {
+                limit: Some(2),
+                ignore_retention: false,
+            },
+            &retention,
+        );
+        assert_eq!(overridden.limit, 2);
+        assert_eq!(overridden.min_age, configured.min_age);
+        assert_eq!(overridden.max_total_bytes, configured.max_total_bytes);
+
+        let purge = cleanup_options_from_retention(
+            true,
+            ControllerRuntimeRetentionOverrides {
+                limit: Some(2),
+                ignore_retention: true,
+            },
+            &retention,
+        );
+        assert_eq!(purge.min_age, Duration::ZERO);
+        assert_eq!(purge.max_total_bytes, 0);
+        assert_eq!(purge.limit, usize::MAX);
+
+        let negative = cleanup_options_from_retention(
+            true,
+            ControllerRuntimeRetentionOverrides {
+                limit: Some(-1),
+                ignore_retention: false,
+            },
+            &retention,
+        );
+        assert_eq!(negative.limit, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prune_pins_honors_the_configured_window_until_a_purge_is_requested() {
+        crate::test_support::with_isolated_home(|_| {
+            save_retention_config(crate::defaults::RetentionConfig {
+                controller_runtime_days: 3_650,
+                controller_runtime_max_bytes: u64::MAX,
+                limit: 10,
+                ..crate::defaults::RetentionConfig::default()
+            });
+            let temporary = tempfile::tempdir().expect("temporary controller directory");
+            let stale = temporary.path().join("stale");
+            let digest = fake_controller(&stale, "homeboy test+stale", "stale");
+            let pin = pinned_path("homeboy test+stale", &digest).expect("stale path");
+            publish_pin(&stale, &pin, &digest).expect("publish stale");
+
+            // Unreferenced, so eligible — but still inside the operator's
+            // configured age and size budget, so it must survive.
+            let planned = prune_pins(false, ControllerRuntimeRetentionOverrides::default())
+                .expect("plan inside configured window");
+            assert!(planned.eligible.contains(&pin));
+            let applied = prune_pins(true, ControllerRuntimeRetentionOverrides::default())
+                .expect("apply inside configured window");
+            assert!(applied.removed.is_empty());
+            assert!(pin.exists());
+
+            let purged = prune_pins(
+                true,
+                ControllerRuntimeRetentionOverrides {
+                    limit: None,
+                    ignore_retention: true,
+                },
+            )
+            .expect("explicit policy-free purge");
+            assert!(purged.removed.contains(&pin));
+            assert!(!pin.exists());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prune_pins_bounds_removals_by_the_configured_limit() {
+        crate::test_support::with_isolated_home(|_| {
+            save_retention_config(crate::defaults::RetentionConfig {
+                controller_runtime_days: 0,
+                controller_runtime_max_bytes: u64::MAX,
+                limit: 1,
+                ..crate::defaults::RetentionConfig::default()
+            });
+            let temporary = tempfile::tempdir().expect("temporary controller directory");
+            let pins = (0..3)
+                .map(|index| {
+                    let artifact = temporary.path().join(format!("stale-{index}"));
+                    let identity = format!("homeboy test+stale-{index}");
+                    let digest = fake_controller(&artifact, &identity, &format!("stale {index}"));
+                    let pin = pinned_path(&identity, &digest).expect("stale path");
+                    publish_pin(&artifact, &pin, &digest).expect("publish stale");
+                    pin
+                })
+                .collect::<Vec<_>>();
+
+            let applied = prune_pins(true, ControllerRuntimeRetentionOverrides::default())
+                .expect("apply configured limit");
+
+            assert_eq!(applied.removed_identities.len(), 1);
+            assert_eq!(pins.iter().filter(|pin| pin.exists()).count(), 2);
         });
     }
 
