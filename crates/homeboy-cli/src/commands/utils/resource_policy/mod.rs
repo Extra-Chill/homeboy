@@ -12,7 +12,10 @@ use classification::{
     is_bounded_agent_task_metadata_read, is_controller_owned_fanout_coordination,
     is_lab_offloadable_fanout_coordinator, is_local_registry_management, is_plan_only_command,
 };
-use messages::{append_local_placement, primary_action, severity_str, warning_message};
+use messages::{
+    append_local_placement, primary_action, runner_pinned_controller_notice, severity_str,
+    warning_message,
+};
 
 // The captured resource-policy context type, its process-wide store, and the
 // runner-placement environment probes moved to `core::resource_policy_context`
@@ -299,6 +302,22 @@ pub fn evaluate_with_runner_hint(
     })
 }
 
+/// Describe controller-side pressure for a workload explicitly routed to a Lab
+/// runner. This is placement evidence, not a local-execution warning: the
+/// runner handoff owns reporting an authorized fallback if remote preparation
+/// later fails.
+pub fn explicit_runner_controller_notice(
+    command: HotCommand,
+    resources: &DoctorOutput,
+    runner_id: &str,
+) -> Option<String> {
+    command
+        .engages_resource_admission(resources.recommendation)
+        .then(|| {
+            runner_pinned_controller_notice(command, resources.recommendation, resources, runner_id)
+        })
+}
+
 /// Cook keeps durable coordination, promotion, and gates on the controller,
 /// but its provider attempt can be pinned to Lab. An explicitly selected ready
 /// runner lets the controller admit that lightweight coordination under warm or
@@ -564,6 +583,24 @@ mod tests {
         assert!(warning.message.contains("Lab runner `homeboy-lab`"));
         assert!(warning.message.contains("--runner homeboy-lab"));
         assert!(!warning.message.contains("--runner <id>"));
+    }
+
+    #[test]
+    fn explicit_runner_notice_separates_controller_overhead_from_runner_workload() {
+        let notice = explicit_runner_controller_notice(
+            lab_supported_hot("worktree cleanup"),
+            &resources(ResourceRecommendation::Warm),
+            "homeboy-lab",
+        )
+        .expect("warm controller reports its own overhead");
+
+        assert!(notice.contains("controller is warm"));
+        assert!(
+            notice.contains("Workload `worktree cleanup` is routed to Lab runner `homeboy-lab`")
+        );
+        assert!(notice.contains("Controller preflight and transport overhead remain local"));
+        assert!(!notice.contains("starting `worktree cleanup` locally"));
+        assert!(!notice.contains("--runner"));
     }
 
     #[test]

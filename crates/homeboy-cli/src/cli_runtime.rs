@@ -1171,12 +1171,30 @@ fn preflight_hot_command(
                         })
                     })
             };
-            let warning = resource_policy::evaluate_with_runner_hint(
-                hot_command,
-                &resources,
-                lab_readiness.as_ref(),
-            );
+            let explicit_runner_placement = explicit_runner_placement(cli, hot_command);
+            // An explicit runner resolves workload placement before resource
+            // guidance. Controller pressure still matters for handoff overhead,
+            // but it must not be presented as a local workload warning.
+            let warning = explicit_runner_placement
+                .is_none()
+                .then(|| {
+                    resource_policy::evaluate_with_runner_hint(
+                        hot_command,
+                        &resources,
+                        lab_readiness.as_ref(),
+                    )
+                })
+                .flatten();
             let runner_hosted = resource_policy::is_runner_hosted_exec();
+            if let Some(runner_id) = explicit_runner_placement {
+                if let Some(notice) = resource_policy::explicit_runner_controller_notice(
+                    hot_command,
+                    &resources,
+                    runner_id,
+                ) {
+                    eprintln!("{notice}");
+                }
+            }
             if let Some(warning) = warning.as_ref() {
                 if !matches!(cli.placement, crate::cli_surface::Placement::Local) && !runner_hosted
                 {
@@ -1204,6 +1222,7 @@ fn preflight_hot_command(
                 && !matches!(cli.placement, crate::cli_surface::Placement::Local)
             {
                 resource_policy_context.runner_selection.reason = "explicit_lab_runner".to_string();
+                resource_policy_context.runner_selection.runner_id = cli.runner.clone();
             }
             resource_policy::capture_context(resource_policy_context);
             if let Some(warning) = warning.as_ref() {
@@ -1238,6 +1257,16 @@ fn resource_policy_runner_hint<'a>(
     default_runner: Option<&'a str>,
 ) -> Option<&'a str> {
     cli.runner.as_deref().or(default_runner)
+}
+
+fn explicit_runner_placement<'a>(
+    cli: &'a Cli,
+    hot_command: resource_policy::HotCommand,
+) -> Option<&'a str> {
+    cli.runner.as_deref().filter(|_| {
+        hot_command.lab_offload_supported
+            && !matches!(cli.placement, crate::cli_surface::Placement::Local)
+    })
 }
 
 fn run_startup_update_checks(command: &Commands) {
@@ -2244,6 +2273,42 @@ mod tests {
             assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
             assert!(hot_command.lab_offload_supported);
             assert_eq!(hot_command.label, *label);
+        }
+    }
+
+    #[test]
+    fn explicit_runner_resolves_worktree_cleanup_placement_for_dry_run_and_apply() {
+        for args in [
+            [
+                "homeboy",
+                "--runner",
+                "homeboy-lab",
+                "worktree",
+                "cleanup",
+                "--dry-run",
+            ]
+            .as_slice(),
+            [
+                "homeboy",
+                "--runner",
+                "homeboy-lab",
+                "worktree",
+                "cleanup",
+                "--apply",
+            ]
+            .as_slice(),
+        ] {
+            let cli = Cli::try_parse_from(args).expect("parse runner-pinned cleanup command");
+            let hot_command = resource_policy::hot_command(&cli.command)
+                .expect("worktree cleanup is resource managed");
+
+            assert!(hot_command.lab_offload_supported);
+            assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+            assert_eq!(
+                explicit_runner_placement(&cli, hot_command),
+                Some("homeboy-lab"),
+                "resource preflight resolves explicit runner placement before warning"
+            );
         }
     }
 
