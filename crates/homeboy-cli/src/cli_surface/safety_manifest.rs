@@ -222,9 +222,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             );
             metadata.dangerous_flags = vec!["--write"];
         }
-        ["review", "ci", "autofix"] => {
-            metadata.operator_mutating("commits and pushes prepared CI autofix changes");
-        }
         ["cleanup", "artifacts"] => {
             metadata.mutating(
                 "default output is a non-mutating cleanup plan; pass --apply to remove artifacts",
@@ -383,9 +380,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.operator_mutating("default output is a non-mutating issue reconciliation plan; pass --apply to mutate tracker state");
             metadata.dry_run_flag = Some("--dry-run");
             metadata.dangerous_flags = vec!["--apply"];
-        }
-        ["review", "audit", "baseline", "refresh"] | ["review", "audit", "baseline", "merge"] => {
-            metadata.mutating("mutates persisted audit baseline data in component configuration");
         }
         ["refactor", "rename"]
         | ["refactor", "add"]

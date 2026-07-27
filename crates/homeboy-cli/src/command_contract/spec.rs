@@ -594,6 +594,28 @@ const RIG_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
     "reads rig package files and emits the standard JSON lint report without evaluating the live environment",
 )];
 
+/// `review audit-baseline` is the real clap path; `review audit baseline` only
+/// exists as a pre-parse argv rewrite in `commands::utils::args`, so declaring
+/// safety against that spelling silently classifies the command as read-only.
+const REVIEW_AUDIT_BASELINE_PATHS: &[&str] = &[
+    "audit-baseline refresh",
+    "audit-baseline merge",
+    "audit-baseline prune",
+];
+
+const REVIEW_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        &["ci autofix"],
+        operator_safety(None, &[]),
+        "commits and pushes prepared CI autofix changes",
+    ),
+    paths_safety(
+        REVIEW_AUDIT_BASELINE_PATHS,
+        mutating_safety(),
+        "mutates persisted audit baseline data in component configuration",
+    ),
+];
+
 pub const COMMAND_SPECS: &[CommandSpec] = &[
     CommandSpec {
         output_notes: "unified active/recent activity read model in the standard JSON envelope",
@@ -710,15 +732,18 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         operator_safety(Some("--dry-run"), RELEASE_DANGEROUS_FLAGS),
     ),
     command_spec("report", CommandJsonFamily::Workspace),
-    command_spec_with_representative_argv(
-        &["homeboy", "review"],
-        lab_command_spec_with_summary(
-            "review",
-            CommandJsonFamily::Quality,
-            "portable Lab offload is available for release-gate review runs",
-            REVIEW_LAB_SUPPORT,
-        ),
-    ),
+    CommandSpec {
+        subcommand_safety: REVIEW_SUBCOMMAND_SAFETY,
+        ..command_spec_with_representative_argv(
+            &["homeboy", "review"],
+            lab_command_spec_with_summary(
+                "review",
+                CommandJsonFamily::Quality,
+                "portable Lab offload is available for release-gate review runs",
+                REVIEW_LAB_SUPPORT,
+            ),
+        )
+    },
     CommandSpec {
         safety: CommandSafetySpec {
             mutates: true,
