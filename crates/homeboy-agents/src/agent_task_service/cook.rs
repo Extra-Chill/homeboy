@@ -1567,7 +1567,7 @@ fn durable_cook_error_report(
     error: Error,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     if super::recipe_exists(&options.cook_id)? {
-        return Ok(cook_report(
+        let mut report = cook_report(
             options.cook_id.clone(),
             "durable_failure",
             Vec::new(),
@@ -1575,7 +1575,15 @@ fn durable_cook_error_report(
             Some("Cook stopped after durable creation; use the recovery actions in failure_context to inspect or continue it.".to_string()),
             1,
             None,
-        ));
+        );
+        if let Some(context) = &mut report.value.failure_context {
+            // This is a controller failure, not a provider attempt. Keep a
+            // bounded, redacted cause so continuation never needs redispatch.
+            context.phase = "controller".to_string();
+            context.reason_code = error.code.as_str().to_string();
+            context.diagnostic = Some(bounded_error_diagnostic(&error));
+        }
+        return Ok(report);
     }
     Err(error)
 }
@@ -1590,8 +1598,6 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
-    validate_cook_workspace(&options)?;
-    validate_cook_candidate_group(&options.initial_plan)?;
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are
     // caller-owned overrides and retain their existing behavior. A typed
@@ -1671,6 +1677,38 @@ where
         {
             reconstructed.initial_run_id = attempt.run_id.clone();
             reconstructed.initial_plan = attempt.plan.clone();
+            if agent_task_lifecycle::run_record_exists(&attempt.run_id)? {
+                // The recipe freezes the task-worktree handle, while the
+                // durable run plan freezes the baseline-bound continuation.
+                // Resolve the former back to its active path: the baseline is
+                // execution evidence, not a task-worktree identity.
+                let continuation_plan = agent_task_lifecycle::load_plan(&attempt.run_id)?;
+                let baseline_bound_continuation =
+                    continuation_plan.tasks.first().is_some_and(|task| {
+                        task.inputs
+                            .pointer("/cook_loop/artifact_provenance/source_run_id")
+                            .is_some()
+                            || task
+                                .metadata
+                                .get("cook_initial_candidate_baseline")
+                                .is_some()
+                    });
+                if baseline_bound_continuation {
+                    if std::path::Path::new(&reconstructed.to_worktree).is_dir() {
+                        reconstructed.source_worktree_path =
+                            Some(reconstructed.to_worktree.clone().into());
+                    } else if let Some(worktree) =
+                        homeboy_core::worktree::resolve_workspace_ref_if_present(
+                            &reconstructed.to_worktree,
+                        )?
+                    {
+                        if worktree.state() == &homeboy_core::worktree::TaskWorktreeState::Active {
+                            reconstructed.source_worktree_path = Some(worktree.path().into());
+                        }
+                    }
+                }
+                reconstructed.initial_plan = continuation_plan;
+            }
         }
         reconstructed
     } else {
@@ -2229,6 +2267,39 @@ where
                     record.state
                 )),
                 1,
+                Some(&run_id),
+            ));
+        }
+
+        if let Some(finalization) = record
+            .metadata
+            .get("cook_finalization")
+            .filter(|finalization| !finalization.is_null())
+            .cloned()
+        {
+            // A terminal child may outlive its coordinator. Its finalization is
+            // the durable completion receipt, so harvesting it must not repeat
+            // promotion, gates, or any provider-facing work.
+            let status = finalization["status"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string();
+            let exit_code = if status == "review_ready" { 0 } else { 1 };
+            attempts.push(AgentTaskCookAttemptReport {
+                attempt,
+                run_id: run_id.clone(),
+                run_state: format!("{:?}", record.state),
+                aggregate_path: record.aggregate_path,
+                promotion: None,
+                feedback: None,
+            });
+            return Ok(cook_report(
+                cook_id,
+                &status,
+                attempts,
+                Some(finalization),
+                None,
+                exit_code,
                 Some(&run_id),
             ));
         }

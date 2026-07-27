@@ -468,6 +468,19 @@ impl CliRuntime {
             }
         }
 
+        match guard_fanout_resume_runtime(&cli) {
+            Ok(()) => {}
+            Err(err) => {
+                output_runtime::emit_json_result_for_identity(
+                    Err(err),
+                    output_file.as_deref(),
+                    2,
+                    &command_identity,
+                );
+                return std::process::ExitCode::from(2);
+            }
+        }
+
         // This internal provider's request is carried on process stdin. Execute
         // it before generic routing or startup work can consume that stream.
         if let Some(exit_code) =
@@ -633,6 +646,9 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
                 None
             }
             crate::commands::agent_task::AgentTaskCommand::Resume(args) => Some(&args.run_id),
+            crate::commands::agent_task::AgentTaskCommand::CookContinue(args) => {
+                return delegate_cook_continue_to_pinned_runtime(&args.cook_or_attempt_id, normalized_args);
+            }
             _ => None,
         },
         _ => None,
@@ -657,6 +673,82 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
             )
         })?;
     Ok(Some(status.code().unwrap_or(1)))
+}
+
+fn delegate_cook_continue_to_pinned_runtime(
+    cook_or_attempt_id: &str,
+    normalized_args: &[String],
+) -> homeboy::core::Result<Option<i32>> {
+    let run_id =
+        crate::agents::agent_tasks::service::resolve_cook_continuation_run_id(cook_or_attempt_id)?;
+    let Some(pinned) = crate::agents::agent_tasks::lifecycle::pinned_runtime_for_mutation(&run_id)?
+    else {
+        return Ok(None);
+    };
+    let status = ProcessCommand::new(&pinned)
+        .args(&normalized_args[1..])
+        .status()
+        .map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "execute pinned controller runtime {}",
+                    pinned.display()
+                )),
+            )
+        })?;
+    Ok(Some(status.code().unwrap_or(1)))
+}
+
+/// Fanout coordination is controller-owned and may span children from distinct
+/// generations. It must not be offloaded wholesale; return exact child-local
+/// continuations before any provider or coordinator work can begin.
+fn guard_fanout_resume_runtime(cli: &Cli) -> homeboy::core::Result<()> {
+    let Commands::AgentTask(agent_task) = &cli.command else {
+        return Ok(());
+    };
+    let crate::commands::agent_task::AgentTaskCommand::Fanout(fanout) = &agent_task.command else {
+        return Ok(());
+    };
+    let crate::commands::agent_task::args::AgentTaskFanoutCommand::Resume(args) = &fanout.command
+    else {
+        return Ok(());
+    };
+    let batch = crate::agents::agent_tasks::batch::read_batch_record(&args.batch_id)?;
+    let mut actions = Vec::new();
+    for child in &batch.child_runs {
+        // Children without a recipe never reached cook admission, so preserve
+        // the existing per-child recovery report instead of inventing a pin.
+        if crate::agents::agent_tasks::service::load_recipe(&child.run_id).is_err() {
+            continue;
+        }
+        let run_id =
+            crate::agents::agent_tasks::service::resolve_cook_continuation_run_id(&child.run_id)?;
+        if let Some(pinned) =
+            crate::agents::agent_tasks::lifecycle::pinned_runtime_for_mutation(&run_id)?
+        {
+            actions.push(pinned_cook_continue_command(&pinned, &child.run_id));
+        }
+    }
+    if actions.is_empty() {
+        return Ok(());
+    }
+    let mut error = homeboy::core::Error::validation_invalid_argument(
+        "batch_id",
+        "fanout coordinator cannot resume children pinned to another controller runtime",
+        Some(args.batch_id.clone()),
+        None,
+    );
+    error.details["next_actions"] = serde_json::json!(actions);
+    Err(error.with_retryable(true))
+}
+
+fn pinned_cook_continue_command(pinned: &std::path::Path, cook_id: &str) -> String {
+    format!(
+        "{} agent-task cook-continue {}",
+        homeboy::core::engine::shell::quote_arg(&pinned.to_string_lossy()),
+        homeboy::core::engine::shell::quote_arg(cook_id),
+    )
 }
 
 fn run_raw_agent_tool_dispatch(command: &Commands) -> Option<i32> {
@@ -2126,6 +2218,17 @@ mod tests {
             resource_policy_runner_hint(&cli, None),
             Some("homeboy-lab"),
             "hot-machine admission must receive the runner selected in pinned argv"
+        );
+    }
+
+    #[test]
+    fn pinned_cook_continuation_command_quotes_the_executable_and_cook_id() {
+        assert_eq!(
+            pinned_cook_continue_command(
+                std::path::Path::new("/tmp/controller runtimes/homeboy's"),
+                "cook id's",
+            ),
+            "'/tmp/controller runtimes/homeboy'\\''s' agent-task cook-continue 'cook id'\\''s'"
         );
     }
 

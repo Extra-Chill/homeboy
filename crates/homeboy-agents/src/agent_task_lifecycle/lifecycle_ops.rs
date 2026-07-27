@@ -408,6 +408,12 @@ where
     };
     let mut preserved_controller_runtime = None;
     if let Ok(existing) = store::read_record(&run_id) {
+        // A runner may re-submit the plan after the controller reserved a
+        // side-effect claim. Claims are durable exactly-once ownership, not
+        // plan-derived state, so replacing the record must retain them.
+        if let Some(claims) = existing.metadata.get("cook_operation_claims") {
+            record.metadata["cook_operation_claims"] = claims.clone();
+        }
         if execution_runner_id.as_deref() == existing.runner_id() {
             // A foreground daemon binds its job before launching runner-local
             // `run-plan`. Keep that transport identity when run-plan replaces
@@ -581,6 +587,15 @@ pub fn pinned_runtime_for_mutation(run_id: &str) -> Result<Option<std::path::Pat
         &record.metadata,
         &homeboy_core::build_identity::current().display,
     )
+    .map_err(|mut error| {
+        // A bad pin must never become a recursive re-exec suggestion. Name the
+        // narrow repair operation against the durable record instead.
+        error.details["next_actions"] = serde_json::json!([format!(
+            "homeboy agent-task runtime-recover {} --artifact <trusted-controller-executable>",
+            homeboy_core::engine::shell::quote_arg(&record.run_id)
+        )]);
+        error
+    })
 }
 
 /// Seal the currently executing controller into an immutable runtime before a

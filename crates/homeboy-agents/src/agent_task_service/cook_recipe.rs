@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Digest;
 
+use crate::agent_task_lifecycle;
 use crate::agent_task_scheduler::AgentTaskPlan;
 use crate::agent_task_service::cook::{
     AgentTaskCookAttemptDispatcher, AgentTaskCookServiceOptions,
@@ -943,6 +944,38 @@ pub fn reconstruct_adoption_options(
     recipe: &AgentTaskCookRecipe,
 ) -> Result<AgentTaskCookServiceOptions> {
     reconstruct_recipe_options(recipe, None, false, false)
+}
+
+/// Resolve a Cook identifier to the durable attempt whose controller runtime
+/// owns continuation. Both the CLI re-exec boundary and the Cook handler use
+/// this so an upgraded controller cannot select different attempts.
+pub fn resolve_cook_continuation_run_id(cook_or_attempt_id: &str) -> Result<String> {
+    let recipe = load_recipe(cook_or_attempt_id)
+        .or_else(|cook_error| load_recipe_for_attempt(cook_or_attempt_id)?.ok_or(cook_error))?;
+    if recipe
+        .attempts
+        .iter()
+        .any(|attempt| attempt.run_id == cook_or_attempt_id)
+    {
+        return Ok(cook_or_attempt_id.to_string());
+    }
+    Ok(agent_task_lifecycle::cook_index(&recipe.cook_id)
+        .ok()
+        .map(|index| index.latest_run_id)
+        .filter(|run_id| {
+            recipe
+                .attempts
+                .iter()
+                .any(|attempt| attempt.run_id == *run_id)
+        })
+        .unwrap_or_else(|| {
+            recipe
+                .attempts
+                .last()
+                .expect("validated recipe has an attempt")
+                .run_id
+                .clone()
+        }))
 }
 
 /// Adoption accepts historical policy, but a remediation retry still needs the
