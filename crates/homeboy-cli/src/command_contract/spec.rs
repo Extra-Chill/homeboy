@@ -52,6 +52,9 @@ pub struct CommandSafetySpec {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandPathSafetySpec {
+    /// Space-separated subcommand paths *below* the owning command, matched
+    /// against the clap-derived command surface. The empty string addresses the
+    /// owning command itself.
     pub paths: &'static [&'static str],
     pub safety: CommandSafetySpec,
     pub output_notes: Option<&'static str>,
@@ -522,6 +525,8 @@ const PROJECT_MUTATING_PATHS: &[&str] = &[
 const COMPONENT_MUTATING_PATHS: &[&str] = &["create", "set", "delete", "rename", "setup"];
 const COMPONENT_GUARDED_PATHS: &[&str] = &["reconcile", "artifacts"];
 const RIG_STATIC_LINT_PATHS: &[&str] = &["lint", "package lint", "materialize"];
+const RIG_RUNTIME_MUTATING_PATHS: &[&str] = &["down", "repair", "install", "update"];
+const RIG_MANAGED_FILE_PATHS: &[&str] = &["sync", "app install", "app update", "app uninstall"];
 
 const DEPS_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
     DEPS_MUTATING_PATHS,
@@ -595,10 +600,61 @@ const COMPONENT_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
         "default output is non-mutating; pass --apply to repair or remove artifacts",
     ),
 ];
-const RIG_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
-    RIG_STATIC_LINT_PATHS,
-    CommandSafetySpec::read_only(),
-    "reads rig package files and emits the standard JSON lint report without evaluating the live environment",
+const RIG_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        RIG_STATIC_LINT_PATHS,
+        CommandSafetySpec::read_only(),
+        "reads rig package files and emits the standard JSON lint report without evaluating the live environment",
+    ),
+    paths_safety(
+        &["release-lock"],
+        operator_safety(None, &["--force"]),
+        "releases a local rig active-run lease; --force can reclaim a live holder's guardrail",
+    ),
+    paths_safety(
+        &["up"],
+        operator_safety(Some("--dry-run"), &[]),
+        "mutates local rig runtime state unless --dry-run is passed with --runner to emit a runner exec plan",
+    ),
+    paths_safety(
+        RIG_RUNTIME_MUTATING_PATHS,
+        operator_safety(None, &[]),
+        "mutates local rig runtime state or installed rig packages",
+    ),
+    paths_safety(
+        RIG_MANAGED_FILE_PATHS,
+        operator_safety(Some("--dry-run"), &[]),
+        "mutates rig-managed files unless --dry-run is passed",
+    ),
+    paths_safety(
+        &["sources remove", "sources refresh"],
+        mutating_safety(),
+        "mutates installed rig source metadata",
+    ),
+];
+
+const FUZZ_CASE_REPLAY_PATHS: &[&str] = &["replay", "minimize"];
+/// The empty path addresses bare `homeboy fuzz`, which shares the default
+/// planning/execution contract with its measurement subcommands.
+const FUZZ_MEASUREMENT_PATHS: &[&str] = &["", "run", "plan", "run-campaign"];
+
+const FUZZ_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        FUZZ_CASE_REPLAY_PATHS,
+        mutating_safety(),
+        "replays or minimizes a persisted fuzz case against local code and may write run artifacts",
+    ),
+    paths_safety(
+        FUZZ_MEASUREMENT_PATHS,
+        guarded_safety(FUZZ_DANGEROUS_FLAGS),
+        "read-only fuzz planning/execution contract by default; --allow-destructive infers isolated mode and attaches an auditable homeboy/isolation-proof/v1 unless one is supplied",
+    ),
+];
+
+const DB_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
+    &["delete-row", "drop-table"],
+    operator_safety(None, &[]),
+    "default output is a non-mutating plan; pass --apply to mutate",
 )];
 
 /// `review audit-baseline` is the real clap path; `review audit baseline` only
@@ -819,6 +875,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     ),
     CommandSpec {
         safety: guarded_safety(FUZZ_DANGEROUS_FLAGS),
+        subcommand_safety: FUZZ_SUBCOMMAND_SAFETY,
         ..command_spec_with_representative_argv(
             &["homeboy", "fuzz"],
             lab_command_spec_with_summary(

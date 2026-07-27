@@ -206,25 +206,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
 
     let path = path.iter().map(String::as_str).collect::<Vec<_>>();
     match path.as_slice() {
-        ["fuzz", "replay"] | ["fuzz", "minimize"] => {
-            metadata.mutating(
-                "replays or minimizes a persisted fuzz case against local code and may write run artifacts",
-            );
-        }
-        ["fuzz"] | ["fuzz", "run"] | ["fuzz", "plan"] | ["fuzz", "run-campaign"] => {
-            metadata.output_notes = "read-only fuzz planning/execution contract by default; --allow-destructive infers isolated mode and attaches an auditable homeboy/isolation-proof/v1 unless one is supplied";
-            metadata.dangerous_flags = vec!["--allow-destructive"];
-        }
-        ["rig", "release-lock"] => {
-            metadata.operator_mutating(
-                "releases a local rig active-run lease; --force can reclaim a live holder's guardrail",
-            );
-            metadata.dangerous_flags = vec!["--force"];
-        }
-        ["db", "delete-row"] | ["db", "drop-table"] => {
-            metadata
-                .operator_mutating("default output is a non-mutating plan; pass --apply to mutate");
-        }
         ["git", "issue", "create"]
         | ["git", "issue", "comment"]
         | ["git", "issue", "close"]
@@ -260,23 +241,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
         | ["refactor", "decompose"] => {
             metadata.mutating("reports a plan by default; pass --write to rewrite source files");
             metadata.dangerous_flags = vec!["--write"];
-        }
-        ["rig", "up"] => {
-            metadata.operator_mutating("mutates local rig runtime state unless --dry-run is passed with --runner to emit a runner exec plan");
-            metadata.dry_run_flag = Some("--dry-run");
-        }
-        ["rig", "down"] | ["rig", "repair"] | ["rig", "install"] | ["rig", "update"] => {
-            metadata.operator_mutating("mutates local rig runtime state or installed rig packages");
-        }
-        ["rig", "sync"]
-        | ["rig", "app", "install"]
-        | ["rig", "app", "update"]
-        | ["rig", "app", "uninstall"] => {
-            metadata.operator_mutating("mutates rig-managed files unless --dry-run is passed");
-            metadata.dry_run_flag = Some("--dry-run");
-        }
-        ["rig", "sources", "remove"] | ["rig", "sources", "refresh"] => {
-            metadata.mutating("mutates installed rig source metadata");
         }
         ["runner", "add"]
         | ["runner", "enable"]

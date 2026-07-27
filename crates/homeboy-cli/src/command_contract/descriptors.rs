@@ -11,7 +11,7 @@ macro_rules! ops_command_descriptors {
         $consumer! {
             (ssh, Ssh, crate::commands::ssh::SshArgs, command_spec("ssh", CommandJsonFamily::Ops), crate::commands::ssh::run),
             (server, Server, crate::commands::server::ServerArgs, CommandSpec { subcommand_safety: SERVER_SUBCOMMAND_SAFETY, ..command_spec("server", CommandJsonFamily::Ops) }, crate::commands::server::run),
-            (db, Db, crate::commands::db::DbArgs, command_spec("db", CommandJsonFamily::Ops), crate::commands::db::run),
+            (db, Db, crate::commands::db::DbArgs, CommandSpec { subcommand_safety: DB_SUBCOMMAND_SAFETY, ..command_spec("db", CommandJsonFamily::Ops) }, crate::commands::db::run),
             (file, File, crate::commands::file::FileArgs, CommandSpec { subcommand_safety: FILE_SUBCOMMAND_SAFETY, ..command_spec("file", CommandJsonFamily::Ops) }, crate::commands::file::run),
             (logs, Logs, crate::commands::logs::LogsArgs, command_spec("logs", CommandJsonFamily::Ops), crate::commands::logs::run),
             (triage, Triage, crate::commands::triage::TriageArgs, command_spec_with_safety("triage", CommandJsonFamily::Ops, operator_safety(None, TRIAGE_DANGEROUS_FLAGS)), crate::commands::triage::run),
@@ -39,7 +39,7 @@ macro_rules! ops_command_descriptors {
 macro_rules! ops_command_spec {
     (ssh) => { command_spec("ssh", CommandJsonFamily::Ops) };
     (server) => { CommandSpec { subcommand_safety: SERVER_SUBCOMMAND_SAFETY, ..command_spec("server", CommandJsonFamily::Ops) } };
-    (db) => { command_spec("db", CommandJsonFamily::Ops) };
+    (db) => { CommandSpec { subcommand_safety: DB_SUBCOMMAND_SAFETY, ..command_spec("db", CommandJsonFamily::Ops) } };
     (file) => { CommandSpec { subcommand_safety: FILE_SUBCOMMAND_SAFETY, ..command_spec("file", CommandJsonFamily::Ops) } };
     (logs) => { command_spec("logs", CommandJsonFamily::Ops) };
     (triage) => { command_spec_with_safety("triage", CommandJsonFamily::Ops, operator_safety(None, TRIAGE_DANGEROUS_FLAGS)) };
