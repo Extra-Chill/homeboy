@@ -113,11 +113,14 @@ enum WorktreeCommand {
     },
     /// Remove cleanup-eligible task worktrees after safety checks
     Cleanup {
+        /// Remove planned worktrees and artifacts after safety checks. Without this flag, only reports the plan.
+        #[arg(long, conflicts_with = "dry_run")]
+        apply: bool,
         /// Allow dirty/unpushed worktree removal; hard gates still apply
         #[arg(long)]
         force: bool,
-        /// Report cleanup candidates without removing worktrees or artifacts.
-        #[arg(long)]
+        /// Deprecated plan-only alias retained for one release; bare cleanup also reports the plan.
+        #[arg(long, conflicts_with = "apply")]
         dry_run: bool,
         /// Also remove declared rebuildable artifacts from the Homeboy checkout that built this binary.
         #[arg(long)]
@@ -236,12 +239,14 @@ pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<Worktre
             allow_unmerged_branch,
         })?),
         WorktreeCommand::Cleanup {
+            apply,
             force,
-            dry_run,
+            dry_run: _,
             cleanup_artifacts,
             cleanup_branches,
             allow_unmerged_branches,
         } => {
+            let dry_run = cleanup_is_dry_run(apply);
             let worktrees = worktree::cleanup(WorktreeCleanupOptions {
                 force,
                 dry_run,
@@ -252,7 +257,7 @@ pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<Worktre
                 Some(artifact_cleanup::cleanup_artifacts(
                     ArtifactCleanupOptions {
                         path: None,
-                        apply: !dry_run,
+                        apply,
                         self_artifacts: true,
                         temp_roots: Vec::new(),
                         sort: ArtifactCleanupSort::Discovery,
@@ -274,45 +279,92 @@ pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<Worktre
     Ok((output, 0))
 }
 
+fn cleanup_is_dry_run(apply: bool) -> bool {
+    !apply
+}
+
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
+    use clap::{error::ErrorKind, Parser};
 
     use crate::cli_surface::{Cli, Commands};
 
-    use super::WorktreeCommand;
+    use super::{cleanup_is_dry_run, WorktreeCommand};
 
     #[test]
-    fn worktree_cleanup_does_not_cleanup_artifacts_by_default() {
+    fn worktree_cleanup_bare_is_a_plan() {
         let cli = Cli::parse_from(["homeboy", "worktree", "cleanup"]);
 
         let Commands::Worktree(args) = cli.command else {
             panic!("expected worktree command");
         };
         let WorktreeCommand::Cleanup {
-            cleanup_artifacts, ..
+            apply,
+            dry_run,
+            cleanup_artifacts,
+            ..
         } = args.command
         else {
             panic!("expected worktree cleanup command");
         };
 
+        assert!(!apply);
+        assert!(!dry_run);
+        assert!(cleanup_is_dry_run(apply));
         assert!(!cleanup_artifacts);
     }
 
     #[test]
-    fn worktree_cleanup_artifact_cleanup_requires_explicit_flag() {
-        let cli = Cli::parse_from(["homeboy", "worktree", "cleanup", "--cleanup-artifacts"]);
+    fn worktree_cleanup_apply_enables_worktree_and_artifact_mutation() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "worktree",
+            "cleanup",
+            "--apply",
+            "--cleanup-artifacts",
+        ]);
 
         let Commands::Worktree(args) = cli.command else {
             panic!("expected worktree command");
         };
         let WorktreeCommand::Cleanup {
-            cleanup_artifacts, ..
+            apply,
+            cleanup_artifacts,
+            ..
         } = args.command
         else {
             panic!("expected worktree cleanup command");
         };
 
+        assert!(apply);
+        assert!(!cleanup_is_dry_run(apply));
         assert!(cleanup_artifacts);
+    }
+
+    #[test]
+    fn worktree_cleanup_dry_run_is_a_legacy_plan_only_alias() {
+        let cli = Cli::parse_from(["homeboy", "worktree", "cleanup", "--dry-run"]);
+
+        let Commands::Worktree(args) = cli.command else {
+            panic!("expected worktree command");
+        };
+        let WorktreeCommand::Cleanup { apply, dry_run, .. } = args.command else {
+            panic!("expected worktree cleanup command");
+        };
+
+        assert!(!apply);
+        assert!(dry_run);
+        assert!(cleanup_is_dry_run(apply));
+    }
+
+    #[test]
+    fn worktree_cleanup_rejects_conflicting_apply_and_dry_run() {
+        let error =
+            match Cli::try_parse_from(["homeboy", "worktree", "cleanup", "--apply", "--dry-run"]) {
+                Ok(_) => panic!("conflicting cleanup modes must be rejected"),
+                Err(error) => error,
+            };
+
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
     }
 }
