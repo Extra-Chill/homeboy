@@ -2676,40 +2676,99 @@ fn workspace_liveness(
     metadata: &serde_json::Value,
     path: &Path,
 ) -> RunnerWorkspaceLivenessEvidence {
-    if (metadata
-        .get("job_id")
-        .and_then(|value| value.as_str())
-        .is_some()
-        || metadata
-            .get("run_id")
-            .and_then(|value| value.as_str())
-            .is_some())
-        && metadata
-            .get("resource_lifecycle")
-            .and_then(|value| value.get("status"))
-            .and_then(|value| value.as_str())
-            == Some("active")
-    {
-        return liveness("live", vec!["active_resource_lifecycle_lease".to_string()]);
-    }
+    let terminal_lifecycle_owner = match active_resource_lifecycle_liveness(metadata, |run_id| {
+        match homeboy_agents::agent_task_lifecycle::exact_record(run_id) {
+            Ok(record) if record.state.is_terminal() => RunAuthority::Terminal,
+            Ok(_) => RunAuthority::Active,
+            Err(_) => RunAuthority::Unavailable,
+        }
+    }) {
+        ActiveResourceLifecycleLiveness::Terminal(owner) => Some(owner),
+        ActiveResourceLifecycleLiveness::Live => {
+            return liveness("live", vec!["active_resource_lifecycle_lease".to_string()]);
+        }
+        ActiveResourceLifecycleLiveness::Unknown(observation) => {
+            return liveness("unknown", vec![observation.to_string()]);
+        }
+        ActiveResourceLifecycleLiveness::NotActive => None,
+    };
 
-    if let Some(job_id) = metadata.get("job_id").and_then(|value| value.as_str()) {
-        match super::super::status(&runner.id) {
-            Ok(report)
-                if report.active_job_state == super::super::RunnerActiveJobState::Available =>
-            {
-                if report.active_jobs.iter().any(|job| job.job_id == job_id) {
-                    return liveness("live", vec![format!("active_runner_job:{job_id}")]);
+    if terminal_lifecycle_owner.is_none() {
+        if let Some(job_id) = metadata.get("job_id").and_then(|value| value.as_str()) {
+            match super::super::status(&runner.id) {
+                Ok(report)
+                    if report.active_job_state == super::super::RunnerActiveJobState::Available =>
+                {
+                    if report.active_jobs.iter().any(|job| job.job_id == job_id) {
+                        return liveness("live", vec![format!("active_runner_job:{job_id}")]);
+                    }
+                }
+                Ok(_) => {
+                    return liveness("unknown", vec!["runner_job_probe_unavailable".to_string()]);
+                }
+                Err(_) => {
+                    return liveness("unknown", vec!["runner_job_probe_failed".to_string()]);
                 }
             }
-            Ok(_) => return liveness("unknown", vec!["runner_job_probe_unavailable".to_string()]),
-            Err(_) => return liveness("unknown", vec!["runner_job_probe_failed".to_string()]),
         }
     }
 
     match runner.kind {
         RunnerKind::Local => local_process_liveness(path),
         RunnerKind::Ssh => ssh_process_liveness(runner, &path.display().to_string()),
+    }
+}
+
+pub(crate) enum RunAuthority {
+    Terminal,
+    Active,
+    Unavailable,
+}
+
+pub(crate) enum ActiveResourceLifecycleLiveness {
+    NotActive,
+    Terminal(String),
+    Live,
+    Unknown(&'static str),
+}
+
+/// A run-owned active workspace lease is only superseded by its exact durable
+/// run. Conflicting ownership or unavailable run authority remains fail-closed.
+pub(crate) fn active_resource_lifecycle_liveness(
+    metadata: &serde_json::Value,
+    authority: impl FnOnce(&str) -> RunAuthority,
+) -> ActiveResourceLifecycleLiveness {
+    let Some(resource) = metadata.get("resource_lifecycle") else {
+        return ActiveResourceLifecycleLiveness::NotActive;
+    };
+    if resource.get("status").and_then(|value| value.as_str()) != Some("active") {
+        return ActiveResourceLifecycleLiveness::NotActive;
+    }
+    if metadata
+        .get("job_id")
+        .and_then(|value| value.as_str())
+        .is_some_and(|id| !id.trim().is_empty())
+    {
+        return ActiveResourceLifecycleLiveness::Live;
+    }
+    let Some(run_id) = metadata
+        .get("run_id")
+        .and_then(|value| value.as_str())
+        .filter(|id| !id.trim().is_empty())
+    else {
+        return ActiveResourceLifecycleLiveness::NotActive;
+    };
+    if resource.get("run_id").and_then(|value| value.as_str()) != Some(run_id) {
+        return ActiveResourceLifecycleLiveness::Unknown(
+            "active_resource_lifecycle_owner_ambiguous",
+        );
+    }
+    match authority(run_id) {
+        RunAuthority::Terminal => ActiveResourceLifecycleLiveness::Terminal(run_id.to_string()),
+        RunAuthority::Active => ActiveResourceLifecycleLiveness::Live,
+        RunAuthority::Unavailable => ActiveResourceLifecycleLiveness::Unknown(
+            "active_resource_lifecycle_authority_unavailable",
+        ),
     }
 }
 
@@ -3115,19 +3174,27 @@ fn remove_prune_candidate(
             remove_workspace(runner, root, &candidate.remote_path)?;
             Ok(None)
         }
-        RunnerKind::Ssh => remove_ssh_prune_candidate(runner, root, &candidate.remote_path),
+        RunnerKind::Ssh => remove_ssh_prune_candidate(runner, root, candidate),
     }
 }
 
 fn remove_ssh_prune_candidate(
     runner: &super::super::Runner,
     root: &str,
-    remote_path: &str,
+    candidate: &RunnerWorkspacePruneEntry,
 ) -> Result<Option<RunnerWorkspaceLivenessEvidence>> {
     let (_server, mut client) = ssh_client_for_runner(runner)?;
     client.env.extend(runner.env.clone());
+    let terminal_owner_run_id = candidate.run_id.as_deref().filter(|run_id| {
+        homeboy_agents::agent_task_lifecycle::exact_record(run_id)
+            .is_ok_and(|record| record.state.is_terminal())
+    });
     let output = client.execute_with_timeout(
-        &ssh_prune_delete_command(root, remote_path),
+        &ssh_prune_delete_command_with_terminal_owner(
+            root,
+            &candidate.remote_path,
+            terminal_owner_run_id,
+        ),
         WORKSPACE_PRUNE_TIMEOUT,
     );
     if !output.success {
@@ -3158,8 +3225,17 @@ fn remove_ssh_prune_candidate(
 }
 
 pub(crate) fn ssh_prune_delete_command(root: &str, remote_path: &str) -> String {
+    ssh_prune_delete_command_with_terminal_owner(root, remote_path, None)
+}
+
+pub(crate) fn ssh_prune_delete_command_with_terminal_owner(
+    root: &str,
+    remote_path: &str,
+    terminal_owner_run_id: Option<&str>,
+) -> String {
+    let owner = shell::quote_arg(terminal_owner_run_id.unwrap_or(""));
     format!(
-        "root={root}; p={path}; meta_rel={meta}; case \"$p\" in \"$root\"/*) ;; *) printf unknown:workspace_path; exit 0 ;; esac; meta=\"$p/$meta_rel\"; [ -f \"$meta\" ] && grep -Eq '\"schema\"[[:space:]]*:[[:space:]]*\"homeboy/runner-workspace/v1\"' \"$meta\" || {{ printf unknown:metadata; exit 0; }}; if grep -Eq '\"status\"[[:space:]]*:[[:space:]]*\"active\"' \"$meta\"; then printf live:active_resource_lifecycle_lease; exit 0; fi; command -v ps >/dev/null 2>&1 && command -v lsof >/dev/null 2>&1 || {{ printf unknown:process_probe_unavailable; exit 0; }}; ps_output=$(ps -eo pid=,ppid=,args=) || {{ printf unknown:process_probe_failed; exit 0; }}; printf '%s\\n' \"$ps_output\" | awk -v p=\"$p\" -v self=\"$$\" -v parent=\"$PPID\" '$1 != self && $1 != parent && $2 != self && index($0, p) {{ found=1 }} END {{ exit !found }}'; state=$?; [ \"$state\" -eq 0 ] && {{ printf live:remote_process_ownership; exit 0; }}; [ \"$state\" -eq 1 ] || {{ printf unknown:process_probe_failed; exit 0; }}; cwd=$(lsof -Fn -a -d cwd +D \"$p\" 2>&1); state=$?; [ \"$state\" -eq 0 ] && [ -n \"$cwd\" ] && {{ printf live:remote_process_ownership; exit 0; }}; {{ [ \"$state\" -eq 1 ] && [ -z \"$cwd\" ]; }} || {{ printf unknown:process_probe_failed; exit 0; }}; open=$(lsof -Fn +D \"$p\" 2>&1); state=$?; [ \"$state\" -eq 0 ] && [ -n \"$open\" ] && {{ printf live:remote_process_ownership; exit 0; }}; {{ [ \"$state\" -eq 1 ] && [ -z \"$open\" ]; }} || {{ printf unknown:process_probe_failed; exit 0; }}; rm -rf -- \"$p\" && printf removed || printf unknown:delete_failed",
+        "root={root}; p={path}; meta_rel={meta}; owner={owner}; case \"$p\" in \"$root\"/*) ;; *) printf unknown:workspace_path; exit 0 ;; esac; meta=\"$p/$meta_rel\"; [ -f \"$meta\" ] && grep -Eq '\"schema\"[[:space:]]*:[[:space:]]*\"homeboy/runner-workspace/v1\"' \"$meta\" || {{ printf unknown:metadata; exit 0; }}; if grep -Eq '\"status\"[[:space:]]*:[[:space:]]*\"active\"' \"$meta\"; then compact=$(tr -d '[:space:]' < \"$meta\") || {{ printf unknown:metadata; exit 0; }}; [ -n \"$owner\" ] && [ \"$(printf '%s' \"$compact\" | grep -Fo -- \"\\\"run_id\\\":\\\"$owner\\\"\" | wc -l | tr -d ' ')\" -ge 2 ] || {{ printf live:active_resource_lifecycle_lease; exit 0; }}; fi; command -v ps >/dev/null 2>&1 && command -v lsof >/dev/null 2>&1 || {{ printf unknown:process_probe_unavailable; exit 0; }}; ps_output=$(ps -eo pid=,ppid=,args=) || {{ printf unknown:process_probe_failed; exit 0; }}; printf '%s\\n' \"$ps_output\" | awk -v p=\"$p\" -v self=\"$$\" -v parent=\"$PPID\" '$1 != self && $1 != parent && $2 != self && index($0, p) {{ found=1 }} END {{ exit !found }}'; state=$?; [ \"$state\" -eq 0 ] && {{ printf live:remote_process_ownership; exit 0; }}; [ \"$state\" -eq 1 ] || {{ printf unknown:process_probe_failed; exit 0; }}; cwd=$(lsof -Fn -a -d cwd +D \"$p\" 2>&1); state=$?; [ \"$state\" -eq 0 ] && [ -n \"$cwd\" ] && {{ printf live:remote_process_ownership; exit 0; }}; {{ [ \"$state\" -eq 1 ] && [ -z \"$cwd\" ]; }} || {{ printf unknown:process_probe_failed; exit 0; }}; open=$(lsof -Fn +D \"$p\" 2>&1); state=$?; [ \"$state\" -eq 0 ] && [ -n \"$open\" ] && {{ printf live:remote_process_ownership; exit 0; }}; {{ [ \"$state\" -eq 1 ] && [ -z \"$open\" ]; }} || {{ printf unknown:process_probe_failed; exit 0; }}; rm -rf -- \"$p\" && printf removed || printf unknown:delete_failed",
         root = shell::quote_arg(root),
         path = shell::quote_arg(remote_path),
         meta = shell::quote_arg(WORKSPACE_METADATA_FILE),

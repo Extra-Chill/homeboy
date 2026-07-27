@@ -826,7 +826,7 @@ impl AgentTaskRunState {
     /// enumerate this set inline (`matches!(state, Succeeded | CandidateRecoverable
     /// | ...)`) delegates here, so adding or reclassifying a run state cannot
     /// leave a stale copy behind.
-    pub(crate) fn is_terminal(self) -> bool {
+    pub fn is_terminal(self) -> bool {
         matches!(
             self,
             AgentTaskRunState::Succeeded
