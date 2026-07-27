@@ -1,23 +1,55 @@
-# Full-tree audit debt sweep.
+# Post-merge guard for `main`, plus the weekly full-tree audit debt sweep.
 #
-# The PR pipeline (ci.yml) runs a `--profile=pr --changed-since` audit: fast,
-# scoped to the diff, and it only runs the cheap RootOnly detector families.
-# The whole-tree discovery detectors (duplication, dead code, constant/command
+# (File name is historical — this started life as the audit-only debt sweep and
+# grew the post-merge lint/test gates. Kept as `audit-debt.yml` so the file's
+# git history stays intact.)
+#
+# ── Why the post-merge gates exist (#6807) ──────────────────────────────────
+# Two pipelines guard this repo, and until now BOTH were changed-scope:
+#
+#   * ci.yml (PRs)  — `differential-gating: true`, scoped to the PR diff.
+#   * release.yml   — gate-lint/gate-test pass `--changed-since <before>`, so
+#                     they only re-check what that one push touched.
+#
+# Nothing ever ran the whole suite against the integrated `main`. A change whose
+# blast radius lands OUTSIDE its own diff is invisible to both: the PR never
+# runs the affected tests, and the release only runs them if some later merge
+# happens to touch those same files.
+#
+# That is exactly how 2026-07-27 went. A POSIX-sh portability bug merged green,
+# main went red in `crates/homeboy-lab-runner/src/workspace/tests/prune.rs`, and
+# nobody found out until merge #10425 happened to touch prune.rs and dragged it
+# into the release's changed scope. Release runs 30272803452 and 30271131168
+# both died at `Release Quality Policy` → `Test`. Cost: 188 commits
+# undeliverable, two orphaned tags, ~16 hours of stranded work.
+#
+# The release is the WORST place to discover this: it runs 16-35 minutes and a
+# failure there can strand a tag. So the gates below run the release-blocking
+# command set (RELEASE_BLOCKING_COMMANDS = `review lint,review test`) against
+# `main` on every merge, at FULL scope.
+#
+# Full scope is not an extra flag — homeboy-action's `scope: auto` already
+# resolves to `mode=full` on push events. The release narrows itself by
+# explicitly passing `--changed-since`; we simply do not pass it. That makes
+# this gate a strict superset of the release's blocking scope, which is the
+# point: anything that would fail the release is caught here first, and so is
+# the cross-scope breakage the release would have missed.
+#
+# ── Why the weekly sweep exists ─────────────────────────────────────────────
+# The PR pipeline runs a `--profile=pr --changed-since` audit: fast, scoped to
+# the diff, and it only runs the cheap RootOnly detector families. The
+# whole-tree discovery detectors (duplication, dead code, constant/command
 # bypass, god files, …) are deliberately OFF in the PR profile — they need the
 # entire codebase to work and would re-report repo-wide debt on every unrelated
 # PR.
 #
 # Those discovery detectors are the "code factory" roadmap: each finding kind
 # becomes one deduplicated tracking issue (via homeboy-action's auto-issue
-# filing), and the issue closes when that fix kind gets automated. Nothing was
-# ever running the full-tree audit, so that roadmap was never populated. This
-# workflow does — on a weekly cadence, decoupled from releases so a full audit
-# never taxes the release path — and files/refreshes one issue per finding kind.
-#
-# Scheduled sweeps continue to maintain the debt roadmap. Pushes to `main` run
-# the same full profile as a blocking post-merge guard below.
+# filing), and the issue closes when that fix kind gets automated. The sweep
+# runs weekly, decoupled from releases so a full audit never taxes the release
+# path, and files/refreshes one issue per finding kind.
 
-name: Audit Debt
+name: Main Guard
 
 on:
   push:
@@ -32,26 +64,224 @@ on:
         required: false
         default: 'full'
 
+# Latest merge wins. This gate answers exactly one question — "is main green
+# RIGHT NOW?" — and that answer is a pure function of the current tip, so a
+# superseded run's verdict is worthless. It also produces no artifacts, mutates
+# nothing, and blocks nothing downstream, so cancelling it is free.
+#
+# This is deliberately the OPPOSITE of release.yml's `cancel-in-progress: false`.
+# The release queues because it may be mid-tag/mid-publish and cancelling it
+# strands a tag. Nothing here can strand anything.
+#
+# It is also a capacity requirement, not just a nicety: at ~40 merges/day
+# against a 16-35 minute suite, queueing every merge would serialise into
+# 10-23 hours of backlog and the gate would end up reporting on hours-old main
+# — strictly worse than reporting on the current tip.
+#
+# Trade-off, stated plainly: when a burst of merges collapses into one run, the
+# failure is attributed to the newest merge rather than the one that actually
+# broke it. The failure summary prints the compare range so the candidate set is
+# still bounded (see "Attribute failure to this merge" below).
+#
+# Push and sweep get separate groups so a merge train never cancels the weekly
+# audit sweep (and vice versa).
 concurrency:
-  group: audit-debt
+  group: main-guard-${{ github.event_name == 'push' && 'post-merge' || 'sweep' }}
   cancel-in-progress: true
 
 permissions:
   contents: read
   issues: write
+  # Shared-artifact handoff between gate-build and the gates.
+  actions: read
 
 jobs:
-  full-audit-gate:
-    name: Full-tree audit gate
+  # ── Build once, share with all three post-merge gates ──
+  # Mirrors release.yml's gate-build → artifact → `binary-path` handoff. Before
+  # this, the audit gate compiled homeboy by itself via `cargo run`; adding two
+  # more gates that each did their own build would have tripled compile cost on
+  # every merge. One release build now feeds all three.
+  gate-build:
+    name: Build
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    # Least privilege: this job compiles and uploads, it never files issues.
     permissions:
       contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+
+      # Deliberately the same cache key as release.yml's gate-build: both run
+      # `cargo build --release` on `main`, so whichever lands first warms the
+      # cache for the other. A key drift in release.yml only costs a cache miss.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-gate-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-gate-
+
+      - name: Build homeboy
+        run: cargo build --release --locked
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: homeboy-binary
+          path: target/release/homeboy
+          retention-days: 1
+
+  full-audit-gate:
+    name: Full-tree audit gate
+    if: github.event_name == 'push'
+    needs: gate-build
+    runs-on: ubuntu-latest
+    # Pure pass/fail gate — deliberately cannot file issues, unlike the sweep.
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download homeboy binary
+        uses: actions/download-artifact@v4
+        with:
+          name: homeboy-binary
+          path: .homeboy-bin
+
+      - name: Verify homeboy binary present
+        run: |
+          if [ ! -f .homeboy-bin/homeboy ]; then
+            echo "::error::Build artifact missing from upstream Build job: .homeboy-bin/homeboy was not produced/uploaded by gate-build. This is a CI artifact-handoff problem, not a code finding on main. Re-run the failed Build job or investigate the homeboy-binary upload step." >&2
+            exit 1
+          fi
+          chmod +x .homeboy-bin/homeboy
+
       - name: Run blocking full-profile audit
-        run: cargo run --locked -- review audit homeboy --profile=full
+        run: .homeboy-bin/homeboy review audit homeboy --profile=full
+
+  # ── Release-blocking suite, at full scope, on the merged result ──
+  # `review lint` + `review test` is exactly release.yml's RELEASE_BLOCKING_COMMANDS
+  # (default 'review lint,review test'). Split into two jobs, and `review test`
+  # carries `--skip-lint`, both matching release.yml's gate-lint / gate-test
+  # split so lint work is not duplicated.
+  #
+  # The ONE deliberate difference from the release gates: no `--changed-since`.
+  # The release passes `--changed-since ${{ github.event.before }}`; omitting it
+  # lets `scope: auto` resolve to full scope on push. Matching the release's
+  # narrowing here would reproduce the blind spot instead of closing it.
+  #
+  # No `differential-gating` (it only applies to pull_request events anyway) and
+  # no `autofix` input — homeboy-action@v2 has no such input, so there is no
+  # autofix/auto-push path to disable. This gate never mutates the repo.
+  full-lint-gate:
+    name: Full-suite lint gate
+    if: github.event_name == 'push'
+    needs: gate-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download homeboy binary
+        uses: actions/download-artifact@v4
+        with:
+          name: homeboy-binary
+          path: .homeboy-bin
+
+      - name: Verify homeboy binary present
+        run: |
+          if [ ! -f .homeboy-bin/homeboy ]; then
+            echo "::error::Build artifact missing from upstream Build job: .homeboy-bin/homeboy was not produced/uploaded by gate-build. This is a CI artifact-handoff problem, not a lint finding on main. Re-run the failed Build job or investigate the homeboy-binary upload step." >&2
+            exit 1
+          fi
+          chmod +x .homeboy-bin/homeboy
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        continue-on-error: true
+        with:
+          app-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+
+      - uses: Extra-Chill/homeboy-action@v2
+        with:
+          binary-path: .homeboy-bin/homeboy
+          commands: review lint
+          expected-commands: review audit,review lint,review test
+          # Durable notification. The failing check is the primary signal, but
+          # nobody watches main's commit list; the issue survives the run.
+          auto-issue: 'true'
+          app-token: ${{ steps.app-token.outputs.token || '' }}
+
+      - name: Attribute failure to this merge
+        if: failure()
+        env:
+          MERGE_SHA: ${{ github.sha }}
+          MERGE_BEFORE: ${{ github.event.before }}
+          MERGE_SUBJECT: ${{ github.event.head_commit.message }}
+          MERGE_AUTHOR: ${{ github.event.head_commit.author.name }}
+          GATE: lint
+        run: bash .github/report-red-main.sh
+
+  full-test-gate:
+    name: Full-suite test gate
+    if: github.event_name == 'push'
+    needs: gate-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download homeboy binary
+        uses: actions/download-artifact@v4
+        with:
+          name: homeboy-binary
+          path: .homeboy-bin
+
+      - name: Verify homeboy binary present
+        run: |
+          if [ ! -f .homeboy-bin/homeboy ]; then
+            echo "::error::Build artifact missing from upstream Build job: .homeboy-bin/homeboy was not produced/uploaded by gate-build. This is a CI artifact-handoff problem, not a test finding on main. Re-run the failed Build job or investigate the homeboy-binary upload step." >&2
+            exit 1
+          fi
+          chmod +x .homeboy-bin/homeboy
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        continue-on-error: true
+        with:
+          app-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+
+      - uses: Extra-Chill/homeboy-action@v2
+        with:
+          binary-path: .homeboy-bin/homeboy
+          commands: review test
+          expected-commands: review audit,review lint,review test
+          # Matches release.yml gate-test: lint is its own job above.
+          args: --skip-lint
+          auto-issue: 'true'
+          app-token: ${{ steps.app-token.outputs.token || '' }}
+
+      - name: Attribute failure to this merge
+        if: failure()
+        env:
+          MERGE_SHA: ${{ github.sha }}
+          MERGE_BEFORE: ${{ github.event.before }}
+          MERGE_SUBJECT: ${{ github.event.head_commit.message }}
+          MERGE_AUTHOR: ${{ github.event.head_commit.author.name }}
+          GATE: test
+        run: bash .github/report-red-main.sh
 
   full-audit:
     name: Full-tree audit → tracking issues
