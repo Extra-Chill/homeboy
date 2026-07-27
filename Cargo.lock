@@ -1176,6 +1176,7 @@ dependencies = [
  "homeboy-extension",
  "homeboy-product-identity",
  "homeboy-release-contract",
+ "libc",
  "regex",
  "semver",
  "serde",
@@ -1183,6 +1184,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "uuid",
+ "windows-sys 0.61.2",
  "zip",
 ]
 
