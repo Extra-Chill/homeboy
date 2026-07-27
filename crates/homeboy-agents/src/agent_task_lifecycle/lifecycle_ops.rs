@@ -1067,10 +1067,102 @@ pub fn reconcile_terminal_artifact_projection(run_id: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Whether answering for this record can require reaching the runner at all.
+///
+/// A controller-local run — no runner id, no runner job id, and no Lab handoff —
+/// is fully described by durable controller state. Answering for it must never
+/// depend on a runner being reachable (#10418): the sharpest symptom of the
+/// wedged-Lab outage was `agent-task status <id>` failing to return a *known
+/// controller-local* run because the read path unconditionally entered runner
+/// reconciliation.
+pub fn is_controller_local(record: &AgentTaskRunRecord) -> bool {
+    record.runner_id().is_none() && record.runner_job_id().is_none() && record.lab_handoff.is_none()
+}
+
+/// Whether a read-side `status()` may reach the runner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentTaskRunnerProbe {
+    /// Reach the runner only when the record is genuinely runner-backed and
+    /// still running. This is the historical behavior for Lab runs and the
+    /// default.
+    #[default]
+    WhenRunnerBacked,
+    /// Never reach the runner. The answer comes from durable controller state
+    /// alone and is labelled as such.
+    Never,
+}
+
+/// Read-side options for [`status_with_options`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AgentTaskStatusOptions {
+    pub runner_probe: AgentTaskRunnerProbe,
+}
+
+/// What the read path actually did about the runner, reported alongside the
+/// record so a caller can tell a complete answer from a deliberately-local one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct AgentTaskRunnerProbePlan {
+    /// Whether runner reconciliation was performed for this read.
+    pub performed: bool,
+    /// Why the runner was not reached, when it was not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped_reason: Option<&'static str>,
+    /// Whether this record is answerable entirely from controller-local state.
+    pub controller_local: bool,
+}
+
+/// The record is fully controller-local; the runner is irrelevant to the answer.
+pub const RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL: &str = "controller_local_record";
+/// The caller explicitly asked for a local-only answer.
+pub const RUNNER_PROBE_SKIPPED_CALLER_OPTED_OUT: &str = "caller_opted_out";
+/// A terminal / non-running record has no live runner job to reconcile.
+pub const RUNNER_PROBE_SKIPPED_NOT_RUNNING: &str = "run_is_not_running";
+
+/// Decide whether this read touches the runner. Pure so the "controller-local
+/// answers locally" contract is directly testable.
+pub fn runner_probe_plan(
+    record: &AgentTaskRunRecord,
+    options: AgentTaskStatusOptions,
+) -> AgentTaskRunnerProbePlan {
+    let controller_local = is_controller_local(record);
+    let skipped_reason = if controller_local {
+        Some(RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL)
+    } else if options.runner_probe == AgentTaskRunnerProbe::Never {
+        Some(RUNNER_PROBE_SKIPPED_CALLER_OPTED_OUT)
+    } else if record.state != AgentTaskRunState::Running {
+        Some(RUNNER_PROBE_SKIPPED_NOT_RUNNING)
+    } else {
+        None
+    };
+    AgentTaskRunnerProbePlan {
+        performed: skipped_reason.is_none(),
+        skipped_reason,
+        controller_local,
+    }
+}
+
+/// A durable run record plus the read-side runner-probe decision that produced
+/// it.
+#[derive(Debug, Clone)]
+pub struct AgentTaskStatusOutcome {
+    pub record: AgentTaskRunRecord,
+    pub runner_probe: AgentTaskRunnerProbePlan,
+}
+
 /// Read the durable run record with live reconciliation applied (deferred
 /// candidate, runtime admission, and runner/daemon status projection) so callers
 /// see the current, joinable controller record.
 pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
+    Ok(status_with_options(run_id, AgentTaskStatusOptions::default())?.record)
+}
+
+/// [`status`] with explicit control over whether the read may reach the runner.
+///
+/// A controller-local record is always answered locally, regardless of options.
+pub fn status_with_options(
+    run_id: &str,
+    options: AgentTaskStatusOptions,
+) -> Result<AgentTaskStatusOutcome> {
     let requested_run_id = sanitize_run_id(run_id);
     let resolved_run_id = resolve_run_id(run_id)?;
     let _ = reconcile_deferred_candidate(&resolved_run_id)?;
@@ -1133,8 +1225,14 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     if reconcile_local_provider_ownership(&mut record) {
         store::write_record(&record)?;
     }
+    // The only genuinely-remote step in this read. Skipping it for a
+    // controller-local record is what makes `agent-task status` answerable while
+    // the Lab is wedged (#10418).
+    let runner_probe = runner_probe_plan(&record, options);
     let before_liveness_reconciliation = record.clone();
-    reconcile_runner_job_state(&mut record)?;
+    if runner_probe.performed {
+        reconcile_runner_job_state(&mut record)?;
+    }
     record.annotate_stale_running();
     if record != before_liveness_reconciliation {
         store::write_record(&record)?;
@@ -1249,7 +1347,10 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
             );
         }
     }
-    Ok(record)
+    Ok(AgentTaskStatusOutcome {
+        record,
+        runner_probe,
+    })
 }
 
 /// Refresh accepted runner handoffs and expire unbound controller handoffs before

@@ -1954,3 +1954,163 @@ fn set_run_state_stamps_finished_at_for_candidate_recoverable_terminal_runs() {
         .expect("rewrite record running");
     });
 }
+
+/// A runner-continuation provider that counts every runner interaction so a
+/// test can assert that a read performed *none* (#10418).
+struct CountingRunnerProvider {
+    interactions: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl CountingRunnerProvider {
+    fn record(&self) {
+        self.interactions
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl RunnerContinuationProvider for CountingRunnerProvider {
+    fn runner_job_log_snapshot(
+        &self,
+        _runner_id: &str,
+        _job_id: &str,
+    ) -> Result<homeboy_core::api_jobs::RunnerJobLogSnapshot> {
+        self.record();
+        Err(Error::internal_unexpected("counted runner snapshot"))
+    }
+
+    fn is_runner_connected(&self, _runner_id: &str) -> bool {
+        self.record();
+        true
+    }
+
+    fn runner_exists(&self, _runner_id: &str) -> bool {
+        self.record();
+        true
+    }
+
+    fn run_continuation_exec(
+        &self,
+        _runner_id: &str,
+        _cwd: &str,
+        _command: &[String],
+        _run_id: &str,
+    ) -> Result<i32> {
+        self.record();
+        Err(Error::internal_unexpected("counted runner exec"))
+    }
+
+    fn submit_reverse_broker_job(
+        &self,
+        _runner_id: &str,
+        _request: RemoteRunnerJobRequest,
+    ) -> Result<Job> {
+        self.record();
+        Err(Error::internal_unexpected("counted reverse broker job"))
+    }
+}
+
+#[test]
+fn controller_local_status_answers_without_any_runner_interaction() {
+    super::ensure_runner_continuation_provider_reset_hook();
+    with_isolated_home(|_| {
+        let interactions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _provider = RunnerContinuationTestGuard::install(Box::new(CountingRunnerProvider {
+            interactions: interactions.clone(),
+        }));
+
+        let record = submit_plan(&test_plan(), Some("controller-local-status")).expect("submit");
+        mark_running(&record.run_id).expect("mark running");
+
+        let outcome = status_with_options(&record.run_id, AgentTaskStatusOptions::default())
+            .expect("controller-local status resolves");
+
+        // The whole point of #10418: a known controller-local run must be
+        // answerable while the Lab is wedged, so the read must not reach the
+        // runner subsystem at all.
+        assert_eq!(
+            interactions.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a controller-local status must not interact with any runner"
+        );
+        assert_eq!(outcome.record.state, AgentTaskRunState::Running);
+        assert!(outcome.runner_probe.controller_local);
+        assert!(!outcome.runner_probe.performed);
+        assert_eq!(
+            outcome.runner_probe.skipped_reason,
+            Some(RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL)
+        );
+    });
+}
+
+#[test]
+fn a_runner_backed_status_still_reconciles_against_the_runner() {
+    super::ensure_runner_continuation_provider_reset_hook();
+    with_isolated_home(|_| {
+        let interactions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _provider = RunnerContinuationTestGuard::install(Box::new(CountingRunnerProvider {
+            interactions: interactions.clone(),
+        }));
+
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "runner-backed-status",
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-10418",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("detached handoff recorded");
+
+        let outcome =
+            status_with_options("runner-backed-status", AgentTaskStatusOptions::default())
+                .expect("runner-backed status resolves");
+
+        assert!(
+            interactions.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "a runner-backed running record must still reconcile against its runner"
+        );
+        assert!(!outcome.runner_probe.controller_local);
+        assert!(outcome.runner_probe.performed);
+        assert_eq!(outcome.runner_probe.skipped_reason, None);
+    });
+}
+
+#[test]
+fn a_caller_can_opt_a_runner_backed_status_out_of_every_runner_probe() {
+    super::ensure_runner_continuation_provider_reset_hook();
+    with_isolated_home(|_| {
+        let interactions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _provider = RunnerContinuationTestGuard::install(Box::new(CountingRunnerProvider {
+            interactions: interactions.clone(),
+        }));
+
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "runner-backed-local-only",
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-10418-local",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+        })
+        .expect("detached handoff recorded");
+
+        let outcome = status_with_options(
+            "runner-backed-local-only",
+            AgentTaskStatusOptions {
+                runner_probe: AgentTaskRunnerProbe::Never,
+            },
+        )
+        .expect("local-only status resolves");
+
+        assert_eq!(
+            interactions.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "--no-runner-probe must not reach the runner"
+        );
+        assert!(!outcome.runner_probe.performed);
+        assert_eq!(
+            outcome.runner_probe.skipped_reason,
+            Some(RUNNER_PROBE_SKIPPED_CALLER_OPTED_OUT)
+        );
+    });
+}

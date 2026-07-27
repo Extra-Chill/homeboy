@@ -713,6 +713,25 @@ resource policy; use `homeboy runner exec <runner> -- homeboy agent-task status
 <run-id>` when the durable state lives on a Lab runner host. `agent-task review`
 hydrates aggregate evidence and remains resource-managed.
 
+### Controller-local status never requires the runner
+
+`agent-task status` always reports a `runner_probe` object describing whether the
+read reconciled against a runner:
+
+```json
+{ "performed": false, "skipped_reason": "controller_local_record", "controller_local": true, "note": "..." }
+```
+
+A **controller-local** run (no runner id, no runner job id, no Lab handoff) is
+answered entirely from durable controller state and never contacts a runner, so
+inspection stays available while a Lab runner is wedged. Pass
+`--no-runner-probe` to extend that to a runner-backed run: the answer is
+returned immediately from controller state and labelled
+`skipped_reason: "caller_opted_out"`, meaning runner-side job state may be
+stale. Without the flag, a runner-backed *running* record still reconciles
+against its runner, but every remote probe on that path is bounded (see
+`docs/commands/runner.md`).
+
 ## Deterministic Smoke Gate
 
 Issue #3392 is covered by a no-secret fixture plan at

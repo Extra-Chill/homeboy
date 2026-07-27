@@ -399,6 +399,16 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
     agent_task_lifecycle::status(run_id)
 }
 
+/// [`status`] with explicit control over whether the read may reach the runner.
+///
+/// Read-only inspection must stay answerable while the Lab is wedged (#10418).
+pub fn status_with_options(
+    run_id: &str,
+    options: agent_task_lifecycle::AgentTaskStatusOptions,
+) -> Result<agent_task_lifecycle::AgentTaskStatusOutcome> {
+    agent_task_lifecycle::status_with_options(run_id, options)
+}
+
 pub fn run_status(run_id: &str, since_cursor: Option<u64>) -> Result<AgentTaskRunStatus> {
     agent_task_lifecycle::run_status(run_id, since_cursor)
 }
