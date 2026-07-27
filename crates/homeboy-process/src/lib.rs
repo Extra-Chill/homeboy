@@ -5,6 +5,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+static PROCESS_CONTAINMENT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(target_os = "linux")]
+static PROCESS_CONTAINMENT_SEQUENCE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(target_os = "linux")]
+const PROCESS_CONTAINMENT_ENV: &str = "_HOMEBOY_PROCESS_CONTAINMENT";
+
+#[cfg(target_os = "windows")]
+const WINDOWS_CONTAINMENT_CREATION_FLAGS: u32 =
+    windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+
 /// Generic process step shape shared by command/runner adapters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessStep {
@@ -31,6 +44,402 @@ impl ProcessStep {
         self.working_dir = Some(working_dir.into());
         self
     }
+}
+
+/// Owns every process created by one command until the scope is explicitly
+/// drained. Linux combines subreaper adoption with an inherited scope marker;
+/// Windows assigns a suspended child to a kill-on-close Job Object before it
+/// can execute. Other Unix hosts use the strongest available process group.
+pub struct ProcessContainment {
+    owner_pid: Option<u32>,
+    #[cfg(target_os = "linux")]
+    marker: String,
+    #[cfg(target_os = "linux")]
+    previous_subreaper: libc::c_int,
+    #[cfg(target_os = "linux")]
+    subreaper_guard: Option<std::sync::MutexGuard<'static, ()>>,
+    #[cfg(target_os = "windows")]
+    job: windows_sys::Win32::Foundation::HANDLE,
+}
+
+impl ProcessContainment {
+    /// Establish containment and configure `command` before it is spawned.
+    pub fn prepare(command: &mut Command) -> Result<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::process::CommandExt;
+
+            let guard = PROCESS_CONTAINMENT_LOCK
+                .lock()
+                .map_err(|_| Error::internal_unexpected("process containment lock was poisoned"))?;
+            let mut previous_subreaper = 0;
+            if unsafe {
+                libc::prctl(
+                    libc::PR_GET_CHILD_SUBREAPER,
+                    &mut previous_subreaper as *mut libc::c_int,
+                )
+            } != 0
+            {
+                return Err(Error::internal_unexpected(format!(
+                    "inspect process subreaper state: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            if previous_subreaper == 0
+                && unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) } != 0
+            {
+                return Err(Error::internal_unexpected(format!(
+                    "enable process subreaper containment: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            let sequence = PROCESS_CONTAINMENT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let started = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let marker = format!("{}-{}-{sequence}", std::process::id(), started);
+            command
+                .env(PROCESS_CONTAINMENT_ENV, &marker)
+                .process_group(0);
+            return Ok(Self {
+                owner_pid: None,
+                marker,
+                previous_subreaper,
+                subreaper_guard: Some(guard),
+            });
+        }
+
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+            return Ok(Self { owner_pid: None });
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            use windows_sys::Win32::System::JobObjects::{
+                CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            };
+
+            let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if job.is_null() {
+                return Err(Error::internal_unexpected(format!(
+                    "create process containment job: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if unsafe {
+                SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    &limits as *const _ as *const std::ffi::c_void,
+                    std::mem::size_of_val(&limits) as u32,
+                )
+            } == 0
+            {
+                unsafe { windows_sys::Win32::Foundation::CloseHandle(job) };
+                return Err(Error::internal_unexpected(format!(
+                    "configure process containment job: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            command.creation_flags(WINDOWS_CONTAINMENT_CREATION_FLAGS);
+            return Ok(Self {
+                owner_pid: None,
+                job,
+            });
+        }
+
+        #[cfg(all(not(unix), not(target_os = "windows")))]
+        {
+            let _ = command;
+            Err(Error::internal_unexpected(
+                "durable process containment is unsupported on this platform",
+            ))
+        }
+    }
+
+    /// Attach the newly spawned child and release it only after containment is
+    /// authoritative. On Windows the process is still suspended at this point.
+    pub fn attach(&mut self, child: &mut std::process::Child) -> Result<()> {
+        self.owner_pid = Some(child.id());
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+
+            if unsafe { AssignProcessToJobObject(self.job, child.as_raw_handle() as _) } == 0 {
+                return Err(Error::internal_unexpected(format!(
+                    "assign process {} to containment job: {}",
+                    child.id(),
+                    std::io::Error::last_os_error()
+                )));
+            }
+            resume_windows_process_threads(child.id())?;
+        }
+
+        Ok(())
+    }
+
+    /// Force every process in the scope to exit without exceeding `timeout`.
+    pub fn terminate_bounded(&mut self, timeout: Duration) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            let deadline = Instant::now() + timeout;
+            loop {
+                let mut targets =
+                    linux_processes_with_environment_value(PROCESS_CONTAINMENT_ENV, &self.marker)?;
+                if let Some(owner_pid) = self.owner_pid {
+                    targets.extend(linux_descendant_pids(owner_pid)?);
+                    if pid_is_running(owner_pid) {
+                        targets.push(owner_pid);
+                    }
+                    unsafe {
+                        let _ = libc::kill(-(owner_pid as libc::pid_t), libc::SIGKILL);
+                    }
+                }
+                targets.retain(|pid| *pid != std::process::id());
+                targets.sort_unstable();
+                targets.dedup();
+                signal_pids(&targets, libc::SIGKILL)?;
+                reap_owned_children(&targets);
+
+                let group_running = self
+                    .owner_pid
+                    .is_some_and(|pid| process_group_is_running(pid as i32));
+                if targets.iter().all(|pid| !pid_is_running(*pid)) && !group_running {
+                    self.restore_linux_subreaper()?;
+                    return Ok(());
+                }
+                if Instant::now() >= deadline {
+                    return Err(Error::internal_unexpected(format!(
+                        "contained process scope did not exit within {} ms; surviving pids: {}",
+                        timeout.as_millis(),
+                        join_pids(
+                            &targets
+                                .into_iter()
+                                .filter(|pid| pid_is_running(*pid))
+                                .collect::<Vec<_>>()
+                        )
+                    )));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            let owner_pid = self.owner_pid.ok_or_else(|| {
+                Error::internal_unexpected("process containment has no attached child")
+            })?;
+            return force_terminate_process_tree_bounded(owner_pid, timeout);
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+            if unsafe { TerminateJobObject(self.job, 1) } == 0 {
+                return Err(Error::internal_unexpected(format!(
+                    "terminate process containment job: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            let deadline = Instant::now() + timeout;
+            loop {
+                if windows_job_active_processes(self.job)? == 0 {
+                    return Ok(());
+                }
+                if Instant::now() >= deadline {
+                    return Err(Error::internal_unexpected(format!(
+                        "process containment job did not empty within {} ms",
+                        timeout.as_millis()
+                    )));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        #[cfg(all(not(unix), not(target_os = "windows")))]
+        {
+            let _ = timeout;
+            Err(Error::internal_unexpected(
+                "durable process containment is unsupported on this platform",
+            ))
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn restore_linux_subreaper(&mut self) -> Result<()> {
+        if self.subreaper_guard.is_none() {
+            return Ok(());
+        }
+        if unsafe {
+            libc::prctl(
+                libc::PR_SET_CHILD_SUBREAPER,
+                self.previous_subreaper as libc::c_ulong,
+            )
+        } != 0
+        {
+            return Err(Error::internal_unexpected(format!(
+                "restore process subreaper state: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        self.subreaper_guard.take();
+        Ok(())
+    }
+}
+
+impl Drop for ProcessContainment {
+    fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(targets) =
+                linux_processes_with_environment_value(PROCESS_CONTAINMENT_ENV, &self.marker)
+            {
+                let _ = signal_pids(&targets, libc::SIGKILL);
+                reap_owned_children(&targets);
+            }
+            if let Some(owner_pid) = self.owner_pid {
+                unsafe {
+                    let _ = libc::kill(-(owner_pid as libc::pid_t), libc::SIGKILL);
+                }
+            }
+            let _ = self.restore_linux_subreaper();
+        }
+
+        #[cfg(all(unix, not(target_os = "linux")))]
+        if let Some(owner_pid) = self.owner_pid {
+            unsafe {
+                let _ = libc::kill(-(owner_pid as libc::pid_t), libc::SIGKILL);
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.job);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_processes_with_environment_value(key: &str, value: &str) -> Result<Vec<u32>> {
+    let expected = format!("{key}={value}");
+    let entries = std::fs::read_dir("/proc").map_err(|error| {
+        Error::internal_unexpected(format!("inspect contained processes: {error}"))
+    })?;
+    let mut pids = Vec::new();
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Ok(pid) = name.parse::<u32>() else {
+            continue;
+        };
+        let Ok(environment) = std::fs::read(entry.path().join("environ")) else {
+            continue;
+        };
+        if environment_contains_assignment(&environment, expected.as_bytes()) {
+            pids.push(pid);
+        }
+    }
+    Ok(pids)
+}
+
+#[cfg(target_os = "linux")]
+fn reap_owned_children(pids: &[u32]) {
+    for pid in pids {
+        let mut status = 0;
+        unsafe {
+            libc::waitpid(*pid as libc::pid_t, &mut status, libc::WNOHANG);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn resume_windows_process_threads(pid: u32) -> Result<()> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(Error::internal_unexpected(format!(
+            "snapshot suspended process {pid} threads: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let mut entry = THREADENTRY32 {
+        dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+        ..THREADENTRY32::default()
+    };
+    let mut found = false;
+    let mut current = unsafe { Thread32First(snapshot, &mut entry) };
+    while current != 0 {
+        if entry.th32OwnerProcessID == pid {
+            let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+            if thread.is_null() {
+                unsafe { CloseHandle(snapshot) };
+                return Err(Error::internal_unexpected(format!(
+                    "open suspended process {pid} thread: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            let resumed = unsafe { ResumeThread(thread) };
+            unsafe { CloseHandle(thread) };
+            if resumed == u32::MAX {
+                unsafe { CloseHandle(snapshot) };
+                return Err(Error::internal_unexpected(format!(
+                    "resume contained process {pid}: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            found = true;
+        }
+        current = unsafe { Thread32Next(snapshot, &mut entry) };
+    }
+    unsafe { CloseHandle(snapshot) };
+    if !found {
+        return Err(Error::internal_unexpected(format!(
+            "suspended process {pid} had no resumable thread"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_job_active_processes(job: windows_sys::Win32::Foundation::HANDLE) -> Result<u32> {
+    use windows_sys::Win32::System::JobObjects::{
+        JobObjectBasicAccountingInformation, QueryInformationJobObject,
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+    };
+
+    let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+    if unsafe {
+        QueryInformationJobObject(
+            job,
+            JobObjectBasicAccountingInformation,
+            &mut accounting as *mut _ as *mut std::ffi::c_void,
+            std::mem::size_of_val(&accounting) as u32,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(Error::internal_unexpected(format!(
+            "inspect process containment job: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(accounting.ActiveProcesses)
 }
 
 pub fn pid_is_running(pid: u32) -> bool {
@@ -1120,5 +1529,28 @@ mod process_tree_tests {
 
         let _ = reaper.join();
         assert!(!pid_is_running(pid));
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_containment_tests {
+    use super::*;
+
+    #[test]
+    fn containment_assigns_a_suspended_child_to_a_job_before_execution() {
+        assert_eq!(
+            WINDOWS_CONTAINMENT_CREATION_FLAGS,
+            windows_sys::Win32::System::Threading::CREATE_SUSPENDED
+        );
+
+        let mut command = Command::new("cmd");
+        command.args(["/C", "exit", "0"]);
+        let mut containment = ProcessContainment::prepare(&mut command).expect("containment job");
+        let mut child = command.spawn().expect("suspended child");
+        containment.attach(&mut child).expect("job assignment");
+        assert!(child.wait().expect("child exit").success());
+        containment
+            .terminate_bounded(Duration::from_secs(1))
+            .expect("empty job");
     }
 }
