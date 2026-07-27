@@ -1827,6 +1827,7 @@ mod tests {
                     source_revision: None,
                     source_ref: None,
                     source_dirty: false,
+                    source_content_hash: None,
                     linked: true,
                     materialized: false,
                 },
