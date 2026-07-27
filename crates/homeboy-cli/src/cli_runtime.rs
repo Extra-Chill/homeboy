@@ -59,23 +59,45 @@ enum StartupFastPath {
     Identity,
 }
 
-pub fn run_startup_fast_path(args: &[String]) -> Option<std::process::ExitCode> {
-    match startup_fast_path(args)? {
+/// Payload a startup fast path emits. Resolving the payload separately from
+/// printing it keeps the user-visible `--help` surface reachable from tests:
+/// rendering help inline is why the root-help tests could only assert against a
+/// builder the binary never called.
+enum StartupFastPathOutput {
+    Help(Box<Command>),
+    Version(String),
+    Identity(serde_json::Value),
+}
+
+fn startup_fast_path_output(args: &[String]) -> Option<StartupFastPathOutput> {
+    Some(match startup_fast_path(args)? {
+        // Root help renders the augmented command because extension-provided
+        // subcommands are part of the user-visible surface; the static derive
+        // command hides every one of them. Extension discovery is only paid on
+        // a root-help invocation — every other argv still leaves the fast path
+        // before any discovery or provider registration happens.
         StartupFastPath::Help => {
-            let mut cmd = Cli::command_with_scoped_lab_args();
-            cmd.print_help().expect("Failed to print help");
+            StartupFastPathOutput::Help(Box::new(CliRuntime::new().build_augmented_command()))
+        }
+        StartupFastPath::Version => {
+            StartupFastPathOutput::Version(upgrade::current_build_version())
+        }
+        StartupFastPath::Identity => StartupFastPathOutput::Identity(
+            serde_json::to_value(homeboy::core::build_identity::current())
+                .expect("build identity serializes"),
+        ),
+    })
+}
+
+pub fn run_startup_fast_path(args: &[String]) -> Option<std::process::ExitCode> {
+    match startup_fast_path_output(args)? {
+        StartupFastPathOutput::Help(mut command) => {
+            command.print_help().expect("Failed to print help");
             println!();
         }
-        StartupFastPath::Version => println!("{}", upgrade::current_build_version()),
-        StartupFastPath::Identity => {
-            output_runtime::emit_json_result(
-                Ok(
-                    serde_json::to_value(homeboy::core::build_identity::current())
-                        .expect("build identity serializes"),
-                ),
-                None,
-                0,
-            );
+        StartupFastPathOutput::Version(version) => println!("{version}"),
+        StartupFastPathOutput::Identity(identity) => {
+            output_runtime::emit_json_result(Ok(identity), None, 0);
         }
     }
 
@@ -1564,17 +1586,8 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    fn sample_extension_info(tool: &str) -> ExtensionCliInfo {
-        ExtensionCliInfo {
-            tool: tool.to_string(),
-            descriptor: DynamicCommandDescriptor::extension_command(
-                tool.to_string(),
-                "Run Sample CLI commands via Sample Extension".to_string(),
-            ),
-            project_id_help: None,
-            args_help: None,
-            examples: Vec::new(),
-        }
+    fn argv(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
     }
 
     fn write_cli_extension(home: &std::path::Path, id: &str, tool: &str) {
@@ -1698,37 +1711,59 @@ mod tests {
 
     #[test]
     fn startup_fast_path_only_matches_root_help_and_version_flags() {
-        let args = |values: &[&str]| {
-            values
-                .iter()
-                .map(|value| value.to_string())
-                .collect::<Vec<_>>()
-        };
+        assert_eq!(
+            startup_fast_path(&argv(&["homeboy", "--help"])),
+            Some(StartupFastPath::Help)
+        );
+        assert_eq!(
+            startup_fast_path(&argv(&["homeboy", "-h"])),
+            Some(StartupFastPath::Help)
+        );
+        assert_eq!(
+            startup_fast_path(&argv(&["homeboy", "--version"])),
+            Some(StartupFastPath::Version)
+        );
+        assert_eq!(
+            startup_fast_path(&argv(&["homeboy", "-V"])),
+            Some(StartupFastPath::Version)
+        );
+        assert_eq!(
+            startup_fast_path(&argv(&["homeboy", "status", "--help"])),
+            None
+        );
+        assert_eq!(
+            startup_fast_path(&argv(&["homeboy", "sample-cli", "--help"])),
+            None
+        );
+    }
 
-        assert_eq!(
-            startup_fast_path(&args(&["homeboy", "--help"])),
-            Some(StartupFastPath::Help)
-        );
-        assert_eq!(
-            startup_fast_path(&args(&["homeboy", "-h"])),
-            Some(StartupFastPath::Help)
-        );
-        assert_eq!(
-            startup_fast_path(&args(&["homeboy", "--version"])),
-            Some(StartupFastPath::Version)
-        );
-        assert_eq!(
-            startup_fast_path(&args(&["homeboy", "-V"])),
-            Some(StartupFastPath::Version)
-        );
-        assert_eq!(
-            startup_fast_path(&args(&["homeboy", "status", "--help"])),
-            None
-        );
-        assert_eq!(
-            startup_fast_path(&args(&["homeboy", "sample-cli", "--help"])),
-            None
-        );
+    /// Only root help pays for extension discovery. `<subcommand> --help`,
+    /// `help <subcommand>` and every other argv leave the fast path before any
+    /// discovery happens, so routing root help through the augmented command
+    /// cannot regress their startup cost.
+    #[test]
+    fn subcommand_help_paths_stay_off_the_startup_fast_path() {
+        for values in [
+            &["homeboy", "status", "--help"][..],
+            &["homeboy", "status", "-h"][..],
+            &["homeboy", "help", "status"][..],
+            &["homeboy", "extension", "list", "--help"][..],
+        ] {
+            assert!(
+                startup_fast_path_output(&argv(values)).is_none(),
+                "{values:?} should be parsed normally, not fast-pathed"
+            );
+        }
+    }
+
+    #[test]
+    fn version_fast_path_reports_the_build_version_without_extension_discovery() {
+        match startup_fast_path_output(&argv(&["homeboy", "--version"])) {
+            Some(StartupFastPathOutput::Version(version)) => {
+                assert_eq!(version, upgrade::current_build_version());
+            }
+            _ => panic!("`homeboy --version` should resolve to the version fast path"),
+        }
     }
 
     #[cfg(unix)]
@@ -1758,35 +1793,59 @@ mod tests {
         });
     }
 
+    /// Renders the help the binary actually prints for `argv`, by driving the
+    /// real startup entry point. Asserting through `startup_fast_path_output`
+    /// (instead of calling `build_augmented_command` directly) is what makes
+    /// these tests fail if root help ever regresses to the static command.
+    fn root_help_for(argv_values: &[&str]) -> String {
+        match startup_fast_path_output(&argv(argv_values)) {
+            Some(StartupFastPathOutput::Help(mut command)) => command.render_help().to_string(),
+            _ => panic!("{argv_values:?} should resolve to the root-help startup fast path"),
+        }
+    }
+
     #[test]
     fn root_help_lists_extension_provided_commands() {
-        let mut command = build_augmented_command(
-            &[sample_extension_info("sample-cli")],
-            &ExtensionCliHealth::default(),
-        );
+        crate::test_support::with_isolated_home(|home| {
+            write_cli_extension(home.path(), "sample-runtime", "sample-cli");
 
-        let help = command.render_help().to_string();
+            for flag in ["--help", "-h"] {
+                let help = root_help_for(&["homeboy", flag]);
 
-        assert!(help.contains("Extension-provided commands: sample-cli"));
+                assert!(
+                    help.contains("Extension-provided commands: sample-cli"),
+                    "`homeboy {flag}` should advertise extension-provided commands: {help}"
+                );
+                assert!(
+                    help.contains("sample-cli"),
+                    "`homeboy {flag}` should list the extension subcommand: {help}"
+                );
+            }
+        });
     }
 
     #[cfg(unix)]
     #[test]
     fn root_help_warns_about_broken_extension_links_without_paths() {
-        let health = ExtensionCliHealth {
-            load_error: None,
-            broken_link_ids: vec!["sample-runtime".to_string()],
-        };
-        let mut command = build_augmented_command(&[], &health);
+        crate::test_support::with_isolated_home(|home| {
+            write_cli_extension(home.path(), "sample-runtime", "sample-cli");
+            let extensions_dir = home.path().join(".config/homeboy/extensions");
+            let link = extensions_dir.join("stale-runtime");
+            let target = extensions_dir.join("missing-stale-runtime");
+            std::os::unix::fs::symlink(&target, &link).expect("broken extension link");
 
-        let help = command.render_help().to_string();
+            let help = root_help_for(&["homeboy", "--help"]);
 
-        assert!(
-            help.contains("Extension health warning: 1 broken extension link(s): sample-runtime")
-        );
-        assert!(help.contains("homeboy extension list"));
-        assert!(help.contains("homeboy extension relink <id> <path>"));
-        assert!(!help.contains("/missing-sample-runtime"));
+            assert!(
+                help.contains(
+                    "Extension health warning: 1 broken extension link(s): stale-runtime"
+                ),
+                "root help should warn about broken extension links: {help}"
+            );
+            assert!(help.contains("homeboy extension list"));
+            assert!(help.contains("homeboy extension relink <id> <path>"));
+            assert!(!help.contains("/missing-stale-runtime"));
+        });
     }
 
     #[cfg(unix)]
