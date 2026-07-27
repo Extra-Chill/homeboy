@@ -603,6 +603,64 @@ const REVIEW_AUDIT_BASELINE_PATHS: &[&str] = &[
     "audit-baseline prune",
 ];
 
+const EXTENSION_MUTATING_PATHS: &[&str] = &[
+    "setup",
+    "refresh",
+    "relink",
+    "dev-run",
+    "install-for-component",
+    "set",
+];
+const EXTENSION_MUTATION_NOTES: &str =
+    "mutates installed extension files or extension manifest metadata";
+const EXTENSION_PASSTHROUGH_DANGEROUS_FLAGS: &[&str] =
+    &["extension runtime command", "passthrough args"];
+
+const EXTENSION_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        EXTENSION_MUTATING_PATHS,
+        mutating_safety(),
+        EXTENSION_MUTATION_NOTES,
+    ),
+    paths_safety(
+        &["install"],
+        guarded_mutating_safety(&["--replace"]),
+        EXTENSION_MUTATION_NOTES,
+    ),
+    paths_safety(
+        &["update"],
+        guarded_mutating_safety(&["--force"]),
+        EXTENSION_MUTATION_NOTES,
+    ),
+    paths_safety(
+        &["uninstall"],
+        guarded_mutating_safety(&["uninstall"]),
+        EXTENSION_MUTATION_NOTES,
+    ),
+    paths_safety(
+        &["run", "exec"],
+        operator_safety(None, EXTENSION_PASSTHROUGH_DANGEROUS_FLAGS),
+        "executes extension-owned runtime commands with forwarded arguments that may mutate the target system",
+    ),
+    paths_safety(
+        &["action"],
+        operator_safety(None, &["extension action"]),
+        "executes extension-owned actions that may mutate the target system",
+    ),
+];
+
+const RUNTIME_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
+    &["refresh"],
+    mutating_safety(),
+    "mutates installed runtime package files",
+)];
+
+const CLEANUP_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
+    &["artifacts"],
+    guarded_mutating_safety(CLEANUP_DANGEROUS_FLAGS),
+    "default output is a non-mutating cleanup plan; pass --apply to remove artifacts",
+)];
+
 const SELF_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
     paths_safety(
         &["docs map"],
@@ -715,28 +773,34 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     ),
     crate::ops_command_spec!(daemon),
     crate::ops_command_spec!(schedule),
-    command_spec_with_representative_argv(
-        &["homeboy", "extension", "refresh", "."],
-        lab_command_spec_with_summary(
-            "extension",
-            CommandJsonFamily::Workspace,
-            "Lab runner routing covers runner extension refresh/update/dev-run workflows",
-            EXTENSION_LAB_SUPPORT,
-        ),
-    ),
+    CommandSpec {
+        subcommand_safety: EXTENSION_SUBCOMMAND_SAFETY,
+        ..command_spec_with_representative_argv(
+            &["homeboy", "extension", "refresh", "."],
+            lab_command_spec_with_summary(
+                "extension",
+                CommandJsonFamily::Workspace,
+                "Lab runner routing covers runner extension refresh/update/dev-run workflows",
+                EXTENSION_LAB_SUPPORT,
+            ),
+        )
+    },
     crate::ops_command_spec!(status),
-    command_spec_with_output_notes_and_safety(
-        "cleanup",
-        CommandJsonFamily::Workspace,
-        "cleanup subcommands report plans by default and require --apply for removals",
-        CommandSafetySpec {
-            mutates: true,
-            operator: false,
-            dry_run_flag: None,
-            risk_exemption: None,
-            dangerous_flags: CLEANUP_DANGEROUS_FLAGS,
-        },
-    ),
+    CommandSpec {
+        subcommand_safety: CLEANUP_SUBCOMMAND_SAFETY,
+        ..command_spec_with_output_notes_and_safety(
+            "cleanup",
+            CommandJsonFamily::Workspace,
+            "cleanup subcommands report plans by default and require --apply for removals",
+            CommandSafetySpec {
+                mutates: true,
+                operator: false,
+                dry_run_flag: None,
+                risk_exemption: None,
+                dangerous_flags: CLEANUP_DANGEROUS_FLAGS,
+            },
+        )
+    },
     crate::ops_command_spec!(git),
     command_spec_with_output_notes_and_safety(
         "release",
@@ -789,22 +853,25 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         )
     },
     command_spec("runner", CommandJsonFamily::Workspace),
-    command_spec_with_representative_argv(
-        &[
-            "homeboy",
-            "runtime",
-            "refresh",
-            "example-runtime",
-            "--source",
-            ".",
-        ],
-        lab_command_spec_with_summary(
-            "runtime",
-            CommandJsonFamily::Workspace,
-            "Lab runner routing covers runtime package refresh workflows",
-            RUNTIME_LAB_SUPPORT,
-        ),
-    ),
+    CommandSpec {
+        subcommand_safety: RUNTIME_SUBCOMMAND_SAFETY,
+        ..command_spec_with_representative_argv(
+            &[
+                "homeboy",
+                "runtime",
+                "refresh",
+                "example-runtime",
+                "--source",
+                ".",
+            ],
+            lab_command_spec_with_summary(
+                "runtime",
+                CommandJsonFamily::Workspace,
+                "Lab runner routing covers runtime package refresh workflows",
+                RUNTIME_LAB_SUPPORT,
+            ),
+        )
+    },
     command_spec_with_representative_argv(
         &["homeboy", "worktree", "cleanup"],
         lab_command_spec_with_summary(

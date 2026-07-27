@@ -150,15 +150,6 @@ impl CommandSafetyMetadata {
         self.mutating(output_notes);
         self.operator = true;
     }
-
-    fn guarded_operator_mutating(
-        &mut self,
-        output_notes: &'static str,
-        dangerous_flags: Vec<&'static str>,
-    ) {
-        self.operator_mutating(output_notes);
-        self.dangerous_flags = dangerous_flags;
-    }
 }
 
 fn flatten_manifest_entries(entries: &[CommandSafetyEntry]) -> Vec<&CommandSafetyEntry> {
@@ -215,35 +206,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
 
     let path = path.iter().map(String::as_str).collect::<Vec<_>>();
     match path.as_slice() {
-        ["cleanup", "artifacts"] => {
-            metadata.mutating(
-                "default output is a non-mutating cleanup plan; pass --apply to remove artifacts",
-            );
-            metadata.dangerous_flags = vec!["--apply"];
-        }
-        ["extension", "setup"]
-        | ["extension", "refresh"]
-        | ["extension", "relink"]
-        | ["extension", "dev-run"]
-        | ["extension", "install-for-component"]
-        | ["extension", "set"] => {
-            metadata.mutating("mutates installed extension files or extension manifest metadata");
-        }
-        ["extension", "install"] => {
-            metadata.mutating("mutates installed extension files or extension manifest metadata");
-            metadata.dangerous_flags = vec!["--replace"];
-        }
-        ["extension", "update"] => {
-            metadata.mutating("mutates installed extension files or extension manifest metadata");
-            metadata.dangerous_flags = vec!["--force"];
-        }
-        ["runtime", "refresh"] => {
-            metadata.mutating("mutates installed runtime package files");
-        }
-        ["extension", "uninstall"] => {
-            metadata.mutating("mutates installed extension files or extension manifest metadata");
-            metadata.dangerous_flags = vec!["uninstall"];
-        }
         ["runs", "reconcile"] => {
             metadata.mutating("marks orphaned running records stale unless --dry-run is passed");
             metadata.dry_run_flag = Some("--dry-run");
@@ -506,18 +468,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             metadata.operator_mutating("pushes the configured stack target branch to its remote");
             metadata.risk_exemption = Some(
                 "push is the explicit remote publication action; no dry-run contract exists yet",
-            );
-        }
-        ["extension", "run"] | ["extension", "exec"] => {
-            metadata.guarded_operator_mutating(
-                "executes extension-owned runtime commands with forwarded arguments that may mutate the target system",
-                vec!["extension runtime command", "passthrough args"],
-            );
-        }
-        ["extension", "action"] => {
-            metadata.guarded_operator_mutating(
-                "executes extension-owned actions that may mutate the target system",
-                vec!["extension action"],
             );
         }
         ["refactor", "undo", "delete"] => {
