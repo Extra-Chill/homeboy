@@ -251,6 +251,13 @@ Extension detail (`extension.show`):
 
 Extensions can provide their own top-level CLI commands and documentation topics.
 
+Root help lists installed extension commands alongside the built-in ones, plus an
+`Extension-provided commands:` summary and any broken-link warnings:
+
+```sh
+homeboy --help
+```
+
 Discover what’s available on your machine:
 
 ```sh
