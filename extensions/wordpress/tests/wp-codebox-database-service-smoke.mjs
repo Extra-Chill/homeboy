@@ -2,7 +2,7 @@
  * External dependencies
  */
 import { strict as assert } from 'node:assert';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -18,7 +18,7 @@ await mkdir(dependency, { recursive: true });
 await writeFile(path.join(component, 'plugin.php'), '<?php\n/**\n * Plugin Name: Provider Test\n */\n');
 await writeFile(path.join(dependency, 'composer.json'), '{}\n');
 await writeFile(cli, `#!/usr/bin/env node
-import { appendFile, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 const args = process.argv.slice(2);
 if (args[0] === 'runtime' && args[1] === 'descriptor') {
   const capabilities = process.env.OMIT_NATIVE_DATABASE_CAPABILITY === '1' ? [] : ['runtime-service:mysql:native:mariadb'];
@@ -55,12 +55,16 @@ if (args[0] === 'recipe' && args[1] === 'build') {
 }
 if (args[0] === 'recipe-run') {
   const recipe = JSON.parse(await readFile(args[args.indexOf('--recipe') + 1], 'utf8'));
+  const artifacts = args[args.indexOf('--artifacts') + 1];
   await appendFile(process.env.OBSERVED, JSON.stringify({ phase: 'run', recipe, args }) + '\\n');
   const configuration = recipe.inputs.services?.[0]?.configuration || {};
   for (const name of [configuration.hostEnv, configuration.portEnv, configuration.usernameEnv, configuration.passwordEnv].filter(Boolean)) {
     process.stdout.write('provider stdout ' + process.env[name] + '\\n');
     process.stderr.write('provider stderr ' + process.env[name] + '\\n');
   }
+  await mkdir(artifacts + '/runtime-fixture/files', { recursive: true });
+  await writeFile(artifacts + '/latest-runtime.json', JSON.stringify({ paths: { runtimeDirectory: 'runtime-fixture' } }));
+  await writeFile(artifacts + '/runtime-fixture/files/test-results.json', JSON.stringify({ schema: 'wp-codebox/test-results/v1', status: 'passed', summary: { total: 1, passed: 1, failed: 0, skipped: 0 }, suites: [], rawLogReferences: [] }));
 }
 `);
 await chmod(cli, 0o755);
@@ -73,6 +77,7 @@ function invoke(settings, env = {}) {
 function invokeSettingsJson(settingsJson, env = {}) {
   scenario += 1;
   const observed = path.join(root, `observed-${scenario}.jsonl`);
+  const artifacts = path.join(root, `artifacts-${scenario}`);
   const result = spawnSync(runner, [], {
     env: {
       ...process.env,
@@ -80,12 +85,13 @@ function invokeSettingsJson(settingsJson, env = {}) {
       COMPONENT_ID: 'provider-test',
       HOMEBOY_WP_CODEBOX_BIN: cli,
       HOMEBOY_SETTINGS_JSON: settingsJson,
+      HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: artifacts,
       OBSERVED: observed,
       ...env,
     },
     encoding: 'utf8',
   });
-  return { result, observed };
+  return { result, observed, artifacts };
 }
 
 async function observations(file) {
@@ -94,6 +100,11 @@ async function observations(file) {
   } catch {
     return [];
   }
+}
+
+async function retainedRuntimeLog(invocation, file) {
+  const runDirectory = (await readdir(invocation.artifacts)).find((entry) => entry.startsWith('wp-codebox-phpunit.'));
+  return readFile(path.join(invocation.artifacts, runDirectory, 'runtime-fixture', 'logs', file), 'utf8');
 }
 
 function expectPreflightFailure(settings, pattern, env = {}) {
@@ -232,8 +243,8 @@ try {
   const policy = JSON.parse(externalObservations[1].args[externalObservations[1].args.indexOf('--policy') + 1]);
   assert.deepEqual(policy.network, { allowHosts: ['database.internal.example:3306'] });
   assert.equal(policy.approvals, 'on-write');
-  assert.match(externalInvocation.result.stdout, /provider stdout \[REDACTED\]/);
-  assert.match(externalInvocation.result.stderr, /provider stderr \[REDACTED\]/);
+  assert.match(await retainedRuntimeLog(externalInvocation, 'recipe-run.stdout.log'), /provider stdout \[REDACTED\]/);
+  assert.match(await retainedRuntimeLog(externalInvocation, 'recipe-run.stderr.log'), /provider stderr \[REDACTED\]/);
 
   const prepareInvocation = invoke({
     ...configured,

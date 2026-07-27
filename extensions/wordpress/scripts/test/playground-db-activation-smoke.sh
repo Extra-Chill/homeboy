@@ -109,6 +109,11 @@ for candidate in "${ARTIFACTS_DIR}"/wp-codebox-phpunit.*; do
     [ -d "$candidate" ] && run_artifacts_dir="$candidate"
 done
 runtime_artifact_directory=$(jq -r '.paths.runtimeDirectory // empty' "${run_artifacts_dir}/latest-runtime.json")
+test_results_artifact="${run_artifacts_dir}/${runtime_artifact_directory}/files/test-results.json"
+if [ "$(jq -r '.status // empty' "$test_results_artifact")" != "passed" ] || [ "$(jq -r '.summary.total // 0' "$test_results_artifact")" -le 0 ]; then
+    echo "ERROR: expected normalized passing PHPUnit test-results.json" >&2
+    exit 1
+fi
 result_artifact="${run_artifacts_dir}/${runtime_artifact_directory}/files/phpunit/.pg-test-result.txt"
 if [ ! -f "$result_artifact" ] || ! grep -q '^STAGE_BEGIN:run_tests' "$result_artifact"; then
     echo "ERROR: expected WP Codebox structured PHPUnit diagnostic artifact" >&2

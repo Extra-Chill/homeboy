@@ -30,6 +30,7 @@ if (args[0] === 'recipe-run') {
   const artifacts = args[args.indexOf('--artifacts') + 1];
   await mkdir(artifacts + '/runtime-fixture/files', { recursive: true });
   await writeFile(artifacts + '/latest-runtime.json', JSON.stringify({ paths: { runtimeDirectory: 'runtime-fixture' } }));
+  await writeFile(artifacts + '/runtime-fixture/files/test-results.json', JSON.stringify({ schema: 'wp-codebox/test-results/v1', status: 'passed', summary: { total: 1, passed: 1, failed: 0, skipped: 0 }, suites: [], rawLogReferences: [] }));
   process.stdout.write(JSON.stringify({ success: true }));
 }
 `);
