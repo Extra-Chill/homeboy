@@ -12,8 +12,10 @@
 //!      half-applied target branch but a correctly-pruned spec, so re-running
 //!      `sync` is a clean rebuild.
 //!   4. Force-recreate `target.branch` from `base.remote/base.branch`.
-//!   5. Cherry-pick the pick list in order. On conflict, abort the
-//!      in-progress pick and return [`Error::stack_apply_conflict`].
+//!   5. Cherry-pick the pick list in order. On conflict, return
+//!      [`Error::stack_apply_conflict`] and leave the conflicted pick in the
+//!      checkout for manual resolution — unless the caller asked for
+//!      [`ConflictPolicy::Abort`] (`--abort-on-conflict`).
 //!
 //! Drop semantics:
 //!   A PR is droppable iff `state == "MERGED"` AND its content is in base
@@ -39,10 +41,10 @@ const STACK_SYNC_REPLAY_KIND: &str = "stack.sync.replay";
 const STACK_SYNC_UNCERTAIN_KIND: &str = "stack.sync.uncertain";
 
 use super::apply::{
-    checkout_force, cherry_pick, ensure_head_remote, fetch_remote_branch, fetch_sha, AppliedPr,
-    CherryPickResult, PickOutcome,
+    checkout_force, cherry_pick, conflict_error, ensure_head_remote,
+    ensure_no_cherry_pick_in_progress, fetch_remote_branch, fetch_sha, AppliedPr, CherryPickResult,
+    ConflictContext, ConflictPolicy, PickOutcome,
 };
-use super::git::run_git;
 use super::pr_meta::fetch_pr_meta;
 pub(crate) use super::pr_meta::StackPrMeta as PrMeta;
 use super::spec::{resolve_existing_component_path, save, StackPrEntry, StackSpec};
@@ -568,7 +570,11 @@ pub fn diff(spec: &StackSpec) -> Result<DiffOutput> {
 
 /// Sync a stack: rebuild target from base, auto-drop merged PRs, replay
 /// the rest.
-pub fn sync(spec: &mut StackSpec, dry_run: bool) -> Result<SyncOutput> {
+pub fn sync(
+    spec: &mut StackSpec,
+    dry_run: bool,
+    conflict_policy: ConflictPolicy,
+) -> Result<SyncOutput> {
     let plan = plan_sync(spec)?;
 
     if dry_run {
@@ -589,6 +595,14 @@ pub fn sync(spec: &mut StackSpec, dry_run: bool) -> Result<SyncOutput> {
             spec.id, summary
         )));
     }
+
+    // A conflict preserved by an earlier run is a reachable entry state.
+    // Refuse before touching the spec or the target branch: the rebuild in
+    // step 5 would clobber a half-finished resolution.
+    ensure_no_cherry_pick_in_progress(
+        &plan.preview.component_path,
+        &format!("homeboy stack sync {}", spec.id),
+    )?;
 
     // 4. Persist the pruned spec BEFORE any cherry-picks. A partial pick
     //    failure leaves a half-applied target but a correct spec — re-run
@@ -634,8 +648,9 @@ pub fn sync(spec: &mut StackSpec, dry_run: bool) -> Result<SyncOutput> {
                 });
             }
             CherryPickResult::Conflict(message) => {
-                let _ = run_git(&plan.preview.component_path, &["cherry-pick", "--abort"]);
-
+                // Same contract as `apply`: the conflicted pick survives by
+                // default, because the error message points the operator
+                // straight at it.
                 applied.push(AppliedPr {
                     repo: pr.repo.clone(),
                     number: pr.number,
@@ -644,15 +659,16 @@ pub fn sync(spec: &mut StackSpec, dry_run: bool) -> Result<SyncOutput> {
                     note: Some(message.clone()),
                 });
 
-                return Err(Error::stack_apply_conflict(
-                    &spec.id,
-                    pr.number,
-                    &pr.repo,
-                    format!(
-                        "{}\n  Resolve manually with standard git tools, then re-run \
-                         `homeboy stack sync {}`. (Phase 3 will add `--continue`.)",
-                        message, spec.id
-                    ),
+                return Err(conflict_error(
+                    ConflictContext {
+                        path: &plan.preview.component_path,
+                        stack_id: &spec.id,
+                        pr,
+                        sha: &meta.head_sha,
+                        rerun_command: &format!("homeboy stack sync {}", spec.id),
+                        policy: conflict_policy,
+                    },
+                    &message,
                 ));
             }
         }

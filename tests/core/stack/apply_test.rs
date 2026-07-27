@@ -9,8 +9,12 @@
 //! End-to-end correctness is verified out-of-band via the live-verify
 //! fixture spec described in the PR body.
 
-use crate::stack::apply::{checkout_force, cherry_pick, rebase, url_matches, CherryPickResult};
-use crate::stack::{save, GitRef, StackSpec};
+use crate::stack::apply::{
+    checkout_force, cherry_pick, cherry_pick_in_progress, conflict_error, conflict_guidance,
+    ensure_no_cherry_pick_in_progress, rebase, url_matches, CherryPickResult, ConflictContext,
+    ConflictPolicy,
+};
+use crate::stack::{save, GitRef, StackPrEntry, StackSpec};
 use homeboy_core::test_support::with_isolated_home;
 use std::fs;
 use std::process::Command;
@@ -103,6 +107,230 @@ fn cherry_pick_returns_conflict_with_message() {
 }
 
 // ---------------------------------------------------------------------------
+// conflict handling — policy + guidance
+// ---------------------------------------------------------------------------
+
+/// Drive a real cherry-pick conflict in a throwaway repo and hand back the
+/// checkout plus the SHA that failed to apply.
+fn repo_with_live_conflict() -> (tempfile::TempDir, String, String) {
+    let (dir, path) = init_repo();
+    commit_file(&dir, &path, "f.txt", "main version\n", "main edit");
+    git(&path, &["checkout", "-q", "-b", "feature", "HEAD~1"]);
+    let conflict_sha = commit_file(&dir, &path, "f.txt", "feature version\n", "feature edit");
+    git(&path, &["checkout", "-q", "main"]);
+
+    let result = cherry_pick(&path, &conflict_sha).expect("cherry_pick");
+    assert!(
+        matches!(result, CherryPickResult::Conflict(_)),
+        "fixture should produce a conflict, got {:?}",
+        result
+    );
+    assert!(
+        cherry_pick_in_progress(&path),
+        "fixture should leave a paused cherry-pick"
+    );
+    (dir, path, conflict_sha)
+}
+
+fn pr_entry() -> StackPrEntry {
+    StackPrEntry {
+        repo: "example-org/studio".to_string(),
+        number: 3120,
+        note: None,
+    }
+}
+
+#[test]
+fn conflict_error_preserves_state_by_default() {
+    let (dir, path, sha) = repo_with_live_conflict();
+    let pr = pr_entry();
+
+    let error = conflict_error(
+        ConflictContext {
+            path: &path,
+            stack_id: "demo",
+            pr: &pr,
+            sha: &sha,
+            rerun_command: "homeboy stack apply demo",
+            policy: ConflictPolicy::default(),
+        },
+        "CONFLICT (content): Merge conflict in f.txt",
+    );
+
+    // The conflict the message points at must still exist.
+    assert!(
+        cherry_pick_in_progress(&path),
+        "default policy must not abort the in-progress cherry-pick"
+    );
+    assert!(
+        dir.path().join(".git/CHERRY_PICK_HEAD").exists(),
+        "CHERRY_PICK_HEAD must survive so `cherry-pick --continue` works"
+    );
+    let conflicted = fs::read_to_string(dir.path().join("f.txt")).expect("read conflicted file");
+    assert!(
+        conflicted.contains("<<<<<<<"),
+        "conflict markers must survive; got: {conflicted}"
+    );
+
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("git -C") && rendered.contains("cherry-pick --continue"),
+        "message must name the resolve command; got: {rendered}"
+    );
+    assert!(
+        rendered.contains("cherry-pick --abort"),
+        "message must name the bail-out command; got: {rendered}"
+    );
+    assert!(
+        rendered.contains(&path),
+        "message must name the repo path; got: {rendered}"
+    );
+
+    let _ = Command::new("git")
+        .args(["cherry-pick", "--abort"])
+        .current_dir(&path)
+        .output();
+}
+
+#[test]
+fn conflict_error_aborts_when_opted_in() {
+    let (dir, path, sha) = repo_with_live_conflict();
+    let pr = pr_entry();
+
+    let error = conflict_error(
+        ConflictContext {
+            path: &path,
+            stack_id: "demo",
+            pr: &pr,
+            sha: &sha,
+            rerun_command: "homeboy stack apply demo",
+            policy: ConflictPolicy::Abort,
+        },
+        "CONFLICT (content): Merge conflict in f.txt",
+    );
+
+    assert!(
+        !cherry_pick_in_progress(&path),
+        "--abort-on-conflict must abort the in-progress cherry-pick"
+    );
+    assert!(!dir.path().join(".git/CHERRY_PICK_HEAD").exists());
+    let status = Command::new("git")
+        .args(["status", "--porcelain=v1"])
+        .current_dir(&path)
+        .output()
+        .unwrap();
+    assert!(
+        status.stdout.is_empty(),
+        "abort should restore a clean tree; got: {}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("--abort-on-conflict"),
+        "abort message must say the pick was aborted; got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("cherry-pick --continue"),
+        "abort message must not point at state it just destroyed; got: {rendered}"
+    );
+}
+
+#[test]
+fn conflict_error_carries_pr_coordinates() {
+    let (_dir, path) = init_repo();
+    let pr = pr_entry();
+
+    let error = conflict_error(
+        ConflictContext {
+            path: &path,
+            stack_id: "demo",
+            pr: &pr,
+            sha: "deadbeef",
+            rerun_command: "homeboy stack sync demo",
+            policy: ConflictPolicy::Preserve,
+        },
+        "CONFLICT (content): Merge conflict in f.txt",
+    );
+
+    assert_eq!(
+        error.code,
+        homeboy_core::error::ErrorCode::StackApplyConflict
+    );
+    let rendered = error.to_string();
+    assert!(rendered.contains("example-org/studio#3120"), "{rendered}");
+    assert!(rendered.contains("deadbeef"), "{rendered}");
+    assert!(rendered.contains("homeboy stack sync demo"), "{rendered}");
+}
+
+#[test]
+fn conflict_guidance_preserve_and_abort_differ() {
+    let pr = pr_entry();
+    fn ctx<'a>(pr: &'a StackPrEntry, policy: ConflictPolicy) -> ConflictContext<'a> {
+        ConflictContext {
+            path: "/tmp/checkout",
+            stack_id: "demo",
+            pr,
+            sha: "abc1234",
+            rerun_command: "homeboy stack apply demo",
+            policy,
+        }
+    }
+
+    let preserve = conflict_guidance(&ctx(&pr, ConflictPolicy::Preserve), "CONFLICT in f.txt");
+    assert!(preserve.contains("still in progress in /tmp/checkout"));
+    assert!(preserve.contains("git -C /tmp/checkout cherry-pick --continue"));
+    assert!(preserve.contains("git -C /tmp/checkout cherry-pick --abort"));
+
+    let abort = conflict_guidance(&ctx(&pr, ConflictPolicy::Abort), "CONFLICT in f.txt");
+    assert!(abort.contains("git cherry-pick --abort"));
+    assert!(abort.contains("/tmp/checkout"));
+    assert!(!abort.contains("cherry-pick --continue"));
+}
+
+#[test]
+fn conflict_policy_maps_the_cli_flag() {
+    assert_eq!(
+        ConflictPolicy::from_abort_flag(false),
+        ConflictPolicy::Preserve
+    );
+    assert_eq!(ConflictPolicy::from_abort_flag(true), ConflictPolicy::Abort);
+    assert_eq!(ConflictPolicy::default(), ConflictPolicy::Preserve);
+}
+
+// ---------------------------------------------------------------------------
+// ensure_no_cherry_pick_in_progress
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rebuild_preflight_allows_a_clean_checkout() {
+    let (_dir, path) = init_repo();
+    assert!(!cherry_pick_in_progress(&path));
+    ensure_no_cherry_pick_in_progress(&path, "homeboy stack apply demo")
+        .expect("clean checkout should pass the preflight");
+}
+
+#[test]
+fn rebuild_preflight_refuses_to_clobber_a_preserved_conflict() {
+    let (_dir, path, _sha) = repo_with_live_conflict();
+
+    let error = ensure_no_cherry_pick_in_progress(&path, "homeboy stack apply demo")
+        .expect_err("paused cherry-pick must block a rebuild");
+    let rendered = error.to_string();
+    assert!(rendered.contains(&path), "{rendered}");
+    assert!(rendered.contains("cherry-pick --continue"), "{rendered}");
+    assert!(rendered.contains("homeboy stack apply demo"), "{rendered}");
+
+    // The preflight is read-only — the conflict is still there afterwards.
+    assert!(cherry_pick_in_progress(&path));
+
+    let _ = Command::new("git")
+        .args(["cherry-pick", "--abort"])
+        .current_dir(&path)
+        .output();
+}
+
+// ---------------------------------------------------------------------------
 // checkout_force
 // ---------------------------------------------------------------------------
 
@@ -170,7 +398,7 @@ fn rebase_rebuilds_target_without_editing_spec() {
             .join(".config/homeboy/stacks/rebase-no-edit.json");
         let before = fs::read_to_string(&spec_path).expect("read spec before rebase");
 
-        let output = rebase(&spec).expect("rebase stack");
+        let output = rebase(&spec, ConflictPolicy::default()).expect("rebase stack");
         assert!(output.success);
         assert_eq!(output.picked_count, 0);
         assert_eq!(output.skipped_count, 0);
