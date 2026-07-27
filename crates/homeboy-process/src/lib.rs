@@ -275,43 +275,65 @@ pub fn terminate_pid_with_sigterm_and_wait(pid: u32, timeout: Duration) -> Resul
         ));
     }
 
-    #[cfg(unix)]
-    {
-        unsafe {
-            if libc::kill(pid as libc::pid_t, libc::SIGTERM) != 0 {
-                let error = std::io::Error::last_os_error();
-                if error.raw_os_error() == Some(libc::ESRCH) {
-                    return Ok(());
-                }
-                return Err(Error::internal_io(
-                    error.to_string(),
-                    Some(format!("send SIGTERM to process {pid}")),
-                ));
-            }
-        }
-        let deadline = Instant::now() + timeout;
-        while process_is_running_after_sigterm(pid) {
-            if Instant::now() >= deadline {
-                return Err(Error::internal_unexpected(format!(
-                    "process {pid} remained alive for {}ms after SIGTERM",
-                    timeout.as_millis()
-                )));
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        return Ok(());
+    signal_pid(pid, libc::SIGTERM)?;
+    if wait_for_pid_exit(pid, timeout) {
+        Ok(())
+    } else {
+        Err(Error::internal_unexpected(format!(
+            "process {pid} remained alive for {}ms after SIGTERM",
+            timeout.as_millis()
+        )))
     }
+}
 
+/// Deliver one Unix signal to an exact PID. Ownership validation belongs to the
+/// caller because persisted protocol tokens are product-level evidence.
+pub fn signal_pid(pid: u32, signal: libc::c_int) -> Result<()> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return Err(Error::validation_invalid_argument(
+            "pid",
+            "recorded process PID is invalid",
+            Some(pid.to_string()),
+            None,
+        ));
+    }
+    #[cfg(unix)]
+    unsafe {
+        if libc::kill(pid as libc::pid_t, signal) != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
+            }
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(format!("send signal {signal} to process {pid}")),
+            ));
+        }
+        Ok(())
+    }
     #[cfg(not(unix))]
     {
-        let _ = timeout;
+        let _ = signal;
         Err(Error::validation_invalid_argument(
             "pid",
-            "SIGTERM process termination is unsupported on this platform",
+            "process signaling is unsupported on this platform",
             Some(pid.to_string()),
             None,
         ))
     }
+}
+
+/// Poll until a process has exited. This reaps direct children on Unix so a
+/// macOS zombie does not look like a surviving process.
+pub fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while process_is_running_after_sigterm(pid) {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
 }
 
 #[cfg(unix)]
@@ -323,6 +345,11 @@ fn process_is_running_after_sigterm(pid: u32) -> bool {
     if reaped == pid as libc::pid_t {
         return false;
     }
+    pid_is_running(pid)
+}
+
+#[cfg(not(unix))]
+fn process_is_running_after_sigterm(pid: u32) -> bool {
     pid_is_running(pid)
 }
 
