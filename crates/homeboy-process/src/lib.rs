@@ -4,6 +4,86 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+#[cfg(target_os = "linux")]
+use uuid::Uuid;
+
+#[cfg(target_os = "linux")]
+const PROCESS_SCOPE_ENV: &str = "HOMEBOY_PROCESS_SCOPE";
+
+/// Owns a process group and, on Linux, an inherited scope marker that survives
+/// descendants changing sessions or outliving their direct parent.
+pub struct ProcessContainment {
+    leader_pid: Option<u32>,
+    #[cfg(target_os = "linux")]
+    scope: String,
+}
+
+impl ProcessContainment {
+    /// Establish containment before spawning so every descendant inherits its
+    /// ownership marker from the first instruction it executes.
+    pub fn prepare(command: &mut Command) -> Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let scope = Uuid::new_v4().to_string();
+            command.env(PROCESS_SCOPE_ENV, &scope);
+            return Ok(Self {
+                leader_pid: None,
+                scope,
+            });
+        }
+        #[cfg(not(target_os = "linux"))]
+        Ok(Self { leader_pid: None })
+    }
+
+    pub fn attach(&mut self, child: &std::process::Child) -> Result<()> {
+        self.leader_pid = Some(child.id());
+        Ok(())
+    }
+
+    /// Terminate a failed child and its owned scope within `timeout`. The
+    /// direct child remains the caller's reaping responsibility.
+    pub fn terminate_on_failure_bounded(
+        &self,
+        timeout: Duration,
+        leader_has_exited: bool,
+    ) -> Result<()> {
+        let pid = self.leader_pid.ok_or_else(|| {
+            Error::internal_unexpected("process containment was not attached to a child")
+        })?;
+        #[cfg(target_os = "linux")]
+        {
+            if leader_has_exited {
+                return terminate_linux_scope_members(&self.scope, timeout, None);
+            }
+            return terminate_linux_process_scope(pid, &self.scope, timeout);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = leader_has_exited;
+            force_terminate_process_tree_bounded(pid, timeout)
+        }
+    }
+
+    /// Clean up descendants after the direct child has exited. Linux uses only
+    /// the inherited marker here, never the former leader's process-group ID.
+    /// Other platforms intentionally preserve their existing normal-exit path.
+    pub fn cleanup_after_leader_exit_bounded(&self, timeout: Duration) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            return terminate_linux_scope_members(&self.scope, timeout, None);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = timeout;
+            Ok(())
+        }
+    }
+}
 
 /// Generic process step shape shared by command/runner adapters.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -659,6 +739,50 @@ pub fn force_terminate_process_tree_bounded(pid: u32, timeout: Duration) -> Resu
     }
 }
 
+#[cfg(target_os = "linux")]
+fn terminate_linux_process_scope(owner_pid: u32, scope: &str, timeout: Duration) -> Result<()> {
+    unsafe {
+        if libc::kill(-(owner_pid as libc::pid_t), libc::SIGKILL) != 0
+            && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+        {
+            return Err(Error::internal_unexpected(format!(
+                "force-terminate owned process group {owner_pid}: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+    }
+
+    terminate_linux_scope_members(scope, timeout, Some(owner_pid))
+}
+
+#[cfg(target_os = "linux")]
+fn terminate_linux_scope_members(
+    scope: &str,
+    timeout: Duration,
+    owner_pid: Option<u32>,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let targets = linux_scope_pids(scope)?;
+        signal_pids(&targets, libc::SIGKILL)?;
+        let survivors = linux_scope_pids(scope)?;
+        if survivors.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            let owner = owner_pid
+                .map(|pid| format!(" {pid}"))
+                .unwrap_or_else(|| " after leader exit".to_string());
+            return Err(Error::internal_unexpected(format!(
+                "owned process scope{owner} did not exit within {} ms; surviving pids: {}",
+                timeout.as_millis(),
+                join_pids(&survivors)
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessTreeTermination {
     pub owner_pid: u32,
@@ -951,6 +1075,33 @@ fn linux_descendant_pids(owner_pid: u32) -> Result<Vec<u32>> {
         }
     }
     Ok(descendant_pids_from_rows(&rows, owner_pid))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_scope_pids(scope: &str) -> Result<Vec<u32>> {
+    let entries = std::fs::read_dir("/proc").map_err(|error| {
+        Error::internal_unexpected(format!("inspect owned process scope: {error}"))
+    })?;
+    let expected = format!("{PROCESS_SCOPE_ENV}={scope}");
+    let mut pids = Vec::new();
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        let Ok(pid) = name.parse::<u32>() else {
+            continue;
+        };
+        let Ok(environment) = std::fs::read(entry.path().join("environ")) else {
+            continue;
+        };
+        if environment_contains_assignment(&environment, expected.as_bytes()) && pid_is_running(pid)
+        {
+            pids.push(pid);
+        }
+    }
+    pids.sort_unstable();
+    Ok(pids)
 }
 
 #[cfg(target_os = "linux")]

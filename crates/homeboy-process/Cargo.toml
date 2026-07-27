@@ -16,3 +16,4 @@ path = "src/lib.rs"
 homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
 libc = "0.2"
 ctrlc = "3.4"
+uuid = { version = "1.11", features = ["v4"] }
