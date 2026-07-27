@@ -206,51 +206,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
 
     let path = path.iter().map(String::as_str).collect::<Vec<_>>();
     match path.as_slice() {
-        ["agent-task", "promote"] => {
-            metadata.mutating(
-                "applies a selected patch artifact into a managed worktree unless --dry-run is passed",
-            );
-            metadata.dry_run_flag = Some("--dry-run");
-        }
-        ["agent-task", "active"] => {
-            metadata.mutating(
-                "reads active runs by default; --reconcile previews the full fleet mutation set and --apply authorizes its cancellation",
-            );
-            metadata.dry_run_flag = Some("--dry-run");
-            metadata.dangerous_flags = vec!["--apply"];
-        }
-        ["agent-task", "reconcile"] => {
-            metadata.mutating(
-                "previews reconciliation for one durable run; --apply authorizes a scoped lifecycle mutation after provider-state inspection",
-            );
-            metadata.dry_run_flag = Some("--dry-run");
-            metadata.dangerous_flags = vec!["--apply"];
-        }
-        ["agent-task", "controller", "init"]
-        | ["agent-task", "controller", "from-spec"]
-        | ["agent-task", "controller", "run-from-spec"]
-        | ["agent-task", "controller", "materialize"]
-        | ["agent-task", "controller", "events"]
-        | ["agent-task", "controller", "apply-event"]
-        | ["agent-task", "controller", "run-next"]
-        | ["agent-task", "controller", "run"]
-        | ["agent-task", "controller", "resume"]
-        | ["agent-task", "controller", "mark-human-ready"] => {
-            metadata.mutating("mutates durable agent-task loop controller state");
-        }
-        ["agent-task", "auth", "remove"] => {
-            metadata.operator_mutating("removes one agent-task provider secret source mapping");
-        }
-        ["agent-task", "prompts", "remove"] => {
-            metadata.mutating("removes one stored agent-task prompt");
-        }
-        ["agent-task", "fanout", "cook-batch"] => {
-            metadata.operator_mutating(
-                "creates/reuses task worktrees and can run the generated fanout unless --dry-run is passed",
-            );
-            metadata.dry_run_flag = Some("--dry-run");
-            metadata.dangerous_flags = vec!["--run-plan"];
-        }
         ["fuzz", "replay"] | ["fuzz", "minimize"] => {
             metadata.mutating(
                 "replays or minimizes a persisted fuzz case against local code and may write run artifacts",

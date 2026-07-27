@@ -610,6 +610,57 @@ const REVIEW_AUDIT_BASELINE_PATHS: &[&str] = &[
     "audit-baseline prune",
 ];
 
+const AGENT_TASK_CONTROLLER_PATHS: &[&str] = &[
+    "controller init",
+    "controller from-spec",
+    "controller run-from-spec",
+    "controller materialize",
+    "controller events",
+    "controller apply-event",
+    "controller run-next",
+    "controller run",
+    "controller resume",
+    "controller mark-human-ready",
+];
+
+const AGENT_TASK_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        &["promote"],
+        with_dry_run(mutating_safety(), "--dry-run"),
+        "applies a selected patch artifact into a managed worktree unless --dry-run is passed",
+    ),
+    paths_safety(
+        &["active"],
+        with_dry_run(guarded_mutating_safety(&["--apply"]), "--dry-run"),
+        "reads active runs by default; --reconcile previews the full fleet mutation set and --apply authorizes its cancellation",
+    ),
+    paths_safety(
+        &["reconcile"],
+        with_dry_run(guarded_mutating_safety(&["--apply"]), "--dry-run"),
+        "previews reconciliation for one durable run; --apply authorizes a scoped lifecycle mutation after provider-state inspection",
+    ),
+    paths_safety(
+        AGENT_TASK_CONTROLLER_PATHS,
+        mutating_safety(),
+        "mutates durable agent-task loop controller state",
+    ),
+    paths_safety(
+        &["auth remove"],
+        operator_safety(None, &[]),
+        "removes one agent-task provider secret source mapping",
+    ),
+    paths_safety(
+        &["prompts remove"],
+        mutating_safety(),
+        "removes one stored agent-task prompt",
+    ),
+    paths_safety(
+        &["fanout cook-batch"],
+        operator_safety(Some("--dry-run"), &["--run-plan"]),
+        "creates/reuses task worktrees and can run the generated fanout unless --dry-run is passed",
+    ),
+];
+
 const RUNS_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
     paths_safety(
         &["reconcile"],
@@ -739,15 +790,18 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         lab_notes: "read-only local activity query; never offloaded because it inspects operator-local stores",
         ..command_spec("activity", CommandJsonFamily::Workspace)
     },
-    command_spec_with_representative_argv(
-        &["homeboy", "agent-task", "providers"],
-        lab_command_spec_with_summary(
-            "agent-task",
-            CommandJsonFamily::Workspace,
-            "Lab runner routing covers portable, explicit-runner, and runner-resident agent-task workflows",
-            AGENT_TASK_LAB_SUPPORT,
-        ),
-    ),
+    CommandSpec {
+        subcommand_safety: AGENT_TASK_SUBCOMMAND_SAFETY,
+        ..command_spec_with_representative_argv(
+            &["homeboy", "agent-task", "providers"],
+            lab_command_spec_with_summary(
+                "agent-task",
+                CommandJsonFamily::Workspace,
+                "Lab runner routing covers portable, explicit-runner, and runner-resident agent-task workflows",
+                AGENT_TASK_LAB_SUPPORT,
+            ),
+        )
+    },
     CommandSpec {
         subcommand_safety: PROJECT_SUBCOMMAND_SAFETY,
         ..command_spec("project", CommandJsonFamily::Workspace)
