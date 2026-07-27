@@ -415,6 +415,21 @@ impl SshClient {
         self.execute_ssh_with_timeout(&effective, None, timeout)
     }
 
+    /// Execute a command with replayable bytes delivered over stdin and a hard
+    /// wall-clock deadline.
+    pub fn execute_with_input_and_timeout(
+        &self,
+        command: &str,
+        input: &[u8],
+        timeout: Duration,
+    ) -> CommandOutput {
+        let effective = self.prepend_env(command);
+        if self.is_local {
+            return execute_local_command_with_stdin_and_timeout(&effective, input, timeout);
+        }
+        self.execute_ssh_with_timeout(&effective, Some(input), timeout)
+    }
+
     /// Execute `command` with secret env vars delivered over stdin instead of
     /// interpolated into the SSH command argv.
     ///

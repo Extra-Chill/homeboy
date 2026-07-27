@@ -1,6 +1,7 @@
 use std::fs;
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -1058,24 +1059,22 @@ fn ssh_materialized_workspace_delete_requires_exact_inactive_lifecycle() {
     let workspaces = root.path().join("_lab_workspaces");
     let eligible = workspaces.join("eligible");
     write_materialized_workspace(&eligible);
-    let expected_metadata = encoded_workspace_metadata(&eligible);
+    let metadata_path = eligible.join(WORKSPACE_METADATA_FILE);
+    let mut metadata: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
+            .expect("metadata json");
+    metadata["large_comparison_payload"] = serde_json::json!("x".repeat(3 * 1024 * 1024));
+    fs::write(&metadata_path, metadata.to_string()).expect("write large metadata");
+    let expected_metadata = workspace_metadata(&eligible);
 
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(ssh_prune_delete_materialized_workspace_command(
-            &workspaces.display().to_string(),
-            &eligible.display().to_string(),
-            &expected_metadata,
-        ))
-        .output()
-        .expect("delete stale materialized workspace");
+    let output = run_materialized_workspace_delete(&workspaces, &eligible, &expected_metadata);
     assert!(output.status.success(), "{output:?}");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "removed");
     assert!(!eligible.exists());
 
     let ambiguous = workspaces.join("ambiguous");
     write_materialized_workspace(&ambiguous);
-    let expected_metadata = encoded_workspace_metadata(&ambiguous);
+    let expected_metadata = workspace_metadata(&ambiguous);
     let metadata_path = ambiguous.join(WORKSPACE_METADATA_FILE);
     let mut metadata: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
@@ -1090,15 +1089,7 @@ fn ssh_materialized_workspace_delete_requires_exact_inactive_lifecycle() {
         &base64::engine::general_purpose::STANDARD.encode(b"{malformed"),
         &ambiguous,
     ));
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(ssh_prune_delete_materialized_workspace_command(
-            &workspaces.display().to_string(),
-            &ambiguous.display().to_string(),
-            &expected_metadata,
-        ))
-        .output()
-        .expect("retain ambiguous materialized workspace");
+    let output = run_materialized_workspace_delete(&workspaces, &ambiguous, &expected_metadata);
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
@@ -1106,24 +1097,29 @@ fn ssh_materialized_workspace_delete_requires_exact_inactive_lifecycle() {
     );
     assert!(ambiguous.exists());
 
+    let malformed = workspaces.join("malformed");
+    write_materialized_workspace(&malformed);
+    let expected_metadata = workspace_metadata(&malformed);
+    fs::write(malformed.join(WORKSPACE_METADATA_FILE), "{malformed")
+        .expect("write malformed metadata");
+    let output = run_materialized_workspace_delete(&workspaces, &malformed, &expected_metadata);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "unknown:materialized_workspace_lifecycle_changed"
+    );
+    assert!(malformed.exists());
+
     let process_owned = workspaces.join("process-owned");
     write_materialized_workspace(&process_owned);
-    let expected_metadata = encoded_workspace_metadata(&process_owned);
+    let expected_metadata = workspace_metadata(&process_owned);
     let mut child = Command::new("sh")
         .arg("-c")
         .arg("sleep 30")
         .current_dir(&process_owned)
         .spawn()
         .expect("hold materialized workspace cwd");
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(ssh_prune_delete_materialized_workspace_command(
-            &workspaces.display().to_string(),
-            &process_owned.display().to_string(),
-            &expected_metadata,
-        ))
-        .output()
-        .expect("retain process-owned materialized workspace");
+    let output = run_materialized_workspace_delete(&workspaces, &process_owned, &expected_metadata);
     child.kill().expect("stop held process");
     child.wait().expect("reap held process");
     assert!(output.status.success(), "{output:?}");
@@ -1269,9 +1265,41 @@ fn write_materialized_workspace(path: &Path) {
 }
 
 fn encoded_workspace_metadata(path: &Path) -> String {
-    base64::engine::general_purpose::STANDARD.encode(
-        fs::read(path.join(WORKSPACE_METADATA_FILE)).expect("read workspace metadata for compare"),
-    )
+    base64::engine::general_purpose::STANDARD.encode(workspace_metadata(path))
+}
+
+fn workspace_metadata(path: &Path) -> Vec<u8> {
+    fs::read(path.join(WORKSPACE_METADATA_FILE)).expect("read workspace metadata for compare")
+}
+
+fn run_materialized_workspace_delete(
+    root: &Path,
+    workspace: &Path,
+    expected_metadata: &[u8],
+) -> std::process::Output {
+    let command = ssh_prune_delete_materialized_workspace_command(
+        &root.display().to_string(),
+        &workspace.display().to_string(),
+    );
+    assert!(
+        command.len() < 16 * 1024,
+        "comparison data must not be embedded in argv"
+    );
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start materialized workspace delete");
+    child
+        .stdin
+        .take()
+        .expect("delete stdin")
+        .write_all(expected_metadata)
+        .expect("stream expected metadata");
+    child.wait_with_output().expect("finish workspace delete")
 }
 
 fn active_lifecycle_metadata(run_id: &str, resource_run_id: &str) -> serde_json::Value {
