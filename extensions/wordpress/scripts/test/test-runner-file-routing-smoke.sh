@@ -27,7 +27,7 @@ assert_not_contains() {
 }
 
 component="${TMPDIR}/component"
-mkdir -p "${component}/tests/Unit" "${component}/wordpress/tests" "${component}/bin/tests/i18n-tools" "${TMPDIR}/stubs"
+mkdir -p "${component}/tests/Unit" "${component}/wordpress/tests" "${component}/tools" "${component}/bin/tests/i18n-tools" "${TMPDIR}/stubs"
 
 # Simulate a caller with a managed Codebox installation whose CLI and core module
 # are incompatible with this fixture. The smoke owns its runtime inputs below.
@@ -80,6 +80,13 @@ set -euo pipefail
 echo "shell contract smoke ran"
 SH
 chmod +x "${component}/tests/shell-contract-smoke.sh"
+
+cat > "${component}/tools/fixture-matrix.test.mjs" <<'JS'
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+test('composed Node test runs', () => assert.equal(2 + 2, 4));
+JS
 
 cat > "${component}/wordpress/tests/codebox-agent-task-matrix-smoke.js" <<'JS'
 console.log('prefixed codebox agent task matrix smoke ran');
@@ -277,6 +284,19 @@ HOMEBOY_TEST_SCOPE_ENV_VALUE=$'tests/import-agent-ability-smoke.php\ntests/queue
 assert_contains "${TMPDIR}/changed-smoke-files.out" "PHP_SMOKE_BEGIN:tests/import-agent-ability-smoke.php"
 assert_contains "${TMPDIR}/changed-smoke-files.out" "PHP_SMOKE_OK:tests/import-agent-ability-smoke.php"
 assert_contains "${TMPDIR}/changed-smoke-files.out" "PHP_SMOKE_SUMMARY:passed=1 failed=0"
+
+HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+HOMEBOY_COMPONENT_ID="component" \
+HOMEBOY_COMPONENT_PATH="$component" \
+HOMEBOY_COMPONENT_SHAPE="plugin" \
+HOMEBOY_CHANGED_TEST_FILES="tools/fixture-matrix.test.mjs" \
+    bash "${EXTENSION_PATH}/scripts/test/test-runner.sh" > "${TMPDIR}/node-test-file.out"
+
+assert_contains "${TMPDIR}/node-test-file.out" "Backend: node-test"
+assert_contains "${TMPDIR}/node-test-file.out" "NODE_TEST_BEGIN:tools/fixture-matrix.test.mjs"
+assert_contains "${TMPDIR}/node-test-file.out" "NODE_TEST_OK:tools/fixture-matrix.test.mjs"
+assert_contains "${TMPDIR}/node-test-file.out" "NODE_TEST_SUMMARY:passed=1 failed=0"
+assert_not_contains "${TMPDIR}/node-test-file.out" "WP_CODEBOX_STUB"
 assert_contains "${TMPDIR}/changed-smoke-files.out" "HOST_SMOKE_BEGIN:tests/queue-routing-smoke.php"
 assert_contains "${TMPDIR}/changed-smoke-files.out" "HOST_SMOKE_SUMMARY:passed=1 failed=0"
 assert_not_contains "${TMPDIR}/changed-smoke-files.out" "HOST_SMOKE_BEGIN:tests/import-agent-ability-smoke.php"
