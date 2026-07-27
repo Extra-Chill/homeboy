@@ -222,12 +222,31 @@ if [ -n "${SKIPPED_REASON}" ]; then
 fi
 
 if [ "${SUCCESS}" != "true" ] || [ "${RELEASE_EXIT}" -ne 0 ]; then
-  ERROR_MSG="$(json_field "${RELEASE_OUTPUT_FILE}" '.error.message // "Unknown error"')"
+  # `.error.message` only exists on the legacy error envelope. A release that
+  # runs and then fails a step returns the v3 command-result envelope, which
+  # classifies the failure under `.diagnostics` and `.summary` and carries the
+  # repair commands in `.next_actions` — so reading `.error.message` alone
+  # printed "Release failed: Unknown error" while the payload held
+  # `reason: "gh-upload-failed"` and a ready-to-paste `gh release ...` command
+  # (Extra-Chill/homeboy#10441). Read the classified fields first.
+  ERROR_MSG="$(json_field "${RELEASE_OUTPUT_FILE}" \
+    '[.error.message?, .diagnostics.message?, .diagnostics.failure_digest.summary?, .summary?]
+     | map(select(type == "string" and . != "")) | first // "Unknown error"')"
   if [ -z "${ERROR_MSG}" ] || [ "${ERROR_MSG}" = "null" ]; then
     ERROR_MSG="Unknown error"
   fi
 
   echo "::error::Release failed: ${ERROR_MSG}"
+
+  # The repair commands are the whole point of the structured envelope: print
+  # them next to the failure instead of leaving them buried in the JSON.
+  while IFS= read -r action; do
+    [ -n "${action}" ] || continue
+    echo "::notice::Release repair: ${action}"
+  done < <(json_field "${RELEASE_OUTPUT_FILE}" \
+    '.next_actions? // [] | .[] | select(.command? != null and .command != "")
+     | "\(.label // "next action") → \(.command)"')
+
   write_release_outputs "${RELEASE_OUTPUT_FILE}" "false" "release-failed"
   rm -f "${RELEASE_OUTPUT_FILE}"
   exit 1

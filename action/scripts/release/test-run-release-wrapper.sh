@@ -144,6 +144,15 @@ JSON
 JSON
     exit 1
     ;;
+  step-failed)
+    # The v3 command-result envelope a release that RAN and then failed a step
+    # emits: no `.error`, but a fully classified `.diagnostics` and executable
+    # `.next_actions` (Extra-Chill/homeboy#10441).
+    cat > "${output_file}" <<'JSON'
+{"schema":"command-result/v3","command":"release","success":false,"exit_code":1,"status":"failed","summary":"Release step github.release (github.release) failed: gh-upload-failed","next_actions":[{"label":"attach the built artifacts to the release that already exists","command":"gh release upload 'v2.1.0' --clobber -R 'Extra-Chill/homeboy'","kind":"repair"}],"diagnostics":{"code":"command.failed","message":"Release step github.release (github.release) failed: gh-upload-failed — `gh release upload` failed for v2.1.0: gh api release metadata exited with status 1"},"data":{"command":"release","result":{"component_id":"mock-component"}}}
+JSON
+    exit 1
+    ;;
   *)
     echo "unknown HOMEBOY_MOCK_SCENARIO=${HOMEBOY_MOCK_SCENARIO}" >&2
     exit 2
@@ -284,5 +293,44 @@ assert_output_line 'release-version=2.1.0' "${OUTPUT_FILE}" "dry-run preserves p
 assert_output_line 'release-tag=v2.1.0' "${OUTPUT_FILE}" "dry-run preserves planned tag"
 assert_output_line 'release-bump-type=minor' "${OUTPUT_FILE}" "dry-run preserves planned bump"
 assert_output_line 'skipped-reason=dry-run' "${OUTPUT_FILE}" "dry-run reason is action glue"
+
+# Extra-Chill/homeboy#10441: a release that fails a step returns the v3
+# envelope, which has no `.error`. Reading only `.error.message` printed
+# "Release failed: Unknown error" while the payload held the classified reason
+# AND a ready-to-paste repair command — the pipeline computed the answer and
+# printed prose. The wrapper must surface both.
+setup_fixture
+HOMEBOY_MOCK_SCENARIO="step-failed"
+GH_TOKEN="secret123"
+set +e
+FAILURE_OUTPUT="$(run_wrapper 2>&1)"
+FAILURE_EXIT=$?
+set -e
+if [ "${FAILURE_EXIT}" -eq 0 ]; then
+  printf 'FAIL: failed release must exit non-zero\n%s\n' "${FAILURE_OUTPUT}"
+  exit 1
+fi
+printf 'PASS: failed release exits non-zero\n'
+assert_not_contains 'Release failed: Unknown error' "${FAILURE_OUTPUT}" "classified step failure is never reported as Unknown error"
+assert_contains 'gh-upload-failed' "${FAILURE_OUTPUT}" "classified failure reason reaches the CI annotation"
+assert_contains "gh release upload 'v2.1.0' --clobber" "${FAILURE_OUTPUT}" "repair command is printed next to the failure"
+assert_output_line 'released=false' "${OUTPUT_FILE}" "failed release reports released=false"
+assert_output_line 'skipped-reason=release-failed' "${OUTPUT_FILE}" "failed release reports the release-failed reason"
+
+# The legacy `.error.message` envelope (validation errors, load failures) must
+# keep working — the new lookup adds fallbacks, it does not replace the field.
+setup_fixture
+HOMEBOY_MOCK_SCENARIO="failed"
+GH_TOKEN="secret123"
+set +e
+LEGACY_OUTPUT="$(run_wrapper 2>&1)"
+LEGACY_EXIT=$?
+set -e
+if [ "${LEGACY_EXIT}" -eq 0 ]; then
+  printf 'FAIL: legacy failure must exit non-zero\n%s\n' "${LEGACY_OUTPUT}"
+  exit 1
+fi
+printf 'PASS: legacy failure exits non-zero\n'
+assert_contains 'Release failed: mock failure' "${LEGACY_OUTPUT}" "legacy .error.message envelope still reports its message"
 
 printf 'All run-release wrapper checks passed.\n'
