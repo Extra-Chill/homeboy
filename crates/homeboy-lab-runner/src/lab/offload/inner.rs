@@ -1520,14 +1520,18 @@ pub(crate) fn run_lab_offload_inner(
             None,
         )
         })?;
-        if request.local_output_file.is_some() {
-            emit_durable_run_id_before_execution(
-                run_id,
-                runner_id,
-                request.local_output_file,
-                &mut messages,
-            );
-        }
+        // Emit unconditionally. `emit_durable_run_id_before_execution` already
+        // treats `--output` as optional and still prints the handle plus its
+        // follow-up commands to stderr. Gating the whole call on `--output`
+        // meant the most common detached invocation — no `--output`, submitted
+        // by an interruptible non-TTY client — got no identity at all before
+        // controller staging began (#10419).
+        emit_durable_run_id_before_execution(
+            run_id,
+            runner_id,
+            request.local_output_file,
+            &mut messages,
+        );
         let controller_job_id = match crate::lab_staging_controller::submit_detached_staging(
             run_id,
             runner_id,
