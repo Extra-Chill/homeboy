@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.6] - 2026-07-27
+
+### Fixed
+- exclude generated ESLint output
+
 ## [3.34.5] - 2026-07-27
 
 ### Fixed
