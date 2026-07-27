@@ -77,6 +77,15 @@ pub(crate) fn reconcile_owned_stale_running_runs(
     reconcile_orphaned_running_runs(store, limit, false, pid_is_running)
 }
 
+/// Reconcile only the run being read by a focused command. Fleet-wide
+/// reconciliation is intentionally reserved for `runs reconcile`.
+pub(crate) fn reconcile_owned_stale_running_run(
+    store: &ObservationStore,
+    run: &RunRecord,
+) -> homeboy::core::Result<Option<ReconciledRunSummary>> {
+    reconcile_orphaned_running_run(store, run, false, pid_is_running)
+}
+
 fn reconcile_orphaned_running_runs<F>(
     store: &ObservationStore,
     limit: i64,
@@ -91,41 +100,53 @@ where
         limit: Some(limit.clamp(1, 1000)),
         ..RunListFilter::default()
     })?;
-    let mut reconciled = Vec::new();
+    Ok(running
+        .iter()
+        .map(|run| reconcile_orphaned_running_run(store, run, dry_run, &pid_is_alive))
+        .collect::<homeboy::core::Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect())
+}
 
-    for run in running {
-        let Some(reason) = stale_running_reason(&run, &pid_is_alive) else {
-            continue;
-        };
+fn reconcile_orphaned_running_run<F>(
+    store: &ObservationStore,
+    run: &RunRecord,
+    dry_run: bool,
+    pid_is_alive: F,
+) -> homeboy::core::Result<Option<ReconciledRunSummary>>
+where
+    F: Fn(u32) -> bool,
+{
+    let Some(reason) = stale_running_reason(run, &pid_is_alive) else {
+        return Ok(None);
+    };
 
-        let owner_pid = run_owner_pid(&run);
-        let artifact_count = if dry_run {
-            store.list_artifacts(&run.id)?.len()
-        } else {
-            reconcile_available_run_dir_artifacts(store, &run)?
-        };
-        let finished = if dry_run {
-            None
-        } else {
-            let metadata =
-                with_reconcile_metadata(&run, owner_pid, reason, &reconcile_run_dir_metadata(&run));
-            Some(store.finish_run(&run.id, RunStatus::Stale, Some(metadata))?)
-        };
+    let owner_pid = run_owner_pid(run);
+    let artifact_count = if dry_run {
+        store.list_artifacts(&run.id)?.len()
+    } else {
+        reconcile_available_run_dir_artifacts(store, run)?
+    };
+    let finished = if dry_run {
+        None
+    } else {
+        let metadata =
+            with_reconcile_metadata(run, owner_pid, reason, &reconcile_run_dir_metadata(run));
+        Some(store.finish_run(&run.id, RunStatus::Stale, Some(metadata))?)
+    };
 
-        reconciled.push(ReconciledRunSummary {
-            id: run.id,
-            kind: run.kind,
-            previous_status: run.status,
-            status: RunStatus::Stale.as_str().to_string(),
-            started_at: run.started_at,
-            finished_at: finished.and_then(|run| run.finished_at),
-            owner_pid,
-            reason: reason.to_string(),
-            artifact_count,
-        });
-    }
-
-    Ok(reconciled)
+    Ok(Some(ReconciledRunSummary {
+        id: run.id.clone(),
+        kind: run.kind.clone(),
+        previous_status: run.status.clone(),
+        status: RunStatus::Stale.as_str().to_string(),
+        started_at: run.started_at.clone(),
+        finished_at: finished.and_then(|run| run.finished_at),
+        owner_pid,
+        reason: reason.to_string(),
+        artifact_count,
+    }))
 }
 
 fn stale_running_reason<F>(run: &RunRecord, pid_is_alive: &F) -> Option<&'static str>
