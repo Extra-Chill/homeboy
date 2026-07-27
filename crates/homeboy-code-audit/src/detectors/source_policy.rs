@@ -88,6 +88,24 @@ pub(crate) fn validate_configured_paths(
         }
     }
 
+    for policy in &config.test_wiring.policies {
+        for (kind, globs) in [
+            ("source", &policy.source_path_globs),
+            ("test", &policy.test_path_globs),
+            (
+                "auto-discovered test",
+                &policy.auto_discovered_test_path_globs,
+            ),
+            ("support test", &policy.support_test_path_globs),
+        ] {
+            for glob in globs {
+                if !paths.iter().any(|path| glob_match::glob_match(glob, path)) {
+                    missing.push(format!("test wiring {} {kind} glob: {glob}", policy.id));
+                }
+            }
+        }
+    }
+
     for (kind, values) in [
         (
             "include",
@@ -612,6 +630,22 @@ mod tests { const PACKAGE: &str = "widget-package.json"; }
             vec!["crates/homeboy-cli/src/commands/".to_string()];
         config.thin_command_adapter.exclude_path_contains =
             vec!["src/commands/legacy.rs".to_string()];
+        config
+            .test_wiring
+            .policies
+            .push(homeboy_audit_contract::TestWiringPolicy {
+                id: "synthetic-test-wiring".to_string(),
+                source_path_globs: vec!["src/**/*.rs".to_string()],
+                test_path_globs: vec!["tests/**/*_test.rs".to_string()],
+                auto_discovered_test_path_globs: Vec::new(),
+                support_test_path_globs: Vec::new(),
+                require_explicit_wiring: false,
+                explicit_wiring_marker_patterns: Vec::new(),
+                convention: "test_wiring".to_string(),
+                severity: "warning".to_string(),
+                description: String::new(),
+                suggestion: String::new(),
+            });
 
         let error = validate_configured_paths(&[&fp], &config)
             .expect_err("stale configured scopes must fail");
@@ -620,6 +654,7 @@ mod tests { const PACKAGE: &str = "widget-package.json"; }
         assert!(message.contains("source policy synthetic-source-boundary exclude"));
         assert!(message.contains("convention exception glob"));
         assert!(message.contains("thin command adapter exclude"));
+        assert!(message.contains("test wiring synthetic-test-wiring test glob"));
     }
 
     // ------------------------------------------------------------------------

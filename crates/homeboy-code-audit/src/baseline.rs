@@ -241,8 +241,9 @@ pub fn file_from_audit_fingerprint(fingerprint: &str) -> Option<String> {
 }
 
 /// Reject full-audit baselines that retain source-file fingerprints for paths
-/// removed by a tree move. Synthetic detector identities without a file
-/// extension (for example artifact portability rows) remain valid.
+/// removed by a tree move. Artifact portability uses a synthetic identity in
+/// place of a file path, so it remains valid even when identity text resembles
+/// a source path.
 pub fn validate_fingerprint_paths(
     source_path: &Path,
     baseline: &AuditBaseline,
@@ -252,7 +253,7 @@ pub fn validate_fingerprint_paths(
         .iter()
         .filter_map(|fingerprint| {
             let file = file_from_audit_fingerprint(fingerprint)?;
-            is_source_file_path(&file).then_some((file, fingerprint))
+            (!is_synthetic_fingerprint(fingerprint)).then_some((file, fingerprint))
         })
         .filter(|(file, _)| !source_path.join(file).is_file())
         .map(|(_, fingerprint)| fingerprint.as_str())
@@ -274,29 +275,8 @@ pub fn validate_fingerprint_paths(
     ))
 }
 
-fn is_source_file_path(path: &str) -> bool {
-    matches!(
-        Path::new(path)
-            .extension()
-            .and_then(|extension| extension.to_str()),
-        Some(
-            "rs" | "php"
-                | "js"
-                | "jsx"
-                | "ts"
-                | "tsx"
-                | "mjs"
-                | "py"
-                | "go"
-                | "java"
-                | "rb"
-                | "swift"
-                | "kt"
-                | "c"
-                | "cpp"
-                | "h"
-        )
-    )
+fn is_synthetic_fingerprint(fingerprint: &str) -> bool {
+    fingerprint.ends_with("::NonPortableArtifactPath")
 }
 
 /// Load a baseline if one exists for the given source path.
@@ -599,8 +579,8 @@ mod tests {
             item_count: 3,
             known_fingerprints: vec![
                 "structural::crates/example/src/live.rs::GodFile".to_string(),
-                "structural::src/retired.rs::GodFile".to_string(),
-                "artifact_portability::artifact_portability/path::NonPortableArtifactPath"
+                "structural::src/retired.json::GodFile".to_string(),
+                "artifact_portability::artifact_portability/path/sidecar.rs::NonPortableArtifactPath"
                     .to_string(),
             ],
             metadata: AuditBaselineMetadata {
@@ -614,8 +594,10 @@ mod tests {
         let error = validate_fingerprint_paths(root, &baseline)
             .expect_err("removed source path must invalidate the baseline");
 
-        assert!(error.to_string().contains("src/retired.rs"));
-        assert!(!error.to_string().contains("artifact_portability/path"));
+        assert!(error.to_string().contains("src/retired.json"));
+        assert!(!error
+            .to_string()
+            .contains("artifact_portability/path/sidecar.rs"));
     }
 
     #[test]
