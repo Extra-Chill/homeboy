@@ -312,11 +312,28 @@ pub struct RunsListOutput {
     /// Lab is wedged" from "there is nothing to report".
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub probe_degradations: Vec<ReadOnlyProbeDegradation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_enrichment: Option<RunsRunnerEnrichment>,
     #[serde(
         rename = "_homeboy_actionable",
         skip_serializing_if = "CommandActionableMetadata::is_empty"
     )]
     pub actionable: CommandActionableMetadata,
+}
+
+#[derive(Serialize)]
+pub struct RunsRunnerEnrichment {
+    pub status: &'static str,
+    pub partial: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub runner_unavailable: Vec<RunsRunnerUnavailable>,
+}
+
+#[derive(Serialize)]
+pub struct RunsRunnerUnavailable {
+    pub runner_id: String,
+    pub code: String,
+    pub message: String,
 }
 
 #[derive(Serialize)]

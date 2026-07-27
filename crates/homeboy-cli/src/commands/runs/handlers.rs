@@ -90,9 +90,14 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
 
     let mut runs = run_summaries_with_artifact_indexes(&store, run_records)?;
 
-    if args.include_active_runner_jobs {
-        runs.extend(active_runner_job_summaries(status_filter.as_deref()));
-    }
+    let runner_enrichment = args
+        .include_active_runner_jobs
+        .then(|| active_runner_job_summaries(status_filter.as_deref()))
+        .map(|enrichment| {
+            runs.extend(enrichment.runs);
+            enrichment.state
+        })
+        .flatten();
 
     let matched_runs = runs.len();
     let actionable = actionable_for_run_list(&runs);
@@ -105,6 +110,7 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
             // Carry the reason for any bounded probe that did not answer, so an
             // empty/short active-job list is never mistaken for an idle Lab.
             probe_degradations: readonly_probe::take_degradations(),
+            runner_enrichment,
             actionable,
         }),
         0,
@@ -261,13 +267,31 @@ fn run_correlates_with(run: &RunRecord, correlation: &str) -> bool {
 /// *reconciliation* that a read-only listing must never block on. The indexed
 /// snapshot answers the only question this listing asks ("what is running right
 /// now") with one bounded `/jobs` query per runner.
-fn active_runner_job_summaries(status: Option<&str>) -> Vec<RunSummary> {
+struct ActiveRunnerJobEnrichment {
+    runs: Vec<RunSummary>,
+    state: Option<super::types::RunsRunnerEnrichment>,
+}
+
+fn active_runner_job_summaries(status: Option<&str>) -> ActiveRunnerJobEnrichment {
     // This view deliberately avoids `runner::status()`: that path reconciles
     // every draining generation and can block local run discovery behind a
     // wedged runner. The indexed snapshot makes one bounded current-session
     // request per runner instead of scanning its historical generations.
-    runner::statuses_indexed()
-        .unwrap_or_default()
+    let snapshots = runner::statuses_indexed().unwrap_or_default();
+    let unavailable = snapshots
+        .iter()
+        .filter_map(|snapshot| {
+            snapshot
+                .active_job_error
+                .as_ref()
+                .map(|error| super::types::RunsRunnerUnavailable {
+                    runner_id: snapshot.runner_id.clone(),
+                    code: error.code.clone(),
+                    message: error.message.clone(),
+                })
+        })
+        .collect::<Vec<_>>();
+    let runs = snapshots
         .into_iter()
         .filter(|snapshot| snapshot.connected)
         .flat_map(|snapshot| snapshot.active_jobs)
@@ -276,7 +300,17 @@ fn active_runner_job_summaries(status: Option<&str>) -> Vec<RunSummary> {
             None => true,
         })
         .filter_map(active_runner_job_run_summary_if_durable)
-        .collect()
+        .collect();
+    let state = Some(super::types::RunsRunnerEnrichment {
+        status: if unavailable.is_empty() {
+            "complete"
+        } else {
+            "partial"
+        },
+        partial: !unavailable.is_empty(),
+        runner_unavailable: unavailable,
+    });
+    ActiveRunnerJobEnrichment { runs, state }
 }
 
 fn active_runner_job_run_summary_if_durable(

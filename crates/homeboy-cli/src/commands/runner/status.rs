@@ -108,7 +108,7 @@ pub(super) fn status(
         ));
     }
 
-    let sessions = runner::statuses()?;
+    let sessions = runner::persisted_statuses()?;
     if !full {
         let omitted = sessions.len().saturating_sub(DEFAULT_STATUS_SESSION_LIMIT);
         let sessions = sessions

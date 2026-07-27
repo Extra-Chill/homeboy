@@ -471,6 +471,8 @@ pub struct RunnerActiveJobsSnapshot {
     pub runner_id: String,
     pub connected: bool,
     pub active_jobs: Vec<ActiveRunnerJobSummary>,
+    pub active_job_state: RunnerActiveJobState,
+    pub active_job_error: Option<RunnerActiveJobError>,
 }
 
 #[derive(Debug, Clone)]
