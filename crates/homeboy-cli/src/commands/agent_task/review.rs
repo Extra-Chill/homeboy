@@ -794,6 +794,75 @@ fn scope_providers(
 const DEFAULT_PROVIDER_LIMIT: usize = 10;
 const DEFAULT_DIAGNOSTIC_LIMIT: usize = 10;
 const DEFAULT_TEXT_LIMIT: usize = 256;
+const DEFAULT_SCOPE_SOURCE_LIMIT: usize = 20;
+pub(crate) const AGENT_TASK_PROVIDER_SCOPE_SCHEMA: &str = "homeboy/agent-task-provider-scope/v1";
+
+/// The execution scope a provider catalog describes.
+///
+/// Controller and runner carry different extensions, runtime defaults,
+/// secrets, and provider readiness, so a catalog is only interpretable
+/// alongside where it was observed. This is emitted as an additive
+/// `observed_scope` object: the pre-existing `scope` object keeps its meaning
+/// (which slice of the catalog is being presented) so existing parsers are
+/// unaffected (#9763).
+fn observed_provider_scope(all_providers: &[AgentTaskExecutorProvider]) -> Value {
+    let runner_id = homeboy::core::resource_policy_context::lab_execution_runner_id();
+    let identity = homeboy::core::build_identity::current();
+    let label = match runner_id.as_deref() {
+        Some(runner_id) => format!("runner `{runner_id}`"),
+        None => "controller".to_string(),
+    };
+    let location = if runner_id.is_some() {
+        "lab"
+    } else {
+        "controller"
+    };
+
+    let bounded_ids = |values: Vec<String>| {
+        let mut values = values;
+        values.sort();
+        values.dedup();
+        let total = values.len();
+        values.truncate(DEFAULT_SCOPE_SOURCE_LIMIT);
+        (total, values)
+    };
+    let (extension_total, extension_ids) = bounded_ids(
+        all_providers
+            .iter()
+            .filter_map(|provider| provider.extension_id.clone())
+            .collect(),
+    );
+    let (runtime_total, runtime_ids) = bounded_ids(
+        all_providers
+            .iter()
+            .filter_map(|provider| provider.runtime_id.clone())
+            .collect(),
+    );
+
+    serde_json::json!({
+        "schema": AGENT_TASK_PROVIDER_SCOPE_SCHEMA,
+        "location": location,
+        "runner_id": runner_id,
+        "label": label,
+        "homeboy_identity": {
+            "version": identity.version,
+            "display": identity.display,
+            "git_commit": identity.git_commit,
+        },
+        "extension_source": {
+            "total": extension_total,
+            "shown": extension_ids.len(),
+            "extension_ids": extension_ids,
+        },
+        "runtime_source": {
+            "total": runtime_total,
+            "shown": runtime_ids.len(),
+            "runtime_ids": runtime_ids,
+        },
+        "observed_at": chrono::Utc::now().to_rfc3339(),
+        "runner_scoped_command": "homeboy agent-task providers --runner <runner-id>",
+    })
+}
 
 pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     let catalog = if args.refresh {
@@ -884,6 +953,9 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
                 "refreshed": args.refresh,
                 "version": catalog_version,
             },
+            // Where this catalog was observed. Provider readiness is
+            // scope-sensitive, so an unlabelled catalog is ambiguous (#9763).
+            "observed_scope": observed_provider_scope(all_providers),
             "scope": {
                 "backend": scoped_backend,
                 "filtered": scoped_backend.is_some()

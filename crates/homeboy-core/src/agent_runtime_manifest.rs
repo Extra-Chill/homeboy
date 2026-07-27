@@ -10,6 +10,20 @@ use crate::{config, paths, Error, Result};
 use homeboy_extension_contract::{ExtensionManifest, RequirementsConfig};
 
 pub const AGENT_RUNTIME_MANIFEST_SCHEMA: &str = "homeboy/agent-runtime-manifest/v1";
+
+/// Deadline for the per-runtime `git rev-parse HEAD` revision probe.
+///
+/// Runtime revisions are derived during agent-runtime/provider catalog
+/// discovery, which is a diagnostic read (`homeboy agent-task providers`). One
+/// wedged runtime checkout must not make the whole catalog unbounded, so the
+/// probe degrades to a labelled partial (#9763).
+pub const AGENT_RUNTIME_REVISION_PROBE_TIMEOUT: std::time::Duration =
+    crate::git::DEFAULT_GIT_READ_PROBE_TIMEOUT;
+
+/// Marker recorded on a selected runtime identity whose bounded revision probe
+/// ran out of budget. Consumers raise this as a scoped discovery diagnostic
+/// instead of reporting the revision as merely absent.
+pub const AGENT_RUNTIME_REVISION_PROBE_TIMED_OUT: &str = "timed_out";
 pub const AGENT_RUNTIME_MATERIALIZATION_PLAN_SCHEMA: &str =
     "homeboy/agent-runtime-materialization-plan/v2";
 
@@ -333,6 +347,12 @@ pub struct AgentRuntimeSelectedIdentity {
     /// installs without that proof are intentionally `unverifiable`.
     #[serde(default = "default_runtime_freshness")]
     pub freshness: String,
+    /// `timed_out` when the bounded revision probe exceeded its budget. Absent
+    /// means the probe answered (positively or negatively) within budget. This
+    /// distinguishes "this runtime has no revision" from "we could not find out
+    /// in time", so discovery can emit a labelled partial (#9763).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_probe: Option<String>,
 }
 
 fn default_runtime_freshness() -> String {
@@ -360,10 +380,12 @@ pub fn runtime_materialization_plan(
     env_passthrough.sort();
     env_passthrough.dedup();
 
-    let revision = manifest
+    let probe = manifest
         .runtime_path
         .as_deref()
-        .and_then(|path| runtime_source_revision(Path::new(path)));
+        .map(|path| runtime_source_revision_probe(Path::new(path)))
+        .unwrap_or_default();
+    let revision = probe.revision.clone();
     let freshness = if revision.as_deref().is_some_and(is_immutable_revision) {
         "current"
     } else {
@@ -408,6 +430,9 @@ pub fn runtime_materialization_plan(
             source_path: manifest.runtime_path.clone(),
             revision,
             freshness: freshness.to_string(),
+            revision_probe: probe
+                .timed_out
+                .then(|| AGENT_RUNTIME_REVISION_PROBE_TIMED_OUT.to_string()),
         },
         provider_id: provider_id.into(),
         source_selector: runtime_source_description(manifest),
@@ -553,13 +578,36 @@ fn runtime_generation_identity(
     format!("sha256:{}", content_hash::sha256_hex(&encoded))
 }
 
-fn runtime_source_revision(path: &Path) -> Option<String> {
-    crate::git::head_sha(path).or_else(|| {
+/// Bounded outcome of a runtime source-revision probe.
+///
+/// `timed_out` is carried separately from `revision` so callers can label a
+/// partial catalog instead of silently reporting an unknown revision (#9763).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuntimeSourceRevisionProbe {
+    pub revision: Option<String>,
+    pub timed_out: bool,
+}
+
+/// Resolve a runtime checkout's source revision under a bounded deadline.
+///
+/// The git probe is the part that can wedge, so it runs under
+/// [`AGENT_RUNTIME_REVISION_PROBE_TIMEOUT`]. The `.source-revision` file
+/// fallback is a plain file read and stays available even when git timed out —
+/// a timed-out git probe still degrades to whatever the extracted install
+/// recorded, and only reports `timed_out` when no answer was found at all.
+pub fn runtime_source_revision_probe(path: &Path) -> RuntimeSourceRevisionProbe {
+    let probe = crate::git::head_sha_within(path, AGENT_RUNTIME_REVISION_PROBE_TIMEOUT);
+    let timed_out = probe.timed_out();
+    let revision = probe.resolved().or_else(|| {
         std::fs::read_to_string(path.join(".source-revision"))
             .ok()
             .map(|revision| revision.trim().to_string())
             .filter(|revision| !revision.is_empty())
-    })
+    });
+    RuntimeSourceRevisionProbe {
+        timed_out: timed_out && revision.is_none(),
+        revision,
+    }
 }
 
 pub fn discover_agent_runtime_catalog() -> AgentRuntimeDiscoveryCatalog {
@@ -747,7 +795,11 @@ fn load_standalone_agent_runtime_manifest(
     manifest.extension_id = None;
     manifest.extension_path = None;
     manifest.runtime_path = Some(path.to_string_lossy().to_string());
-    manifest.source_revision = crate::git::head_sha(path);
+    // Bounded: catalog discovery must not block on one wedged runtime checkout
+    // (#9763). An unresolved revision keeps the runtime discoverable and merely
+    // unverifiable, which is what the freshness contract already expects.
+    manifest.source_revision =
+        crate::git::head_sha_within(path, AGENT_RUNTIME_REVISION_PROBE_TIMEOUT).resolved();
     if let Some(diagnostic) = mutable_runtime_source_diagnostic(
         &manifest.id,
         None,
@@ -1004,6 +1056,58 @@ mod materialization_tests {
             revision: "ffffffffffffffffffffffffffffffffffffffff".to_string(),
         };
         assert!(validate_runtime_materialization_plan(&invalid).is_err());
+    }
+
+    #[test]
+    fn revision_probe_falls_back_to_the_recorded_source_revision() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(".source-revision"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .expect("write source revision");
+
+        let probe = runtime_source_revision_probe(dir.path());
+
+        assert_eq!(
+            probe.revision.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+        assert!(!probe.timed_out);
+    }
+
+    #[test]
+    fn revision_probe_reports_no_revision_without_claiming_a_timeout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let probe = runtime_source_revision_probe(dir.path());
+
+        assert_eq!(probe.revision, None);
+        assert!(!probe.timed_out);
+    }
+
+    #[test]
+    fn a_timed_out_probe_labels_the_selected_identity_as_a_partial() {
+        // The probe status, not the absent revision, is what makes the catalog
+        // a labelled partial: `revision_probe` distinguishes "no revision" from
+        // "could not find out in time" (#9763).
+        let identity = AgentRuntimeSelectedIdentity {
+            revision_probe: Some(AGENT_RUNTIME_REVISION_PROBE_TIMED_OUT.to_string()),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&identity).expect("serialize selected identity");
+
+        assert_eq!(
+            value.get("revision_probe").and_then(Value::as_str),
+            Some(AGENT_RUNTIME_REVISION_PROBE_TIMED_OUT)
+        );
+        assert_eq!(
+            serde_json::to_value(AgentRuntimeSelectedIdentity::default())
+                .expect("serialize default identity")
+                .get("revision_probe"),
+            None,
+            "an in-budget probe must not add the partial marker to existing output"
+        );
     }
 
     #[test]

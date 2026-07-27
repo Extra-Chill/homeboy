@@ -658,6 +658,29 @@ constants, instead of copying schema strings into downstream code. Provider
 manifests may omit `schema`, `request_schema`, and `outcome_schema`; Homeboy
 defaults them to the current core contract ids.
 
+### Provider discovery is scope-sensitive
+
+Controller and runner carry different extensions, runtime defaults, secrets, and
+provider readiness, so a provider catalog only means something alongside *where*
+it was read. `agent-task providers` therefore reports an additive
+`observed_scope` object naming the observed location (`controller` or `lab` plus
+`runner_id`), the Homeboy build identity, the extension/runtime sources behind
+the catalog, and the observation timestamp.
+
+Unscoped `homeboy agent-task providers` is always a controller-local read: it is
+never relocated to a Lab runner because the controller is under load, since that
+would silently answer a different question. Ask for a runner's catalog
+explicitly with `homeboy agent-task providers --runner <runner-id>` (or
+`--placement lab`). The explicit runner probe is runner-resident — it
+materializes no workload workspace — and its dispatch is bounded
+(`HOMEBOY_LAB_PROVIDER_DISCOVERY_DISPATCH_TIMEOUT_SECS`, default 90s) so it
+returns a labelled timeout with durable runner/job identity instead of hanging.
+
+Per-runtime revision probes (`git rev-parse HEAD`) are bounded too. A wedged
+runtime checkout yields a partial catalog plus an
+`agent_runtime_manifest.revision_probe_timeout` diagnostic naming the runtime,
+rather than an unbounded discovery.
+
 Use `homeboy agent-task providers --backend <backend> --validate-readiness` to
 fail fast when the selected backend is registered but its declared runner
 readiness is not usable in the current environment. Lab offload runs this check

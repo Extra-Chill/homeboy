@@ -42,6 +42,55 @@ fn providers_output_includes_core_capability_contract() {
 }
 
 #[test]
+fn providers_output_declares_the_scope_it_observed() {
+    // A provider catalog is only interpretable together with where it was
+    // read: controller and runner differ in extensions, runtime defaults,
+    // secrets, and provider readiness (#9763).
+    with_isolated_home(|_| {
+        let execution_runner = homeboy::core::lab_contract::LAB_EXECUTION_RUNNER_ID_ENV;
+        let previous = std::env::var_os(execution_runner);
+        std::env::remove_var(execution_runner);
+
+        let result = review::providers(ProvidersArgs {
+            backend: None,
+            selector: None,
+            runtime: None,
+            status: None,
+            secret_env: Vec::new(),
+            validate_readiness: false,
+            refresh: false,
+            catalog: false,
+            full: false,
+        });
+
+        if let Some(value) = previous {
+            std::env::set_var(execution_runner, value);
+        }
+        let (value, status) = result.expect("providers output");
+
+        assert_eq!(status, 0);
+        let scope = &value["observed_scope"];
+        assert_eq!(scope["schema"], "homeboy/agent-task-provider-scope/v1");
+        assert_eq!(scope["location"], "controller");
+        assert!(scope["runner_id"].is_null());
+        assert_eq!(scope["label"], "controller");
+        assert!(scope["homeboy_identity"]["version"].is_string());
+        assert!(scope["observed_at"].is_string());
+        assert!(scope["extension_source"]["total"].is_number());
+        assert!(scope["runtime_source"]["total"].is_number());
+        assert_eq!(
+            scope["runner_scoped_command"],
+            "homeboy agent-task providers --runner <runner-id>"
+        );
+
+        // Additive only: the pre-existing `scope` object keeps its meaning for
+        // callers that already parse this output.
+        assert_eq!(value["schema"], "homeboy/agent-task-providers/v1");
+        assert_eq!(value["scope"]["filtered"], false);
+    });
+}
+
+#[test]
 fn contract_output_exports_core_agent_task_metadata() {
     let (value, status) = contract::contract(ContractArgs {
         format: ContractFormat::Json,

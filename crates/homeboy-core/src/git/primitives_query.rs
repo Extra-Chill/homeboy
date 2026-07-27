@@ -6,6 +6,98 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
+
+use crate::engine::command as engine_command;
+
+/// Default deadline for read-only git probes issued by catalog/discovery code
+/// paths.
+///
+/// A diagnostic read must answer quickly. `git rev-parse` looks cheap but can
+/// block indefinitely on a wedged filesystem, a stuck index lock, a hanging
+/// fsmonitor, or a credential helper, which turned provider-catalog discovery
+/// into an unbounded hang (#9763). Discovery callers use the bounded probes
+/// below so a stuck repository degrades to a labelled partial instead.
+pub const DEFAULT_GIT_READ_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Outcome of a bounded read-only git probe.
+///
+/// `Unresolved` and `TimedOut` are deliberately distinct: the first is a normal
+/// negative answer (not a repo, command failed, empty output), the second is a
+/// missing answer the caller must label rather than silently report as absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundedGitRead {
+    /// The probe completed with trimmed, non-empty stdout.
+    Resolved(String),
+    /// The probe completed without a usable answer.
+    Unresolved,
+    /// The probe exceeded its deadline; its process group was terminated.
+    TimedOut,
+}
+
+impl BoundedGitRead {
+    /// The resolved value, or `None` for both negative outcomes.
+    pub fn resolved(self) -> Option<String> {
+        match self {
+            Self::Resolved(value) => Some(value),
+            Self::Unresolved | Self::TimedOut => None,
+        }
+    }
+
+    /// Whether the probe ran out of budget rather than answering.
+    pub fn timed_out(&self) -> bool {
+        matches!(self, Self::TimedOut)
+    }
+}
+
+/// Run a read-only git command under a deadline, terminating its isolated
+/// process group on expiry.
+///
+/// Mirrors [`output_optional`] but never blocks past `timeout`.
+pub fn output_optional_within(git_root: &Path, args: &[&str], timeout: Duration) -> BoundedGitRead {
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .current_dir(git_root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    engine_command::isolate_process_tree(&mut command);
+    let Ok(mut child) = command.spawn() else {
+        return BoundedGitRead::Unresolved;
+    };
+    let started = Instant::now();
+    let mut timed_out = false;
+    let waited = engine_command::wait_with_bounded_output_until_cancelled(
+        &mut child,
+        engine_command::DEFAULT_CAPTURE_LIMIT_BYTES,
+        || {
+            timed_out = started.elapsed() >= timeout;
+            timed_out
+        },
+    );
+    if timed_out {
+        return BoundedGitRead::TimedOut;
+    }
+    let Ok(output) = waited else {
+        return BoundedGitRead::Unresolved;
+    };
+    let output = output.into_output();
+    if !output.status.success() {
+        return BoundedGitRead::Unresolved;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        BoundedGitRead::Unresolved
+    } else {
+        BoundedGitRead::Resolved(value)
+    }
+}
+
+/// Get the full HEAD commit SHA under a deadline.
+pub fn head_sha_within(git_root: &Path, timeout: Duration) -> BoundedGitRead {
+    output_optional_within(git_root, &["rev-parse", "HEAD"], timeout)
+}
 
 /// Resolve a git revision to its commit/object id, returning None when the ref
 /// cannot be resolved.
@@ -165,6 +257,51 @@ mod tests {
         assert_eq!(
             status_porcelain_bytes(dir.path()).as_deref(),
             Some(&b""[..])
+        );
+
+        assert_eq!(
+            head_sha_within(dir.path(), DEFAULT_GIT_READ_PROBE_TIMEOUT).resolved(),
+            head_sha(dir.path()),
+            "the bounded probe must agree with the unbounded one when git answers in time"
+        );
+    }
+
+    #[test]
+    fn bounded_probe_reports_unresolved_outside_a_repository() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        assert_eq!(
+            head_sha_within(dir.path(), DEFAULT_GIT_READ_PROBE_TIMEOUT),
+            BoundedGitRead::Unresolved
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_probe_times_out_instead_of_hanging() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        git(dir.path(), &["init", "--quiet"]);
+
+        // A shell alias that outlives the budget is the deterministic stand-in
+        // for a wedged repository. The probe must terminate the child process
+        // group and return a labelled `TimedOut` rather than block, and that
+        // outcome must never be mistaken for "no revision" (#9763).
+        let started = Instant::now();
+        let probe = output_optional_within(
+            dir.path(),
+            &["-c", "alias.hbprobehang=!sleep 30", "hbprobehang"],
+            Duration::from_millis(200),
+        );
+
+        assert!(
+            probe.timed_out(),
+            "expected a timed-out probe, got {probe:?}"
+        );
+        assert_ne!(probe, BoundedGitRead::Unresolved);
+        assert_eq!(probe.resolved(), None);
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "bounded probe must not wait for the wedged child"
         );
     }
 }

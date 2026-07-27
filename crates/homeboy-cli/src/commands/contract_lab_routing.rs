@@ -95,9 +95,23 @@ impl Commands {
             // workload run: a merely `warm` controller should not pay the Lab
             // round-trip for it. Only offload when the machine is genuinely hot.
             .cheap(),
+            // Provider discovery is scope-sensitive: controller and runner
+            // carry different extensions, runtime defaults, secrets, and
+            // provider readiness, so *where* the catalog is read changes what
+            // the answer means. An unscoped read therefore stays controller-
+            // local, and a runner catalog is requested explicitly with
+            // `--runner <id>` / `--placement lab`.
+            //
+            // `runner_resident` is what encodes that: it keeps
+            // `default_lab_offload` off (explicit-runner only) and, because its
+            // source path mode is `RunnerResident`, it is exempt from the
+            // warm-controller pressure promotion in the Lab offload executor
+            // that previously flipped this read onto Lab automatically. It also
+            // drops controller-cwd materialization, so the explicit runner
+            // probe answers before any workload workspace is built (#9763).
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command: agent_task::AgentTaskCommand::Providers(_),
-            }) => LabCommandContract::explicit_runner_simple(AGENT_TASK_PROVIDERS_LAB_LABEL),
+            }) => LabCommandContract::runner_resident(AGENT_TASK_PROVIDERS_LAB_LABEL),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Fanout(agent_task::AgentTaskFanoutArgs {

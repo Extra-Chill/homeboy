@@ -728,6 +728,43 @@ fn lab_route_dispatch_timeout_plumbs_core_timeout() {
 }
 
 #[test]
+fn explicit_runner_provider_discovery_dispatch_is_bounded() {
+    // An explicit `--runner` provider read still has to answer inside a
+    // caller's patience: it degrades to the labelled dispatch-timeout error
+    // rather than waiting out the generic workload budget (#9763).
+    let _env = EnvGuard::remove(lab_routing::LAB_PROVIDER_DISCOVERY_DISPATCH_TIMEOUT_ENV);
+    let explicit = Cli::parse_from([
+        "homeboy",
+        "--runner",
+        "homeboy-lab",
+        "agent-task",
+        "providers",
+    ]);
+    let unscoped = Cli::parse_from(["homeboy", "agent-task", "providers"]);
+    let budget = lab_routing::lab_provider_discovery_dispatch_timeout();
+
+    assert_eq!(lab_route_dispatch_timeout(&explicit.command), Some(budget));
+    assert_eq!(lab_route_dispatch_timeout(&unscoped.command), Some(budget));
+    assert!(
+        budget < std::time::Duration::from_secs(lab_routing::DEFAULT_LAB_DISPATCH_TIMEOUT_SECS),
+        "provider discovery must not inherit the generic workload dispatch budget"
+    );
+}
+
+#[test]
+fn provider_discovery_dispatch_timeout_reads_env_override() {
+    let _env = EnvGuard::set(
+        lab_routing::LAB_PROVIDER_DISCOVERY_DISPATCH_TIMEOUT_ENV,
+        "11",
+    );
+
+    assert_eq!(
+        lab_routing::lab_provider_discovery_dispatch_timeout(),
+        std::time::Duration::from_secs(11)
+    );
+}
+
+#[test]
 fn detached_agent_task_handoffs_do_not_use_trace_dispatch_timeout() {
     let cook = Cli::parse_from([
         "homeboy",

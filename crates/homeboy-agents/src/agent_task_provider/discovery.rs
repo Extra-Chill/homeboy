@@ -12,7 +12,8 @@ use std::collections::BTreeMap;
 
 use homeboy_core::agent_runtime_manifest::{
     discover_agent_runtime_catalog, runtime_materialization_plan, AgentRuntimeDiscoveryDiagnostic,
-    AgentRuntimeManifest,
+    AgentRuntimeManifest, AgentRuntimeSelectedIdentity, AGENT_RUNTIME_REVISION_PROBE_TIMED_OUT,
+    AGENT_RUNTIME_REVISION_PROBE_TIMEOUT,
 };
 use homeboy_core::command_invocation::COMMAND_INVOCATION_SCHEMA;
 use homeboy_core::{Error, Result};
@@ -30,11 +31,11 @@ pub(crate) fn discover_agent_task_executor_provider_catalog(
 ) -> AgentTaskExecutorProviderDiscoveryCatalog {
     let catalog = discover_agent_runtime_catalog();
     let mut diagnostics = catalog.diagnostics;
+    let discovered =
+        agent_task_executor_providers_from_runtime_manifests(catalog.manifests, &mut diagnostics);
+    let providers = reject_duplicate_provider_ids(discovered, &mut diagnostics);
     AgentTaskExecutorProviderDiscoveryCatalog {
-        providers: reject_duplicate_provider_ids(
-            agent_task_executor_providers_from_runtime_manifests(catalog.manifests),
-            &mut diagnostics,
-        ),
+        providers,
         diagnostics,
     }
 }
@@ -46,11 +47,46 @@ pub struct AgentTaskExecutorProviderDiscoveryCatalog {
     pub diagnostics: Vec<AgentRuntimeDiscoveryDiagnostic>,
 }
 
+/// Diagnostic class raised when a runtime's bounded revision probe ran out of
+/// budget. The provider stays in the catalog; the diagnostic is what makes the
+/// result an explicitly labelled partial rather than a silent unknown (#9763).
+pub const AGENT_RUNTIME_REVISION_PROBE_TIMEOUT_DIAGNOSTIC: &str =
+    "agent_runtime_manifest.revision_probe_timeout";
+
+/// Turn a timed-out runtime revision probe into a scoped discovery diagnostic.
+///
+/// The provider stays in the catalog: losing a revision must not lose the
+/// provider. What the diagnostic adds is the distinction between "this runtime
+/// has no revision" and "we could not find out inside the budget", so callers
+/// read a labelled partial rather than a confident wrong answer (#9763).
+fn revision_probe_timeout_diagnostic(
+    runtime_manifest: &AgentRuntimeManifest,
+    selected_identity: &AgentRuntimeSelectedIdentity,
+) -> Option<AgentRuntimeDiscoveryDiagnostic> {
+    if selected_identity.revision_probe.as_deref() != Some(AGENT_RUNTIME_REVISION_PROBE_TIMED_OUT) {
+        return None;
+    }
+    Some(AgentRuntimeDiscoveryDiagnostic {
+        class: AGENT_RUNTIME_REVISION_PROBE_TIMEOUT_DIAGNOSTIC.to_string(),
+        message: format!(
+            "runtime revision probe exceeded its {}s budget; this catalog is a partial and the runtime revision is unknown, not absent",
+            AGENT_RUNTIME_REVISION_PROBE_TIMEOUT.as_secs()
+        ),
+        runtime_id: Some(runtime_manifest.id.clone()),
+        extension_id: runtime_manifest.extension_id.clone(),
+        path: runtime_manifest.runtime_path.clone(),
+    })
+}
+
 fn agent_task_executor_providers_from_runtime_manifests(
     runtime_manifests: Vec<AgentRuntimeManifest>,
+    diagnostics: &mut Vec<AgentRuntimeDiscoveryDiagnostic>,
 ) -> Vec<AgentTaskExecutorProvider> {
     let mut providers = Vec::new();
     for runtime_manifest in runtime_manifests {
+        // One runtime yields one probe outcome regardless of how many providers
+        // it declares, so the partial is reported once per runtime.
+        let mut reported_revision_probe_timeout = false;
         for provider_value in runtime_manifest.agent_task_executors.clone() {
             let Ok(mut provider) =
                 serde_json::from_value::<AgentTaskExecutorProvider>(provider_value)
@@ -67,6 +103,15 @@ fn agent_task_executor_providers_from_runtime_manifests(
             provider.runtime_path = runtime_manifest.runtime_path.clone();
             let materialization_plan =
                 runtime_materialization_plan(&runtime_manifest, &provider.id);
+            if !reported_revision_probe_timeout {
+                if let Some(diagnostic) = revision_probe_timeout_diagnostic(
+                    &runtime_manifest,
+                    &materialization_plan.selected_identity,
+                ) {
+                    diagnostics.push(diagnostic);
+                    reported_revision_probe_timeout = true;
+                }
+            }
             if let Ok(value) = serde_json::to_value(&materialization_plan) {
                 provider
                     .extra
@@ -270,4 +315,49 @@ pub fn register() {
     homeboy_core::extension_provider_discovery::register_extension_provider_discovery_validator(
         Box::new(ExtensionProviderDiscoveryValidatorImpl),
     );
+}
+
+#[cfg(test)]
+mod revision_probe_tests {
+    use super::*;
+
+    fn manifest() -> AgentRuntimeManifest {
+        serde_json::from_value(serde_json::json!({
+            "schema": homeboy_core::agent_runtime_manifest::AGENT_RUNTIME_MANIFEST_SCHEMA,
+            "id": "opencode",
+            "extension_id": "homeboy-opencode",
+            "runtime_path": "/runtimes/opencode",
+        }))
+        .expect("valid runtime manifest fixture")
+    }
+
+    #[test]
+    fn a_timed_out_revision_probe_becomes_a_labelled_partial() {
+        // The bounded probe must degrade, not hang and not lie: the provider
+        // stays discoverable and the catalog says the revision is unknown
+        // rather than absent (#9763).
+        let identity = AgentRuntimeSelectedIdentity {
+            revision_probe: Some(AGENT_RUNTIME_REVISION_PROBE_TIMED_OUT.to_string()),
+            ..Default::default()
+        };
+
+        let diagnostic = revision_probe_timeout_diagnostic(&manifest(), &identity)
+            .expect("a timed-out probe must be reported");
+
+        assert_eq!(
+            diagnostic.class,
+            AGENT_RUNTIME_REVISION_PROBE_TIMEOUT_DIAGNOSTIC
+        );
+        assert_eq!(diagnostic.runtime_id.as_deref(), Some("opencode"));
+        assert_eq!(diagnostic.extension_id.as_deref(), Some("homeboy-opencode"));
+        assert_eq!(diagnostic.path.as_deref(), Some("/runtimes/opencode"));
+        assert!(diagnostic.message.contains("unknown, not absent"));
+    }
+
+    #[test]
+    fn an_in_budget_probe_adds_no_diagnostic() {
+        let identity = AgentRuntimeSelectedIdentity::default();
+
+        assert!(revision_probe_timeout_diagnostic(&manifest(), &identity).is_none());
+    }
 }

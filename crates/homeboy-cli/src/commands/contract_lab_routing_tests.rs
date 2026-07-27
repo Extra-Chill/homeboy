@@ -248,3 +248,71 @@ fn rig_source_management_explains_lab_setup_boundary() {
         );
     }
 }
+
+#[test]
+fn unscoped_provider_discovery_stays_controller_local() {
+    // The semantic guarantee of #9763: an unscoped `agent-task providers` is a
+    // read of *this* controller's catalog. Controller and runner differ in
+    // extensions, runtime defaults, secrets, and provider readiness, so
+    // automatically relocating the read would change what the answer means.
+    let contract = parsed_command(&["homeboy", "agent-task", "providers"])
+        .lab_contract()
+        .expect("provider discovery keeps a Lab contract for explicit placement");
+
+    assert!(
+        !contract.routing_policy.default_lab_offload,
+        "unscoped provider discovery must not offload automatically"
+    );
+    assert_eq!(contract.source_path_mode, LabSourcePathMode::RunnerResident);
+    assert_eq!(
+        contract.workspace_mode_policy,
+        LabWorkspaceModePolicy::RunnerResident,
+        "a provider catalog read must not materialize a workload workspace"
+    );
+    assert!(
+        contract.is_portable(),
+        "an explicit --runner probe must remain available"
+    );
+}
+
+#[test]
+fn warm_controller_pressure_never_relocates_provider_discovery() {
+    // `explicit_runner_simple` left provider discovery eligible for the
+    // warm-controller pressure promotion in the Lab offload executor, which is
+    // what silently moved the read onto `homeboy-lab`. Runner-resident source
+    // mode is the contract-level exemption from that promotion (#9763).
+    let contract = parsed_command(&["homeboy", "agent-task", "providers"])
+        .lab_contract()
+        .expect("provider discovery contract");
+
+    assert_eq!(
+        contract.source_path_mode,
+        LabSourcePathMode::RunnerResident,
+        "runner-resident reads are exempt from pressure-driven offload promotion"
+    );
+
+    // Guard the shared policy too: no severity may promote a contract that
+    // declares no default offload without an explicit caller request.
+    assert!(!contract.routing_policy.default_lab_offload);
+}
+
+#[test]
+fn explicit_runner_provider_discovery_still_offloads() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "--runner",
+        "homeboy-lab",
+        "agent-task",
+        "providers",
+    ])
+    .expect("CLI args should parse");
+
+    assert_eq!(cli.runner.as_deref(), Some("homeboy-lab"));
+    assert!(
+        cli.command
+            .lab_contract()
+            .expect("provider discovery contract")
+            .is_portable(),
+        "an explicit runner request must still reach the runner"
+    );
+}
