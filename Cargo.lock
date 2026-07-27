@@ -1121,6 +1121,7 @@ dependencies = [
  "ctrlc",
  "homeboy-error",
  "libc",
+ "uuid",
 ]
 
 [[package]]

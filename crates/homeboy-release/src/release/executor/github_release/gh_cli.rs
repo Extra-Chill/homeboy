@@ -17,6 +17,7 @@ pub(crate) const GITHUB_RELEASE_UPLOAD_TIMEOUT_ENV: &str =
 const DEFAULT_GITHUB_RELEASE_UPLOAD_TIMEOUT_SECS: u64 = 30 * 60;
 const GITHUB_RELEASE_DOWNLOAD_DIAGNOSTIC_BYTES: usize = 8 * 1024;
 const GITHUB_RELEASE_DOWNLOAD_READER_CLEANUP_TIMEOUT: Duration = Duration::from_millis(500);
+const GITHUB_RELEASE_DOWNLOAD_PIPE_CHUNKS_PER_TURN: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GhCommandOutput {
@@ -594,17 +595,27 @@ fn run_bounded_asset_download(
         )
     })?;
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
+    let mut containment =
+        homeboy_core::process::ProcessContainment::prepare(command).map_err(|error| {
+            format!(
+                "could not contain GitHub Release asset '{}' download: {error}",
+                asset_name
+            )
+        })?;
     let mut child = command.spawn().map_err(|error| {
         format!(
             "could not download GitHub Release asset '{}': {error}",
             asset_name
         )
     })?;
+    if let Err(error) = containment.attach(&child) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!(
+            "could not contain GitHub Release asset '{}' download: {error}",
+            asset_name
+        ));
+    }
     let mut stdout = child.stdout.take().ok_or_else(|| {
         format!(
             "could not capture download stream for GitHub Release asset '{}'",
@@ -628,23 +639,28 @@ fn run_bounded_asset_download(
     let mut exited_at = None;
     let outcome = loop {
         if stdout_open {
-            stdout_open = match drain_available_pipe(&mut stdout, |bytes| {
-                let remaining = expected_size.saturating_sub(size).min(bytes.len() as u64) as usize;
-                let accepted = bytes.len().min(remaining);
-                if accepted > 0 {
-                    output_file.write_all(&bytes[..accepted]).map_err(|error| {
-                        format!("could not write temporary asset bytes: {error}")
-                    })?;
-                    hasher.update(&bytes[..accepted]);
-                    size += accepted as u64;
-                }
-                if accepted != bytes.len() {
-                    return Err(format!(
-                        "download exceeded expected byte length {expected_size}"
-                    ));
-                }
-                Ok(())
-            }) {
+            stdout_open = match drain_available_pipe(
+                &mut stdout,
+                GITHUB_RELEASE_DOWNLOAD_PIPE_CHUNKS_PER_TURN,
+                |bytes| {
+                    let remaining =
+                        expected_size.saturating_sub(size).min(bytes.len() as u64) as usize;
+                    let accepted = bytes.len().min(remaining);
+                    if accepted > 0 {
+                        output_file.write_all(&bytes[..accepted]).map_err(|error| {
+                            format!("could not write temporary asset bytes: {error}")
+                        })?;
+                        hasher.update(&bytes[..accepted]);
+                        size += accepted as u64;
+                    }
+                    if accepted != bytes.len() {
+                        return Err(format!(
+                            "download exceeded expected byte length {expected_size}"
+                        ));
+                    }
+                    Ok(())
+                },
+            ) {
                 Ok(open) => open,
                 Err(error) => {
                     break Err(format!(
@@ -655,13 +671,17 @@ fn run_bounded_asset_download(
             };
         }
         if stderr_open {
-            stderr_open = match drain_available_pipe(&mut stderr, |bytes| {
-                let remaining =
-                    GITHUB_RELEASE_DOWNLOAD_DIAGNOSTIC_BYTES.saturating_sub(diagnostics.len());
-                diagnostics.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
-                diagnostics_truncated |= bytes.len() > remaining;
-                Ok(())
-            }) {
+            stderr_open = match drain_available_pipe(
+                &mut stderr,
+                GITHUB_RELEASE_DOWNLOAD_PIPE_CHUNKS_PER_TURN,
+                |bytes| {
+                    let remaining =
+                        GITHUB_RELEASE_DOWNLOAD_DIAGNOSTIC_BYTES.saturating_sub(diagnostics.len());
+                    diagnostics.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+                    diagnostics_truncated |= bytes.len() > remaining;
+                    Ok(())
+                },
+            ) {
                 Ok(open) => open,
                 Err(error) => {
                     break Err(format!(
@@ -709,13 +729,22 @@ fn run_bounded_asset_download(
     let status = match outcome {
         Ok(status) => status,
         Err(error) => {
-            let cleanup = terminate_asset_download_child(&mut child)
-                .err()
-                .map(|cleanup| format!("; {cleanup}"))
-                .unwrap_or_default();
+            let cleanup =
+                terminate_asset_download_child(&mut child, &mut containment, status.is_some())
+                    .err()
+                    .map(|cleanup| format!("; {cleanup}"))
+                    .unwrap_or_default();
             return Err(format!("{error}{cleanup}"));
         }
     };
+    containment
+        .cleanup_after_leader_exit_bounded(GITHUB_RELEASE_DOWNLOAD_READER_CLEANUP_TIMEOUT)
+        .map_err(|error| {
+            format!(
+                "could not clean up GitHub Release asset '{}' download containment: {error}",
+                asset_name
+            )
+        })?;
     let mut diagnostics = String::from_utf8_lossy(&diagnostics).to_string();
     if diagnostics_truncated {
         diagnostics.push_str("\n[diagnostics truncated]");
@@ -730,12 +759,16 @@ fn run_bounded_asset_download(
     Ok((size, format!("{:x}", hasher.finalize())))
 }
 
-fn terminate_asset_download_child(child: &mut std::process::Child) -> Result<(), String> {
+fn terminate_asset_download_child(
+    child: &mut std::process::Child,
+    containment: &mut homeboy_core::process::ProcessContainment,
+    leader_has_exited: bool,
+) -> Result<(), String> {
     let pid = child.id();
     let started = Instant::now();
-    let tree_result = homeboy_core::process::force_terminate_process_tree_bounded(
-        pid,
+    let tree_result = containment.terminate_on_failure_bounded(
         GITHUB_RELEASE_DOWNLOAD_READER_CLEANUP_TIMEOUT,
+        leader_has_exited,
     );
     let _ = child.kill();
     let deadline = started + GITHUB_RELEASE_DOWNLOAD_READER_CLEANUP_TIMEOUT;
@@ -758,10 +791,11 @@ fn terminate_asset_download_child(child: &mut std::process::Child) -> Result<(),
 #[cfg(unix)]
 fn drain_available_pipe<R: Read + std::os::fd::AsRawFd>(
     input: &mut R,
+    max_chunks: usize,
     mut consume: impl FnMut(&[u8]) -> Result<(), String>,
 ) -> Result<bool, String> {
     let mut buffer = [0_u8; 8192];
-    loop {
+    for _ in 0..max_chunks {
         let mut descriptor = libc::pollfd {
             fd: input.as_raw_fd(),
             events: libc::POLLIN,
@@ -785,11 +819,13 @@ fn drain_available_pipe<R: Read + std::os::fd::AsRawFd>(
             Err(error) => return Err(format!("could not read download pipe: {error}")),
         }
     }
+    Ok(true)
 }
 
 #[cfg(windows)]
 fn drain_available_pipe<R: Read + std::os::windows::io::AsRawHandle>(
     input: &mut R,
+    max_chunks: usize,
     mut consume: impl FnMut(&[u8]) -> Result<(), String>,
 ) -> Result<bool, String> {
     use std::os::windows::io::AsRawHandle;
@@ -801,7 +837,7 @@ fn drain_available_pipe<R: Read + std::os::windows::io::AsRawHandle>(
         return Err("download output handle is not a pipe".to_string());
     }
     let mut buffer = [0_u8; 8192];
-    loop {
+    for _ in 0..max_chunks {
         let mut available = 0;
         let peeked = unsafe {
             PeekNamedPipe(
@@ -830,11 +866,13 @@ fn drain_available_pipe<R: Read + std::os::windows::io::AsRawHandle>(
             Err(error) => return Err(format!("could not read download pipe: {error}")),
         }
     }
+    Ok(true)
 }
 
 #[cfg(all(not(unix), not(windows)))]
 fn drain_available_pipe<R: Read>(
     _input: &mut R,
+    _max_chunks: usize,
     _consume: impl FnMut(&[u8]) -> Result<(), String>,
 ) -> Result<bool, String> {
     Err("nonblocking download pipes are unsupported on this platform".to_string())
@@ -1132,6 +1170,87 @@ mod tests {
                 .count(),
             0,
             "timed-out download must clean up its tempfile"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_asset_download_continuous_output_observes_timeout() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let downloads = temp.path().join("downloads");
+        std::fs::create_dir(&downloads).expect("download tempdir");
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut command = Command::new("sh");
+            command.args([
+                "-c",
+                "(while :; do printf x; done) & (while :; do printf diagnostic >&2; done) & wait",
+            ]);
+            let started = Instant::now();
+            let result = run_bounded_asset_download(
+                &mut command,
+                "asset.zip",
+                u64::MAX,
+                Duration::from_millis(30),
+                Some(&downloads),
+            );
+            let _ = result_tx.send((result, started.elapsed()));
+        });
+
+        let (result, elapsed) = result_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("continuous output exceeded the external bound");
+        worker.join().expect("download worker");
+        let error = result.expect_err("continuous output must time out");
+        assert!(error.contains("timed out"), "unexpected error: {error}");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "continuous output cleanup took {elapsed:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounded_asset_download_kills_setsid_descendant_after_leader_exit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let downloads = temp.path().join("downloads");
+        std::fs::create_dir(&downloads).expect("download tempdir");
+        let descendant_pid = temp.path().join("descendant.pid");
+        let script = format!(
+            "setsid sleep 30 & echo $! > {}; exit 0",
+            quote_arg(&descendant_pid.display().to_string())
+        );
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut command = Command::new("sh");
+            command.args(["-c", &script]);
+            let result = run_bounded_asset_download(
+                &mut command,
+                "asset.zip",
+                4,
+                Duration::from_secs(5),
+                Some(&downloads),
+            );
+            let _ = result_tx.send(result);
+        });
+
+        let error = result_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("leader-exit cleanup exceeded the external bound")
+            .expect_err("inherited descendant pipes must fail cleanup");
+        worker.join().expect("download worker");
+        assert!(
+            error.contains("pipes remained open"),
+            "unexpected error: {error}"
+        );
+        let pid = std::fs::read_to_string(&descendant_pid)
+            .expect("descendant pid")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric descendant pid");
+        assert!(
+            !homeboy_core::process::pid_is_running(pid),
+            "setsid descendant {pid} survived cleanup"
         );
     }
 
