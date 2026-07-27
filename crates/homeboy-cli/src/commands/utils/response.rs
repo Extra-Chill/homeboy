@@ -2,7 +2,7 @@
 //!
 //! Provides JSON envelope, printing, and exit code mapping.
 
-use homeboy::core::error::Hint;
+use homeboy::core::error::{ExecutableAction, Hint, ACTIONS_DETAILS_KEY};
 use homeboy::core::{Error, ErrorCode, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -169,6 +169,10 @@ pub struct CommandNextAction {
     pub command: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<CommandNextActionKind>,
+    /// The executable form of a repair action. `command` remains the stable
+    /// human-facing rendering for existing consumers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<ExecutableAction>,
 }
 
 impl CommandNextAction {
@@ -177,12 +181,22 @@ impl CommandNextAction {
             label: label.into(),
             command: command.into(),
             kind: None,
+            action: None,
         }
     }
 
     pub fn with_kind(mut self, kind: CommandNextActionKind) -> Self {
         self.kind = Some(kind);
         self
+    }
+
+    pub fn from_action(action: ExecutableAction) -> Self {
+        Self {
+            label: action.label.clone(),
+            command: action.render_command(),
+            kind: Some(CommandNextActionKind::Repair),
+            action: Some(action),
+        }
     }
 }
 
@@ -316,6 +330,7 @@ impl<T: Serialize> CommandResultEnvelope<T> {
 
 impl CommandResultEnvelope<()> {
     fn from_error(identity: &CommandIdentity, err: &Error, exit_code: i32) -> Self {
+        let next_actions = actions_for_error(err);
         Self {
             schema: COMMAND_RESULT_SCHEMA,
             command: identity.command.clone(),
@@ -326,7 +341,7 @@ impl CommandResultEnvelope<()> {
             run: None,
             refs: CommandResultRefs::default(),
             summary: Some(err.message.clone()),
-            next_actions: Vec::new(),
+            next_actions,
             artifacts: Vec::new(),
             evidence: Vec::new(),
             diagnostics: Some(CommandDiagnostics {
@@ -639,13 +654,14 @@ fn failure_diagnostics_for_data(
 }
 
 fn failure_digest_for_error(err: &Error) -> Option<CommandFailureDigest> {
+    let next_actions = actions_for_error(err);
     match err.code {
         ErrorCode::RemoteCommandFailed => Some(CommandFailureDigest {
             summary: remote_failure_summary(&err.details),
             stdout_tail: string_at(&err.details, &["stdout"]).map(tail_text),
             stderr_tail: string_at(&err.details, &["stderr"]).map(tail_text),
             artifact_refs: Vec::new(),
-            next_actions: Vec::new(),
+            next_actions,
             retryable: err.retryable,
         }),
         _ => Some(CommandFailureDigest {
@@ -653,10 +669,21 @@ fn failure_digest_for_error(err: &Error) -> Option<CommandFailureDigest> {
             stdout_tail: None,
             stderr_tail: None,
             artifact_refs: Vec::new(),
-            next_actions: Vec::new(),
+            next_actions,
             retryable: err.retryable,
         }),
     }
+}
+
+fn actions_for_error(err: &Error) -> Vec<CommandNextAction> {
+    err.details
+        .get(ACTIONS_DETAILS_KEY)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| serde_json::from_value::<ExecutableAction>(value.clone()).ok())
+        .map(CommandNextAction::from_action)
+        .collect()
 }
 
 fn failure_digest_for_data(data: &Value) -> Option<CommandFailureDigest> {
@@ -1158,6 +1185,50 @@ mod tests {
         assert_eq!(
             payload.expect_err("error payload").code,
             ErrorCode::ValidationMissingArgument
+        );
+    }
+
+    #[test]
+    fn actionable_errors_lift_one_explicit_repair_contract_into_human_and_machine_forms() {
+        let action = ExecutableAction::new(
+            "runner.disconnect",
+            "disconnect runner lab one",
+            "homeboy",
+            ["runner", "disconnect", "lab one"],
+            homeboy::core::error::ActionSafety::Mutating,
+        )
+        .requiring_confirmation("operator")
+        .with_evidence(json!({ "runner_id": "lab one", "lease_id": "lease-123" }));
+        let response = cli_response_for_json_result_for_command(
+            &Err(
+                Error::validation_invalid_argument("runner", "stale daemon", None, None)
+                    .with_action(action),
+            ),
+            2,
+            "agent-task",
+            None,
+        );
+        let value = serde_json::to_value(response).expect("response json");
+        let action = &value["next_actions"][0];
+
+        assert_eq!(action["label"], "disconnect runner lab one");
+        assert_eq!(action["kind"], "repair");
+        assert_eq!(action["command"], "homeboy runner disconnect 'lab one'");
+        assert_eq!(action["action"]["id"], "runner.disconnect");
+        assert_eq!(action["action"]["program"], "homeboy");
+        assert_eq!(
+            action["action"]["args"],
+            json!(["runner", "disconnect", "lab one"])
+        );
+        assert_eq!(action["action"]["safety"], "mutating");
+        assert_eq!(
+            action["action"]["required_confirmations"],
+            json!(["operator"])
+        );
+        assert_eq!(action["action"]["evidence"]["lease_id"], "lease-123");
+        assert_eq!(
+            value["diagnostics"]["failure_digest"]["next_actions"][0]["command"],
+            action["command"]
         );
     }
 

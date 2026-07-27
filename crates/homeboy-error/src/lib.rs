@@ -1,6 +1,89 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub const ACTIONS_DETAILS_KEY: &str = "_homeboy_actions";
+
+/// An explicit command the caller may execute to repair a reported condition.
+///
+/// This intentionally carries program and arguments separately. Consumers must
+/// execute those fields directly; `render_command` is presentation only.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutableAction {
+    pub id: String,
+    pub label: String,
+    pub program: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    pub safety: ActionSafety,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_confirmations: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<Value>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionSafety {
+    ReadOnly,
+    Mutating,
+}
+
+impl ExecutableAction {
+    pub fn new(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        program: impl Into<String>,
+        args: impl IntoIterator<Item = impl Into<String>>,
+        safety: ActionSafety,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            program: program.into(),
+            args: args.into_iter().map(Into::into).collect(),
+            safety,
+            required_confirmations: Vec::new(),
+            evidence: None,
+        }
+    }
+
+    pub fn requiring_confirmation(mut self, confirmation: impl Into<String>) -> Self {
+        self.required_confirmations.push(confirmation.into());
+        self
+    }
+
+    pub fn with_evidence(mut self, evidence: Value) -> Self {
+        self.evidence = Some(evidence);
+        self
+    }
+
+    pub fn render_command(&self) -> String {
+        std::iter::once(self.program.as_str())
+            .chain(self.args.iter().map(String::as_str))
+            .map(posix_quote_arg)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+// Kept byte-for-byte compatible with homeboy-engine-primitives::shell::quote_arg.
+// homeboy-error is below that crate in the dependency graph, so it cannot import it.
+fn posix_quote_arg(arg: &str) -> String {
+    if arg.is_empty() {
+        return "''".to_string();
+    }
+
+    const SHELL_META: &[char] = &[
+        ' ', '\t', '\n', '\'', '"', '\\', '$', '`', '!', '*', '?', '[', ']', '(', ')', '{', '}',
+        '<', '>', '|', '&', ';', '#', '~',
+    ];
+    if !arg.contains(SHELL_META) {
+        return arg.to_string();
+    }
+
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
 fn format_suggestions(suggestions: &[String]) -> String {
     if suggestions.len() == 1 {
         format!("Did you mean: {}?", suggestions[0])
@@ -1185,6 +1268,30 @@ impl Error {
         self
     }
 
+    /// Attach an explicit action without inferring arguments from ambient error
+    /// details. The CLI lifts this contract into its existing action envelope.
+    pub fn with_action(mut self, action: ExecutableAction) -> Self {
+        if !self.details.is_object() {
+            self.details = serde_json::json!({ "details": self.details });
+        }
+        let details = self
+            .details
+            .as_object_mut()
+            .expect("details was normalized to an object");
+        let actions = match details.entry(ACTIONS_DETAILS_KEY) {
+            serde_json::map::Entry::Vacant(entry) => entry.insert(Value::Array(Vec::new())),
+            serde_json::map::Entry::Occupied(mut entry) if !entry.get().is_array() => {
+                entry.insert(Value::Array(Vec::new()));
+                entry.into_mut()
+            }
+            serde_json::map::Entry::Occupied(entry) => entry.into_mut(),
+        }
+        .as_array_mut()
+        .expect("action entries are initialized as an array");
+        actions.push(to_details(action));
+        self
+    }
+
     pub fn with_retryable(mut self, retryable: bool) -> Self {
         self.retryable = Some(retryable);
         self
@@ -1227,5 +1334,54 @@ mod ergonomic_constructor_tests {
         assert_eq!(short.code, verbose.code);
         assert_eq!(short.message, verbose.message);
         assert_eq!(short.details, verbose.details);
+    }
+
+    #[test]
+    fn executable_action_renders_arguments_with_the_shared_posix_quoting_contract() {
+        let values = ["apostrophe: it's", "two words", "$HOME;*[]"];
+        let action = ExecutableAction::new(
+            "test.argv",
+            "test argv",
+            "sh",
+            std::iter::once("-c")
+                .chain(std::iter::once("printf '%s\\0' \"$@\""))
+                .chain(std::iter::once("action"))
+                .chain(values),
+            ActionSafety::ReadOnly,
+        );
+        let output = std::process::Command::new("sh")
+            .args(["-c", &action.render_command()])
+            .output()
+            .expect("run rendered command");
+
+        assert!(output.status.success());
+        let actual: Vec<_> = output
+            .stdout
+            .split(|byte| *byte == b'\0')
+            .filter(|value| !value.is_empty())
+            .map(|value| std::str::from_utf8(value).expect("utf8 action argument"))
+            .collect();
+        assert_eq!(actual, values);
+    }
+
+    #[test]
+    fn with_action_replaces_a_malformed_reserved_key_deterministically() {
+        let action = ExecutableAction::new(
+            "test.repair",
+            "repair",
+            "homeboy",
+            ["status"],
+            ActionSafety::ReadOnly,
+        );
+        let error = Error::new(
+            ErrorCode::InternalUnexpected,
+            "fixture",
+            serde_json::json!({ ACTIONS_DETAILS_KEY: "foreign value", "kept": true }),
+        )
+        .with_action(action);
+
+        assert_eq!(error.details["kept"], true);
+        assert_eq!(error.details[ACTIONS_DETAILS_KEY][0]["id"], "test.repair");
+        assert!(error.details[ACTIONS_DETAILS_KEY].is_array());
     }
 }
