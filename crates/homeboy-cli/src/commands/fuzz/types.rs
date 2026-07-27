@@ -281,12 +281,12 @@ pub struct FuzzRunArgs {
     pub(crate) setting_args: SettingArgs,
 
     /// Extension-declared workload id to select.
-    #[arg(long = "workload", value_name = "ID")]
+    #[arg(long = "workload", value_name = "ID", conflicts_with = "profile")]
     pub(crate) workload_id: Option<String>,
 
     /// Rig-defined fuzz profile to select. Without --rig, `lab` expands the
     /// generic safe Lab evidence-run defaults.
-    #[arg(long = "profile", value_name = "ID")]
+    #[arg(long = "profile", value_name = "ID", conflicts_with = "workload_id")]
     pub(crate) profile: Option<String>,
 
     /// Shared state directory handed to the fuzz runner. Homeboy forwards the
