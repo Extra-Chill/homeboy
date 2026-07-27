@@ -406,6 +406,52 @@ homeboy_wordpress_is_js_smoke_file() {
     esac
 }
 
+homeboy_wordpress_is_node_test_file() {
+    case "$1" in
+        *.test.js|*.test.cjs|*.test.mjs)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+homeboy_wordpress_run_node_test_files() {
+    local test_files_raw="$1"
+    local node_bin="${HOMEBOY_NODE_BIN:-node}"
+    local test_file test_abs rel_path exit_code
+    local passed=0
+    local failed=0
+    local last_failure_exit=0
+
+    echo "Running Node test files..."
+    echo "  Component: ${HOMEBOY_COMPONENT_ID:-$(basename "$PLUGIN_PATH")} (${PLUGIN_PATH})"
+    echo "  Backend: node-test"
+
+    while IFS= read -r test_file; do
+        [ -n "$test_file" ] || continue
+        if ! rel_path="$(homeboy_wordpress_rel_test_file "$test_file")"; then
+            echo "ERROR: requested Node test file not found or outside the component: ${test_file}" >&2
+            return 2
+        fi
+        test_abs="${PLUGIN_PATH}/${rel_path}"
+        echo "NODE_TEST_BEGIN:${rel_path}"
+        if "$node_bin" --test "$test_abs"; then
+            echo "NODE_TEST_OK:${rel_path}"
+            passed=$((passed + 1))
+        else
+            exit_code=$?
+            echo "NODE_TEST_FAIL:${rel_path}:exit=${exit_code}"
+            failed=$((failed + 1))
+            last_failure_exit="$exit_code"
+        fi
+    done <<< "$test_files_raw"
+
+    echo "NODE_TEST_SUMMARY:passed=${passed} failed=${failed}"
+    [ "$failed" -eq 0 ] || return "$last_failure_exit"
+}
+
 homeboy_wordpress_run_shell_smoke_files() {
     local smoke_files_raw="$1"
     local smoke_files=()
@@ -512,6 +558,7 @@ fi
 if [ -z "$TARGET_FILE" ] && [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
     changed_js_smoke_files=""
     changed_shell_smoke_files=""
+    changed_node_test_files=""
     changed_non_host_smoke_files=0
     while IFS= read -r changed_test_file; do
         [ -n "$changed_test_file" ] || continue
@@ -529,19 +576,33 @@ if [ -z "$TARGET_FILE" ] && [ -n "${HOMEBOY_CHANGED_TEST_FILES:-}" ]; then
                 changed_shell_smoke_files+=$'\n'
             fi
             changed_shell_smoke_files+="$changed_test_rel"
+        elif homeboy_wordpress_is_node_test_file "$changed_test_rel"; then
+            if [ -n "$changed_node_test_files" ]; then
+                changed_node_test_files+=$'\n'
+            fi
+            changed_node_test_files+="$changed_test_rel"
         else
             changed_non_host_smoke_files=1
         fi
     done <<< "$HOMEBOY_CHANGED_TEST_FILES"
 
-    if [ -n "$changed_js_smoke_files" ] && [ -z "$changed_shell_smoke_files" ] && [ "$changed_non_host_smoke_files" -eq 0 ]; then
+    if [ -n "$changed_js_smoke_files" ] && [ -z "$changed_shell_smoke_files" ] && [ -z "$changed_node_test_files" ] && [ "$changed_non_host_smoke_files" -eq 0 ]; then
         homeboy_wordpress_run_js_smoke_files "$changed_js_smoke_files"
         exit 0
     fi
 
-    if [ -z "$changed_js_smoke_files" ] && [ -n "$changed_shell_smoke_files" ] && [ "$changed_non_host_smoke_files" -eq 0 ]; then
+    if [ -z "$changed_js_smoke_files" ] && [ -n "$changed_shell_smoke_files" ] && [ -z "$changed_node_test_files" ] && [ "$changed_non_host_smoke_files" -eq 0 ]; then
         homeboy_wordpress_run_shell_smoke_files "$changed_shell_smoke_files"
         exit 0
+    fi
+
+    if [ -z "$changed_js_smoke_files" ] && [ -z "$changed_shell_smoke_files" ] && [ -n "$changed_node_test_files" ] && [ "$changed_non_host_smoke_files" -eq 0 ]; then
+        homeboy_wordpress_run_node_test_files "$changed_node_test_files"
+        exit $?
+    fi
+
+    if [ -n "$changed_node_test_files" ]; then
+        homeboy_wordpress_run_node_test_files "$changed_node_test_files" || exit $?
     fi
 fi
 
@@ -552,6 +613,11 @@ if [ -n "$TARGET_FILE" ]; then
     fi
 
     target_base="$(basename "$target_rel")"
+    if homeboy_wordpress_is_node_test_file "$target_rel"; then
+        homeboy_wordpress_run_node_test_files "$target_rel"
+        exit $?
+    fi
+
     if homeboy_wordpress_is_js_smoke_file "$target_rel"; then
         homeboy_wordpress_run_js_smoke_files "$target_rel"
         exit 0
