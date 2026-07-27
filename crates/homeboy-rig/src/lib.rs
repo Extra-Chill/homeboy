@@ -70,7 +70,8 @@ pub use local_artifact::{
 };
 pub use pipeline::{PipelineOutcome, PipelineStepOutcome};
 pub use resource_lifecycle::{
-    rig_resource_lifecycle_index, rig_resource_lifecycle_records, RigResourceLifecycleOptions,
+    lifecycle_snapshot_lifecycle_records, rig_resource_lifecycle_index,
+    rig_resource_lifecycle_records, RigResourceLifecycleOptions, LIFECYCLE_SNAPSHOT_RESOURCE_KIND,
 };
 pub use runner::{
     head_sha_and_branch, preflight_effective_component_checkouts, record_effective_component_path,
@@ -104,8 +105,9 @@ pub use spec::{
     TraceExperimentCommandSpec, TraceExperimentSpec, TraceGuardrailSpec,
     TraceNativePublicPreviewSpec, TracePhaseTemplateSpec, TracePreviewAssetFanoutSpec,
     TraceProfileSpec, TracePublicPreviewMode, TracePublicPreviewSpec, TraceVariantSpec,
-    WorkloadSpec, RIG_RESOURCE_CLASSES, RIG_RESOURCE_CLASS_EXCLUSIVE, RIG_RESOURCE_CLASS_PATHS,
-    RIG_RESOURCE_CLASS_PORTS, RIG_RESOURCE_CLASS_PROCESS_PATTERNS,
+    WorkloadSpec, RIG_RESOURCE_CLASSES, RIG_RESOURCE_CLASS_EXCLUSIVE,
+    RIG_RESOURCE_CLASS_LIFECYCLE_SNAPSHOTS, RIG_RESOURCE_CLASS_PATHS, RIG_RESOURCE_CLASS_PORTS,
+    RIG_RESOURCE_CLASS_PROCESS_PATTERNS,
 };
 pub use stack::{
     plan_stack_sync, run_component_sync, run_sync, RigStackPlanEntry, RigStackSyncEntry,

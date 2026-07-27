@@ -23,8 +23,8 @@ use super::pipeline::{
     PipelineOutcome, PipelineStepOutcome, SharedPathRepair, SharedPathRepairStatus,
 };
 use super::resource_lifecycle::{
-    dependency_materialization_cache_lifecycle_record, rig_resource_lifecycle_index,
-    RigResourceLifecycleOptions,
+    dependency_materialization_cache_lifecycle_record, lifecycle_snapshot_lifecycle_records,
+    rig_resource_lifecycle_index, RigResourceLifecycleOptions,
 };
 use super::service::{self, ServiceStatus};
 use super::spec::{DependencyMaterializationOutputKind, RigSpec, ServiceKind, SymlinkSpec};
@@ -1397,7 +1397,12 @@ impl RigRunObserver {
             .dependency_materialization
             .iter()
             .any(|step| !step.cache_key_inputs.is_empty() && !step.expected_outputs.is_empty());
-        if resources.is_empty() && !cache_enabled {
+        // Live lifecycle snapshot handles are produced at run time, not
+        // declared, so they are read back from state rather than from the spec.
+        let snapshots = RigState::load(&rig.id)
+            .map(|state| state.lifecycle_snapshots)
+            .unwrap_or_default();
+        if resources.is_empty() && !cache_enabled && snapshots.is_empty() {
             return;
         }
 
@@ -1425,6 +1430,14 @@ impl RigRunObserver {
                     ));
             }
         }
+        // One record per live handle, so a run that dies before its `teardown`
+        // phase leaves a reapable trail instead of an orphaned environment.
+        index.resources.extend(lifecycle_snapshot_lifecycle_records(
+            &rig.id,
+            &resources,
+            &options,
+            snapshots.iter(),
+        ));
         if index.resources.is_empty() || index.validate().is_err() {
             return;
         }
