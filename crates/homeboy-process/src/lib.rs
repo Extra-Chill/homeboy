@@ -997,10 +997,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&pid_file);
-        let script = format!(
-            "setsid sleep 30 & echo $! > {}; wait",
-            pid_file.display()
-        );
+        let script = format!("setsid sleep 30 & echo $! > {}; wait", pid_file.display());
         let mut command = Command::new("sh");
         command.args(["-c", &script]).process_group(0);
         let mut child = command.spawn().expect("spawn owned process tree");
