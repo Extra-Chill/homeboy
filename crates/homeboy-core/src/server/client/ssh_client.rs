@@ -788,8 +788,20 @@ where
     });
     let mut timed_out = false;
     let mut stdin_failed = false;
+    let mut interrupted_signal = None;
     let mut status = None;
     loop {
+        // `configure_process_group_cleanup` replaced the default SIGINT/SIGTERM
+        // disposition with a recording handler, so a cancelled caller no longer
+        // terminates this process implicitly. Poll the recorded signal the same
+        // way the local executor does (#10418): without this the child keeps
+        // running to the full probe deadline and the `homeboy` process survives
+        // the operator's cancellation.
+        if let Some(signal) = crate::server::process_cleanup::active_cleanup_signal() {
+            interrupted_signal = Some(signal);
+            status = terminate_process_group_with_deadline(&mut child, pid);
+            break;
+        }
         if matches!(writer_rx.try_recv(), Ok(Err(_))) {
             stdin_failed = true;
             status = terminate_process_group_with_deadline(&mut child, pid);
@@ -815,10 +827,48 @@ where
     let stdout = stdout
         .and_then(|handle| handle.join().ok())
         .unwrap_or_default();
-    let mut stderr = stderr
+    let stderr = stderr
         .and_then(|handle| handle.join().ok())
         .unwrap_or_default();
-    if timed_out {
+    bounded_probe_output(
+        stdout,
+        stderr,
+        BoundedProbeOutcome {
+            exit_code: status.and_then(|status| status.code()),
+            succeeded: status.is_some_and(|status| status.success()),
+            timed_out,
+            stdin_failed,
+            interrupted_signal,
+        },
+        timeout,
+    )
+}
+
+/// How a bounded remote probe finished. Kept separate from the wait loop so the
+/// operator-visible shape of a timed-out or cancelled probe is unit-testable
+/// without spawning a real child (#10418).
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct BoundedProbeOutcome {
+    pub(super) exit_code: Option<i32>,
+    pub(super) succeeded: bool,
+    pub(super) timed_out: bool,
+    pub(super) stdin_failed: bool,
+    pub(super) interrupted_signal: Option<i32>,
+}
+
+/// Assemble the labelled `CommandOutput` for a bounded probe.
+///
+/// Every non-success mode is named in `stderr` so a caller can distinguish "the
+/// remote is wedged" (timeout) from "the operator cancelled" (interruption)
+/// from "the command genuinely failed".
+pub(super) fn bounded_probe_output(
+    stdout: String,
+    stderr: String,
+    outcome: BoundedProbeOutcome,
+    timeout: Duration,
+) -> CommandOutput {
+    let mut stderr = stderr;
+    if outcome.timed_out {
         if !stderr.is_empty() && !stderr.ends_with('\n') {
             stderr.push('\n');
         }
@@ -827,23 +877,96 @@ where
             timeout.as_millis()
         ));
     }
-    if stdin_failed {
+    if outcome.stdin_failed {
         if !stderr.is_empty() && !stderr.ends_with('\n') {
             stderr.push('\n');
         }
         stderr.push_str("Homeboy SSH stdin delivery failed before command completion.");
     }
+    let stderr = crate::server::process_cleanup::stderr_with_interruption(
+        stderr,
+        outcome.interrupted_signal,
+    );
     CommandOutput {
         stdout,
         stderr,
-        success: !timed_out && !stdin_failed && status.is_some_and(|status| status.success()),
-        exit_code: if timed_out {
+        success: !outcome.timed_out
+            && !outcome.stdin_failed
+            && outcome.interrupted_signal.is_none()
+            && outcome.succeeded,
+        exit_code: if outcome.timed_out {
             124
         } else {
-            status.and_then(|status| status.code()).unwrap_or(-1)
+            crate::server::process_cleanup::interrupted_exit_code(
+                outcome.interrupted_signal,
+                outcome.exit_code.unwrap_or(-1),
+            )
         },
-        timed_out,
+        timed_out: outcome.timed_out,
         child_resource: None,
+    }
+}
+
+#[cfg(test)]
+mod bounded_probe_output_tests {
+    use super::*;
+
+    #[test]
+    fn a_cancelled_probe_reports_the_signal_and_never_succeeds() {
+        let output = bounded_probe_output(
+            String::new(),
+            "partial".to_string(),
+            BoundedProbeOutcome {
+                exit_code: Some(0),
+                succeeded: true,
+                interrupted_signal: Some(15),
+                ..BoundedProbeOutcome::default()
+            },
+            Duration::from_secs(15),
+        );
+
+        assert!(!output.success);
+        assert!(!output.timed_out);
+        assert_eq!(output.exit_code, 143);
+        assert!(output.stderr.contains("interrupted by signal 15"));
+        assert!(output.stderr.contains("terminated child process group"));
+    }
+
+    #[test]
+    fn a_timed_out_probe_names_its_deadline() {
+        let output = bounded_probe_output(
+            String::new(),
+            String::new(),
+            BoundedProbeOutcome {
+                timed_out: true,
+                ..BoundedProbeOutcome::default()
+            },
+            Duration::from_secs(15),
+        );
+
+        assert!(!output.success);
+        assert!(output.timed_out);
+        assert_eq!(output.exit_code, 124);
+        assert!(output.stderr.contains("timed out after 15000ms"));
+    }
+
+    #[test]
+    fn a_healthy_probe_is_unchanged() {
+        let output = bounded_probe_output(
+            "ok".to_string(),
+            String::new(),
+            BoundedProbeOutcome {
+                exit_code: Some(0),
+                succeeded: true,
+                ..BoundedProbeOutcome::default()
+            },
+            Duration::from_secs(15),
+        );
+
+        assert!(output.success);
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.stdout, "ok");
+        assert!(output.stderr.is_empty());
     }
 }
 

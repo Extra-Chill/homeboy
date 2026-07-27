@@ -356,6 +356,7 @@ mod tests {
                 bridge: false,
                 since_cursor: None,
                 full: false,
+                no_runner_probe: false,
             }),
         };
 

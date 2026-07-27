@@ -48,8 +48,15 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
         ));
     }
 
-    let record = match agent_task_service::status(&args.run_id) {
-        Ok(record) => record,
+    let options = agent_task_lifecycle::AgentTaskStatusOptions {
+        runner_probe: if args.no_runner_probe {
+            agent_task_lifecycle::AgentTaskRunnerProbe::Never
+        } else {
+            agent_task_lifecycle::AgentTaskRunnerProbe::WhenRunnerBacked
+        },
+    };
+    let outcome = match agent_task_service_direct::status_with_options(&args.run_id, options) {
+        Ok(outcome) => outcome,
         Err(error) if is_missing_agent_task_run_metadata_error(&error) => {
             if let Some(remediation) =
                 agent_task_service::offloaded_status_remediation(&args.run_id)?
@@ -60,6 +67,8 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
         }
         Err(error) => return Err(error),
     };
+    let runner_probe = runner_probe_projection(&outcome.runner_probe);
+    let record = outcome.record;
     // A future durable budget is incompatible, not an absent optional preview.
     if let Err(error) = agent_task_lifecycle::load_plan(&args.run_id) {
         if error
@@ -74,13 +83,107 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     attach_transport_proxy_recovery_guidance(&mut value, &args.run_id);
     if args.full {
         bound_full_reader_payload(&mut value);
+        attach_runner_probe(&mut value, &runner_probe);
         attach_agent_task_status_actionable(&mut value, &args.run_id);
         return Ok((value, 0));
     }
     let summary = compact_status_summary(&value, &args.run_id);
     let mut summary = summary;
+    attach_runner_probe(&mut summary, &runner_probe);
     attach_agent_task_status_actionable(&mut summary, &args.run_id);
     Ok((summary, 0))
+}
+
+/// Project the read-side runner-probe decision into the status payload.
+///
+/// This is the operator's answer to "is this a complete status, or a local one
+/// because the runner could not be consulted?" (#10418). It is always present
+/// so the distinction never has to be inferred from a missing field.
+pub(crate) fn runner_probe_projection(
+    plan: &agent_task_lifecycle::AgentTaskRunnerProbePlan,
+) -> Value {
+    let mut projection = serde_json::to_value(plan).unwrap_or(Value::Null);
+    if let Value::Object(map) = &mut projection {
+        map.insert(
+            "note".to_string(),
+            Value::String(runner_probe_note(plan.skipped_reason)),
+        );
+    }
+    projection
+}
+
+fn runner_probe_note(skipped_reason: Option<&str>) -> String {
+    let Some(reason) = skipped_reason else {
+        return "runner reconciliation was performed for this read".to_string();
+    };
+    if reason == agent_task_lifecycle::RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL {
+        "run is controller-local; answered from durable controller state without contacting any runner".to_string()
+    } else if reason == agent_task_lifecycle::RUNNER_PROBE_SKIPPED_CALLER_OPTED_OUT {
+        "--no-runner-probe was requested; this is a partial, controller-local answer and runner-side job state may be stale".to_string()
+    } else if reason == agent_task_lifecycle::RUNNER_PROBE_SKIPPED_NOT_RUNNING {
+        "run is not running; there is no live runner job to reconcile".to_string()
+    } else {
+        format!("runner reconciliation was skipped: {reason}")
+    }
+}
+
+fn attach_runner_probe(value: &mut Value, runner_probe: &Value) {
+    if let Value::Object(map) = value {
+        map.insert("runner_probe".to_string(), runner_probe.clone());
+    }
+}
+
+#[cfg(test)]
+mod runner_probe_tests {
+    use super::*;
+
+    #[test]
+    fn a_controller_local_answer_says_it_never_contacted_a_runner() {
+        let projection = runner_probe_projection(&agent_task_lifecycle::AgentTaskRunnerProbePlan {
+            performed: false,
+            skipped_reason: Some(agent_task_lifecycle::RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL),
+            controller_local: true,
+        });
+
+        assert_eq!(projection["performed"], false);
+        assert_eq!(projection["controller_local"], true);
+        assert_eq!(projection["skipped_reason"], "controller_local_record");
+        assert!(projection["note"]
+            .as_str()
+            .expect("note")
+            .contains("without contacting any runner"));
+    }
+
+    #[test]
+    fn an_opted_out_answer_is_labelled_partial() {
+        let projection = runner_probe_projection(&agent_task_lifecycle::AgentTaskRunnerProbePlan {
+            performed: false,
+            skipped_reason: Some(agent_task_lifecycle::RUNNER_PROBE_SKIPPED_CALLER_OPTED_OUT),
+            controller_local: false,
+        });
+
+        assert_eq!(projection["skipped_reason"], "caller_opted_out");
+        assert!(projection["note"]
+            .as_str()
+            .expect("note")
+            .contains("partial"));
+    }
+
+    #[test]
+    fn a_completed_probe_reports_no_skip_reason() {
+        let projection = runner_probe_projection(&agent_task_lifecycle::AgentTaskRunnerProbePlan {
+            performed: true,
+            skipped_reason: None,
+            controller_local: false,
+        });
+
+        assert_eq!(projection["performed"], true);
+        assert!(projection.get("skipped_reason").is_none());
+        assert!(projection["note"]
+            .as_str()
+            .expect("note")
+            .contains("was performed"));
+    }
 }
 
 /// Full recovery output remains a local reader: retain a stable digest for a

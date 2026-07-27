@@ -1370,9 +1370,11 @@ pub(crate) fn configured_runner_homeboy_build_identity(
         return Ok(None);
     };
 
-    Ok(remote_homeboy_identity(&client, homeboy)
-        .ok()
-        .and_then(|identity| identity.build_identity))
+    Ok(
+        bounded_remote_homeboy_identity(&client, homeboy, Some(&runner.id))
+            .ok()
+            .and_then(|identity| identity.build_identity),
+    )
 }
 
 fn status_for_admission_with<Status, Reconnect>(
@@ -2096,8 +2098,8 @@ fn stale_daemon_warning(
     let Some((_server_id, _server, client)) = resolve_ssh_runner(runner)? else {
         return Ok(None);
     };
-    let current_identity =
-        remote_homeboy_identity(&client, homeboy).unwrap_or_else(|_| RemoteHomeboyIdentity {
+    let current_identity = bounded_remote_homeboy_identity(&client, homeboy, Some(&runner.id))
+        .unwrap_or_else(|_| RemoteHomeboyIdentity {
             version: session.homeboy_version.clone(),
             build_identity: None,
         });
@@ -2178,7 +2180,7 @@ fn reconcile_session_metadata_with_observed_daemon(
     let Some((_, _, client)) = resolve_ssh_runner(runner)? else {
         return Ok(());
     };
-    let Ok(configured) = remote_homeboy_identity(&client, homeboy) else {
+    let Ok(configured) = bounded_remote_homeboy_identity(&client, homeboy, Some(&runner.id)) else {
         return Ok(());
     };
     let Ok(observed_version) = daemon_http_version(local_url) else {

@@ -18,6 +18,7 @@ use homeboy::core::observation::{
 use homeboy::core::resource_lifecycle_index::resource_lifecycle_index_from_artifacts;
 use homeboy::core::validation_progress::ValidationProgressLedger;
 use homeboy::core::Error;
+use homeboy::runner::readonly_probe;
 use homeboy::runner::runners as runner;
 
 use super::bench::run_contains_scenario;
@@ -101,6 +102,9 @@ pub fn list_runs(args: RunsListArgs, command: &'static str) -> CmdResult<RunsOut
             runs,
             matched_runs,
             hidden_mirrors,
+            // Carry the reason for any bounded probe that did not answer, so an
+            // empty/short active-job list is never mistaken for an idle Lab.
+            probe_degradations: readonly_probe::take_degradations(),
             actionable,
         }),
         0,
@@ -249,12 +253,20 @@ fn run_correlates_with(run: &RunRecord, correlation: &str) -> bool {
     false
 }
 
+/// Active runner jobs for `runs list --include-active-runner-jobs`.
+///
+/// Deliberately uses the latency-bounded indexed snapshot rather than the full
+/// `statuses()` report (#10418). `statuses()` reconciles the daemon generation
+/// ledger and issues unbounded remote identity probes — expensive
+/// *reconciliation* that a read-only listing must never block on. The indexed
+/// snapshot answers the only question this listing asks ("what is running right
+/// now") with one bounded `/jobs` query per runner.
 fn active_runner_job_summaries(status: Option<&str>) -> Vec<RunSummary> {
-    runner::statuses()
+    runner::statuses_indexed()
         .unwrap_or_default()
         .into_iter()
-        .filter(|report| report.connected)
-        .flat_map(|report| report.active_jobs)
+        .filter(|snapshot| snapshot.connected)
+        .flat_map(|snapshot| snapshot.active_jobs)
         .filter(|job| match status {
             Some(status) => status == job.status.run_status_label(),
             None => true,

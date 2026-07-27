@@ -307,6 +307,7 @@ fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_command
             bridge: false,
             since_cursor: None,
             full: true,
+            no_runner_probe: false,
         })
         .expect("cook status resolves through its public alias");
         assert_eq!(status_exit, 0);
@@ -335,6 +336,7 @@ fn cook_runner_preflight_failure_is_visible_and_resumable_through_public_command
                 bridge: false,
                 since_cursor: None,
                 full: true,
+                no_runner_probe: false,
             })
             .expect("resumed Cook status")
             .0["metadata"]["worktree_provision"]["action"],
@@ -378,6 +380,7 @@ fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
             bridge: false,
             since_cursor: None,
             full: true,
+            no_runner_probe: false,
         })
         .expect("controller status resolves");
         let (logs_value, logs_exit) = logs(LogsArgs {
@@ -624,6 +627,7 @@ fn submit_run_status_reports_terminal_state() {
             bridge: false,
             since_cursor: None,
             full: true,
+            no_runner_probe: false,
         })
         .expect("status loaded");
         let (bridge_status_json, bridge_status_exit_code) = status(StatusArgs {
@@ -631,6 +635,7 @@ fn submit_run_status_reports_terminal_state() {
             bridge: true,
             since_cursor: Some(0),
             full: false,
+            no_runner_probe: false,
         })
         .expect("bridge status loaded");
         let record: AgentTaskRunRecord = serde_json::from_value(status_json).expect("record");
@@ -661,6 +666,7 @@ fn failed_run_status_logs_and_review_include_outcome_diagnostic_summary() {
             bridge: false,
             since_cursor: None,
             full: false,
+            no_runner_probe: false,
         })
         .expect("status loaded");
         let (logs_value, _) = logs(LogsArgs {
@@ -808,6 +814,7 @@ fn diagnose_hydrates_executor_result_evidence_root_cause() {
             bridge: false,
             since_cursor: None,
             full: true,
+            no_runner_probe: false,
         })
         .expect("status loaded");
         assert_eq!(status_exit_code, 0);
@@ -1001,6 +1008,7 @@ fn generic_contract_fixtures_surface_runtime_import_before_missing_artifact() {
             bridge: false,
             since_cursor: None,
             full: true,
+            no_runner_probe: false,
         })
         .expect("status loaded");
         assert_eq!(status_exit_code, 0);
@@ -1452,6 +1460,7 @@ fn promotion_heavy_30kb_fixture_keeps_status_and_diagnose_bounded() {
         let (status_value, _) = status(StatusArgs {
             run_id: run_id.to_string(),
             full: true,
+            no_runner_probe: false,
             bridge: false,
             since_cursor: None,
         })
@@ -1804,6 +1813,7 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
             bridge: true,
             since_cursor: Some(1),
             full: false,
+            no_runner_probe: false,
         })
         .expect("bridge resume reconciles terminal projection");
 
@@ -1834,6 +1844,7 @@ fn bridge_resume_reprojects_historical_lab_artifacts_and_preserves_status_cursor
             bridge: true,
             since_cursor: Some(1),
             full: false,
+            no_runner_probe: false,
         })
         .expect("bridge reconciliation is idempotent");
         assert_eq!(
@@ -1872,6 +1883,7 @@ fn non_bridge_resume_keeps_aggregate_output_shape() {
             bridge: false,
             since_cursor: None,
             full: false,
+            no_runner_probe: false,
         })
         .expect("ordinary resume returns terminal aggregate");
 

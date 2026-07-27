@@ -25,16 +25,52 @@ pub(super) fn resolve_ssh_runner(runner: &Runner) -> Result<Option<(String, Serv
     Ok(Some((server_id, server, client)))
 }
 
+/// Read the remote Homeboy version on a lifecycle (write) path.
+///
+/// Retains the retrying, unbounded execution used by `connect`, where a
+/// transient SSH failure should be retried rather than surfaced. Read-only
+/// inspection must use [`bounded_remote_homeboy_version`] instead.
 pub(super) fn remote_homeboy_version(
     client: &SshClient,
     homeboy: &str,
 ) -> std::result::Result<String, String> {
-    let command = format!("{} --version", shell::quote_arg(homeboy));
-    let output = client.execute(&command);
+    parse_remote_homeboy_version(&client.execute(&remote_homeboy_version_command(homeboy)))
+}
+
+/// Read the remote Homeboy version under a hard wall-clock bound (#10418).
+///
+/// Reachable from read-only inspection (`runner status`, `runs list`,
+/// `agent-task status`), which used to run this probe with no bound at all — so
+/// a wedged Lab made the whole diagnostic surface hang. On timeout the SSH
+/// child process group is killed and the degradation is recorded.
+pub(super) fn bounded_remote_homeboy_version(
+    client: &SshClient,
+    homeboy: &str,
+    runner_id: Option<&str>,
+) -> std::result::Result<String, String> {
+    let command = remote_homeboy_version_command(homeboy);
+    let timeout = crate::readonly_probe::readonly_probe_timeout();
+    let output = client.execute_with_timeout(&command, timeout);
+    crate::readonly_probe::record_probe_outcome(
+        "runner_homeboy_version",
+        runner_id,
+        timeout,
+        &output,
+    );
+    parse_remote_homeboy_version(&output)
+}
+
+fn remote_homeboy_version_command(homeboy: &str) -> String {
+    format!("{} --version", shell::quote_arg(homeboy))
+}
+
+fn parse_remote_homeboy_version(
+    output: &homeboy_core::server::CommandOutput,
+) -> std::result::Result<String, String> {
     if !output.success {
         return Err(command_failure_message(
             "remote Homeboy version check failed",
-            &output,
+            output,
         ));
     }
     let version = output.stdout.trim().to_string();
@@ -50,23 +86,68 @@ pub(super) struct RemoteHomeboyIdentity {
     pub(super) build_identity: Option<String>,
 }
 
+/// Read the immutable identity of the remote Homeboy executable on a lifecycle
+/// (write) path. Retains the retrying, unbounded execution used by `connect`.
 pub(super) fn remote_homeboy_identity(
     client: &SshClient,
     homeboy: &str,
 ) -> std::result::Result<RemoteHomeboyIdentity, String> {
-    let command = format!("{} self identity", shell::quote_arg(homeboy));
-    let output = client.execute(&command);
+    let output = client.execute(&remote_homeboy_identity_command(homeboy));
     if output.success {
         if let Some(identity) = parse_self_identity_output(&output.stdout) {
             return Ok(identity);
         }
     }
-
     let version = remote_homeboy_version(client, homeboy)?;
     Ok(RemoteHomeboyIdentity {
         version: normalize_homeboy_version_owned(&version),
         build_identity: None,
     })
+}
+
+/// Read the remote Homeboy identity under a hard wall-clock bound (#10418).
+///
+/// This is the probe `runner status` was blocked on while a prune/cook occupied
+/// the Lab path. A timeout degrades to an unverifiable identity — which callers
+/// already model as `IdentityComparison::Unverifiable` — and is recorded in the
+/// read-only probe ledger so the partial answer names its own gap.
+pub(super) fn bounded_remote_homeboy_identity(
+    client: &SshClient,
+    homeboy: &str,
+    runner_id: Option<&str>,
+) -> std::result::Result<RemoteHomeboyIdentity, String> {
+    let command = remote_homeboy_identity_command(homeboy);
+    let timeout = crate::readonly_probe::readonly_probe_timeout();
+    let output = client.execute_with_timeout(&command, timeout);
+    let degraded = crate::readonly_probe::record_probe_outcome(
+        "runner_homeboy_identity",
+        runner_id,
+        timeout,
+        &output,
+    );
+    if output.success {
+        if let Some(identity) = parse_self_identity_output(&output.stdout) {
+            return Ok(identity);
+        }
+    }
+    // A probe that already exhausted its deadline must not be followed by a
+    // second probe against the same wedged endpoint: two bounded probes in
+    // series is a doubled bound, which is what this fix exists to prevent.
+    if degraded {
+        return Err(command_failure_message(
+            "remote Homeboy identity probe did not complete within its read-only bound",
+            &output,
+        ));
+    }
+    let version = bounded_remote_homeboy_version(client, homeboy, runner_id)?;
+    Ok(RemoteHomeboyIdentity {
+        version: normalize_homeboy_version_owned(&version),
+        build_identity: None,
+    })
+}
+
+fn remote_homeboy_identity_command(homeboy: &str) -> String {
+    format!("{} self identity", shell::quote_arg(homeboy))
 }
 
 pub(super) fn parse_self_identity_output(output: &str) -> Option<RemoteHomeboyIdentity> {

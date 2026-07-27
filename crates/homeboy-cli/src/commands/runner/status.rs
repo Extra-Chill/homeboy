@@ -7,6 +7,7 @@ use homeboy::core::agent_runtime_manifest::{
     AgentRuntimeToolDiagnosticDeclaration,
 };
 use homeboy::core::daemon::{DaemonRecoveryEvidence, DaemonStaleReasonCode};
+use homeboy::runner::readonly_probe;
 use homeboy::runner::runners::{
     self as runner, RunnerActiveJobState, RunnerAvailability, RunnerBinarySource, RunnerSession,
     RunnerStatusReport, RunnerTunnelMode, RuntimeMaterializationStatus,
@@ -68,6 +69,7 @@ pub(super) fn status(
                             full_command: format!("homeboy runner status {} --full", shell_arg(id)),
                         }),
                         generation_inventory,
+                        probe_degradations: readonly_probe::take_degradations(),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -76,9 +78,11 @@ pub(super) fn status(
             ));
         }
 
-        let operator_hints = runner_status_operator_hints(&report);
+        let mut operator_hints = runner_status_operator_hints(&report);
         let operator_commands = runner_status_operator_commands(&report);
         let selected_lab_runner = selected_lab_runner_status(Some(id), Some(report.clone()))?;
+        // Collected last so every bounded probe issued above is represented.
+        operator_hints.extend(probe_degradation_hints());
         return Ok((
             RunnerOutput {
                 command: "runner.status".to_string(),
@@ -92,6 +96,7 @@ pub(super) fn status(
                     managed_followups: runner_followups(Some(id)),
                     operator_hints,
                     operator_commands,
+                    probe_degradations: readonly_probe::take_degradations(),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -119,6 +124,7 @@ pub(super) fn status(
                         evidence_ref: "runner:session-inventory".to_string(),
                         full_command: "homeboy runner status --full".to_string(),
                     }),
+                    probe_degradations: readonly_probe::take_degradations(),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -126,7 +132,7 @@ pub(super) fn status(
             0,
         ));
     }
-    let operator_hints = sessions
+    let mut operator_hints: Vec<String> = sessions
         .iter()
         .flat_map(runner_status_operator_hints)
         .collect();
@@ -136,6 +142,8 @@ pub(super) fn status(
         .collect();
     let selected_lab_runner = selected_lab_runner_status(preferred_lab_runner.as_deref(), None)?;
     let managed_followups = runner_followups(preferred_lab_runner.as_deref());
+    // Collected last so every bounded probe issued above is represented.
+    operator_hints.extend(probe_degradation_hints());
     Ok((
         RunnerOutput {
             command: "runner.status".to_string(),
@@ -146,12 +154,28 @@ pub(super) fn status(
                 managed_followups,
                 operator_hints,
                 operator_commands,
+                probe_degradations: readonly_probe::take_degradations(),
                 ..Default::default()
             },
             ..Default::default()
         },
         0,
     ))
+}
+
+/// Operator-facing hints for read-only probes that hit their bound while this
+/// status was assembled (#10418). Without these an operator cannot distinguish
+/// "the Lab answered and is idle" from "the Lab never answered".
+fn probe_degradation_hints() -> Vec<String> {
+    readonly_probe::degradations()
+        .into_iter()
+        .map(|degradation| {
+            format!(
+                "PARTIAL STATUS ({}): {}",
+                degradation.reason_code, degradation.detail
+            )
+        })
+        .collect()
 }
 
 fn operator_summary(report: &RunnerStatusReport) -> RunnerOperatorSummary {

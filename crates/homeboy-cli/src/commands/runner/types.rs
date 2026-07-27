@@ -3,6 +3,7 @@ use serde_json::Value;
 
 use homeboy::core::api_jobs::{Job, JobEvent};
 use homeboy::core::EntityCrudOutput;
+use homeboy::runner::readonly_probe::ReadOnlyProbeDegradation;
 use homeboy::runner::runners::{
     ReverseRunnerWorkerOutput, Runner, RunnerAdmissionSummary, RunnerAvailability,
     RunnerConnectReport, RunnerDaemonGenerationStatus, RunnerDisconnectReport, RunnerExecOutput,
@@ -46,6 +47,12 @@ pub struct RunnerExtra {
     pub operator_summaries: Vec<RunnerOperatorSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncation: Option<RunnerTruncation>,
+    /// Read-only remote probes that hit their wall-clock bound while composing
+    /// this status (#10418). A non-empty list means the status is PARTIAL: the
+    /// runner did not answer within the bound, which is the operator's signal
+    /// that the Lab is wedged rather than idle.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub probe_degradations: Vec<ReadOnlyProbeDegradation>,
 }
 
 impl Default for RunnerExtra {
@@ -64,6 +71,7 @@ impl Default for RunnerExtra {
             operator_summary: None,
             operator_summaries: Vec::new(),
             truncation: None,
+            probe_degradations: Vec::new(),
         }
     }
 }
