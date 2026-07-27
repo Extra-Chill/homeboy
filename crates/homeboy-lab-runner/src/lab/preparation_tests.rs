@@ -317,6 +317,18 @@ fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
         .any(|suggestion| suggestion
             .as_str()
             .is_some_and(|value| value.contains("homeboy runner refresh-homeboy lab --ref "))));
+    let action = &err.details[homeboy_core::error::ACTIONS_DETAILS_KEY][0];
+    assert_eq!(action["id"], "runner.refresh_homeboy");
+    assert_eq!(action["program"], "homeboy");
+    assert_eq!(action["args"][0], "runner");
+    assert_eq!(action["args"][1], "refresh-homeboy");
+    assert_eq!(action["args"][2], "lab");
+    assert_eq!(action["args"][3], "--ref");
+    assert_eq!(action["args"][5], "--reconnect");
+    assert_eq!(
+        action["evidence"]["recovery_plan"][0],
+        err.details["tried"][0]
+    );
 }
 
 #[test]

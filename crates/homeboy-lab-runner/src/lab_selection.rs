@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::resolve_lab_runner_hint;
+use homeboy_core::error::{ActionSafety, ExecutableAction};
 use homeboy_core::lab_contract::LabCommandPortability;
 use homeboy_core::{Error, ErrorCode, Result};
 
@@ -531,6 +532,7 @@ pub(super) fn prepare_lab_runner_for_offload_with(
                     selection.runner_id
                 ),
                 daemon_repair_command(&selection.runner_id, &status),
+                daemon_repair_action(&selection.runner_id, &status),
             );
         }
         eprintln!(
@@ -555,6 +557,7 @@ pub(super) fn prepare_lab_runner_for_offload_with(
             ),
             "Start the reverse runner session on the Lab machine before using --runner."
                 .to_string(),
+            None,
         );
     }
 
@@ -591,6 +594,7 @@ pub(super) fn prepare_lab_runner_for_offload_with(
             "Run `homeboy runner connect {}` for full diagnostics.",
             selection.runner_id
         ),
+        None,
     )
 }
 
@@ -610,19 +614,23 @@ fn automatic_fallback_or_explicit_error(
     reason: String,
     explicit_message: String,
     remediation: String,
+    action: Option<ExecutableAction>,
 ) -> Result<LabRunnerPreparation> {
     match selection.source {
         LabRunnerSelectionSource::Default => Ok(LabRunnerPreparation::FallBackLocal { reason }),
-        LabRunnerSelectionSource::Explicit => Err(Error::validation_invalid_argument(
-            "runner",
-            format!("{explicit_message}: {reason}"),
-            Some(selection.runner_id.clone()),
-            Some(vec![
-                remediation,
-                "Use --placement local to run the command locally instead of offloading."
-                    .to_string(),
-            ]),
-        )),
+        LabRunnerSelectionSource::Explicit => {
+            let error = Error::validation_invalid_argument(
+                "runner",
+                format!("{explicit_message}: {reason}"),
+                Some(selection.runner_id.clone()),
+                Some(vec![
+                    remediation,
+                    "Use --placement local to run the command locally instead of offloading."
+                        .to_string(),
+                ]),
+            );
+            Err(action.map_or(error.clone(), |action| error.with_action(action)))
+        }
     }
 }
 
@@ -680,6 +688,55 @@ fn daemon_repair_command(runner_id: &str, status: &RunnerStatusReport) -> String
     } else {
         restart
     }
+}
+
+fn daemon_repair_action(runner_id: &str, status: &RunnerStatusReport) -> Option<ExecutableAction> {
+    let recovery_plan: Vec<&str> = status
+        .daemon_freshness
+        .as_ref()
+        .filter(|report| !report.repair_plan.is_empty())
+        .map(|report| {
+            report
+                .repair_plan
+                .iter()
+                .map(|step| step.command.as_str())
+                .collect()
+        })
+        .or_else(|| {
+            status.stale_daemon.as_ref().map(|warning| {
+                warning
+                    .recovery_commands
+                    .iter()
+                    .map(String::as_str)
+                    .collect()
+            })
+        })?;
+    let recovery_ref = homeboy_product_identity::build_identity()
+        .git_commit
+        .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()));
+    let action = ExecutableAction::new(
+        "runner.refresh_homeboy",
+        format!("refresh runner {runner_id}"),
+        "homeboy",
+        [
+            "runner",
+            "refresh-homeboy",
+            runner_id,
+            "--ref",
+            &recovery_ref,
+            "--reconnect",
+        ],
+        ActionSafety::Mutating,
+    )
+    .requiring_confirmation("operator")
+    .with_evidence(serde_json::json!({
+        "runner_id": runner_id,
+        "recovery_plan": recovery_plan,
+    }));
+
+    // The report exposes shell text, not argv. Only lift a single command that
+    // exactly matches this explicit action; never parse or approximate a plan.
+    (recovery_plan.len() == 1 && recovery_plan[0] == action.render_command()).then_some(action)
 }
 
 pub(super) fn resolve_lab_runner_selection(
