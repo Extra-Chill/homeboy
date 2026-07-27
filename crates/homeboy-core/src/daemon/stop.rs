@@ -6,7 +6,7 @@
 //! inherits the parent module's state types, lock, and persistence helpers.
 
 use super::*;
-use crate::process::{signal_pid, wait_for_pid_exit};
+use crate::process::{signal_pid, wait_for_pid_exit, SIGNAL_KILL, SIGNAL_TERMINATE};
 
 const TERM_GRACE: Duration = Duration::from_secs(2);
 const KILL_GRACE: Duration = Duration::from_secs(2);
@@ -116,7 +116,7 @@ fn force_stop_for_lease_unlocked(expected_lease_id: &str) -> Result<DaemonStopRe
             .to_string(),
         os_evidence: termination,
         exit_code: None,
-        signal: Some(libc::SIGTERM),
+        signal: Some(SIGNAL_TERMINATE),
         stdout: None,
         stderr: None,
         stop_requested: true,
@@ -142,12 +142,12 @@ fn terminate_exact_supervised_daemon(
 ) -> Result<String> {
     let supervisor = supervised_parent_pid(state.pid, &state.startup_token)?;
     revalidate_exact_termination_target(path, identity, state)?;
-    signal_pid(state.pid, libc::SIGTERM)?;
+    signal_pid(state.pid, SIGNAL_TERMINATE)?;
     let child_signal = if wait_for_pid_exit(state.pid, TERM_GRACE) {
         "SIGTERM"
     } else {
         revalidate_exact_termination_target(path, identity, state)?;
-        signal_pid(state.pid, libc::SIGKILL)?;
+        signal_pid(state.pid, SIGNAL_KILL)?;
         if !wait_for_pid_exit(state.pid, KILL_GRACE) {
             return Err(Error::internal_unexpected(format!(
                 "daemon pid {} survived bounded SIGTERM-to-SIGKILL escalation",
@@ -171,7 +171,7 @@ fn terminate_exact_supervised_daemon(
                     None,
                 ));
             }
-            signal_pid(pid, libc::SIGTERM)?;
+            signal_pid(pid, SIGNAL_TERMINATE)?;
             if wait_for_pid_exit(pid, TERM_GRACE) {
                 "SIGTERM"
             } else {
@@ -183,7 +183,7 @@ fn terminate_exact_supervised_daemon(
                         None,
                     ));
                 }
-                signal_pid(pid, libc::SIGKILL)?;
+                signal_pid(pid, SIGNAL_KILL)?;
                 if !wait_for_pid_exit(pid, KILL_GRACE) {
                     return Err(Error::internal_unexpected(format!(
                         "daemon supervisor pid {pid} survived bounded SIGTERM-to-SIGKILL escalation"

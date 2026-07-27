@@ -6,10 +6,11 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::workspace::snapshot::{
     copy_snapshot_to_directory, ensure_no_runner_workspace_metadata_collision,
-    snapshot_archive_command, snapshot_install_command, synthetic_checkout_value,
-    workspace_content_hash, workspace_content_hash_algorithm, workspace_content_hash_for_policy,
-    workspace_content_hash_v1, workspace_content_manifest_for_policy,
-    WORKSPACE_CONTENT_PERMISSION_PORTABLE, WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+    scratch_scoped_command, snapshot_archive_command, snapshot_install_command,
+    synthetic_checkout_value, workspace_content_hash, workspace_content_hash_algorithm,
+    workspace_content_hash_for_policy, workspace_content_hash_v1,
+    workspace_content_manifest_for_policy, WORKSPACE_CONTENT_PERMISSION_PORTABLE,
+    WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
     WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
 };
 
@@ -1355,6 +1356,43 @@ fn snapshot_archive_command_disables_extended_attributes() {
 
     assert!(command.contains("COPYFILE_DISABLE=1"));
     assert!(command.contains("tar --no-xattrs"));
+}
+
+/// A scratch-scoped snapshot command must still be a *parseable* POSIX shell
+/// program. `TMPDIR=x (cd ...)` is not: POSIX allows assignment prefixes only
+/// on simple commands, so dash rejected every scratch-admitted materialization
+/// with `Syntax error: "(" unexpected` before transferring a byte. `sh -n`
+/// parses without executing, which is exactly the regression surface.
+#[test]
+fn scratch_scoped_snapshot_command_parses_under_posix_sh() {
+    for excludes in [
+        vec![],
+        vec!["./target".to_string(), "node_modules".to_string()],
+    ] {
+        let command = snapshot_archive_command(
+            Path::new("/Users/user/Developer/wp-site-generator"),
+            "ssh runner 'tar -xf -'",
+            &excludes,
+        );
+        let scoped = scratch_scoped_command(&command, Path::new("/var/lib/homeboy/scratch dir"));
+
+        assert!(
+            scoped.starts_with("export TMPDIR="),
+            "scratch scoping must export rather than prefix an assignment: {scoped}"
+        );
+
+        let parsed = std::process::Command::new("sh")
+            .arg("-n")
+            .arg("-c")
+            .arg(&scoped)
+            .output()
+            .expect("run sh -n");
+        assert!(
+            parsed.status.success(),
+            "scratch-scoped snapshot command must parse under POSIX sh: {}\ncommand: {scoped}",
+            String::from_utf8_lossy(&parsed.stderr)
+        );
+    }
 }
 
 #[test]
