@@ -211,12 +211,7 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 12,
-        sql: r#"
-        ALTER TABLE artifact_publication_intents ADD COLUMN owner_token TEXT;
-        ALTER TABLE artifact_publication_intents ADD COLUMN lease_expires_at_ms INTEGER;
-        CREATE INDEX IF NOT EXISTS idx_artifact_publication_intents_lease
-            ON artifact_publication_intents(lease_expires_at_ms);
-        "#,
+        sql: "",
     },
 ];
 
@@ -393,6 +388,27 @@ fn apply_migration_sql(connection: &Connection, migration: &Migration) -> Result
         return Ok(());
     }
 
+    if migration.version == 12 {
+        for (column, definition) in [("owner_token", "TEXT"), ("lease_expires_at_ms", "INTEGER")] {
+            if !column_exists(connection, "artifact_publication_intents", column)? {
+                connection
+                    .execute_batch(&format!(
+                        "ALTER TABLE artifact_publication_intents ADD COLUMN {column} {definition};"
+                    ))
+                    .map_err(sqlite_error("apply migration 12"))?;
+            }
+        }
+        connection
+            .execute_batch(
+                r#"
+                CREATE INDEX IF NOT EXISTS idx_artifact_publication_intents_lease
+                    ON artifact_publication_intents(lease_expires_at_ms);
+                "#,
+            )
+            .map_err(sqlite_error("apply migration 12"))?;
+        return Ok(());
+    }
+
     connection
         .execute_batch(migration.sql)
         .map_err(sqlite_error(format!(
@@ -473,4 +489,144 @@ fn column_exists(connection: &Connection, table: &str, column: &str) -> Result<b
         }
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_12_adds_both_missing_columns() {
+        assert_migration_12_completes(false, false);
+    }
+
+    #[test]
+    fn migration_12_preserves_preexisting_owner_token() {
+        assert_migration_12_completes(true, false);
+    }
+
+    #[test]
+    fn migration_12_preserves_preexisting_lease_expiry() {
+        assert_migration_12_completes(false, true);
+    }
+
+    #[test]
+    fn migration_12_accepts_both_preexisting_columns() {
+        assert_migration_12_completes(true, true);
+    }
+
+    fn assert_migration_12_completes(has_owner_token: bool, has_lease_expiry: bool) {
+        let connection = schema_through_migration_11();
+        connection
+            .execute_batch(
+                "INSERT INTO artifact_publication_intents \
+                 (publication_id, artifact_id, staging_path, final_path) \
+                 VALUES ('publication', 'artifact', '/staging', '/final');",
+            )
+            .unwrap();
+
+        if has_owner_token {
+            connection
+                .execute_batch(
+                    "ALTER TABLE artifact_publication_intents ADD COLUMN owner_token TEXT; \
+                     UPDATE artifact_publication_intents SET owner_token = 'existing-owner';",
+                )
+                .unwrap();
+        }
+        if has_lease_expiry {
+            connection
+                .execute_batch(
+                    "ALTER TABLE artifact_publication_intents \
+                         ADD COLUMN lease_expires_at_ms INTEGER; \
+                     UPDATE artifact_publication_intents SET lease_expires_at_ms = 4242;",
+                )
+                .unwrap();
+        }
+        if has_owner_token && has_lease_expiry {
+            connection
+                .execute_batch(
+                    "CREATE INDEX idx_artifact_publication_intents_lease \
+                     ON artifact_publication_intents(lease_expires_at_ms);",
+                )
+                .unwrap();
+        }
+
+        apply_migrations(&connection).unwrap();
+
+        assert!(column_exists(&connection, "artifact_publication_intents", "owner_token").unwrap());
+        assert!(column_exists(
+            &connection,
+            "artifact_publication_intents",
+            "lease_expires_at_ms"
+        )
+        .unwrap());
+        let values: (Option<String>, Option<i64>) = connection
+            .query_row(
+                "SELECT owner_token, lease_expires_at_ms \
+                 FROM artifact_publication_intents \
+                 WHERE publication_id = 'publication' AND artifact_id = 'artifact'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            values,
+            (
+                has_owner_token.then(|| "existing-owner".to_owned()),
+                has_lease_expiry.then_some(4242),
+            )
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master \
+                     WHERE type = 'index' \
+                       AND name = 'idx_artifact_publication_intents_lease'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version = 12",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    fn schema_through_migration_11() -> Connection {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL
+                );
+                "#,
+            )
+            .unwrap();
+
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= 11)
+        {
+            let tx = connection.transaction().unwrap();
+            apply_migration_sql(&tx, migration).unwrap();
+            tx.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, 'test')",
+                [migration.version],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+
+        connection
+    }
 }
