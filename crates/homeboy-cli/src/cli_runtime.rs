@@ -1506,6 +1506,9 @@ fn extract_parent_command_from_error(e: &clap::Error) -> Option<String> {
 mod tests {
     use super::*;
     use clap::Parser;
+    use sha2::{Digest, Sha256};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     #[test]
@@ -2230,6 +2233,112 @@ mod tests {
             ),
             "'/tmp/controller runtimes/homeboy'\\''s' agent-task cook-continue 'cook id'\\''s'"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cook_continue_reexecutes_the_verified_origin_runtime_for_the_exact_attempt() {
+        crate::test_support::with_isolated_home(|home| {
+            let target = home.path().join("active-task-worktree");
+            std::fs::create_dir(&target).expect("create active task worktree");
+            let mut plan: crate::agents::agent_tasks::scheduler::AgentTaskPlan =
+                serde_json::from_str(include_str!(
+                    "../../../tests/fixtures/agent_task_smoke_plan.json"
+                ))
+                .expect("deserialize durable test plan");
+            plan.tasks[0].workspace.root = Some(target.display().to_string());
+
+            let cook_id = "cook-runtime-a";
+            let run_id = "cook-runtime-a-attempt-1";
+            let options = crate::agents::agent_tasks::service::AgentTaskCookServiceOptions {
+                cook_id: cook_id.to_string(),
+                initial_run_id: run_id.to_string(),
+                initial_plan: plan.clone(),
+                to_worktree: target.display().to_string(),
+                source_worktree_path: Some(target.clone()),
+                provider_command: None,
+                provider_invocation: None,
+                gates: Default::default(),
+                max_attempts: 1,
+                no_finalize: true,
+                base: "main".to_string(),
+                task_base_sha: None,
+                head: None,
+                title: "runtime continuation fixture".to_string(),
+                commit_message: "runtime continuation fixture".to_string(),
+                source_refs: Vec::new(),
+                protected_branches: Vec::new(),
+                ai_tool: "test".to_string(),
+                ai_model: None,
+                ai_used_for: "test".to_string(),
+                attempt_dispatcher: None,
+                harvest_context: Default::default(),
+            };
+            crate::agents::agent_tasks::service::persist_initial_recipe(&options)
+                .expect("persist runtime-A cook recipe");
+            crate::agents::agent_tasks::lifecycle::submit_plan(&plan, Some(run_id))
+                .expect("persist runtime-A lifecycle run");
+
+            let invocation = home.path().join("runtime-a-invocation");
+            let runtime_a = home.path().join("runtime-a");
+            let identity = "homeboy test-runtime-a";
+            std::fs::write(
+                &runtime_a,
+                format!(
+                    "#!/bin/sh\nif [ \"$1\" = self ] && [ \"$2\" = identity ]; then\n  printf '%s\\n' '{{\"data\":{{\"display\":\"{identity}\"}}}}'\n  exit 0\nfi\nprintf '%s\\n' \"$@\" > \"$HOMEBOY_TEST_RUNTIME_A_INVOCATION\"\nexit 17\n"
+                ),
+            )
+            .expect("write runtime-A fixture");
+            std::fs::set_permissions(&runtime_a, std::fs::Permissions::from_mode(0o700))
+                .expect("make runtime-A fixture executable");
+            let digest = format!(
+                "{:x}",
+                Sha256::digest(std::fs::read(&runtime_a).expect("read runtime-A fixture"))
+            );
+            crate::agents::agent_tasks::lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["controller_runtime"] = serde_json::json!({
+                    "originating": {
+                        "build_identity": identity,
+                        "pinned_executable": runtime_a,
+                        "sha256": digest,
+                    }
+                });
+            })
+            .expect("record runtime-A pin");
+
+            let _env = EnvGuard::remove("HOMEBOY_TEST_RUNTIME_A_INVOCATION");
+            std::env::set_var("HOMEBOY_TEST_RUNTIME_A_INVOCATION", &invocation);
+            let exit_code = delegate_cook_continue_to_pinned_runtime(
+                cook_id,
+                &[
+                    "homeboy".to_string(),
+                    "agent-task".to_string(),
+                    "cook-continue".to_string(),
+                    cook_id.to_string(),
+                    "--full".to_string(),
+                ],
+            )
+            .expect("current runtime delegates to verified runtime A");
+
+            assert_eq!(exit_code, Some(17));
+            assert_eq!(
+                std::fs::read_to_string(invocation).expect("runtime-A invocation"),
+                format!("agent-task\ncook-continue\n{cook_id}\n--full\n")
+            );
+            assert_eq!(
+                crate::agents::agent_tasks::service::resolve_cook_continuation_run_id(cook_id)
+                    .expect("resolve exact continuation attempt"),
+                run_id
+            );
+            let pinned = crate::agents::agent_tasks::lifecycle::pinned_runtime_for_mutation(run_id)
+                .expect("validate runtime-A pin")
+                .expect("select runtime-A pin");
+            assert!(pinned.is_file());
+            assert_ne!(
+                pinned, runtime_a,
+                "runtime A must execute from its immutable pin"
+            );
+        });
     }
 
     #[test]
