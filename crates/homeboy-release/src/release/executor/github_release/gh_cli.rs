@@ -17,6 +17,7 @@ pub(crate) const GITHUB_RELEASE_UPLOAD_TIMEOUT_ENV: &str =
     "HOMEBOY_GITHUB_RELEASE_UPLOAD_TIMEOUT_SECS";
 const DEFAULT_GITHUB_RELEASE_UPLOAD_TIMEOUT_SECS: u64 = 30 * 60;
 const GITHUB_RELEASE_DOWNLOAD_DIAGNOSTIC_BYTES: usize = 8 * 1024;
+const GITHUB_RELEASE_DOWNLOAD_READER_CLEANUP_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GhCommandOutput {
@@ -594,6 +595,11 @@ fn run_bounded_asset_download(
         )
     })?;
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child = command.spawn().map_err(|error| {
         format!(
             "could not download GitHub Release asset '{}': {error}",
@@ -622,61 +628,57 @@ fn run_bounded_asset_download(
     let status = loop {
         match stream_rx.try_recv() {
             Ok(Ok(identity)) => stream_result = Some(identity),
-            Ok(Err(error)) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = output_handle.join();
-                let _ = stderr_handle.join();
-                return Err(format!(
-                    "could not download GitHub Release asset '{}': {error}",
-                    asset_name
-                ));
-            }
+            Ok(Err(error)) => break Err(format!(
+                "could not download GitHub Release asset '{}': {error}",
+                asset_name
+            )),
             Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = output_handle.join();
-                let _ = stderr_handle.join();
-                return Err(format!(
-                    "could not download GitHub Release asset '{}': download stream ended unexpectedly",
-                    asset_name
-                ));
-            }
+            Err(mpsc::TryRecvError::Disconnected) => break Err(format!(
+                "could not download GitHub Release asset '{}': download stream ended unexpectedly",
+                asset_name
+            )),
         }
         match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() >= timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = output_handle.join();
-                let _ = stderr_handle.join();
-                return Err(format!(
-                    "download of GitHub Release asset '{}' timed out",
-                    asset_name
-                ));
-            }
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if started.elapsed() >= timeout => break Err(format!(
+                "download of GitHub Release asset '{}' timed out",
+                asset_name
+            )),
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = output_handle.join();
-                let _ = stderr_handle.join();
-                return Err(format!(
-                    "could not monitor download of GitHub Release asset '{}': {error}",
-                    asset_name
-                ));
-            }
+            Err(error) => break Err(format!(
+                "could not monitor download of GitHub Release asset '{}': {error}",
+                asset_name
+            )),
         }
     };
+    let status = match status {
+        Ok(status) => status,
+        Err(error) => {
+            terminate_asset_download_child(&mut child);
+            let cleanup = finish_asset_download_readers(
+                &mut child,
+                output_handle,
+                stderr_handle,
+            )
+            .err()
+            .map(|cleanup| format!("; {cleanup}"))
+            .unwrap_or_default();
+            return Err(format!("{error}{cleanup}"));
+        }
+    };
+    let diagnostics = finish_asset_download_readers(&mut child, output_handle, stderr_handle)
+        .map_err(|error| {
+            format!(
+                "could not clean up GitHub Release asset '{}' download: {error}",
+                asset_name
+            )
+        })?;
     let stream_result = match stream_result {
         Some(identity) => Ok(identity),
         None => stream_rx
-            .recv()
+            .try_recv()
             .map_err(|_| "download stream ended without reporting an asset identity".to_string())?,
     };
-    let _ = output_handle.join();
-    let diagnostics = stderr_handle.join().unwrap_or_default();
     if !status.success() {
         return Err(format!(
             "could not download GitHub Release asset '{}': {}",
@@ -690,6 +692,52 @@ fn run_bounded_asset_download(
             asset_name
         )
     })
+}
+
+fn terminate_asset_download_child(child: &mut std::process::Child) {
+    let pid = child.id();
+    #[cfg(unix)]
+    let _ = homeboy_core::process::terminate_isolated_process_group(pid);
+    #[cfg(not(unix))]
+    let _ = homeboy_core::process::terminate_process_tree_best_effort(pid);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn finish_asset_download_readers(
+    child: &mut std::process::Child,
+    output_handle: std::thread::JoinHandle<()>,
+    stderr_handle: std::thread::JoinHandle<String>,
+) -> Result<String, String> {
+    if !wait_for_asset_download_readers(&output_handle, &stderr_handle) {
+        terminate_asset_download_child(child);
+        if !wait_for_asset_download_readers(&output_handle, &stderr_handle) {
+            return Err(format!(
+                "stdout/stderr readers did not finish within {} ms after process-tree termination",
+                GITHUB_RELEASE_DOWNLOAD_READER_CLEANUP_TIMEOUT.as_millis()
+            ));
+        }
+    }
+    output_handle
+        .join()
+        .map_err(|_| "download stream reader panicked".to_string())?;
+    stderr_handle
+        .join()
+        .map_err(|_| "download diagnostics reader panicked".to_string())
+}
+
+fn wait_for_asset_download_readers(
+    output_handle: &std::thread::JoinHandle<()>,
+    stderr_handle: &std::thread::JoinHandle<String>,
+) -> bool {
+    let deadline = Instant::now() + GITHUB_RELEASE_DOWNLOAD_READER_CLEANUP_TIMEOUT;
+    while !output_handle.is_finished() || !stderr_handle.is_finished() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    true
 }
 
 fn stream_bounded_asset(
@@ -1034,6 +1082,108 @@ mod tests {
                 .count(),
             0,
             "timed-out download must clean up its tempfile"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_asset_download_timeout_closes_descendant_inherited_pipes() {
+        assert_inherited_pipe_cleanup(
+            "wait",
+            Duration::from_millis(50),
+            "timed out",
+            "timeout",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_asset_download_oversize_closes_descendant_inherited_pipes() {
+        assert_inherited_pipe_cleanup(
+            "printf 'oversized'; wait",
+            Duration::from_secs(5),
+            "exceeded expected byte length 4",
+            "oversize",
+        );
+    }
+
+    #[cfg(unix)]
+    fn assert_inherited_pipe_cleanup(
+        command_tail: &str,
+        timeout: Duration,
+        expected_error: &str,
+        case: &str,
+    ) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let downloads = temp.path().join("downloads");
+        std::fs::create_dir(&downloads).expect("download tempdir");
+        let leader_pid = temp.path().join("leader.pid");
+        let descendant_pid = temp.path().join("descendant.pid");
+        let script = format!(
+            "echo $$ > {}; sleep 30 & echo $! > {}; {command_tail}",
+            quote_arg(&leader_pid.display().to_string()),
+            quote_arg(&descendant_pid.display().to_string())
+        );
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut command = Command::new("sh");
+            command.args(["-c", &script]);
+            let started = Instant::now();
+            let result = run_bounded_asset_download(
+                &mut command,
+                "asset.zip",
+                4,
+                timeout,
+                Some(&downloads),
+            );
+            let _ = result_tx.send((result, started.elapsed()));
+        });
+
+        let (result, elapsed) = result_rx
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap_or_else(|_| panic!("{case} cleanup exceeded the external bound"));
+        worker.join().expect("download worker");
+        let error = result.unwrap_err();
+        assert!(error.contains(expected_error), "unexpected error: {error}");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "{case} cleanup took {elapsed:?}"
+        );
+        assert_fixture_processes_stopped(&leader_pid, &descendant_pid);
+        assert_eq!(
+            std::fs::read_dir(temp.path().join("downloads"))
+                .expect("read download tempdir")
+                .count(),
+            0,
+            "{case} inherited pipes must not retain the tempfile"
+        );
+    }
+
+    #[cfg(unix)]
+    fn assert_fixture_processes_stopped(
+        leader_pid_path: &std::path::Path,
+        descendant_pid_path: &std::path::Path,
+    ) {
+        let leader_pid = std::fs::read_to_string(leader_pid_path)
+            .expect("leader pid")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric leader pid");
+        let descendant_pid = std::fs::read_to_string(descendant_pid_path)
+            .expect("descendant pid")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric descendant pid");
+        for _ in 0..40 {
+            if !homeboy_core::process::process_group_is_running(leader_pid as i32)
+                && !homeboy_core::process::pid_is_running(descendant_pid)
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        panic!(
+            "download process group {leader_pid} or descendant {descendant_pid} remained alive"
         );
     }
 
