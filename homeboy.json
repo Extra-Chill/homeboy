@@ -683,7 +683,6 @@
         "dead_code::src/commands/runs/gh_actions.rs::UnreferencedExport",
         "dead_code::src/commands/utils/response.rs::UnreferencedExport",
         "dead_code::src/core/agent_task_controller_service/artifacts.rs::UnreferencedExport",
-        "dead_code::src/core/agent_task_deterministic_loop.rs::UnreferencedExport",
         "dead_code::src/core/agent_task_fanout.rs::UnreferencedExport",
         "dead_code::src/core/agent_task_schedule.rs::UnreferencedExport",
         "dead_code::src/core/artifact_dom_boxes.rs::UnreferencedExport",
