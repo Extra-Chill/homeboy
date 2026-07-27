@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use super::*;
 
@@ -232,6 +232,8 @@ pub(crate) fn persisted_artifact_path(
     artifact_id: &str,
     source: &Path,
 ) -> Result<PathBuf> {
+    validate_artifact_path_component("run_id", run_id)?;
+    validate_artifact_path_component("artifact_id", artifact_id)?;
     let file_name = source
         .file_name()
         .and_then(|name| name.to_str())
@@ -239,6 +241,22 @@ pub(crate) fn persisted_artifact_path(
         .map(|name| format!("{artifact_id}-{name}"))
         .unwrap_or_else(|| artifact_id.to_string());
     Ok(paths::artifact_root()?.join(run_id).join(file_name))
+}
+
+fn validate_artifact_path_component(field: &str, value: &str) -> Result<()> {
+    if !matches!(
+        Path::new(value).components().next(),
+        Some(Component::Normal(_))
+    ) || Path::new(value).components().count() != 1
+    {
+        return Err(Error::validation_invalid_argument(
+            field,
+            format!("{field} must be a single path component"),
+            Some(value.to_string()),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn copy_artifact_file(source: &Path, target: &Path) -> Result<()> {
@@ -249,6 +267,23 @@ pub(crate) fn copy_artifact_file(source: &Path, target: &Path) -> Result<()> {
                 Some(format!("create artifact directory {}", parent.display())),
             )
         })?;
+        let metadata = fs::symlink_metadata(parent).map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some(format!("inspect artifact directory {}", parent.display())),
+            )
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(Error::validation_invalid_argument(
+                "path",
+                format!(
+                    "artifact directory parent is a symlink: {}",
+                    parent.display()
+                ),
+                Some(parent.display().to_string()),
+                None,
+            ));
+        }
     }
     fs::copy(source, target).map_err(|e| {
         Error::internal_io(
@@ -263,13 +298,48 @@ pub(crate) fn copy_artifact_file(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Reserve a new target directory before copying so a failed publication can
+/// remove only the tree created by this invocation.
 pub(crate) fn copy_artifact_directory(source: &Path, target: &Path) -> Result<()> {
-    fs::create_dir_all(target).map_err(|e| {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some(format!("create artifact directory {}", parent.display())),
+            )
+        })?;
+        let metadata = fs::symlink_metadata(parent).map_err(|e| {
+            Error::internal_io(
+                e.to_string(),
+                Some(format!("inspect artifact directory {}", parent.display())),
+            )
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(Error::validation_invalid_argument(
+                "path",
+                format!(
+                    "artifact directory parent is a symlink: {}",
+                    parent.display()
+                ),
+                Some(parent.display().to_string()),
+                None,
+            ));
+        }
+    }
+    fs::create_dir(target).map_err(|e| {
         Error::internal_io(
             e.to_string(),
-            Some(format!("create artifact directory {}", target.display())),
+            Some(format!("reserve artifact directory {}", target.display())),
         )
     })?;
+    if let Err(error) = copy_artifact_directory_contents(source, target) {
+        fs::remove_dir_all(target).ok();
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn copy_artifact_directory_contents(source: &Path, target: &Path) -> Result<()> {
     for entry in fs::read_dir(source).map_err(|e| {
         Error::internal_io(
             e.to_string(),
@@ -297,9 +367,28 @@ pub(crate) fn copy_artifact_directory(source: &Path, target: &Path) -> Result<()
             )
         })?;
         if entry_type.is_dir() {
-            copy_artifact_directory(&entry_source, &entry_target)?;
+            fs::create_dir(&entry_target).map_err(|e| {
+                Error::internal_io(
+                    e.to_string(),
+                    Some(format!(
+                        "create artifact directory {}",
+                        entry_target.display()
+                    )),
+                )
+            })?;
+            copy_artifact_directory_contents(&entry_source, &entry_target)?;
         } else if entry_type.is_file() {
             copy_artifact_file(&entry_source, &entry_target)?;
+        } else {
+            return Err(Error::validation_invalid_argument(
+                "path",
+                format!(
+                    "artifact directory contains unsupported entry: {}",
+                    entry_source.display()
+                ),
+                Some(entry_source.display().to_string()),
+                None,
+            ));
         }
     }
     Ok(())
