@@ -770,6 +770,15 @@ fn check(
         apply_check_path_override(&mut rig, path)?;
     }
     let report = rig::run_check(&rig)?;
+    if let Some(path) = path_override {
+        if let Some((component_id, _)) = rig
+            .components
+            .iter()
+            .find(|(_, component)| component.path == path)
+        {
+            rig::record_effective_component_path(&rig.id, component_id, path)?;
+        }
+    }
     let exit_code = if report.success { 0 } else { 1 };
     Ok((
         RigCommandOutput::Check(RigCheckOutput {

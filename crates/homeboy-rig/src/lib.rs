@@ -73,10 +73,11 @@ pub use resource_lifecycle::{
     rig_resource_lifecycle_index, rig_resource_lifecycle_records, RigResourceLifecycleOptions,
 };
 pub use runner::{
-    head_sha_and_branch, run_bench_prepare, run_check, run_check_groups,
-    run_check_groups_with_settings, run_check_with_settings, run_down, run_down_with_settings,
-    run_fuzz_prepare, run_lint, run_repair, run_status, run_up, snapshot_state, BenchPrepareReport,
-    CheckReport, DownReport, FuzzPrepareReport, RepairReport, RepairResourceReport,
+    head_sha_and_branch, preflight_effective_component_checkouts, record_effective_component_path,
+    run_bench_prepare, run_check, run_check_groups, run_check_groups_with_settings,
+    run_check_with_settings, run_down, run_down_with_settings, run_fuzz_prepare, run_lint,
+    run_repair, run_status, run_up, snapshot_state, BenchPrepareReport, CheckReport, DownReport,
+    FuzzPrepareReport, RepairReport, RepairResourceReport, RigComponentStatusReport,
     RigStatusReport, SymlinkStatusReport, SymlinkStatusState, UpReport,
 };
 pub use service::{DiscoveredProcess, ServiceStatus};
