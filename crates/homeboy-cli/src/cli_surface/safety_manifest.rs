@@ -206,60 +206,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
 
     let path = path.iter().map(String::as_str).collect::<Vec<_>>();
     match path.as_slice() {
-        ["runner", "add"]
-        | ["runner", "enable"]
-        | ["runner", "set"]
-        | ["runner", "trust"]
-        | ["runner", "pair"]
-        | ["runner", "remove"]
-        | ["runner", "disconnect"]
-        | ["runner", "refresh-homeboy"] => {
-            metadata.operator_mutating(
-                "mutates runner configuration, trust policy, or runner lifecycle state",
-            );
-        }
-        ["runner", "connect"] | ["runner", "work"] => {
-            metadata.operator_mutating("mutates runner lifecycle state");
-            metadata.risk_exemption = Some(
-                "runner lifecycle command name is the explicit operator action; no dry-run contract exists yet",
-            );
-        }
-        ["runner", "doctor"] => {
-            metadata.operator_mutating(
-                "diagnoses runners by default; --repair mutates runner lifecycle state",
-            );
-            metadata.dangerous_flags = vec!["--repair"];
-        }
-        ["runner", "exec"] => {
-            metadata.operator_mutating("executes commands on a runner unless --dry-run is passed");
-            metadata.dry_run_flag = Some("--dry-run");
-        }
-        ["runner", "lifecycle"] => {
-            metadata.output_notes = "non-mutating runner workspace lifecycle/finalization readiness report suitable for RunOutcomeEnvelope embedding";
-        }
-        ["runner", "workspace", "sync"] => {
-            metadata.operator_mutating("materializes a local worktree into runner workspace state");
-            metadata.dangerous_flags = vec!["--allow-dirty-lab-workspace"];
-        }
-        ["runner", "workspace", "update"] => {
-            metadata
-                .operator_mutating("advances a prepared runner workspace from its snapshot lease");
-        }
-        ["runner", "workspace", "pull"] => {
-            metadata.operator_mutating(
-                "copies selected files from runner workspace state to a local destination",
-            );
-            metadata.dry_run_flag = Some("--dry-run");
-        }
-        ["runner", "workspace", "apply"] => {
-            metadata
-                .operator_mutating("applies a Lab-generated workspace patch to a local worktree");
-            metadata.dangerous_flags = vec!["--force"];
-        }
-        ["runner", "workspace", "prune"] => {
-            metadata.operator_mutating("default output is a non-mutating orphan cleanup plan with candidate/remaining bytes; pass --apply to delete exact runner workspace paths and --passes to drain bounded pages");
-            metadata.dangerous_flags = vec!["--apply"];
-        }
         ["worktree", "queue-create"] => {
             metadata.mutating("default output creates task worktrees one-at-a-time; pass --dry-run to plan without creating");
             metadata.dry_run_flag = Some("--dry-run");

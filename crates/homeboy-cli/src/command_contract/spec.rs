@@ -661,6 +661,73 @@ const FUZZ_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
     ),
 ];
 
+const RUNNER_CONFIG_PATHS: &[&str] = &[
+    "add",
+    "enable",
+    "set",
+    "trust",
+    "pair",
+    "remove",
+    "disconnect",
+    "refresh-homeboy",
+];
+
+const RUNNER_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        RUNNER_CONFIG_PATHS,
+        operator_safety(None, &[]),
+        "mutates runner configuration, trust policy, or runner lifecycle state",
+    ),
+    paths_safety(
+        &["connect", "work"],
+        with_risk_exemption(
+            operator_safety(None, &[]),
+            "runner lifecycle command name is the explicit operator action; no dry-run contract exists yet",
+        ),
+        "mutates runner lifecycle state",
+    ),
+    paths_safety(
+        &["doctor"],
+        operator_safety(None, &["--repair"]),
+        "diagnoses runners by default; --repair mutates runner lifecycle state",
+    ),
+    paths_safety(
+        &["exec"],
+        operator_safety(Some("--dry-run"), &[]),
+        "executes commands on a runner unless --dry-run is passed",
+    ),
+    paths_safety(
+        &["lifecycle"],
+        CommandSafetySpec::read_only(),
+        "non-mutating runner workspace lifecycle/finalization readiness report suitable for RunOutcomeEnvelope embedding",
+    ),
+    paths_safety(
+        &["workspace sync"],
+        operator_safety(None, &["--allow-dirty-lab-workspace"]),
+        "materializes a local worktree into runner workspace state",
+    ),
+    paths_safety(
+        &["workspace update"],
+        operator_safety(None, &[]),
+        "advances a prepared runner workspace from its snapshot lease",
+    ),
+    paths_safety(
+        &["workspace pull"],
+        operator_safety(Some("--dry-run"), &[]),
+        "copies selected files from runner workspace state to a local destination",
+    ),
+    paths_safety(
+        &["workspace apply"],
+        operator_safety(None, &["--force"]),
+        "applies a Lab-generated workspace patch to a local worktree",
+    ),
+    paths_safety(
+        &["workspace prune"],
+        operator_safety(None, &["--apply"]),
+        "default output is a non-mutating orphan cleanup plan with candidate/remaining bytes; pass --apply to delete exact runner workspace paths and --passes to drain bounded pages",
+    ),
+];
+
 const GIT_ISSUE_WRITE_PATHS: &[&str] =
     &["issue create", "issue comment", "issue close", "issue edit"];
 const GIT_PR_WRITE_PATHS: &[&str] = &[
@@ -1075,7 +1142,10 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             ),
         )
     },
-    command_spec("runner", CommandJsonFamily::Workspace),
+    CommandSpec {
+        subcommand_safety: RUNNER_SUBCOMMAND_SAFETY,
+        ..command_spec("runner", CommandJsonFamily::Workspace)
+    },
     CommandSpec {
         subcommand_safety: RUNTIME_SUBCOMMAND_SAFETY,
         ..command_spec_with_representative_argv(
