@@ -483,6 +483,12 @@ fn bind_materialized_worktrees(
     worktrees: &worktree::WorktreeQueueCreateOutput,
 ) -> Result<()> {
     for cook in &mut plan.cooks {
+        // Generated cook-batch children infer their workspace from the
+        // materialized target. A supplied plan's cwd/workspace is explicit
+        // provider and promotion source identity, so preserve it unchanged.
+        if cook.cwd.is_some() || cook.workspace.is_some() {
+            continue;
+        }
         let row = worktrees
             .rows
             .iter()
@@ -1803,6 +1809,60 @@ mod tests {
         assert_eq!(
             compiled[0].initial_plan.tasks[0].workspace.root.as_deref(),
             root.to_str()
+        );
+    }
+
+    #[test]
+    fn cook_batch_binding_preserves_explicit_workspace_and_cwd_precedence() {
+        let mut plan = build_cook_batch_plan(&cook_batch_args()).expect("generated cook plan");
+        let explicit_cwd = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR"))
+            .expect("canonical explicit cwd")
+            .display()
+            .to_string();
+        plan.cooks[0].cwd = Some(explicit_cwd.clone());
+        plan.cooks[0].workspace = Some("/explicit/multi-repo-workspace".to_string());
+        let materialized_root =
+            std::fs::canonicalize(env!("CARGO_MANIFEST_DIR")).expect("canonical materialized root");
+        let rows = plan
+            .cooks
+            .iter()
+            .map(|cook| worktree::WorktreeQueueCreateRow {
+                branch: cook.head.clone().expect("generated head"),
+                handle: cook.to_worktree.clone(),
+                status: worktree::WorktreeQueueCreateStatus::Created,
+                command: Vec::new(),
+                retry_after_seconds: None,
+                active_lock_holder: None,
+                path: Some(materialized_root.display().to_string()),
+                error: None,
+            })
+            .collect();
+        bind_materialized_worktrees(
+            &mut plan,
+            &worktree::WorktreeQueueCreateOutput {
+                schema: "homeboy/worktree-queue-create/v1",
+                repo: "homeboy".to_string(),
+                base_ref: "origin/main".to_string(),
+                dry_run: false,
+                rows,
+            },
+        )
+        .expect("bind materialized worktrees");
+
+        let invocation = plan.cooks[0]
+            .to_cook_invocation(&plan)
+            .expect("explicit workspace cook invocation");
+        assert_eq!(
+            invocation.dispatch.cwd.as_deref(),
+            Some(explicit_cwd.as_str())
+        );
+        assert_eq!(
+            invocation.dispatch.workspace.as_deref(),
+            Some("/explicit/multi-repo-workspace")
+        );
+        assert_eq!(
+            invocation.options.source_worktree_path.as_deref(),
+            Some(std::path::Path::new(&explicit_cwd))
         );
     }
 
