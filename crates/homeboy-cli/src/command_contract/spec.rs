@@ -603,6 +603,19 @@ const REVIEW_AUDIT_BASELINE_PATHS: &[&str] = &[
     "audit-baseline prune",
 ];
 
+const SELF_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        &["docs map"],
+        guarded_mutating_safety(&["--write"]),
+        "default JSON output is non-mutating; pass --write to write markdown docs to disk",
+    ),
+    paths_safety(
+        &["cleanup-runtime-tmp"],
+        operator_safety(None, &["--apply"]),
+        "default output is a non-mutating cleanup plan; pass --apply to delete runtime temp entries",
+    ),
+];
+
 const REVIEW_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
     paths_safety(
         &["ci autofix"],

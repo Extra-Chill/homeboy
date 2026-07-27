@@ -215,21 +215,10 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
 
     let path = path.iter().map(String::as_str).collect::<Vec<_>>();
     match path.as_slice() {
-        ["contract", "manifest"] => {}
-        ["self", "docs", "map"] => {
-            metadata.mutating(
-                "default JSON output is non-mutating; pass --write to write markdown docs to disk",
-            );
-            metadata.dangerous_flags = vec!["--write"];
-        }
         ["cleanup", "artifacts"] => {
             metadata.mutating(
                 "default output is a non-mutating cleanup plan; pass --apply to remove artifacts",
             );
-            metadata.dangerous_flags = vec!["--apply"];
-        }
-        ["self", "cleanup-runtime-tmp"] => {
-            metadata.operator_mutating("default output is a non-mutating cleanup plan; pass --apply to delete runtime temp entries");
             metadata.dangerous_flags = vec!["--apply"];
         }
         ["extension", "setup"]

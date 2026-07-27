@@ -21,7 +21,7 @@ macro_rules! ops_command_descriptors {
             (schedule, Schedule, crate::commands::schedule::ScheduleArgs, command_spec("schedule", CommandJsonFamily::Ops), crate::commands::schedule::run),
             (status, Status, crate::commands::status::StatusArgs, command_spec("status", CommandJsonFamily::Ops), crate::commands::status::run),
             (git, Git, crate::commands::git::GitArgs, command_spec("git", CommandJsonFamily::Ops), crate::commands::git::run),
-            (self_cmd, SelfCmd, crate::commands::self_cmd::SelfArgs, command_spec_with_output_notes("self", CommandJsonFamily::Ops, "inspects the active Homeboy runtime and renders built-in CLI documentation"), crate::commands::self_cmd::run),
+            (self_cmd, SelfCmd, crate::commands::self_cmd::SelfArgs, CommandSpec { subcommand_safety: SELF_SUBCOMMAND_SAFETY, ..command_spec_with_output_notes("self", CommandJsonFamily::Ops, "inspects the active Homeboy runtime and renders built-in CLI documentation") }, crate::commands::self_cmd::run),
             (api, Api, crate::commands::api::ApiArgs, CommandSpec { subcommand_safety: API_SUBCOMMAND_SAFETY, ..command_spec("api", CommandJsonFamily::Ops) }, crate::commands::api::run),
             (upgrade, Upgrade, crate::commands::upgrade::UpgradeArgs, command_spec_with_output_notes_and_safety("upgrade", CommandJsonFamily::Ops, "upgrades the active Homeboy binary, extensions, runners, and services unless --check or skip flags are used", operator_safety(None, UPGRADE_DANGEROUS_FLAGS)), crate::commands::upgrade::run),
         }
@@ -49,7 +49,7 @@ macro_rules! ops_command_spec {
     (schedule) => { command_spec("schedule", CommandJsonFamily::Ops) };
     (status) => { command_spec("status", CommandJsonFamily::Ops) };
     (git) => { command_spec("git", CommandJsonFamily::Ops) };
-    (self_cmd) => { command_spec_with_output_notes("self", CommandJsonFamily::Ops, "inspects the active Homeboy runtime and renders built-in CLI documentation") };
+    (self_cmd) => { CommandSpec { subcommand_safety: SELF_SUBCOMMAND_SAFETY, ..command_spec_with_output_notes("self", CommandJsonFamily::Ops, "inspects the active Homeboy runtime and renders built-in CLI documentation") } };
     (api) => { CommandSpec { subcommand_safety: API_SUBCOMMAND_SAFETY, ..command_spec("api", CommandJsonFamily::Ops) } };
     (upgrade) => { command_spec_with_output_notes_and_safety("upgrade", CommandJsonFamily::Ops, "upgrades the active Homeboy binary, extensions, runners, and services unless --check or skip flags are used", operator_safety(None, UPGRADE_DANGEROUS_FLAGS)) };
 }
