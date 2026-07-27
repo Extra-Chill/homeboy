@@ -44,6 +44,11 @@ pub struct HomeboyConfig {
     #[serde(default)]
     pub notifications: NotificationConfig,
 
+    /// Identity applied to commits homeboy creates on its own behalf, such as
+    /// an unattended harvest recovery.
+    #[serde(default)]
+    pub automation: AutomationConfig,
+
     /// External worktree lifecycle providers keyed by provider id.
     ///
     /// Providers are command-backed integration points owned by the local
@@ -145,6 +150,7 @@ impl Default for HomeboyConfig {
             triage: TriageConfig::default(),
             agent_task: AgentTaskConfig::default(),
             notifications: NotificationConfig::default(),
+            automation: AutomationConfig::default(),
             worktree_providers: HashMap::new(),
             github_hosts: HashMap::new(),
             git_hosts: HashMap::new(),
@@ -255,6 +261,19 @@ pub struct NotificationConfig {
     /// no route bound to its persisted run record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_transport: Option<String>,
+}
+
+/// Identity used for commits homeboy authors itself.
+///
+/// A one-off recovery can pass `--author`, but an unattended harvest invents an
+/// identity at the call site on every run, so nothing records what that string
+/// is supposed to mean. Configuring it once makes automated commits
+/// attributable to a real, intentional actor (#10221).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutomationConfig {
+    /// `Name <email>` applied to automated commits when no author is passed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_identity: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

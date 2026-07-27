@@ -82,6 +82,17 @@ pub struct Component {
     pub capability_extensions: HashMap<String, String>,
     pub version_targets: Option<Vec<VersionTarget>>,
     pub changelog_target: Option<String>,
+
+    /// Paths never compared when harvesting remote content into this component.
+    ///
+    /// A deployed artifact is not its source tree: packaging generates files
+    /// that exist only on the remote, and development-only files such as
+    /// lockfiles and manifests are never deployed. Declaring those here keeps
+    /// the exclude set with the component instead of requiring it to be retyped
+    /// on every invocation, where a drifting copy silently changes what drift
+    /// means (#10220).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harvest_excludes: Option<Vec<String>>,
     pub changelog_next_section_label: Option<String>,
     pub changelog_next_section_aliases: Option<Vec<String>>,
     /// Lifecycle hooks: event name -> list of shell commands.
@@ -194,6 +205,8 @@ struct RawComponent {
     version_targets: Option<Vec<VersionTarget>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     changelog_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    harvest_excludes: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     changelog_next_section_label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -267,6 +280,7 @@ impl From<RawComponent> for Component {
             capability_extensions: raw.capability_extensions,
             version_targets: raw.version_targets,
             changelog_target: raw.changelog_target,
+            harvest_excludes: None,
             changelog_next_section_label: raw.changelog_next_section_label,
             changelog_next_section_aliases: raw.changelog_next_section_aliases,
             hooks: raw.hooks,
@@ -314,6 +328,7 @@ impl From<Component> for RawComponent {
             capability_extensions: c.capability_extensions,
             version_targets: c.version_targets,
             changelog_target: c.changelog_target,
+            harvest_excludes: c.harvest_excludes,
             changelog_next_section_label: c.changelog_next_section_label,
             changelog_next_section_aliases: c.changelog_next_section_aliases,
             hooks: c.hooks,
@@ -392,6 +407,7 @@ impl Component {
             capability_extensions: HashMap::new(),
             version_targets: None,
             changelog_target: None,
+            harvest_excludes: None,
             changelog_next_section_label: None,
             changelog_next_section_aliases: None,
             hooks: HashMap::new(),
