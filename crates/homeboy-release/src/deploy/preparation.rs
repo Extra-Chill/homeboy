@@ -11,7 +11,7 @@ use homeboy_core::error::{Error, Result};
 use super::execution::{
     release_artifact_plan, resolve_planned_release_artifact, ReleaseArtifactPlan,
 };
-use super::orchestration_ref_checkout::{ExactRefCheckout, ExactRefIdentity};
+use super::orchestration_ref_checkout::ExactRefCheckout;
 use super::{sha256_file, DeployConfig, PreparedDeployArtifact};
 use homeboy_core::git::release_download::{ReleaseArtifactLease, ReleaseArtifactStore};
 
@@ -108,11 +108,6 @@ impl ComponentPayloadPreparationRequest {
             release: self.component.release.clone(),
             ..Component::default()
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn evidence_digest(&self) -> String {
-        digest_json(&self.evidence())
     }
 }
 
@@ -235,7 +230,6 @@ impl From<&DeployConfig> for PreparationConfig {
 pub(crate) struct PreparedComponentPayload {
     pub artifact: PreparedDeployArtifact,
     pub source_commit: String,
-    pub exact_ref: Option<ExactRefIdentity>,
     _release_artifact: Option<ReleaseArtifactLease>,
     _exact_ref_checkout: Option<ExactRefCheckout>,
     payload_artifact: PreparedArtifactCleanup,
@@ -421,7 +415,6 @@ fn prepare_payload(
         return Ok(PreparedComponentPayload {
             source_commit: artifact.source_commit.clone(),
             artifact,
-            exact_ref: None,
             _release_artifact: None,
             _exact_ref_checkout: None,
             payload_artifact: PreparedArtifactCleanup(None),
@@ -581,7 +574,6 @@ fn prepare_payload(
     Ok(PreparedComponentPayload {
         artifact,
         source_commit,
-        exact_ref,
         _release_artifact: release_artifact,
         _exact_ref_checkout: checkout,
         payload_artifact,
@@ -1019,7 +1011,6 @@ mod tests {
 
         assert_eq!(first.identity(), second.identity());
         assert_eq!(first.evidence(), second.evidence());
-        assert_eq!(first.evidence_digest(), second.evidence_digest());
         assert_ne!(
             first.identity(),
             ComponentPayloadPreparationRequest::new(

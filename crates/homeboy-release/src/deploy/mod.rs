@@ -11,7 +11,6 @@ mod path_roots;
 pub(crate) mod permissions;
 mod planning;
 mod policy;
-#[allow(dead_code)] // Internal contract consumed by the follow-up payload integration.
 pub(crate) mod preparation;
 pub(crate) mod provenance;
 mod safety_and_artifact;
