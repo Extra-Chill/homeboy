@@ -1,3 +1,4 @@
+use homeboy_engine_primitives::content_hash;
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -6,7 +7,6 @@ use std::time::SystemTime;
 use homeboy::core::observation::{disk_budget::disk_budget, loop_inventory_run, NewRunRecord};
 use homeboy::core::{Error, Result};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 mod types;
 
@@ -383,7 +383,7 @@ fn is_archive_file(path: &Path) -> bool {
 
 fn patch_fingerprint(path: &Path, size_bytes: u64) -> Result<String> {
     let content = fs::read(path).map_err(|e| io_error("read patch", path, e))?;
-    let digest = format!("{:x}", Sha256::digest(&content));
+    let digest = content_hash::sha256_hex(&content);
     Ok(format!("{}:{size_bytes}", &digest[..16]))
 }
 

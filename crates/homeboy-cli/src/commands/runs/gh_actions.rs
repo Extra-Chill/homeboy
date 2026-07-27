@@ -20,6 +20,7 @@
 //! `runs drift` primitives project arbitrary JSONPath expressions over the
 //! resulting artifact corpus.
 
+use homeboy_engine_primitives::content_hash;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Cursor, Read};
@@ -28,7 +29,6 @@ use std::path::PathBuf;
 use clap::Args;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use homeboy::core::git::GhClient;
 use homeboy::core::observation::{ObservationStore, RunRecord};
@@ -205,7 +205,7 @@ pub fn import_from_gh_actions(args: GhActionsImportArgs) -> CmdResult<RunsOutput
                     &file_name,
                     &json_bytes,
                 )?;
-                let sha = format!("{:x}", Sha256::digest(&json_bytes));
+                let sha = content_hash::sha256_hex(&json_bytes);
                 let size = i64::try_from(json_bytes.len()).ok();
                 let artifact_record = homeboy::core::observation::ArtifactRecord {
                     id: artifact_id,
@@ -705,8 +705,7 @@ mod helpers {
 
     pub fn list_runs_cache_key(repo: &str, workflow: &str) -> String {
         let composite = format!("{repo}::{workflow}");
-        let digest = Sha256::digest(composite.as_bytes());
-        format!("{:x}", digest)
+        content_hash::sha256_hex(composite.as_bytes())
     }
 
     pub fn list_runs_cache_path(key: &str, ext: &str) -> homeboy::core::Result<PathBuf> {

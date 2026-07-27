@@ -1,8 +1,8 @@
+use homeboy_engine_primitives::content_hash;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use homeboy::core::observation::{
     build_bundle, bundle_artifact_uri, extract_directory_artifact_archive, portable_artifact_label,
@@ -240,8 +240,7 @@ fn rewrite_bundle_run_references(bundle: &mut ObservationBundle, from: &str, to:
 }
 
 fn remapped_child_record_id(id: &str, run_id: &str) -> String {
-    let hash = Sha256::digest(format!("{run_id}\0{id}").as_bytes());
-    let hex = format!("{hash:x}");
+    let hex = content_hash::sha256_hex(format!("{run_id}\0{id}").as_bytes());
     format!("{id}-imported-{}", &hex[..16])
 }
 
@@ -256,8 +255,7 @@ fn remapped_lab_run_id(run: &RunRecord) -> homeboy::core::Result<String> {
             run.id, error
         ))
     })?;
-    let hash = Sha256::digest(bytes);
-    let hex = format!("{hash:x}");
+    let hex = content_hash::sha256_hex(&bytes);
     Ok(format!("{}-imported-{}", run.id, &hex[..16]))
 }
 

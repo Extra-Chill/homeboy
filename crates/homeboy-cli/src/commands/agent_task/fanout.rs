@@ -1,8 +1,8 @@
 //! Public batch-cook fanout command handlers.
 
+use homeboy_engine_primitives::content_hash;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 use homeboy::agents::agent_task_provider::AgentTaskProviderProfileDeclaration;
@@ -947,8 +947,8 @@ fn cook_recipe_source_identity(plan: &BatchCookFanoutPlan, cook: &BatchCookSpec)
     }))
     .map_err(|error| Error::internal_json(error.to_string(), None))?;
     Ok(format!(
-        "homeboy://agent-task/fanout-source/{:x}",
-        Sha256::digest(encoded)
+        "homeboy://agent-task/fanout-source/{}",
+        content_hash::sha256_hex(&encoded)
     ))
 }
 
@@ -1079,7 +1079,7 @@ fn build_cook_batch_plan(args: &AgentTaskFanoutCookBatchArgs) -> Result<BatchCoo
         .unwrap_or_else(|| "empty".to_string());
     let fanout_id = args.fanout_id.clone().unwrap_or_else(|| {
         let encoded = serde_json::to_vec(&cooks).expect("Cook specs serialize");
-        let digest = format!("{:x}", Sha256::digest(encoded));
+        let digest = content_hash::sha256_hex(&encoded);
         format!(
             "cook-batch-{}-{}-{}-{}",
             args.repo,
