@@ -38,7 +38,7 @@ const mode = process.env.FIXTURE_MODE;
 if (mode !== 'crash') {
   fs.mkdirSync(artifacts + '/runtime-fixture/files', { recursive: true });
   fs.writeFileSync(artifacts + '/latest-runtime.json', JSON.stringify({ paths: { runtimeDirectory: 'runtime-fixture' } }));
-  fs.writeFileSync(artifacts + '/runtime-fixture/files/test-results.json', JSON.stringify({ schema: 'wp-codebox/test-results/v1', status: mode === 'success' ? 'passed' : 'failed', summary: { total: mode === 'failure' ? 281 : 0, passed: 0, failed: 0, skipped: 0 } }));
+  fs.writeFileSync(artifacts + '/runtime-fixture/files/test-results.json', JSON.stringify({ schema: 'wp-codebox/test-results/v1', status: 'unknown', summary: { total: mode === 'failure' ? 281 : 0, passed: 0, failed: 0, skipped: 0 } }));
 }
 const output = mode === 'success' ? 'OK (3 tests, 76 assertions)\\n' : 'ERRORS!\\nTests: 281, Assertions: 329, Errors: 46, Failures: 100.\\n';
 process.stdout.write(JSON.stringify({ executions: [{ stdout: output, stderr: '' }] }));
@@ -58,6 +58,10 @@ try {
     assert.equal(run.status, mode === 'success' ? 0 : 2, run.stderr);
     assert.deepEqual(JSON.parse(await readFile(results, 'utf8')), expected);
     const runArtifact = path.join(artifacts, (await readdir(artifacts)).find((entry) => entry.startsWith('wp-codebox-phpunit.')));
+    if (mode !== 'crash') {
+      const artifactResults = JSON.parse(await readFile(path.join(runArtifact, 'runtime-fixture', 'files', 'test-results.json'), 'utf8'));
+      assert.equal(artifactResults.status, expected.failed > 0 ? 'failed' : 'passed');
+    }
     const options = JSON.parse(await readFile(path.join(runArtifact, 'wp-codebox-phpunit-recipe-options.json'), 'utf8'));
     const profile = JSON.parse(await readFile(path.join(runArtifact, 'wp-codebox-phpunit-profile.json'), 'utf8'));
     const provenance = JSON.parse(await readFile(path.join(runArtifact, 'wp-codebox-phpunit-provenance.json'), 'utf8'));

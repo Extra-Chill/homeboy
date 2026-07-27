@@ -534,6 +534,7 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
     const summary = isObject(results.summary) ? results.summary : {};
     if (aggregate) {
       results.summary = { ...summary, ...aggregate };
+      results.status = aggregate.failed > 0 ? 'failed' : 'passed';
     }
     const references = Array.isArray(results.rawLogReferences) ? results.rawLogReferences : [];
     results.rawLogReferences = [
