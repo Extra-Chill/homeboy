@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use base64::Engine;
 use homeboy_core::source_snapshot::SourceSnapshot;
@@ -48,7 +48,9 @@ use super::util::{
     validate_absolute_path,
 };
 use homeboy_core::engine::shell;
-use homeboy_core::server::{is_transient_ssh_error, CommandOutput};
+use homeboy_core::server::{
+    execute_local_command_in_dir_with_timeout, is_transient_ssh_error, CommandOutput,
+};
 
 mod snapshots;
 use snapshots::workspace_snapshot_for_lease;
@@ -63,6 +65,10 @@ const METADATA_SSH_RECOVERY_ATTEMPTS: usize = 2;
 const WORKSPACE_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 const WORKSPACE_METADATA_OUTPUT_LIMIT: usize = 4 * 1024;
 const WORKSPACE_PRUNE_TIMEOUT: Duration = Duration::from_secs(30);
+// A page must leave time for its transport timeout and advance past a directory
+// whose size cannot be measured. Size is advisory, never a deletion proof.
+const WORKSPACE_PRUNE_SCAN_BUDGET: Duration = Duration::from_secs(20);
+const WORKSPACE_PRUNE_SIZE_TIMEOUT: Duration = Duration::from_secs(1);
 // Prepared sources include hydrated dependency trees, so retain a small fixed
 // working set instead of making every historical commit permanent runner state.
 const PREPARED_SOURCE_CACHE_MAX_ENTRIES: usize = 8;
@@ -2515,17 +2521,21 @@ fn prune_candidates_local(
             paths.pop_last();
         }
     }
-    let scan_complete = paths.len() <= scan_limit;
+    let mut scan_complete = paths.len() <= scan_limit;
     if !scan_complete {
         paths.pop_last();
     }
     let inspected = paths.into_iter().collect::<Vec<_>>();
-    let scanned_workspace_count = inspected.len();
-    let continuation_cursor = (!scan_complete)
-        .then(|| inspected.last())
-        .flatten()
-        .map(|path| encode_prune_cursor(path));
+    let mut scanned_workspace_count = 0;
+    let deadline = Instant::now() + WORKSPACE_PRUNE_SCAN_BUDGET;
+    let mut last_inspected = None;
     for path in inspected {
+        if last_inspected.is_some() && Instant::now() >= deadline {
+            scan_complete = false;
+            break;
+        }
+        last_inspected = Some(path.clone());
+        scanned_workspace_count += 1;
         if let Some(candidate) = classify_local_candidate(runner, root, &path, options)? {
             if candidate.liveness.state == "inactive" {
                 candidates.push(candidate);
@@ -2534,6 +2544,10 @@ fn prune_candidates_local(
             }
         }
     }
+    let continuation_cursor = (!scan_complete)
+        .then(|| last_inspected.as_ref())
+        .flatten()
+        .map(|path| encode_prune_cursor(path));
     candidates.sort_by(|a, b| {
         b.bytes
             .cmp(&a.bytes)
@@ -2585,6 +2599,14 @@ fn classify_local_candidate(
     let Some(reason) = reason else {
         return Ok(None);
     };
+    let size = bounded_directory_size(path);
+    let liveness = match size {
+        Some(_) => workspace_liveness(runner, &metadata, path),
+        None => liveness(
+            "unknown",
+            vec!["workspace_size_measurement_unavailable".to_string()],
+        ),
+    };
     Ok(Some(RunnerWorkspacePruneEntry {
         remote_path: path.display().to_string(),
         source_path: source_path.to_string(),
@@ -2605,9 +2627,9 @@ fn classify_local_candidate(
             .and_then(|value| value.as_str())
             .map(str::to_string),
         age_seconds,
-        bytes: directory_size(path)?,
+        bytes: size.unwrap_or(0),
         reason,
-        liveness: workspace_liveness(runner, &metadata, path),
+        liveness,
     }))
 }
 
@@ -2924,8 +2946,8 @@ fn prune_candidates_ssh(
             scan_status = Some((scanned_workspace_count, scan_complete, continuation_cursor));
             continue;
         }
-        let parts = line.splitn(4, '\t').collect::<Vec<_>>();
-        if parts.len() != 4 {
+        let parts = line.splitn(5, '\t').collect::<Vec<_>>();
+        if parts.len() != 5 {
             continue;
         }
         let age_seconds = parts[0].parse::<u64>().unwrap_or(0);
@@ -2949,6 +2971,14 @@ fn prune_candidates_ssh(
         let Some(reason) = reason else {
             continue;
         };
+        let liveness = if parts[4] == "measured" {
+            workspace_liveness(runner, &metadata, Path::new(&parts[2]))
+        } else {
+            liveness(
+                "unknown",
+                vec!["workspace_size_measurement_unavailable".to_string()],
+            )
+        };
         let entry = RunnerWorkspacePruneEntry {
             remote_path,
             source_path: source_path.to_string(),
@@ -2971,7 +3001,7 @@ fn prune_candidates_ssh(
             age_seconds,
             bytes,
             reason,
-            liveness: workspace_liveness(runner, &metadata, Path::new(&parts[2])),
+            liveness,
         };
         if entry.liveness.state == "inactive" {
             candidates.push(entry);
@@ -3033,12 +3063,14 @@ pub(crate) fn prune_scan_command(
     after: Option<&Path>,
 ) -> String {
     format!(
-        "root={root}; after={after}; meta_rel={meta}; min_age={min_age}; now=$(date +%s); if [ -d \"$root\" ]; then LC_ALL=C find \"$root\" -mindepth 1 -maxdepth 1 -type d -print | LC_ALL=C sort | {{ scanned=0; complete=complete; last=; while IFS= read -r dir; do [ -z \"$after\" ] || [ \"$dir\" \\> \"$after\" ] || continue; if [ \"$scanned\" -ge {scan_limit} ]; then complete=partial; break; fi; scanned=$((scanned + 1)); last=$dir; meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; mtime=$(stat -c %Y \"$dir\" 2>/dev/null || stat -f %m \"$dir\" 2>/dev/null || echo 0); age=$((now-mtime)); [ \"$age\" -ge \"$min_age\" ] || continue; if find \"$dir/.homeboy\" -type f \\( -name \"*.patch\" -o -name \"*.diff\" -o -name \"*patch*\" \\) 2>/dev/null | grep -q .; then continue; fi; blocks=$(du -sk \"$dir\" 2>/dev/null); blocks=${{blocks%%[!0-9]*}}; bytes=$((blocks * 1024)); printf \"%s\\t%s\\t%s\\t\" \"$age\" \"${{bytes:-0}}\" \"$dir\"; base64 < \"$meta\" | tr -d \"\\n\"; printf \"\\n\"; done; printf \"__homeboy_prune_scan__\\t%s\\t%s\\t%s\\n\" \"$scanned\" \"$complete\" \"$last\"; }}; else printf \"__homeboy_prune_scan__\\t0\\tcomplete\\t\\n\"; fi",
+        "root={root}; after={after}; meta_rel={meta}; min_age={min_age}; now=$(date +%s); deadline=$((now + {scan_budget})); if [ -d \"$root\" ]; then LC_ALL=C find \"$root\" -mindepth 1 -maxdepth 1 -type d -print | LC_ALL=C sort | {{ scanned=0; complete=complete; last=; while IFS= read -r dir; do [ -z \"$after\" ] || [ \"$dir\" \\> \"$after\" ] || continue; if [ \"$scanned\" -ge {scan_limit} ] || {{ [ \"$scanned\" -gt 0 ] && [ \"$(date +%s)\" -ge \"$deadline\" ]; }}; then complete=partial; break; fi; scanned=$((scanned + 1)); last=$dir; meta=\"$dir/$meta_rel\"; [ -f \"$meta\" ] || continue; mtime=$(stat -c %Y \"$dir\" 2>/dev/null || stat -f %m \"$dir\" 2>/dev/null || echo 0); age=$((now-mtime)); [ \"$age\" -ge \"$min_age\" ] || continue; if find \"$dir/.homeboy\" -type f \\( -name \"*.patch\" -o -name \"*.diff\" -o -name \"*patch*\" \\) 2>/dev/null | grep -q .; then continue; fi; blocks=; size_file=$(mktemp \"${{TMPDIR:-/tmp}}/homeboy-prune.XXXXXX\") || size_file=; if [ -n \"$size_file\" ]; then du -sk \"$dir\" > \"$size_file\" 2>/dev/null & measure_pid=$!; {{ sleep {size_timeout}; kill \"$measure_pid\" 2>/dev/null; }} & measure_watchdog=$!; wait \"$measure_pid\"; measure_status=$?; kill \"$measure_watchdog\" 2>/dev/null; wait \"$measure_watchdog\" 2>/dev/null; [ \"$measure_status\" -eq 0 ] && blocks=$(cat \"$size_file\"); rm -f \"$size_file\"; fi; blocks=${{blocks%%[!0-9]*}}; bytes=$((blocks * 1024)); measurement=measured; [ -n \"$blocks\" ] || measurement=unknown; printf \"%s\\t%s\\t%s\\t\" \"$age\" \"${{bytes:-0}}\" \"$dir\"; base64 < \"$meta\" | tr -d \"\\n\"; printf \"\\t%s\\n\" \"$measurement\"; done; [ \"$complete\" = partial ] || last=; printf \"__homeboy_prune_scan__\\t%s\\t%s\\t%s\\n\" \"$scanned\" \"$complete\" \"$last\"; }}; else printf \"__homeboy_prune_scan__\\t0\\tcomplete\\t\\n\"; fi",
         root = shell::quote_arg(root),
         after = shell::quote_arg(after.and_then(Path::to_str).unwrap_or("")),
         meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
         min_age = shell::quote_arg(&min_age.to_string()),
         scan_limit = scan_limit,
+        scan_budget = WORKSPACE_PRUNE_SCAN_BUDGET.as_secs(),
+        size_timeout = WORKSPACE_PRUNE_SIZE_TIMEOUT.as_secs(),
     )
 }
 
@@ -3207,30 +3239,22 @@ fn path_age_seconds(path: &Path) -> Result<u64> {
         .as_secs())
 }
 
-fn directory_size(path: &Path) -> Result<u64> {
-    let mut total = 0u64;
-    for entry in fs::read_dir(path).map_err(|err| {
-        Error::internal_io(err.to_string(), Some("read workspace size".to_string()))
-    })? {
-        let entry = entry.map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some("read workspace size entry".to_string()),
-            )
-        })?;
-        let metadata = entry.metadata().map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some("read workspace size metadata".to_string()),
-            )
-        })?;
-        if metadata.is_dir() {
-            total = total.saturating_add(directory_size(&entry.path())?);
-        } else if metadata.is_file() {
-            total = total.saturating_add(metadata.len());
-        }
-    }
-    Ok(total)
+fn bounded_directory_size(path: &Path) -> Option<u64> {
+    let command = format!("du -sk {}", shell::quote_arg(&path.display().to_string()));
+    let output = execute_local_command_in_dir_with_timeout(
+        &command,
+        None,
+        None,
+        WORKSPACE_PRUNE_SIZE_TIMEOUT,
+    );
+    output.success.then_some(())?;
+    output
+        .stdout
+        .split_whitespace()
+        .next()?
+        .parse::<u64>()
+        .ok()
+        .map(|blocks| blocks.saturating_mul(1024))
 }
 
 fn has_pending_apply_back_local(path: &Path) -> bool {
