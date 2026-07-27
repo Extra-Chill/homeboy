@@ -52,6 +52,9 @@ pub struct CommandSafetySpec {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandPathSafetySpec {
+    /// Space-separated subcommand paths *below* the owning command, matched
+    /// against the clap-derived command surface. The empty string addresses the
+    /// owning command itself.
     pub paths: &'static [&'static str],
     pub safety: CommandSafetySpec,
     pub output_notes: Option<&'static str>,
@@ -445,6 +448,32 @@ const fn guarded_mutating_safety(dangerous_flags: &'static [&'static str]) -> Co
     }
 }
 
+const fn with_dry_run(safety: CommandSafetySpec, dry_run_flag: &'static str) -> CommandSafetySpec {
+    CommandSafetySpec {
+        dry_run_flag: Some(dry_run_flag),
+        ..safety
+    }
+}
+
+const fn with_risk_exemption(
+    safety: CommandSafetySpec,
+    risk_exemption: &'static str,
+) -> CommandSafetySpec {
+    CommandSafetySpec {
+        risk_exemption: Some(risk_exemption),
+        ..safety
+    }
+}
+
+/// Operator-gated but non-mutating: an explicit operator entry point that only
+/// renders a plan.
+const fn operator_read_only() -> CommandSafetySpec {
+    CommandSafetySpec {
+        operator: true,
+        ..CommandSafetySpec::read_only()
+    }
+}
+
 const fn paths_safety(
     paths: &'static [&'static str],
     safety: CommandSafetySpec,
@@ -515,6 +544,8 @@ const PROJECT_MUTATING_PATHS: &[&str] = &[
 const COMPONENT_MUTATING_PATHS: &[&str] = &["create", "set", "delete", "rename", "setup"];
 const COMPONENT_GUARDED_PATHS: &[&str] = &["reconcile", "artifacts"];
 const RIG_STATIC_LINT_PATHS: &[&str] = &["lint", "package lint", "materialize"];
+const RIG_RUNTIME_MUTATING_PATHS: &[&str] = &["down", "repair", "install", "update"];
+const RIG_MANAGED_FILE_PATHS: &[&str] = &["sync", "app install", "app update", "app uninstall"];
 
 const DEPS_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
     DEPS_MUTATING_PATHS,
@@ -588,11 +619,459 @@ const COMPONENT_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
         "default output is non-mutating; pass --apply to repair or remove artifacts",
     ),
 ];
-const RIG_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
-    RIG_STATIC_LINT_PATHS,
-    CommandSafetySpec::read_only(),
-    "reads rig package files and emits the standard JSON lint report without evaluating the live environment",
+const RIG_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        RIG_STATIC_LINT_PATHS,
+        CommandSafetySpec::read_only(),
+        "reads rig package files and emits the standard JSON lint report without evaluating the live environment",
+    ),
+    paths_safety(
+        &["release-lock"],
+        operator_safety(None, &["--force"]),
+        "releases a local rig active-run lease; --force can reclaim a live holder's guardrail",
+    ),
+    paths_safety(
+        &["up"],
+        operator_safety(Some("--dry-run"), &[]),
+        "mutates local rig runtime state unless --dry-run is passed with --runner to emit a runner exec plan",
+    ),
+    paths_safety(
+        RIG_RUNTIME_MUTATING_PATHS,
+        operator_safety(None, &[]),
+        "mutates local rig runtime state or installed rig packages",
+    ),
+    paths_safety(
+        RIG_MANAGED_FILE_PATHS,
+        operator_safety(Some("--dry-run"), &[]),
+        "mutates rig-managed files unless --dry-run is passed",
+    ),
+    paths_safety(
+        &["sources remove", "sources refresh"],
+        mutating_safety(),
+        "mutates installed rig source metadata",
+    ),
+];
+
+const FUZZ_CASE_REPLAY_PATHS: &[&str] = &["replay", "minimize"];
+/// The empty path addresses bare `homeboy fuzz`, which shares the default
+/// planning/execution contract with its measurement subcommands.
+const FUZZ_MEASUREMENT_PATHS: &[&str] = &["", "run", "plan", "run-campaign"];
+
+const FUZZ_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        FUZZ_CASE_REPLAY_PATHS,
+        mutating_safety(),
+        "replays or minimizes a persisted fuzz case against local code and may write run artifacts",
+    ),
+    paths_safety(
+        FUZZ_MEASUREMENT_PATHS,
+        guarded_safety(FUZZ_DANGEROUS_FLAGS),
+        "read-only fuzz planning/execution contract by default; --allow-destructive infers isolated mode and attaches an auditable homeboy/isolation-proof/v1 unless one is supplied",
+    ),
+];
+
+const WORKTREE_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        &["queue-create"],
+        with_dry_run(mutating_safety(), "--dry-run"),
+        "default output creates task worktrees one-at-a-time; pass --dry-run to plan without creating",
+    ),
+    paths_safety(
+        &["create"],
+        mutating_safety(),
+        "creates a task worktree from a registered component checkout",
+    ),
+    paths_safety(
+        &["remove"],
+        guarded_mutating_safety(&["--force"]),
+        "removes a task worktree after safety checks",
+    ),
+    paths_safety(
+        &["cleanup"],
+        operator_safety(
+            Some("--dry-run"),
+            &["--apply", "--force", "--cleanup-artifacts"],
+        ),
+        "default output is a non-mutating task-worktree cleanup plan; pass --apply to remove eligible worktrees, and --cleanup-artifacts to include rebuildable Homeboy artifacts",
+    ),
+];
+
+const TUNNEL_SERVICE_DECLARATION_PATHS: &[&str] =
+    &["service expose", "service set", "service remove"];
+const TUNNEL_PREVIEW_RUNTIME_PATHS: &[&str] = &[
+    "preview-client start",
+    "preview-consumer run",
+    "preview-ingress serve",
+    "artifact-origin serve",
+];
+
+const TUNNEL_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        TUNNEL_SERVICE_DECLARATION_PATHS,
+        operator_safety(None, &[]),
+        "mutates private service tunnel declarations",
+    ),
+    paths_safety(
+        &["service start", "service stop"],
+        operator_safety(None, &[]),
+        "mutates private service tunnel runtime state",
+    ),
+    paths_safety(
+        TUNNEL_PREVIEW_RUNTIME_PATHS,
+        operator_safety(None, &[]),
+        "starts or supervises tunnel preview runtime state",
+    ),
+    paths_safety(
+        &["preview-ingress route", "preview-ingress unroute"],
+        operator_safety(None, &[]),
+        "mutates preview ingress route state",
+    ),
+    paths_safety(
+        &["preview-ingress install"],
+        operator_read_only(),
+        "renders a non-destructive operator install plan",
+    ),
+];
+
+const STACK_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        &["create", "add-pr", "remove-pr"],
+        mutating_safety(),
+        "mutates persisted stack specification metadata",
+    ),
+    paths_safety(
+        &["apply", "rebase"],
+        with_risk_exemption(
+            operator_safety(None, &[]),
+            "stack command name is the explicit branch mutation action; status/sync --dry-run are the planning paths",
+        ),
+        "mutates the configured stack target branch",
+    ),
+    paths_safety(
+        &["sync"],
+        operator_safety(Some("--dry-run"), &[]),
+        "mutates the configured stack target branch and may update the stack spec unless --dry-run is passed",
+    ),
+    paths_safety(
+        &["push"],
+        with_risk_exemption(
+            operator_safety(None, &[]),
+            "push is the explicit remote publication action; no dry-run contract exists yet",
+        ),
+        "pushes the configured stack target branch to its remote",
+    ),
+];
+
+const RUNNER_CONFIG_PATHS: &[&str] = &[
+    "add",
+    "enable",
+    "set",
+    "trust",
+    "pair",
+    "remove",
+    "disconnect",
+    "refresh-homeboy",
+];
+
+const RUNNER_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        RUNNER_CONFIG_PATHS,
+        operator_safety(None, &[]),
+        "mutates runner configuration, trust policy, or runner lifecycle state",
+    ),
+    paths_safety(
+        &["connect", "work"],
+        with_risk_exemption(
+            operator_safety(None, &[]),
+            "runner lifecycle command name is the explicit operator action; no dry-run contract exists yet",
+        ),
+        "mutates runner lifecycle state",
+    ),
+    paths_safety(
+        &["doctor"],
+        operator_safety(None, &["--repair"]),
+        "diagnoses runners by default; --repair mutates runner lifecycle state",
+    ),
+    paths_safety(
+        &["exec"],
+        operator_safety(Some("--dry-run"), &[]),
+        "executes commands on a runner unless --dry-run is passed",
+    ),
+    paths_safety(
+        &["lifecycle"],
+        CommandSafetySpec::read_only(),
+        "non-mutating runner workspace lifecycle/finalization readiness report suitable for RunOutcomeEnvelope embedding",
+    ),
+    paths_safety(
+        &["workspace sync"],
+        operator_safety(None, &["--allow-dirty-lab-workspace"]),
+        "materializes a local worktree into runner workspace state",
+    ),
+    paths_safety(
+        &["workspace update"],
+        operator_safety(None, &[]),
+        "advances a prepared runner workspace from its snapshot lease",
+    ),
+    paths_safety(
+        &["workspace pull"],
+        operator_safety(Some("--dry-run"), &[]),
+        "copies selected files from runner workspace state to a local destination",
+    ),
+    paths_safety(
+        &["workspace apply"],
+        operator_safety(None, &["--force"]),
+        "applies a Lab-generated workspace patch to a local worktree",
+    ),
+    paths_safety(
+        &["workspace prune"],
+        operator_safety(None, &["--apply"]),
+        "default output is a non-mutating orphan cleanup plan with candidate/remaining bytes; pass --apply to delete exact runner workspace paths and --passes to drain bounded pages",
+    ),
+];
+
+const GIT_ISSUE_WRITE_PATHS: &[&str] =
+    &["issue create", "issue comment", "issue close", "issue edit"];
+const GIT_PR_WRITE_PATHS: &[&str] = &[
+    "pr create",
+    "pr edit",
+    "pr comment",
+    "pr refresh",
+    "pr policy open",
+];
+
+const GIT_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        GIT_ISSUE_WRITE_PATHS,
+        with_risk_exemption(
+            operator_safety(None, &[]),
+            "the issue subcommand is the explicit GitHub write action; no dry-run contract exists yet",
+        ),
+        "mutates GitHub issue state through the configured repository",
+    ),
+    paths_safety(
+        GIT_PR_WRITE_PATHS,
+        with_risk_exemption(
+            operator_safety(None, &[]),
+            "the PR subcommand is the explicit GitHub write action; no dry-run contract exists yet",
+        ),
+        "mutates GitHub pull request state or branch state",
+    ),
+    paths_safety(
+        &["pr fleet", "pr land"],
+        operator_safety(Some("--dry-run"), &["--apply", "--delete-branch"]),
+        "reports by default or with --dry-run; apply/merge flags mutate PR state",
+    ),
+];
+
+const REFACTOR_SOURCE_REWRITE_PATHS: &[&str] = &[
+    "rename",
+    "add",
+    "move",
+    "propagate",
+    "transform",
+    "decompose",
+];
+
+const REFACTOR_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        REFACTOR_SOURCE_REWRITE_PATHS,
+        guarded_mutating_safety(&["--write"]),
+        "reports a plan by default; pass --write to rewrite source files",
+    ),
+    paths_safety(
+        &["undo delete"],
+        mutating_safety(),
+        "deletes an undo snapshot without restoring it",
+    ),
+];
+
+const DB_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
+    &["delete-row", "drop-table"],
+    operator_safety(None, &[]),
+    "default output is a non-mutating plan; pass --apply to mutate",
 )];
+
+/// `review audit-baseline` is the real clap path; `review audit baseline` only
+/// exists as a pre-parse argv rewrite in `commands::utils::args`, so declaring
+/// safety against that spelling silently classifies the command as read-only.
+const REVIEW_AUDIT_BASELINE_PATHS: &[&str] = &[
+    "audit-baseline refresh",
+    "audit-baseline merge",
+    "audit-baseline prune",
+];
+
+const AGENT_TASK_CONTROLLER_PATHS: &[&str] = &[
+    "controller init",
+    "controller from-spec",
+    "controller run-from-spec",
+    "controller materialize",
+    "controller events",
+    "controller apply-event",
+    "controller run-next",
+    "controller run",
+    "controller resume",
+    "controller mark-human-ready",
+];
+
+const AGENT_TASK_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        &["promote"],
+        with_dry_run(mutating_safety(), "--dry-run"),
+        "applies a selected patch artifact into a managed worktree unless --dry-run is passed",
+    ),
+    paths_safety(
+        &["active"],
+        with_dry_run(guarded_mutating_safety(&["--apply"]), "--dry-run"),
+        "reads active runs by default; --reconcile previews the full fleet mutation set and --apply authorizes its cancellation",
+    ),
+    paths_safety(
+        &["reconcile"],
+        with_dry_run(guarded_mutating_safety(&["--apply"]), "--dry-run"),
+        "previews reconciliation for one durable run; --apply authorizes a scoped lifecycle mutation after provider-state inspection",
+    ),
+    paths_safety(
+        AGENT_TASK_CONTROLLER_PATHS,
+        mutating_safety(),
+        "mutates durable agent-task loop controller state",
+    ),
+    paths_safety(
+        &["auth remove"],
+        operator_safety(None, &[]),
+        "removes one agent-task provider secret source mapping",
+    ),
+    paths_safety(
+        &["prompts remove"],
+        mutating_safety(),
+        "removes one stored agent-task prompt",
+    ),
+    paths_safety(
+        &["fanout cook-batch"],
+        operator_safety(Some("--dry-run"), &["--run-plan"]),
+        "creates/reuses task worktrees and can run the generated fanout unless --dry-run is passed",
+    ),
+];
+
+const RUNS_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        &["reconcile"],
+        with_dry_run(mutating_safety(), "--dry-run"),
+        "marks orphaned running records stale unless --dry-run is passed",
+    ),
+    paths_safety(
+        &["import"],
+        mutating_safety(),
+        "imports observation bundle or GitHub Actions artifacts into the local run store",
+    ),
+    paths_safety(
+        &["loop-sync"],
+        with_dry_run(mutating_safety(), "--dry-run"),
+        "syncs copied loop archives into observation runs/artifacts unless --dry-run is passed",
+    ),
+    paths_safety(
+        &["artifact cleanup-downloads", "artifact cleanup-persisted"],
+        guarded_mutating_safety(&["--apply"]),
+        "default output is a non-mutating cleanup plan; pass --apply to delete artifacts",
+    ),
+    paths_safety(
+        &["resources"],
+        guarded_mutating_safety(&["--apply"]),
+        "default output is non-mutating; pass --cleanup-plan to plan lifecycle resource cleanup or --apply with --cleanup-root to delete bounded apply-intended candidates",
+    ),
+    paths_safety(
+        &["artifact attach"],
+        mutating_safety(),
+        "copies an existing runner-side file into the persisted local artifact store and records it against a run",
+    ),
+    paths_safety(
+        &["findings reconcile", "findings reconcile-run"],
+        operator_safety(Some("--dry-run"), &["--apply"]),
+        "default output is a non-mutating issue reconciliation plan; pass --apply to mutate tracker state",
+    ),
+];
+
+const EXTENSION_MUTATING_PATHS: &[&str] = &[
+    "setup",
+    "refresh",
+    "relink",
+    "dev-run",
+    "install-for-component",
+    "set",
+];
+const EXTENSION_MUTATION_NOTES: &str =
+    "mutates installed extension files or extension manifest metadata";
+const EXTENSION_PASSTHROUGH_DANGEROUS_FLAGS: &[&str] =
+    &["extension runtime command", "passthrough args"];
+
+const EXTENSION_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        EXTENSION_MUTATING_PATHS,
+        mutating_safety(),
+        EXTENSION_MUTATION_NOTES,
+    ),
+    paths_safety(
+        &["install"],
+        guarded_mutating_safety(&["--replace"]),
+        EXTENSION_MUTATION_NOTES,
+    ),
+    paths_safety(
+        &["update"],
+        guarded_mutating_safety(&["--force"]),
+        EXTENSION_MUTATION_NOTES,
+    ),
+    paths_safety(
+        &["uninstall"],
+        guarded_mutating_safety(&["uninstall"]),
+        EXTENSION_MUTATION_NOTES,
+    ),
+    paths_safety(
+        &["run", "exec"],
+        operator_safety(None, EXTENSION_PASSTHROUGH_DANGEROUS_FLAGS),
+        "executes extension-owned runtime commands with forwarded arguments that may mutate the target system",
+    ),
+    paths_safety(
+        &["action"],
+        operator_safety(None, &["extension action"]),
+        "executes extension-owned actions that may mutate the target system",
+    ),
+];
+
+const RUNTIME_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
+    &["refresh"],
+    mutating_safety(),
+    "mutates installed runtime package files",
+)];
+
+const CLEANUP_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
+    &["artifacts"],
+    guarded_mutating_safety(CLEANUP_DANGEROUS_FLAGS),
+    "default output is a non-mutating cleanup plan; pass --apply to remove artifacts",
+)];
+
+const SELF_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        &["docs map"],
+        guarded_mutating_safety(&["--write"]),
+        "default JSON output is non-mutating; pass --write to write markdown docs to disk",
+    ),
+    paths_safety(
+        &["cleanup-runtime-tmp"],
+        operator_safety(None, &["--apply"]),
+        "default output is a non-mutating cleanup plan; pass --apply to delete runtime temp entries",
+    ),
+];
+
+const REVIEW_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        &["ci autofix"],
+        operator_safety(None, &[]),
+        "commits and pushes prepared CI autofix changes",
+    ),
+    paths_safety(
+        REVIEW_AUDIT_BASELINE_PATHS,
+        mutating_safety(),
+        "mutates persisted audit baseline data in component configuration",
+    ),
+];
 
 pub const COMMAND_SPECS: &[CommandSpec] = &[
     CommandSpec {
@@ -601,15 +1080,18 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         lab_notes: "read-only local activity query; never offloaded because it inspects operator-local stores",
         ..command_spec("activity", CommandJsonFamily::Workspace)
     },
-    command_spec_with_representative_argv(
-        &["homeboy", "agent-task", "providers"],
-        lab_command_spec_with_summary(
-            "agent-task",
-            CommandJsonFamily::Workspace,
-            "Lab runner routing covers portable, explicit-runner, and runner-resident agent-task workflows",
-            AGENT_TASK_LAB_SUPPORT,
-        ),
-    ),
+    CommandSpec {
+        subcommand_safety: AGENT_TASK_SUBCOMMAND_SAFETY,
+        ..command_spec_with_representative_argv(
+            &["homeboy", "agent-task", "providers"],
+            lab_command_spec_with_summary(
+                "agent-task",
+                CommandJsonFamily::Workspace,
+                "Lab runner routing covers portable, explicit-runner, and runner-resident agent-task workflows",
+                AGENT_TASK_LAB_SUPPORT,
+            ),
+        )
+    },
     CommandSpec {
         subcommand_safety: PROJECT_SUBCOMMAND_SAFETY,
         ..command_spec("project", CommandJsonFamily::Workspace)
@@ -627,6 +1109,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     ),
     CommandSpec {
         safety: guarded_safety(FUZZ_DANGEROUS_FLAGS),
+        subcommand_safety: FUZZ_SUBCOMMAND_SAFETY,
         ..command_spec_with_representative_argv(
             &["homeboy", "fuzz"],
             lab_command_spec_with_summary(
@@ -680,28 +1163,34 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
     ),
     crate::ops_command_spec!(daemon),
     crate::ops_command_spec!(schedule),
-    command_spec_with_representative_argv(
-        &["homeboy", "extension", "refresh", "."],
-        lab_command_spec_with_summary(
-            "extension",
-            CommandJsonFamily::Workspace,
-            "Lab runner routing covers runner extension refresh/update/dev-run workflows",
-            EXTENSION_LAB_SUPPORT,
-        ),
-    ),
+    CommandSpec {
+        subcommand_safety: EXTENSION_SUBCOMMAND_SAFETY,
+        ..command_spec_with_representative_argv(
+            &["homeboy", "extension", "refresh", "."],
+            lab_command_spec_with_summary(
+                "extension",
+                CommandJsonFamily::Workspace,
+                "Lab runner routing covers runner extension refresh/update/dev-run workflows",
+                EXTENSION_LAB_SUPPORT,
+            ),
+        )
+    },
     crate::ops_command_spec!(status),
-    command_spec_with_output_notes_and_safety(
-        "cleanup",
-        CommandJsonFamily::Workspace,
-        "cleanup subcommands report plans by default and require --apply for removals",
-        CommandSafetySpec {
-            mutates: true,
-            operator: false,
-            dry_run_flag: None,
-            risk_exemption: None,
-            dangerous_flags: CLEANUP_DANGEROUS_FLAGS,
-        },
-    ),
+    CommandSpec {
+        subcommand_safety: CLEANUP_SUBCOMMAND_SAFETY,
+        ..command_spec_with_output_notes_and_safety(
+            "cleanup",
+            CommandJsonFamily::Workspace,
+            "cleanup subcommands report plans by default and require --apply for removals",
+            CommandSafetySpec {
+                mutates: true,
+                operator: false,
+                dry_run_flag: None,
+                risk_exemption: None,
+                dangerous_flags: CLEANUP_DANGEROUS_FLAGS,
+            },
+        )
+    },
     crate::ops_command_spec!(git),
     command_spec_with_output_notes_and_safety(
         "release",
@@ -710,15 +1199,18 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         operator_safety(Some("--dry-run"), RELEASE_DANGEROUS_FLAGS),
     ),
     command_spec("report", CommandJsonFamily::Workspace),
-    command_spec_with_representative_argv(
-        &["homeboy", "review"],
-        lab_command_spec_with_summary(
-            "review",
-            CommandJsonFamily::Quality,
-            "portable Lab offload is available for release-gate review runs",
-            REVIEW_LAB_SUPPORT,
-        ),
-    ),
+    CommandSpec {
+        subcommand_safety: REVIEW_SUBCOMMAND_SAFETY,
+        ..command_spec_with_representative_argv(
+            &["homeboy", "review"],
+            lab_command_spec_with_summary(
+                "review",
+                CommandJsonFamily::Quality,
+                "portable Lab offload is available for release-gate review runs",
+                REVIEW_LAB_SUPPORT,
+            ),
+        )
+    },
     CommandSpec {
         safety: CommandSafetySpec {
             mutates: true,
@@ -727,6 +1219,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             risk_exemption: None,
             dangerous_flags: REFACTOR_DANGEROUS_FLAGS,
         },
+        subcommand_safety: REFACTOR_SUBCOMMAND_SAFETY,
         ..command_spec_with_representative_argv(
             &["homeboy", "refactor", "--all"],
             lab_command_spec_with_output_notes_and_summary(
@@ -750,56 +1243,74 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             ),
         )
     },
-    command_spec("runner", CommandJsonFamily::Workspace),
-    command_spec_with_representative_argv(
-        &[
-            "homeboy",
-            "runtime",
-            "refresh",
-            "example-runtime",
-            "--source",
-            ".",
-        ],
-        lab_command_spec_with_summary(
-            "runtime",
+    CommandSpec {
+        subcommand_safety: RUNNER_SUBCOMMAND_SAFETY,
+        ..command_spec("runner", CommandJsonFamily::Workspace)
+    },
+    CommandSpec {
+        subcommand_safety: RUNTIME_SUBCOMMAND_SAFETY,
+        ..command_spec_with_representative_argv(
+            &[
+                "homeboy",
+                "runtime",
+                "refresh",
+                "example-runtime",
+                "--source",
+                ".",
+            ],
+            lab_command_spec_with_summary(
+                "runtime",
+                CommandJsonFamily::Workspace,
+                "Lab runner routing covers runtime package refresh workflows",
+                RUNTIME_LAB_SUPPORT,
+            ),
+        )
+    },
+    CommandSpec {
+        subcommand_safety: WORKTREE_SUBCOMMAND_SAFETY,
+        ..command_spec_with_representative_argv(
+            &["homeboy", "worktree", "cleanup"],
+            lab_command_spec_with_summary(
+                "worktree",
+                CommandJsonFamily::Workspace,
+                "Lab runner routing covers runner-resident task worktree cleanup",
+                WORKTREE_LAB_SUPPORT,
+            ),
+        )
+    },
+    CommandSpec {
+        subcommand_safety: TUNNEL_SUBCOMMAND_SAFETY,
+        ..command_spec_with_representative_argv(
+            &[
+                "homeboy",
+                "tunnel",
+                "service",
+                "start",
+                "example-service",
+                "--command",
+                "npm start",
+            ],
+            lab_command_spec_with_summary(
+                "tunnel",
+                CommandJsonFamily::Workspace,
+                "Lab runner routing covers tunnel preview and service workflows",
+                TUNNEL_LAB_SUPPORT,
+            ),
+        )
+    },
+    CommandSpec {
+        subcommand_safety: RUNS_SUBCOMMAND_SAFETY,
+        ..command_spec_with_output_notes(
+            "runs",
             CommandJsonFamily::Workspace,
-            "Lab runner routing covers runtime package refresh workflows",
-            RUNTIME_LAB_SUPPORT,
-        ),
-    ),
-    command_spec_with_representative_argv(
-        &["homeboy", "worktree", "cleanup"],
-        lab_command_spec_with_summary(
-            "worktree",
-            CommandJsonFamily::Workspace,
-            "Lab runner routing covers runner-resident task worktree cleanup",
-            WORKTREE_LAB_SUPPORT,
-        ),
-    ),
-    command_spec_with_representative_argv(
-        &[
-            "homeboy",
-            "tunnel",
-            "service",
-            "start",
-            "example-service",
-            "--command",
-            "npm start",
-        ],
-        lab_command_spec_with_summary(
-            "tunnel",
-            CommandJsonFamily::Workspace,
-            "Lab runner routing covers tunnel preview and service workflows",
-            TUNNEL_LAB_SUPPORT,
-        ),
-    ),
-    command_spec_with_output_notes(
-        "runs",
-        CommandJsonFamily::Workspace,
-        "inspects persisted evidence, artifacts, artifact postprocessing, and finding reconciliation workflows",
-    ),
+            "inspects persisted evidence, artifacts, artifact postprocessing, and finding reconciliation workflows",
+        )
+    },
     crate::ops_command_spec!(self_cmd),
-    command_spec("stack", CommandJsonFamily::Workspace),
+    CommandSpec {
+        subcommand_safety: STACK_SUBCOMMAND_SAFETY,
+        ..command_spec("stack", CommandJsonFamily::Workspace)
+    },
     crate::ops_command_spec!(api),
     crate::ops_command_spec!(upgrade),
 ];
