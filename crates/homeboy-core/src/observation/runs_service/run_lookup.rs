@@ -299,9 +299,12 @@ pub fn refresh_selected_mirrored_daemon_evidence_best_effort(
     run: &RunRecord,
 ) {
     if let Some(err) = refresh_selected_mirrored_daemon_evidence(store, run) {
+        let (runner_id, job_id) =
+            runner_evidence::with_runner_evidence(|p| p.mirrored_runner_job_identity(run))
+                .expect("selected refresh errors only for mirrored runner jobs");
         eprintln!(
-            "Warning: could not refresh mirrored Lab runner evidence for `{}`: {}",
-            run.id, err.message
+            "Warning: could not refresh mirrored Lab runner evidence for `{}` (runner `{runner_id}`, job `{job_id}`): {}. Inspect it with `homeboy runner job logs {runner_id} {job_id}`.",
+            run.id, err.message,
         );
     }
 }

@@ -9,8 +9,8 @@
 //! that reflects pass/fail.
 //!
 //! Two safety properties keep it from hanging forever:
-//! - Each poll runs the existing reconcile pass, so a run whose owner process
-//!   died transitions to `stale` and the watch surfaces it instead of waiting.
+//! - Each poll reconciles the requested run's owner, so a run whose owner
+//!   process died transitions to `stale` and the watch surfaces it instead of waiting.
 //! - `--timeout` bounds the total wait; on expiry the watch returns the
 //!   last-seen state with a distinct timeout exit code.
 
@@ -81,17 +81,20 @@ pub(super) trait RunPoller {
     fn poll(&self, run_id: &str) -> homeboy::core::Result<RunRecord>;
 }
 
-/// Production poller: reconcile dead-owner runs, refresh mirrored runner
-/// evidence, then read the freshest local record. Mirrors `runs show` side
-/// effects so a detached/offloaded run's status is up to date each poll.
+/// Production poller: refresh the requested mirrored runner evidence, reconcile
+/// its owner, then read the freshest local record. Fleet reconciliation remains
+/// an explicit `runs reconcile` operation rather than a side effect of a focused
+/// watch.
 struct StorePoller<'a> {
     store: &'a ObservationStore,
 }
 
 impl RunPoller for StorePoller<'_> {
     fn poll(&self, run_id: &str) -> homeboy::core::Result<RunRecord> {
-        runs_service::refresh_running_mirrored_daemon_evidence_best_effort(self.store);
-        reconcile::reconcile_owned_stale_running_runs(self.store, 1000)?;
+        let run = runs_service::require_run(self.store, run_id)?;
+        runs_service::refresh_selected_mirrored_daemon_evidence_best_effort(self.store, &run);
+        let run = runs_service::require_run(self.store, run_id)?;
+        reconcile::reconcile_owned_stale_running_run(self.store, &run)?;
         runs_service::require_run(self.store, run_id)
     }
 }

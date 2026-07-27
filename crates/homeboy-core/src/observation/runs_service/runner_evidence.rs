@@ -553,6 +553,7 @@ mod tests {
     struct SelectedRefreshProvider {
         calls: Arc<Mutex<Vec<String>>>,
         error: Option<Error>,
+        converge_target: bool,
     }
 
     impl RunnerEvidenceProvider for SelectedRefreshProvider {
@@ -582,6 +583,13 @@ mod tests {
 
         fn refresh_mirrored_daemon_evidence(&self, run_id: &str) -> Result<Option<Vec<RunRecord>>> {
             self.calls.lock().expect("calls").push(run_id.to_string());
+            if self.converge_target && run_id == "target" {
+                ObservationStore::open_initialized()?.finish_run(
+                    run_id,
+                    RunStatus::Pass,
+                    Some(serde_json::json!({ "refreshed": true })),
+                )?;
+            }
             self.error.clone().map_or(Ok(None), Err)
         }
 
@@ -627,6 +635,7 @@ mod tests {
             register_runner_evidence_provider(Box::new(SelectedRefreshProvider {
                 calls: calls.clone(),
                 error: Some(Error::internal_unexpected("unrelated refresh must not run")),
+                converge_target: false,
             }));
 
             assert!(
@@ -653,6 +662,7 @@ mod tests {
                     "daemon request failed: job not found",
                     serde_json::json!({ "http_status": 404, "path": "/jobs/job-1" }),
                 )),
+                converge_target: false,
             }));
 
             assert!(
@@ -686,6 +696,7 @@ mod tests {
             register_runner_evidence_provider(Box::new(SelectedRefreshProvider {
                 calls: calls.clone(),
                 error: Some(Error::internal_unexpected("runner transport unavailable")),
+                converge_target: false,
             }));
 
             let err = super::super::refresh_selected_mirrored_daemon_evidence(&store, &selected)
@@ -697,6 +708,49 @@ mod tests {
                     .get_run("selected")
                     .expect("read")
                     .expect("run")
+                    .status,
+                RunStatus::Running.as_str()
+            );
+        });
+        PROVIDER.lock().expect("provider").take();
+    }
+
+    #[test]
+    fn selected_refresh_converges_target_without_querying_hundreds_of_stale_mirrors() {
+        let _lock = provider_lock().lock().expect("provider lock");
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let target = mirrored_run("target");
+            store.import_run(&target).expect("target");
+            for index in 0..500 {
+                store
+                    .import_run(&mirrored_run(&format!("stale-mirror-{index}")))
+                    .expect("unrelated stale mirror");
+            }
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            register_runner_evidence_provider(Box::new(SelectedRefreshProvider {
+                calls: calls.clone(),
+                error: None,
+                converge_target: true,
+            }));
+
+            assert!(
+                super::super::refresh_selected_mirrored_daemon_evidence(&store, &target).is_none()
+            );
+            assert_eq!(*calls.lock().expect("calls"), vec!["target"]);
+            assert_eq!(
+                store
+                    .get_run("target")
+                    .expect("target read")
+                    .expect("target")
+                    .status,
+                RunStatus::Pass.as_str()
+            );
+            assert_eq!(
+                store
+                    .get_run("stale-mirror-499")
+                    .expect("unrelated read")
+                    .expect("unrelated")
                     .status,
                 RunStatus::Running.as_str()
             );
