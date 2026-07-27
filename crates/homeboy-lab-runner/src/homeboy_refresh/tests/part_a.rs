@@ -776,6 +776,18 @@ fn materialize_script_records_the_peeled_commit_for_tags_and_direct_commits() {
     .trim()
     .to_string();
     assert_ne!(annotated_object, commit, "fixture tag is annotated");
+    std::fs::write(source.join("README.md"), "newer remote head\n").expect("update fixture");
+    for args in [vec!["add", "."], vec!["commit", "-m", "newer head"]] {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(&source)
+            .status()
+            .expect("advance source fixture");
+        assert!(
+            status.success(),
+            "source fixture advances past requested refs"
+        );
+    }
 
     for (index, git_ref) in ["annotated", "lightweight", commit.as_str()]
         .iter()
