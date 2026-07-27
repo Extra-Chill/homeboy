@@ -45,7 +45,19 @@ pub use args::{
 pub(crate) use status::diagnostic_summary_from_aggregate;
 
 pub fn run(args: AgentTaskArgs, _global: &GlobalArgs) -> CmdResult<Value> {
+    // Announce durable identity exactly once, on the first progress event that
+    // carries a run id, and do it outside the TTY gate. Phase chatter stays
+    // TTY-gated so non-interactive logs are not spammed, but the operator
+    // handle itself must reach every caller — a non-TTY client that is
+    // interrupted mid-cook otherwise has no way to answer "what did I just
+    // start?" (#10419).
+    let announced_identity = std::sync::atomic::AtomicBool::new(false);
     let progress = |phase: &str, cook_id: Option<&str>, run_id: Option<&str>| {
+        if let Some(run_id) = run_id {
+            if !announced_identity.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                run::announce_durable_cook_identity(cook_id, run_id);
+            }
+        }
         let identity = match (cook_id, run_id) {
             (_, Some(run_id)) => format!(" [{run_id}]"),
             (Some(cook_id), None) => format!(" [{cook_id}]"),
