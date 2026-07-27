@@ -233,6 +233,7 @@ fn run_batch_cook_fanout_plan_with_attempt_dispatcher(
         },
         provider::ExtensionProviderAgentTaskExecutor::discover(),
     )?;
+    record_terminal_batch_admission_failures(&plan, &result.value)?;
     Ok(batch_cook_result(&plan, result))
 }
 
@@ -259,7 +260,23 @@ where
         },
         executor,
     )?;
+    record_terminal_batch_admission_failures(&plan, &result.value)?;
     Ok(batch_cook_result(&plan, result))
+}
+
+/// A failure before Cook creates its durable child record is nevertheless a
+/// terminal outcome for this controller-owned fanout. Persist it on the batch
+/// so later status reads do not leave the child running and unavailable.
+fn record_terminal_batch_admission_failures(
+    plan: &BatchCookFanoutPlan,
+    report: &agent_task_service::AgentTaskCookBatchReport,
+) -> Result<()> {
+    let failed = report
+        .cooks
+        .iter()
+        .filter(|cell| cell.result.is_none() && cell.exit_code != 0)
+        .map(|cell| cell.initial_run_id.as_str());
+    batch::record_fanout_run_batch_failed_admissions(&plan.fanout_id, failed)
 }
 
 fn batch_harvest_context() -> Result<homeboy::agents::agent_task_scheduler::HarvestExecutionContext>
@@ -369,7 +386,6 @@ fn cook_batch_inner(
     // pins every child cook to the same resolved backend.
     resolve_and_validate_effective_backend(&mut args)?;
     let mut plan = build_cook_batch_plan(&args)?;
-    preflight_batch_cook_recipes(&plan, attempt_dispatcher)?;
     let branches = plan
         .cooks
         .iter()
@@ -397,6 +413,15 @@ fn cook_batch_inner(
             .rows
             .iter()
             .all(|row| matches!(row.status, worktree::WorktreeQueueCreateStatus::Created));
+    if can_run {
+        bind_materialized_worktrees(&mut plan, &worktrees)?;
+        // Compare the exact workspace-bound recipe that provider execution will
+        // persist, not the handle-only planning form created before worktree
+        // materialization.
+        preflight_batch_cook_recipes(&plan, attempt_dispatcher)?;
+    } else if args.dry_run {
+        preflight_batch_cook_recipes(&plan, attempt_dispatcher)?;
+    }
     let run_result = if args.run_plan && can_run {
         let (value, exit_code) = match attempt_dispatcher {
             Some(dispatcher) => {
@@ -452,6 +477,36 @@ fn cook_batch_inner(
         }),
         exit_code,
     ))
+}
+
+fn bind_materialized_worktrees(
+    plan: &mut BatchCookFanoutPlan,
+    worktrees: &worktree::WorktreeQueueCreateOutput,
+) -> Result<()> {
+    for cook in &mut plan.cooks {
+        let row = worktrees
+            .rows
+            .iter()
+            .find(|row| row.handle == cook.to_worktree)
+            .ok_or_else(|| {
+                Error::internal_unexpected(format!(
+                    "worktree materialization omitted declared cook target '{}'",
+                    cook.to_worktree
+                ))
+            })?;
+        let path = row.path.as_deref().ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "materialized cook worktree '{}' has no filesystem path",
+                cook.to_worktree
+            ))
+        })?;
+        let path = std::fs::canonicalize(path)
+            .map_err(|error| Error::internal_io(error.to_string(), Some(path.to_string())))?;
+        let path = path.display().to_string();
+        cook.cwd = None;
+        cook.workspace = Some(path);
+    }
+    Ok(())
 }
 
 fn cook_batch_outer_exit_code(blocked: usize, run_result: &Option<Value>) -> i32 {
@@ -1749,6 +1804,55 @@ mod tests {
                 Some(workspace.path())
             );
         });
+    }
+
+    #[test]
+    fn cook_batch_run_plan_binds_inferred_worktree_for_dispatch_and_promotion() {
+        // `cook-batch --run-plan` generates children without --cwd/--workspace.
+        // Once its declared worktree is materialized, the same canonical root
+        // must drive provider dispatch and promotion before execution starts.
+        let mut plan = build_cook_batch_plan(&cook_batch_args()).expect("generated cook plan");
+        let root = std::fs::canonicalize(env!("CARGO_MANIFEST_DIR")).expect("canonical root");
+        let rows = plan
+            .cooks
+            .iter()
+            .map(|cook| worktree::WorktreeQueueCreateRow {
+                branch: cook.head.clone().expect("generated head"),
+                handle: cook.to_worktree.clone(),
+                status: worktree::WorktreeQueueCreateStatus::Created,
+                command: Vec::new(),
+                retry_after_seconds: None,
+                active_lock_holder: None,
+                path: Some(root.display().to_string()),
+                error: None,
+            })
+            .collect();
+        bind_materialized_worktrees(
+            &mut plan,
+            &worktree::WorktreeQueueCreateOutput {
+                schema: "homeboy/worktree-queue-create/v1",
+                repo: "homeboy".to_string(),
+                base_ref: "origin/main".to_string(),
+                dry_run: false,
+                rows,
+            },
+        )
+        .expect("bind materialized worktrees");
+
+        let invocation = plan.cooks[0]
+            .to_cook_invocation(&plan)
+            .expect("workspace-bound cook invocation");
+        assert_eq!(invocation.dispatch.workspace.as_deref(), root.to_str());
+        assert_eq!(
+            invocation.options.source_worktree_path.as_deref(),
+            Some(root.as_path())
+        );
+
+        let compiled = compile_batch_cooks(&plan, |_| {}).expect("compile before provider");
+        assert_eq!(
+            compiled[0].initial_plan.tasks[0].workspace.root.as_deref(),
+            root.to_str()
+        );
     }
 
     #[test]
