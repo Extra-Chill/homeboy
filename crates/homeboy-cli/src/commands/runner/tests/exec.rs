@@ -240,6 +240,32 @@ fn compact_exec_command_run_preserves_full_output_file_payload() {
 }
 
 #[test]
+fn compact_exec_projects_nested_command_result_without_losing_structured_output() {
+    let nested = format!(
+        r#"{{"schema":"homeboy/command-result/v3","command":"fuzz","operation":"run","success":false,"status":"failed","data":{{"execution":{{"stderr":"Cannot find module 'tar'"}},"transcript":"{}"}}}}"#,
+        "x".repeat(10_000)
+    );
+    let output = runner_exec_output("lab", RunnerExecMode::Daemon, "/workspace");
+    let output = RunnerExecOutput {
+        stdout: nested.clone(),
+        exit_code: 1,
+        ..output
+    };
+
+    let rendered = render_compact_exec_output(&output);
+    let run = compact_exec_command_run(output, 1);
+    let structured = run
+        .output_file_result
+        .expect("structured result")
+        .expect("structured payload");
+
+    assert!(rendered.contains("Root cause: Cannot find module 'tar'"));
+    assert!(!rendered.contains("\"transcript\""));
+    assert!(rendered.len() < 2_048);
+    assert_eq!(structured["stdout"], nested);
+}
+
+#[test]
 fn sync_workspace_exec_rejects_explicit_cwd() {
     let err = exec_workspace_context(
         "lab",
