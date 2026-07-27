@@ -4,10 +4,9 @@
 //! Lab workspaces are clean checkouts, so generated ignored/untracked files must
 //! be materialized explicitly before the runner command executes.
 
+use homeboy_engine_primitives::content_hash;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-
-use sha2::{Digest, Sha256};
 
 use homeboy_agents::agent_task_prompts;
 use homeboy_core::{Error, Result};
@@ -187,7 +186,7 @@ fn resolve_at_file_spec(
                 Some(format!("read Lab @file {}", local_path.display())),
             )
         })?;
-        let content_sha256 = format!("{:x}", Sha256::digest(&content));
+        let content_sha256 = content_hash::sha256_hex(&content);
         let remote_path =
             remote_path_for_at_file(&content_sha256, local_path.file_name(), remote_cwd);
         return Ok(LabAtFileSpec {

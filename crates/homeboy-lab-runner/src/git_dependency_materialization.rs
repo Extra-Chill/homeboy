@@ -1,3 +1,4 @@
+use homeboy_engine_primitives::content_hash;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -437,13 +438,11 @@ fn cache_key_file(
             Some(format!("read dependency cache key file {}", full.display())),
         )
     })?;
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
     Ok(RunnerDependencyCacheKeyFile {
         role: role.to_string(),
         path: normalized,
         status: "present".to_string(),
-        sha256: Some(hex(&hasher.finalize())),
+        sha256: Some(content_hash::sha256_hex(&bytes)),
     })
 }
 

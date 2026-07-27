@@ -1,3 +1,4 @@
+use homeboy_engine_primitives::content_hash;
 use std::fs;
 use std::time::Duration;
 
@@ -6,7 +7,6 @@ use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::json;
 use serde_json::Value;
-use sha2::Digest;
 
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, ErrorCode, Result};
@@ -262,7 +262,7 @@ impl RunnerFileTransfer {
         let content = fs::read(local_path).map_err(|err| {
             Error::internal_io(err.to_string(), Some(format!("read {local_path}")))
         })?;
-        let actual_sha256 = format!("{:x}", sha2::Sha256::digest(&content));
+        let actual_sha256 = content_hash::sha256_hex(&content);
         if actual_sha256 != expected_sha256 {
             return Err(Error::validation_invalid_argument(
                 "at_file",

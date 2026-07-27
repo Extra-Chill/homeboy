@@ -3,6 +3,7 @@
 //! Detached Lab routing constructs this job after the agent-task attempt exists
 //! and before workspace staging begins.
 
+use homeboy_engine_primitives::content_hash;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -22,7 +23,6 @@ use homeboy_core::lab_contract::{
 };
 use homeboy_core::runner_execution_envelope::PathMaterializationPlan;
 use homeboy_core::{Error, Result};
-use sha2::{Digest, Sha256};
 
 use crate::{LabOffloadCommand, LabOffloadRequest};
 
@@ -1102,7 +1102,7 @@ fn canonical_digest<T: Serialize>(value: &T) -> Result<String> {
             Some("serialize canonical durable Lab workspace state".to_string()),
         )
     })?;
-    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+    Ok(format!("sha256:{}", content_hash::sha256_hex(&bytes)))
 }
 
 /// Shared identity header carried by every durable Lab stage

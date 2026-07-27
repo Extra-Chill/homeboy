@@ -1,3 +1,4 @@
+use homeboy_engine_primitives::content_hash;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -15,7 +16,6 @@ use homeboy_core::runner_execution_envelope::{
 use homeboy_core::secret_env_plan::SecretEnvPlan;
 use homeboy_core::server::{self, SshClient};
 use homeboy_core::source_snapshot::SourceSnapshot;
-use sha2::{Digest, Sha256};
 
 use super::super::normalize_runner_command_env_for_homeboy_path;
 use super::super::resource_metrics::{
@@ -806,7 +806,7 @@ fn child_provenance_env(
         if raw.len() <= PROVENANCE_ENV_INLINE_MAX_BYTES {
             continue;
         }
-        let hash = format!("{:x}", Sha256::digest(raw.as_bytes()));
+        let hash = content_hash::sha256_hex(raw.as_bytes());
         let path = stage_dir.join(format!("{hash}.json"));
         publish_provenance(&stage_dir, &path, raw.as_bytes(), &hash)?;
         let reference = serde_json::json!({
@@ -925,7 +925,7 @@ fn validate_published_provenance(path: &Path, expected_hash: &str) -> Result<()>
             Some("read published provenance".to_string()),
         )
     })?;
-    let actual_hash = format!("{:x}", Sha256::digest(&contents));
+    let actual_hash = content_hash::sha256_hex(&contents);
     if actual_hash != expected_hash {
         return Err(provenance_reference_error(
             "existing content-addressed provenance file failed hash verification",

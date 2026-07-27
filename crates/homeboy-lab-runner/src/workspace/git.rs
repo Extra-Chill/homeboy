@@ -1,8 +1,7 @@
+use homeboy_engine_primitives::content_hash;
 use std::path::Path;
 use std::process::Command;
 use std::process::Stdio;
-
-use sha2::{Digest, Sha256};
 
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
@@ -330,13 +329,7 @@ fn materialize_git_snapshot_from_controller_bundle_fallback(
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
-    let bytes = std::fs::read(path).map_err(|err| {
-        Error::internal_io(
-            err.to_string(),
-            Some("read git bundle for digest".to_string()),
-        )
-    })?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    content_hash::sha256_file(path)
 }
 
 /// Resolve the exact object closure locally before `git bundle` can invoke a

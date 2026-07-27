@@ -1,3 +1,4 @@
+use homeboy_engine_primitives::content_hash;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
@@ -838,11 +839,10 @@ pub(crate) fn git_dirty_fingerprint(path: &Path) -> Option<String> {
         ])
         .output()
         .ok()?;
-    output.status.success().then(|| {
-        let mut hasher = Sha256::new();
-        hasher.update(&output.stdout);
-        format!("{:x}", hasher.finalize())
-    })
+    output
+        .status
+        .success()
+        .then(|| content_hash::sha256_hex(&output.stdout))
 }
 
 fn sanitize_ref(value: &str) -> String {

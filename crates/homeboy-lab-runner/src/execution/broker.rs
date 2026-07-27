@@ -1,3 +1,4 @@
+use homeboy_engine_primitives::content_hash;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -9,7 +10,6 @@ use homeboy_core::lab_contract::LabRunnerWorkload;
 use homeboy_core::redaction::redact_argv;
 use homeboy_core::source_snapshot::SourceSnapshot;
 use reqwest::blocking::Client;
-use sha2::{Digest, Sha256};
 
 use super::super::broker_http;
 use super::super::evidence::mirror_reverse_broker_evidence;
@@ -526,7 +526,7 @@ fn durable_command_assets(
             Ok(serde_json::json!({
                 "argument": argument,
                 "remote_path": remote_path,
-                "sha256": format!("{:x}", Sha256::digest(&content)),
+                "sha256": content_hash::sha256_hex(&content),
                 "content_base64": base64::engine::general_purpose::STANDARD.encode(content),
             }))
         })
