@@ -317,7 +317,19 @@ fn install_shared_assets_from_root(
     extension_dir: &Path,
     mode: SharedAssetMode,
 ) -> Result<()> {
+    if runtime_generation_boundary_active()? {
+        // Once runtime generations are active, extension refreshes publish a
+        // successor generation rather than writing through the stable link.
+        homeboy_core::runtime_package::refresh_shared_assets(source_root)?;
+    }
     for shared_dir in shared_assets_for_root(source_root) {
+        if matches!(
+            shared_dir.as_str(),
+            "agent-runtimes" | "agent-task-contracts" | "runtime-agent-ci"
+        ) && runtime_generation_boundary_active()?
+        {
+            continue;
+        }
         let source = source_root.join(&shared_dir);
         if !source.is_dir() {
             continue;
@@ -343,6 +355,15 @@ fn install_shared_assets_from_root(
     Ok(())
 }
 
+fn runtime_generation_boundary_active() -> Result<bool> {
+    Ok(std::fs::read_link(paths::legacy_agent_runtimes()?)
+        .ok()
+        .as_deref()
+        == Some(std::path::Path::new(
+            "runtime-generations/current/agent-runtimes",
+        )))
+}
+
 fn persist_installed_root_manifest(source_root: &Path, extension_dir: &Path) -> Result<()> {
     let source = source_root.join(ROOT_MANIFEST);
     if !source.is_file() {
@@ -366,7 +387,10 @@ fn installed_shared_asset_target(extension_dir: &Path, shared_dir: &str) -> Resu
         )
     })?;
     Ok(match shared_dir {
-        "agent-runtimes" => paths::agent_runtimes()?,
+        // Extension installation maintains the legacy/source layout. A runtime
+        // refresh snapshots it into an immutable generation; it must not write
+        // through the active generation read boundary.
+        "agent-runtimes" => paths::legacy_agent_runtimes()?,
         "runtime-agent-ci" | "agent-task-contracts" => paths::homeboy()?.join(shared_dir),
         // Shared extension libraries install under the extensions root so
         // installed wrappers can source `../../../scripts/lib/...`.

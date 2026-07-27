@@ -36,6 +36,14 @@ pub fn extensions() -> Result<PathBuf> {
 
 /// Agent runtime package directory
 pub fn agent_runtimes() -> Result<PathBuf> {
+    // This is the documented and process-stable runtime boundary. Generation
+    // activation changes only runtime-generations/current behind this path.
+    Ok(homeboy()?.join("agent-runtimes"))
+}
+
+/// Legacy runtime package directory, used only while migrating it into a
+/// generation. Runtime consumers must use [`agent_runtimes`].
+pub fn legacy_agent_runtimes() -> Result<PathBuf> {
     Ok(homeboy()?.join("agent-runtimes"))
 }
 
