@@ -194,6 +194,50 @@ pub fn persist_fanout_run_batch(
     Ok(record)
 }
 
+/// Record child failures that occurred before Cook could create a lifecycle
+/// record. These are terminal controller-admission failures, not unavailable
+/// runner observations, so status must retain them as failures.
+pub fn record_fanout_run_batch_failed_admissions<'a>(
+    batch_id: &str,
+    failed_run_ids: impl IntoIterator<Item = &'a str>,
+) -> Result<()> {
+    let mut batch = read_batch(batch_id)?;
+    let failed_run_ids = failed_run_ids.into_iter().collect::<HashSet<_>>();
+    if failed_run_ids.is_empty() {
+        return Ok(());
+    }
+    let mut changed = false;
+    for child in &mut batch.child_runs {
+        if failed_run_ids.contains(child.run_id.as_str())
+            && child.state != AgentTaskRunState::Failed
+        {
+            child.state = AgentTaskRunState::Failed;
+            changed = true;
+        }
+    }
+    if changed {
+        if !batch.metadata.is_object() {
+            batch.metadata = Value::Object(serde_json::Map::new());
+        }
+        let metadata = batch.metadata.as_object_mut().expect("metadata object");
+        let failures = metadata
+            .entry("terminal_admission_failures")
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("admission failures are an array");
+        for run_id in &failed_run_ids {
+            if !failures.iter().any(|value| value.as_str() == Some(*run_id)) {
+                failures.push(Value::String((*run_id).to_string()));
+            }
+        }
+        let totals = totals_for_children(&batch.child_runs);
+        batch.state = aggregate_state(&totals);
+        batch.updated_at = Some(now_timestamp());
+        write_batch(&batch)?;
+    }
+    Ok(())
+}
+
 pub fn status(batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
     let mut batch = read_batch(batch_id)?;
     let mut changed = false;
@@ -202,6 +246,9 @@ pub fn status(batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
     let mut resumable_child_runs = Vec::new();
     let mut timed_out_child_runs = HashSet::new();
     for child in &mut batch.child_runs {
+        if terminal_admission_failure(&batch.metadata, &child.run_id) {
+            continue;
+        }
         match agent_task_lifecycle::status(&child.run_id) {
             Ok(record) => {
                 if child.state != record.state {
@@ -227,10 +274,12 @@ pub fn status(batch_id: &str) -> Result<AgentTaskBatchStatusReport> {
                 }
             }
             Err(error) => {
-                unavailable_child_runs.push(child_issue(
-                    child,
-                    format!("unable to read child run status: {}", error.message),
-                ));
+                if !child.state.is_terminal() {
+                    unavailable_child_runs.push(child_issue(
+                        child,
+                        format!("unable to read child run status: {}", error.message),
+                    ));
+                }
             }
         }
     }
@@ -292,6 +341,12 @@ fn resumable_child_reason(record: &agent_task_lifecycle::AgentTaskRunRecord) -> 
         )),
         _ => None,
     }
+}
+
+fn terminal_admission_failure(metadata: &Value, run_id: &str) -> bool {
+    metadata["terminal_admission_failures"]
+        .as_array()
+        .is_some_and(|failures| failures.iter().any(|value| value.as_str() == Some(run_id)))
 }
 
 pub fn artifacts(batch_id: &str) -> Result<AgentTaskBatchArtifactsReport> {
@@ -731,6 +786,31 @@ mod tests {
             .next_actions
             .iter()
             .any(|action| action.contains("partial results only")));
+    }
+
+    #[test]
+    fn terminal_admission_failure_is_not_reclassified_as_unavailable() {
+        let _home = homeboy_core::test_support::HomeGuard::new();
+        let batch_id = format!("fanout-admission-failure-{}", uuid::Uuid::new_v4());
+        let child_run_id = format!("cook-workspace-bound-child-{}", uuid::Uuid::new_v4());
+        persist_fanout_run_batch(
+            &batch_id,
+            &batch_id,
+            &[FanoutRunBatchChild {
+                task_id: "workspace-bound-child".to_string(),
+                run_id: child_run_id.clone(),
+            }],
+            Value::Null,
+        )
+        .expect("persist fanout");
+        record_fanout_run_batch_failed_admissions(&batch_id, [child_run_id.as_str()])
+            .expect("record terminal admission failure");
+
+        let report = status(&batch_id).expect("terminal batch status");
+        assert_eq!(report.status, "failed");
+        assert_eq!(report.batch.state, AgentTaskBatchState::Failed);
+        assert_eq!(report.totals.failed, 1);
+        assert!(report.unavailable_child_runs.is_empty());
     }
 
     #[test]
