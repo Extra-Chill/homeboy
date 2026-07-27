@@ -385,8 +385,225 @@ pub fn retry(
     new_run_id: Option<&str>,
     run: bool,
 ) -> Result<AgentTaskRetryServiceResult> {
-    let record = agent_task_lifecycle::retry(run_id, new_run_id)?;
+    let source = agent_task_lifecycle::status(run_id)?;
+    let cook_retry = retryable_cook_attempt(&source)?;
+    let record = match cook_retry {
+        Some(cook_retry) => {
+            let retry_run_id = cook_retry
+                .pending_run_id
+                .as_deref()
+                .or(new_run_id)
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    agent_task_lifecycle::cook_attempt_run_id(
+                        &cook_retry.cook_id,
+                        cook_retry.attempt,
+                    )
+                });
+            let retry_exists = agent_task_lifecycle::run_record_exists(&retry_run_id)?;
+            if retry_exists
+                && !is_exact_retry_reservation(&source, &cook_retry.plan, &retry_run_id)?
+            {
+                return Err(Error::validation_invalid_argument(
+                    "new_run_id",
+                    "retry run id is not the durable retry reservation for this Cook attempt",
+                    Some(retry_run_id),
+                    None,
+                ));
+            }
+            // The lifecycle record is the durable reservation. It writes retry_of
+            // before recipe/index binding, so recovery can prove ownership without
+            // adopting an unrelated same-plan run.
+            if !retry_exists {
+                agent_task_lifecycle::retry(&source.run_id, Some(&retry_run_id))?;
+            }
+            super::record_recipe_attempt(
+                &cook_retry.cook_id,
+                cook_retry.attempt,
+                &retry_run_id,
+                &cook_retry.plan,
+            )?;
+            agent_task_lifecycle::record_cook_attempt(
+                &cook_retry.cook_id,
+                cook_retry.attempt,
+                &retry_run_id,
+            )?;
+            let record = agent_task_lifecycle::status(&retry_run_id)?;
+            if record.state.is_terminal() {
+                return Ok(AgentTaskRetryServiceResult { record, run: false });
+            }
+            record
+        }
+        None => agent_task_lifecycle::retry(&source.run_id, new_run_id)?,
+    };
     Ok(AgentTaskRetryServiceResult { record, run })
+}
+
+/// A retryable failure before provider execution has no candidate or execution
+/// evidence to supersede, so its retry remains an append-only Cook attempt.
+fn retryable_cook_attempt(
+    source: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Result<Option<CookRetryAttempt>> {
+    if source.metadata["pre_execution_failure"]["retryable"] != serde_json::Value::Bool(true) {
+        return Ok(None);
+    }
+    let Some(cook_id) = source.metadata["cook_id"].as_str() else {
+        return Ok(None);
+    };
+    let Some(source_attempt) = source.metadata["cook_attempt"].as_u64() else {
+        return Ok(None);
+    };
+    let attempt = u32::try_from(source_attempt).map_err(|_| {
+        Error::validation_invalid_argument(
+            "cook_attempt",
+            "durable Cook attempt number exceeds the supported range",
+            Some(source.run_id.clone()),
+            None,
+        )
+    })?;
+    if !super::recipe_exists(cook_id)? {
+        // Legacy runs predate durable recipes. Retain their established generic
+        // lifecycle retry behavior rather than inventing Cook ownership.
+        return Ok(None);
+    }
+    let recipe = super::load_recipe(cook_id)?;
+    let source_recipe_attempt = recipe.attempts.iter().find(|recipe_attempt| {
+        recipe_attempt.attempt == attempt && recipe_attempt.run_id == source.run_id
+    });
+    let Some(source_recipe_attempt) = source_recipe_attempt else {
+        return Err(Error::validation_invalid_argument(
+            "cook_recipe.attempts",
+            "retryable pre-provider failure is not owned by its durable Cook recipe",
+            Some(source.run_id.clone()),
+            Some(vec![format!(
+                "Continue the owning Cook with: homeboy agent-task cook-continue {}",
+                cook_id
+            )]),
+        ));
+    };
+    let mut pending_attempt = None;
+    for recipe_attempt in recipe
+        .attempts
+        .iter()
+        .filter(|recipe_attempt| recipe_attempt.attempt == attempt.saturating_add(1))
+    {
+        if !agent_task_lifecycle::run_record_exists(&recipe_attempt.run_id)? {
+            return Err(Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "pending Cook retry recipe entry has no durable lifecycle reservation",
+                Some(recipe_attempt.run_id.clone()),
+                None,
+            ));
+        }
+        let record = agent_task_lifecycle::exact_record(&recipe_attempt.run_id)?;
+        if record.metadata["retry_of"] != source.run_id {
+            return Err(Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "pending Cook retry run is not the durable retry of its source attempt",
+                Some(recipe_attempt.run_id.clone()),
+                None,
+            ));
+        }
+        if agent_task_lifecycle::load_plan(&recipe_attempt.run_id)? != recipe_attempt.plan {
+            return Err(Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "pending Cook retry run does not match its durable plan",
+                Some(recipe_attempt.run_id.clone()),
+                None,
+            ));
+        }
+        if record.state.is_terminal() {
+            if record.state == agent_task_lifecycle::AgentTaskRunState::Succeeded {
+                return Ok(Some(CookRetryAttempt {
+                    cook_id: cook_id.to_string(),
+                    attempt: recipe_attempt.attempt,
+                    pending_run_id: Some(recipe_attempt.run_id.clone()),
+                    plan: recipe_attempt.plan.clone(),
+                }));
+            }
+            // A terminal failed successor is authoritative evidence. It cannot
+            // be resumed; a later attempt may be allocated below if the durable
+            // retry budget permits it.
+            continue;
+        }
+        if record.state != agent_task_lifecycle::AgentTaskRunState::Queued {
+            return Err(Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "pending Cook retry run is already active and must be resumed through its lifecycle",
+                Some(recipe_attempt.run_id.clone()),
+                None,
+            ));
+        }
+        pending_attempt = Some(recipe_attempt);
+        break;
+    }
+    if let Some(pending_attempt) = pending_attempt {
+        return Ok(Some(CookRetryAttempt {
+            cook_id: cook_id.to_string(),
+            attempt: pending_attempt.attempt,
+            pending_run_id: Some(pending_attempt.run_id.clone()),
+            plan: pending_attempt.plan.clone(),
+        }));
+    }
+    let max_attempts = recipe
+        .retry_budget
+        .get("max_attempts")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.retry_budget.max_attempts",
+                "durable Cook recipe is missing a valid max_attempts budget",
+                Some(cook_id.to_string()),
+                None,
+            )
+        })?;
+    let next_attempt = recipe
+        .attempts
+        .iter()
+        .map(|recipe_attempt| recipe_attempt.attempt)
+        .max()
+        .unwrap_or(attempt)
+        .checked_add(1)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "durable Cook attempt sequence is exhausted",
+                Some(cook_id.to_string()),
+                None,
+            )
+        })?;
+    if next_attempt > max_attempts {
+        return Err(Error::validation_invalid_argument(
+            "cook_recipe.retry_budget.max_attempts",
+            "manual retry would exceed the durable Cook attempt budget",
+            Some(cook_id.to_string()),
+            None,
+        ));
+    }
+    Ok(Some(CookRetryAttempt {
+        cook_id: cook_id.to_string(),
+        attempt: next_attempt,
+        pending_run_id: None,
+        plan: source_recipe_attempt.plan.clone(),
+    }))
+}
+
+fn is_exact_retry_reservation(
+    source: &agent_task_lifecycle::AgentTaskRunRecord,
+    plan: &AgentTaskPlan,
+    run_id: &str,
+) -> Result<bool> {
+    let record = agent_task_lifecycle::exact_record(run_id)?;
+    Ok(record.metadata["retry_of"] == source.run_id
+        && agent_task_lifecycle::load_plan(run_id)? == *plan)
+}
+
+struct CookRetryAttempt {
+    cook_id: String,
+    attempt: u32,
+    pending_run_id: Option<String>,
+    plan: AgentTaskPlan,
 }
 
 #[derive(Debug, Clone)]
