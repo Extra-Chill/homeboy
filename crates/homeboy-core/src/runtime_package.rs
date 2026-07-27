@@ -143,6 +143,7 @@ fn refresh_locked(
     fs::rename(&stage, &generation).map_err(io("publish runtime generation"))?;
     sync_dir(&store)?;
     switch_current(&store, &generation_name)?;
+    ensure_stable_runtime_boundary(&config_root, &store)?;
     write_journal(
         &store,
         &RefreshJournal {
@@ -166,10 +167,56 @@ fn refresh_locked(
     })
 }
 
+/// Snapshot root-manifest runtime assets into a new generation. Linked extension
+/// installs call this instead of writing through the stable runtime boundary.
+pub fn refresh_shared_assets(source_root: &Path) -> Result<()> {
+    config::with_config_lock(|| refresh_shared_assets_locked(source_root))
+}
+
+fn refresh_shared_assets_locked(source_root: &Path) -> Result<()> {
+    let config_root = paths::homeboy()?;
+    let store = config_root.join(GENERATIONS);
+    fs::create_dir_all(store.join("staging")).map_err(io("prepare runtime generation store"))?;
+    recover(&store)?;
+    let source_root =
+        canonical_contained_directory(source_root, source_root, "resolve linked runtime source")?;
+    let generation_name = format!("extension-assets-{}", nonce());
+    let stage = store.join("staging").join(&generation_name);
+    remove_if_exists(&stage, "clean linked runtime generation stage")?;
+    seed_generation(&config_root, &store, &stage)?;
+    materialize_all_declared_runtime_assets(&source_root, &stage)?;
+    sync_tree(&stage)?;
+    write_journal(
+        &store,
+        &RefreshJournal {
+            schema: JOURNAL_SCHEMA.to_string(),
+            generation: generation_name.clone(),
+            switched: false,
+        },
+    )?;
+    fs::rename(&stage, store.join(&generation_name))
+        .map_err(io("publish linked runtime generation"))?;
+    sync_dir(&store)?;
+    switch_current(&store, &generation_name)?;
+    ensure_stable_runtime_boundary(&config_root, &store)?;
+    write_journal(
+        &store,
+        &RefreshJournal {
+            schema: JOURNAL_SCHEMA.to_string(),
+            generation: generation_name,
+            switched: true,
+        },
+    )?;
+    remove_if_exists(
+        &store.join(JOURNAL),
+        "finalize linked runtime generation refresh",
+    )?;
+    sync_dir(&store)
+}
+
 fn seed_generation(config_root: &Path, store: &Path, stage: &Path) -> Result<()> {
-    let current = store.join(CURRENT);
-    if active_current_generation(store).is_some() {
-        reject_symlink_tree_except_root(&current)?;
+    if let Some(current) = active_current_generation(store)? {
+        reject_symlink_tree(&current)?;
         return copy_regular_tree(&current, stage, "copy active runtime generation");
     }
     // First activation migrates the runtime surface only; all unrelated Homeboy
@@ -197,14 +244,48 @@ fn seed_generation(config_root: &Path, store: &Path, stage: &Path) -> Result<()>
     Ok(())
 }
 
-fn active_current_generation(store: &Path) -> Option<PathBuf> {
-    let target = fs::read_link(store.join(CURRENT)).ok()?;
-    safe_relative(target.to_str()?, "runtime_generation").ok()?;
-    let generation = store.join(target);
-    generation
-        .join("agent-runtimes")
-        .is_dir()
-        .then_some(generation)
+fn active_current_generation(store: &Path) -> Result<Option<PathBuf>> {
+    let current = store.join(CURRENT);
+    let Ok(target) = fs::read_link(&current) else {
+        return Ok(None);
+    };
+    let target = target.to_str().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "runtime_generation",
+            "current generation target is not valid UTF-8",
+            None,
+            None,
+        )
+    })?;
+    safe_relative(target, "runtime_generation")?;
+    let generation = canonical_contained_directory(
+        &store.join(target),
+        store,
+        "resolve current runtime generation",
+    )?;
+    if !generation.join("agent-runtimes").is_dir() {
+        return Err(Error::validation_invalid_argument(
+            "runtime_generation",
+            "current generation has no runtime package directory",
+            Some(generation.display().to_string()),
+            None,
+        ));
+    }
+    Ok(Some(generation))
+}
+
+fn canonical_contained_directory(path: &Path, root: &Path, context: &str) -> Result<PathBuf> {
+    let root = fs::canonicalize(root).map_err(io(context))?;
+    let path = fs::canonicalize(path).map_err(io(context))?;
+    if !path.is_dir() || !path.starts_with(&root) {
+        return Err(Error::validation_invalid_argument(
+            "runtime_generation",
+            "runtime generation escapes its store",
+            Some(path.display().to_string()),
+            None,
+        ));
+    }
+    Ok(path)
 }
 
 fn manifest_root<'a>(source_root: &'a Path, package: &'a Path) -> &'a Path {
@@ -267,6 +348,48 @@ fn materialize_declared_assets(root: &Path, stage: &Path, runtime_id: &str) -> R
         }
     }
     Ok(assets)
+}
+
+fn materialize_all_declared_runtime_assets(root: &Path, stage: &Path) -> Result<()> {
+    let manifest = root.join(ROOT_MANIFEST);
+    let raw = fs::read_to_string(&manifest).map_err(io("read linked runtime asset manifest"))?;
+    let parsed: RootManifest = serde_json::from_str(&raw).map_err(|error| {
+        Error::validation_invalid_argument(
+            "source",
+            format!("invalid shared asset manifest: {error}"),
+            Some(manifest.display().to_string()),
+            None,
+        )
+    })?;
+    let root = fs::canonicalize(root).map_err(io("resolve linked runtime source"))?;
+    for asset in parsed
+        .shared_assets
+        .into_iter()
+        .map(SharedAssetDeclaration::path)
+    {
+        if !matches!(
+            asset.as_str(),
+            "agent-runtimes" | "agent-task-contracts" | "runtime-agent-ci"
+        ) {
+            continue;
+        }
+        let relative = safe_relative(&asset, "shared_assets")?;
+        let source =
+            fs::canonicalize(root.join(relative)).map_err(io("resolve linked runtime asset"))?;
+        if !source.is_dir() || !source.starts_with(&root) {
+            return Err(Error::validation_invalid_argument(
+                "shared_assets",
+                "linked runtime asset escapes its source root",
+                Some(asset),
+                None,
+            ));
+        }
+        reject_symlink_tree(&source)?;
+        let target = stage.join(relative);
+        remove_if_exists(&target, "replace linked runtime asset")?;
+        copy_regular_tree(&source, &target, "stage linked runtime asset")?;
+    }
+    Ok(())
 }
 
 fn materialize_runtime_shared_tree(source: &Path, target: &Path, runtime_id: &str) -> Result<()> {
@@ -450,6 +573,33 @@ fn switch_current(store: &Path, generation: &str) -> Result<()> {
     sync_dir(store)
 }
 
+fn ensure_stable_runtime_boundary(config_root: &Path, _store: &Path) -> Result<()> {
+    let boundary = paths::legacy_agent_runtimes()?;
+    let expected = Path::new(GENERATIONS).join(CURRENT).join("agent-runtimes");
+    if fs::read_link(&boundary).ok().as_deref() == Some(expected.as_path()) {
+        return Ok(());
+    }
+    // The first generation already contains a validated copy of a legacy
+    // directory or linked source. Replace that old boundary once, never again.
+    let backup = config_root.join(format!(".agent-runtimes-legacy-{}", nonce()));
+    if fs::symlink_metadata(&boundary).is_ok() {
+        fs::rename(&boundary, &backup).map_err(io("migrate legacy runtime boundary"))?;
+    }
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(&expected, &boundary);
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_dir(&expected, &boundary);
+    if let Err(error) = linked {
+        if fs::symlink_metadata(&backup).is_ok() {
+            let _ = fs::rename(&backup, &boundary);
+        }
+        return Err(io("create stable runtime boundary")(error));
+    }
+    sync_dir(config_root)?;
+    remove_if_exists(&backup, "remove migrated legacy runtime boundary")?;
+    sync_dir(config_root)
+}
+
 fn recover(store: &Path) -> Result<()> {
     let journal = store.join(JOURNAL);
     let Ok(raw) = fs::read(&journal) else {
@@ -472,8 +622,9 @@ fn recover(store: &Path) -> Result<()> {
         ));
     }
     let generation = store.join(&record.generation);
-    let current = active_current_generation(store);
-    if !record.switched && current.as_deref() != Some(generation.as_path()) {
+    let current = active_current_generation(store)?;
+    let published_generation = fs::canonicalize(&generation).ok();
+    if !record.switched && current.as_ref() != published_generation.as_ref() {
         remove_if_exists(
             &store.join("staging").join(&record.generation),
             "recover staged runtime generation",
@@ -680,8 +831,14 @@ mod tests {
             manifest(source.path(), &["agent-runtimes", "agent-task-contracts"]);
             let result = refresh("opencode", &source.path().to_string_lossy(), None).unwrap();
             fs::remove_dir_all(source.path()).unwrap();
+            let documented = paths::legacy_agent_runtimes().unwrap();
+            assert_eq!(result.path, documented.join("opencode"));
+            assert_eq!(
+                fs::read_link(&documented).unwrap(),
+                Path::new("runtime-generations/current/agent-runtimes")
+            );
             let output = Command::new("node")
-                .arg(result.path.join("run.cjs"))
+                .arg(documented.join("opencode/run.cjs"))
                 .output()
                 .unwrap();
             assert!(
@@ -775,6 +932,9 @@ mod tests {
             let reader = std::thread::spawn(move || {
                 for _ in 0..1_000 {
                     let runtimes = paths::agent_runtimes().unwrap();
+                    // A consumer resolves the stable boundary once, so both
+                    // package and sibling dependency stay in that generation.
+                    let runtimes = fs::canonicalize(runtimes).unwrap();
                     let generation = runtimes.parent().unwrap();
                     let runtime = fs::read_to_string(runtimes.join("neutral/marker")).unwrap();
                     let dependency =
@@ -816,6 +976,49 @@ mod tests {
                 fs::read_to_string(paths::agent_runtimes().unwrap().join("legacy/marker")).unwrap(),
                 "linked"
             );
+        });
+    }
+
+    #[test]
+    fn linked_runtime_asset_reinstall_publishes_a_new_generation() {
+        with_isolated_home(|_| {
+            let runtime = tempfile::tempdir().unwrap();
+            package(runtime.path(), "neutral", "one");
+            refresh("neutral", &runtime.path().to_string_lossy(), None).unwrap();
+            let first =
+                fs::read_link(paths::homeboy().unwrap().join(GENERATIONS).join(CURRENT)).unwrap();
+
+            let linked = tempfile::tempdir().unwrap();
+            package(linked.path(), "linked", "first");
+            manifest(linked.path(), &["agent-runtimes"]);
+            refresh_shared_assets(linked.path()).unwrap();
+            let second =
+                fs::read_link(paths::homeboy().unwrap().join(GENERATIONS).join(CURRENT)).unwrap();
+
+            assert_ne!(first, second);
+            assert_eq!(
+                fs::read_to_string(paths::agent_runtimes().unwrap().join("linked/marker")).unwrap(),
+                "first"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_nested_current_generation_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        with_isolated_home(|_| {
+            let source = tempfile::tempdir().unwrap();
+            package(source.path(), "neutral", "working");
+            refresh("neutral", &source.path().to_string_lossy(), None).unwrap();
+            let store = paths::homeboy().unwrap().join(GENERATIONS);
+            let outside = tempfile::tempdir().unwrap();
+            fs::create_dir_all(outside.path().join("agent-runtimes")).unwrap();
+            fs::remove_file(store.join(CURRENT)).unwrap();
+            symlink(outside.path(), store.join(CURRENT)).unwrap();
+
+            assert!(refresh("neutral", &source.path().to_string_lossy(), None).is_err());
         });
     }
 

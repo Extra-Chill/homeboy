@@ -36,30 +36,9 @@ pub fn extensions() -> Result<PathBuf> {
 
 /// Agent runtime package directory
 pub fn agent_runtimes() -> Result<PathBuf> {
-    let root = homeboy()?;
-    let generations = root.join("runtime-generations");
-    let current = generations.join("current");
-    // Generations are opt-in at read time: installs created before #10478 keep
-    // their established location until the first successful refresh publishes one.
-    Ok(if current_generation(&generations, &current) {
-        current.join("agent-runtimes")
-    } else {
-        root.join("agent-runtimes")
-    })
-}
-
-fn current_generation(generations: &std::path::Path, current: &std::path::Path) -> bool {
-    let Ok(target) = std::fs::read_link(current) else {
-        return false;
-    };
-    if target.is_absolute()
-        || target
-            .components()
-            .any(|part| !matches!(part, std::path::Component::Normal(_)))
-    {
-        return false;
-    }
-    generations.join(target).join("agent-runtimes").is_dir()
+    // This is the documented and process-stable runtime boundary. Generation
+    // activation changes only runtime-generations/current behind this path.
+    Ok(homeboy()?.join("agent-runtimes"))
 }
 
 /// Legacy runtime package directory, used only while migrating it into a
