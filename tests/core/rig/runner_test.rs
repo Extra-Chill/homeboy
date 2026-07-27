@@ -21,8 +21,8 @@ use crate::dependency_materialization_cache::{
 use crate::pipeline::PipelineOutcome;
 use crate::runner::{
     head_sha_and_branch, run_check, run_check_groups, run_down, run_down_with_settings,
-    run_fuzz_prepare, run_repair, run_status, run_up, snapshot_state, CheckReport, RigStatusReport,
-    ServiceStatusReport, SymlinkStatusState, UpReport,
+    run_fuzz_prepare, run_repair, run_status, run_up, snapshot_state, CheckReport,
+    RigComponentStatusReport, RigStatusReport, ServiceStatusReport, SymlinkStatusState, UpReport,
 };
 use crate::spec::{
     ComponentSpec, DependencyMaterializationOutputKind, DependencyMaterializationOutputSpec,
@@ -120,6 +120,7 @@ fn test_status_report_empty_services_serializes() {
     let report = RigStatusReport {
         rig_id: "test".to_string(),
         description: "empty rig".to_string(),
+        components: Vec::<RigComponentStatusReport>::new(),
         services: Vec::new(),
         symlinks: Vec::new(),
         last_up: None,
@@ -246,6 +247,68 @@ fn test_run_check() {
         let status = run_status(&rig).expect("run_status reads back state");
         assert_eq!(status.last_check_result.as_deref(), Some("pass"));
         assert!(status.last_check.is_some(), "last_check timestamp recorded");
+    });
+}
+
+#[test]
+fn status_projects_current_component_identity_without_materialized_resources() {
+    with_isolated_home(|_dir| {
+        let checkout = tempfile::tempdir().expect("checkout");
+        let init = std::process::Command::new("git")
+            .args(["init", "-b", "status-projection"])
+            .current_dir(checkout.path())
+            .status()
+            .expect("initialize checkout");
+        assert!(init.success());
+        std::fs::write(checkout.path().join("fixture.txt"), "fixture").expect("write fixture");
+        let commit = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test",
+                "add",
+                "fixture.txt",
+            ])
+            .current_dir(checkout.path())
+            .status()
+            .expect("stage fixture");
+        assert!(commit.success());
+        let commit = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "-m",
+                "fixture",
+            ])
+            .current_dir(checkout.path())
+            .status()
+            .expect("commit fixture");
+        assert!(commit.success());
+        let rig: RigSpec = serde_json::from_str(&format!(
+            r#"{{"id":"status-projection","components":{{"fixture":{{"path":"{}"}}}}}}"#,
+            checkout.path().display()
+        ))
+        .expect("parse rig");
+
+        let report = run_status(&rig).expect("status");
+
+        assert_eq!(report.components.len(), 1);
+        assert_eq!(report.components[0].id, "fixture");
+        assert_eq!(
+            report.components[0].path,
+            checkout.path().display().to_string()
+        );
+        assert_eq!(report.components[0].source, "installed_default");
+        assert_eq!(
+            report.components[0].r#ref.as_deref(),
+            Some("status-projection")
+        );
+        assert_eq!(report.components[0].freshness, "unmanaged");
+        assert!(report.materialized.is_none());
     });
 }
 

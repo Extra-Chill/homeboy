@@ -47,6 +47,7 @@ fn prepare_rig_bench_context(
     let declared_spec = spec.clone();
     apply_bench_path_override(&mut spec, args);
     source.spec = spec.clone();
+    rig::preflight_effective_component_checkouts(&spec)?;
     let prepare_settings = bench_prepare_settings(args);
     let lease =
         rig::lease::acquire_active_run_lease_with_settings(&spec, "bench", &prepare_settings)?;

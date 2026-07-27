@@ -31,6 +31,7 @@ fn test_state_round_trips_with_service() {
         services: Default::default(),
         shared_paths: Default::default(),
         materialized: None,
+        last_effective_components: Default::default(),
     };
     state.services.insert(
         "tarball".to_string(),

@@ -20,6 +20,11 @@ const PROVIDER_CLEANUP_HEARTBEAT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const PROVIDER_CLEANUP_HEARTBEAT: Duration = Duration::from_millis(100);
 const PROVIDER_CLEANUP_OUTPUT_LIMIT: usize = 64 * 1024;
+#[cfg(not(test))]
+const PROVIDER_LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const PROVIDER_LOOKUP_TIMEOUT: Duration = Duration::from_secs(1);
+const PROVIDER_LOOKUP_OUTPUT_LIMIT: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct WorktreeProviderCleanupOptions {
@@ -161,6 +166,54 @@ pub fn resolve_worktree_provider_handle_from_config(
 /// Resolve a provider-managed workspace and retain the selected provider id.
 pub fn resolve_worktree_provider(handle: &str) -> Result<WorktreeProviderResolution> {
     resolve_worktree_provider_from_config(handle, &defaults::load_config())
+}
+
+/// Resolve an effective checkout path through configured providers.
+///
+/// Unlike handle resolution this is intentionally optional: a rig may declare
+/// an ordinary local checkout. When a provider owns the exact path, its safety
+/// contract is validated before callers start expensive work.
+pub fn resolve_worktree_provider_path(
+    path: &std::path::Path,
+) -> Result<Option<WorktreeProviderResolution>> {
+    resolve_worktree_provider_path_from_config(path, &defaults::load_config())
+}
+
+pub fn resolve_worktree_provider_path_from_config(
+    path: &std::path::Path,
+    config: &HomeboyConfig,
+) -> Result<Option<WorktreeProviderResolution>> {
+    let requested = match std::fs::canonicalize(path) {
+        Ok(path) => path,
+        Err(_) => return Ok(None),
+    };
+    let mut provider_ids = config
+        .worktree_providers
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    provider_ids.sort();
+    for provider_id in provider_ids {
+        let provider = &config.worktree_providers[&provider_id];
+        if !provider.enabled {
+            continue;
+        }
+        let Some(command) = provider.commands.list.as_ref() else {
+            continue;
+        };
+        let worktrees = run_provider_list_command(&provider_id, provider, command)?;
+        let Some(worktree) = worktrees.into_iter().find(|worktree| {
+            std::fs::canonicalize(&worktree.path).ok().as_deref() == Some(requested.as_path())
+        }) else {
+            continue;
+        };
+        validate_provider_handle(&provider_id, &worktree, None, None)?;
+        return Ok(Some(WorktreeProviderResolution {
+            provider_id,
+            worktree,
+        }));
+    }
+    Ok(None)
 }
 
 pub fn resolve_worktree_provider_from_config(
@@ -348,7 +401,13 @@ fn run_provider_ensure_command(provider_id: &str, command: &[String]) -> Result<
             None,
         ));
     };
-    let output = Command::new(program).args(args).output().map_err(|error| {
+    let mut process = Command::new(program);
+    process
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::engine::command::isolate_process_tree(&mut process);
+    let mut child = process.spawn().map_err(|error| {
         Error::validation_invalid_argument(
             "to_worktree",
             format!("worktree provider `{provider_id}` ensure command could not start: {error}"),
@@ -356,6 +415,39 @@ fn run_provider_ensure_command(provider_id: &str, command: &[String]) -> Result<
             None,
         )
     })?;
+    let output = crate::engine::command::wait_with_bounded_output_supervised(
+        &mut child,
+        PROVIDER_LOOKUP_OUTPUT_LIMIT,
+        PROVIDER_LOOKUP_TIMEOUT,
+        Duration::from_millis(100),
+        || false,
+        |_, _| Ok(()),
+    )
+    .map_err(|error| {
+        Error::validation_invalid_argument(
+            "to_worktree",
+            format!(
+                "worktree provider `{provider_id}` ensure command could not be supervised: {error}"
+            ),
+            Some(provider_id.to_string()),
+            None,
+        )
+    })?;
+    if output.termination != crate::engine::command::SupervisedCommandTermination::Completed {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            format!(
+                "worktree provider `{provider_id}` ensure command timed out after {} ms",
+                PROVIDER_LOOKUP_TIMEOUT.as_millis()
+            ),
+            Some(provider_id.to_string()),
+            Some(vec![
+                "Refresh or repair the configured workspace provider, then retry the operation."
+                    .to_string(),
+            ]),
+        ));
+    }
+    let output = output.output.into_output();
     if output.status.success() {
         return Ok(());
     }
@@ -516,7 +608,13 @@ fn run_provider_lookup_command(
                 None,
             )
         })?;
-    let output = Command::new(program).args(args).output().map_err(|error| {
+    let mut process = Command::new(program);
+    process
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::engine::command::isolate_process_tree(&mut process);
+    let mut child = process.spawn().map_err(|error| {
         Error::validation_invalid_argument(
             "to_worktree",
             format!(
@@ -526,6 +624,37 @@ fn run_provider_lookup_command(
             None,
         )
     })?;
+    let output = crate::engine::command::wait_with_bounded_output_supervised(
+        &mut child,
+        PROVIDER_LOOKUP_OUTPUT_LIMIT,
+        PROVIDER_LOOKUP_TIMEOUT,
+        Duration::from_millis(100),
+        || false,
+        |_, _| Ok(()),
+    )
+    .map_err(|error| {
+        Error::validation_invalid_argument(
+            "to_worktree",
+            format!("worktree provider `{provider_id}` {operation} command could not be supervised: {error}"),
+            Some(provider_id.to_string()),
+            None,
+        )
+    })?;
+    if output.termination != crate::engine::command::SupervisedCommandTermination::Completed {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            format!(
+                "worktree provider `{provider_id}` {operation} command timed out after {} ms",
+                PROVIDER_LOOKUP_TIMEOUT.as_millis()
+            ),
+            Some(provider_id.to_string()),
+            Some(vec![
+                "Refresh or repair the configured workspace provider, then retry the operation."
+                    .to_string(),
+            ]),
+        ));
+    }
+    let output = output.output.into_output();
     if !output.status.success() {
         return Err(Error::validation_invalid_argument_with_evidence(
             "to_worktree",
@@ -2045,6 +2174,98 @@ mod tests {
 
         assert_eq!(handle.path, workspace.path().display().to_string());
         assert_eq!(handle.branch, "cook-target");
+    }
+
+    #[test]
+    fn path_resolution_rejects_a_provider_declared_primary_before_work_starts() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "main");
+        let script = fake_list_provider_script(json!({ "worktrees": [{
+            "handle": "fixture",
+            "path": workspace.path(),
+            "branch": "main",
+            "safety": { "dirty": false, "unpushed": false, "primary": true }
+        }]}));
+
+        let error = resolve_worktree_provider_path_from_config(
+            workspace.path(),
+            &config_with_provider(WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: false,
+                commands: WorktreeProviderCommands {
+                    list: Some(vec![script]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(worktrees_mapping()),
+            }),
+        )
+        .expect_err("provider primary must fail before rig work starts");
+
+        assert!(error.message.contains("primary"));
+        assert_eq!(error.details["worktree_provider_lookup"], Value::Null);
+    }
+
+    #[test]
+    fn path_resolution_accepts_an_explicit_provider_worktree_identity() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "fix/10251");
+        let script = fake_list_provider_script(json!({ "worktrees": [{
+            "handle": "fixture@fix-10251",
+            "path": workspace.path(),
+            "branch": "fix/10251",
+            "safety": { "dirty": false, "unpushed": false, "primary": false }
+        }]}));
+
+        let resolution = resolve_worktree_provider_path_from_config(
+            workspace.path(),
+            &config_with_provider(WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: false,
+                commands: WorktreeProviderCommands {
+                    list: Some(vec![script]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(worktrees_mapping()),
+            }),
+        )
+        .expect("provider lookup")
+        .expect("exact path is provider managed");
+
+        assert_eq!(resolution.provider_id, "fixture");
+        assert_eq!(resolution.worktree.handle, "fixture@fix-10251");
+        assert_eq!(
+            resolution.worktree.path,
+            workspace.path().display().to_string()
+        );
+    }
+
+    #[test]
+    fn path_resolution_reports_provider_timeout() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let dir = unique_fixture_script_dir();
+        let script = dir.join("provider");
+        fs::write(&script, "#!/bin/sh\nsleep 2\nprintf '{\"worktrees\":[]}'\n")
+            .expect("write provider");
+        make_executable(&script);
+
+        let error = resolve_worktree_provider_path_from_config(
+            workspace.path(),
+            &config_with_provider(WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: false,
+                commands: WorktreeProviderCommands {
+                    list: Some(vec![script.to_string_lossy().to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(worktrees_mapping()),
+            }),
+        )
+        .expect_err("a hung provider must be bounded");
+
+        assert!(error.message.contains("timed out"));
     }
 
     #[test]

@@ -41,6 +41,10 @@ pub struct RigState {
     /// Long-lived ownership materialized by the last successful `rig up`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub materialized: Option<MaterializedRigState>,
+
+    /// Effective component identities selected by the most recent invocation.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_effective_components: BTreeMap<String, ComponentSnapshot>,
 }
 
 /// Persistent record of what a successful `rig up` materialized.

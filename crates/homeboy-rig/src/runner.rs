@@ -120,12 +120,27 @@ pub struct RepairResourceReport {
 pub struct RigStatusReport {
     pub rig_id: String,
     pub description: String,
+    /// Current component checkout resolution, independent of historical
+    /// materialization resources.
+    pub components: Vec<RigComponentStatusReport>,
     pub services: Vec<ServiceStatusReport>,
     pub symlinks: Vec<SymlinkStatusReport>,
     pub last_up: Option<String>,
     pub last_check: Option<String>,
     pub last_check_result: Option<String>,
     pub materialized: Option<MaterializedRigState>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RigComponentStatusReport {
+    pub id: String,
+    pub path: String,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#ref: Option<String>,
+    pub freshness: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -162,6 +177,7 @@ pub enum SymlinkStatusState {
 
 /// Materialize a rig: run the `up` pipeline, stash timestamp in state.
 pub fn run_up(rig: &RigSpec) -> Result<UpReport> {
+    preflight_effective_component_checkouts(rig)?;
     let _lease = acquire_active_run_lease(rig, "up")?;
     let observer = RigRunObserver::start(rig, "up");
 
@@ -220,6 +236,7 @@ pub fn run_check_with_settings(
     rig: &RigSpec,
     settings: &[(String, String)],
 ) -> Result<CheckReport> {
+    preflight_effective_component_checkouts(rig)?;
     let observer = RigRunObserver::start(rig, "check");
 
     let execute = || {
@@ -320,6 +337,7 @@ pub fn run_check_groups_with_settings(
     groups: &[String],
     settings: &[(String, String)],
 ) -> Result<CheckReport> {
+    preflight_effective_component_checkouts(rig)?;
     let outcome = run_pipeline_check_groups(rig, groups, false, settings)?;
 
     Ok(CheckReport {
@@ -852,9 +870,24 @@ pub fn run_status(rig: &RigSpec) -> Result<RigStatusReport> {
         .collect::<Vec<_>>();
     symlinks.sort_by(|a, b| a.link.cmp(&b.link));
 
+    let mut components = rig
+        .components
+        .iter()
+        .map(|(id, component)| {
+            component_status(
+                rig,
+                id,
+                &component.path,
+                state.last_effective_components.get(id),
+            )
+        })
+        .collect::<Vec<_>>();
+    components.sort_by(|a, b| a.id.cmp(&b.id));
+
     Ok(RigStatusReport {
         rig_id: rig.id.clone(),
         description: rig.description.clone(),
+        components,
         services,
         symlinks,
         last_up: state.last_up,
@@ -862,6 +895,80 @@ pub fn run_status(rig: &RigSpec) -> Result<RigStatusReport> {
         last_check_result: state.last_check_result,
         materialized: state.materialized,
     })
+}
+
+/// Validate every provider-owned component checkout before acquiring a rig
+/// lease, opening an observation, or running a pipeline step.
+pub fn preflight_effective_component_checkouts(rig: &RigSpec) -> Result<()> {
+    for component in rig.components.values() {
+        let path = expand_vars(rig, &component.path);
+        let path = shellexpand::tilde(&path).into_owned();
+        homeboy_core::worktree_providers::resolve_worktree_provider_path(Path::new(&path))?;
+    }
+    Ok(())
+}
+
+/// Persist a caller-selected effective checkout for later status reporting.
+pub fn record_effective_component_path(rig_id: &str, component_id: &str, path: &str) -> Result<()> {
+    let (sha, branch) = head_sha_and_branch(path);
+    let mut state = RigState::load(rig_id)?;
+    state.last_effective_components.insert(
+        component_id.to_string(),
+        ComponentSnapshot {
+            path: path.to_string(),
+            declared_path: None,
+            sha,
+            branch,
+        },
+    );
+    state.save(rig_id)
+}
+
+fn component_status(
+    rig: &RigSpec,
+    id: &str,
+    declared_path: &str,
+    last_effective: Option<&ComponentSnapshot>,
+) -> RigComponentStatusReport {
+    let declared = shellexpand::tilde(&expand_vars(rig, declared_path)).into_owned();
+    let (path, source) = match last_effective {
+        Some(snapshot) if snapshot.path != declared => {
+            (snapshot.path.clone(), "last_override".to_string())
+        }
+        _ => (declared, "installed_default".to_string()),
+    };
+    match homeboy_core::worktree_providers::resolve_worktree_provider_path(Path::new(&path)) {
+        Ok(Some(resolution)) => RigComponentStatusReport {
+            id: id.to_string(),
+            path: resolution.worktree.path,
+            source: format!("provider:{}", resolution.provider_id),
+            r#ref: Some(resolution.worktree.branch),
+            freshness: "current".to_string(),
+            error: None,
+        },
+        Ok(None) => {
+            let (_, branch) = head_sha_and_branch(&path);
+            RigComponentStatusReport {
+                id: id.to_string(),
+                path,
+                source,
+                r#ref: branch,
+                freshness: "unmanaged".to_string(),
+                error: None,
+            }
+        }
+        Err(error) => {
+            let (_, branch) = head_sha_and_branch(&path);
+            RigComponentStatusReport {
+                id: id.to_string(),
+                path,
+                source: "provider".to_string(),
+                r#ref: branch,
+                freshness: "stale".to_string(),
+                error: Some(error.message),
+            }
+        }
+    }
 }
 
 fn symlink_status(rig: &RigSpec, link: &super::spec::SymlinkSpec) -> SymlinkStatusReport {
