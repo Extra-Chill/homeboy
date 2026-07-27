@@ -296,32 +296,6 @@ where
     cleanup_result
 }
 
-/// Connect using an explicit dead-lease or missing-lease selector. A
-/// lease-less store is handled by its dedicated operator-confirmed path.
-pub fn connect_with_recovery(
-    runner_id: &str,
-    orphan_lease_id: Option<&str>,
-    missing_lease_state_identity: Option<&str>,
-) -> Result<(RunnerConnectReport, i32)> {
-    if missing_lease_state_identity.is_some() {
-        return Err(Error::validation_invalid_argument(
-            "recover_missing_lease_state",
-            "missing-lease recovery requires the explicit remote recovery command",
-            missing_lease_state_identity.map(str::to_string),
-            None,
-        ));
-    }
-    connect_with_orphan_adoption(runner_id, orphan_lease_id, &[], false, None, None, None)
-}
-
-/// Reconnect after the explicit lease-less recovery transaction has terminalized
-/// the unowned store and started its replacement daemon.
-pub fn connect_with_leaseless_orphan_reconciliation(
-    runner_id: &str,
-) -> Result<(RunnerConnectReport, i32)> {
-    connect_with_orphan_adoption(runner_id, None, &[], true, None, None, None)
-}
-
 /// Connect while explicitly adopting one recorded dead remote lease. This is an
 /// operator recovery path; ordinary reconnects never infer orphan ownership.
 pub fn connect_with_orphan_adoption(

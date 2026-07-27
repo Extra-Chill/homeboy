@@ -208,18 +208,6 @@ pub enum RoleOwners {
     Many(Vec<String>),
 }
 
-impl CompositionConfig {
-    /// The single extension id that owns `role`, if the role designates exactly
-    /// one owner. Multi-owner roles return `None` (they do not designate a
-    /// unique capability owner).
-    pub fn role_owner(&self, role: &str) -> Option<&str> {
-        match self.roles.get(role) {
-            Some(RoleOwners::One(owner)) => Some(owner.as_str()),
-            _ => None,
-        }
-    }
-}
-
 impl ExtensionManifest {
     pub fn validate_notification_transports(&self) -> homeboy_error::Result<()> {
         let mut ids = std::collections::HashSet::new();
@@ -533,14 +521,6 @@ impl ExtensionManifest {
             .unwrap_or(&[])
     }
 
-    /// Get capabilities this extension provides (empty if not specified).
-    pub fn provided_capabilities(&self) -> &[String] {
-        self.provides
-            .as_ref()
-            .map(|p| p.capabilities.as_slice())
-            .unwrap_or(&[])
-    }
-
     /// Get component discovery marker rules (empty if not specified).
     pub fn discovery_markers(&self) -> &[DiscoveryMarkerConfig] {
         self.provides
@@ -569,11 +549,6 @@ impl ExtensionManifest {
         self.scripts.as_ref().and_then(|s| s.topology.as_deref())
     }
 
-    /// Get the validate script path (relative to extension dir), if configured.
-    pub fn validate_script(&self) -> Option<&str> {
-        self.scripts.as_ref().and_then(|s| s.validate.as_deref())
-    }
-
     /// Get the format script path (relative to extension dir), if configured.
     pub fn format_script(&self) -> Option<&str> {
         self.scripts.as_ref().and_then(|s| s.format.as_deref())
@@ -591,11 +566,6 @@ impl ExtensionManifest {
         self.scripts
             .as_ref()
             .and_then(|s| s.compiler_warning_fixes.as_deref())
-    }
-
-    /// Get the contract script path (relative to extension dir), if configured.
-    pub fn contract_script(&self) -> Option<&str> {
-        self.scripts.as_ref().and_then(|s| s.contract.as_deref())
     }
 }
 
@@ -622,12 +592,21 @@ mod composition_tests {
 
         let composition = manifest.composition.expect("composition present");
         assert_eq!(composition.includes, vec!["nodejs".to_string()]);
-        // Single-owner role resolves to the owning extension.
-        assert_eq!(composition.role_owner("javascript"), Some("nodejs"));
-        // Multi-owner role does not designate a unique owner.
-        assert_eq!(composition.role_owner("project"), None);
+        // A bare string owner deserializes into the single-owner shape.
+        assert_eq!(
+            composition.roles.get("javascript"),
+            Some(&RoleOwners::One("nodejs".to_string()))
+        );
+        // A list owner deserializes into the multi-owner shape.
+        assert_eq!(
+            composition.roles.get("project"),
+            Some(&RoleOwners::Many(vec![
+                "wordpress-plugin".to_string(),
+                "wordpress-theme".to_string(),
+            ]))
+        );
         // Absent role.
-        assert_eq!(composition.role_owner("missing"), None);
+        assert_eq!(composition.roles.get("missing"), None);
     }
 
     #[test]

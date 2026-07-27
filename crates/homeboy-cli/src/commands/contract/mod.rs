@@ -1177,7 +1177,6 @@ fn json_family(value: CommandJsonFamily) -> &'static str {
         CommandJsonFamily::Quality => "quality",
         CommandJsonFamily::Workspace => "workspace",
         CommandJsonFamily::Ops => "ops",
-        CommandJsonFamily::RawOnly => "raw_only",
     }
 }
 
@@ -1186,7 +1185,6 @@ fn dispatch_family(value: CommandDispatchFamily) -> &'static str {
         CommandDispatchFamily::Quality => "quality",
         CommandDispatchFamily::Workspace => "workspace",
         CommandDispatchFamily::Ops => "ops",
-        CommandDispatchFamily::RawOnly => "raw_only",
     }
 }
 
@@ -1224,7 +1222,6 @@ fn output_file_mode(value: CommandOutputFileMode) -> &'static str {
 fn output_contract(value: CommandOutputContractKind) -> &'static str {
     match value {
         CommandOutputContractKind::JsonEnvelope => "json_envelope",
-        CommandOutputContractKind::RawOnly => "raw_only",
     }
 }
 

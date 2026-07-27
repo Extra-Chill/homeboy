@@ -5,59 +5,6 @@ use serde::Serialize;
 use crate::lab_contract::{LabRoutingPolicy, LabRunnerWorkloadCapability};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct CommandExecutionPlan {
-    pub label: String,
-    pub portability: CommandPortability,
-    pub remote_argv: Vec<String>,
-    pub source_policy: CommandSourcePolicy,
-    pub workspace_policy: CommandWorkspacePolicy,
-    pub output_contract: CommandOutputContract,
-}
-
-impl CommandExecutionPlan {
-    pub fn remote(
-        label: impl Into<String>,
-        remote_argv: Vec<String>,
-        source_policy: CommandSourcePolicy,
-        workspace_policy: CommandWorkspacePolicy,
-        output_contract: CommandOutputContract,
-    ) -> Self {
-        Self {
-            label: label.into(),
-            portability: CommandPortability::Portable,
-            remote_argv,
-            source_policy,
-            workspace_policy,
-            output_contract,
-        }
-    }
-
-    pub fn local_only(label: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self {
-            label: label.into(),
-            portability: CommandPortability::LocalOnly {
-                reason: reason.into(),
-            },
-            remote_argv: Vec::new(),
-            source_policy: CommandSourcePolicy::ControllerCwdOrExplicitPath,
-            workspace_policy: CommandWorkspacePolicy::Snapshot,
-            output_contract: CommandOutputContract::inherit(),
-        }
-    }
-
-    pub fn safe_remote_argv(&self) -> Option<&[String]> {
-        matches!(self.portability, CommandPortability::Portable).then_some(&self.remote_argv)
-    }
-
-    pub fn local_only_reason(&self) -> Option<&str> {
-        match &self.portability {
-            CommandPortability::Portable => None,
-            CommandPortability::LocalOnly { reason } => Some(reason),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum CommandPortability {
     Portable,

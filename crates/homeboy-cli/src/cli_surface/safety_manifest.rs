@@ -184,8 +184,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
     let mut metadata = CommandSafetyMetadata::default();
 
     if let Some(top_level) = path.first().and_then(|name| registered_command(name)) {
-        metadata.structured_output =
-            top_level.json_family != crate::command_contract::CommandJsonFamily::RawOnly;
         metadata.output_notes = top_level.output_notes;
         metadata.lab_supported = top_level.lab_supported;
         metadata.lab_notes = top_level.lab_notes;
