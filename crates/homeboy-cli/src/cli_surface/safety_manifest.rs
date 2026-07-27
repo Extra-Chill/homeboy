@@ -206,36 +206,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
 
     let path = path.iter().map(String::as_str).collect::<Vec<_>>();
     match path.as_slice() {
-        ["runs", "reconcile"] => {
-            metadata.mutating("marks orphaned running records stale unless --dry-run is passed");
-            metadata.dry_run_flag = Some("--dry-run");
-        }
-        ["runs", "import"] => {
-            metadata.mutating(
-                "imports observation bundle or GitHub Actions artifacts into the local run store",
-            );
-        }
-        ["runs", "loop-sync"] => {
-            metadata.mutating(
-                "syncs copied loop archives into observation runs/artifacts unless --dry-run is passed",
-            );
-            metadata.dry_run_flag = Some("--dry-run");
-        }
-        ["runs", "artifact", "cleanup-downloads"] | ["runs", "artifact", "cleanup-persisted"] => {
-            metadata.mutating(
-                "default output is a non-mutating cleanup plan; pass --apply to delete artifacts",
-            );
-            metadata.dangerous_flags = vec!["--apply"];
-        }
-        ["runs", "resources"] => {
-            metadata.mutating("default output is non-mutating; pass --cleanup-plan to plan lifecycle resource cleanup or --apply with --cleanup-root to delete bounded apply-intended candidates");
-            metadata.dangerous_flags = vec!["--apply"];
-        }
-        ["runs", "artifact", "attach"] => {
-            metadata.mutating(
-                "copies an existing runner-side file into the persisted local artifact store and records it against a run",
-            );
-        }
         ["agent-task", "promote"] => {
             metadata.mutating(
                 "applies a selected patch artifact into a managed worktree unless --dry-run is passed",
@@ -326,11 +296,6 @@ fn command_safety_metadata(path: &[String]) -> CommandSafetyMetadata {
             );
             metadata.dry_run_flag = Some("--dry-run");
             metadata.dangerous_flags = vec!["--apply", "--delete-branch"];
-        }
-        ["runs", "findings", "reconcile"] | ["runs", "findings", "reconcile-run"] => {
-            metadata.operator_mutating("default output is a non-mutating issue reconciliation plan; pass --apply to mutate tracker state");
-            metadata.dry_run_flag = Some("--dry-run");
-            metadata.dangerous_flags = vec!["--apply"];
         }
         ["refactor", "rename"]
         | ["refactor", "add"]

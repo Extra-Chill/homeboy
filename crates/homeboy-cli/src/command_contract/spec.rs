@@ -445,6 +445,13 @@ const fn guarded_mutating_safety(dangerous_flags: &'static [&'static str]) -> Co
     }
 }
 
+const fn with_dry_run(safety: CommandSafetySpec, dry_run_flag: &'static str) -> CommandSafetySpec {
+    CommandSafetySpec {
+        dry_run_flag: Some(dry_run_flag),
+        ..safety
+    }
+}
+
 const fn paths_safety(
     paths: &'static [&'static str],
     safety: CommandSafetySpec,
@@ -601,6 +608,44 @@ const REVIEW_AUDIT_BASELINE_PATHS: &[&str] = &[
     "audit-baseline refresh",
     "audit-baseline merge",
     "audit-baseline prune",
+];
+
+const RUNS_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        &["reconcile"],
+        with_dry_run(mutating_safety(), "--dry-run"),
+        "marks orphaned running records stale unless --dry-run is passed",
+    ),
+    paths_safety(
+        &["import"],
+        mutating_safety(),
+        "imports observation bundle or GitHub Actions artifacts into the local run store",
+    ),
+    paths_safety(
+        &["loop-sync"],
+        with_dry_run(mutating_safety(), "--dry-run"),
+        "syncs copied loop archives into observation runs/artifacts unless --dry-run is passed",
+    ),
+    paths_safety(
+        &["artifact cleanup-downloads", "artifact cleanup-persisted"],
+        guarded_mutating_safety(&["--apply"]),
+        "default output is a non-mutating cleanup plan; pass --apply to delete artifacts",
+    ),
+    paths_safety(
+        &["resources"],
+        guarded_mutating_safety(&["--apply"]),
+        "default output is non-mutating; pass --cleanup-plan to plan lifecycle resource cleanup or --apply with --cleanup-root to delete bounded apply-intended candidates",
+    ),
+    paths_safety(
+        &["artifact attach"],
+        mutating_safety(),
+        "copies an existing runner-side file into the persisted local artifact store and records it against a run",
+    ),
+    paths_safety(
+        &["findings reconcile", "findings reconcile-run"],
+        operator_safety(Some("--dry-run"), &["--apply"]),
+        "default output is a non-mutating issue reconciliation plan; pass --apply to mutate tracker state",
+    ),
 ];
 
 const EXTENSION_MUTATING_PATHS: &[&str] = &[
@@ -898,11 +943,14 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             TUNNEL_LAB_SUPPORT,
         ),
     ),
-    command_spec_with_output_notes(
-        "runs",
-        CommandJsonFamily::Workspace,
-        "inspects persisted evidence, artifacts, artifact postprocessing, and finding reconciliation workflows",
-    ),
+    CommandSpec {
+        subcommand_safety: RUNS_SUBCOMMAND_SAFETY,
+        ..command_spec_with_output_notes(
+            "runs",
+            CommandJsonFamily::Workspace,
+            "inspects persisted evidence, artifacts, artifact postprocessing, and finding reconciliation workflows",
+        )
+    },
     crate::ops_command_spec!(self_cmd),
     command_spec("stack", CommandJsonFamily::Workspace),
     crate::ops_command_spec!(api),
