@@ -342,6 +342,9 @@ fn update_group(source: RigSourceGroup) -> Result<RigSourceUpdateResult> {
             source_revision: source_revision.clone(),
             source_ref: source_ref.clone(),
             source_dirty,
+            source_content_hash: Some(super::install::package_content_hash(Path::new(
+                &source.package_path,
+            ))?),
         };
         write_source_metadata(&rig.id, &metadata)?;
 

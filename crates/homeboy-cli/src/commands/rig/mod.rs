@@ -545,6 +545,9 @@ fn install(
             source: result.source,
             package_path: result.package_path.to_string_lossy().to_string(),
             linked: result.linked,
+            source_revision: result.source_revision,
+            source_dirty: result.source_dirty,
+            source_content_hash: result.source_content_hash,
             installed: result
                 .installed
                 .into_iter()

@@ -38,6 +38,10 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
     let effective_run_id = effective_fuzz_run_id(args.run_id.as_deref());
     args.run_id = Some(effective_run_id.clone());
     let rig_context = load_rig(args.rig.as_deref(), &args.setting_args)?;
+    let rig_package = rig_context
+        .as_ref()
+        .and_then(|context| rig::package_evidence(&context.spec.id));
+    ensure_strict_rig_source_is_clean(&args, rig_package.as_ref())?;
     if let Some(context) = rig_context.as_ref() {
         let prepare_settings = fuzz_prepare_settings(&args);
         if let Some(prepare) = rig::run_fuzz_prepare(&context.spec, &prepare_settings)? {
@@ -195,6 +199,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         run_id: Some(&effective_run_id),
         component_id: &ctx.component_id,
         rig_id: rig_id.as_deref(),
+        rig_package: rig_package.as_ref(),
         workload_id: workload_id.as_deref(),
         workload_path: workload_path.as_deref(),
         status: &status,
@@ -297,6 +302,25 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
     ))
 }
 
+pub(super) fn ensure_strict_rig_source_is_clean(
+    args: &FuzzRunArgs,
+    rig_package: Option<&homeboy_extension::bench::parsing::RigPackageEvidence>,
+) -> homeboy::core::Result<()> {
+    if args.effective_gate_profile().as_core() == FuzzGateProfile::Strict
+        && rig_package.is_some_and(|package| package.linked && package.source_dirty)
+    {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "rig",
+            "strict fuzz runs require a clean linked rig package source",
+            args.rig.clone(),
+            Some(vec![
+                "Commit or stash the linked rig package changes, then reinstall the rig to record its canonical package identity.".to_string(),
+                "Use the evidence gate profile to retain the execution-time package content hash for an intentional dirty development run.".to_string(),
+            ]),
+        ));
+    }
+    Ok(())
+}
 pub(super) fn effective_fuzz_run_id(requested: Option<&str>) -> String {
     requested
         .map(str::trim)
@@ -806,6 +830,7 @@ pub(super) struct FuzzRunEvidenceInput<'a> {
     pub(super) run_id: Option<&'a str>,
     pub(super) component_id: &'a str,
     pub(super) rig_id: Option<&'a str>,
+    pub(super) rig_package: Option<&'a homeboy_extension::bench::parsing::RigPackageEvidence>,
     pub(super) workload_id: Option<&'a str>,
     pub(super) workload_path: Option<&'a str>,
     pub(super) status: &'a str,
@@ -843,6 +868,7 @@ pub(super) fn persist_fuzz_run_evidence(
         "source": "homeboy fuzz run",
         "workload_id": input.workload_id,
         "workload_path": input.workload_path,
+        "rig_package": input.rig_package,
         "seed": input.args.seed.clone(),
         "max_duration": input.args.max_duration.clone(),
         "passthrough_args": input.args.args.clone(),

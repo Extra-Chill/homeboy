@@ -1,5 +1,38 @@
 use super::*;
-use crate::commands::fuzz::execution::effective_fuzz_run_id;
+use crate::commands::fuzz::execution::{effective_fuzz_run_id, ensure_strict_rig_source_is_clean};
+
+#[test]
+fn strict_fuzz_rejects_dirty_linked_rig_packages() {
+    let mut args = fuzz_run_args_with_run_id("dirty-rig");
+    args.gate_profile = FuzzGateProfileArg::Strict;
+    let dirty_linked = homeboy_extension::bench::parsing::RigPackageEvidence {
+        rig_id: "rig".to_string(),
+        package_root: "/tmp/rig".to_string(),
+        source: "/tmp/rig".to_string(),
+        source_root: Some("/tmp/rig".to_string()),
+        rig_path: Some("/tmp/rig/rigs/rig/rig.json".to_string()),
+        discovery_path: Some("/tmp/rig".to_string()),
+        installed_source_revision: Some("abc123".to_string()),
+        current_source_revision: Some("abc123".to_string()),
+        source_content_hash: Some("a".repeat(64)),
+        source_ref: Some("main".to_string()),
+        source_dirty: true,
+        linked: true,
+        materialized: false,
+        freshness: homeboy_extension::bench::parsing::RigPackageFreshness::Stale,
+        freshness_verified: false,
+        freshness_message: Some("content changed".to_string()),
+        refresh_command: None,
+    };
+
+    let error = ensure_strict_rig_source_is_clean(&args, Some(&dirty_linked))
+        .expect_err("strict dirty linked source must fail");
+    assert!(error.message.contains("clean linked rig package source"));
+
+    args.gate_profile = FuzzGateProfileArg::Evidence;
+    ensure_strict_rig_source_is_clean(&args, Some(&dirty_linked))
+        .expect("evidence profile retains exact dirty content provenance");
+}
 
 #[test]
 fn auto_run_ids_scope_identical_payloads_while_explicit_ids_remain_stable() {
@@ -113,6 +146,7 @@ fn fuzz_run_persists_requested_run_id_and_results_artifact() {
             run_id: args.run_id.as_deref(),
             component_id: "component-a",
             rig_id: args.rig.as_deref(),
+            rig_package: None,
             workload_id: args.workload_id.as_deref(),
             workload_path: Some("/tmp/fuzz/parser.json"),
             status: "passed",
@@ -259,6 +293,7 @@ fn fuzz_execution_request_artifact_records_runner_intent() {
             run_id: args.run_id.as_deref(),
             component_id: "component-a",
             rig_id: args.rig.as_deref(),
+            rig_package: None,
             workload_id: args.workload_id.as_deref(),
             workload_path: Some("/tmp/fuzz/parser.json"),
             status: "passed",
@@ -545,6 +580,7 @@ fn fuzz_sequence_plan_flag_records_request_env_and_artifact() {
             run_id: args.run_id.as_deref(),
             component_id: "component-a",
             rig_id: args.rig.as_deref(),
+            rig_package: None,
             workload_id: args.workload_id.as_deref(),
             workload_path: Some("/tmp/fuzz/parser.json"),
             status: "passed",
@@ -646,6 +682,7 @@ fn fuzz_run_persists_coverage_reconciliation_artifact() {
             run_id: args.run_id.as_deref(),
             component_id: "component-a",
             rig_id: args.rig.as_deref(),
+            rig_package: None,
             workload_id: args.workload_id.as_deref(),
             workload_path: Some("/tmp/fuzz/parser.json"),
             status: "passed",
@@ -722,6 +759,7 @@ fn fuzz_run_persistence_generates_run_id_when_omitted() {
             run_id: args.run_id.as_deref(),
             component_id: "component-a",
             rig_id: args.rig.as_deref(),
+            rig_package: None,
             workload_id: args.workload_id.as_deref(),
             workload_path: Some("/tmp/fuzz/parser.json"),
             status: "passed",
@@ -774,6 +812,7 @@ fn fuzz_run_persists_result_envelope_artifact_for_valid_campaign() {
             run_id: args.run_id.as_deref(),
             component_id: "component-a",
             rig_id: args.rig.as_deref(),
+            rig_package: None,
             workload_id: args.workload_id.as_deref(),
             workload_path: Some("/tmp/fuzz/parser.json"),
             status: "passed",
@@ -1333,6 +1372,7 @@ fn fuzz_run_persists_raw_results_artifact_when_results_parse_fails() {
             run_id: args.run_id.as_deref(),
             component_id: "component-a",
             rig_id: args.rig.as_deref(),
+            rig_package: None,
             workload_id: args.workload_id.as_deref(),
             workload_path: Some("/tmp/fuzz/parser.json"),
             status: "failed",
