@@ -4,6 +4,109 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.320.0] - 2026-07-27
+
+### Added
+- emit a reapable resource record per live lifecycle snapshot
+- persist lifecycle snapshot handles in RigState
+- execute lifecycle phases and capture snapshot handles
+- add PipelineStep::Lifecycle variant
+- add canonical sha256 content-hash primitive
+- repair shared paths and services, not just symlinks
+- make toolchain path discovery declarative
+
+### Changed
+- route sha256 hashing through the shared primitive
+- guard declared safety paths against the clap command surface
+- migrate worktree, tunnel, and stack safety and delete the imperative registry
+- migrate runner command safety into the spec table
+- migrate git and refactor command safety into spec tables
+- migrate fuzz, rig, and db command safety into spec tables
+- migrate agent-task command safety into the spec table
+- migrate runs command safety into the spec table
+- migrate extension, runtime, and cleanup safety into spec tables
+- migrate self command safety into the spec table
+- convert provider registries to provider_registry!
+- convert homeboy-core provider registries to provider_registry!
+- add provider_registry macros and convert homeboy-code-audit
+- delete duplicate nested re-export groups
+- build per-project deploy config with struct update syntax
+- drop hardcoded DriftOptions language constructors
+- remove unused extension-manifest accessors
+- remove never-constructed RawOnly output-contract variants
+- remove unreachable lab-runner connect recovery wrappers
+- remove dead CommandExecutionPlan struct and methods
+- format release GitHub client
+- stabilize artifact index migration coverage
+- format escaped cleanup regression
+- cover bounded escaped tree cleanup
+- delete the orphaned review-dossier directory
+- format bounded asset cleanup
+- index artifact queries
+- assert cook continuation workspace identity
+- cover pinned cook continuation runtime
+- delete the dead deterministic-loop framework
+- align artifact fixtures with safety
+
+### Fixed
+- keep unscoped provider discovery controller-local and bounded
+- keep snapshot materialization POSIX-sh portable
+- stop the prepared-source cache from breaking dependency-free offloads
+- bound workspace prune page wall time
+- import STILL_ACTIVE from its windows-sys 0.61 location
+- keep scratch-scoped snapshot commands valid POSIX sh
+- validate baseline fingerprint paths by existence, not file-ness
+- route stop signals through portable process primitives
+- declare review subcommand safety against real clap paths
+- repoint runner_evidence tests at the generated slot accessor
+- carry build exit code in structured error details
+- show extension-provided commands in root help
+- parse versions with semver instead of splitting on dots
+- key the dependency cache on resolved tools, not PATH
+- preserve bounded download supervision
+- validate all persisted audit paths
+- expose deprecated cleanup flag
+- reserve directory rollback targets
+- preserve explicit fanout workspaces
+- avoid direct-child cleanup false positive
+- validate baseline paths and crate scope
+- bind fanout worktree paths
+- require apply for cleanup
+- gate dispatch on workload-declared capabilities
+- reject non-public reviewer URLs
+- bind fanout cook workspaces
+- continue bounded workspace pruning
+- roll back failed directory inserts
+- own bounded asset cleanup
+- preserve cherry-pick conflict state for resolution
+- bound digestless asset reader cleanup
+- honor configured retention in controller-runtime prune
+- make multi-extension artifact resolution deterministic
+- preserve bounded scratch cleanup semantics
+- preserve terminal watch refresh
+- accept full Windows PID range
+- normalize changed component paths
+- ignore fresh clone as downgrade authority
+- bound digestless asset downloads
+- restore pinned cook continuation workspace
+- bound controller scratch detail output
+- stop batch fanout from silently running every cook locally
+- propagate notification routes onto fanout worker threads
+- scope watch evidence refresh
+- route nested extension JS smoke files
+- support Windows operation claim liveness
+- verify digestless GitHub assets by download
+- preflight managed checkout safety
+- converge stale macOS lease stops
+- compare canonical package content
+- reserve snapshot filesystem capacity
+- make unattended harvest safe and diagnosable
+- preserve pinned cook continuation
+- honor explicit Cook model selection
+- retrieve nested public artifacts
+- bound Cook recovery readers
+- preflight package asset ownership
+
 ## [0.319.3] - 2026-07-26
 
 ### Fixed
