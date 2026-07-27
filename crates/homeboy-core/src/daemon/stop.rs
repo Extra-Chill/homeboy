@@ -6,6 +6,10 @@
 //! inherits the parent module's state types, lock, and persistence helpers.
 
 use super::*;
+use crate::process::{signal_pid, wait_for_pid_exit};
+
+const TERM_GRACE: Duration = Duration::from_secs(2);
+const KILL_GRACE: Duration = Duration::from_secs(2);
 
 pub fn stop() -> Result<DaemonStopResult> {
     stop_with_force(false)
@@ -100,8 +104,7 @@ fn force_stop_for_lease_unlocked(expected_lease_id: &str) -> Result<DaemonStopRe
         });
     }
 
-    let _ = read_lease_if_identity_matches(&path, &identity)?;
-    terminate_pid_with_sigterm_and_wait(state.pid, FORCE_STOP_WAIT)?;
+    let termination = terminate_exact_supervised_daemon(&path, &identity, &state)?;
     let evidence = DaemonTerminationEvidence {
         classification: DaemonTerminationClassification::CleanStop,
         observed_at: chrono::Utc::now().to_rfc3339(),
@@ -111,10 +114,7 @@ fn force_stop_for_lease_unlocked(expected_lease_id: &str) -> Result<DaemonStopRe
         active_jobs: 0,
         resource_evidence: "unavailable: forced stop does not collect OS resource snapshots"
             .to_string(),
-        os_evidence: format!(
-            "SIGTERM sent to recorded daemon PID and process death verified within {}ms",
-            FORCE_STOP_WAIT.as_millis()
-        ),
+        os_evidence: termination,
         exit_code: None,
         signal: Some(libc::SIGTERM),
         stdout: None,
@@ -130,6 +130,147 @@ fn force_stop_for_lease_unlocked(expected_lease_id: &str) -> Result<DaemonStopRe
         state_path: state_path_display,
         termination_evidence: Some(evidence),
     })
+}
+
+/// Stop the serving child first, allowing its supervisor to record the exit and
+/// leave normally. Every signal is preceded by fresh lease, zero-job, and token
+/// checks so a reused PID cannot be killed between the grace window and SIGKILL.
+fn terminate_exact_supervised_daemon(
+    path: &std::path::Path,
+    identity: &DaemonLeaseIdentity,
+    state: &DaemonState,
+) -> Result<String> {
+    let supervisor = supervised_parent_pid(state.pid, &state.startup_token)?;
+    revalidate_exact_termination_target(path, identity, state)?;
+    signal_pid(state.pid, libc::SIGTERM)?;
+    let child_signal = if wait_for_pid_exit(state.pid, TERM_GRACE) {
+        "SIGTERM"
+    } else {
+        revalidate_exact_termination_target(path, identity, state)?;
+        signal_pid(state.pid, libc::SIGKILL)?;
+        if !wait_for_pid_exit(state.pid, KILL_GRACE) {
+            return Err(Error::internal_unexpected(format!(
+                "daemon pid {} survived bounded SIGTERM-to-SIGKILL escalation",
+                state.pid
+            )));
+        }
+        "SIGKILL"
+    };
+
+    // The supervisor observes its child exit and normally leaves on its own.
+    // If it remains, prove its matching token before applying the same bounded
+    // escalation; an unrelated reparented process is never signaled.
+    let supervisor_signal = match supervisor {
+        Some(pid) if wait_for_pid_exit(pid, TERM_GRACE) => "exited after child",
+        Some(pid) => {
+            if !pid_has_ownership_token(pid, DAEMON_STARTUP_TOKEN_ENV, &state.startup_token)? {
+                return Err(Error::validation_invalid_argument(
+                    "daemon_lease",
+                    format!("supervisor pid {pid} no longer owns the daemon startup token"),
+                    Some(pid.to_string()),
+                    None,
+                ));
+            }
+            signal_pid(pid, libc::SIGTERM)?;
+            if wait_for_pid_exit(pid, TERM_GRACE) {
+                "SIGTERM"
+            } else {
+                if !pid_has_ownership_token(pid, DAEMON_STARTUP_TOKEN_ENV, &state.startup_token)? {
+                    return Err(Error::validation_invalid_argument(
+                        "daemon_lease",
+                        format!("supervisor pid {pid} changed identity before SIGKILL"),
+                        Some(pid.to_string()),
+                        None,
+                    ));
+                }
+                signal_pid(pid, libc::SIGKILL)?;
+                if !wait_for_pid_exit(pid, KILL_GRACE) {
+                    return Err(Error::internal_unexpected(format!(
+                        "daemon supervisor pid {pid} survived bounded SIGTERM-to-SIGKILL escalation"
+                    )));
+                }
+                "SIGKILL"
+            }
+        }
+        None => "not observed",
+    };
+    Ok(format!(
+        "exact startup-token ownership revalidated immediately before every signal; daemon pid {} stopped with {child_signal}; supervisor {supervisor_signal}",
+        state.pid
+    ))
+}
+
+fn revalidate_exact_termination_target(
+    path: &std::path::Path,
+    identity: &DaemonLeaseIdentity,
+    state: &DaemonState,
+) -> Result<()> {
+    let current = read_lease_if_identity_matches(path, identity)?;
+    if current.pid != state.pid || !active_daemon_job_ids()?.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "daemon_stop",
+            "daemon lease or active durable jobs changed before termination; refusing to signal",
+            Some(state.lease_id.clone()),
+            None,
+        ));
+    }
+    if !pid_has_ownership_token(state.pid, DAEMON_STARTUP_TOKEN_ENV, &state.startup_token)? {
+        return Err(Error::validation_invalid_argument(
+            "daemon_lease",
+            format!(
+                "daemon pid {} no longer owns the persisted startup token",
+                state.pid
+            ),
+            Some(state.pid.to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// `ps` is the portable evidence adapter for the supervisor relationship. The
+/// token remains the exact identity proof on platforms without Linux `/proc`.
+fn supervised_parent_pid(child_pid: u32, startup_token: &str) -> Result<Option<u32>> {
+    let output = std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid=,command="])
+        .output()
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("inspect daemon supervisor".to_string()),
+            )
+        })?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let rows = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some((
+                fields.next()?.parse::<u32>().ok()?,
+                fields.next()?.parse::<u32>().ok()?,
+                fields.collect::<Vec<_>>().join(" "),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let Some((_, parent_pid, _)) = rows.iter().find(|(pid, _, _)| *pid == child_pid) else {
+        return Ok(None);
+    };
+    Ok(rows.iter().find_map(|(pid, _, command)| {
+        (*pid == *parent_pid
+            && command_has_startup_token(command, startup_token)
+            && command.contains("daemon supervise"))
+        .then_some(*pid)
+    }))
+}
+
+fn command_has_startup_token(command: &str, startup_token: &str) -> bool {
+    command
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|pair| pair == ["--startup-token", startup_token])
 }
 
 pub(super) fn stop_with_force_for_lease(

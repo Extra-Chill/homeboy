@@ -1973,10 +1973,18 @@ fn stop_refuses_stale_lease_that_points_at_reused_pid() {
 
 #[cfg(unix)]
 fn spawn_force_stop_test_process(startup_token: Option<&str>) -> std::process::Child {
-    let mut command = Command::new("sleep");
-    command.arg("30").env_clear();
+    let mut command = Command::new("sh");
+    command.args([
+        "-c",
+        "while :; do sleep 1; done",
+        "homeboy",
+        "daemon",
+        "serve",
+    ]);
+    command.env_clear();
     if let Some(startup_token) = startup_token {
         command.env(DAEMON_STARTUP_TOKEN_ENV, startup_token);
+        command.args(["--startup-token", startup_token]);
     }
     command.spawn().expect("start force-stop test process")
 }
@@ -2031,7 +2039,7 @@ fn force_stop_active_jobs_block_signaling() {
     child.wait().expect("reap test process");
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[test]
 fn force_stop_matching_zero_job_stale_daemon_is_terminated_and_verified() {
     let _home = HomeGuard::new();
@@ -2051,9 +2059,43 @@ fn force_stop_matching_zero_job_stale_daemon_is_terminated_and_verified() {
     assert_eq!(evidence.lease_id.as_deref(), Some(state.lease_id.as_str()));
     assert_eq!(evidence.pid, Some(pid));
     assert_eq!(evidence.signal, Some(libc::SIGTERM));
-    assert!(evidence.os_evidence.contains("process death verified"));
+    assert!(evidence
+        .os_evidence
+        .contains("startup-token ownership revalidated"));
     assert!(!pid_is_running(pid));
     assert!(!state_path().expect("state path").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn force_stop_escalates_when_a_token_owned_daemon_ignores_sigterm() {
+    let _home = HomeGuard::new();
+    let startup_token = "force-stop-ignores-term";
+    let child = Command::new("sh")
+        .args([
+            "-c",
+            "trap '' TERM; while :; do sleep 1; done",
+            "homeboy",
+            "daemon",
+            "serve",
+            "--startup-token",
+            startup_token,
+        ])
+        .env(DAEMON_STARTUP_TOKEN_ENV, startup_token)
+        .spawn()
+        .expect("start TERM-resistant daemon fixture");
+    let pid = child.id();
+    let mut state = daemon_state_for_test(pid, "127.0.0.1:1");
+    state.binary_sha256 = Some("stale-binary-hash".to_string());
+    state.startup_token = startup_token.to_string();
+    write_daemon_state_for_test(&state);
+
+    let result = force_stop_for_lease(&state.lease_id).expect("bounded forced stop");
+
+    assert!(result.stopped);
+    let evidence = result.termination_evidence.expect("termination evidence");
+    assert!(evidence.os_evidence.contains("SIGKILL"));
+    assert!(!pid_is_running(pid));
 }
 
 #[cfg(target_os = "linux")]
