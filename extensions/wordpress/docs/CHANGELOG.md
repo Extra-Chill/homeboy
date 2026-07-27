@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.8] - 2026-07-27
+
+### Fixed
+- route composed Node tests
+
 ## [3.34.7] - 2026-07-27
 
 ### Fixed
