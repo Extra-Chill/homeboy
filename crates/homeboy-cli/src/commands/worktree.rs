@@ -166,6 +166,8 @@ pub struct WorktreeCleanupCommandOutput {
     pub worktrees: WorktreeCleanupOutput,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_cleanup: Option<ArtifactCleanupOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated_flag: Option<&'static str>,
 }
 
 pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<WorktreeOutput> {
@@ -241,7 +243,7 @@ pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<Worktre
         WorktreeCommand::Cleanup {
             apply,
             force,
-            dry_run: _,
+            dry_run: deprecated_dry_run,
             cleanup_artifacts,
             cleanup_branches,
             allow_unmerged_branches,
@@ -273,6 +275,7 @@ pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<Worktre
             WorktreeOutput::Cleanup(WorktreeCleanupCommandOutput {
                 worktrees,
                 artifact_cleanup,
+                deprecated_flag: deprecated_dry_run.then_some("--dry-run"),
             })
         }
     };
@@ -355,6 +358,20 @@ mod tests {
         assert!(!apply);
         assert!(dry_run);
         assert!(cleanup_is_dry_run(apply));
+    }
+
+    #[test]
+    fn worktree_cleanup_dry_run_marks_the_deprecated_flag() {
+        let cli = Cli::parse_from(["homeboy", "worktree", "cleanup", "--dry-run"]);
+
+        let Commands::Worktree(args) = cli.command else {
+            panic!("expected worktree command");
+        };
+        let WorktreeCommand::Cleanup { dry_run, .. } = args.command else {
+            panic!("expected worktree cleanup command");
+        };
+
+        assert_eq!(dry_run.then_some("--dry-run"), Some("--dry-run"));
     }
 
     #[test]
