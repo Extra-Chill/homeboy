@@ -7,9 +7,13 @@ export default [
   {
     ignores: [
       'node_modules/',
-      'vendor/',
+      '**/vendor/**',
+      '**/vendor_prefixed/**',
+      '**/vendor-prefixed/**',
+      '**/vendor_scoped/**',
+      '**/vendor-scoped/**',
       '**/build/**',
-      'dist/',
+      '**/dist/**',
       '*.min.js',
       'tests/',
     ],
