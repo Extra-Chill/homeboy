@@ -92,6 +92,11 @@ fn lab_cli_arguments_are_visible_for_path(path: &[String]) -> bool {
             | ["agent-task", "fanout", "submit-batch"]
             | ["agent-task", "fanout", "status"]
             | ["agent-task", "fanout", "artifacts"]
+            // The fanout coordinator is controller-owned, but split placement
+            // hands each child attempt to the selected runner, so the placement
+            // arguments are load-bearing here and must stay discoverable.
+            | ["agent-task", "fanout", "cook-batch"]
+            | ["agent-task", "fanout", "run-plan"]
             | ["agent-task", "auth", "status"]
             | ["agent-task", "controller", "from-spec"]
             | ["agent-task", "controller", "run-from-spec"]

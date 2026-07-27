@@ -1796,3 +1796,123 @@ fn rig_install_source_sync_root_skips_git_url_and_missing_paths() {
     ];
     assert_eq!(rig_install_source_sync_root(&missing), None);
 }
+
+#[test]
+fn local_fanout_warning_covers_batch_fanout_not_just_cook() {
+    // Batch fanout is the command most able to overwhelm a controller, so a
+    // silent local fallback here is worse than for a single cook.
+    let cli = Cli::parse_from([
+        "homeboy",
+        "agent-task",
+        "fanout",
+        "cook-batch",
+        "https://github.com/o/r/issues/1",
+        "https://github.com/o/r/issues/2",
+        "--repo",
+        "r",
+        "--verify",
+        "cargo test",
+        "--run-plan",
+    ]);
+    let warning =
+        agent_task_local_fanout_warning(&cli.command, None).expect("batch fanout warns locally");
+    assert!(warning.contains("HOMEBOY_LOCAL_FANOUT_WARNING"));
+    assert!(warning.contains("fanout cook-batch"));
+    assert!(warning.contains("tasks=2"));
+    assert!(warning.contains("execution_location=local"));
+}
+
+#[test]
+fn local_fanout_warning_is_silent_for_a_single_child() {
+    let cli = Cli::parse_from([
+        "homeboy",
+        "agent-task",
+        "fanout",
+        "cook-batch",
+        "https://github.com/o/r/issues/1",
+        "--repo",
+        "r",
+        "--verify",
+        "cargo test",
+        "--run-plan",
+    ]);
+    assert_eq!(agent_task_local_fanout_warning(&cli.command, None), None);
+}
+
+#[test]
+fn local_fanout_warning_is_silent_for_a_dry_run_plan() {
+    // A dry run never dispatches providers, so it cannot heat the controller.
+    let cli = Cli::parse_from([
+        "homeboy",
+        "agent-task",
+        "fanout",
+        "cook-batch",
+        "https://github.com/o/r/issues/1",
+        "https://github.com/o/r/issues/2",
+        "--repo",
+        "r",
+        "--verify",
+        "cargo test",
+        "--dry-run",
+        "--run-plan",
+    ]);
+    assert_eq!(agent_task_local_fanout_warning(&cli.command, None), None);
+}
+
+#[test]
+fn local_fanout_warning_carries_lab_readiness_reasons_and_remediation() {
+    let cli = Cli::parse_from([
+        "homeboy",
+        "agent-task",
+        "fanout",
+        "cook-batch",
+        "https://github.com/o/r/issues/1",
+        "https://github.com/o/r/issues/2",
+        "--repo",
+        "r",
+        "--verify",
+        "cargo test",
+        "--run-plan",
+    ]);
+    let readiness = runners::LabRunnerReadiness {
+        state: runners::LabRunnerReadinessState::Stale,
+        selected_runner_id: None,
+        available_runner_ids: vec!["lab-a".to_string()],
+        reasons: vec!["lab-a daemon is stale".to_string()],
+        remediation_commands: vec!["homeboy runner refresh-homeboy lab-a".to_string()],
+    };
+    let warning = agent_task_local_fanout_warning(&cli.command, Some(&readiness))
+        .expect("batch fanout warns locally");
+    // Without these the operator has no way to learn why the Lab was skipped.
+    assert!(warning.contains("lab_unavailable_reason=lab-a daemon is stale"));
+    assert!(warning.contains("remediation=`homeboy runner refresh-homeboy lab-a`"));
+}
+
+#[test]
+fn batch_fanout_exposes_placement_arguments() {
+    // Split placement hands each child to the selected runner, so hiding these
+    // made a load-bearing flag undiscoverable.
+    for path in [
+        ["agent-task", "fanout", "cook-batch"],
+        ["agent-task", "fanout", "run-plan"],
+    ] {
+        let command = homeboy::cli_surface::Cli::command_with_scoped_lab_args();
+        let leaf = path.iter().fold(&command, |command, segment| {
+            command
+                .get_subcommands()
+                .find(|candidate| candidate.get_name() == *segment)
+                .unwrap_or_else(|| panic!("{segment} subcommand exists"))
+        });
+        for flag in ["placement", "runner"] {
+            let arg = leaf
+                .get_arguments()
+                .find(|arg| arg.get_id() == flag)
+                .unwrap_or_else(|| panic!("{} exposes --{flag}", path.join(" ")));
+            assert!(
+                !arg.is_hide_set(),
+                "{} must advertise --{flag}",
+                path.join(" ")
+            );
+        }
+    }
+}
