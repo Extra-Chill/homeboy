@@ -17,6 +17,7 @@ use homeboy::core::observation::ArtifactRecord;
 use homeboy::core::resource_lifecycle_index::ResourceLifecycleIndex;
 use homeboy::core::validation_progress::ValidationCommandSummary;
 use homeboy::fuzz::FuzzResultEnvelopeArtifactInspection;
+use homeboy::runner::readonly_probe::ReadOnlyProbeDegradation;
 use homeboy::runner::runners::RunnerArtifactRef;
 
 use super::bench::{BenchCompareOutput, RunsBenchCompareArgs};
@@ -305,6 +306,12 @@ pub struct RunsListOutput {
     /// Always 0 when `--include-mirrors` is set. `matched_runs + hidden_mirrors`
     /// equals the post-filter observation row count.
     pub hidden_mirrors: usize,
+    /// Read-only remote probes that hit their wall-clock bound while composing
+    /// this listing (#10418). A non-empty list means the answer is PARTIAL:
+    /// some runner could not be reached in time. An operator can then tell "the
+    /// Lab is wedged" from "there is nothing to report".
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub probe_degradations: Vec<ReadOnlyProbeDegradation>,
     #[serde(
         rename = "_homeboy_actionable",
         skip_serializing_if = "CommandActionableMetadata::is_empty"

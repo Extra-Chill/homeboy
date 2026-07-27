@@ -945,3 +945,33 @@ All command output is wrapped in the global JSON envelope described in the [JSON
 - `entities`: list for `list`
 - `updated_fields`: list of updated field names for writes
 - `deleted`: list of removed runner IDs
+
+## Bounded Read-Only Probes
+
+`runner status`, `runs list --include-active-runner-jobs`, and `agent-task
+status` are read-only inspection commands. Every remote probe they issue is
+bounded by a wall-clock deadline (default 15s per probe, overridable with
+`HOMEBOY_READONLY_PROBE_TIMEOUT_SECONDS`). When a probe hits its bound the SSH
+child process group is terminated and the command still returns, with the reason
+attached:
+
+```json
+"probe_degradations": [
+  {
+    "probe": "runner_homeboy_identity",
+    "runner_id": "homeboy-lab",
+    "reason_code": "readonly_probe.timeout",
+    "timeout_seconds": 15,
+    "detail": "read-only probe `runner_homeboy_identity` exceeded its 15s bound ..."
+  }
+]
+```
+
+`runner status --full` also surfaces each degradation as a `PARTIAL STATUS (...)`
+entry in `operator_hints`. A non-empty `probe_degradations` list means the answer
+is **partial** — the runner did not respond in time — which is how an operator
+distinguishes "the Lab is wedged" from "there is nothing to report".
+
+`runs list --include-active-runner-jobs` deliberately reads the latency-bounded
+indexed active-job snapshot rather than the full status report: it does not
+reconcile the daemon generation ledger, so a wedged Lab cannot block a listing.

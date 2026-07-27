@@ -79,6 +79,7 @@ pub fn list_runner_runs(
             // Remote listing returns the runner daemon's own rows; mirror
             // collapsing is a controller-store concern and does not apply here.
             hidden_mirrors: 0,
+            probe_degradations: homeboy::runner::readonly_probe::take_degradations(),
             actionable,
         }),
         0,
