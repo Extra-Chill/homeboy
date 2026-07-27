@@ -63,6 +63,51 @@ fn test_list_sources() {
 }
 
 #[test]
+fn linked_package_provenance_tracks_execution_time_content_and_dirty_state() {
+    let _home = HomeGuard::new();
+    let package = tempfile::tempdir().expect("package");
+    let rig = write_rig(package.path(), "alpha", &minimal_rig("alpha"));
+    GitFixture::init(package.path()).commit("initial rig");
+
+    let installed = install(package.path().to_str().unwrap(), Some("alpha"), false)
+        .expect("install linked rig");
+    assert!(installed.linked);
+    assert!(!installed.source_dirty);
+    let metadata = crate::read_source_metadata("alpha").expect("source metadata");
+    let installed_hash = metadata
+        .source_content_hash
+        .expect("installed content hash");
+    assert_eq!(installed_hash, installed.source_content_hash);
+
+    fs::write(
+        &rig,
+        minimal_rig("alpha").replace("alpha rig", "changed rig"),
+    )
+    .expect("modify tracked rig");
+    let tracked_change = crate::package_evidence("alpha").expect("execution evidence");
+    assert!(tracked_change.source_dirty);
+    assert_ne!(
+        tracked_change.source_content_hash.as_deref(),
+        Some(installed_hash.as_str())
+    );
+    assert!(!tracked_change.freshness_verified);
+
+    run_git(package.path(), &["checkout", "--", "."]);
+    fs::write(
+        package.path().join("runner.sh"),
+        "#!/bin/sh\necho changed\n",
+    )
+    .expect("add untracked runner");
+    let untracked_change = crate::package_evidence("alpha").expect("execution evidence");
+    assert!(untracked_change.source_dirty);
+    assert_ne!(
+        untracked_change.source_content_hash.as_deref(),
+        Some(installed_hash.as_str())
+    );
+    assert!(!untracked_change.freshness_verified);
+}
+
+#[test]
 fn list_sources_reports_stack_specs_from_package() {
     let _home = HomeGuard::new();
     let package = tempfile::tempdir().expect("package");

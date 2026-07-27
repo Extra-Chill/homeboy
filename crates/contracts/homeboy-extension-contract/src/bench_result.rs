@@ -28,6 +28,9 @@ pub struct RigPackageEvidence {
     pub installed_source_revision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_source_revision: Option<String>,
+    /// Deterministic SHA-256 identity of the package files used by this run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_content_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_ref: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

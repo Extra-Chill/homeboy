@@ -56,7 +56,7 @@ pub use capabilities::{
 pub use component_resolution::{component_ref, resolve_component, resolve_component_path};
 pub use install::{
     default_materialize_source_root, discover_rigs, discover_stacks, install, materialize_rig_spec,
-    materialize_rig_spec_with_default_source_root, read_source_metadata,
+    materialize_rig_spec_with_default_source_root, package_content_hash, read_source_metadata,
     read_stack_source_metadata, DiscoveredRig, DiscoveredStack, InstalledStack, RigInstallResult,
     RigSourceMetadata, StackSourceMetadata,
 };
@@ -174,6 +174,7 @@ fn local_package_evidence(id: &str, package_root: PathBuf) -> RigPackageEvidence
     let source_ref = git::current_branch(&package_root).filter(|branch| !branch.is_empty());
     let source_dirty =
         git::status_porcelain_bytes(&package_root).is_some_and(|status| !status.is_empty());
+    let source_content_hash = package_content_hash(&package_root).ok();
     RigPackageEvidence {
         rig_id: id.to_string(),
         package_root: source.clone(),
@@ -190,6 +191,7 @@ fn local_package_evidence(id: &str, package_root: PathBuf) -> RigPackageEvidence
         discovery_path: Some(package_root.to_string_lossy().to_string()),
         installed_source_revision: current_source_revision.clone(),
         current_source_revision,
+        source_content_hash,
         source_ref,
         source_dirty,
         linked: true,
@@ -208,23 +210,28 @@ fn package_evidence_from_metadata(id: &str, metadata: RigSourceMetadata) -> RigP
         .clone()
         .unwrap_or_else(|| metadata.package_path.clone());
     let current_source_revision = git::short_head_revision_at(Path::new(&source_root));
+    let current_source_dirty = git::status_porcelain_bytes(Path::new(&source_root))
+        .is_some_and(|status| !status.is_empty());
+    let current_source_content_hash = package_content_hash(Path::new(&package_root)).ok();
     let root_present = Path::new(&source_root).is_dir();
     let (freshness, freshness_message) = if !root_present {
         (
             RigPackageFreshness::Missing,
             Some("installed rig package source path is missing".to_string()),
         )
-    } else if let (Some(installed), Some(current)) = (
+    } else if let (Some(installed), Some(current), Some(installed_hash), Some(current_hash)) = (
         metadata.source_revision.as_deref(),
         current_source_revision.as_deref(),
+        metadata.source_content_hash.as_deref(),
+        current_source_content_hash.as_deref(),
     ) {
-        if installed == current {
+        if installed == current && installed_hash == current_hash {
             (RigPackageFreshness::Verified, None)
         } else {
             (
                 RigPackageFreshness::Stale,
                 Some(format!(
-                    "installed source revision {installed} differs from current source revision {current}"
+                    "installed source identity differs from current package content (revision {installed} -> {current}, content {installed_hash} -> {current_hash})"
                 )),
             )
         }
@@ -255,8 +262,9 @@ fn package_evidence_from_metadata(id: &str, metadata: RigSourceMetadata) -> RigP
         discovery_path: metadata.discovery_path,
         installed_source_revision: metadata.source_revision,
         current_source_revision,
+        source_content_hash: current_source_content_hash,
         source_ref: metadata.source_ref,
-        source_dirty: metadata.source_dirty,
+        source_dirty: current_source_dirty,
         linked: metadata.linked,
         materialized: metadata.materialized,
         freshness,

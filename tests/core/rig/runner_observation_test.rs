@@ -532,6 +532,7 @@ fn write_rig_source_metadata(rig_id: &str) {
             source_revision: Some("abc123".to_string()),
             source_ref: Some("main".to_string()),
             source_dirty: false,
+            source_content_hash: None,
         })
         .expect("serialize source metadata"),
     )

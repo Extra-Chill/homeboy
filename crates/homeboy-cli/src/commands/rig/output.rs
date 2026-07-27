@@ -134,6 +134,10 @@ pub struct RigInstallOutput {
     pub source: String,
     pub package_path: String,
     pub linked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
+    pub source_dirty: bool,
+    pub source_content_hash: String,
     pub installed: Vec<RigInstalledSummary>,
     pub installed_stacks: Vec<RigInstalledStackSummary>,
 }

@@ -10,6 +10,7 @@ use homeboy_core::{git, paths};
 use homeboy_extension as extension;
 use homeboy_stack::stack;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -28,6 +29,9 @@ pub struct RigInstallResult {
     pub source_root: PathBuf,
     pub package_path: PathBuf,
     pub linked: bool,
+    pub source_revision: Option<String>,
+    pub source_dirty: bool,
+    pub source_content_hash: String,
     pub installed: Vec<InstalledRig>,
     pub installed_stacks: Vec<InstalledStack>,
 }
@@ -42,6 +46,7 @@ pub(crate) struct PreparedSource {
     pub source_revision: Option<String>,
     pub source_ref: Option<String>,
     pub source_dirty: bool,
+    pub source_content_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -80,6 +85,8 @@ pub struct RigSourceMetadata {
     pub source_ref: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub source_dirty: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_content_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +161,7 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
             source_revision: prepared.source_revision.clone(),
             source_ref: prepared.source_ref.clone(),
             source_dirty: prepared.source_dirty,
+            source_content_hash: Some(prepared.source_content_hash.clone()),
         };
         write_source_metadata(&rig.id, &metadata)?;
 
@@ -199,6 +207,9 @@ pub fn install(source: &str, id: Option<&str>, all: bool) -> Result<RigInstallRe
         source_root: prepared.source_root,
         package_path: prepared.package_path,
         linked: prepared.linked,
+        source_revision: prepared.source_revision,
+        source_dirty: prepared.source_dirty,
+        source_content_hash: prepared.source_content_hash,
         installed,
         installed_stacks,
     })
@@ -1055,6 +1066,7 @@ fn prepare_git_source(source: &str) -> Result<PreparedSource> {
     let source_ref = git::current_branch(&package_path).filter(|branch| !branch.is_empty());
     let source_dirty =
         git::status_porcelain_bytes(&package_path).is_some_and(|status| !status.is_empty());
+    let source_content_hash = package_content_hash(&package_path)?;
     let discovery_path = match subpath {
         Some(subpath) => package_path.join(subpath),
         None => package_path.clone(),
@@ -1083,6 +1095,7 @@ fn prepare_git_source(source: &str) -> Result<PreparedSource> {
         source_revision,
         source_ref,
         source_dirty,
+        source_content_hash,
     })
 }
 
@@ -1125,6 +1138,7 @@ fn prepare_local_source(source: &str) -> Result<PreparedSource> {
     let source_ref = git::current_branch(&package_path).filter(|branch| !branch.is_empty());
     let source_dirty =
         git::status_porcelain_bytes(&package_path).is_some_and(|status| !status.is_empty());
+    let source_content_hash = package_content_hash(&package_path)?;
 
     Ok(PreparedSource {
         source: package_path.to_string_lossy().to_string(),
@@ -1135,7 +1149,68 @@ fn prepare_local_source(source: &str) -> Result<PreparedSource> {
         source_revision,
         source_ref,
         source_dirty,
+        source_content_hash,
     })
+}
+
+/// Hash every regular package file in stable relative-path order, excluding the
+/// repository's Git administration directory. This identifies the linked
+/// package content that the runner can actually read, including untracked files.
+pub fn package_content_hash(package_path: &Path) -> Result<String> {
+    let mut files = Vec::new();
+    collect_package_files(package_path, package_path, &mut files)?;
+    files.sort();
+
+    let mut hasher = Sha256::new();
+    for relative in files {
+        let bytes = fs::read(package_path.join(&relative)).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("read package file {}", relative.display())),
+            )
+        })?;
+        let path = relative.to_string_lossy();
+        hasher.update((path.len() as u64).to_be_bytes());
+        hasher.update(path.as_bytes());
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn collect_package_files(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(directory).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("read package directory {}", directory.display())),
+        )
+    })? {
+        let entry = entry.map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read package directory entry".into()),
+            )
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("inspect package path {}", path.display())),
+            )
+        })?;
+        if file_type.is_dir() {
+            if entry.file_name() != ".git" {
+                collect_package_files(root, &path, files)?;
+            }
+        } else if file_type.is_file() {
+            files.push(
+                path.strip_prefix(root)
+                    .expect("package child path")
+                    .to_path_buf(),
+            );
+        }
+    }
+    Ok(())
 }
 
 pub fn write_source_metadata(id: &str, metadata: &RigSourceMetadata) -> Result<()> {
