@@ -966,6 +966,71 @@ mod tests {
         }
     }
 
+    /// Every declared safety path must resolve to a real node in the
+    /// clap-derived command surface.
+    ///
+    /// This is the structural guard for the class of bug in #10313: safety was
+    /// declared for `review audit baseline refresh`, a spelling that only
+    /// exists in pre-parse argv rewriting, while clap exposes
+    /// `review audit-baseline refresh`. The declaration could never match, so
+    /// the manifest reported a command that mutates persisted baseline data as
+    /// non-mutating. A declared path that clap does not expose is always a bug.
+    #[test]
+    fn command_path_safety_specs_resolve_to_clap_surface_nodes() {
+        fn resolves(entries: &[CommandSurfaceEntry], path: &[&str]) -> bool {
+            let Some((first, rest)) = path.split_first() else {
+                return true;
+            };
+
+            entries
+                .iter()
+                .find(|entry| entry.name == *first)
+                .is_some_and(|entry| resolves(&entry.subcommands, rest))
+        }
+
+        let surface = current_command_surface();
+
+        for spec in crate::command_contract::COMMAND_SPECS {
+            for path_safety in spec.subcommand_safety {
+                for declared in path_safety.paths {
+                    let path = std::iter::once(spec.name)
+                        .chain(declared.split_whitespace())
+                        .collect::<Vec<_>>();
+
+                    assert!(
+                        resolves(&surface.commands, &path),
+                        "command `{}` declares safety metadata for `{}`, which is not a path in the clap command surface",
+                        spec.name,
+                        path.join(" ")
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn review_audit_baseline_manifest_declares_baseline_mutation() {
+        let manifest = current_command_safety_manifest();
+
+        for subcommand in ["refresh", "merge", "prune"] {
+            let entry = manifest
+                .find_path(&["review", "audit-baseline", subcommand])
+                .unwrap_or_else(|| panic!("review audit-baseline {subcommand} must be present in the command safety manifest"));
+
+            assert!(
+                entry.mutates,
+                "review audit-baseline {subcommand} mutates persisted audit baseline data"
+            );
+        }
+
+        assert!(
+            manifest
+                .find_path(&["review", "audit", "baseline", "refresh"])
+                .is_none(),
+            "`review audit baseline` is a pre-parse argv spelling, not a clap path"
+        );
+    }
+
     #[test]
     fn rig_lint_manifest_declares_static_read_only_behavior() {
         let manifest = current_command_safety_manifest();
