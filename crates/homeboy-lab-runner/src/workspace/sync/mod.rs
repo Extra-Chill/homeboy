@@ -3281,11 +3281,16 @@ fn remove_ssh_prune_candidate(
                 vec!["materialized_workspace_lifecycle_changed".to_string()],
             )));
         }
-        ssh_prune_delete_materialized_workspace_command(
-            root,
-            &candidate.remote_path,
-            encoded_metadata,
-        )
+        let expected_metadata = base64::engine::general_purpose::STANDARD
+            .decode(encoded_metadata)
+            .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+        let command = ssh_prune_delete_materialized_workspace_command(root, &candidate.remote_path);
+        let output = client.execute_with_input_and_timeout(
+            &command,
+            &expected_metadata,
+            WORKSPACE_PRUNE_TIMEOUT,
+        );
+        return parse_ssh_prune_delete_output(output);
     } else {
         let terminal_owner_run_id = candidate.run_id.as_deref().filter(|run_id| {
             homeboy_agents::agent_task_lifecycle::exact_record(run_id)
@@ -3298,6 +3303,12 @@ fn remove_ssh_prune_candidate(
         )
     };
     let output = client.execute_with_timeout(&command, WORKSPACE_PRUNE_TIMEOUT);
+    parse_ssh_prune_delete_output(output)
+}
+
+fn parse_ssh_prune_delete_output(
+    output: CommandOutput,
+) -> Result<Option<RunnerWorkspaceLivenessEvidence>> {
     if !output.success {
         return Err(Error::internal_unexpected(format!(
             "remove runner workspace failed: {}",
@@ -3346,15 +3357,15 @@ pub(crate) fn ssh_prune_delete_command_with_terminal_owner(
 pub(crate) fn ssh_prune_delete_materialized_workspace_command(
     root: &str,
     remote_path: &str,
-    expected_metadata: &str,
 ) -> String {
     format!(
         concat!(
-            "root={root}; p={path}; meta_rel={meta}; expected={expected}; ",
+            "root={root}; p={path}; meta_rel={meta}; ",
             "case \"$p\" in \"$root\"/*) ;; *) printf unknown:workspace_path; exit 0 ;; esac; ",
+            "expected=$(mktemp \"${{TMPDIR:-/tmp}}/homeboy-prune-delete.XXXXXX\") || {{ printf unknown:metadata_transport; exit 0; }}; ",
+            "trap 'rm -f \"$expected\"' EXIT HUP INT TERM; cat > \"$expected\" || {{ printf unknown:metadata_transport; exit 0; }}; ",
             "meta=\"$p/$meta_rel\"; [ -f \"$meta\" ] || {{ printf unknown:metadata; exit 0; }}; ",
-            "actual=$(base64 < \"$meta\" | tr -d '\\n') || {{ printf unknown:metadata; exit 0; }}; ",
-            "[ \"$actual\" = \"$expected\" ] || {{ printf unknown:materialized_workspace_lifecycle_changed; exit 0; }}; ",
+            "cmp -s \"$meta\" \"$expected\" || {{ printf unknown:materialized_workspace_lifecycle_changed; exit 0; }}; ",
             "command -v ps >/dev/null 2>&1 && command -v lsof >/dev/null 2>&1 || {{ printf unknown:process_probe_unavailable; exit 0; }}; ",
             "ps_output=$(ps -eo pid=,ppid=,args=) || {{ printf unknown:process_probe_failed; exit 0; }}; ",
             "printf '%s\n' \"$ps_output\" | awk -v p=\"$p\" -v self=\"$$\" -v parent=\"$PPID\" '$1 != self && $1 != parent && $2 != self && index($0, p) {{ found=1 }} END {{ exit !found }}'; state=$?; ",
@@ -3368,7 +3379,6 @@ pub(crate) fn ssh_prune_delete_materialized_workspace_command(
         root = shell::quote_arg(root),
         path = shell::quote_arg(remote_path),
         meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
-        expected = shell::quote_arg(expected_metadata),
     )
 }
 
