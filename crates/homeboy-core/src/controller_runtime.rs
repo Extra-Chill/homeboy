@@ -33,6 +33,10 @@ const ADMISSION_QUEUE_POLL: Duration = Duration::from_millis(250);
 const ADMISSION_QUEUE_LEASE: Duration = Duration::from_secs(30);
 const ADMISSION_QUEUE_HEARTBEAT: Duration = Duration::from_secs(5);
 const ADMISSION_QUEUE_WAIT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// How long an uncoordinated admission caller queues before reporting
+/// contention. Queued cook submissions use [`ADMISSION_QUEUE_WAIT_TIMEOUT`];
+/// this bound covers callers that hold no durable request identity.
+const ADMISSION_BUSY_WAIT: Duration = Duration::from_secs(30);
 
 fn admission_queue_lease() -> Duration {
     test_admission_duration(
@@ -52,6 +56,13 @@ fn admission_queue_wait_timeout() -> Duration {
     test_admission_duration(
         "HOMEBOY_TEST_CONTROLLER_ADMISSION_WAIT_TIMEOUT_MS",
         ADMISSION_QUEUE_WAIT_TIMEOUT,
+    )
+}
+
+fn admission_busy_wait() -> Duration {
+    test_admission_duration(
+        "HOMEBOY_TEST_CONTROLLER_ADMISSION_BUSY_WAIT_MS",
+        ADMISSION_BUSY_WAIT,
     )
 }
 
@@ -1067,8 +1078,34 @@ fn write_active_generation(path: &Path, runtime: &Value) -> Result<()> {
     })
 }
 
+/// Acquire admission for an uncoordinated caller: cleanup, generation
+/// activation, and pin migration/recovery carry no durable request ID, so they
+/// cannot join the FIFO queue that cook submissions use.
+///
+/// They must still not fast-fail the instant a parallel cook wave holds
+/// admission. Bounded queueing is strictly better than an immediate retryable
+/// error the operator has to re-run by hand (#9373): wait out a normal
+/// admission critical section (which is short — selection plus durable record
+/// creation), then surface the contention with a named owner.
 fn acquire_admission_lock(path: &Path) -> Result<AdmissionLock> {
-    acquire_admission_lock_for(path, &format!("controller-{}", Uuid::new_v4()))
+    acquire_admission_lock_bounded(path, admission_busy_wait())
+}
+
+fn acquire_admission_lock_bounded(path: &Path, wait: Duration) -> Result<AdmissionLock> {
+    let request_id = format!("controller-{}", Uuid::new_v4());
+    let started = std::time::Instant::now();
+    loop {
+        match acquire_admission_lock_for(path, &request_id) {
+            Ok(lock) => return Ok(lock),
+            Err(error) if error.retryable == Some(true) => {
+                if started.elapsed() >= wait {
+                    return Err(error);
+                }
+                std::thread::sleep(ADMISSION_QUEUE_POLL.min(wait));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn acquire_admission_lock_for(path: &Path, request_id: &str) -> Result<AdmissionLock> {
@@ -1274,11 +1311,35 @@ fn replace_admission_owner_after_snapshot_for_test(_path: &Path) -> Result<()> {
 }
 
 fn admission_busy_error(path: &Path) -> Error {
-    Error::internal_unexpected(format!(
+    let mut error = Error::internal_unexpected(format!(
         "controller generation admission is currently owned by {}",
         admission_owner_summary(path)
     ))
-    .with_retryable(true)
+    .with_retryable(true);
+    error.details["controller_admission"] = admission_contention_evidence(path);
+    error
+}
+
+/// Structured contention evidence for an admission failure.
+///
+/// The rendered summary is the operator-facing sentence; this is the
+/// machine-readable form durable records and follow-up commands can join on, so
+/// a failed admission attempt is inspectable after the process exits (#9373).
+fn admission_contention_evidence(path: &Path) -> Value {
+    let queue = read_admission_queue(path).unwrap_or_else(
+        |_| json!({ "schema": ADMISSION_QUEUE_SCHEMA, "requests": [], "owner": null }),
+    );
+    let waiting = queue["requests"]
+        .as_array()
+        .map(|requests| requests.len())
+        .unwrap_or(0);
+    json!({
+        "owner_summary": admission_owner_summary(path),
+        "owner": queue["owner"],
+        "waiting_requests": waiting,
+        "advisory_lock_held": admission_lock_is_held(path),
+        "queueing": "controller admission is FIFO; concurrent requests wait their turn instead of racing",
+    })
 }
 
 #[cfg(test)]
@@ -1337,12 +1398,20 @@ fn acquire_queued_admission_lock_with_timeout(
             );
         }
         if started.elapsed() >= wait_timeout {
+            // Name the holder before the waiter is removed: an expired wait
+            // whose diagnostic cannot say who held admission is unactionable
+            // (#9373).
+            let owner = admission_owner_summary(path);
+            let evidence = admission_contention_evidence(path);
             remove_admission_request(path, request_id)?;
-            return Err(Error::internal_unexpected(format!(
-                "controller generation admission queue wait exceeded {}ms",
+            let mut error = Error::internal_unexpected(format!(
+                "controller generation admission queue wait exceeded {}ms; current owner: {owner}",
                 wait_timeout.as_millis()
             ))
-            .with_retryable(true));
+            .with_retryable(true);
+            error.details["controller_admission"] = evidence;
+            error.details["request_id"] = json!(request_id);
+            return Err(error);
         }
         if last_heartbeat.elapsed() >= admission_queue_heartbeat() {
             heartbeat_admission_waiter(path, request_id)?;
@@ -1654,19 +1723,97 @@ fn admission_owner_token(path: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Describe who currently holds controller-generation admission.
+///
+/// An admission error that cannot name its holder is unactionable by
+/// construction: `owned by unavailable` told operators nothing about whether to
+/// wait, retry, or repair (#9373). Resolution is therefore layered and always
+/// ends in a concrete, actionable state:
+///
+/// 1. the published owner record, including a verified liveness verdict;
+/// 2. the durable admission queue, which names the owning request even while
+///    the owner record is being rewritten between claim and publication;
+/// 3. the observable advisory-lock state, which distinguishes "held by a
+///    process that has not published ownership yet" from "free, retry now".
 fn admission_owner_summary(path: &Path) -> String {
-    let Ok(owner) = serde_json::from_slice::<Value>(&fs::read(path).unwrap_or_default()) else {
-        return "unavailable".to_string();
-    };
-    let pid = owner.get("pid").and_then(Value::as_u64);
-    let token = owner.get("token").and_then(Value::as_str);
+    admission_owner_record_summary(path)
+        .or_else(|| admission_queue_owner_summary(path))
+        .unwrap_or_else(|| admission_lock_state_summary(path))
+}
+
+fn admission_owner_record_summary(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let owner = serde_json::from_slice::<Value>(&bytes).ok()?;
+    let token = owner.get("token").and_then(Value::as_str)?;
     let starttime = owner.get("linux_starttime_ticks").and_then(Value::as_u64);
-    match (pid, token, starttime) {
-        (Some(pid), Some(token), Some(starttime)) => {
-            format!("pid={pid}, linux_starttime_ticks={starttime}, token={token}")
+    let Some(pid) = owner
+        .get("pid")
+        .and_then(Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok())
+    else {
+        // A legacy record fences a generation without naming a local process.
+        // It cannot protect a live owner, so the next attempt reclaims it.
+        return Some(format!(
+            "token={token} (legacy owner record with no PID; no live local process holds admission, so the next attempt reclaims it)"
+        ));
+    };
+    let liveness = admission_owner_liveness(pid, starttime);
+    Some(match starttime {
+        Some(starttime) => {
+            format!("pid={pid} ({liveness}), linux_starttime_ticks={starttime}, token={token}")
         }
-        (Some(pid), Some(token), None) => format!("pid={pid}, token={token}"),
-        _ => "unavailable".to_string(),
+        None => format!("pid={pid} ({liveness}), token={token}"),
+    })
+}
+
+fn admission_owner_liveness(pid: u32, starttime: Option<u64>) -> &'static str {
+    match crate::process::process_identity_state(pid, starttime) {
+        crate::process::ProcessIdentityState::Live => "live; wait for it to release admission",
+        crate::process::ProcessIdentityState::Dead => {
+            "already exited; the next attempt reclaims admission"
+        }
+        crate::process::ProcessIdentityState::IdentityMismatch => {
+            "PID reused by a different process; the next attempt reclaims admission"
+        }
+        crate::process::ProcessIdentityState::Unverifiable => {
+            "liveness unverifiable on this platform; admission stays protected until the owner record is reclaimed"
+        }
+    }
+}
+
+/// Name the owner recorded in the durable queue when the owner record itself is
+/// absent or mid-rewrite. The queue survives the owning process, so it is the
+/// only evidence that can name a holder across a controller restart.
+fn admission_queue_owner_summary(path: &Path) -> Option<String> {
+    let queue = read_admission_queue(path).ok()?;
+    let owner = queue.get("owner")?.as_object()?;
+    let request_id = owner.get("request_id").and_then(Value::as_str)?;
+    let Some(pid) = owner
+        .get("pid")
+        .and_then(Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok())
+    else {
+        return Some(format!(
+            "admission request `{request_id}` (durable queue owner with no recorded PID; the queue entry outlives its process, so cancelling or completing that request releases admission)"
+        ));
+    };
+    let liveness = admission_owner_liveness(
+        pid,
+        owner.get("linux_starttime_ticks").and_then(Value::as_u64),
+    );
+    Some(format!(
+        "admission request `{request_id}`, pid={pid} ({liveness})"
+    ))
+}
+
+fn admission_lock_state_summary(path: &Path) -> String {
+    if admission_lock_is_held(path) {
+        "a controller that holds the advisory lock but has not published its owner record yet (it is still running, so retry — concurrent requests queue in FIFO order)".to_string()
+    } else {
+        "no live owner (the advisory lock is free and the owner record is absent or unreadable, so retry immediately)".to_string()
     }
 }
 
@@ -2497,6 +2644,126 @@ mod tests {
         assert!(error.message.contains("waited"));
         assert!(error.message.contains("pid="));
         assert!(error.message.contains("token="));
+    }
+
+    /// #9373: an admission diagnostic that cannot name its holder is
+    /// unactionable by construction. No resolution path may print the old
+    /// `unavailable` placeholder.
+    #[test]
+    fn admission_owner_summary_never_reports_unavailable() {
+        let temporary = tempfile::tempdir().expect("temporary runtime directory");
+        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+
+        let absent = admission_owner_summary(&path);
+        assert!(!absent.contains("unavailable"), "{absent}");
+        assert!(absent.contains("no live owner"), "{absent}");
+        assert!(absent.contains("retry"), "{absent}");
+
+        // A released guard truncates the record; the lock is free, so the
+        // summary must say retry rather than name a placeholder.
+        fs::write(&path, b"").expect("truncate owner record");
+        let released = admission_owner_summary(&path);
+        assert!(!released.contains("unavailable"), "{released}");
+        assert!(released.contains("retry"), "{released}");
+
+        // An unreadable record still resolves to observable lock state.
+        fs::write(&path, b"{ not json").expect("write malformed owner record");
+        let malformed = admission_owner_summary(&path);
+        assert!(!malformed.contains("unavailable"), "{malformed}");
+        assert!(malformed.contains("retry"), "{malformed}");
+
+        // A record without a PID names the fence and its reclaim consequence
+        // instead of dropping to a placeholder.
+        write_admission_owner(&path, &stale_admission_owner(None, None, "pidless"));
+        let pidless = admission_owner_summary(&path);
+        assert!(!pidless.contains("unavailable"), "{pidless}");
+        assert!(pidless.contains("token=pidless"), "{pidless}");
+        assert!(pidless.contains("reclaims"), "{pidless}");
+
+        // A live owner is named with a verified liveness verdict.
+        write_admission_owner(&path, &admission_owner_record("live-token"));
+        let live = admission_owner_summary(&path);
+        assert!(!live.contains("unavailable"), "{live}");
+        assert!(
+            live.contains(&format!("pid={}", std::process::id())),
+            "{live}"
+        );
+        assert!(live.contains("token=live-token"), "{live}");
+        assert!(live.contains("(live;"), "{live}");
+    }
+
+    /// The durable queue outlives the owning process, so it can name a holder
+    /// even while the owner record is being rewritten between claim and
+    /// publication (#9373).
+    #[test]
+    fn admission_owner_summary_falls_back_to_the_durable_queue_owner() {
+        let temporary = tempfile::tempdir().expect("temporary runtime directory");
+        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+        update_admission_queue(&path, |queue| {
+            queue["owner"] = json!({
+                "request_id": "agent-task-queued",
+                "pid": 4_294_967_294u64,
+                "linux_starttime_ticks": null,
+                "advisory_lock": true,
+            });
+        })
+        .expect("persist durable queue owner");
+
+        let summary = admission_owner_summary(&path);
+
+        assert!(!summary.contains("unavailable"), "{summary}");
+        assert!(summary.contains("agent-task-queued"), "{summary}");
+        assert!(summary.contains("pid=4294967294"), "{summary}");
+    }
+
+    /// A contended admission failure must carry machine-readable evidence, not
+    /// just a sentence: durable records and follow-up commands join on it.
+    #[test]
+    fn admission_busy_error_carries_named_owner_evidence() {
+        let temporary = tempfile::tempdir().expect("temporary runtime directory");
+        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+        write_admission_owner(&path, &admission_owner_record("busy-token"));
+
+        let error = admission_busy_error(&path);
+
+        assert_eq!(error.retryable, Some(true));
+        assert!(!error.message.contains("unavailable"), "{}", error.message);
+        assert!(error.message.contains("token=busy-token"));
+        assert!(error.details["controller_admission"]["owner_summary"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("token=busy-token")));
+        assert!(error.details["controller_admission"]["queueing"]
+            .as_str()
+            .is_some_and(|queueing| queueing.contains("FIFO")));
+    }
+
+    /// Uncoordinated callers (cleanup, generation activation, pin recovery)
+    /// carry no durable request ID and cannot join the FIFO queue. They must
+    /// still queue for a bounded window instead of fast-failing the moment a
+    /// parallel cook wave holds admission (#9373).
+    #[test]
+    fn uncoordinated_admission_queues_for_a_bounded_window_before_reporting_contention() {
+        let temporary = tempfile::tempdir().expect("temporary runtime directory");
+        let path = temporary.path().join(ADMISSION_LOCK_DIR);
+        let child = spawn_admission_lock_holder(&path, temporary.path(), false);
+
+        let started = std::time::Instant::now();
+        let attempt = acquire_admission_lock_bounded(&path, Duration::from_millis(400));
+        let waited = started.elapsed();
+        release_admission_lock_holder(child, temporary.path());
+        let error = attempt.expect_err("a live holder still wins the bounded wait");
+
+        assert!(
+            waited >= Duration::from_millis(400),
+            "bounded admission must queue, waited {waited:?}"
+        );
+        assert_eq!(error.retryable, Some(true));
+        assert!(error.message.contains("pid="), "{}", error.message);
+
+        // Once the holder releases, the same bounded acquisition succeeds.
+        let admission =
+            acquire_admission_lock_bounded(&path, Duration::ZERO).expect("released lock is free");
+        drop(admission);
     }
 
     #[test]
