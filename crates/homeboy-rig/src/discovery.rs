@@ -5,7 +5,7 @@
 //! in a sibling module so the install root stays under the structural
 //! item-count threshold (#5241).
 
-use homeboy_core::error::{Error, Result};
+use homeboy_core::error::{Error, ErrorCode, Result};
 use homeboy_extension as extension;
 use homeboy_stack::stack;
 use serde::Serialize;
@@ -36,7 +36,7 @@ pub(crate) fn discover_rigs_for_install(
     all: bool,
 ) -> Result<Vec<DiscoveredRig>> {
     if all {
-        return discover_rigs(package_path);
+        return discover_rigs_with_preflight(package_path);
     }
     let Some(id) = id else {
         return discover_rigs(package_path);
@@ -44,19 +44,99 @@ pub(crate) fn discover_rigs_for_install(
     discover_rigs_matching(package_path, Some(&extension::slugify_id(id)?))
 }
 
+/// Discover every package member before returning a schema failure so `--all`
+/// can report every incompatible rig without changing installed state.
+fn discover_rigs_with_preflight(package_path: &Path) -> Result<Vec<DiscoveredRig>> {
+    let candidates = discover_rig_paths(package_path, None)?;
+    let mut rigs = Vec::new();
+    let mut outcomes = Vec::new();
+
+    for (path, fallback_name) in candidates {
+        let fallback_id = fallback_name
+            .as_deref()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string();
+        match discovered_from_path(&path, fallback_name.as_deref(), package_path) {
+            Ok(rig) => {
+                outcomes.push(serde_json::json!({
+                    "id": rig.id,
+                    "spec_path": rig.rig_path,
+                    "status": "preflight_passed",
+                }));
+                rigs.push(rig);
+            }
+            Err(error) => outcomes.push(serde_json::json!({
+                "id": fallback_id,
+                "spec_path": path,
+                "status": if error.message.contains("schema is not compatible") {
+                    "incompatible"
+                } else {
+                    "failed"
+                },
+                "schema_failure_path": error.details.get("field").cloned().unwrap_or_else(|| serde_json::json!("rig_spec")),
+                "error": error.message,
+                "active_homeboy_version": homeboy_product_identity::product_version(),
+                "upgrade_guidance": "Run `homeboy upgrade` to install a binary that supports this rig schema, then retry.",
+            })),
+        }
+    }
+
+    if outcomes
+        .iter()
+        .any(|outcome| outcome["status"] != "preflight_passed")
+    {
+        return Err(Error::new(
+            ErrorCode::ValidationMultipleErrors,
+            "Rig package preflight failed; no rigs were installed",
+            serde_json::json!({
+                "atomic": true,
+                "active_homeboy_version": homeboy_product_identity::product_version(),
+                "outcomes": outcomes,
+            }),
+        ));
+    }
+
+    rigs.sort_by(|a, b| a.id.cmp(&b.id));
+    rigs.dedup_by(|a, b| a.id == b.id);
+    if rigs.is_empty() {
+        return no_rigs_found(package_path);
+    }
+    Ok(rigs)
+}
+
 fn discover_rigs_matching(
     package_path: &Path,
     only_id: Option<&str>,
 ) -> Result<Vec<DiscoveredRig>> {
-    let mut rigs = Vec::new();
+    let mut rigs = discover_rig_paths(package_path, only_id)?
+        .into_iter()
+        .map(|(path, fallback_name)| {
+            discovered_from_path(&path, fallback_name.as_deref(), package_path)
+        })
+        .collect::<Result<Vec<_>>>()?;
 
+    rigs.sort_by(|a, b| a.id.cmp(&b.id));
+    rigs.dedup_by(|a, b| a.id == b.id);
+
+    if rigs.is_empty() {
+        if only_id.is_some() {
+            return Ok(rigs);
+        }
+        return no_rigs_found(package_path);
+    }
+
+    Ok(rigs)
+}
+
+fn discover_rig_paths(
+    package_path: &Path,
+    only_id: Option<&str>,
+) -> Result<Vec<(PathBuf, Option<std::ffi::OsString>)>> {
+    let mut rigs = Vec::new();
     let single = package_path.join("rig.json");
     if single.is_file() {
-        rigs.push(discovered_from_path(
-            &single,
-            package_path.file_name(),
-            package_path,
-        )?);
+        rigs.push((single, package_path.file_name().map(ToOwned::to_owned)));
     }
 
     let rigs_dir = package_path.join("rigs");
@@ -83,23 +163,17 @@ fn discover_rigs_matching(
                         continue;
                     }
                 }
-                rigs.push(discovered_from_path(
-                    &rig_path,
-                    path.file_name(),
-                    package_path,
-                )?);
+                rigs.push((rig_path, path.file_name().map(ToOwned::to_owned)));
             }
         }
     }
 
-    rigs.sort_by(|a, b| a.id.cmp(&b.id));
-    rigs.dedup_by(|a, b| a.id == b.id);
+    rigs.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(rigs)
+}
 
-    if rigs.is_empty() {
-        if only_id.is_some() {
-            return Ok(rigs);
-        }
-        return Err(Error::validation_invalid_argument(
+fn no_rigs_found(package_path: &Path) -> Result<Vec<DiscoveredRig>> {
+    Err(Error::validation_invalid_argument(
             "source",
             format!(
                 "No rig specs found at {} (expected rig.json or rigs/<id>/rig.json)",
@@ -115,10 +189,7 @@ fn discover_rigs_matching(
                 "Install a package-shaped source with: homeboy rig install <package-path> --id <rig-id>".to_string(),
                 "For command-local package discovery, run Homeboy from inside a checkout that contains rigs/<id>/rig.json.".to_string(),
             ]),
-        ));
-    }
-
-    Ok(rigs)
+        ))
 }
 
 pub fn discover_stacks(package_path: &Path) -> Result<Vec<DiscoveredStack>> {
