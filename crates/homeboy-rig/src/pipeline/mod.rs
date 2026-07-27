@@ -12,6 +12,7 @@ mod fs_step;
 mod git_step;
 mod host_mutation_step;
 mod labels;
+mod lifecycle_step;
 mod ordering;
 mod outcome;
 mod patch_step;
@@ -334,6 +335,12 @@ fn run_step(
             lifecycle,
             ..
         } => host_mutation_step::run_host_mutation_step(rig, *op, *dry_run, lifecycle),
+        PipelineStep::Lifecycle {
+            component,
+            lifecycle,
+            op,
+            ..
+        } => lifecycle_step::run_lifecycle_step(rig, component.as_deref(), lifecycle, *op),
         PipelineStep::Check { spec, .. } => check::evaluate(rig, spec),
     }
 }

@@ -10,7 +10,10 @@ use std::collections::{BTreeMap, HashMap};
 
 pub use homeboy_core::artifact_postprocess::ArtifactPostprocessAction as ArtifactPostprocessSpec;
 use homeboy_core::component::ScopedExtensionConfig;
-use homeboy_core::lifecycle::LifecycleContract;
+pub use homeboy_core::lifecycle::{
+    LifecycleContract, LifecyclePhaseContract, LifecyclePhaseKind, LifecyclePhaseResult,
+    LifecyclePhaseStatus, LifecycleResultMetadata, LifecycleSnapshotRef,
+};
 use homeboy_extension::bench::{BenchGate, BenchGateOp};
 
 mod check;

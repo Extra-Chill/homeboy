@@ -3,13 +3,22 @@ use std::collections::HashMap;
 use homeboy_extension::trace::{TraceProbeConfig, TraceSpanMetadata};
 
 use super::{
-    ArtifactPostprocessSpec, TraceDependencySpec, TraceGuardrailSpec, TracePublicPreviewSpec,
-    TraceVariantSpec, WorkloadSpec,
+    ArtifactPostprocessSpec, LifecycleContract, TraceDependencySpec, TraceGuardrailSpec,
+    TracePublicPreviewSpec, TraceVariantSpec, WorkloadSpec,
 };
 
 impl WorkloadSpec {
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    /// Lifecycle contract declared by this workload, if any.
+    ///
+    /// Every other `WorkloadSpec` field has had an accessor since the type was
+    /// introduced; `lifecycle` did not, which is why the contract was parsed
+    /// and serialized but never reachable from an execution path.
+    pub fn lifecycle(&self) -> Option<&LifecycleContract> {
+        self.lifecycle.as_ref()
     }
 
     pub fn env_provider_extensions(&self) -> &[String] {

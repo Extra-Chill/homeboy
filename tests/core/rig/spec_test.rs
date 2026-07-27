@@ -788,6 +788,130 @@ fn test_spec_patch_op_defaults_to_apply_when_omitted() {
 }
 
 #[test]
+fn test_spec_lifecycle_step_round_trips_the_shipped_contract() {
+    use crate::spec::LifecyclePhaseKind;
+    let json = r#"{
+        "id": "sandbox-rig",
+        "components": { "app": { "path": "/tmp/app" } },
+        "pipeline": {
+            "up": [
+                {
+                    "kind": "lifecycle",
+                    "id": "sandbox",
+                    "depends_on": ["preflight"],
+                    "component": "app",
+                    "op": "snapshot",
+                    "label": "capture sandbox handle",
+                    "lifecycle": {
+                        "schema": "homeboy/lifecycle-contract/v1",
+                        "version": 1,
+                        "phases": [
+                            { "id": "prepare", "phase": "prepare", "command": "true" },
+                            {
+                                "id": "capture",
+                                "phase": "snapshot",
+                                "extension_hook": "runtime.snapshot",
+                                "timeout_seconds": 30
+                            },
+                            { "id": "reap", "phase": "teardown", "extension_hook": "runtime.teardown" }
+                        ],
+                        "metadata": { "purpose": "disposable workload" }
+                    }
+                }
+            ]
+        }
+    }"#;
+
+    let spec: RigSpec = serde_json::from_str(json).expect("parse");
+    match &spec.pipeline.get("up").unwrap()[0] {
+        PipelineStep::Lifecycle {
+            step_id,
+            depends_on,
+            component,
+            lifecycle,
+            op,
+            label,
+        } => {
+            assert_eq!(step_id.as_deref(), Some("sandbox"));
+            assert_eq!(depends_on, &vec!["preflight".to_string()]);
+            assert_eq!(component.as_deref(), Some("app"));
+            assert_eq!(*op, LifecyclePhaseKind::Snapshot);
+            assert_eq!(label.as_deref(), Some("capture sandbox handle"));
+            assert_eq!(lifecycle.schema, "homeboy/lifecycle-contract/v1");
+            assert_eq!(lifecycle.phases.len(), 3);
+            assert_eq!(lifecycle.phases[1].phase, LifecyclePhaseKind::Snapshot);
+            assert_eq!(
+                lifecycle.phases[1].extension_hook.as_deref(),
+                Some("runtime.snapshot")
+            );
+            assert_eq!(lifecycle.phases[1].timeout_seconds, Some(30));
+            assert_eq!(
+                lifecycle.metadata.get("purpose").map(String::as_str),
+                Some("disposable workload")
+            );
+        }
+        other => panic!("expected Lifecycle, got {:?}", other),
+    }
+
+    // The step survives a serialize/parse cycle unchanged.
+    let re_serialized = serde_json::to_string(&spec).expect("serialize");
+    let re_parsed: RigSpec = serde_json::from_str(&re_serialized).expect("reparse");
+    match &re_parsed.pipeline.get("up").unwrap()[0] {
+        PipelineStep::Lifecycle { lifecycle, op, .. } => {
+            assert_eq!(*op, LifecyclePhaseKind::Snapshot);
+            assert_eq!(lifecycle.phases.len(), 3);
+        }
+        other => panic!("expected Lifecycle, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_spec_lifecycle_step_defaults_op_and_component() {
+    use crate::spec::LifecyclePhaseKind;
+    let json = r#"{
+        "id": "sandbox-rig",
+        "pipeline": {
+            "up": [
+                {
+                    "kind": "lifecycle",
+                    "lifecycle": {
+                        "phases": [{ "id": "prepare", "phase": "prepare", "command": "true" }]
+                    }
+                }
+            ]
+        }
+    }"#;
+
+    let spec: RigSpec = serde_json::from_str(json).expect("parse");
+    match &spec.pipeline.get("up").unwrap()[0] {
+        PipelineStep::Lifecycle {
+            component,
+            lifecycle,
+            op,
+            ..
+        } => {
+            assert_eq!(*op, LifecyclePhaseKind::Prepare);
+            assert!(component.is_none());
+            // Contract schema/version default without being declared.
+            assert_eq!(lifecycle.schema, "homeboy/lifecycle-contract/v1");
+            assert_eq!(lifecycle.version, 1);
+        }
+        other => panic!("expected Lifecycle, got {:?}", other),
+    }
+}
+
+/// Non-breaking guarantee: every step kind that existed before the `lifecycle`
+/// variant still parses to the same discriminant.
+#[test]
+fn test_spec_without_lifecycle_step_is_unchanged() {
+    let spec: RigSpec = serde_json::from_str(GENERIC_APP_RIG_SPEC).expect("parse");
+    let up = spec.pipeline.get("up").expect("up pipeline");
+    assert!(!up
+        .iter()
+        .any(|step| matches!(step, PipelineStep::Lifecycle { .. })));
+}
+
+#[test]
 fn test_spec_external_service_kind_with_discover() {
     let json = r#"{
         "id": "r",
