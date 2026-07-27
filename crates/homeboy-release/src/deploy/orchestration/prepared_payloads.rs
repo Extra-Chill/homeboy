@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use homeboy_core::component::Component;
+use homeboy_core::error::Error;
 use homeboy_core::project::Project;
 
 use super::super::binding::bind_project_payloads;
@@ -90,7 +91,7 @@ pub(super) fn prepare_component_deployments(
                             remote_versions.get(&component.id).cloned(),
                             error.to_string(),
                         );
-                        if let Some(exit_code) = preparation_build_exit_code(&error.to_string()) {
+                        if let Some(exit_code) = preparation_build_exit_code(&error) {
                             failure = failure.with_build_exit_code(Some(exit_code));
                         }
                         failures.push(failure);
@@ -150,11 +151,46 @@ pub(super) fn prepare_component_deployments(
     }
 }
 
-fn preparation_build_exit_code(message: &str) -> Option<i32> {
-    message
-        .strip_prefix("Invalid argument 'build': Build failed (exit code ")?
-        .split_once(')')?
-        .0
-        .parse()
-        .ok()
+/// Read the build exit code the preparation step recorded on the structured
+/// error details. The producer (`preparation::…` build failure) sets
+/// `details.exit_code`, so this never depends on the human-readable message.
+fn preparation_build_exit_code(error: &Error) -> Option<i32> {
+    error
+        .details
+        .get("exit_code")
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mirrors what the preparation build-failure producer records, without
+    /// depending on the wording of the failure message.
+    fn build_failure(exit_code: Option<i32>) -> Error {
+        let mut error = Error::validation_invalid_argument(
+            "build",
+            "Build failed (exit code 3): extension build reported failure",
+            None,
+            None,
+        );
+        if let (Some(code), Some(details)) = (exit_code, error.details.as_object_mut()) {
+            details.insert("exit_code".to_string(), serde_json::Value::from(code));
+        }
+        error
+    }
+
+    #[test]
+    fn reads_structured_build_exit_code() {
+        assert_eq!(
+            preparation_build_exit_code(&build_failure(Some(3))),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn returns_none_when_no_structured_exit_code_present() {
+        assert_eq!(preparation_build_exit_code(&build_failure(None)), None);
+    }
 }
