@@ -351,9 +351,10 @@ pub fn non_interactive_preflight_error(
     let mut error = crate::core::Error::validation_invalid_argument(
         "resource-policy",
         format!(
-            "Refusing to start `{}` on a {} machine from a non-interactive shell. {} Use a safe Lab/offload path once this command supports it, or rerun later when `homeboy self doctor` reports ok.",
+            "Refusing to start `{}` on a {} machine from a non-interactive shell. {} {}",
             warning.command,
             severity_str(warning.recommendation),
+            warning.message,
             primary_action(warning, None),
         ),
         None,
@@ -387,8 +388,16 @@ pub fn rerun_command(
                 rerun.push("--runner".to_string());
                 rerun.push(runner_id.to_string());
             }
+        } else if args
+            .iter()
+            .any(|arg| arg == "--placement" || arg.starts_with("--placement="))
+        {
+            rerun.extend(args.iter().skip(1).cloned());
+            return Some(crate::core::engine::shell::quote_args(&rerun));
         } else {
-            append_local_placement(&mut rerun, args);
+            // A disconnected or unconfigured Lab must not turn a portable
+            // workload into a suggested local hot-machine retry.
+            return None;
         }
     } else {
         append_local_placement(&mut rerun, args);
@@ -1280,7 +1289,7 @@ mod tests {
     }
 
     #[test]
-    fn portable_refusal_without_runner_uses_explicit_local_last_resort() {
+    fn portable_refusal_without_runner_requires_lab_recovery_or_deferral() {
         let _lock = env_lock();
         let _guard = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
         let warning = evaluate(
@@ -1296,18 +1305,61 @@ mod tests {
         let error = non_interactive_preflight_error(&warning, false, false, rerun, false)
             .expect("non-interactive hot runs should fail fast");
 
-        assert_eq!(
-            error.details["rerun_command"].as_str(),
-            Some("homeboy --placement local audit")
-        );
+        assert!(error.details.get("rerun_command").is_none());
         assert!(error
             .message
             .contains("No Homeboy Lab runner is configured on this host"));
-        // #7749: the refusal must not point the operator at Lab infrastructure
-        // that does not exist on this host.
-        assert!(!error
+        assert!(error.message.contains("connect a runner"));
+        assert!(error
             .message
-            .contains("Connect a default Homeboy Lab runner"));
+            .contains("explicit, authorized `--placement local` override"));
+    }
+
+    #[test]
+    fn disconnected_portable_fuzz_requires_lab_recovery_without_local_rerun() {
+        let command = Cli::parse_from([
+            "homeboy",
+            "fuzz",
+            "run",
+            "--rig",
+            "studio",
+            "--workload",
+            "db-dropin",
+        ]);
+        let hot = hot_command(&command.command).expect("fuzz run is resource managed");
+        assert!(hot.lab_offload_supported, "rig-backed fuzz run is portable");
+
+        let disconnected = LabRunnerReadiness {
+            state: crate::runner::runners::LabRunnerReadinessState::Disconnected,
+            selected_runner_id: Some("homeboy-lab".to_string()),
+            available_runner_ids: Vec::new(),
+            reasons: vec!["runner is disconnected".to_string()],
+            remediation_commands: vec!["homeboy runner reconnect homeboy-lab".to_string()],
+        };
+        let warning = evaluate_with_runner_hint(
+            hot,
+            &resources(ResourceRecommendation::Hot),
+            Some(&disconnected),
+        )
+        .expect("hot controller warns");
+        let error = non_interactive_preflight_error(
+            &warning,
+            false,
+            false,
+            rerun_command(
+                hot,
+                &["homeboy".to_string(), "fuzz".to_string(), "run".to_string()],
+                None,
+            ),
+            false,
+        )
+        .expect("disconnected Lab refuses local execution");
+
+        assert!(error.details.get("rerun_command").is_none());
+        assert!(error
+            .message
+            .contains("homeboy runner reconnect homeboy-lab"));
+        assert!(error.message.contains("requires a ready Lab runner"));
     }
 
     #[test]

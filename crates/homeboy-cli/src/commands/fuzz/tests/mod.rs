@@ -57,6 +57,28 @@ mod replay_tests;
 mod report_tests;
 mod workload_tests;
 
+#[test]
+fn fuzz_run_rejects_profile_and_workload_during_cli_parsing() {
+    let result = Cli::try_parse_from([
+        "homeboy",
+        "fuzz",
+        "run",
+        "--rig",
+        "studio",
+        "--profile",
+        "strict",
+        "--workload",
+        "db-dropin",
+    ]);
+    let Err(error) = result else {
+        panic!("conflicting workload selectors must fail before runtime preflight");
+    };
+
+    assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    assert!(error.to_string().contains("--profile"));
+    assert!(error.to_string().contains("--workload"));
+}
+
 #[derive(Parser)]
 struct FuzzCli {
     #[command(flatten)]

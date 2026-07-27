@@ -48,7 +48,10 @@ pub(super) fn primary_action(
     {
         // Portable command, but no Lab runner is configured on this host (#7749):
         // do not point the operator at nonexistent Lab infrastructure.
-        return "No Homeboy Lab runner is configured on this host, so Lab offload is not available. Defer verification to CI, connect a runner with `homeboy runner connect`, or use the local-hot rerun command only if local execution is explicitly authorized.".to_string();
+        return "No Homeboy Lab runner is configured on this host, so this portable command cannot run through Lab. Defer verification to CI or connect a runner with `homeboy runner connect`. Local execution requires an explicit, authorized `--placement local` override.".to_string();
+    }
+    if warning.message.contains("Lab runner inventory is") {
+        return "This portable command requires a ready Lab runner. Follow the listed runner recovery command or defer verification until Lab is available. Local execution requires an explicit, authorized `--placement local` override.".to_string();
     }
     if warning.message.contains("--runner") {
         "Pass --runner <id> when Lab offload supports this mode.".to_string()
@@ -67,11 +70,13 @@ pub(super) fn warning_message(
     let reason = primary_reason(resources);
     if command.lab_offload_supported {
         if let Some(readiness) = lab_readiness {
-            if let Some(runner_id) = readiness.selected_runner_id.as_deref() {
-                return format!(
+            if readiness.state == crate::runner::runners::LabRunnerReadinessState::ConnectedReady {
+                if let Some(runner_id) = readiness.selected_runner_id.as_deref() {
+                    return format!(
                 "Resource policy warning: machine is {severity}; starting `{}` locally may skew results or add pressure. {reason} Homeboy found Lab runner `{runner_id}`; use --runner {runner_id} to route this portable command through Lab offload, or omit local-hot overrides so automatic Lab routing can use it.",
                 command.label
             );
+                }
             }
             return format!(
                 "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} Lab runner inventory is {} (available runner IDs: {}). {}",
@@ -82,7 +87,7 @@ pub(super) fn warning_message(
             );
         }
         return format!(
-            "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} No Homeboy Lab runner is configured on this host, so Lab offload is not currently available; connect a runner (`homeboy runner connect`) to enable it, defer verification to CI, or use --placement local to run locally without this warning.",
+            "Resource policy warning: machine is {severity}; starting `{}` may skew results or add pressure. {reason} No Homeboy Lab runner is configured on this host, so Lab offload is not currently available; connect a runner (`homeboy runner connect`) or defer verification to CI. Local execution requires an explicit, authorized `--placement local` override.",
             command.label
         );
     }
