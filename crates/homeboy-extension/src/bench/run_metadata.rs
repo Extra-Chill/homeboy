@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
+use homeboy_engine_primitives::content_hash;
 
 use crate::bench::parsing::{
     BenchResults, BenchRunMetadata, BenchRunnerMetadata, BenchScenario, BenchWorkloadMetadata,
@@ -106,9 +106,7 @@ fn resolve_workload_path(path: &str, component: &Component) -> PathBuf {
 }
 
 fn sha256_file(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    let hash = Sha256::digest(&bytes);
-    Some(hash.iter().map(|byte| format!("{:02x}", byte)).collect())
+    content_hash::sha256_file(path).ok()
 }
 
 fn bench_warmup_iterations() -> Option<u64> {

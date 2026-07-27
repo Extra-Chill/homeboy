@@ -29,7 +29,6 @@ regex = "1.11"
 reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls", "socks", "http2", "charset", "system-proxy"] }
 glob = "0.3"
 glob-match = "0.2"
-sha2 = "0.10.9"
 libc = "0.2"
 shellexpand = "3.1"
 tempfile = "3.14"

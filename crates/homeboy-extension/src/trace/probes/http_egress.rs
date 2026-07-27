@@ -7,7 +7,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use sha2::{Digest, Sha256};
+use homeboy_engine_primitives::content_hash;
 
 use super::{event, push_event, TraceEvent};
 
@@ -513,7 +513,7 @@ struct CapturedBody {
 fn capture_body(body: &[u8], max: usize, artifact_dir: Option<&Path>) -> CapturedBody {
     let preview_bytes = body.len().min(max);
     let truncated = body.len() > max;
-    let sha256 = format!("{:x}", Sha256::digest(body));
+    let sha256 = content_hash::sha256_hex(body);
     let artifact_ref = if truncated {
         artifact_dir.and_then(|dir| write_body_artifact(dir, &sha256, body).ok())
     } else {

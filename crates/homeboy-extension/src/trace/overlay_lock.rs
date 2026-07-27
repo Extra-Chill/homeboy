@@ -1,5 +1,5 @@
+use homeboy_engine_primitives::content_hash;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -238,14 +238,9 @@ pub(super) fn normalize_component_path(component_path: &Path) -> PathBuf {
 }
 
 pub(super) fn trace_overlay_lock_id(component_path: &Path) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(component_path.to_string_lossy().as_bytes());
-    let digest = hasher.finalize();
-    let hex = digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    hex[..24].to_string()
+    // Deliberately truncated: this is a filesystem lock-file name, not a
+    // content identity, so only the leading 24 hex characters are used.
+    content_hash::sha256_hex(component_path.to_string_lossy().as_bytes())[..24].to_string()
 }
 
 fn write_trace_overlay_lock_holder(path: &Path, holder: &TraceOverlayLockHolder) -> Result<()> {
