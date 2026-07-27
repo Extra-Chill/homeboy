@@ -404,17 +404,64 @@ pub(crate) fn gh_release_metadata(
 ) -> Result<GitHubReleaseMetadata, String> {
     // `gh release view --json` uses GraphQL, whose release asset shape omits
     // the REST digest field. Recovery authority requires that digest, including
-    // for drafts, so read the tag endpoint directly.
+    // for drafts, so read the REST API directly.
     let endpoint = format!("repos/{repo_flag}/releases/tags/{tag}");
     let output = run_gh_command(
         gh_command(github, config, &["api", &endpoint]),
         github_release_upload_timeout(),
     );
-    if output.timed_out || output.exit_code != Some(0) {
+    if !output.timed_out && output.exit_code == Some(0) {
+        return serde_json::from_str(&output.stdout)
+            .map_err(|error| format!("GitHub REST release metadata was invalid: {error}"));
+    }
+    if output.timed_out {
         return Err(gh_failure_detail("gh api release metadata", &output));
     }
-    serde_json::from_str(&output.stdout)
-        .map_err(|error| format!("GitHub REST release metadata was invalid: {error}"))
+
+    // `releases/tags/{tag}` resolves published releases only -- GitHub returns
+    // 404 for a draft, because a draft has no tag association on that endpoint.
+    // A failed publish leaves exactly that state, so looking the release up by
+    // tag made recovery impossible for the one case recovery exists to handle:
+    // every retry 404'd, left the release a draft, and 404'd again forever.
+    // Drafts are visible on the list endpoint, so fall back to resolving by id.
+    gh_draft_release_metadata(github, config, tag, repo_flag)
+        .ok_or_else(|| gh_failure_detail("gh api release metadata", &output))
+}
+
+/// Resolve a draft release by scanning the list endpoint, which -- unlike
+/// `releases/tags/{tag}` -- includes drafts. Returns the REST shape, so the
+/// asset digests recovery depends on are preserved.
+fn gh_draft_release_metadata(
+    github: &GitHubRepo,
+    config: &GithubConfig,
+    tag: &str,
+    repo_flag: &str,
+) -> Option<GitHubReleaseMetadata> {
+    let endpoint = format!("repos/{repo_flag}/releases");
+    let filter = format!(".[] | select(.tag_name == \"{tag}\")");
+    let output = run_gh_command(
+        gh_command(
+            github,
+            config,
+            &["api", "--paginate", &endpoint, "--jq", &filter],
+        ),
+        github_release_upload_timeout(),
+    );
+    if output.timed_out || output.exit_code != Some(0) {
+        return None;
+    }
+    parse_listed_release_metadata(&output.stdout)
+}
+
+/// `gh api --jq` streams one JSON object per match rather than an array, and
+/// `--paginate` concatenates pages. A tag resolves to at most one release, so
+/// take the first non-empty record.
+fn parse_listed_release_metadata(stdout: &str) -> Option<GitHubReleaseMetadata> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .and_then(|line| serde_json::from_str(line).ok())
 }
 
 pub(crate) fn verify_release_assets(
@@ -1033,6 +1080,29 @@ pub(crate) fn github_cli_env(github: &GitHubRepo, config: &GithubConfig) -> Vec<
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    /// The list endpoint is the only REST surface that exposes a draft release:
+    /// `releases/tags/{tag}` returns 404 for drafts, which deadlocked recovery
+    /// (a failed publish leaves a draft, every retry 404'd, it stayed a draft).
+    /// This is a real `gh api --paginate --jq` record for a stranded release.
+    #[test]
+    fn draft_release_metadata_parses_from_the_list_endpoint() {
+        let stdout = r#"{"id":360531007,"tag_name":"v0.320.0","draft":true,"assets":[{"id":1,"name":"homeboy-x86_64-unknown-linux-gnu.tar.xz","size":9876543,"digest":"sha256:abc123"}]}"#;
+        let metadata = parse_listed_release_metadata(stdout).expect("draft metadata parses");
+        assert!(metadata.is_draft);
+        assert_eq!(metadata.assets.len(), 1);
+        // Recovery reconciles by digest, so losing it would silently re-upload.
+        assert_eq!(metadata.assets[0].digest.as_deref(), Some("sha256:abc123"));
+    }
+
+    #[test]
+    fn listed_release_metadata_ignores_blank_and_paginated_noise() {
+        let stdout = "\n\n{\"tag_name\":\"v1.2.3\",\"draft\":false,\"assets\":[]}\n";
+        let metadata = parse_listed_release_metadata(stdout).expect("metadata parses");
+        assert!(!metadata.is_draft);
+        assert!(parse_listed_release_metadata("").is_none());
+        assert!(parse_listed_release_metadata("not json").is_none());
+    }
 
     fn remote_asset(name: &str, size: u64, digest: Option<String>) -> GitHubReleaseAsset {
         GitHubReleaseAsset {
