@@ -1,6 +1,7 @@
 use homeboy_core::config;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::server;
+use homeboy_engine_primitives::content_hash;
 
 use super::preview::parse_rfc3339_utc;
 use super::types::*;
@@ -123,12 +124,7 @@ fn validate_native_preview_auth_policy(
                 None,
             ));
         }
-        if token.token_sha256.len() != 64
-            || !token
-                .token_sha256
-                .chars()
-                .all(|character| character.is_ascii_hexdigit())
-        {
+        if !content_hash::is_sha256_hex(&token.token_sha256) {
             return Err(Error::validation_invalid_argument(
                 "policy.native_preview_auth.tokens.token_sha256",
                 "native preview tokens store a SHA-256 digest, not plaintext token material",

@@ -1,4 +1,4 @@
-use sha2::{Digest, Sha256};
+use homeboy_engine_primitives::content_hash;
 use std::path::PathBuf;
 
 use homeboy_core::config::ConfigEntity;
@@ -10,8 +10,7 @@ use super::validation::validate_service_tunnel;
 use super::{load, save};
 
 pub fn native_preview_token_sha256(token: &str) -> String {
-    let digest = Sha256::digest(token.as_bytes());
-    format!("{digest:x}")
+    content_hash::sha256_hex(token.as_bytes())
 }
 
 pub fn native_preview_token_record(

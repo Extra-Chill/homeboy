@@ -16,6 +16,7 @@ pub use types::{
 };
 
 use base64::Engine;
+use homeboy_engine_primitives::content_hash;
 use reqwest::blocking::Client;
 use serde_json::json;
 use std::io::Read;
@@ -573,9 +574,7 @@ fn post_json(
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(bytes);
-    format!("{digest:x}")
+    content_hash::sha256_hex(bytes)
 }
 
 fn validate_start_spec(spec: &PreviewClientStartSpec) -> Result<()> {
