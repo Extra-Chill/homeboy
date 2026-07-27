@@ -340,7 +340,9 @@ fn run_step(
             lifecycle,
             op,
             ..
-        } => lifecycle_step::run_lifecycle_step(rig, component.as_deref(), lifecycle, *op),
+        } => {
+            lifecycle_step::run_lifecycle_step(rig, component.as_deref(), lifecycle, *op, settings)
+        }
         PipelineStep::Check { spec, .. } => check::evaluate(rig, spec),
     }
 }
