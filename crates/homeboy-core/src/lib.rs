@@ -84,7 +84,6 @@ pub mod controller_runtime;
 pub mod daemon;
 pub mod db;
 pub mod deps;
-pub mod deterministic_loop;
 pub mod engine;
 pub use homeboy_lab_contract::env_materialization_plan;
 // error moved to the internal `homeboy-error` crate. Re-exported here so existing
