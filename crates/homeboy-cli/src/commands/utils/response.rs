@@ -760,17 +760,104 @@ fn release_failure_digest(data: &Value) -> Option<CommandFailureDigest> {
         })
         .unwrap_or("release step failed without a reported error");
 
+    // The step already classified itself (`reason: "gh-upload-failed"`) and
+    // already computed the repair command. Dropping both here is what left CI
+    // printing `Release failed: Unknown error` while holding the exact fix
+    // (#10441), so lift the classification into the summary and the repair
+    // commands into next_actions.
+    let step_data = failed_step.get("data");
+    let cause = match step_data
+        .and_then(|data| data.get("reason"))
+        .and_then(Value::as_str)
+        .filter(|reason| !reason.trim().is_empty())
+    {
+        Some(reason) => format!("{reason} — {cause}"),
+        None => cause.to_string(),
+    };
+
+    let mut next_actions = release_repair_actions(step_data);
+    if next_actions.is_empty() {
+        next_actions.push(release_gate_repro_action(step_id, step_type, component_id));
+    }
+
     Some(CommandFailureDigest {
         summary: format!(
             "Release step {step_id} ({step_type}) failed: {}",
-            bounded_text(cause, 1000)
+            bounded_text(&cause, 1000)
         ),
         stdout_tail: None,
         stderr_tail: None,
         artifact_refs: Vec::new(),
-        next_actions: vec![release_gate_repro_action(step_id, step_type, component_id)],
+        next_actions,
         retryable: None,
     })
+}
+
+/// Lift a failed release step's own `repair` block into executable next
+/// actions.
+///
+/// A publish failure is not a quality-gate failure: re-running a gate does
+/// nothing for it, and the plan-only `--dry-run` fallback actively misleads.
+/// The step already knows whether the GitHub Release object exists, which
+/// decides the repair: an existing Draft must be *finished* (upload + publish),
+/// never re-created, or the release ends up duplicated.
+fn release_repair_actions(step_data: Option<&Value>) -> Vec<CommandNextAction> {
+    let Some(repair) = step_data
+        .and_then(|data| data.get("repair"))
+        .and_then(Value::as_object)
+    else {
+        return Vec::new();
+    };
+
+    let command = |key: &str| {
+        repair
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+
+    let release_created = step_data
+        .and_then(|data| data.get("release_created"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let mut actions = Vec::new();
+
+    if release_created {
+        if let Some(upload) = command("upload_command") {
+            actions.push(
+                CommandNextAction::new(
+                    "attach the built artifacts to the release that already exists",
+                    upload,
+                )
+                .with_kind(CommandNextActionKind::Repair),
+            );
+        }
+        if let Some(publish) = command("publish_command") {
+            actions.push(
+                CommandNextAction::new("publish that release once its assets verify", publish)
+                    .with_kind(CommandNextActionKind::Repair),
+            );
+        }
+    } else if let Some(create) = command("create_command") {
+        actions.push(
+            CommandNextAction::new(
+                "create the GitHub Release from the pushed tag and built artifacts (no new tag)",
+                create,
+            )
+            .with_kind(CommandNextActionKind::Repair),
+        );
+    }
+
+    if let Some(view) = command("view_command").filter(|_| !actions.is_empty()) {
+        actions.push(
+            CommandNextAction::new("verify the release and its assets", view)
+                .with_kind(CommandNextActionKind::Repair),
+        );
+    }
+
+    actions
 }
 
 /// Map a failed release step to a non-mutating command that actually executes
@@ -1166,6 +1253,88 @@ mod tests {
             "dry-run fallback must be labeled plan-only, got: {}",
             action.label
         );
+    }
+
+    fn github_release_failure_payload(step_data: Value) -> Value {
+        json!({
+            "command": "release",
+            "result": {
+                "component_id": "homeboy",
+                "run": { "result": { "steps": [{
+                    "id": "github.release",
+                    "type": "github.release",
+                    "status": "failed",
+                    "error": "`gh release upload` failed for v0.320.0: gh api release metadata exited with status 1",
+                    "data": step_data
+                }] } }
+            }
+        })
+    }
+
+    /// #10441: the step classified itself (`reason`) and computed the repair
+    /// command, then the envelope threw both away — which is how CI ended up
+    /// printing "Release failed: Unknown error" while holding the exact fix.
+    #[test]
+    fn failed_publish_surfaces_its_classified_reason_and_repair_commands() {
+        let digest = release_failure_digest(&github_release_failure_payload(json!({
+            "reason": "gh-upload-failed",
+            "release_created": true,
+            "repair": {
+                "upload_command": "gh release upload 'v0.320.0' 'a.tar.gz' --clobber -R 'Extra-Chill/homeboy'",
+                "publish_command": "gh release edit 'v0.320.0' --draft=false -R 'Extra-Chill/homeboy'",
+                "create_command": "gh release create 'v0.320.0' --title 'v0.320.0'",
+                "view_command": "gh release view 'v0.320.0' -R 'Extra-Chill/homeboy'"
+            }
+        })))
+        .expect("release digest");
+
+        assert!(
+            digest.summary.contains("gh-upload-failed"),
+            "classified reason must reach the envelope summary, got: {}",
+            digest.summary
+        );
+
+        let commands: Vec<&str> = digest
+            .next_actions
+            .iter()
+            .map(|action| action.command.as_str())
+            .collect();
+        assert_eq!(
+            commands,
+            vec![
+                "gh release upload 'v0.320.0' 'a.tar.gz' --clobber -R 'Extra-Chill/homeboy'",
+                "gh release edit 'v0.320.0' --draft=false -R 'Extra-Chill/homeboy'",
+                "gh release view 'v0.320.0' -R 'Extra-Chill/homeboy'",
+            ],
+            "an existing release must be finished, never re-created"
+        );
+        assert!(
+            !commands.iter().any(|command| command.contains("--dry-run")),
+            "a publish failure must not be handed a plan-only dry run"
+        );
+    }
+
+    /// When no GitHub Release object exists yet, the repair is to create it
+    /// from the already-pushed tag — not to cut a second tag.
+    #[test]
+    fn failed_publish_without_a_release_object_recommends_creating_it() {
+        let digest = release_failure_digest(&github_release_failure_payload(json!({
+            "reason": "gh-create-failed",
+            "release_created": false,
+            "repair": {
+                "create_command": "gh release create 'v0.320.0' --title 'v0.320.0' --notes-file 'notes.md'",
+                "upload_command": "gh release upload 'v0.320.0' --clobber",
+                "view_command": "gh release view 'v0.320.0'"
+            }
+        })))
+        .expect("release digest");
+
+        let first = digest.next_actions.first().expect("next action");
+        assert_eq!(
+            first.command,
+            "gh release create 'v0.320.0' --title 'v0.320.0' --notes-file 'notes.md'"
+        );
+        assert!(digest.summary.contains("gh-create-failed"));
     }
 
     #[test]

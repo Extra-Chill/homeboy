@@ -60,6 +60,7 @@ jobs:
       should-release: ${{ steps.check.outputs.should-release }}
       bump-type: ${{ steps.check.outputs['release-bump-type'] }}
       recovery-release: ${{ steps.check.outputs.recovery-release }}
+      recovery-attempts: ${{ steps.check.outputs.recovery-attempts }}
       release-version: ${{ steps.check.outputs['release-version'] }}
       release-tag: ${{ steps.check.outputs['release-tag'] }}
     steps:
@@ -78,6 +79,19 @@ jobs:
           restore-keys: |
             release-last-failed-${{ github.ref_name }}-
 
+      # Recovery attempts are counted per TAG, not per SHA. The SHA marker
+      # above only suppresses retrying the same HEAD; a stranded tag outlives
+      # every HEAD, so its retry budget has to travel with the tag.
+      - name: Restore release recovery attempts
+        id: recovery-attempts-cache
+        if: inputs.release_tag == ''
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/homeboy-release-recovery-attempts
+          key: release-recovery-attempts-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            release-recovery-attempts-${{ github.ref_name }}-
+
       - name: Check failed release marker
         id: failed-release
         if: inputs.release_tag == ''
@@ -95,9 +109,39 @@ jobs:
 
           echo "blocked=false" >> "$GITHUB_OUTPUT"
 
+      # ── HEAD-independent stranded-release detection (issue #10441) ──
+      # The `bump-type=recovery` contract below only fires while HEAD is still
+      # sitting on the prepared tag. main moves within minutes, so a tag whose
+      # publish step failed was never revisited: v0.320.0 stranded 188 commits
+      # for three hours while the pipeline was holding the exact repair
+      # command. This step asks git and the GitHub API what is unpublished
+      # instead of asking what HEAD is, so it fires regardless of how far main
+      # has moved. See .github/detect-stranded-release.sh for the provenance,
+      # in-flight, ordering, and retry-budget rules.
+      - name: Detect stranded prepared release
+        id: stranded
+        if: inputs.release_tag == ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RECOVERY_ATTEMPTS_FILE: ${{ runner.temp }}/homeboy-release-recovery-attempts
+        run: |
+          # Fail-safe: this detector sits in front of every release. A bug in it
+          # must degrade to "no recovery", never to "no releases". The script
+          # writes all four outputs in one final block, so a crash before that
+          # leaves them unset and this fallback supplies the inert defaults.
+          if ! bash .github/detect-stranded-release.sh; then
+            echo "::warning::Stranded-release detection failed; continuing without recovery"
+            {
+              echo "stranded-tag="
+              echo "stranded-version="
+              echo "stranded-attempts=0"
+              echo "hold-reason="
+            } >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Dry-run release check
         id: release-check
-        if: inputs.release_tag == '' && steps.failed-release.outputs.blocked != 'true'
+        if: inputs.release_tag == '' && steps.failed-release.outputs.blocked != 'true' && steps.stranded.outputs['stranded-tag'] == '' && steps.stranded.outputs['hold-reason'] == ''
         uses: Extra-Chill/homeboy-action@v2
         with:
           commands: release
@@ -132,19 +176,44 @@ jobs:
         run: |
           HEAD_SHA="$(git rev-parse HEAD)"
           RECOVERY_TAG="${{ steps.recovery.outputs['release-tag'] }}"
+          STRANDED_TAG="${{ steps.stranded.outputs['stranded-tag'] }}"
+          STRANDED_VERSION="${{ steps.stranded.outputs['stranded-version'] }}"
+          STRANDED_ATTEMPTS="${{ steps.stranded.outputs['stranded-attempts'] }}"
+          HOLD_REASON="${{ steps.stranded.outputs['hold-reason'] }}"
           RELEASE_VERSION="${{ steps.recovery.outputs['release-version'] || steps.release-check.outputs['release-version'] }}"
           RELEASE_TAG="${{ steps.recovery.outputs['release-tag'] || steps.release-check.outputs['release-tag'] }}"
           BUMP_TYPE="${{ steps.recovery.outputs['release-bump-type'] || steps.release-check.outputs['release-bump-type'] }}"
 
-          if [ "${{ steps.failed-release.outputs.blocked }}" = "true" ]; then
-            echo "should-release=false" >> "$GITHUB_OUTPUT"
-          elif [ -n "${RECOVERY_TAG}" ]; then
+          echo "recovery-attempts=${STRANDED_ATTEMPTS:-0}" >> "$GITHUB_OUTPUT"
+
+          if [ -n "${RECOVERY_TAG}" ]; then
+            # Explicit workflow_dispatch recovery always wins.
             echo "should-release=true" >> "$GITHUB_OUTPUT"
             echo "release-bump-type=${BUMP_TYPE}" >> "$GITHUB_OUTPUT"
             echo "release-version=${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
             echo "release-tag=${RECOVERY_TAG}" >> "$GITHUB_OUTPUT"
             echo "recovery-release=true" >> "$GITHUB_OUTPUT"
             echo "::notice::Release recovery will publish ${RECOVERY_TAG}"
+          elif [ -n "${STRANDED_TAG}" ]; then
+            # Recovery PREEMPTS a fresh release, and preempts the failed-SHA
+            # marker too. The marker is keyed to github.sha and only means
+            # "do not re-prepare this HEAD"; finishing an already-prepared tag
+            # is a different, HEAD-independent action. Preemption is the whole
+            # point: a fresh release prepared on top of a stranded tag buries
+            # it under a newer published release, where the contiguous-window
+            # scan can never find it again — permanently orphaning a version
+            # whose artifacts were already built and paid for.
+            echo "should-release=true" >> "$GITHUB_OUTPUT"
+            echo "release-bump-type=recovery" >> "$GITHUB_OUTPUT"
+            echo "release-version=${STRANDED_VERSION}" >> "$GITHUB_OUTPUT"
+            echo "release-tag=${STRANDED_TAG}" >> "$GITHUB_OUTPUT"
+            echo "recovery-release=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Self-recovery: publishing stranded prepared tag ${STRANDED_TAG} instead of preparing a fresh release"
+          elif [ -n "${HOLD_REASON}" ]; then
+            echo "should-release=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Holding release — ${HOLD_REASON}"
+          elif [ "${{ steps.failed-release.outputs.blocked }}" = "true" ]; then
+            echo "should-release=false" >> "$GITHUB_OUTPUT"
           elif [ -z "${RELEASE_VERSION}" ]; then
             echo "should-release=false" >> "$GITHUB_OUTPUT"
             echo "::notice::No releasable commits at HEAD ${HEAD_SHA:0:8}"
@@ -402,9 +471,12 @@ jobs:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
+      # A push-triggered self-recovery has no `inputs.release_tag`, and main has
+      # normally moved well past the stranded tag by now. Check out the tag
+      # being recovered so every job in the publish chain agrees on the tree.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.release_tag || github.ref }}
+          ref: ${{ inputs.release_tag || (needs.check.outputs.recovery-release == 'true' && needs.check.outputs['release-tag']) || github.ref }}
           fetch-depth: 0
           persist-credentials: true
           token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
@@ -441,7 +513,7 @@ jobs:
       # Rust toolchain needed so run-release.sh can regenerate Cargo.lock
       # after bumping Cargo.toml version
       - name: Install Rust toolchain
-        if: inputs.release_tag == ''
+        if: inputs.release_tag == '' && needs.check.outputs.recovery-release != 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Preflight release workspace build
@@ -905,14 +977,55 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The SHA marker means "do not re-PREPARE this HEAD". A recovery run
+      # never prepares anything — it finishes an already-prepared tag — so
+      # recording HEAD there would wrongly suppress the fresh release this
+      # HEAD still deserves.
       - name: Save failed SHA
+        if: needs.check.outputs.recovery-release != 'true'
         run: git rev-parse HEAD > "${RUNNER_TEMP}/homeboy-release-last-failed"
 
       - name: Cache failed SHA
+        if: needs.check.outputs.recovery-release != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/homeboy-release-last-failed
           key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}
+
+      # A failed recovery is charged to the TAG, so a stranded tag that cannot
+      # be published gets a bounded retry budget instead of re-firing on every
+      # push forever. `detect-stranded-release.sh` refuses a tag once it hits
+      # MAX_RECOVERY_ATTEMPTS and falls through to a normal fresh release.
+      - name: Restore recovery attempts
+        if: needs.check.outputs.recovery-release == 'true' && needs.check.outputs['release-tag'] != ''
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/homeboy-release-recovery-attempts
+          key: release-recovery-attempts-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            release-recovery-attempts-${{ github.ref_name }}-
+
+      - name: Record failed recovery attempt
+        if: needs.check.outputs.recovery-release == 'true' && needs.check.outputs['release-tag'] != ''
+        env:
+          RELEASE_TAG: ${{ needs.check.outputs['release-tag'] }}
+        run: |
+          set -euo pipefail
+          MARKER="${RUNNER_TEMP}/homeboy-release-recovery-attempts"
+          touch "${MARKER}"
+          NEXT="$(awk -v tag="${RELEASE_TAG}" '$1 == tag { count = $2 } END { printf "%d", count + 1 }' "${MARKER}")"
+          awk -v tag="${RELEASE_TAG}" '$1 != tag' "${MARKER}" > "${MARKER}.next"
+          printf '%s %s\n' "${RELEASE_TAG}" "${NEXT}" >> "${MARKER}.next"
+          mv "${MARKER}.next" "${MARKER}"
+          echo "::warning::Automatic recovery of ${RELEASE_TAG} failed (attempt ${NEXT})"
+          cat "${MARKER}"
+
+      - name: Cache recovery attempts
+        if: needs.check.outputs.recovery-release == 'true' && needs.check.outputs['release-tag'] != ''
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/homeboy-release-recovery-attempts
+          key: release-recovery-attempts-${{ github.ref_name }}-${{ github.run_id }}
 
   clear-failure:
     name: Clear failed release SHA cache
@@ -934,9 +1047,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Clear failed SHA cache
+        if: needs.check.outputs.recovery-release != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh cache list --json id,key --jq '.[] | select(.key | startswith("release-last-failed-${{ github.ref_name }}-")) | .id' | while read -r id; do
+            gh cache delete "$id" 2>/dev/null || true
+          done
+
+      # Only a SUCCESSFUL recovery clears the retry budget. Clearing it after a
+      # successful *fresh* release would reset the counter of a tag that keeps
+      # failing, turning the bounded retry into a slow infinite loop.
+      - name: Clear recovery attempts cache
+        if: needs.check.outputs.recovery-release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh cache list --json id,key --jq '.[] | select(.key | startswith("release-recovery-attempts-${{ github.ref_name }}-")) | .id' | while read -r id; do
             gh cache delete "$id" 2>/dev/null || true
           done
