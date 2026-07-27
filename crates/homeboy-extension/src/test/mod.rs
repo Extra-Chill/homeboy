@@ -490,22 +490,11 @@ fn is_inline_test_support_file(component: &Component, test_file: &str, routing_f
 
 /// Detects whether Rust source `contents` declares at least one test function
 /// via a `#[test]` or `#[<path>::test]` (e.g. `#[tokio::test]`) attribute.
+///
+/// Inline-test selection asks the same question, so the detection lives in
+/// `drift` and both callers share it.
 fn file_declares_test_function(contents: &str) -> bool {
-    contents.lines().any(|line| {
-        let trimmed = line.trim_start();
-        let Some(attr) = trimmed.strip_prefix("#[") else {
-            return false;
-        };
-        let attr = attr.trim_start();
-        // Match `#[test]`, `#[test(...)]`, and `#[<path>::test]` /
-        // `#[<path>::test(...)]` such as `#[tokio::test]`.
-        let head = attr
-            .split(|c| c == '(' || c == ']' || c == ',')
-            .next()
-            .unwrap_or("")
-            .trim();
-        head == "test" || head.rsplit("::").next() == Some("test")
-    })
+    drift::declares_test_function(contents)
 }
 
 /// Resolves the module path a test file is actually mounted at when a sibling
@@ -820,7 +809,35 @@ fn compute_changed_test_files_with_drift_options(
         selected.insert(drifted.test_file.clone());
     }
 
+    for file in inline_test_sources(opts, changed_files) {
+        selected.insert(file);
+    }
+
     Ok(selected.into_iter().collect())
+}
+
+/// Select changed source files that carry their own unit tests.
+///
+/// Languages with inline tests (Rust's `#[cfg(test)] mod tests`) keep the tests
+/// that cover a change inside the changed file itself. Drift only ever maps a
+/// change to *separate* files that reference its symbols, so without this the
+/// tests sitting directly beside an edit are the ones least likely to run —
+/// which is how two regressions shipped in `76c8c99a8` with their covering
+/// tests untouched. (#10465)
+///
+/// Only files that actually declare a test function are selected: emitting a
+/// filter for a file with no tests would match zero tests, which the runner
+/// treats as a failure.
+fn inline_test_sources(opts: &DriftOptions, changed_files: &[String]) -> Vec<String> {
+    if !opts.inline_tests {
+        return Vec::new();
+    }
+
+    changed_files
+        .iter()
+        .filter(|file| drift::is_inline_test_source(opts, file))
+        .cloned()
+        .collect()
 }
 
 pub fn compute_changed_test_scope_for_files(
@@ -1095,6 +1112,59 @@ mod tests {
                 "-p\nhomeboy-lab-runner\n--lib\n--\nworkspace::tests::snapshot".to_string()
             )),
             "env: {env:?}"
+        );
+    }
+
+    /// End-to-end proof for #10465: a changed workspace-member source that
+    /// carries its own `#[cfg(test)] mod tests` must route to that crate's lib
+    /// target, filtered to the changed module.
+    ///
+    /// This is the exact shape of `76c8c99a8`, whose two covering unit tests
+    /// lived inside the changed crate and never ran.
+    #[test]
+    fn changed_inline_test_source_routes_to_its_owning_crate_lib() {
+        let dir = TempDir::new().expect("temp dir should be created");
+        let workspace_root = dir.path();
+        fs::write(
+            workspace_root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .expect("workspace manifest");
+        let member = workspace_root.join("crates/homeboy-lab-runner");
+        fs::create_dir_all(member.join("src/lab/offload")).expect("member dirs");
+        fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"homeboy-lab-runner\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("member manifest");
+        fs::write(
+            member.join("src/lab/offload/hydration.rs"),
+            "pub fn hydrate() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn hydrates() {}\n}\n",
+        )
+        .expect("changed source with inline tests");
+
+        let component = Component::new(
+            "homeboy".to_string(),
+            workspace_root.to_string_lossy().to_string(),
+            "/tmp/remote".to_string(),
+            None,
+        );
+
+        let env = rust_cargo_changed_test_env(
+            &component,
+            &["crates/homeboy-lab-runner/src/lab/offload/hydration.rs".to_string()],
+        );
+
+        assert!(env.contains(&(
+            "HOMEBOY_TEST_SCOPE_KIND".to_string(),
+            "rust_filter".to_string()
+        )));
+        assert!(
+            env.contains(&(
+                "HOMEBOY_TEST_RUNNER_ARGS".to_string(),
+                "-p\nhomeboy-lab-runner\n--lib\n--\nlab::offload::hydration".to_string()
+            )),
+            "inline tests beside a change must run against their own crate: {env:?}"
         );
     }
 
