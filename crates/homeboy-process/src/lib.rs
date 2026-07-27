@@ -581,7 +581,6 @@ pub fn force_terminate_process_tree_bounded(pid: u32, timeout: Duration) -> Resu
         let mut targets = linux_descendant_pids(pid)?;
         #[cfg(not(target_os = "linux"))]
         let mut targets = Vec::new();
-        targets.push(pid);
         targets.retain(|target| *target != std::process::id());
         targets.sort_unstable();
         targets.dedup();
@@ -598,7 +597,10 @@ pub fn force_terminate_process_tree_bounded(pid: u32, timeout: Duration) -> Resu
         }
         signal_pids(&targets, libc::SIGKILL)?;
         let survivors = wait_for_exit(&targets, timeout);
-        if survivors.is_empty() && !process_group_is_running(pid as i32) {
+        // The caller owns and reaps the direct child. Waiting for it here
+        // misidentifies an unreaped zombie as a surviving process on Unix
+        // platforms without Linux's procfs state inspection.
+        if survivors.is_empty() {
             return Ok(());
         }
         return Err(Error::internal_unexpected(format!(

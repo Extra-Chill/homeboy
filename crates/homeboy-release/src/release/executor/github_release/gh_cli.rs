@@ -1122,6 +1122,10 @@ mod tests {
         .expect_err("stalled output must time out");
 
         assert!(error.contains("timed out"));
+        assert!(
+            !error.contains("owned process tree"),
+            "reaping the direct child must not be reported as failed tree cleanup: {error}"
+        );
         assert_eq!(
             std::fs::read_dir(temp.path())
                 .expect("read tempdir")
