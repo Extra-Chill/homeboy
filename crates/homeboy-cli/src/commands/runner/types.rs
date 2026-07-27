@@ -33,6 +33,8 @@ pub struct RunnerExtra {
     /// status output; the full generation inventory below is detail behind it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub admission_summary: Option<RunnerAdmissionSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inspection: Option<RunnerStatusInspection>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<RunnerStatusReport>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -64,6 +66,7 @@ impl Default for RunnerExtra {
             managed_followups: Vec::new(),
             connection: None,
             admission_summary: None,
+            inspection: None,
             sessions: Vec::new(),
             generation_inventory: Vec::new(),
             operator_hints: Vec::new(),
@@ -74,6 +77,25 @@ impl Default for RunnerExtra {
             probe_degradations: Vec::new(),
         }
     }
+}
+
+/// The bounded inspection state for a registry-wide status response.
+#[derive(Debug, Serialize)]
+pub struct RunnerStatusInspection {
+    pub status: &'static str,
+    pub partial: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub runner_unavailable: Vec<RunnerStatusUnavailable>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub runner_unqueried: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunnerStatusUnavailable {
+    pub runner_id: String,
+    pub code: String,
+    pub message: String,
+    pub refresh_command: String,
 }
 
 /// Bounded default status contract. Detailed status remains behind `--full`.
