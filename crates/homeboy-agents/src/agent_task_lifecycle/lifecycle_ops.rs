@@ -356,6 +356,26 @@ where
     F: FnOnce(&str) -> Result<A>,
     A: RuntimeAdmissionEvidence,
 {
+    submit_plan_with_runtime_admission_on_runner_with_metadata(
+        plan,
+        requested_run_id,
+        execution_runner_id,
+        None,
+        admit_runtime,
+    )
+}
+
+fn submit_plan_with_runtime_admission_on_runner_with_metadata<F, A>(
+    plan: &AgentTaskPlan,
+    requested_run_id: Option<&str>,
+    execution_runner_id: Option<String>,
+    submission_metadata: Option<serde_json::Map<String, Value>>,
+    admit_runtime: F,
+) -> Result<AgentTaskRunRecord>
+where
+    F: FnOnce(&str) -> Result<A>,
+    A: RuntimeAdmissionEvidence,
+{
     let run_id = requested_run_id
         .map(sanitize_run_id)
         .unwrap_or_else(default_run_id);
@@ -386,6 +406,12 @@ where
     if let Some(route) = homeboy_core::notification_route::current() {
         route.insert_into_metadata(&mut metadata);
     }
+    if let Some(submission_metadata) = submission_metadata {
+        metadata
+            .as_object_mut()
+            .expect("submission metadata is an object")
+            .extend(submission_metadata);
+    }
 
     let mut record = AgentTaskRunRecord {
         schema: schemas::RUN.to_string(),
@@ -414,6 +440,13 @@ where
         // plan-derived state, so replacing the record must retain them.
         if let Some(claims) = existing.metadata.get("cook_operation_claims") {
             record.metadata["cook_operation_claims"] = claims.clone();
+        }
+        // A runner re-submitting a retry must not erase the predecessor identity
+        // that makes the reservation discoverable through the indexed lookup.
+        for key in ["retry_of", "retry_requested_at", "retry_origin"] {
+            if let Some(value) = existing.metadata.get(key) {
+                record.metadata[key] = value.clone();
+            }
         }
         if execution_runner_id.as_deref() == existing.runner_id() {
             // A foreground daemon binds its job before launching runner-local
@@ -1565,8 +1598,7 @@ pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRu
     let mut plan = load_controller_plan(&source.run_id)?;
     super::cook_workspace_restore::restore_initial_cook_candidate_workspace(&mut plan)?;
     super::cook_workspace_restore::restore_follow_up_cook_candidate_workspace(&mut plan)?;
-    let mut retry = submit_plan(&plan, requested_run_id)?;
-    let metadata = retry.ensure_metadata_object();
+    let mut metadata = serde_json::Map::new();
     if let Some(route) =
         homeboy_core::notification_route::NotificationRoute::from_metadata(&source.metadata)
     {
@@ -1599,8 +1631,47 @@ pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRu
     }
     metadata.insert("retry_of".to_string(), json!(source.run_id));
     metadata.insert("retry_requested_at".to_string(), json!(now_timestamp()));
-    store::write_record(&retry)?;
-    Ok(retry)
+    submit_plan_with_runtime_admission_on_runner_with_metadata(
+        &plan,
+        requested_run_id,
+        execution_runner_id(),
+        Some(metadata),
+        |run_id| {
+            homeboy_core::controller_runtime::admit_current_for_with_cancellation_check(
+                run_id,
+                || Ok(store::read_record(run_id)?.state.is_terminal()),
+            )
+        },
+    )
+}
+
+/// Find the one lifecycle-first Cook retry reservation that can be bound to an
+/// unbound recipe attempt. The `retry_of` lookup is backed by the observation
+/// metadata index; the plan and attempt-shaped run id prevent adoption of an
+/// unrelated retry from the same source.
+pub fn find_unbound_cook_retry_successor(
+    source_run_id: &str,
+    cook_id: &str,
+    attempt: u32,
+    plan: &AgentTaskPlan,
+) -> Result<Option<AgentTaskRunRecord>> {
+    let prefix = format!("{}-attempt-{attempt}-", sanitize_run_id(cook_id));
+    let mut matches = store::read_retry_successors(&sanitize_run_id(source_run_id))?
+        .into_iter()
+        .filter(|record| record.run_id.starts_with(&prefix))
+        .filter(|record| record.plan_id == plan.plan_id)
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| left.run_id.cmp(&right.run_id));
+    match matches.as_slice() {
+        [] => Ok(None),
+        [record] => Ok(Some(record.clone())),
+        _ => Err(Error::validation_invalid_argument(
+            "cook_recipe.attempts",
+            "multiple lifecycle retry reservations match this Cook attempt",
+            Some(source_run_id.to_string()),
+            None,
+        )),
+    }
 }
 
 /// Rebuild a gate-failed Cook candidate from its controller-owned promotion

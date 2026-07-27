@@ -18,6 +18,33 @@ use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
 #[test]
+fn retry_first_visible_record_always_has_indexed_predecessor_identity() {
+    with_isolated_home(|_| {
+        let source_id = "retry-atomic-source";
+        let retry_id = "retry-atomic-successor";
+        submit_plan(&test_plan(), Some(source_id)).expect("submit source");
+
+        // The former implementation had a durable submitted record at this
+        // point, then wrote `retry_of` separately. The first record write now
+        // includes retry provenance, so an interruption leaves no successor
+        // visible to the indexed lookup at all.
+        store::fail_next_record_write_for_test();
+        assert!(retry(source_id, Some(retry_id)).is_err());
+        assert!(!run_record_exists(retry_id).expect("retry remains absent"));
+        assert!(store::read_retry_successors(source_id)
+            .expect("indexed retry lookup")
+            .is_empty());
+
+        let retry = retry(source_id, Some(retry_id)).expect("retry after failed first write");
+        let successors = store::read_retry_successors(source_id).expect("indexed retry lookup");
+        assert_eq!(successors.len(), 1);
+        assert_eq!(successors[0].run_id, retry_id);
+        assert_eq!(successors[0].metadata["retry_of"], source_id);
+        assert_eq!(retry.metadata["retry_of"], source_id);
+    });
+}
+
+#[test]
 fn cook_progress_is_durable_across_active_and_terminal_lifecycle_states() {
     with_isolated_home(|_| {
         let run_id = "cook-progress-lifecycle";

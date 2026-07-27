@@ -932,6 +932,77 @@ fn lab_cook_materializes_goal_and_explicit_task_as_one_durable_cell() {
 }
 
 #[test]
+fn lab_run_retry_keeps_a_retryable_cook_failure_attached_to_its_recipe() {
+    crate::test_support::with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path());
+        let run_id = "cook-lab-retry-attempt-1";
+        let cook_id = "cook-lab-retry";
+        let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+            run_id,
+            vec![serde_json::from_value(serde_json::json!({
+                "task_id": "cook-lab-retry-task",
+                "executor": { "backend": "fixture" },
+                "instructions": "Repair the Lab Cook compiler",
+                "workspace": { "root": workspace.path() }
+            }))
+            .expect("task")],
+        );
+        let options = crate::agents::agent_task_service::AgentTaskCookServiceOptions {
+            cook_id: cook_id.to_string(),
+            initial_run_id: run_id.to_string(),
+            initial_plan: plan.clone(),
+            to_worktree: workspace.path().display().to_string(),
+            source_worktree_path: Some(workspace.path().to_path_buf()),
+            provider_command: None,
+            provider_invocation: None,
+            gates: Default::default(),
+            max_attempts: 2,
+            no_finalize: true,
+            base: "main".to_string(),
+            task_base_sha: None,
+            head: None,
+            title: "Lab Cook retry".to_string(),
+            commit_message: "Lab Cook retry".to_string(),
+            source_refs: Vec::new(),
+            protected_branches: Vec::new(),
+            ai_tool: "fixture".to_string(),
+            ai_model: None,
+            ai_used_for: "test".to_string(),
+            attempt_dispatcher: None,
+            harvest_context:
+                homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
+                    .expect("harvest context"),
+        };
+        crate::agents::agent_task_service::persist_initial_recipe(&options)
+            .expect("persist Cook recipe");
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("persist Cook attempt");
+        agent_task_lifecycle::record_cook_attempt(cook_id, 1, run_id).expect("bind Cook attempt");
+        agent_task_lifecycle::record_pre_execution_failure(
+            run_id,
+            &plan,
+            "gate_environment.preserve",
+            &Error::validation_invalid_argument("CARGO_HOME", "unavailable", None, None)
+                .with_retryable(true),
+        )
+        .expect("persist retryable Cook failure");
+        let args = ["homeboy", "agent-task", "retry", run_id, "--run"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let handoff = materialize_agent_task_retry_handoff(&Cli::parse_from(&args), &args)
+            .expect("materialize Cook retry handoff")
+            .expect("Cook retry handoff");
+
+        assert!(handoff.run_id.starts_with(&format!("{cook_id}-attempt-2-")));
+        let replacement = agent_task_lifecycle::status(&handoff.run_id)
+            .expect("Cook-aware Lab retry is persisted");
+        assert_eq!(replacement.metadata["cook_id"], cook_id);
+        assert_eq!(replacement.metadata["cook_attempt"], 2);
+    });
+}
+
+#[test]
 fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_failure() {
     crate::test_support::with_isolated_home(|_| {
         let workspace = tempfile::tempdir().expect("workspace");

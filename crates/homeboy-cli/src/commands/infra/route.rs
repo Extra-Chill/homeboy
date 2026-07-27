@@ -1203,7 +1203,12 @@ fn materialize_agent_task_retry_handoff(
         return Ok(None);
     }
 
-    let record = agent_task_lifecycle::retry(&retry.run_id, retry.new_run_id.as_deref())?;
+    let retry_result =
+        crate::agents::agent_task_service::retry(&retry.run_id, retry.new_run_id.as_deref(), true)?;
+    if !retry_result.run {
+        return Ok(None);
+    }
+    let record = retry_result.record;
     let plan = agent_task_lifecycle::load_plan(&record.run_id)?;
     let primary_workspace = match retry_plan_primary_workspace(&plan) {
         Ok(workspace) => workspace,

@@ -1706,7 +1706,17 @@ pub(crate) fn cook_report(
                 .map(|attempt| attempt.run_id)
                 .collect::<Vec<_>>()
         })
-        .unwrap_or_default();
+        .unwrap_or_else(|_| {
+            super::load_recipe(&cook_id)
+                .map(|recipe| {
+                    recipe
+                        .attempts
+                        .into_iter()
+                        .map(|attempt| attempt.run_id)
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
     let latest_run_id = invocation_latest_run_id
         .map(str::to_string)
         .or_else(|| {

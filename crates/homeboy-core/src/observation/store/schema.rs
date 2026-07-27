@@ -184,6 +184,15 @@ const MIGRATIONS: &[Migration] = &[
             ON artifacts(created_at ASC, id ASC);
         "#,
     },
+    Migration {
+        version: 10,
+        sql: r#"
+        -- Retry reconciliation starts from its durable predecessor identity.
+        -- Keep this JSON projection indexed so it never walks run history.
+        CREATE INDEX IF NOT EXISTS idx_runs_metadata_retry_of
+            ON runs(json_extract(metadata_json, '$.agent_task_run.metadata.retry_of'));
+        "#,
+    },
 ];
 
 static MIGRATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
