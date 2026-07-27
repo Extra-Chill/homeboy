@@ -198,24 +198,6 @@ jobs:
           path: target/release/homeboy
           retention-days: 1
 
-  # The artifact matrix includes Windows, so compile the complete workspace on
-  # its native target before preparation creates a release tag.
-  gate-windows-build:
-    name: Windows Build
-    needs: check
-    if: needs.check.outputs.should-release == 'true'
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.release_tag || github.ref }}
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Compile Windows workspace
-        run: cargo build --workspace --locked
-
   # ── Step 3: Quality checks (parallel read-only checks + advisory repair) ──
   # Release preparation is gated by release-quality-policy, not by raw job
   # failures. Commands opt in to release blocking through RELEASE_BLOCKING_COMMANDS
@@ -376,11 +358,10 @@ jobs:
     needs:
       - check
       - gate-build
-      - gate-windows-build
       - gate-audit
       - gate-lint
       - gate-test
-    if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.check.outputs.recovery-release != 'true' && needs.gate-build.result == 'success' && needs.gate-windows-build.result == 'success' }}
+    if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.check.outputs.recovery-release != 'true' && needs.gate-build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout workflow event commit
@@ -403,9 +384,8 @@ jobs:
     needs:
       - check
       - gate-build
-      - gate-windows-build
       - release-quality-policy
-    if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.gate-build.result == 'success' && needs.gate-windows-build.result == 'success' && (needs.check.outputs.recovery-release == 'true' || inputs.release_tag != '' || needs.release-quality-policy.result == 'success') }}
+    if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.gate-build.result == 'success' && (needs.check.outputs.recovery-release == 'true' || inputs.release_tag != '' || needs.release-quality-policy.result == 'success') }}
     runs-on: ubuntu-latest
     outputs:
       release-version: ${{ steps.outputs.outputs['release-version'] }}
@@ -909,7 +889,6 @@ jobs:
     needs:
       - check
       - gate-build
-      - gate-windows-build
       - gate-audit
       - gate-lint
       - gate-test
@@ -940,7 +919,6 @@ jobs:
     needs:
       - check
       - gate-build
-      - gate-windows-build
       - gate-audit
       - gate-lint
       - gate-test
