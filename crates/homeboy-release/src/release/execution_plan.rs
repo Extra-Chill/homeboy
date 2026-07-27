@@ -5,6 +5,7 @@ use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git;
 use homeboy_core::plan::{PlanStep, PlanValues};
+use semver::Version;
 
 use super::context::{load_component, resolve_extensions};
 use super::execution_dispatch::{
@@ -182,9 +183,9 @@ fn resolve_head_release(
     if let Some((tag, version)) = tags
         .iter()
         .filter_map(|tag| release_tag_version(tag, tag_prefix).map(|version| (tag, version)))
-        .max_by(|(_, a), (_, b)| compare_versions(a, b))
+        .max_by(|(_, a), (_, b)| a.cmp(b))
     {
-        return Ok((tag.to_string(), version));
+        return Ok((tag.to_string(), version.to_string()));
     }
 
     let latest_local = latest_release_tag(local_path, tag_prefix).unwrap_or(None);
@@ -226,24 +227,24 @@ fn resolve_head_release(
     ))
 }
 
-fn release_tag_version(tag: &str, tag_prefix: Option<&str>) -> Option<String> {
+/// Parse the semver version carried by a release tag.
+///
+/// Strips the optional component tag prefix (`<prefix>-v1.2.3`) and the
+/// conventional `v`, then defers to `semver::Version::parse`. Prerelease and
+/// build metadata are preserved (`v1.2.3-beta.1`, `v1.2.3+build.5`) instead of
+/// being rejected — the previous hand-rolled `split('.')` demanded exactly
+/// three all-ASCII-digit parts, so no prerelease tag was ever recognised as a
+/// release tag.
+///
+/// Returns `None` when the tag does not carry a valid semver version. A tag
+/// that fails to parse is never silently coerced into a version.
+fn release_tag_version(tag: &str, tag_prefix: Option<&str>) -> Option<Version> {
     let tag = match tag_prefix {
         Some(prefix) => tag.strip_prefix(&format!("{}-", prefix))?,
         None => tag,
     };
     let version = tag.strip_prefix('v').unwrap_or(tag);
-    let mut parts = version.split('.');
-    let major = parts.next()?;
-    let minor = parts.next()?;
-    let patch = parts.next()?;
-    if parts.next().is_some()
-        || [major, minor, patch]
-            .iter()
-            .any(|part| part.is_empty() || !part.chars().all(|c| c.is_ascii_digit()))
-    {
-        return None;
-    }
-    Some(version.to_string())
+    Version::parse(version).ok()
 }
 
 fn latest_release_tag(local_path: &str, tag_prefix: Option<&str>) -> Result<Option<String>> {
@@ -271,21 +272,8 @@ fn latest_remote_release_tag(local_path: &str, tag_prefix: Option<&str>) -> Resu
         .filter_map(|tag| {
             release_tag_version(tag, tag_prefix).map(|version| (tag.to_string(), version))
         })
-        .max_by(|(_, a), (_, b)| compare_versions(a, b))
+        .max_by(|(_, a), (_, b)| a.cmp(b))
         .map(|(tag, _)| tag))
-}
-
-fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
-    version_parts(a).cmp(&version_parts(b))
-}
-
-fn version_parts(version: &str) -> (u64, u64, u64) {
-    let mut parts = version.split('.').map(|part| part.parse().unwrap_or(0));
-    (
-        parts.next().unwrap_or(0),
-        parts.next().unwrap_or(0),
-        parts.next().unwrap_or(0),
-    )
 }
 
 fn read_current_release_notes(component: &Component) -> Result<Option<String>> {
@@ -312,13 +300,97 @@ fn read_current_release_notes(component: &Component) -> Result<Option<String>> {
 mod tests {
     use super::{
         build_dry_run_preflight_plan, execute_plan_steps, initial_executable_preflight_ids,
-        resolve_head_release,
+        release_tag_version, resolve_head_release,
     };
     use crate::release::types::{ReleaseOptions, ReleaseStepStatus};
     use homeboy_core::plan::PlanStepStatus;
+    use semver::Version;
     use std::collections::HashSet;
     use std::path::Path;
     use std::process::Command;
+
+    // ========================================================================
+    // release_tag_version — semver parsing (see #10321)
+    // ========================================================================
+
+    #[test]
+    fn release_tag_version_parses_plain_and_prefixed_tags() {
+        assert_eq!(
+            release_tag_version("v1.2.3", None),
+            Some(Version::new(1, 2, 3))
+        );
+        assert_eq!(
+            release_tag_version("1.2.3", None),
+            Some(Version::new(1, 2, 3))
+        );
+        assert_eq!(
+            release_tag_version("wordpress-v1.2.3", Some("wordpress")),
+            Some(Version::new(1, 2, 3))
+        );
+        // A prefixed component tag must not match when the prefix is absent.
+        assert_eq!(release_tag_version("v1.2.3", Some("wordpress")), None);
+    }
+
+    /// The hand-rolled parser required exactly three all-ASCII-digit parts, so
+    /// every prerelease tag was invisible to release-tag resolution.
+    #[test]
+    fn release_tag_version_accepts_prerelease_and_build_metadata() {
+        let pre = release_tag_version("v1.2.3-beta.1", None).expect("prerelease tag parses");
+        assert_eq!(pre.to_string(), "1.2.3-beta.1");
+        assert_eq!(pre.pre.as_str(), "beta.1");
+
+        let build = release_tag_version("v1.2.3+build.5", None).expect("build metadata tag parses");
+        assert_eq!(build.to_string(), "1.2.3+build.5");
+        assert_eq!(build.build.as_str(), "build.5");
+
+        let both = release_tag_version("v1.2.3-rc.1+build.5", None).expect("combined tag parses");
+        assert_eq!(both.to_string(), "1.2.3-rc.1+build.5");
+    }
+
+    /// Malformed tags must be rejected outright. The old `version_parts` helper
+    /// used `.unwrap_or(0)`, so `v1.x.3` silently compared as `1.0.3`.
+    #[test]
+    fn release_tag_version_rejects_malformed_tags() {
+        for tag in ["v1.x.3", "v1.2", "v1.2.3.4", "release", "v", "v1..3", ""] {
+            assert_eq!(
+                release_tag_version(tag, None),
+                None,
+                "tag '{}' must not parse as a release version",
+                tag
+            );
+        }
+    }
+
+    /// Ordering now comes from `semver`'s `Ord`, which implements the full
+    /// precedence rules: a prerelease sorts below its release, and build
+    /// metadata is ignored for precedence (semver §10-11).
+    #[test]
+    fn release_tag_versions_sort_by_semver_precedence() {
+        let v = |tag: &str| release_tag_version(tag, None).expect(tag);
+
+        assert!(v("v1.2.3-beta.1") < v("v1.2.3"));
+        assert!(v("v1.2.3-alpha") < v("v1.2.3-beta.1"));
+        assert!(v("v1.2.3-beta.2") < v("v1.2.3-beta.10"));
+        assert!(v("v1.2.3") < v("v1.10.0"));
+        assert!(v("v1.9.0") < v("v1.10.0"));
+        assert_eq!(
+            v("v1.2.3+build.5").cmp(&v("v1.2.3")),
+            std::cmp::Ordering::Equal
+        );
+
+        // The regression the hand-rolled compare produced: `v1.x.3` used to
+        // parse as `(1, 0, 3)` and could win a `max_by` against a real tag.
+        // It is now rejected, so it can never participate in the comparison.
+        let mut tags = ["v1.2.3-beta.1", "v1.x.3", "v1.2.3", "v0.9.9"]
+            .into_iter()
+            .filter_map(|tag| release_tag_version(tag, None))
+            .collect::<Vec<_>>();
+        tags.sort();
+        assert_eq!(
+            tags.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+            vec!["0.9.9", "1.2.3-beta.1", "1.2.3"]
+        );
+    }
 
     #[test]
     fn test_initial_executable_preflight_ids() {

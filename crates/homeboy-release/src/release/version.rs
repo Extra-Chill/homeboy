@@ -45,33 +45,50 @@ pub fn parse_version(content: &str, pattern: &str) -> Option<String> {
 ///
 /// bump_type can be:
 /// - "patch", "minor", or "major" — increments the corresponding semver component
-/// - An explicit version string like "2.0.0" — returned as-is after validation
+/// - An explicit version string like "2.0.0" — returned after semver validation
+///
+/// Both the current version and an explicit target are parsed with
+/// `semver::Version`, so prerelease and build metadata are understood rather
+/// than rejected. A version that does not parse yields `None`; it is never
+/// silently coerced to `0.0.0`.
+///
+/// # Prerelease semantics
+///
+/// A named bump **drops prerelease and build metadata and then increments the
+/// named field**:
+///
+/// - `1.2.3-beta.1` + `patch` → `1.2.4`
+/// - `1.2.3-beta.1` + `minor` → `1.3.0`
+/// - `1.2.3-beta.1` + `major` → `2.0.0`
+/// - `1.2.3+build.5` + `patch` → `1.2.4`
+///
+/// This single rule keeps the result **strictly greater** than the input for
+/// every bump type, which is exactly the invariant the release floor checks
+/// (`validate_release_version_floor`, `release_version_floor_base`) rely on —
+/// no special cases, no chance of planning a non-advancing release. Build
+/// metadata is dropped because semver §10 excludes it from precedence, so
+/// carrying it onto a new release would be meaningless.
+///
+/// npm's alternative reading — "`patch` on `1.2.3-beta.1` *releases* it as
+/// `1.2.3`" — is intentionally not implemented here. Homeboy already has a
+/// first-class way to express that: pass the explicit target,
+/// `homeboy release <component> --bump 1.2.3`.
 pub fn increment_version(version: &str, bump_type: &str) -> Option<String> {
+    // Explicit target version, e.g. `--bump 2.0.0` or `--bump 2.0.0-rc.1`.
     if bump_type.contains('.') {
-        let parts: Vec<&str> = bump_type.split('.').collect();
-        if parts.len() != 3 || parts.iter().any(|p| p.parse::<u32>().is_err()) {
-            return None;
-        }
-        return Some(bump_type.to_string());
+        return Some(semver::Version::parse(bump_type).ok()?.to_string());
     }
 
-    let parts: Vec<&str> = version.split('.').collect();
-    if parts.len() != 3 {
-        return None;
-    }
+    let current = semver::Version::parse(version).ok()?;
 
-    let major: u32 = parts[0].parse().ok()?;
-    let minor: u32 = parts[1].parse().ok()?;
-    let patch: u32 = parts[2].parse().ok()?;
-
-    let (new_major, new_minor, new_patch) = match bump_type {
-        "patch" => (major, minor, patch + 1),
-        "minor" => (major, minor + 1, 0),
-        "major" => (major + 1, 0, 0),
+    let next = match bump_type {
+        "patch" => semver::Version::new(current.major, current.minor, current.patch + 1),
+        "minor" => semver::Version::new(current.major, current.minor + 1, 0),
+        "major" => semver::Version::new(current.major + 1, 0, 0),
         _ => return None,
     };
 
-    Some(format!("{}.{}.{}", new_major, new_minor, new_patch))
+    Some(next.to_string())
 }
 
 /// Get version string from a component's first version target.
@@ -662,6 +679,95 @@ mod tests {
     #[test]
     fn increment_version_unknown_bump_type() {
         assert_eq!(increment_version("1.0.0", "huge"), None);
+    }
+
+    // ========================================================================
+    // Prerelease / build metadata handling (see #10321)
+    // ========================================================================
+
+    /// `--bump patch` on a prerelease used to return `None` because the
+    /// hand-rolled parser split on `.` and demanded exactly three numeric
+    /// parts, so `1.2.3-beta.1` yielded `["1", "2", "3-beta", "1"]`.
+    #[test]
+    fn increment_version_bumps_prerelease_by_dropping_it() {
+        assert_eq!(
+            increment_version("1.2.3-beta.1", "patch"),
+            Some("1.2.4".to_string())
+        );
+        assert_eq!(
+            increment_version("1.2.3-beta.1", "minor"),
+            Some("1.3.0".to_string())
+        );
+        assert_eq!(
+            increment_version("1.2.3-beta.1", "major"),
+            Some("2.0.0".to_string())
+        );
+    }
+
+    /// Every named bump must land strictly above the prerelease it came from,
+    /// so the release floor checks can never plan a non-advancing release.
+    #[test]
+    fn increment_version_prerelease_result_is_strictly_greater() {
+        let current = semver::Version::parse("1.2.3-beta.1").unwrap();
+        for bump in ["patch", "minor", "major"] {
+            let next = increment_version("1.2.3-beta.1", bump).expect(bump);
+            let next = semver::Version::parse(&next).expect("bumped version is valid semver");
+            assert!(
+                next > current,
+                "{} bump produced {} which does not advance past {}",
+                bump,
+                next,
+                current
+            );
+        }
+    }
+
+    /// Build metadata is excluded from precedence by semver §10, so it is not
+    /// carried onto the next release.
+    #[test]
+    fn increment_version_drops_build_metadata() {
+        assert_eq!(
+            increment_version("1.2.3+build.5", "patch"),
+            Some("1.2.4".to_string())
+        );
+        assert_eq!(
+            increment_version("1.2.3-rc.1+build.5", "minor"),
+            Some("1.3.0".to_string())
+        );
+    }
+
+    /// An explicit target version is validated through semver, which means a
+    /// prerelease or build-metadata target is now accepted. This is the
+    /// supported way to "release" a prerelease as its final version.
+    #[test]
+    fn increment_version_explicit_prerelease_target() {
+        assert_eq!(
+            increment_version("1.2.3-beta.1", "1.2.3"),
+            Some("1.2.3".to_string())
+        );
+        assert_eq!(
+            increment_version("1.2.3", "2.0.0-rc.1"),
+            Some("2.0.0-rc.1".to_string())
+        );
+        assert_eq!(
+            increment_version("1.2.3", "2.0.0+build.5"),
+            Some("2.0.0+build.5".to_string())
+        );
+    }
+
+    /// A malformed current version must be an explicit `None`, never silently
+    /// coerced (the old `version_parts` sibling used `.unwrap_or(0)`, so
+    /// `1.x.3` degraded to `1.0.3`).
+    #[test]
+    fn increment_version_rejects_malformed_current_version() {
+        for version in ["1.x.3", "1.2", "1.2.3.4", "v1.2.3", "", "not-a-version"] {
+            assert_eq!(
+                increment_version(version, "patch"),
+                None,
+                "'{}' must not be coerced into a bumpable version",
+                version
+            );
+        }
     }
 
     #[test]
