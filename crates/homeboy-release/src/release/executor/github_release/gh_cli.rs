@@ -10,13 +10,13 @@ use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub(crate) const GITHUB_RELEASE_UPLOAD_TIMEOUT_ENV: &str =
     "HOMEBOY_GITHUB_RELEASE_UPLOAD_TIMEOUT_SECS";
 const DEFAULT_GITHUB_RELEASE_UPLOAD_TIMEOUT_SECS: u64 = 30 * 60;
 const GITHUB_RELEASE_DOWNLOAD_DIAGNOSTIC_BYTES: usize = 8 * 1024;
+const GITHUB_RELEASE_DOWNLOAD_READER_CLEANUP_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GhCommandOutput {
@@ -587,96 +587,135 @@ fn run_bounded_asset_download(
             asset_name
         )
     })?;
-    let output_file = download.reopen().map_err(|error| {
+    let mut output_file = download.reopen().map_err(|error| {
         format!(
             "could not open temporary file for GitHub Release asset '{}': {error}",
             asset_name
         )
     })?;
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child = command.spawn().map_err(|error| {
         format!(
             "could not download GitHub Release asset '{}': {error}",
             asset_name
         )
     })?;
-    let stdout = child.stdout.take().ok_or_else(|| {
+    let mut stdout = child.stdout.take().ok_or_else(|| {
         format!(
             "could not capture download stream for GitHub Release asset '{}'",
             asset_name
         )
     })?;
-    let stderr = child.stderr.take().ok_or_else(|| {
+    let mut stderr = child.stderr.take().ok_or_else(|| {
         format!(
             "could not capture download diagnostics for GitHub Release asset '{}'",
             asset_name
         )
     })?;
-    let (stream_tx, stream_rx) = mpsc::channel();
-    let output_handle = std::thread::spawn(move || {
-        let _ = stream_tx.send(stream_bounded_asset(stdout, output_file, expected_size));
-    });
-    let stderr_handle = std::thread::spawn(move || drain_bounded_diagnostics(stderr));
     let started = Instant::now();
-    let mut stream_result = None;
-    let status = loop {
-        match stream_rx.try_recv() {
-            Ok(Ok(identity)) => stream_result = Some(identity),
-            Ok(Err(error)) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = output_handle.join();
-                let _ = stderr_handle.join();
-                return Err(format!(
+    let mut hasher = Sha256::new();
+    let mut size = 0_u64;
+    let mut diagnostics = Vec::new();
+    let mut diagnostics_truncated = false;
+    let mut stdout_open = true;
+    let mut stderr_open = true;
+    let mut status = None;
+    let mut exited_at = None;
+    let outcome = loop {
+        if stdout_open {
+            stdout_open = match drain_available_pipe(&mut stdout, |bytes| {
+                let remaining = expected_size.saturating_sub(size).min(bytes.len() as u64) as usize;
+                let accepted = bytes.len().min(remaining);
+                if accepted > 0 {
+                    output_file
+                        .write_all(&bytes[..accepted])
+                        .map_err(|error| format!("could not write temporary asset bytes: {error}"))?;
+                    hasher.update(&bytes[..accepted]);
+                    size += accepted as u64;
+                }
+                if accepted != bytes.len() {
+                    return Err(format!(
+                        "download exceeded expected byte length {expected_size}"
+                    ));
+                }
+                Ok(())
+            }) {
+                Ok(open) => open,
+                Err(error) => break Err(format!(
                     "could not download GitHub Release asset '{}': {error}",
                     asset_name
-                ));
-            }
-            Err(mpsc::TryRecvError::Empty) => {}
-            Err(mpsc::TryRecvError::Disconnected) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = output_handle.join();
-                let _ = stderr_handle.join();
-                return Err(format!(
-                    "could not download GitHub Release asset '{}': download stream ended unexpectedly",
+                )),
+            };
+        }
+        if stderr_open {
+            stderr_open = match drain_available_pipe(&mut stderr, |bytes| {
+                let remaining = GITHUB_RELEASE_DOWNLOAD_DIAGNOSTIC_BYTES
+                    .saturating_sub(diagnostics.len());
+                diagnostics.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+                diagnostics_truncated |= bytes.len() > remaining;
+                Ok(())
+            }) {
+                Ok(open) => open,
+                Err(error) => break Err(format!(
+                    "could not read GitHub Release asset '{}' diagnostics: {error}",
                     asset_name
-                ));
+                )),
+            };
+        }
+        if !stdout_open && !stderr_open {
+            if let Some(status) = status {
+                break Ok(status);
             }
         }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() >= timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = output_handle.join();
-                let _ = stderr_handle.join();
-                return Err(format!(
-                    "download of GitHub Release asset '{}' timed out",
-                    asset_name
-                ));
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(Some(exit_status)) => {
+                    status = Some(exit_status);
+                    exited_at = Some(Instant::now());
+                }
+                Ok(None) if started.elapsed() >= timeout => {
+                    break Err(format!(
+                        "download of GitHub Release asset '{}' timed out",
+                        asset_name
+                    ));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    break Err(format!(
+                        "could not monitor download of GitHub Release asset '{}': {error}",
+                        asset_name
+                    ));
+                }
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = output_handle.join();
-                let _ = stderr_handle.join();
-                return Err(format!(
-                    "could not monitor download of GitHub Release asset '{}': {error}",
-                    asset_name
-                ));
-            }
+        } else if exited_at.is_some_and(|exit| {
+            exit.elapsed() >= GITHUB_RELEASE_DOWNLOAD_READER_CLEANUP_TIMEOUT
+        }) {
+            break Err(format!(
+                "GitHub Release asset '{}' pipes remained open after the download process exited",
+                asset_name
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let status = match outcome {
+        Ok(status) => status,
+        Err(error) => {
+            let cleanup = terminate_asset_download_child(&mut child)
+                .err()
+                .map(|cleanup| format!("; {cleanup}"))
+                .unwrap_or_default();
+            return Err(format!("{error}{cleanup}"));
         }
     };
-    let stream_result = match stream_result {
-        Some(identity) => Ok(identity),
-        None => stream_rx
-            .recv()
-            .map_err(|_| "download stream ended without reporting an asset identity".to_string())?,
-    };
-    let _ = output_handle.join();
-    let diagnostics = stderr_handle.join().unwrap_or_default();
+    let mut diagnostics = String::from_utf8_lossy(&diagnostics).to_string();
+    if diagnostics_truncated {
+        diagnostics.push_str("\n[diagnostics truncated]");
+    }
     if !status.success() {
         return Err(format!(
             "could not download GitHub Release asset '{}': {}",
@@ -684,67 +723,117 @@ fn run_bounded_asset_download(
             diagnostics.trim()
         ));
     }
-    stream_result.map_err(|error| {
-        format!(
-            "could not download GitHub Release asset '{}': {error}",
-            asset_name
-        )
-    })
-}
-
-fn stream_bounded_asset(
-    mut input: impl Read,
-    mut output: impl Write,
-    expected_size: u64,
-) -> Result<(u64, String), String> {
-    let mut hasher = Sha256::new();
-    let mut size = 0_u64;
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let read = input
-            .read(&mut buffer)
-            .map_err(|error| format!("could not read asset bytes: {error}"))?;
-        if read == 0 {
-            break;
-        }
-        let remaining = expected_size.saturating_sub(size).min(buffer.len() as u64) as usize;
-        let accepted = read.min(remaining);
-        if accepted > 0 {
-            output
-                .write_all(&buffer[..accepted])
-                .map_err(|error| format!("could not write temporary asset bytes: {error}"))?;
-            hasher.update(&buffer[..accepted]);
-            size += accepted as u64;
-        }
-        if accepted != read {
-            return Err(format!(
-                "download exceeded expected byte length {expected_size}"
-            ));
-        }
-    }
     Ok((size, format!("{:x}", hasher.finalize())))
 }
 
-fn drain_bounded_diagnostics(mut input: impl Read) -> String {
-    let mut diagnostics = Vec::new();
-    let mut truncated = false;
+fn terminate_asset_download_child(child: &mut std::process::Child) -> Result<(), String> {
+    let pid = child.id();
+    let started = Instant::now();
+    let tree_result = homeboy_core::process::force_terminate_process_tree_bounded(
+        pid,
+        GITHUB_RELEASE_DOWNLOAD_READER_CLEANUP_TIMEOUT,
+    );
+    let _ = child.kill();
+    let deadline = started + GITHUB_RELEASE_DOWNLOAD_READER_CLEANUP_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() >= deadline => {
+                return Err(format!(
+                    "download process {pid} did not exit within {} ms",
+                    GITHUB_RELEASE_DOWNLOAD_READER_CLEANUP_TIMEOUT.as_millis()
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => return Err(format!("could not reap download process {pid}: {error}")),
+        }
+    }
+    tree_result.map_err(|error| error.to_string())
+}
+
+#[cfg(unix)]
+fn drain_available_pipe<R: Read + std::os::fd::AsRawFd>(
+    input: &mut R,
+    mut consume: impl FnMut(&[u8]) -> Result<(), String>,
+) -> Result<bool, String> {
     let mut buffer = [0_u8; 8192];
     loop {
-        let Ok(read) = input.read(&mut buffer) else {
-            break;
+        let mut descriptor = libc::pollfd {
+            fd: input.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
         };
-        if read == 0 {
-            break;
+        let ready = unsafe { libc::poll(&mut descriptor, 1, 0) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(format!("could not poll download pipe: {error}"));
         }
-        let remaining = GITHUB_RELEASE_DOWNLOAD_DIAGNOSTIC_BYTES.saturating_sub(diagnostics.len());
-        diagnostics.extend_from_slice(&buffer[..read.min(remaining)]);
-        truncated |= read > remaining;
+        if ready == 0 {
+            return Ok(true);
+        }
+        match input.read(&mut buffer) {
+            Ok(0) => return Ok(false),
+            Ok(read) => consume(&buffer[..read])?,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(format!("could not read download pipe: {error}")),
+        }
     }
-    let mut diagnostics = String::from_utf8_lossy(&diagnostics).to_string();
-    if truncated {
-        diagnostics.push_str("\n[diagnostics truncated]");
+}
+
+#[cfg(windows)]
+fn drain_available_pipe<R: Read + std::os::windows::io::AsRawHandle>(
+    input: &mut R,
+    mut consume: impl FnMut(&[u8]) -> Result<(), String>,
+) -> Result<bool, String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_PIPE};
+    use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+
+    let handle = input.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+    if unsafe { GetFileType(handle) } != FILE_TYPE_PIPE {
+        return Err("download output handle is not a pipe".to_string());
     }
-    diagnostics
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let mut available = 0;
+        let peeked = unsafe {
+            PeekNamedPipe(
+                handle,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut available,
+                std::ptr::null_mut(),
+            )
+        };
+        if peeked == 0 {
+            let error = std::io::Error::last_os_error();
+            if available == 0 && matches!(error.raw_os_error(), Some(109 | 233)) {
+                return Ok(false);
+            }
+            return Err(format!("could not inspect download pipe: {error}"));
+        }
+        if available == 0 {
+            return Ok(true);
+        }
+        let read_size = buffer.len().min(available as usize);
+        match input.read(&mut buffer[..read_size]) {
+            Ok(0) => return Ok(false),
+            Ok(read) => consume(&buffer[..read])?,
+            Err(error) => return Err(format!("could not read download pipe: {error}")),
+        }
+    }
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn drain_available_pipe<R: Read>(
+    _input: &mut R,
+    _consume: impl FnMut(&[u8]) -> Result<(), String>,
+) -> Result<bool, String> {
+    Err("nonblocking download pipes are unsupported on this platform".to_string())
 }
 
 /// GitHub REST represents release asset checksums as `sha256:<hex>`. Preserve
@@ -925,6 +1014,7 @@ pub(crate) fn github_cli_env(github: &GitHubRepo, config: &GithubConfig) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
 
     fn remote_asset(name: &str, size: u64, digest: Option<String>) -> GitHubReleaseAsset {
         GitHubReleaseAsset {
@@ -1034,6 +1124,123 @@ mod tests {
                 .count(),
             0,
             "timed-out download must clean up its tempfile"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_asset_download_timeout_closes_descendant_inherited_pipes() {
+        assert_inherited_pipe_cleanup(
+            "sleep 30",
+            "wait",
+            Duration::from_millis(50),
+            "timed out",
+            "timeout",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_asset_download_oversize_closes_descendant_inherited_pipes() {
+        assert_inherited_pipe_cleanup(
+            "sleep 30",
+            "printf 'oversized'; wait",
+            Duration::from_secs(5),
+            "exceeded expected byte length 4",
+            "oversize",
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounded_asset_download_timeout_kills_escaped_inherited_pipes() {
+        assert_inherited_pipe_cleanup(
+            "setsid sleep 30",
+            "wait",
+            Duration::from_millis(50),
+            "timed out",
+            "escaped timeout",
+        );
+    }
+
+    #[cfg(unix)]
+    fn assert_inherited_pipe_cleanup(
+        descendant_command: &str,
+        command_tail: &str,
+        timeout: Duration,
+        expected_error: &str,
+        case: &str,
+    ) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let downloads = temp.path().join("downloads");
+        std::fs::create_dir(&downloads).expect("download tempdir");
+        let leader_pid = temp.path().join("leader.pid");
+        let descendant_pid = temp.path().join("descendant.pid");
+        let script = format!(
+            "echo $$ > {}; {descendant_command} & echo $! > {}; {command_tail}",
+            quote_arg(&leader_pid.display().to_string()),
+            quote_arg(&descendant_pid.display().to_string())
+        );
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut command = Command::new("sh");
+            command.args(["-c", &script]);
+            let started = Instant::now();
+            let result = run_bounded_asset_download(
+                &mut command,
+                "asset.zip",
+                4,
+                timeout,
+                Some(&downloads),
+            );
+            let _ = result_tx.send((result, started.elapsed()));
+        });
+
+        let (result, elapsed) = result_rx
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap_or_else(|_| panic!("{case} cleanup exceeded the external bound"));
+        worker.join().expect("download worker");
+        let error = result.unwrap_err();
+        assert!(error.contains(expected_error), "unexpected error: {error}");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "{case} cleanup took {elapsed:?}"
+        );
+        assert_fixture_processes_stopped(&leader_pid, &descendant_pid);
+        assert_eq!(
+            std::fs::read_dir(temp.path().join("downloads"))
+                .expect("read download tempdir")
+                .count(),
+            0,
+            "{case} inherited pipes must not retain the tempfile"
+        );
+    }
+
+    #[cfg(unix)]
+    fn assert_fixture_processes_stopped(
+        leader_pid_path: &std::path::Path,
+        descendant_pid_path: &std::path::Path,
+    ) {
+        let leader_pid = std::fs::read_to_string(leader_pid_path)
+            .expect("leader pid")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric leader pid");
+        let descendant_pid = std::fs::read_to_string(descendant_pid_path)
+            .expect("descendant pid")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric descendant pid");
+        for _ in 0..40 {
+            if !homeboy_core::process::process_group_is_running(leader_pid as i32)
+                && !homeboy_core::process::pid_is_running(descendant_pid)
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        panic!(
+            "download process group {leader_pid} or descendant {descendant_pid} remained alive"
         );
     }
 

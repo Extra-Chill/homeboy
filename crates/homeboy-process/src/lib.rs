@@ -562,6 +562,101 @@ pub fn terminate_process_tree_best_effort(pid: u32) -> Result<()> {
     }
 }
 
+/// Force-terminate an owned process tree without allowing cleanup itself to
+/// exceed `timeout`. Linux snapshots descendants from procfs so children that
+/// changed sessions or process groups remain under the owner's cleanup scope.
+pub fn force_terminate_process_tree_bounded(pid: u32, timeout: Duration) -> Result<()> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return Err(Error::validation_invalid_argument(
+            "pid",
+            "owned process-tree leader PID is invalid",
+            Some(pid.to_string()),
+            None,
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        #[cfg(target_os = "linux")]
+        let mut targets = linux_descendant_pids(pid)?;
+        #[cfg(not(target_os = "linux"))]
+        let mut targets = Vec::new();
+        targets.push(pid);
+        targets.retain(|target| *target != std::process::id());
+        targets.sort_unstable();
+        targets.dedup();
+
+        unsafe {
+            if libc::kill(-(pid as libc::pid_t), libc::SIGKILL) != 0
+                && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+            {
+                return Err(Error::internal_unexpected(format!(
+                    "force-terminate owned process group {pid}: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+        }
+        signal_pids(&targets, libc::SIGKILL)?;
+        let survivors = wait_for_exit(&targets, timeout);
+        if survivors.is_empty() && !process_group_is_running(pid as i32) {
+            return Ok(());
+        }
+        return Err(Error::internal_unexpected(format!(
+            "owned process tree {pid} did not exit within {} ms; surviving pids: {}",
+            timeout.as_millis(),
+            join_pids(&survivors)
+        )));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let step = windows_taskkill_process_tree_step(pid);
+        let mut taskkill = Command::new(&step.program)
+            .args(&step.args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|error| {
+                Error::internal_unexpected(format!(
+                    "terminate process tree {pid} with taskkill: {error}"
+                ))
+            })?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            match taskkill.try_wait() {
+                Ok(Some(status)) if status.success() => return Ok(()),
+                Ok(Some(status)) => {
+                    return Err(Error::internal_unexpected(format!(
+                        "terminate process tree {pid} with taskkill exited {status}"
+                    )))
+                }
+                Ok(None) if Instant::now() >= deadline => {
+                    let _ = taskkill.kill();
+                    return Err(Error::internal_unexpected(format!(
+                        "terminate process tree {pid} with taskkill exceeded {} ms",
+                        timeout.as_millis()
+                    )));
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                Err(error) => {
+                    let _ = taskkill.kill();
+                    return Err(Error::internal_unexpected(format!(
+                        "monitor process tree {pid} taskkill: {error}"
+                    )));
+                }
+            }
+        }
+    }
+
+    #[cfg(all(not(unix), not(target_os = "windows")))]
+    {
+        let _ = timeout;
+        Err(Error::internal_unexpected(
+            "bounded process-tree termination is unsupported on this platform",
+        ))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessTreeTermination {
     pub owner_pid: u32,
@@ -720,10 +815,11 @@ fn wait_for_exit(pids: &[u32], grace: std::time::Duration) -> Vec<u32> {
             .copied()
             .filter(|pid| pid_is_running(*pid))
             .collect();
-        if survivors.is_empty() || std::time::Instant::now() >= deadline {
+        let now = std::time::Instant::now();
+        if survivors.is_empty() || now >= deadline {
             return survivors;
         }
-        std::thread::sleep(SIGTERM_POLL_INTERVAL);
+        std::thread::sleep(SIGTERM_POLL_INTERVAL.min(deadline.saturating_duration_since(now)));
     }
 }
 
@@ -813,6 +909,7 @@ fn linux_process_group_has_running_member(pgid: i32) -> Option<bool> {
 #[cfg(target_os = "linux")]
 struct LinuxProcessStat {
     state: char,
+    parent_pid: u32,
     process_group_id: i32,
 }
 
@@ -821,12 +918,52 @@ fn parse_linux_stat(stat: &str) -> Option<LinuxProcessStat> {
     let after_command = stat.rsplit_once(") ")?.1;
     let mut fields = after_command.split_whitespace();
     let state = fields.next()?.chars().next()?;
-    let _parent_pid = fields.next()?;
+    let parent_pid = fields.next()?.parse().ok()?;
     let process_group_id = fields.next()?.parse().ok()?;
     Some(LinuxProcessStat {
         state,
+        parent_pid,
         process_group_id,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_descendant_pids(owner_pid: u32) -> Result<Vec<u32>> {
+    let entries = std::fs::read_dir("/proc").map_err(|error| {
+        Error::internal_unexpected(format!("inspect owned process tree {owner_pid}: {error}"))
+    })?;
+    let mut rows = Vec::new();
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        let Ok(pid) = name.parse::<u32>() else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        if let Some(process) = parse_linux_stat(&stat) {
+            rows.push((pid, process.parent_pid));
+        }
+    }
+    Ok(descendant_pids_from_rows(&rows, owner_pid))
+}
+
+#[cfg(target_os = "linux")]
+fn descendant_pids_from_rows(rows: &[(u32, u32)], owner_pid: u32) -> Vec<u32> {
+    let mut descendants = Vec::new();
+    let mut frontier = vec![owner_pid];
+    while let Some(parent) = frontier.pop() {
+        for (pid, parent_pid) in rows {
+            if *parent_pid == parent && !descendants.contains(pid) {
+                descendants.push(*pid);
+                frontier.push(*pid);
+            }
+        }
+    }
+    descendants
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -839,7 +976,16 @@ mod tests {
         let process = parse_linux_stat(stat).expect("process stat");
 
         assert_eq!(process.state, 'Z');
+        assert_eq!(process.parent_pid, 1);
         assert_eq!(process.process_group_id, 456);
+    }
+
+    #[test]
+    fn descendant_rows_include_children_outside_the_owner_group() {
+        assert_eq!(
+            descendant_pids_from_rows(&[(10, 1), (11, 10), (12, 11), (13, 1)], 10),
+            vec![11, 12]
+        );
     }
 
     #[test]
