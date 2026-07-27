@@ -1,8 +1,7 @@
+use homeboy_engine_primitives::content_hash;
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
-
-use sha2::{Digest, Sha256};
 
 use super::*;
 use crate::agent_task_promotion::{normalize_promotion_patch, validate_artifact_content};
@@ -262,7 +261,7 @@ fn candidate_artifact_url(run_id: &str, task_id: &str, artifact_id: &str) -> Str
 }
 
 fn sha256(content: &str) -> String {
-    format!("{:x}", Sha256::digest(content.as_bytes()))
+    content_hash::sha256_hex(content.as_bytes())
 }
 
 fn canonical_repository_identity_for_root(root: Option<&str>) -> Option<String> {

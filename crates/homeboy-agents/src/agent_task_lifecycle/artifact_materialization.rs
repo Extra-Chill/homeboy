@@ -1,8 +1,8 @@
+use homeboy_engine_primitives::content_hash;
 use std::fs;
 use std::path::PathBuf;
 
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
 use crate::agent_task::AgentTaskArtifact;
 use crate::agent_task_timeout_artifacts::is_patch_artifact_kind;
@@ -226,7 +226,7 @@ fn validate_file(artifact: &AgentTaskArtifact, path: &PathBuf) -> Result<()> {
             "retained artifact size does not match the aggregate",
         ));
     }
-    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let sha256 = content_hash::sha256_hex(&bytes);
     if artifact.sha256.as_deref() != Some(sha256.as_str()) {
         return Err(unavailable(
             artifact,
@@ -275,6 +275,7 @@ fn io_error(path: &PathBuf) -> impl FnOnce(std::io::Error) -> Error + '_ {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
 
     fn artifact(bytes: &[u8]) -> AgentTaskArtifact {
         AgentTaskArtifact {

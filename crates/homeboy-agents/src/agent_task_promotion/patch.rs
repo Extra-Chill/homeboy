@@ -1,6 +1,6 @@
+use homeboy_engine_primitives::content_hash;
 use std::io::Write;
 
-use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 use crate::agent_task::AgentTaskArtifact;
@@ -204,9 +204,7 @@ pub(crate) fn validate_artifact_content(artifact: &AgentTaskArtifact, patch: &st
     }
 
     if let Some(expected_sha256) = artifact.sha256.as_deref() {
-        let mut hasher = Sha256::new();
-        hasher.update(patch.as_bytes());
-        let actual_sha256 = format!("{:x}", hasher.finalize());
+        let actual_sha256 = content_hash::sha256_hex(patch.as_bytes());
         if expected_sha256 != actual_sha256 {
             return Err(Error::validation_invalid_argument(
                 "artifact.sha256",

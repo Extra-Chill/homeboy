@@ -1,8 +1,8 @@
+use homeboy_engine_primitives::content_hash;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use homeboy_core::{Error, Result};
 
@@ -100,9 +100,7 @@ pub(crate) fn committed_changes_patch(
     if commits.is_empty() {
         return Ok(None);
     }
-    let mut hasher = Sha256::new();
-    hasher.update(patch.as_bytes());
-    let sha256 = format!("{:x}", hasher.finalize());
+    let sha256 = content_hash::sha256_hex(patch.as_bytes());
     let patch_path = committed_changes_patch_path(options, &sha256)?;
     std::fs::write(&patch_path, patch.as_bytes()).map_err(|error| {
         Error::internal_io(

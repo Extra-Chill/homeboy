@@ -1,8 +1,7 @@
+use homeboy_engine_primitives::content_hash;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-
-use sha2::{Digest, Sha256};
 
 use super::harvest::{
     git_is_repository, git_output_raw, git_output_with_env, git_status_ignoring_runner_metadata,
@@ -770,7 +769,7 @@ pub(crate) fn fingerprint(contents: &[u8]) -> String {
 }
 
 fn sha256_hex(contents: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(contents))
+    content_hash::sha256_hex(contents)
 }
 
 #[cfg(test)]

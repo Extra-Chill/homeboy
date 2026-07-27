@@ -7,6 +7,7 @@
 //! it, and assembles generator evidence. This orchestration belongs in core so
 //! the CLI adapter stays thin.
 
+use homeboy_engine_primitives::content_hash;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -15,7 +16,6 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::agent_task_loop_definition::{
     materialize_repo_loop_spec, AgentTaskLoopSpecMaterializationRequest,
@@ -166,7 +166,7 @@ fn load_generated_materialize_spec(
                 Some("controller.materialize.generator.serialize".to_string()),
             )
         })?);
-    let spec_hash = format!("{:x}", Sha256::digest(generated_raw.as_bytes()));
+    let spec_hash = content_hash::sha256_hex(generated_raw.as_bytes());
 
     Ok(MaterializeSpecSource {
         spec,

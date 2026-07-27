@@ -1,8 +1,8 @@
+use homeboy_engine_primitives::content_hash;
 use std::path::Path;
 use std::process::Command;
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use homeboy_core::gate_feedback_baseline::{
     register_gate_feedback_baseline_provider, GateFeedbackBaselineProvider,
@@ -102,7 +102,7 @@ pub(crate) fn validate_gate_feedback_candidate_baseline(
         std::fs::read(path)
             .map_err(|error| invalid(&format!("recorded patch artifact is unreadable: {error}")))?
     };
-    if format!("{:x}", Sha256::digest(&patch)) != expected_sha256 {
+    if content_hash::sha256_hex(&patch) != expected_sha256 {
         return Err(invalid(
             "recorded patch artifact sha256 does not match its content",
         ));
@@ -163,7 +163,7 @@ fn validate_promotion_chain_baseline(root: &Path, baseline: &Value) -> Result<St
 }
 
 fn valid_sha256(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    content_hash::is_sha256_hex(value)
 }
 
 fn valid_git_object_id(value: &str) -> bool {
@@ -263,6 +263,7 @@ fn invalid(message: &str) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
 
     #[test]
     fn immutable_candidate_tree_accepts_exact_commit_and_rejects_dirty_state() {

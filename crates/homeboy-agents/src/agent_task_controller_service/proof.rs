@@ -26,11 +26,11 @@
 //! argument parsing, calling [`prepare_controller_proof`], running the resolved
 //! dispatch through the existing offload path, and rendering the JSON envelope.
 
+use homeboy_engine_primitives::content_hash;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::agent_task_provider;
 use homeboy_core::{Error, Result};
@@ -176,9 +176,7 @@ pub fn derive_proof_identity(
 }
 
 fn hex_digest(input: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    format!("{:x}", hasher.finalize())
+    content_hash::sha256_hex(input.as_bytes())
 }
 
 /// Build the run inputs the controller materializer consumes: the profile's

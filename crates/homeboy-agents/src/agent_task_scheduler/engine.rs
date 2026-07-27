@@ -1,3 +1,4 @@
+use homeboy_engine_primitives::content_hash;
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::{mpsc, Arc};
@@ -1184,8 +1185,6 @@ struct TaskResult {
 pub(super) fn deferred_cleanup_action_artifact(
     running: &RunningTask,
 ) -> Result<AgentTaskArtifact, HarvestError> {
-    use sha2::{Digest, Sha256};
-
     let run_id = running.run_id.as_deref().unwrap_or("unrecorded-run");
     let directory = homeboy_core::artifacts::root()
         .map_err(|error| HarvestError::ArtifactDirectory {
@@ -1230,7 +1229,7 @@ pub(super) fn deferred_cleanup_action_artifact(
         url: None,
         mime: Some("application/json".to_string()),
         size_bytes: Some(content.len() as u64),
-        sha256: Some(format!("{:x}", Sha256::digest(&content))),
+        sha256: Some(content_hash::sha256_hex(&content)),
         metadata: serde_json::json!({ "run_id": running.run_id, "task_id": running.task_id, "attempt": running.attempt }),
     })
 }

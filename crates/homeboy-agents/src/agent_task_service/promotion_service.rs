@@ -3,11 +3,11 @@
 //! This is deliberately below the CLI boundary: durable controller jobs and
 //! interactive commands use the same checkpointed mutation state machine.
 
+use homeboy_engine_primitives::content_hash;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::daemon::controller_job_driver::{
@@ -164,8 +164,8 @@ fn promotion_job_idempotency_key(
     // The digest makes every immutable execution input part of the identity
     // without exposing aggregate content, paths, or gate configuration.
     Ok(format!(
-        "promotion:{source_run_id}:{artifact_id}:{:x}",
-        Sha256::digest(serialized)
+        "promotion:{source_run_id}:{artifact_id}:{}",
+        content_hash::sha256_hex(&serialized)
     ))
 }
 

@@ -3,8 +3,8 @@ use crate::agent_task_lifecycle;
 use chrono::{DateTime, Utc};
 use homeboy_core::engine::local_files::write_json_file as write_json;
 use homeboy_core::{paths, Error, Result};
+use homeboy_engine_primitives::content_hash;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::ErrorKind;
@@ -456,7 +456,10 @@ fn failed_child_failure_signature(
         diagnostic_class.unwrap_or(""),
         normalized_message
     );
-    let digest = format!("sha256:{:x}", Sha256::digest(signature_material.as_bytes()));
+    let digest = format!(
+        "sha256:{}",
+        content_hash::sha256_hex(signature_material.as_bytes())
+    );
     AgentTaskLoopFailureSignature {
         digest,
         task_id: task_id.or(child_run_id).map(str::to_string),

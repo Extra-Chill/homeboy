@@ -1,6 +1,6 @@
 use super::*;
 use homeboy_core::api_jobs::RemoteRunnerJobRequest;
-use sha2::{Digest, Sha256};
+use homeboy_engine_primitives::content_hash;
 use std::fs::{self, File, OpenOptions};
 
 const LAB_HANDOFF_ACCEPTANCE_TIMEOUT_SECONDS: i64 = 120;
@@ -124,15 +124,16 @@ pub fn reconcile_deferred_candidate(run_id: &str) -> Result<bool> {
                             &outcome.task_id,
                             &artifact.id,
                         ));
-                    let valid_sha = artifact.sha256.as_deref().is_some_and(|sha| {
-                        sha.len() == 64 && sha.bytes().all(|byte| byte.is_ascii_hexdigit())
-                    });
+                    let valid_sha = artifact
+                        .sha256
+                        .as_deref()
+                        .is_some_and(content_hash::is_sha256_hex);
                     let content_matches = artifact
                         .path
                         .as_deref()
                         .and_then(|candidate_path| fs::read(candidate_path).ok())
                         .is_some_and(|bytes| {
-                            let actual = format!("{:x}", Sha256::digest(bytes));
+                            let actual = content_hash::sha256_hex(&bytes);
                             artifact.sha256.as_deref() == Some(actual.as_str())
                         });
                     if artifact.schema == crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA
