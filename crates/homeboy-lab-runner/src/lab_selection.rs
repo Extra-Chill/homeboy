@@ -880,9 +880,16 @@ pub(super) fn resolve_lab_runner_selection_from_placement(
 /// The generic "portable commands are ..." hint left operators guessing which
 /// spelling was correct (#9373). This surfaces command-specific remediation so
 /// runtime behavior and guidance agree: for a cook/agent-task coordinator it
-/// explains that the coordinator stays local while its provider attempt already
-/// routes to Lab automatically, and points at the real levers
-/// (`--runner <runner-id>` to pin the Lab runner, `fanout` for waves).
+/// explains that the coordinator stays controller-owned while its provider
+/// attempt is dispatched to the selected Lab runner, and names the levers that
+/// select it (`--placement lab`, `--runner <runner-id>`, `fanout` for waves).
+///
+/// A split-placement coordinator that can serve `--placement lab` never reaches
+/// here: `route_after_parse` dispatches it (or reports that no Lab runner is
+/// ready) before placement resolution. What remains are the cases where the
+/// coordinator genuinely cannot place a provider attempt at all — for example a
+/// cook with no deterministic gate, or controller-local batch planning — so the
+/// remediation must not claim Lab placement is meaningless for cook waves.
 fn local_only_flag_rejection(
     field: &'static str,
     message: String,
@@ -892,13 +899,13 @@ fn local_only_flag_rejection(
     let mut hints = Vec::new();
     if hot_label.starts_with("agent-task cook") || hot_label.starts_with("agent-task fanout") {
         hints.push(
-            "The cook coordinator is controller-owned by design; its provider attempt already routes to the configured Lab runner automatically — no --placement lab needed.".to_string(),
+            "The cook coordinator is controller-owned by design: only its provider attempt is placed. `--placement lab` and `--runner <runner-id>` select the Lab runner for that attempt; neither offloads the coordinator.".to_string(),
         );
         hints.push(
-            "To pin a specific Lab runner for the provider attempt, pass `--runner <runner-id>` (not `--placement lab`).".to_string(),
+            "This invocation has no placeable provider attempt, so resolve the reason above first (for example, add a deterministic `--verify` gate to a cook).".to_string(),
         );
         hints.push(
-            "To fan out many independent cooks in one operation, use `homeboy agent-task fanout` so the batch coordinator dispatches each child cook's provider attempt to Lab.".to_string(),
+            "To fan out many independent cooks in one operation, use `homeboy agent-task fanout cook-batch --run-plan --placement lab` so the batch coordinator dispatches each child cook's provider attempt to Lab.".to_string(),
         );
     } else {
         hints.push(resolve_lab_runner_hint().hint);
@@ -991,10 +998,11 @@ mod placement_rejection_tests {
 
     #[test]
     fn placement_lab_on_cook_yields_cook_aware_remediation() {
-        // #9373: `--placement lab` on the controller-owned cook coordinator must
-        // not just report a generic "portable commands are ..." hint. It must
-        // explain that the provider attempt already routes to Lab and point at
-        // the correct lever (`--runner`), so guidance and runtime agree.
+        // #9373: `--placement lab` on a cook coordinator that has no placeable
+        // provider attempt must not report a generic "portable commands are ..."
+        // hint, and must not claim Lab placement is meaningless for cook waves
+        // (the documented spelling for a wave). It explains that placement
+        // selects the runner for the attempt and names the levers.
         let command = local_only_command(
             "agent-task cook/run-plan/retry --run",
             "agent-task cook is a controller-owned coordinator.",
@@ -1028,8 +1036,14 @@ mod placement_rejection_tests {
         assert!(
             hints
                 .iter()
-                .any(|hint| hint.contains("routes to the configured Lab runner automatically")),
-            "cook remediation must explain automatic Lab routing, got {hints:?}"
+                .any(|hint| hint.contains("select the Lab runner for that attempt")),
+            "cook remediation must explain what placement selects, got {hints:?}"
+        );
+        assert!(
+            !hints
+                .iter()
+                .any(|hint| hint.contains("no --placement lab needed")),
+            "cook remediation must not contradict documented wave guidance, got {hints:?}"
         );
         assert!(
             hints.iter().any(|hint| hint.contains("fanout")),

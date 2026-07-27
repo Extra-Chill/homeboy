@@ -116,6 +116,18 @@ pub fn route_after_parse(
         None
     };
 
+    // A split-placement coordinator honors `--placement lab`; it must never fall
+    // through to the generic local-only portability rejection, which contradicts
+    // the documented guidance for Cook waves (#9373).
+    if let Some(error) = split_placement_lab_runner_unavailable_error(
+        &cli.command,
+        cli.placement,
+        inferred_runner_id.as_deref(),
+        lab_readiness.as_ref(),
+    ) {
+        return Err(error);
+    }
+
     if let Some(exit_code) = run_split_placement_cook(
         cli,
         normalized_args,
@@ -303,6 +315,96 @@ fn runner_resident_execution(cli: &Cli) -> bool {
             })
         ) || cli.runner.as_deref() == Some(runner_id.as_str())
     })
+}
+
+/// The coordinators that implement split placement: the coordinator itself
+/// stays controller-owned while each provider attempt is dispatched to the
+/// selected Lab runner (`run_split_placement_cook` /
+/// `run_split_placement_fanout`).
+///
+/// For these commands `--placement lab` is supported and documented guidance,
+/// even though their portability contract is `LocalOnly` — the contract
+/// describes the *coordinator*, not the attempt.
+fn split_placement_coordinator_label(command: &Commands) -> Option<&'static str> {
+    use crate::commands::agent_task::{
+        AgentTaskArgs, AgentTaskCommand, AgentTaskFanoutArgs, AgentTaskFanoutCommand,
+    };
+
+    match command {
+        Commands::AgentTask(AgentTaskArgs {
+            command: AgentTaskCommand::Cook(cook),
+        }) if !cook.dispatch.core.queue_only => Some("agent-task cook"),
+        Commands::AgentTask(AgentTaskArgs {
+            command:
+                AgentTaskCommand::Fanout(AgentTaskFanoutArgs {
+                    command: AgentTaskFanoutCommand::RunPlan(_),
+                }),
+        }) => Some("agent-task fanout run-plan"),
+        Commands::AgentTask(AgentTaskArgs {
+            command:
+                AgentTaskCommand::Fanout(AgentTaskFanoutArgs {
+                    command: AgentTaskFanoutCommand::CookBatch(args),
+                }),
+        }) if args.run_plan => Some("agent-task fanout cook-batch --run-plan"),
+        _ => None,
+    }
+}
+
+/// Explain a Lab placement that cannot be served, without contradicting the
+/// documented guidance.
+///
+/// Docs recommend global `--placement lab` for Cook waves, and the runtime
+/// honors it: the coordinator stays controller-owned while provider attempts go
+/// to the selected runner. When no runner can be selected, the generic
+/// portability rejection ("`--placement lab` is unavailable for this local-only
+/// command") is a contradiction the operator has to reverse-engineer (#9373).
+/// Report the real cause — no ready Lab runner — with the readiness verdict and
+/// its remediation commands instead.
+///
+/// `--placement lab-or-local` intentionally does not reach here: it authorizes
+/// controller execution when Lab cannot be served.
+fn split_placement_lab_runner_unavailable_error(
+    command: &Commands,
+    placement: homeboy::cli_surface::Placement,
+    inferred_runner_id: Option<&str>,
+    readiness: Option<&runners::LabRunnerReadiness>,
+) -> Option<Error> {
+    if placement != homeboy::cli_surface::Placement::Lab || inferred_runner_id.is_some() {
+        return None;
+    }
+    let label = split_placement_coordinator_label(command)?;
+    let state = readiness
+        .map(|readiness| readiness.state.as_str())
+        .unwrap_or("unknown");
+    let mut hints = Vec::new();
+    if let Some(readiness) = readiness {
+        hints.extend(
+            readiness
+                .reasons
+                .iter()
+                .map(|reason| format!("Lab runner readiness: {reason}")),
+        );
+        hints.extend(readiness.remediation_commands.iter().cloned());
+    }
+    hints.push(format!(
+        "`--placement lab` is the supported spelling for {label} waves: it selects the Lab runner for each provider attempt while the coordinator stays on this controller."
+    ));
+    hints.push(
+        "Pin one runner explicitly with `--runner <runner-id>` when several are configured."
+            .to_string(),
+    );
+    hints.push(
+        "Use `--placement lab-or-local` to authorize controller execution when no Lab runner is ready."
+            .to_string(),
+    );
+    Some(Error::validation_invalid_argument(
+        "placement",
+        format!(
+            "{label} accepts `--placement lab`, but no ready Lab runner could be selected (readiness: {state}); no provider attempt was dispatched"
+        ),
+        Some("lab".to_string()),
+        Some(hints),
+    ))
 }
 
 /// Fanout keeps durable batch state, worktree ownership, artifact ingestion,

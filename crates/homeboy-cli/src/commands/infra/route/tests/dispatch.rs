@@ -1953,3 +1953,155 @@ fn batch_fanout_exposes_placement_arguments() {
         }
     }
 }
+
+/// #9373: docs recommend global `--placement lab` for Cook waves and the
+/// runtime honors it, so a cook that CAN be served must never be reported as a
+/// command for which Lab placement is unavailable.
+#[test]
+fn split_placement_cook_accepts_lab_placement_when_a_runner_is_selected() {
+    let cli = Cli::parse_from([
+        "homeboy",
+        "--placement",
+        "lab",
+        "agent-task",
+        "cook",
+        "--to-worktree",
+        "fixture@wave",
+        "--verify",
+        "true",
+        "--prompt",
+        "route this attempt to Lab",
+    ]);
+
+    assert!(
+        split_placement_lab_runner_unavailable_error(
+            &cli.command,
+            cli.placement,
+            Some("homeboy-lab"),
+            None,
+        )
+        .is_none(),
+        "a selected runner serves --placement lab instead of refusing it"
+    );
+}
+
+/// The failure an operator actually hits is "no ready Lab runner", not
+/// "`--placement lab` is unavailable for this local-only command". Reporting the
+/// portability contract there contradicts the documented wave guidance (#9373).
+#[test]
+fn split_placement_cook_without_a_runner_reports_readiness_not_a_placement_contradiction() {
+    let cli = Cli::parse_from([
+        "homeboy",
+        "--placement",
+        "lab",
+        "agent-task",
+        "cook",
+        "--to-worktree",
+        "fixture@wave",
+        "--verify",
+        "true",
+        "--prompt",
+        "route this attempt to Lab",
+    ]);
+    let readiness = runners::LabRunnerReadiness {
+        state: runners::LabRunnerReadinessState::Disconnected,
+        selected_runner_id: None,
+        available_runner_ids: vec!["homeboy-lab".to_string()],
+        reasons: vec!["homeboy-lab is disconnected".to_string()],
+        remediation_commands: vec!["homeboy runner connect homeboy-lab".to_string()],
+    };
+
+    let error = split_placement_lab_runner_unavailable_error(
+        &cli.command,
+        cli.placement,
+        None,
+        Some(&readiness),
+    )
+    .expect("lab placement with no runner must be explained");
+
+    assert_eq!(error.details["field"].as_str(), Some("placement"));
+    let problem = error.details["problem"].as_str().expect("problem");
+    assert!(
+        problem.contains("accepts `--placement lab`"),
+        "guidance and runtime must agree: {problem}"
+    );
+    assert!(
+        problem.contains("disconnected"),
+        "the readiness verdict is the real cause: {problem}"
+    );
+    let hints = error.details["tried"]
+        .as_array()
+        .expect("remediation hints")
+        .iter()
+        .filter_map(|hint| hint.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        hints
+            .iter()
+            .any(|hint| hint.contains("homeboy runner connect homeboy-lab")),
+        "readiness remediation must be carried through: {hints:?}"
+    );
+    assert!(
+        hints
+            .iter()
+            .any(|hint| hint.contains("`--placement lab` is the supported spelling")),
+        "remediation must confirm the documented spelling: {hints:?}"
+    );
+}
+
+/// `--placement lab-or-local` authorizes controller execution, so it must keep
+/// falling back instead of failing when no runner is ready.
+#[test]
+fn lab_or_local_placement_still_falls_back_without_a_runner() {
+    let cli = Cli::parse_from([
+        "homeboy",
+        "--placement",
+        "lab-or-local",
+        "agent-task",
+        "cook",
+        "--to-worktree",
+        "fixture@wave",
+        "--verify",
+        "true",
+        "--prompt",
+        "fall back locally",
+    ]);
+
+    assert!(
+        split_placement_lab_runner_unavailable_error(&cli.command, cli.placement, None, None)
+            .is_none()
+    );
+}
+
+/// Batch fanout is the documented one-command path for a wave, so it resolves
+/// Lab placement through the same contract as a single cook.
+#[test]
+fn split_placement_covers_batch_fanout_run_plan_coordinators() {
+    let batch = Cli::parse_from([
+        "homeboy",
+        "--placement",
+        "lab",
+        "agent-task",
+        "fanout",
+        "cook-batch",
+        "https://github.com/o/r/issues/1",
+        "https://github.com/o/r/issues/2",
+        "--repo",
+        "r",
+        "--verify",
+        "cargo test",
+        "--run-plan",
+    ]);
+
+    assert_eq!(
+        split_placement_coordinator_label(&batch.command),
+        Some("agent-task fanout cook-batch --run-plan")
+    );
+    assert!(split_placement_lab_runner_unavailable_error(
+        &batch.command,
+        batch.placement,
+        None,
+        None,
+    )
+    .is_some());
+}
