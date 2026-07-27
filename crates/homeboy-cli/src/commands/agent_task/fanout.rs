@@ -395,6 +395,7 @@ fn cook_batch_inner(
         })
         .collect::<Vec<_>>();
     let worktrees = queue_or_reuse_worktrees(&args, &branches)?;
+    bind_materialized_worktree_paths(&mut plan, &worktrees);
     let blocked = worktrees
         .rows
         .iter()
@@ -516,6 +517,22 @@ fn cook_batch_outer_exit_code(blocked: usize, run_result: &Option<Value>) -> i32
             .as_ref()
             .and_then(|value| value["exit_code"].as_i64())
             .unwrap_or(0) as i32
+    }
+}
+
+fn bind_materialized_worktree_paths(
+    plan: &mut BatchCookFanoutPlan,
+    worktrees: &worktree::WorktreeQueueCreateOutput,
+) {
+    for cook in &mut plan.cooks {
+        if cook.cwd.is_some() || cook.workspace.is_some() {
+            continue;
+        }
+        cook.workspace = worktrees
+            .rows
+            .iter()
+            .find(|row| row.handle == cook.to_worktree)
+            .and_then(|row| row.path.clone());
     }
 }
 
@@ -1718,7 +1735,7 @@ mod tests {
     fn cook_batch_builds_batch_cook_plan_from_issue_urls() {
         with_isolated_home(|_| {
             let args = cook_batch_args();
-            let plan = build_cook_batch_plan(&args).expect("cook batch plan");
+            let mut plan = build_cook_batch_plan(&args).expect("cook batch plan");
 
             assert_eq!(plan.fanout_id, "issue-wave");
             assert_eq!(plan.cooks.len(), 2);
@@ -1753,6 +1770,38 @@ mod tests {
             assert_eq!(
                 invocation.dispatch.workspace.as_deref(),
                 Some("homeboy@fix-issue-6453-homeboy")
+            );
+
+            let workspace = tempfile::tempdir().expect("task worktree");
+            bind_materialized_worktree_paths(
+                &mut plan,
+                &worktree::WorktreeQueueCreateOutput {
+                    schema: "homeboy/worktree-queue-create/v1",
+                    repo: "homeboy".to_string(),
+                    base_ref: "origin/main".to_string(),
+                    dry_run: false,
+                    rows: vec![worktree::WorktreeQueueCreateRow {
+                        branch: "fix/issue-6453-homeboy".to_string(),
+                        handle: "homeboy@fix-issue-6453-homeboy".to_string(),
+                        status: worktree::WorktreeQueueCreateStatus::Created,
+                        command: Vec::new(),
+                        retry_after_seconds: None,
+                        active_lock_holder: None,
+                        path: Some(workspace.path().display().to_string()),
+                        error: None,
+                    }],
+                },
+            );
+            let invocation = plan.cooks[0]
+                .to_cook_invocation(&plan)
+                .expect("materialized cook invocation");
+            assert_eq!(
+                invocation.dispatch.workspace.as_deref(),
+                Some(workspace.path().to_string_lossy().as_ref())
+            );
+            assert_eq!(
+                invocation.options.source_worktree_path.as_deref(),
+                Some(workspace.path())
             );
         });
     }
