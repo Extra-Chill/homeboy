@@ -124,10 +124,11 @@ Example handoff row:
 
 ## 6. Clean Up Deliberately
 
-Preview cleanup first:
+Preview cleanup first. The bare command is plan-only; `--apply` is the mutation gate:
 
 ```bash
-homeboy worktree cleanup --dry-run
+homeboy worktree cleanup
+homeboy worktree cleanup --apply
 ```
 
 Remove one safe worktree when the branch is merged or no longer needed:

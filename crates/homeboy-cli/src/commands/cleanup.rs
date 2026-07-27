@@ -612,8 +612,8 @@ const TASK_WORKTREES_METADATA: CleanupInventoryCategoryMetadata =
     CleanupInventoryCategoryMetadata {
         category: "task_worktrees",
         include_arg: "task-worktrees",
-        dry_run_command: "homeboy worktree cleanup --dry-run --cleanup-branches",
-        apply_command: "homeboy worktree cleanup --cleanup-branches",
+        dry_run_command: "homeboy worktree cleanup --cleanup-branches",
+        apply_command: "homeboy worktree cleanup --cleanup-branches --apply",
     };
 
 const WORKTREE_PROVIDERS_METADATA: CleanupInventoryCategoryMetadata =
@@ -1382,7 +1382,7 @@ fn cleanup_actionable(
             format!("{} cleanup", category.category.replace('_', " ")),
             if category.category == REPO_ARTIFACTS_METADATA.category {
                 apply_command(&category.canonical_cleanup_command)
-            } else if apply || category.category == TASK_WORKTREES_METADATA.category {
+            } else if apply {
                 category.specialist_command.clone()
             } else {
                 apply_command(&category.specialist_command)
@@ -2023,8 +2023,8 @@ mod tests {
                 TASK_WORKTREES_METADATA,
                 "task_worktrees",
                 "task-worktrees",
-                "homeboy worktree cleanup --dry-run --cleanup-branches",
                 "homeboy worktree cleanup --cleanup-branches",
+                "homeboy worktree cleanup --cleanup-branches --apply",
             ),
             (
                 TERMINAL_RUNS_METADATA,
@@ -2086,14 +2086,17 @@ mod tests {
         }
     }
 
+    /// Task worktrees used to be the only category whose specialist command
+    /// deleted without `--apply`, which forced a special case in
+    /// `cleanup_actionable` so the plan mode would not append `--apply` to an
+    /// already-destructive command. Now that `homeboy worktree cleanup` is
+    /// plan-only by default, both modes surface the same `--apply`-gated
+    /// command like every other category (#10286).
     #[test]
-    fn task_worktree_cleanup_next_actions_preserve_mode_specific_commands() {
+    fn task_worktree_cleanup_next_actions_follow_the_apply_convention() {
         let cases = [
-            (
-                false,
-                "homeboy worktree cleanup --dry-run --cleanup-branches",
-            ),
-            (true, "homeboy worktree cleanup --cleanup-branches"),
+            (false, "homeboy worktree cleanup --cleanup-branches --apply"),
+            (true, "homeboy worktree cleanup --cleanup-branches --apply"),
         ];
 
         for (apply, command) in cases {

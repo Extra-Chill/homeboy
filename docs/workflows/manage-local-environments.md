@@ -88,7 +88,10 @@ Remove only when the worktree is safe to discard:
 ```bash
 homeboy worktree remove <worktree-id>
 homeboy worktree cleanup
+homeboy worktree cleanup --apply
 ```
+
+`homeboy worktree cleanup` reports cleanup candidates without removing anything. Pass `--apply` when the plan is acceptable.
 
 Removal refuses dirty worktrees, unpushed commits, primary checkouts, and paths outside the component checkout parent. Treat `--force` as an explicit operator decision, not routine cleanup.
 

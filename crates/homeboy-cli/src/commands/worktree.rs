@@ -111,13 +111,18 @@ enum WorktreeCommand {
         #[arg(long, requires = "cleanup_branch")]
         allow_unmerged_branch: bool,
     },
-    /// Remove cleanup-eligible task worktrees after safety checks
+    /// Report cleanup-eligible task worktrees; pass --apply to remove them
     Cleanup {
+        /// Apply cleanup by removing cleanup-eligible task worktrees and any
+        /// selected artifacts. Without this flag, the command is a dry run.
+        #[arg(long)]
+        apply: bool,
         /// Allow dirty/unpushed worktree removal; hard gates still apply
         #[arg(long)]
         force: bool,
-        /// Report cleanup candidates without removing worktrees or artifacts.
-        #[arg(long)]
+        /// Deprecated no-op retained for one release: cleanup is already
+        /// plan-only unless --apply is passed.
+        #[arg(long, hide = true, conflicts_with = "apply")]
         dry_run: bool,
         /// Also remove declared rebuildable artifacts from the Homeboy checkout that built this binary.
         #[arg(long)]
@@ -163,6 +168,27 @@ pub struct WorktreeCleanupCommandOutput {
     pub worktrees: WorktreeCleanupOutput,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_cleanup: Option<ArtifactCleanupOutput>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// Soft deprecation note emitted when a caller still passes the legacy
+/// `--dry-run` flag. Cleanup is plan-only by default now, so the flag is a
+/// no-op kept for one release so existing scripts keep parsing.
+const DRY_RUN_DEPRECATION_NOTICE: &str = "`--dry-run` is deprecated and has no effect: `homeboy worktree cleanup` is plan-only by default. Pass --apply to remove worktrees.";
+
+/// Resolve the mutation gate for `worktree cleanup`.
+///
+/// Removal only happens when `--apply` is passed. `--dry-run` is a deprecated
+/// no-op alias; it can never turn the command into a mutation.
+fn cleanup_apply_mode(apply: bool, dry_run: bool) -> (bool, Vec<String>) {
+    let warnings = if dry_run {
+        vec![DRY_RUN_DEPRECATION_NOTICE.to_string()]
+    } else {
+        Vec::new()
+    };
+
+    (apply && !dry_run, warnings)
 }
 
 pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<WorktreeOutput> {
@@ -236,15 +262,17 @@ pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<Worktre
             allow_unmerged_branch,
         })?),
         WorktreeCommand::Cleanup {
+            apply,
             force,
             dry_run,
             cleanup_artifacts,
             cleanup_branches,
             allow_unmerged_branches,
         } => {
+            let (apply, warnings) = cleanup_apply_mode(apply, dry_run);
             let worktrees = worktree::cleanup(WorktreeCleanupOptions {
                 force,
-                dry_run,
+                dry_run: !apply,
                 cleanup_branches,
                 allow_unmerged_branches,
             })?;
@@ -252,7 +280,7 @@ pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<Worktre
                 Some(artifact_cleanup::cleanup_artifacts(
                     ArtifactCleanupOptions {
                         path: None,
-                        apply: !dry_run,
+                        apply,
                         self_artifacts: true,
                         temp_roots: Vec::new(),
                         sort: ArtifactCleanupSort::Discovery,
@@ -268,6 +296,7 @@ pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<Worktre
             WorktreeOutput::Cleanup(WorktreeCleanupCommandOutput {
                 worktrees,
                 artifact_cleanup,
+                warnings,
             })
         }
     };
@@ -280,7 +309,75 @@ mod tests {
 
     use crate::cli_surface::{Cli, Commands};
 
-    use super::WorktreeCommand;
+    use super::{cleanup_apply_mode, WorktreeCommand, DRY_RUN_DEPRECATION_NOTICE};
+
+    /// Parse `worktree cleanup` and return its `(apply, dry_run)` gate flags.
+    fn parse_cleanup_gate(args: &[&str]) -> (bool, bool) {
+        let cli = Cli::parse_from(args);
+
+        let Commands::Worktree(args) = cli.command else {
+            panic!("expected worktree command");
+        };
+        let WorktreeCommand::Cleanup { apply, dry_run, .. } = args.command else {
+            panic!("expected worktree cleanup command");
+        };
+
+        (apply, dry_run)
+    }
+
+    /// The mutation gate for every other cleanup surface is `--apply`. The bare
+    /// command must stay plan-only so an operator or agent that generalizes
+    /// "append --apply to make it real" cannot delete worktrees on the preview
+    /// step.
+    #[test]
+    fn worktree_cleanup_is_plan_only_without_apply() {
+        let (apply, dry_run) = parse_cleanup_gate(&["homeboy", "worktree", "cleanup"]);
+
+        assert!(!apply);
+        assert!(!dry_run);
+        assert_eq!(cleanup_apply_mode(apply, dry_run), (false, Vec::new()));
+    }
+
+    #[test]
+    fn worktree_cleanup_mutates_only_with_apply() {
+        let (apply, dry_run) = parse_cleanup_gate(&["homeboy", "worktree", "cleanup", "--apply"]);
+
+        assert!(apply);
+        assert!(!dry_run);
+        assert_eq!(cleanup_apply_mode(apply, dry_run), (true, Vec::new()));
+    }
+
+    /// `--dry-run` is a deprecated no-op alias kept for one release so existing
+    /// scripts keep parsing. It must never mutate.
+    #[test]
+    fn worktree_cleanup_dry_run_still_parses_and_does_not_mutate() {
+        let (apply, dry_run) = parse_cleanup_gate(&["homeboy", "worktree", "cleanup", "--dry-run"]);
+
+        assert!(!apply);
+        assert!(dry_run);
+        assert_eq!(
+            cleanup_apply_mode(apply, dry_run),
+            (false, vec![DRY_RUN_DEPRECATION_NOTICE.to_string()])
+        );
+    }
+
+    #[test]
+    fn worktree_cleanup_rejects_dry_run_with_apply() {
+        assert!(
+            Cli::try_parse_from(["homeboy", "worktree", "cleanup", "--dry-run", "--apply"])
+                .is_err()
+        );
+    }
+
+    /// Defense in depth: even if the conflict gate were relaxed, the deprecated
+    /// alias can only ever downgrade to plan-only.
+    #[test]
+    fn worktree_cleanup_dry_run_cannot_upgrade_to_apply() {
+        assert_eq!(
+            cleanup_apply_mode(true, true),
+            (false, vec![DRY_RUN_DEPRECATION_NOTICE.to_string()])
+        );
+    }
 
     #[test]
     fn worktree_cleanup_does_not_cleanup_artifacts_by_default() {
