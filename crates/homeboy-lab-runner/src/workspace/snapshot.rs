@@ -1701,13 +1701,24 @@ fn materialize_snapshot_piped(
 ) -> Result<()> {
     let mut command = snapshot_archive_command(local_path, target_command, excludes);
     if let Some(scratch) = scratch {
-        command = format!(
-            "TMPDIR={} {};",
-            shell::quote_arg(&scratch.display().to_string()),
-            command.trim_end_matches(';')
-        );
+        command = scratch_scoped_command(&command, scratch);
     }
     run_shell_command(&command, action)
+}
+
+/// Scope one snapshot command to an admitted controller scratch filesystem.
+///
+/// Uses `export` rather than a `TMPDIR=x cmd` assignment prefix: the archive
+/// command begins with a `(...)` subshell, and POSIX sh only accepts assignment
+/// prefixes on *simple* commands. `TMPDIR=x (cd ...)` is a hard parse error
+/// under dash (`Syntax error: "(" unexpected`), which failed every
+/// scratch-admitted materialization before a byte was transferred.
+pub(super) fn scratch_scoped_command(command: &str, scratch: &Path) -> String {
+    format!(
+        "export TMPDIR={}; {};",
+        shell::quote_arg(&scratch.display().to_string()),
+        command.trim_end_matches(';')
+    )
 }
 
 pub(super) fn snapshot_archive_command(
