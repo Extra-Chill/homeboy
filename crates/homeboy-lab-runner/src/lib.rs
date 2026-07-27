@@ -46,7 +46,17 @@ mod generation_store;
 pub mod lab_staging_controller;
 pub fn runner_generation_inventory(runner_id: &str) -> Result<Vec<RunnerDaemonGenerationStatus>> {
     let report = connection::status(runner_id)?;
-    generation_store::status_projection(runner_id, report.session.as_ref())
+    runner_generation_inventory_for_session(runner_id, report.session.as_ref())
+}
+
+/// Project persisted generation state from an already-observed status session.
+/// This keeps `runner status` from re-running its remote observation path just
+/// to render the generation ledger.
+pub fn runner_generation_inventory_for_session(
+    runner_id: &str,
+    session: Option<&RunnerSession>,
+) -> Result<Vec<RunnerDaemonGenerationStatus>> {
+    generation_store::status_projection(runner_id, session)
 }
 mod git_dependency_materialization;
 mod homeboy_refresh;

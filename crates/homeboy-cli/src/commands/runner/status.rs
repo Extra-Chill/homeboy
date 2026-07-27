@@ -33,9 +33,10 @@ pub(super) fn status(
     let preferred_lab_runner = runner::resolve_default_lab_runner()?;
     if let Some(id) = id {
         let report = runner::status(id)?;
-        // Also polls draining generations and retires only those that report
-        // authoritative zero active jobs.
-        let generation_inventory = runner::runner_generation_inventory(id)?;
+        // Reuse this status observation when rendering persisted generations;
+        // a read-only command must not repeat remote runner inspection.
+        let generation_inventory =
+            runner::runner_generation_inventory_for_session(id, report.session.as_ref())?;
         // Lead with the compact authoritative admission answer, summarizing the
         // draining generations by count rather than expanding the full ledger
         // (#9478/#9522). The full inventory stays available as detail below.
