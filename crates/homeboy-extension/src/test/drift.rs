@@ -39,6 +39,13 @@ pub struct DriftOptions {
     pub source_patterns: Vec<String>,
     /// Glob patterns for test files.
     pub test_patterns: Vec<String>,
+    /// Whether the language keeps unit tests inside the source file they cover
+    /// (Rust's `#[cfg(test)] mod tests`) rather than in a separate test file.
+    ///
+    /// When true, a changed source file is itself a test target: selecting only
+    /// separate files that reference its symbols would skip the tests sitting
+    /// directly beside the change.
+    pub inline_tests: bool,
 }
 
 impl DriftOptions {
@@ -60,6 +67,7 @@ impl DriftOptions {
             since: since.to_string(),
             source_patterns: glob_patterns(&config.source_dirs, extensions),
             test_patterns: glob_patterns(&config.test_dirs, extensions),
+            inline_tests: config.inline_tests,
         }
     }
 }
@@ -480,6 +488,43 @@ fn matches_any_pattern(path: &str, patterns: &[String]) -> bool {
         glob::Pattern::new(pattern)
             .map(|compiled| compiled.matches_path(Path::new(path)))
             .unwrap_or(false)
+    })
+}
+
+/// True when `path` is a changed production source file that declares its own
+/// unit tests, and the component's language keeps tests inline.
+///
+/// Reads the working-tree file because the tests live in the file's current
+/// contents, not in the diff. A file that cannot be read, is not a production
+/// source file, or declares no test function returns `false` so the caller
+/// never emits a filter that would match zero tests. (#10465)
+pub fn is_inline_test_source(opts: &DriftOptions, path: &str) -> bool {
+    if !opts.inline_tests || is_test_path(path) {
+        return false;
+    }
+    if !matches_any_pattern(path, &opts.source_patterns) {
+        return false;
+    }
+
+    std::fs::read_to_string(opts.root.join(path))
+        .map(|contents| declares_test_function(&contents))
+        .unwrap_or(false)
+}
+
+/// True when Rust-like `contents` declares at least one test function via a
+/// `#[test]` or `#[<path>::test]` (e.g. `#[tokio::test]`) attribute.
+pub fn declares_test_function(contents: &str) -> bool {
+    contents.lines().any(|line| {
+        let Some(attr) = line.trim_start().strip_prefix("#[") else {
+            return false;
+        };
+        let head = attr
+            .trim_start()
+            .split(|c| c == '(' || c == ']' || c == ',')
+            .next()
+            .unwrap_or("")
+            .trim();
+        head == "test" || head.rsplit("::").next() == Some("test")
     })
 }
 
@@ -1025,6 +1070,7 @@ mod tests {
             since: "HEAD".to_string(),
             source_patterns: vec!["src/**/*.rs".to_string()],
             test_patterns: vec!["tests/**/*.rs".to_string()],
+            inline_tests: false,
         };
 
         let report = detect_drift("fixture", &opts).expect("drift report");
@@ -1065,6 +1111,7 @@ mod tests {
             since: "HEAD".to_string(),
             source_patterns: vec!["inc/**/*.php".to_string()],
             test_patterns: vec!["tests/**/*.php".to_string()],
+            inline_tests: false,
         };
 
         let report = detect_drift("fixture", &opts).expect("drift report");
@@ -1113,6 +1160,7 @@ mod tests {
             since: "HEAD".to_string(),
             source_patterns: vec!["src/**/*.rs".to_string()],
             test_patterns: vec!["tests/**/*.rs".to_string()],
+            inline_tests: false,
         };
 
         let relocated = relocation_only_source_files(
@@ -1164,6 +1212,7 @@ mod tests {
             since: "HEAD".to_string(),
             source_patterns: vec!["src/**/*.rs".to_string()],
             test_patterns: vec!["tests/**/*.rs".to_string()],
+            inline_tests: false,
         };
 
         let relocated = relocation_only_source_files(
@@ -1219,6 +1268,7 @@ mod tests {
             since: "HEAD".to_string(),
             source_patterns: Vec::new(),
             test_patterns: Vec::new(),
+            inline_tests: false,
         };
         assert!(!empty.has_usable_patterns());
     }
@@ -1377,6 +1427,20 @@ mod workspace_layout_tests {
         );
     }
 
+    fn rust_extension_options_at(root: &Path) -> DriftOptions {
+        DriftOptions::from_config(
+            root,
+            "HEAD",
+            &TestDriftConfig {
+                source_dirs: vec!["src".to_string()],
+                test_dirs: vec!["tests".to_string()],
+                file_extensions: vec!["rs".to_string()],
+                inline_tests: true,
+            },
+            &["rs".to_string()],
+        )
+    }
+
     fn rust_extension_options() -> DriftOptions {
         // Exactly what `.config/homeboy/extensions/rust/rust.json` declares.
         DriftOptions::from_config(
@@ -1397,6 +1461,84 @@ mod workspace_layout_tests {
     /// those files as source; otherwise a change to any member crate is
     /// invisible to drift detection AND to the `#8340` fail-closed guard, so the
     /// gate reports green without running that crate's tests.
+
+    /// The regression that motivated this: `76c8c99a8` changed
+    /// `crates/homeboy-lab-runner/src/lab/offload/hydration.rs` and broke two
+    /// `#[cfg(test)] mod tests` cases inside that very crate. Drift only maps a
+    /// change to *separate* files referencing its symbols, so the tests beside
+    /// the edit were never selected and the gate reported green.
+    #[test]
+    fn changed_source_with_inline_tests_is_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("crates/member/src/lab/offload")).unwrap();
+        let changed = "crates/member/src/lab/offload/hydration.rs";
+        std::fs::write(
+            root.join(changed),
+            "pub fn hydrate() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn hydrates() {}\n}\n",
+        )
+        .unwrap();
+
+        let opts = rust_extension_options_at(root);
+
+        assert!(
+            is_inline_test_source(&opts, changed),
+            "a changed source carrying its own tests must be selectable"
+        );
+    }
+
+    /// A source file with no tests of its own must not be selected: it would
+    /// compile a cargo filter matching zero tests, which the runner treats as a
+    /// failure rather than a pass.
+    #[test]
+    fn changed_source_without_inline_tests_is_not_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("crates/member/src")).unwrap();
+        let changed = "crates/member/src/plain.rs";
+        std::fs::write(root.join(changed), "pub fn helper() {}\n").unwrap();
+
+        let opts = rust_extension_options_at(root);
+
+        assert!(!is_inline_test_source(&opts, changed));
+    }
+
+    /// Languages that keep tests in separate files must be unaffected.
+    #[test]
+    fn inline_selection_is_off_when_the_language_does_not_use_inline_tests() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let changed = "src/Thing.php";
+        std::fs::write(root.join(changed), "<?php\n#[test]\nclass Thing {}\n").unwrap();
+
+        let opts = DriftOptions::from_config(
+            root,
+            "HEAD",
+            &TestDriftConfig {
+                source_dirs: vec!["src".to_string()],
+                test_dirs: vec!["tests".to_string()],
+                file_extensions: vec!["php".to_string()],
+                inline_tests: false,
+            },
+            &["php".to_string()],
+        );
+
+        assert!(!is_inline_test_source(&opts, changed));
+    }
+
+    /// Docs and non-source files are never inline test targets, even when the
+    /// language uses inline tests.
+    #[test]
+    fn non_source_changes_are_never_inline_test_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("README.md"), "#[test]\n").unwrap();
+
+        let opts = rust_extension_options_at(root);
+
+        assert!(!is_inline_test_source(&opts, "README.md"));
+    }
 
     /// Drift detection must see a change inside a monorepo member crate as a
     /// production change and route it to the test that references the changed
