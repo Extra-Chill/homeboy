@@ -21,16 +21,18 @@ use crate::dependency_materialization_cache::{
 use crate::pipeline::PipelineOutcome;
 use crate::runner::{
     head_sha_and_branch, run_check, run_check_groups, run_down, run_down_with_settings,
-    run_fuzz_prepare, run_repair, run_status, run_up, snapshot_state, CheckReport,
-    RigComponentStatusReport, RigStatusReport, ServiceStatusReport, SymlinkStatusState, UpReport,
+    run_fuzz_prepare, run_repair, run_status, run_up, snapshot_state, CheckReport, RepairReport,
+    RepairResourceReport, RigComponentStatusReport, RigStatusReport, ServiceStatusReport,
+    SymlinkStatusState, UpReport,
 };
 use crate::spec::{
     ComponentSpec, DependencyMaterializationOutputKind, DependencyMaterializationOutputSpec,
-    DependencyMaterializationSafety, DependencyMaterializationStepSpec, ExecutableRequirementSpec,
-    FilesystemAssertionKind, FilesystemAssertionSpec, PipelineStep, RigRequirementsSpec,
-    RigResourcesSpec, RigSpec, ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec, SymlinkSpec,
+    DependencyMaterializationSafety, DependencyMaterializationStepSpec, DiscoverSpec,
+    ExecutableRequirementSpec, FilesystemAssertionKind, FilesystemAssertionSpec, PipelineStep,
+    RigRequirementsSpec, RigResourcesSpec, RigSpec, ServiceKind, ServiceSpec, SharedPathOp,
+    SharedPathSpec, SymlinkSpec,
 };
-use crate::state::RigState;
+use crate::state::{RigState, ServiceState};
 use homeboy_core::test_support::with_isolated_home;
 
 fn empty_pipeline(name: &str) -> PipelineOutcome {
@@ -183,6 +185,7 @@ fn test_run_up() {
             paths: vec!["/tmp/run-up-path".to_string()],
             ports: vec![9981],
             process_patterns: vec!["run-up-process".to_string()],
+            ..Default::default()
         };
         let report = run_up(&rig).expect("run_up succeeds with empty pipeline");
         assert_eq!(report.rig_id, "run-up-fixture");
@@ -658,6 +661,345 @@ fn test_run_repair_does_not_run_pipeline_commands() {
             !command_marker.exists(),
             "repair must not run heavy or arbitrary pipeline commands"
         );
+    });
+}
+
+// ------------------------------------------------------------------
+// repair: shared paths
+// ------------------------------------------------------------------
+
+fn shared_path_spec(id: &str, link: &std::path::Path, target: &std::path::Path) -> RigSpec {
+    RigSpec {
+        shared_paths: vec![SharedPathSpec {
+            link: link.to_string_lossy().into_owned(),
+            target: target.to_string_lossy().into_owned(),
+        }],
+        ..minimal_spec(id)
+    }
+}
+
+fn resource(report: &RepairReport, kind: &str) -> RepairResourceReport {
+    report
+        .resources
+        .iter()
+        .find(|resource| resource.kind == kind)
+        .unwrap_or_else(|| panic!("{kind} resource in report"))
+        .clone()
+}
+
+#[cfg(unix)]
+#[test]
+fn test_run_repair_creates_missing_shared_path() {
+    with_isolated_home(|_dir| {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let target = tmp.path().join("primary-node_modules");
+        let link = tmp.path().join("worktree-node_modules");
+        std::fs::create_dir(&target).expect("target dir");
+
+        let rig = shared_path_spec("repair-missing-shared-path-fixture", &link, &target);
+        let report = run_repair(&rig).expect("repair succeeds");
+
+        assert!(report.success);
+        let shared = resource(&report, "shared_path");
+        assert_eq!(shared.status, "repaired");
+        assert_eq!(std::fs::read_link(&link).expect("read link"), target);
+
+        // Ownership is recorded, so `down` / a later repair can clean it up.
+        let state = RigState::load("repair-missing-shared-path-fixture").expect("state");
+        assert!(state
+            .shared_paths
+            .contains_key(link.to_string_lossy().as_ref()));
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn test_run_repair_leaves_healthy_shared_path_alone() {
+    with_isolated_home(|_dir| {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let target = tmp.path().join("primary-node_modules");
+        let link = tmp.path().join("worktree-node_modules");
+        std::fs::create_dir(&target).expect("target dir");
+        unix_symlink(&target, &link);
+
+        let rig = shared_path_spec("repair-healthy-shared-path-fixture", &link, &target);
+        let report = run_repair(&rig).expect("repair succeeds");
+
+        assert!(report.success);
+        assert_eq!(report.unchanged, 1);
+        assert_eq!(resource(&report, "shared_path").status, "unchanged");
+        assert_eq!(std::fs::read_link(&link).expect("read link"), target);
+    });
+}
+
+/// Ownership contract: a symlink this rig never created is reported, never
+/// replaced — even when it points somewhere the spec disagrees with.
+#[cfg(unix)]
+#[test]
+fn test_run_repair_blocks_unowned_shared_path_symlink() {
+    with_isolated_home(|_dir| {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let target = tmp.path().join("primary-node_modules");
+        let foreign = tmp.path().join("someone-elses-node_modules");
+        let link = tmp.path().join("worktree-node_modules");
+        std::fs::create_dir(&target).expect("target dir");
+        std::fs::create_dir(&foreign).expect("foreign dir");
+        unix_symlink(&foreign, &link);
+
+        let rig = shared_path_spec("repair-unowned-shared-path-fixture", &link, &target);
+        let report = run_repair(&rig).expect("repair reports blocked resource");
+
+        assert!(!report.success);
+        assert_eq!(report.blocked, 1);
+        let shared = resource(&report, "shared_path");
+        assert_eq!(shared.status, "blocked");
+        assert!(shared
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("does not own"));
+        assert_eq!(
+            std::fs::read_link(&link).expect("read link"),
+            foreign,
+            "an unowned symlink must survive repair untouched"
+        );
+    });
+}
+
+/// A rig-owned link whose target vanished is dangling drift. `cleanup` removes
+/// exactly what this rig created and nothing else.
+#[cfg(unix)]
+#[test]
+fn test_run_repair_removes_rig_owned_dangling_shared_path() {
+    with_isolated_home(|_dir| {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let target = tmp.path().join("primary-node_modules");
+        let link = tmp.path().join("worktree-node_modules");
+        std::fs::create_dir(&target).expect("target dir");
+
+        let rig = shared_path_spec("repair-dangling-shared-path-fixture", &link, &target);
+        run_repair(&rig).expect("repair creates the link");
+        std::fs::remove_dir_all(&target).expect("remove target");
+
+        let report = run_repair(&rig).expect("repair succeeds");
+
+        assert!(report.success);
+        assert_eq!(report.repaired, 1);
+        assert_eq!(resource(&report, "shared_path").status, "repaired");
+        assert!(!link.is_symlink(), "dangling rig-owned link is removed");
+
+        let state = RigState::load("repair-dangling-shared-path-fixture").expect("state");
+        assert!(state.shared_paths.is_empty(), "ownership record is dropped");
+    });
+}
+
+/// A real directory at the link path satisfies the dependency. Repair must
+/// never delete it to "fix" the declaration.
+#[cfg(unix)]
+#[test]
+fn test_run_repair_never_removes_a_real_directory_at_a_shared_path() {
+    with_isolated_home(|_dir| {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let target = tmp.path().join("primary-node_modules");
+        let link = tmp.path().join("worktree-node_modules");
+        std::fs::create_dir(&target).expect("target dir");
+        std::fs::create_dir(&link).expect("real dir at link path");
+        std::fs::write(link.join("marker"), "real").expect("marker");
+
+        let rig = shared_path_spec("repair-real-dir-shared-path-fixture", &link, &target);
+        let report = run_repair(&rig).expect("repair succeeds");
+
+        assert!(report.success);
+        assert_eq!(resource(&report, "shared_path").status, "unchanged");
+        assert_eq!(
+            std::fs::read_to_string(link.join("marker")).expect("marker"),
+            "real"
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn test_run_repair_blocks_shared_path_with_missing_target() {
+    with_isolated_home(|_dir| {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let target = tmp.path().join("never-materialized");
+        let link = tmp.path().join("worktree-node_modules");
+
+        let rig = shared_path_spec("repair-missing-target-fixture", &link, &target);
+        let report = run_repair(&rig).expect("repair reports blocked resource");
+
+        assert!(!report.success);
+        assert_eq!(report.blocked, 1);
+        let shared = resource(&report, "shared_path");
+        assert_eq!(shared.status, "blocked");
+        assert!(shared
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("does not exist"));
+        assert!(!link.exists() && !link.is_symlink());
+    });
+}
+
+// ------------------------------------------------------------------
+// repair: services
+// ------------------------------------------------------------------
+
+fn service_rig(id: &str, kind: ServiceKind) -> RigSpec {
+    let discover = (kind == ServiceKind::External).then(|| DiscoverSpec {
+        pattern: "homeboy-repair-fixture-never-matches".to_string(),
+        argv_contains: Vec::new(),
+    });
+    let mut services = HashMap::new();
+    services.insert(
+        "web".to_string(),
+        ServiceSpec {
+            kind,
+            cwd: Some("/tmp".to_string()),
+            port: Some(9724),
+            command: None,
+            env: HashMap::new(),
+            health: None,
+            discover,
+        },
+    );
+    RigSpec {
+        services,
+        ..minimal_spec(id)
+    }
+}
+
+/// Dead PID in rig state is drift the rig owns: it wrote that record. Repair
+/// clears it without signalling anything (the process is already gone).
+#[test]
+fn test_run_repair_clears_stale_service_state() {
+    with_isolated_home(|_dir| {
+        let rig = service_rig("repair-stale-service-fixture", ServiceKind::HttpStatic);
+        let mut state = RigState::default();
+        state.services.insert(
+            "web".to_string(),
+            ServiceState {
+                // Above i32::MAX, so it can never be a live PID.
+                pid: Some(u32::MAX),
+                started_at: Some("2026-01-01T00:00:00Z".to_string()),
+                status: "running".to_string(),
+            },
+        );
+        state.save("repair-stale-service-fixture").expect("state");
+
+        let report = run_repair(&rig).expect("repair succeeds");
+
+        assert!(report.success);
+        assert_eq!(report.repaired, 1);
+        let service = resource(&report, "service");
+        assert_eq!(service.status, "repaired");
+        assert_eq!(service.path, "web");
+        assert_eq!(service.previous_target.as_deref(), Some("4294967295"));
+
+        let state = RigState::load("repair-stale-service-fixture").expect("state");
+        assert!(
+            !state.services.contains_key("web"),
+            "stale service record is cleared"
+        );
+    });
+}
+
+/// `repair` is not `up`: it reports a stopped service instead of starting one.
+#[test]
+fn test_run_repair_does_not_start_stopped_services() {
+    with_isolated_home(|_dir| {
+        let rig = service_rig("repair-stopped-service-fixture", ServiceKind::HttpStatic);
+
+        let report = run_repair(&rig).expect("repair succeeds");
+
+        assert!(report.success);
+        assert_eq!(report.skipped, 1);
+        let service = resource(&report, "service");
+        assert_eq!(service.status, "skipped");
+        assert!(service
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("does not start services"));
+
+        let state = RigState::load("repair-stopped-service-fixture").expect("state");
+        assert!(state.services.is_empty(), "repair started nothing");
+    });
+}
+
+/// Adopted `external` processes belong to something else. Repair reports them
+/// and never signals them.
+#[test]
+fn test_run_repair_skips_external_services() {
+    with_isolated_home(|_dir| {
+        let rig = service_rig("repair-external-service-fixture", ServiceKind::External);
+
+        let report = run_repair(&rig).expect("repair succeeds");
+
+        assert!(report.success);
+        assert_eq!(report.skipped, 1);
+        let service = resource(&report, "service");
+        assert_eq!(service.status, "skipped");
+        assert!(service
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("adopted"));
+    });
+}
+
+// ------------------------------------------------------------------
+// repair: declarative resource coverage
+// ------------------------------------------------------------------
+
+/// Classes repair cannot fix safely are reported, not silently dropped.
+#[test]
+fn test_run_repair_reports_uncovered_declared_resources() {
+    with_isolated_home(|_dir| {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let present = tmp.path().join("present");
+        std::fs::create_dir(&present).expect("present dir");
+
+        let mut rig = minimal_spec("repair-declared-resources-fixture");
+        rig.resources = RigResourcesSpec {
+            exclusive: vec!["repair-runtime".to_string()],
+            paths: vec![
+                present.to_string_lossy().into_owned(),
+                tmp.path().join("absent").to_string_lossy().into_owned(),
+            ],
+            ports: vec![9981],
+            process_patterns: vec!["repair-fixture".to_string()],
+            ..Default::default()
+        };
+
+        let report = run_repair(&rig).expect("repair succeeds");
+
+        // Nothing here is repairable, but nothing is silently missing either.
+        assert!(report.success);
+        assert_eq!(report.repaired, 0);
+        assert_eq!(report.blocked, 0);
+        assert_eq!(report.resources.len(), 5);
+        assert_eq!(report.unchanged, 1, "the present declared path is healthy");
+        assert_eq!(report.skipped, 4);
+
+        let kinds = report
+            .resources
+            .iter()
+            .map(|resource| resource.kind.as_str())
+            .collect::<Vec<_>>();
+        assert!(kinds.contains(&"rig_exclusive"));
+        assert!(kinds.contains(&"rig_path"));
+        assert!(kinds.contains(&"rig_port"));
+        assert!(kinds.contains(&"rig_process_pattern"));
+
+        for resource in &report.resources {
+            assert!(
+                resource.detail.is_some(),
+                "{} must explain itself",
+                resource.kind
+            );
+        }
     });
 }
 

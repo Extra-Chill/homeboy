@@ -295,6 +295,7 @@ fn test_run_up_persists_step_order_source_and_component_snapshot() {
             paths: vec![repo.to_string_lossy().to_string()],
             ports: vec![9981],
             process_patterns: Vec::new(),
+            ..Default::default()
         };
         rig.components.insert(
             "component".to_string(),

@@ -904,6 +904,7 @@ mod tests {
             paths: vec!["/tmp/homeboy-studio".to_string()],
             ports: vec![9724],
             process_patterns: vec!["app-server-child.mjs".to_string()],
+            ..Default::default()
         }
     }
 

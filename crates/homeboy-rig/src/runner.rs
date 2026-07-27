@@ -18,9 +18,9 @@ use super::expand::{expand_resources, expand_vars};
 use super::lease::acquire_active_run_lease;
 use super::lint::run_package_lint;
 use super::pipeline::{
-    cleanup_shared_paths, run_command_step, run_pipeline, run_pipeline_check_groups,
-    run_pipeline_with_settings, run_prepare_requirement_steps, PipelineOutcome,
-    PipelineStepOutcome,
+    cleanup_shared_paths, repair_shared_paths, run_command_step, run_pipeline,
+    run_pipeline_check_groups, run_pipeline_with_settings, run_prepare_requirement_steps,
+    PipelineOutcome, PipelineStepOutcome, SharedPathRepair, SharedPathRepairStatus,
 };
 use super::resource_lifecycle::{
     dependency_materialization_cache_lifecycle_record, rig_resource_lifecycle_index,
@@ -92,6 +92,13 @@ pub struct DownReport {
 }
 
 /// Report from `rig repair`.
+///
+/// Counters partition `resources` by status:
+///
+/// - `repaired` — drift this rig owned and corrected
+/// - `unchanged` — already healthy
+/// - `blocked` — drift that needs manual attention; fails the command
+/// - `skipped` — declared resources `repair` deliberately does not manage
 #[derive(Debug, Clone, Serialize)]
 pub struct RepairReport {
     pub rig_id: String,
@@ -99,6 +106,7 @@ pub struct RepairReport {
     pub repaired: usize,
     pub unchanged: usize,
     pub blocked: usize,
+    pub skipped: usize,
     pub success: bool,
 }
 
@@ -111,9 +119,21 @@ pub struct RepairResourceReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_target: Option<String>,
     pub status: String,
+    /// Human-readable explanation of what repair did, or why it did not act.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
+
+/// `repaired` — drift this rig owned and corrected.
+pub const REPAIR_STATUS_REPAIRED: &str = "repaired";
+/// `unchanged` — the resource is already healthy.
+pub const REPAIR_STATUS_UNCHANGED: &str = "unchanged";
+/// `blocked` — drift repair refuses to touch; needs manual attention.
+pub const REPAIR_STATUS_BLOCKED: &str = "blocked";
+/// `skipped` — declared, but outside what `repair` manages.
+pub const REPAIR_STATUS_SKIPPED: &str = "skipped";
 
 /// Report from `rig status`.
 #[derive(Debug, Clone, Serialize)]
@@ -690,25 +710,45 @@ pub fn run_down_with_settings(rig: &RigSpec, settings: &[(String, String)]) -> R
 
 /// Repair safe declared drift without running the heavy `up` pipeline.
 ///
-/// v1 intentionally repairs only declared symlinks. It will create missing
-/// symlinks and replace drifted symlinks, but refuses to remove real
-/// files/directories at the link path.
+/// Covered classes, all ownership-checked — repair never removes something
+/// this rig did not create:
+///
+/// - `symlinks` — creates missing links, replaces drifted ones, refuses to
+///   remove a real file or directory at the link path
+/// - `shared_paths` — reuses the declared `ensure` / `cleanup` ops, so only
+///   links this rig created and still owns are removed or relinked
+/// - `services` — clears rig state for a recorded PID that is no longer alive
+///   (`service::stop` is a no-op on a dead PID beyond dropping the record).
+///   Repair never starts services and never signals adopted `external`
+///   processes.
+///
+/// The remaining declared classes — `resources.exclusive`, `resources.paths`,
+/// `resources.ports`, `resources.process_patterns` — are inspected read-only
+/// and reported as `skipped` with the reason, so the coverage gap is visible in
+/// the report rather than silently absent.
 pub fn run_repair(rig: &RigSpec) -> Result<RepairReport> {
     let _lease = acquire_active_run_lease(rig, "repair")?;
     let mut resources = Vec::new();
+
+    for link in &rig.symlinks {
+        resources.push(repair_symlink(rig, link)?);
+    }
+    resources.extend(repair_rig_shared_paths(rig)?);
+    resources.extend(repair_services(rig)?);
+    resources.extend(report_declared_resources(rig));
+
     let mut repaired = 0;
     let mut unchanged = 0;
     let mut blocked = 0;
-
-    for link in &rig.symlinks {
-        let resource = repair_symlink(rig, link)?;
+    let mut skipped = 0;
+    for resource in &resources {
         match resource.status.as_str() {
-            "repaired" => repaired += 1,
-            "unchanged" => unchanged += 1,
-            "blocked" => blocked += 1,
+            REPAIR_STATUS_REPAIRED => repaired += 1,
+            REPAIR_STATUS_UNCHANGED => unchanged += 1,
+            REPAIR_STATUS_BLOCKED => blocked += 1,
+            REPAIR_STATUS_SKIPPED => skipped += 1,
             _ => {}
         }
-        resources.push(resource);
     }
 
     Ok(RepairReport {
@@ -718,7 +758,173 @@ pub fn run_repair(rig: &RigSpec) -> Result<RepairReport> {
         repaired,
         unchanged,
         blocked,
+        skipped,
     })
+}
+
+/// Repair declared shared paths through the shared-path ops.
+fn repair_rig_shared_paths(rig: &RigSpec) -> Result<Vec<RepairResourceReport>> {
+    Ok(repair_shared_paths(rig)?
+        .into_iter()
+        .map(|repair: SharedPathRepair| RepairResourceReport {
+            kind: "shared_path".to_string(),
+            path: repair.link,
+            expected_target: Some(repair.target),
+            previous_target: repair.previous_target,
+            status: match repair.status {
+                SharedPathRepairStatus::Repaired => REPAIR_STATUS_REPAIRED,
+                SharedPathRepairStatus::Unchanged => REPAIR_STATUS_UNCHANGED,
+                SharedPathRepairStatus::Blocked => REPAIR_STATUS_BLOCKED,
+            }
+            .to_string(),
+            detail: repair.detail,
+            error: repair.error,
+        })
+        .collect())
+}
+
+/// Reconcile declared services with live process state.
+///
+/// Only stale rig-recorded PIDs are repaired: the rig wrote that PID, the
+/// process is gone, and the record is drift. Running services are left alone,
+/// stopped services are reported (starting them is `up`'s job), and adopted
+/// `external` services are never signalled — this rig does not own them.
+fn repair_services(rig: &RigSpec) -> Result<Vec<RepairResourceReport>> {
+    let mut service_ids = rig.services.keys().cloned().collect::<Vec<_>>();
+    service_ids.sort();
+
+    let mut reports = Vec::with_capacity(service_ids.len());
+    for service_id in service_ids {
+        let spec = &rig.services[&service_id];
+        if spec.kind == ServiceKind::External {
+            reports.push(service_resource(
+                &service_id,
+                REPAIR_STATUS_SKIPPED,
+                None,
+                "external services are adopted, not rig-managed; repair does not signal a process this rig did not start",
+                None,
+            ));
+            continue;
+        }
+
+        match service::status(&rig.id, &service_id)? {
+            ServiceStatus::Running(pid) => reports.push(service_resource(
+                &service_id,
+                REPAIR_STATUS_UNCHANGED,
+                Some(pid.to_string()),
+                "service is running",
+                None,
+            )),
+            ServiceStatus::Stale(pid) => {
+                // `stop` on a dead PID only drops the stale state record.
+                service::stop(rig, &service_id)?;
+                reports.push(service_resource(
+                    &service_id,
+                    REPAIR_STATUS_REPAIRED,
+                    Some(pid.to_string()),
+                    "cleared stale rig state for a process that is no longer running",
+                    None,
+                ));
+            }
+            ServiceStatus::Stopped => reports.push(service_resource(
+                &service_id,
+                REPAIR_STATUS_SKIPPED,
+                None,
+                "service is not running; repair does not start services — run `homeboy rig up`",
+                None,
+            )),
+        }
+    }
+    Ok(reports)
+}
+
+fn service_resource(
+    service_id: &str,
+    status: &str,
+    previous_target: Option<String>,
+    detail: &str,
+    error: Option<String>,
+) -> RepairResourceReport {
+    RepairResourceReport {
+        kind: "service".to_string(),
+        path: service_id.to_string(),
+        expected_target: None,
+        previous_target,
+        status: status.to_string(),
+        detail: Some(detail.to_string()),
+        error,
+    }
+}
+
+/// Read-only coverage report for the declarative `resources` block.
+///
+/// These classes have no ownership-safe repair without new infrastructure
+/// (binding ports, signalling matched processes, or creating paths whose shape
+/// the rig never declared). Reporting them keeps the gap tracked instead of
+/// hidden behind a silent skip.
+fn report_declared_resources(rig: &RigSpec) -> Vec<RepairResourceReport> {
+    let mut reports = Vec::new();
+
+    for token in &rig.resources.exclusive {
+        reports.push(declared_resource(
+            "rig_exclusive",
+            expand_vars(rig, token),
+            REPAIR_STATUS_SKIPPED,
+            "exclusive resource tokens are lease-scoped; repair does not adjust rig leases",
+        ));
+    }
+
+    for path in &rig.resources.paths {
+        let expanded = expand_vars(rig, path);
+        let candidate = Path::new(&expanded);
+        let present = candidate.exists() || candidate.is_symlink();
+        reports.push(declared_resource(
+            "rig_path",
+            expanded,
+            if present {
+                REPAIR_STATUS_UNCHANGED
+            } else {
+                REPAIR_STATUS_SKIPPED
+            },
+            if present {
+                "declared resource path is present"
+            } else {
+                "declared resource path is missing; repair does not create paths the rig never described — run `homeboy rig up`"
+            },
+        ));
+    }
+
+    for port in &rig.resources.ports {
+        reports.push(declared_resource(
+            "rig_port",
+            format!("tcp://localhost:{port}"),
+            REPAIR_STATUS_SKIPPED,
+            "port ownership is declarative; repair does not bind, probe, or reclaim ports",
+        ));
+    }
+
+    for pattern in &rig.resources.process_patterns {
+        reports.push(declared_resource(
+            "rig_process_pattern",
+            format!("process-pattern:{}", expand_vars(rig, pattern)),
+            REPAIR_STATUS_SKIPPED,
+            "process-pattern ownership is declarative; repair does not signal matched processes",
+        ));
+    }
+
+    reports
+}
+
+fn declared_resource(kind: &str, path: String, status: &str, detail: &str) -> RepairResourceReport {
+    RepairResourceReport {
+        kind: kind.to_string(),
+        path,
+        expected_target: None,
+        previous_target: None,
+        status: status.to_string(),
+        detail: Some(detail.to_string()),
+        error: None,
+    }
 }
 
 fn repair_symlink(rig: &RigSpec, link: &SymlinkSpec) -> Result<RepairResourceReport> {
@@ -749,7 +955,8 @@ fn repair_symlink(rig: &RigSpec, link: &SymlinkSpec) -> Result<RepairResourceRep
             let previous_target = current.to_string_lossy().into_owned();
             if current == target_path {
                 return Ok(RepairResourceReport {
-                    status: "unchanged".to_string(),
+                    status: REPAIR_STATUS_UNCHANGED.to_string(),
+                    detail: Some("symlink already points at its declared target".to_string()),
                     ..symlink_resource(path, expected_target, Some(previous_target), None)
                 });
             }
@@ -763,12 +970,14 @@ fn repair_symlink(rig: &RigSpec, link: &SymlinkSpec) -> Result<RepairResourceRep
             })?;
             create_repair_symlink(rig, &target_path, &link_path)?;
             Ok(RepairResourceReport {
-                status: "repaired".to_string(),
+                status: REPAIR_STATUS_REPAIRED.to_string(),
+                detail: Some("relinked drifted symlink to its declared target".to_string()),
                 ..symlink_resource(path, expected_target, Some(previous_target), None)
             })
         }
         Ok(_) => Ok(RepairResourceReport {
-            status: "blocked".to_string(),
+            status: REPAIR_STATUS_BLOCKED.to_string(),
+            detail: Some("link path holds a real file or directory".to_string()),
             ..symlink_resource(
                 path,
                 expected_target,
@@ -779,7 +988,8 @@ fn repair_symlink(rig: &RigSpec, link: &SymlinkSpec) -> Result<RepairResourceRep
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             create_repair_symlink(rig, &target_path, &link_path)?;
             Ok(RepairResourceReport {
-                status: "repaired".to_string(),
+                status: REPAIR_STATUS_REPAIRED.to_string(),
+                detail: Some("created missing declared symlink".to_string()),
                 ..symlink_resource(path, expected_target, None, None)
             })
         }
@@ -803,6 +1013,7 @@ fn symlink_resource(
         expected_target: Some(expected_target),
         previous_target,
         status: String::new(),
+        detail: None,
         error,
     }
 }
