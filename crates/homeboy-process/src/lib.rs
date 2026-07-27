@@ -989,6 +989,43 @@ mod tests {
     }
 
     #[test]
+    fn bounded_force_termination_kills_session_escapee() {
+        use std::os::unix::process::CommandExt;
+
+        let pid_file = std::env::temp_dir().join(format!(
+            "homeboy-process-escaped-descendant-{}.pid",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&pid_file);
+        let script = format!(
+            "setsid sleep 30 & echo $! > {}; wait",
+            pid_file.display()
+        );
+        let mut command = Command::new("sh");
+        command.args(["-c", &script]).process_group(0);
+        let mut child = command.spawn().expect("spawn owned process tree");
+        for _ in 0..100 {
+            if pid_file.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let escaped_pid = std::fs::read_to_string(&pid_file)
+            .expect("escaped descendant pid")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric escaped descendant pid");
+
+        let started = Instant::now();
+        force_terminate_process_tree_bounded(child.id(), Duration::from_millis(500))
+            .expect("force-terminate owned tree");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let _ = child.wait();
+        let _ = std::fs::remove_file(&pid_file);
+        assert!(!pid_is_running(escaped_pid));
+    }
+
+    #[test]
     fn force_stop_environment_ownership_requires_an_exact_assignment() {
         let environment = b"HOME=/tmp\0HOMEBOY_DAEMON_STARTUP_TOKEN=lease-token\0";
 
