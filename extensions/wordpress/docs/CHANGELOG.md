@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.5] - 2026-07-27
+
+### Fixed
+- trust resolved PHPUnit dependencies
+
 ## [3.34.4] - 2026-07-26
 
 ### Fixed
