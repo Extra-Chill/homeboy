@@ -2,10 +2,10 @@
  * External dependencies
  */
 import { strict as assert } from 'node:assert';
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 const extension = path.resolve(import.meta.dirname, '..');
 const runner = path.join(extension, 'scripts/test/test-runner-wp-codebox.sh');
@@ -145,6 +145,70 @@ printf '%s\\n' '${JSON.stringify({ data: { entity: { local_path: conflictingData
   const metadataProvenance = JSON.parse(await readFile(path.join(metadataRunArtifact, 'wp-codebox-phpunit-provenance.json'), 'utf8'));
   assert.deepEqual(metadataOptions.extra_plugins.slice(1), [{ source: dataMachine, slug: 'data-machine', activate: true }]);
   assert.deepEqual(metadataProvenance.source_refs.slice(1), [{ slug: 'data-machine', source: dataMachine }]);
+
+  const malformedManifestArtifacts = path.join(root, 'malformed-manifest-artifacts');
+  await mkdir(malformedManifestArtifacts);
+  await writeFile(path.join(malformedManifestArtifacts, 'homeboy-artifact-manifest.json'), '{"schema":"homeboy/artifact-manifest/v1","artifacts":{}}\n');
+  const malformedManifestRun = spawnSync(runner, [], { env: { ...process.env, FIXTURE: JSON.stringify({ sidecar: unknownSidecar, output: green }), HOMEBOY_COMPONENT_PATH: component, COMPONENT_ID: 'component', HOMEBOY_WP_CODEBOX_BIN: cli, HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: path.join(root, 'malformed-manifest-run'), HOMEBOY_INVOCATION_ARTIFACT_DIR: malformedManifestArtifacts, HOMEBOY_RUNTIME_WRITE_TEST_RESULTS: resultsWriter, HOMEBOY_TEST_RESULTS_FILE: path.join(root, 'malformed-manifest-results.json'), HOMEBOY_SETTINGS_JSON: '{}' }, encoding: 'utf8' });
+  assert.notEqual(malformedManifestRun.status, 0);
+  assert.match(malformedManifestRun.stderr, /invalid artifact manifest/);
+
+  for (const symlinkCase of ['root', 'directory', 'manifest']) {
+    const invocationRoot = path.join(root, `symlink-${symlinkCase}`);
+    const target = path.join(root, `symlink-${symlinkCase}-target`);
+    await mkdir(target, { recursive: true });
+    if (symlinkCase === 'root') {
+      await symlink(target, invocationRoot);
+    } else {
+      await mkdir(invocationRoot);
+      await writeFile(path.join(invocationRoot, 'homeboy-artifact-manifest.json'), '{"schema":"homeboy/artifact-manifest/v1"}\n');
+      if (symlinkCase === 'directory') {
+        await symlink(target, path.join(invocationRoot, 'wp-codebox-phpunit'));
+      } else {
+        await rm(path.join(invocationRoot, 'homeboy-artifact-manifest.json'));
+        await symlink(path.join(target, 'manifest.json'), path.join(invocationRoot, 'homeboy-artifact-manifest.json'));
+      }
+    }
+    const rejected = spawnSync(runner, [], { env: { ...process.env, FIXTURE: JSON.stringify({ sidecar: unknownSidecar, output: green }), HOMEBOY_COMPONENT_PATH: component, COMPONENT_ID: 'component', HOMEBOY_WP_CODEBOX_BIN: cli, HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: path.join(root, `symlink-${symlinkCase}-run`), HOMEBOY_INVOCATION_ARTIFACT_DIR: invocationRoot, HOMEBOY_RUNTIME_WRITE_TEST_RESULTS: resultsWriter, HOMEBOY_TEST_RESULTS_FILE: path.join(root, `symlink-${symlinkCase}-results.json`), HOMEBOY_SETTINGS_JSON: '{}' }, encoding: 'utf8' });
+    assert.notEqual(rejected.status, 0, symlinkCase);
+    assert.match(rejected.stderr, /non-symlink|symlink/, symlinkCase);
+  }
+
+  const parserFailureInvocation = path.join(root, 'parser-failure-invocation');
+  const parserFailureBin = path.join(root, 'parser-failure-bin');
+  await mkdir(parserFailureInvocation);
+  await mkdir(parserFailureBin);
+  await writeFile(path.join(parserFailureInvocation, 'homeboy-artifact-manifest.json'), '{"schema":"homeboy/artifact-manifest/v1"}\n');
+  await writeFile(path.join(parserFailureBin, 'php'), '#!/usr/bin/env sh\nexit 1\n');
+  await chmod(path.join(parserFailureBin, 'php'), 0o755);
+  const parserFailureRun = spawnSync(runner, [], { env: { ...process.env, PATH: `${parserFailureBin}:${process.env.PATH}`, FIXTURE: JSON.stringify({ sidecar: unknownSidecar, output: green }), HOMEBOY_COMPONENT_PATH: component, COMPONENT_ID: 'component', HOMEBOY_WP_CODEBOX_BIN: cli, HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: path.join(root, 'parser-failure-run'), HOMEBOY_INVOCATION_ARTIFACT_DIR: parserFailureInvocation, HOMEBOY_RUNTIME_WRITE_TEST_RESULTS: resultsWriter, HOMEBOY_TEST_RESULTS_FILE: path.join(root, 'parser-failure-results.json'), HOMEBOY_TEST_FAILURES_FILE: path.join(root, 'parser-failure-failures.json'), HOMEBOY_SETTINGS_JSON: '{}' }, encoding: 'utf8' });
+  assert.notEqual(parserFailureRun.status, 0);
+  const parserFailureManifest = JSON.parse(await readFile(path.join(parserFailureInvocation, 'homeboy-artifact-manifest.json'), 'utf8'));
+  assert.ok(parserFailureManifest.artifacts.some((artifact) => artifact.path === 'wp-codebox-phpunit/files/test-failures.json'));
+  assert.equal(await readFile(path.join(parserFailureInvocation, 'wp-codebox-phpunit/files/test-failures.json'), 'utf8'), '{}\n');
+
+  const concurrentInvocation = path.join(root, 'concurrent-invocation');
+  await mkdir(concurrentInvocation);
+  await writeFile(path.join(concurrentInvocation, 'homeboy-artifact-manifest.json'), JSON.stringify({ schema: 'homeboy/artifact-manifest/v1', artifacts: [{ id: 'unrelated', path: 'unrelated.json', kind: 'proof', provenance: { producer: 'fixture' } }] }));
+  await writeFile(path.join(concurrentInvocation, 'unrelated.json'), '{}\n');
+  const concurrentRun = (index) => new Promise((resolve, reject) => {
+    const child = spawn(runner, [], { env: { ...process.env, FIXTURE: JSON.stringify({ sidecar: unknownSidecar, output: green }), HOMEBOY_COMPONENT_PATH: component, COMPONENT_ID: 'component', HOMEBOY_WP_CODEBOX_BIN: cli, HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: path.join(root, `concurrent-run-${index}`), HOMEBOY_INVOCATION_ARTIFACT_DIR: concurrentInvocation, HOMEBOY_RUNTIME_WRITE_TEST_RESULTS: resultsWriter, HOMEBOY_TEST_RESULTS_FILE: path.join(root, `concurrent-results-${index}.json`), HOMEBOY_SETTINGS_JSON: '{}' }, stdio: 'ignore' });
+    child.on('error', reject);
+    child.on('close', (status) => resolve(status));
+  });
+  let atomicReaderError;
+  let atomicReaderReads = 0;
+  const reader = setInterval(() => {
+    readFile(path.join(concurrentInvocation, 'homeboy-artifact-manifest.json'), 'utf8').then((text) => { JSON.parse(text); atomicReaderReads += 1; }).catch((error) => { atomicReaderError ||= error; });
+  }, 1);
+  const concurrentStatuses = await Promise.all([concurrentRun(1), concurrentRun(2)]);
+  clearInterval(reader);
+  assert.deepEqual(concurrentStatuses, [0, 0]);
+  assert.ok(atomicReaderReads > 0);
+  assert.equal(atomicReaderError, undefined);
+  const concurrentManifest = JSON.parse(await readFile(path.join(concurrentInvocation, 'homeboy-artifact-manifest.json'), 'utf8'));
+  assert.equal(concurrentManifest.artifacts.find((artifact) => artifact.id === 'unrelated').provenance.producer, 'fixture');
+  assert.equal(concurrentManifest.artifacts.filter((artifact) => artifact.path === 'wp-codebox-phpunit/files/test-results.json').length, 1);
 } finally {
   await rm(root, { recursive: true, force: true });
 }

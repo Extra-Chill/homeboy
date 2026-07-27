@@ -3,7 +3,7 @@
  * External dependencies
  */
 import { createWriteStream } from 'node:fs';
-import { access, copyFile, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
@@ -507,20 +507,28 @@ async function publishPhpunitArtifacts(artifactDirectory, status) {
     return { directory: artifactDirectory, status, failuresPath: '' };
   }
 
-  const publishedFilesDirectory = path.join(invocationArtifacts, 'wp-codebox-phpunit', 'files');
+  const publishedDirectory = path.join(invocationArtifacts, 'wp-codebox-phpunit');
+  const publishedFilesDirectory = path.join(publishedDirectory, 'files');
   const files = [
     { name: 'test-results.json', kind: 'test-results', role: 'structured-test-results', semantic_key: 'test_results', content_type: 'application/json' },
     { name: 'phpunit-output.log', kind: 'phpunit-output', role: 'raw-test-output', semantic_key: 'phpunit_output', content_type: 'text/plain' },
+    { name: 'test-failures.json', kind: 'test-failures', role: 'structured-test-failures', semantic_key: 'test_failures', content_type: 'application/json' },
   ];
-  await mkdir(publishedFilesDirectory, { recursive: true });
-  for (const file of files) {
-    await copyFile(path.join(artifactDirectory, 'files', file.name), path.join(publishedFilesDirectory, file.name));
-  }
-  await registerInvocationArtifacts(invocationArtifacts, files.map((file) => ({
-    ...file,
-    path: path.join('wp-codebox-phpunit', 'files', file.name).replaceAll(path.sep, '/'),
-  })));
-  return { directory: path.join(invocationArtifacts, 'wp-codebox-phpunit'), status, failuresPath: path.join(publishedFilesDirectory, 'test-failures.json') };
+  await withInvocationArtifactLock(invocationArtifacts, async () => {
+    await assertDirectoryTree(invocationArtifacts, ['wp-codebox-phpunit', 'files']);
+    await assertDirectoryTree(artifactDirectory, ['files']);
+    for (const file of files.slice(0, 2)) {
+      await atomicCopy(path.join(artifactDirectory, 'files', file.name), path.join(publishedFilesDirectory, file.name));
+    }
+    // The parser replaces this durable placeholder atomically. Its registration
+    // survives a parser crash so reviewers can still locate the expected evidence.
+    await atomicWrite(path.join(publishedFilesDirectory, 'test-failures.json'), '{}\n');
+    await registerInvocationArtifacts(invocationArtifacts, files.map((file) => ({
+      ...file,
+      path: path.join('wp-codebox-phpunit', 'files', file.name).replaceAll(path.sep, '/'),
+    })));
+  });
+  return { directory: publishedDirectory, status, failuresPath: path.join(publishedFilesDirectory, 'test-failures.json') };
 }
 async function parsePublishedArtifacts(published) {
   if (process.env.HOMEBOY_TEST_RESULTS_FILE) {
@@ -528,22 +536,23 @@ async function parsePublishedArtifacts(published) {
   }
   if (process.env.HOMEBOY_TEST_FAILURES_FILE || published.failuresPath) {
     const requestedFailuresPath = process.env.HOMEBOY_TEST_FAILURES_FILE;
+    const temporaryFailuresPath = published.failuresPath ? `${published.failuresPath}.${process.pid}.parse` : requestedFailuresPath;
     if (published.failuresPath) {
-      process.env.HOMEBOY_TEST_FAILURES_FILE = published.failuresPath;
+      process.env.HOMEBOY_TEST_FAILURES_FILE = temporaryFailuresPath;
     }
-    runScript('parse-test-failures.sh', [published.directory, componentPath]);
-    if (published.failuresPath) {
-      await registerInvocationArtifacts(process.env.HOMEBOY_INVOCATION_ARTIFACT_DIR, [{
-        name: 'test-failures.json',
-        path: 'wp-codebox-phpunit/files/test-failures.json',
-        kind: 'test-failures',
-        role: 'structured-test-failures',
-        semantic_key: 'test_failures',
-        content_type: 'application/json',
-      }]);
-      if (requestedFailuresPath && requestedFailuresPath !== published.failuresPath) {
-        await copyFile(published.failuresPath, requestedFailuresPath);
+    try {
+      runScript('parse-test-failures.sh', [published.directory, componentPath]);
+      if (published.failuresPath) {
+        await withInvocationArtifactLock(process.env.HOMEBOY_INVOCATION_ARTIFACT_DIR, async () => {
+          await assertDirectoryTree(process.env.HOMEBOY_INVOCATION_ARTIFACT_DIR, ['wp-codebox-phpunit', 'files']);
+          await atomicCopy(temporaryFailuresPath, published.failuresPath);
+        });
+        if (requestedFailuresPath && requestedFailuresPath !== published.failuresPath) {
+          await atomicCopy(published.failuresPath, requestedFailuresPath);
+        }
       }
+    } finally {
+      if (published.failuresPath) { await unlink(temporaryFailuresPath).catch(() => {}); }
       if (requestedFailuresPath) {
         process.env.HOMEBOY_TEST_FAILURES_FILE = requestedFailuresPath;
       } else {
@@ -555,13 +564,14 @@ async function parsePublishedArtifacts(published) {
 }
 async function registerInvocationArtifacts(invocationRoot, publishedArtifacts) {
   const manifestPath = path.join(invocationRoot, 'homeboy-artifact-manifest.json');
+  await assertRegularOrMissing(manifestPath);
   let manifest = { schema: 'homeboy/artifact-manifest/v1', artifacts: [] };
   try {
     manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   } catch (error) {
     if (error.code !== 'ENOENT') { throw error; }
   }
-  if (!isObject(manifest) || manifest.schema !== 'homeboy/artifact-manifest/v1') {
+  if (!isObject(manifest) || manifest.schema !== 'homeboy/artifact-manifest/v1' || (Object.hasOwn(manifest, 'artifacts') && !Array.isArray(manifest.artifacts))) {
     throw new Error('HOMEBOY_INVOCATION_ARTIFACT_DIR contains an invalid artifact manifest');
   }
   const existing = Array.isArray(manifest.artifacts) ? manifest.artifacts : [];
@@ -569,7 +579,71 @@ async function registerInvocationArtifacts(invocationRoot, publishedArtifacts) {
     ...existing.filter((entry) => !publishedArtifacts.some((artifact) => artifact.path === entry?.path)),
     ...publishedArtifacts.map(({ name, ...artifact }) => ({ id: name, label: name, ...artifact })),
   ];
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  await atomicWrite(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+async function withInvocationArtifactLock(invocationRoot, action) {
+  await assertDirectoryTree(invocationRoot, []);
+  const lockPath = path.join(invocationRoot, '.wp-codebox-phpunit-publication.lock');
+  let lock;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      lock = await open(lockPath, 'wx', 0o600);
+      break;
+    } catch (error) {
+      if (error.code !== 'EEXIST') { throw error; }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  if (!lock) { throw new Error('Timed out waiting to publish WP Codebox test artifacts'); }
+  try {
+    return await action();
+  } finally {
+    await lock.close();
+    await unlink(lockPath).catch(() => {});
+  }
+}
+async function assertDirectoryTree(directoryRoot, segments) {
+  const rootStat = await lstat(directoryRoot);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error(`WP Codebox artifact directory must be a non-symlink directory: ${directoryRoot}`);
+  }
+  const canonicalRoot = await realpath(directoryRoot);
+  let current = directoryRoot;
+  for (const segment of segments) {
+    current = path.join(current, segment);
+    try {
+      const stat = await lstat(current);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) { throw new Error(`WP Codebox artifact directory contains a symlink or non-directory: ${current}`); }
+    } catch (error) {
+      if (error.code !== 'ENOENT') { throw error; }
+      await mkdir(current);
+    }
+    const canonicalCurrent = await realpath(current);
+    if (canonicalCurrent !== canonicalRoot && !canonicalCurrent.startsWith(`${canonicalRoot}${path.sep}`)) {
+      throw new Error(`WP Codebox artifact directory escapes its invocation root: ${current}`);
+    }
+  }
+}
+async function assertRegularOrMissing(target) {
+  try {
+    const stat = await lstat(target);
+    if (!stat.isFile() || stat.isSymbolicLink()) { throw new Error(`WP Codebox artifact target must be a non-symlink file: ${target}`); }
+  } catch (error) {
+    if (error.code !== 'ENOENT') { throw error; }
+  }
+}
+async function atomicCopy(source, target) {
+  await assertRegularOrMissing(source);
+  await assertRegularOrMissing(target);
+  const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
+  await copyFile(source, temporary);
+  await rename(temporary, target);
+}
+async function atomicWrite(target, content) {
+  await assertRegularOrMissing(target);
+  const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(temporary, content);
+  await rename(temporary, target);
 }
 async function preservePhpunitOutput(artifactDirectory, execution, managedRuntimeServices) {
   const filesDirectory = path.join(artifactDirectory, 'files');
