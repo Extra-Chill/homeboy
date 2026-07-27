@@ -7,8 +7,8 @@ use crate::workspace::sync::{
     active_resource_lifecycle_liveness, prune_scan_command, prune_workspaces,
     ssh_process_liveness_command, ssh_prune_delete_command,
     ssh_prune_delete_command_with_terminal_owner, sync_workspace,
-    update_workspace_resource_lifecycle, ActiveResourceLifecycleLiveness, RunAuthority,
-    WORKSPACE_METADATA_FILE,
+    update_workspace_resource_lifecycle, workspace_liveness_with_size_observation,
+    ActiveResourceLifecycleLiveness, RunAuthority, WORKSPACE_METADATA_FILE,
 };
 use crate::workspace::types::{
     RunnerWorkspacePruneOptions, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
@@ -841,6 +841,50 @@ fn ssh_prune_scan_command_advances_past_a_timed_out_size_measurement() {
     );
     assert!(resumed_stdout.contains("\tunknown\n"), "{resumed_stdout}");
     assert!(resumed_stdout.contains("__homeboy_prune_scan__\t1\tcomplete\t\n"));
+}
+
+#[test]
+fn unavailable_size_does_not_override_inactive_ownership_evidence() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let root = tempfile::tempdir().expect("workspace root");
+        let workspace = root.path().join("_lab_workspaces/orphan");
+        write_orphan_workspace(&workspace);
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-local-prune-advisory-size","kind":"local","workspace_root":"{}"}}"#,
+                root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+        let runner = crate::load("lab-local-prune-advisory-size").expect("load runner");
+        let mut metadata: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(workspace.join(WORKSPACE_METADATA_FILE)).expect("metadata"),
+        )
+        .expect("metadata json");
+
+        let evidence =
+            workspace_liveness_with_size_observation(&runner, &metadata, &workspace, false);
+
+        assert_eq!(evidence.state, "inactive");
+        assert_eq!(
+            evidence.observations,
+            vec!["workspace_size_measurement_unavailable"]
+        );
+
+        metadata["job_id"] = serde_json::json!("active-job");
+        metadata["resource_lifecycle"] = serde_json::json!({ "status": "active" });
+        let evidence =
+            workspace_liveness_with_size_observation(&runner, &metadata, &workspace, false);
+        assert_eq!(evidence.state, "live");
+        assert_eq!(
+            evidence.observations,
+            vec![
+                "active_resource_lifecycle_lease",
+                "workspace_size_measurement_unavailable"
+            ]
+        );
+    });
 }
 
 #[test]
