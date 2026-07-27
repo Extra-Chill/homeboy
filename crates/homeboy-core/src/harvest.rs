@@ -25,6 +25,10 @@ pub struct HarvestComponentResult {
     pub component_id: String,
     pub local_path: String,
     pub remote_path: String,
+    /// The exclude set actually applied, after composing every source. Without
+    /// this an operator cannot tell why a path was or was not compared.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolved_excludes: Vec<String>,
     pub status: String,
     pub changes: Vec<ContentChange>,
     pub committed: bool,
@@ -98,8 +102,24 @@ pub fn run(project_id: &str, options: &HarvestOptions) -> Result<HarvestResult> 
         let remote_path =
             project::resolve_effective_remote_path(&resolved_project, &component, &base_path)?;
         let local_path = PathBuf::from(&component.local_path);
+        // Exclusions compose from four sources, widest to narrowest: env
+        // policy, extension sync excludes, gitignore-derived entries, the
+        // component's own declaration, and finally this invocation's flags.
+        // The component-declared set exists because the others vary by
+        // environment — extensions are not installed on a CI runner, so an
+        // inherited exclude set is not the same set there (#10220).
         let mut excludes = crate::source_snapshot::policy_for_path(&local_path).sync_excludes;
+        if let Some(declared) = component.harvest_excludes.as_ref() {
+            excludes.extend(
+                declared
+                    .iter()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+            );
+        }
         excludes.extend(options.excludes.clone());
+        excludes.sort();
+        excludes.dedup();
         let snapshot = tempfile::tempdir().map_err(|error| {
             Error::internal_io(
                 error.to_string(),
@@ -112,6 +132,7 @@ pub fn run(project_id: &str, options: &HarvestOptions) -> Result<HarvestResult> 
             component_id: id.clone(),
             local_path: component.local_path.clone(),
             remote_path: remote_path.clone(),
+            resolved_excludes: excludes.clone(),
             status: if changes.is_empty() {
                 "up_to_date".to_string()
             } else if options.apply {
@@ -134,14 +155,50 @@ pub fn run(project_id: &str, options: &HarvestOptions) -> Result<HarvestResult> 
             })?;
             let git_root = Path::new(&git_root);
             if !git::is_workdir_clean_or_not_git(git_root) {
-                return Err(Error::validation_invalid_argument("local_path", format!("refusing harvest for '{id}': local worktree has uncommitted changes"), None, Some(vec!["Commit, stash, or otherwise resolve local changes before applying remote content.".to_string()])));
+                // Name the offending paths. An unattended harvest that refuses
+                // keeps refusing every run, and an operator who cannot see
+                // *why* has to reproduce the state locally to find out — while
+                // remote work accumulates uncaptured (#10222).
+                let dirty =
+                    git::get_dirty_files(&git_root.display().to_string()).unwrap_or_default();
+                let listed: Vec<String> = dirty.iter().take(20).cloned().collect();
+                let mut hints = vec![
+                    "Commit, stash, or otherwise resolve local changes before applying remote content."
+                        .to_string(),
+                ];
+                if !listed.is_empty() {
+                    hints.push(format!("Uncommitted paths: {}", listed.join(", ")));
+                }
+                if dirty.len() > listed.len() {
+                    hints.push(format!("...and {} more.", dirty.len() - listed.len()));
+                }
+                return Err(Error::validation_invalid_argument(
+                    "local_path",
+                    format!(
+                        "refusing harvest for '{id}': local worktree has {} uncommitted change(s)",
+                        dirty.len().max(1)
+                    ),
+                    Some(git_root.display().to_string()),
+                    Some(hints),
+                ));
             }
             content_diff::apply(snapshot.path(), &local_path, &result.changes)?;
             stage_component(git_root, &local_path)?;
+            // Precedence: an explicit --author, then the configured automation
+            // identity, then an anonymous fallback. The middle rung exists so an
+            // unattended harvest does not invent an identity at the call site on
+            // every run (#10221).
+            let configured_identity = crate::defaults::load_config()
+                .automation
+                .commit_identity
+                .filter(|identity| !identity.trim().is_empty());
             let author = options
                 .author
                 .as_deref()
-                .unwrap_or("Remote harvest <harvest@homeboy.invalid>");
+                .or(configured_identity.as_deref())
+                .unwrap_or("Remote harvest <harvest@homeboy.invalid>")
+                .to_string();
+            let author = author.as_str();
             let provenance = format!("Harvested-from: {project_id}:{remote_path}");
             git::commit_staged_with_author(
                 git_root,
@@ -274,6 +331,93 @@ mod tests {
     use homeboy_extension_contract::{ExtensionManifest, RemotePathRootRule};
     use std::collections::HashMap;
     use std::process::Command;
+
+    /// #10220: the exclude set must not depend on what happens to be
+    /// installed. Extensions are absent on a CI runner, so a component that
+    /// relies on inherited excludes gets a different comparison there than it
+    /// does locally.
+    #[test]
+    fn component_declared_excludes_compose_with_invocation_flags() {
+        let declared = vec!["composer.lock".to_string(), " vendor ".to_string()];
+        let mut excludes: Vec<String> = vec!["node_modules".to_string()];
+        excludes.extend(
+            declared
+                .iter()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+        );
+        excludes.extend(vec!["package-lock.json".to_string()]);
+        excludes.sort();
+        excludes.dedup();
+
+        assert_eq!(
+            excludes,
+            vec![
+                "composer.lock".to_string(),
+                "node_modules".to_string(),
+                "package-lock.json".to_string(),
+                "vendor".to_string(),
+            ],
+            "declared excludes compose with policy and flag sources, trimmed and deduped"
+        );
+    }
+
+    /// #10221: precedence is explicit flag, then configured identity, then an
+    /// anonymous fallback. The middle rung is the point — an unattended run
+    /// should not invent an identity at the call site.
+    #[test]
+    fn commit_author_precedence_prefers_flag_then_configuration() {
+        fn resolve(flag: Option<&str>, configured: Option<&str>) -> String {
+            let configured = configured
+                .map(str::to_string)
+                .filter(|identity| !identity.trim().is_empty());
+            flag.or(configured.as_deref())
+                .unwrap_or("Remote harvest <harvest@homeboy.invalid>")
+                .to_string()
+        }
+
+        assert_eq!(
+            resolve(
+                Some("Op <op@example.invalid>"),
+                Some("CI <ci@example.invalid>")
+            ),
+            "Op <op@example.invalid>",
+            "an explicit author wins"
+        );
+        assert_eq!(
+            resolve(None, Some("CI <ci@example.invalid>")),
+            "CI <ci@example.invalid>",
+            "configuration is used when no author is passed"
+        );
+        assert_eq!(
+            resolve(None, None),
+            "Remote harvest <harvest@homeboy.invalid>",
+            "anonymous fallback remains when nothing is configured"
+        );
+        assert_eq!(
+            resolve(None, Some("   ")),
+            "Remote harvest <harvest@homeboy.invalid>",
+            "a blank configured identity is not authoritative"
+        );
+    }
+
+    /// #10221: the configured identity must survive a config round trip, or the
+    /// setting silently does nothing.
+    #[test]
+    fn automation_commit_identity_round_trips_through_config() {
+        with_isolated_home(|_| {
+            let mut config = crate::defaults::load_config();
+            assert!(config.automation.commit_identity.is_none());
+            config.automation.commit_identity = Some("CI <ci@example.invalid>".to_string());
+            crate::defaults::save_config(&config).expect("save config");
+
+            let reloaded = crate::defaults::load_config();
+            assert_eq!(
+                reloaded.automation.commit_identity.as_deref(),
+                Some("CI <ci@example.invalid>")
+            );
+        });
+    }
 
     fn git(path: &Path, args: &[&str]) {
         let status = Command::new("git")
