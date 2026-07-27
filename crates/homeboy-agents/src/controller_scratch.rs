@@ -7,17 +7,12 @@ use sha2::{Digest, Sha256};
 
 use crate::agent_task::AgentTaskOutcome;
 use homeboy_core::observation::ObservationStore;
+use homeboy_core::output::{OutputBudget, OutputPresentation, OutputTruncation};
 use homeboy_core::{git, paths, Error, Result};
 
 pub const CONTROLLER_SCRATCH_SCHEMA: &str = "homeboy/controller-scratch/v1";
 const INTERRUPTED_RETENTION: &str = "P1D";
 const RETENTION_OWNER_SUMMARY_LIMIT: usize = 20;
-/// Upper bound on the number of materialized `skipped` rows returned by a single
-/// cleanup invocation. The aggregate `skipped_count` and `retention_reasons`
-/// summary remain complete; this only bounds the rendered per-resource rows so a
-/// cleanup on a huge scratch index (thousands of retained resources) does not
-/// emit thousands of rows. Independent of the eligible-candidate `limit`.
-const MAX_SKIPPED_ROWS: usize = 100;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ControllerScratchResource {
@@ -268,7 +263,9 @@ pub struct ControllerScratchCleanupOutput {
     pub override_unlocked_bytes: u64,
     pub reclaimed_bytes: u64,
     pub candidates: Vec<ControllerScratchCandidate>,
+    pub candidate_detail: OutputTruncation,
     pub skipped: Vec<ControllerScratchSkipped>,
+    pub skipped_detail: OutputTruncation,
     pub retention_reasons: Vec<ControllerScratchRetentionReason>,
     pub remaining_candidate_count: usize,
     pub remaining_candidate_bytes: u64,
@@ -278,7 +275,7 @@ pub struct ControllerScratchCleanupOutput {
     pub drain_command: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ControllerScratchCandidate {
     pub path: String,
     pub run_id: String,
@@ -291,7 +288,7 @@ pub struct ControllerScratchCandidate {
     pub source_ref: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ControllerScratchSkipped {
     pub path: String,
     pub run_id: Option<String>,
@@ -321,6 +318,8 @@ pub struct ControllerScratchRetentionOwner {
 pub struct ControllerScratchCleanupOptions {
     pub apply: bool,
     pub limit: usize,
+    /// Return all detail rows rather than the normal agent-facing response budget.
+    pub full: bool,
     /// Optional override for the terminal-run retention window, in seconds.
     ///
     /// `None` (default) uses each resource's own configured retention window
@@ -559,7 +558,6 @@ fn cleanup_unlocked(
     options: ControllerScratchCleanupOptions,
 ) -> Result<ControllerScratchCleanupOutput> {
     let mut index = read_index_unlocked()?;
-    let mut candidates = Vec::new();
     // Only durably registered resources are cleanup candidates. In particular,
     // do not infer ownership by scanning a shared system temporary directory.
     let mut skipped = Vec::new();
@@ -587,21 +585,18 @@ fn cleanup_unlocked(
         reconciled |= resource.lifecycle_state != lifecycle_state
             || resource.interrupted_at != interrupted_at;
         if let Some(reason) = reason {
-            // Record every skip in the lightweight aggregate so `skipped_count`
-            // and the `retention_reasons` summary stay complete, but bound the
-            // rich materialized `skipped` rows (independent of the eligible
-            // `limit`) so a huge scratch index does not render thousands of rows.
+            // Keep every row for an explicit `--full` inspection while the
+            // default response projects it through the independent detail budget.
+            // The aggregate remains exact in either presentation.
             all_skips.push((reason.clone(), Some(resource.run_id.clone())));
-            if skipped.len() < MAX_SKIPPED_ROWS {
-                skipped.push(ControllerScratchSkipped {
-                    path: resource.path.clone(),
-                    run_id: Some(resource.run_id.clone()),
-                    owner_pid: Some(resource.owner_pid),
-                    lifecycle_state: Some(resource.lifecycle_state.clone()),
-                    recovery_command: scratch_recovery_command(resource),
-                    reason,
-                });
-            }
+            skipped.push(ControllerScratchSkipped {
+                path: resource.path.clone(),
+                run_id: Some(resource.run_id.clone()),
+                owner_pid: Some(resource.owner_pid),
+                lifecycle_state: Some(resource.lifecycle_state.clone()),
+                recovery_command: scratch_recovery_command(resource),
+                reason,
+            });
             continue;
         }
         let size_bytes = path_size(&path)?;
@@ -634,7 +629,13 @@ fn cleanup_unlocked(
     let remaining_candidate_count = remaining.len();
     let remaining_candidate_bytes = remaining.iter().map(|candidate| candidate.size_bytes).sum();
     let has_more = remaining_candidate_count > 0;
-    for candidate in eligible.into_iter().take(options.limit) {
+    let mutation_candidate_count = candidate_count.min(options.limit);
+    let mutation_candidates = eligible
+        .iter()
+        .take(options.limit)
+        .cloned()
+        .collect::<Vec<_>>();
+    for candidate in &mutation_candidates {
         if options.apply {
             match remove_candidate(&candidate, now, options.retention_override_seconds)? {
                 Some(bytes) => {
@@ -644,34 +645,46 @@ fn cleanup_unlocked(
                 None => {
                     let reason = "resource changed or disappeared before deletion".to_string();
                     all_skips.push((reason.clone(), Some(candidate.run_id.clone())));
-                    if skipped.len() < MAX_SKIPPED_ROWS {
-                        skipped.push(ControllerScratchSkipped {
-                            path: candidate.path.clone(),
-                            run_id: Some(candidate.run_id.clone()),
-                            owner_pid: Some(candidate.owner_pid),
-                            lifecycle_state: Some(candidate.lifecycle_state.clone()),
-                            recovery_command: None,
-                            reason,
-                        });
-                    }
+                    skipped.push(ControllerScratchSkipped {
+                        path: candidate.path.clone(),
+                        run_id: Some(candidate.run_id.clone()),
+                        owner_pid: Some(candidate.owner_pid),
+                        lifecycle_state: Some(candidate.lifecycle_state.clone()),
+                        recovery_command: None,
+                        reason,
+                    });
                 }
             }
         }
-        candidates.push(candidate);
     }
+    let (candidates, candidate_detail) = present_detail(
+        mutation_candidates,
+        options.full,
+        mutation_candidate_count,
+        format!("{} --full", cleanup_command(options)),
+    )?;
+    let skipped_count = all_skips.len();
+    let (skipped, skipped_detail) = present_detail(
+        skipped,
+        options.full,
+        skipped_count,
+        "homeboy cleanup --include controller-scratch --full".to_string(),
+    )?;
     Ok(ControllerScratchCleanupOutput {
         command: "cleanup.controller-scratch",
         mode: if options.apply { "apply" } else { "dry_run" },
         candidate_count,
         applied_count,
-        skipped_count: all_skips.len(),
+        skipped_count,
         estimated_bytes,
         default_policy_eligible_bytes,
         override_unlocked_bytes: estimated_bytes.saturating_sub(default_policy_eligible_bytes),
         reclaimed_bytes,
         candidates,
+        candidate_detail,
         retention_reasons: summarize_retention(&all_skips),
         skipped,
+        skipped_detail,
         remaining_candidate_count,
         remaining_candidate_bytes,
         has_more,
@@ -679,14 +692,94 @@ fn cleanup_unlocked(
         drain_command: cleanup_command(ControllerScratchCleanupOptions {
             apply: true,
             limit: options.limit.saturating_mul(10).max(1),
+            full: false,
             retention_override_seconds: options.retention_override_seconds,
         }),
     })
 }
 
+/// Bound response presentation separately from the ordered set admitted for
+/// mutation. `--full` is the explicit lossless inspection mode.
+fn present_detail<T>(
+    items: Vec<T>,
+    full: bool,
+    total_items: usize,
+    export_command: String,
+) -> Result<(Vec<T>, OutputTruncation)>
+where
+    T: Clone + Serialize,
+{
+    let total_bytes = items.iter().try_fold(0usize, |total, item| {
+        serde_json::to_vec(item)
+            .map(|value| total.saturating_add(value.len()))
+            .map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("serialize cleanup detail".to_string()),
+                )
+            })
+    })?;
+    if full {
+        return Ok((
+            items,
+            OutputTruncation {
+                presentation: OutputPresentation::LosslessExport,
+                total_items,
+                returned_items: total_items,
+                omitted_items: 0,
+                total_bytes,
+                returned_bytes: total_bytes,
+                omitted_bytes: 0,
+                total_bytes_known: true,
+                truncated: false,
+                continue_command: export_command.clone(),
+                export_command,
+            },
+        ));
+    }
+
+    let mut returned = Vec::new();
+    let mut returned_bytes: usize = 0;
+    for item in items {
+        let item_bytes = serde_json::to_vec(&item)
+            .map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("serialize cleanup detail".to_string()),
+                )
+            })?
+            .len();
+        if returned.len() >= OutputBudget::COLLECTION.max_items
+            || returned_bytes.saturating_add(item_bytes) > OutputBudget::COLLECTION.max_bytes
+        {
+            break;
+        }
+        returned_bytes += item_bytes;
+        returned.push(item);
+    }
+    let returned_items = returned.len();
+    let omitted_items = total_items.saturating_sub(returned_items);
+    Ok((
+        returned,
+        OutputTruncation {
+            presentation: OutputPresentation::BoundedCollection,
+            total_items,
+            returned_items,
+            omitted_items,
+            total_bytes,
+            returned_bytes,
+            omitted_bytes: total_bytes.saturating_sub(returned_bytes),
+            total_bytes_known: true,
+            truncated: omitted_items > 0,
+            continue_command: export_command.clone(),
+            export_command,
+        },
+    ))
+}
+
 /// Summarize every skipped resource by reason and owning run. Takes the complete
-/// lightweight `(reason, run_id)` record (not the capped materialized rows) so
-/// the aggregate counts stay accurate even when `skipped` rows are bounded.
+/// lightweight `(reason, run_id)` record so aggregates stay exact when the
+/// default response bounds detailed rows.
 fn summarize_retention(
     all_skips: &[(String, Option<String>)],
 ) -> Vec<ControllerScratchRetentionReason> {
@@ -1527,6 +1620,7 @@ mod tests {
             let output = cleanup(ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
+                full: false,
                 retention_override_seconds: None,
             })
             .expect("reconcile");
@@ -1650,6 +1744,7 @@ mod tests {
             let first = cleanup(ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
+                full: false,
                 retention_override_seconds: Some(0),
             })
             .expect("reconcile interrupted checkout");
@@ -1658,6 +1753,7 @@ mod tests {
             let second = cleanup(ControllerScratchCleanupOptions {
                 apply: true,
                 limit: 1,
+                full: false,
                 retention_override_seconds: Some(0),
             })
             .expect("reap interrupted checkout");
@@ -1816,6 +1912,7 @@ mod tests {
             let output = cleanup(ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
+                full: false,
                 retention_override_seconds: None,
             })
             .expect("cleanup inventory");
@@ -1980,6 +2077,7 @@ mod tests {
             let output = cleanup(ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
+                full: false,
                 retention_override_seconds: Some(0),
             })
             .expect("cleanup preview");
@@ -2021,6 +2119,7 @@ mod tests {
             let output = cleanup(ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
+                full: false,
                 retention_override_seconds: Some(0),
             })
             .expect("cleanup preview");
@@ -2133,6 +2232,7 @@ mod tests {
             let output = cleanup(ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
+                full: false,
                 retention_override_seconds: Some(0),
             })
             .expect("cleanup preview");
@@ -2192,13 +2292,12 @@ mod tests {
     }
 
     #[test]
-    fn skipped_rows_are_capped_while_count_stays_complete() {
+    fn skipped_rows_have_bounded_default_detail_and_lossless_full_detail() {
         homeboy_core::test_support::with_isolated_home(|_| {
-            // Register more retained (within-window) resources than the skipped
-            // row cap and assert the materialized rows are bounded while the
-            // aggregate `skipped_count` reflects the true total.
+            // Large retained inventories keep exact aggregates while the default
+            // response stays inside the shared item and byte presentation budget.
             let root = tempfile::tempdir().expect("root");
-            let total = MAX_SKIPPED_ROWS + 25;
+            let total = 125;
             let mut resources = Vec::with_capacity(total);
             for index in 0..total {
                 let scratch = root.path().join(format!("scratch-{index}"));
@@ -2220,6 +2319,7 @@ mod tests {
             let output = cleanup(ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
+                full: false,
                 retention_override_seconds: None,
             })
             .expect("cleanup");
@@ -2227,11 +2327,14 @@ mod tests {
             assert_eq!(output.candidate_count, 0);
             // True total is preserved even though rendered rows are bounded.
             assert_eq!(output.skipped_count, total);
-            assert!(
-                output.skipped.len() <= MAX_SKIPPED_ROWS,
-                "materialized skipped rows must be capped: got {}",
-                output.skipped.len()
+            assert!(output.skipped.len() <= OutputBudget::COLLECTION.max_items);
+            assert!(output.skipped_detail.returned_bytes <= OutputBudget::COLLECTION.max_bytes);
+            assert_eq!(output.skipped_detail.total_items, total);
+            assert_eq!(
+                output.skipped_detail.omitted_items,
+                total - output.skipped.len()
             );
+            assert!(output.skipped_detail.truncated);
             // The aggregate summary still accounts for every retained resource.
             let summarized: usize = output
                 .retention_reasons
@@ -2239,7 +2342,110 @@ mod tests {
                 .map(|reason| reason.resource_count)
                 .sum();
             assert_eq!(summarized, total);
+
+            let full = cleanup(ControllerScratchCleanupOptions {
+                apply: false,
+                limit: 1,
+                full: true,
+                retention_override_seconds: None,
+            })
+            .expect("full cleanup");
+            assert_eq!(full.skipped.len(), total);
+            assert!(!full.skipped_detail.truncated);
         });
+    }
+
+    #[test]
+    fn thousands_of_candidates_keep_default_output_bounded_and_apply_exactly_the_limit() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("root");
+            let total = 1_000;
+            let mut resources = Vec::with_capacity(total);
+            for index in 0..total {
+                let scratch = root.path().join(format!("scratch-{index}"));
+                fs::create_dir(&scratch).expect("scratch");
+                fs::write(scratch.join("payload"), "x").expect("payload");
+                let mut resource = resource(&scratch, root.path());
+                resource.run_id = format!("run-{index}");
+                resource.lease_id = format!("lease-{index}");
+                resource.lifecycle_state = "released".to_string();
+                resource.ephemeral = true;
+                resources.push(resource);
+            }
+            write_index(&ControllerScratchIndex {
+                schema: schema(),
+                resources,
+            })
+            .expect("resource index");
+
+            let preview = cleanup(ControllerScratchCleanupOptions {
+                apply: false,
+                limit: total,
+                full: false,
+                retention_override_seconds: None,
+            })
+            .expect("preview");
+            assert_eq!(preview.candidate_count, total);
+            assert_eq!(preview.candidates.len(), OutputBudget::COLLECTION.max_items);
+            assert!(preview.candidate_detail.returned_bytes <= OutputBudget::COLLECTION.max_bytes);
+            assert_eq!(preview.candidate_detail.total_items, total);
+            assert_eq!(
+                preview.candidate_detail.omitted_items,
+                total - preview.candidates.len()
+            );
+            assert!(preview.candidate_detail.truncated);
+            assert_eq!(preview.remaining_candidate_count, 0);
+
+            let applied = cleanup(ControllerScratchCleanupOptions {
+                apply: true,
+                limit: total,
+                full: false,
+                retention_override_seconds: None,
+            })
+            .expect("apply");
+            assert_eq!(applied.candidate_count, total);
+            assert_eq!(applied.applied_count, total);
+            assert_eq!(applied.reclaimed_bytes, preview.estimated_bytes);
+            assert_eq!(applied.candidate_detail.total_items, total);
+            assert_eq!(applied.candidates.len(), OutputBudget::COLLECTION.max_items);
+            assert!(!root.path().join("scratch-0").exists());
+            assert!(!root.path().join(format!("scratch-{}", total - 1)).exists());
+        });
+    }
+
+    #[test]
+    fn full_detail_is_lossless_for_thousands_of_candidates_without_expanding_default_output() {
+        let candidates = (0..2_000)
+            .map(|index| ControllerScratchCandidate {
+                path: format!("/scratch/{index}"),
+                run_id: format!("run-{index}"),
+                task_id: format!("task-{index}"),
+                size_bytes: index,
+                owner_pid: u32::MAX,
+                lease_id: format!("lease-{index}"),
+                reason: String::new(),
+                lifecycle_state: "released".to_string(),
+                source_ref: None,
+            })
+            .collect::<Vec<_>>();
+        let (default, default_detail) = present_detail(
+            candidates.clone(),
+            false,
+            candidates.len(),
+            "homeboy cleanup --include controller-scratch --full".to_string(),
+        )
+        .expect("default detail");
+        assert_eq!(default.len(), OutputBudget::COLLECTION.max_items);
+        assert_eq!(default_detail.omitted_items, 2_000 - default.len());
+        let (full, full_detail) = present_detail(
+            candidates,
+            true,
+            2_000,
+            "homeboy cleanup --include controller-scratch --full".to_string(),
+        )
+        .expect("full detail");
+        assert_eq!(full.len(), 2_000);
+        assert!(!full_detail.truncated);
     }
 
     #[test]
@@ -2265,6 +2471,7 @@ mod tests {
             let default_run = cleanup(ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 10,
+                full: false,
                 retention_override_seconds: None,
             })
             .expect("default cleanup");
@@ -2278,6 +2485,7 @@ mod tests {
             let override_run = cleanup(ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 10,
+                full: false,
                 retention_override_seconds: Some(0),
             })
             .expect("override cleanup");
@@ -2352,6 +2560,7 @@ mod tests {
             let inventory = cleanup(ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
+                full: false,
                 retention_override_seconds: None,
             })
             .expect("inventory");
@@ -2365,6 +2574,7 @@ mod tests {
             let applied = cleanup(ControllerScratchCleanupOptions {
                 apply: true,
                 limit: 1,
+                full: false,
                 retention_override_seconds: None,
             })
             .expect("apply");
@@ -2383,6 +2593,7 @@ mod tests {
             let repeated = cleanup(ControllerScratchCleanupOptions {
                 apply: true,
                 limit: 1,
+                full: false,
                 retention_override_seconds: None,
             })
             .expect("repeated apply");
@@ -2468,6 +2679,7 @@ mod tests {
             let output = cleanup(ControllerScratchCleanupOptions {
                 apply: false,
                 limit: 1,
+                full: false,
                 retention_override_seconds: None,
             })
             .expect("preview");
