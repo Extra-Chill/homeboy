@@ -203,6 +203,44 @@ impl AgentTaskExecutorAdapter for DiagnosticFailureExecutor {
     }
 }
 
+/// Fail with one exact typed failure classification so the read-side recovery
+/// mapping can be exercised end to end from a durable run.
+pub(crate) struct ClassifiedFailureExecutor {
+    pub(crate) classification: AgentTaskFailureClassification,
+}
+
+impl AgentTaskExecutorAdapter for ClassifiedFailureExecutor {
+    fn execute(
+        &self,
+        request: AgentTaskRequest,
+        _context: AgentTaskExecutionContext,
+    ) -> AgentTaskOutcome {
+        AgentTaskOutcome {
+            schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
+            task_id: request.task_id,
+            status: AgentTaskOutcomeStatus::Failed,
+            summary: Some("classified failure fixture".to_string()),
+            failure_classification: Some(self.classification),
+            artifacts: Vec::new(),
+            typed_artifacts: Vec::new(),
+            evidence_refs: vec![AgentTaskEvidenceRef {
+                kind: "transcript".to_string(),
+                uri: "target/agent-task-review/transcript.log".to_string(),
+                label: Some("transcript".to_string()),
+            }],
+            diagnostics: vec![AgentTaskDiagnostic {
+                class: "fixture.classified_failure".to_string(),
+                message: "classified failure fixture".to_string(),
+                data: Value::Null,
+            }],
+            outputs: Value::Null,
+            workflow: None,
+            follow_up: None,
+            metadata: Value::Null,
+        }
+    }
+}
+
 pub(crate) struct ExecutorResultEvidenceFailureExecutor {
     pub(crate) evidence_uri: String,
 }
