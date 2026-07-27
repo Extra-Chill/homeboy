@@ -5,7 +5,10 @@
   "target": { "worker": "example-edge-service", "account_id": "account-id" },
   "expected_bindings": ["CACHE", "API_ORIGIN"],
   "predeploy_commands": [
-    { "id": "provision-artifacts", "executable": "npm", "args": ["run", "provision:artifacts", "--", "--remote"], "timeout_ms": 300000 }
+    { "id": "provision-artifacts", "executable": "npm", "args": ["run", "provision:artifacts", "--", "--remote"], "stdin_secret_input": "artifact-signing-input", "timeout_ms": 300000 }
+  ],
+  "secret_inputs": [
+    { "id": "artifact-signing-input", "env": "EXAMPLE_ARTIFACT_SIGNING_INPUT" }
   ],
   "secrets": [
     { "name": "UPSTREAM_TOKEN", "env": "EXAMPLE_UPSTREAM_TOKEN" },
