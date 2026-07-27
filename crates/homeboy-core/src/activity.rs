@@ -43,13 +43,16 @@ const RUNNING_HEARTBEAT_STALE_MINUTES: i64 = 30;
 pub fn activity_report(scope: ActivityScope, limit: usize) -> Result<ActivityReport> {
     let mut collector = ActivityCollector::default();
     observation::collect(&mut collector, limit)?;
-    for item in agent_task_provider::agent_task_activity_items()? {
+    // Items and record health come from one pass over the durable agent-task
+    // records. Reading them separately walked the corpus twice (#10308).
+    let (agent_task_items, agent_task_record_health) = agent_task_provider::agent_task_activity()?;
+    for item in agent_task_items {
         collector.insert(item);
     }
     daemon_jobs::collect(&mut collector)?;
     runner_sessions::collect(&mut collector);
     let mut report = report_from_items(collector.items(scope, limit), "activity");
-    report.agent_task_record_health = agent_task_provider::agent_task_record_health()?;
+    report.agent_task_record_health = agent_task_record_health;
     Ok(report)
 }
 
@@ -65,11 +68,21 @@ pub fn activity_report(scope: ActivityScope, limit: usize) -> Result<ActivityRep
 ///
 /// Ownership note: full-corpus aggregation belongs to `activity list`, so the
 /// fallback is intentionally the last resort here.
+///
+/// Probe order mirrors the collector's source precedence. Agent-task lifecycle
+/// records are also rows in the observation store, so the untyped observation
+/// probe resolves an agent-task id too — but only into the subordinate
+/// observation projection. Probing the authoritative lifecycle source first
+/// keeps `show`/`watch` agreeing with `list`, where the lifecycle projection
+/// wins the same id (#10308).
 fn resolve_activity_item(id: &str) -> Result<Option<ActivityItem>> {
     // Bounded, indexed probes for the id shapes `show`/`watch` are called with.
     // A failing probe (missing store, etc.) must not abort resolution — treat it
     // as "not found here" and continue so a partial-source outage still resolves
     // the id from another provider.
+    if let Ok(Some(item)) = agent_task_provider::probe_by_id(id) {
+        return Ok(Some(item));
+    }
     if let Ok(Some(item)) = observation::probe_by_id(id) {
         return Ok(Some(item));
     }
@@ -98,11 +111,11 @@ pub fn show_activity(id: &str) -> Result<ActivityReport> {
     let Some(item) = resolve_activity_item(id)? else {
         return Err(activity_item_not_found(id));
     };
-    let mut result = report_from_items(vec![item], "activity.show");
-    // Preserve the record-health field the full-report path attached. This is a
-    // single bounded provider probe, not a corpus scan.
-    result.agent_task_record_health = agent_task_provider::agent_task_record_health()?;
-    Ok(result)
+    // Record health is a full-corpus diagnostic owned by `activity list`.
+    // Attaching it here re-read every durable agent-task record just to answer
+    // one id, so it stays null — the report shape carries the field either way
+    // (#10308).
+    Ok(report_from_items(vec![item], "activity.show"))
 }
 
 pub fn resolve_activity(id: &str) -> Result<ActivityItem> {
@@ -558,6 +571,16 @@ mod tests {
                 .expect("probe")
                 .is_none());
         });
+    }
+
+    #[test]
+    fn agent_task_probe_defaults_to_none_without_a_registered_provider() {
+        // The trait default keeps the no-op provider (and any implementor that
+        // has no indexed lookup) out of the resolution path entirely, so id
+        // resolution falls through to the remaining probes (#10308).
+        assert!(agent_task_provider::probe_by_id("agent-task-run-1")
+            .expect("probe")
+            .is_none());
     }
 
     #[test]

@@ -24,8 +24,10 @@ JSON output uses the standard command-result envelope with `data.schema = homebo
 - artifact/evidence refs
 - structured `next_actions` with `label` and exact `command`
 
+`agent_task_record_health` is a full-corpus diagnostic attached by `list` only. `show` and `watch` resolve a single id and leave it null rather than scanning every durable agent-task record to fill it.
+
 Human output is a compact table followed by next-action command lines per item.
 
 ## Scope
 
-This is a local read model only. List, show, and watch do not reconcile or otherwise mutate persisted state. Agent-task stale actions target the inspected run with `homeboy agent-task reconcile <run-id> --dry-run`; review the authoritative provider-state preview, then add `--apply` to authorize that one lifecycle mutation. It does not create a daemon, event bus, or offloaded job, and the Lab contract marks it local-only.
+This is a local read model only. List, show, and watch do not reconcile or otherwise mutate persisted state. `show` and `watch` resolve their id through indexed per-provider probes — agent-task lifecycle, observation run, daemon job — and only fall back to a bounded full report when no probe answers. (`list` still refreshes agent-task records through the reconciling lifecycle status read, which writes; making that projection read-only is tracked separately.) Agent-task stale actions target the inspected run with `homeboy agent-task reconcile <run-id> --dry-run`; review the authoritative provider-state preview, then add `--apply` to authorize that one lifecycle mutation. It does not create a daemon, event bus, or offloaded job, and the Lab contract marks it local-only.
