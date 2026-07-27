@@ -6,6 +6,7 @@ on:
     paths:
       - .github/workflows/wp-codebox-test-runtime-canary.yml
       - wordpress/scripts/test/**
+      - wordpress/tests/wp-codebox-phpunit-aggregate-smoke.mjs
       - wordpress/tests/fixtures/test-db-activation-host/**
       - wordpress/tests/fixtures/bench-db-activation-dep/**
       - wordpress/tests/fixtures/test-managed-dependency-order-host/**
@@ -63,6 +64,10 @@ jobs:
           HOMEBOY_WP_CODEBOX_CORE_MODULE: ${{ github.workspace }}/.ci/wp-codebox/packages/runtime-core/dist/index.js
           HOMEBOY_CORE_DIR: ${{ github.workspace }}/.ci/homeboy
         run: bash wordpress/scripts/test/playground-db-activation-smoke.sh
+
+      - name: Run PHPUnit aggregate normalization smoke
+        working-directory: wordpress
+        run: npm run test:wp-codebox-phpunit-aggregate
 
       - name: Run managed dependency ordering canary
         env:

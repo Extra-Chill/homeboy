@@ -34,30 +34,50 @@ const value = (name) => args[args.indexOf(name) + 1];
 if (process.env.DISPATCHED) { fs.appendFileSync(process.env.DISPATCHED, JSON.stringify(args) + '\\n'); }
 if (args[0] === 'recipe') { fs.writeFileSync(value('--output'), JSON.stringify({ schema: 'wp-codebox/workspace-recipe/v1' })); process.exit(0); }
 const artifacts = value('--artifacts');
-const mode = process.env.FIXTURE_MODE;
-if (mode !== 'crash') {
+const fixture = JSON.parse(process.env.FIXTURE || '{}');
+if (!fixture.crash) {
   fs.mkdirSync(artifacts + '/runtime-fixture/files', { recursive: true });
-  fs.writeFileSync(artifacts + '/latest-runtime.json', JSON.stringify({ paths: { runtimeDirectory: 'runtime-fixture' } }));
-  fs.writeFileSync(artifacts + '/runtime-fixture/files/test-results.json', JSON.stringify({ schema: 'wp-codebox/test-results/v1', status: mode === 'success' ? 'passed' : 'failed', summary: { total: mode === 'failure' ? 281 : 0, passed: 0, failed: 0, skipped: 0 } }));
+  fs.writeFileSync(artifacts + '/latest-runtime.json', fixture.pointer === 'malformed' ? '{}' : JSON.stringify({ paths: { runtimeDirectory: 'runtime-fixture' } }));
+  if (fixture.sidecar === 'malformed') {
+    fs.writeFileSync(artifacts + '/runtime-fixture/files/test-results.json', '{');
+  } else if (fixture.sidecar) {
+    fs.writeFileSync(artifacts + '/runtime-fixture/files/test-results.json', JSON.stringify(fixture.sidecar));
+  }
 }
-const output = mode === 'success' ? 'OK (3 tests, 76 assertions)\\n' : 'ERRORS!\\nTests: 281, Assertions: 329, Errors: 46, Failures: 100.\\n';
-process.stdout.write(JSON.stringify({ executions: [{ stdout: output, stderr: '' }] }));
-process.exitCode = mode === 'success' ? 0 : 2;
+process.stdout.write(JSON.stringify({ executions: [{ stdout: fixture.output || '', stderr: '' }] }));
+process.exitCode = fixture.exitCode || 0;
 `);
 await chmod(cli, 0o755);
 
 try {
-  for (const [mode, expected] of [
-    ['failure', { total: 281, passed: 135, failed: 146, skipped: 0 }],
-    ['success', { total: 3, passed: 3, failed: 0, skipped: 0 }],
-    ['crash', { total: 281, passed: 135, failed: 146, skipped: 0 }],
-  ]) {
-    const artifacts = path.join(root, `${mode}-artifacts`);
-    const results = path.join(root, `${mode}-results.json`);
-    const run = spawnSync(runner, [], { env: { ...process.env, FIXTURE_MODE: mode, HOMEBOY_COMPONENT_PATH: component, COMPONENT_ID: 'component', HOMEBOY_WP_CODEBOX_BIN: cli, HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: artifacts, HOMEBOY_RUNTIME_WRITE_TEST_RESULTS: resultsWriter, HOMEBOY_TEST_RESULTS_FILE: results, HOMEBOY_SETTINGS_JSON: JSON.stringify({ validation_dependencies: [dependency] }) }, encoding: 'utf8' });
-    assert.equal(run.status, mode === 'success' ? 0 : 2, run.stderr);
-    assert.deepEqual(JSON.parse(await readFile(results, 'utf8')), expected);
+  const unknownSidecar = { schema: 'wp-codebox/test-results/v1', status: 'unknown', summary: { total: 0, passed: 0, failed: 0, skipped: 0 } };
+  const passedSidecar = { schema: 'wp-codebox/test-results/v1', status: 'passed', summary: { total: 3, passed: 3, failed: 0, skipped: 0 }, suites: [], rawLogReferences: [] };
+  const failedSidecar = { schema: 'wp-codebox/test-results/v1', status: 'failed', summary: { total: 3, passed: 3, failed: 0, skipped: 0 } };
+  const green = 'OK (3 tests, 76 assertions)\n';
+  const failures = 'ERRORS!\nTests: 281, Assertions: 329, Errors: 46, Failures: 100.\n';
+  const testCases = [
+    { name: 'unknown-green', fixture: { sidecar: unknownSidecar, output: green }, status: 0, artifactStatus: 'passed', expected: { total: 3, passed: 3, failed: 0, skipped: 0 } },
+    { name: 'failed-green', fixture: { sidecar: failedSidecar, output: green }, status: 1, artifactStatus: 'failed', expected: { total: 3, passed: 3, failed: 0, skipped: 0 } },
+    { name: 'nonzero-green', fixture: { sidecar: unknownSidecar, output: green, exitCode: 2 }, status: 2, artifactStatus: 'failed', expected: { total: 3, passed: 3, failed: 0, skipped: 0 } },
+    { name: 'zero-tests', fixture: { sidecar: unknownSidecar, output: 'OK (0 tests, 0 assertions)\n' }, settings: { phpunit_no_tests: 'fail' }, status: 1, artifactStatus: 'failed', expected: { total: 0, passed: 0, failed: 0, skipped: 0 } },
+    { name: 'zero-tests-skipped', fixture: { sidecar: unknownSidecar, output: 'OK (0 tests, 0 assertions)\n' }, settings: { phpunit_no_tests: 'skipped' }, status: 0, artifactStatus: 'skipped', expected: { total: 0, passed: 0, failed: 0, skipped: 0 } },
+    { name: 'malformed-sidecar', fixture: { sidecar: 'malformed', output: green }, status: 1, artifactStatus: 'unknown', expected: { total: 3, passed: 3, failed: 0, skipped: 0 } },
+    { name: 'missing-sidecar', fixture: { output: green }, status: 1, artifactStatus: 'unknown', expected: { total: 3, passed: 3, failed: 0, skipped: 0 } },
+    { name: 'malformed-pointer', fixture: { pointer: 'malformed', output: green }, status: 1, artifactStatus: 'unknown', expected: { total: 3, passed: 3, failed: 0, skipped: 0 } },
+    { name: 'errors-and-failures', fixture: { sidecar: unknownSidecar, output: failures, exitCode: 2 }, status: 2, artifactStatus: 'failed', expected: { total: 281, passed: 135, failed: 146, skipped: 0 } },
+    { name: 'managed-passed', fixture: { sidecar: passedSidecar }, status: 0, artifactStatus: 'passed', expected: { total: 3, passed: 3, failed: 0, skipped: 0 } },
+    { name: 'crash', fixture: { crash: true, output: failures, exitCode: 2 }, status: 2, artifactStatus: 'failed', expected: { total: 281, passed: 135, failed: 146, skipped: 0 } },
+  ];
+  for (const testCase of testCases) {
+    const artifacts = path.join(root, `${testCase.name}-artifacts`);
+    const results = path.join(root, `${testCase.name}-results.json`);
+    const run = spawnSync(runner, [], { env: { ...process.env, FIXTURE: JSON.stringify(testCase.fixture), HOMEBOY_COMPONENT_PATH: component, COMPONENT_ID: 'component', HOMEBOY_WP_CODEBOX_BIN: cli, HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: artifacts, HOMEBOY_RUNTIME_WRITE_TEST_RESULTS: resultsWriter, HOMEBOY_TEST_RESULTS_FILE: results, HOMEBOY_SETTINGS_JSON: JSON.stringify({ validation_dependencies: [dependency], ...testCase.settings }) }, encoding: 'utf8' });
+    assert.equal(run.status, testCase.status, `${testCase.name}: ${run.stderr}`);
+    assert.deepEqual(JSON.parse(await readFile(results, 'utf8')), testCase.expected, testCase.name);
     const runArtifact = path.join(artifacts, (await readdir(artifacts)).find((entry) => entry.startsWith('wp-codebox-phpunit.')));
+    const artifactDirectory = testCase.fixture.crash || testCase.fixture.pointer === 'malformed' ? runArtifact : path.join(runArtifact, 'runtime-fixture');
+    const artifactResults = JSON.parse(await readFile(path.join(artifactDirectory, 'files', 'test-results.json'), 'utf8'));
+    assert.equal(artifactResults.status, testCase.artifactStatus, testCase.name);
     const options = JSON.parse(await readFile(path.join(runArtifact, 'wp-codebox-phpunit-recipe-options.json'), 'utf8'));
     const profile = JSON.parse(await readFile(path.join(runArtifact, 'wp-codebox-phpunit-profile.json'), 'utf8'));
     const provenance = JSON.parse(await readFile(path.join(runArtifact, 'wp-codebox-phpunit-provenance.json'), 'utf8'));
@@ -87,7 +107,7 @@ printf '%s\\n' '${JSON.stringify({ data: { entity: { local_path: conflictingData
       ...process.env,
       PATH: `${bin}:${process.env.PATH}`,
       DISPATCHED: dispatched,
-      FIXTURE_MODE: 'success',
+      FIXTURE: JSON.stringify({ sidecar: unknownSidecar, output: green }),
       HOMEBOY_COMPONENT_PATH: component,
       COMPONENT_ID: 'component',
       HOMEBOY_WP_CODEBOX_BIN: cli,

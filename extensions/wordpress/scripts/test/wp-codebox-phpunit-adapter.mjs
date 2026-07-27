@@ -71,9 +71,9 @@ try {
     executionArgs.push('--approve-external-service-writes', '--policy', JSON.stringify(databaseService.policy));
   }
   const execution = await runCaptured(executionArgs);
-  await handoffArtifacts(runArtifacts, execution);
-  if (execution.status !== 0) {
-    process.exitCode = execution.status;
+  const artifactStatus = await handoffArtifacts(runArtifacts, execution);
+  if (execution.status !== 0 || !['passed', 'skipped'].includes(artifactStatus)) {
+    process.exitCode = execution.status || 1;
   } else {
     process.stdout.write('WP Codebox test run complete.\n');
   }
@@ -482,28 +482,36 @@ async function handoffArtifacts(artifactRoot, execution) {
     // A crashed workload may never write a runtime pointer. Preserve and parse
     // the captured aggregate at the stable artifact root rather than reporting
     // a zero-test run.
-    await preservePhpunitOutput(artifactRoot, execution, []);
+    const status = await preservePhpunitOutput(artifactRoot, execution, []);
     if (process.env.HOMEBOY_TEST_RESULTS_FILE) {
       runScript('parse-test-results.sh', [artifactRoot]);
     }
     if (process.env.HOMEBOY_TEST_FAILURES_FILE) {
       runScript('parse-test-failures.sh', [artifactRoot, componentPath]);
     }
-    return;
+    return status;
   }
   const runtime = pointer?.paths?.runtimeDirectory;
   if (typeof runtime !== 'string' || !/^runtime-[A-Za-z0-9][A-Za-z0-9-]*$/.test(runtime)) {
-    return;
+    const status = await preservePhpunitOutput(artifactRoot, execution, []);
+    if (process.env.HOMEBOY_TEST_RESULTS_FILE) {
+      runScript('parse-test-results.sh', [artifactRoot]);
+    }
+    if (process.env.HOMEBOY_TEST_FAILURES_FILE) {
+      runScript('parse-test-failures.sh', [artifactRoot, componentPath]);
+    }
+    return status;
   }
   const artifactDirectory = path.join(artifactRoot, runtime);
   const managedRuntimeServices = Array.isArray(pointer.managedRuntimeServices) ? pointer.managedRuntimeServices : [];
-  await preservePhpunitOutput(artifactDirectory, execution, managedRuntimeServices);
+  const status = await preservePhpunitOutput(artifactDirectory, execution, managedRuntimeServices);
   if (process.env.HOMEBOY_TEST_RESULTS_FILE) {
     runScript('parse-test-results.sh', [artifactDirectory]);
   }
   if (process.env.HOMEBOY_TEST_FAILURES_FILE) {
     runScript('parse-test-failures.sh', [artifactDirectory, componentPath]);
   }
+  return status;
 }
 async function preservePhpunitOutput(artifactDirectory, execution, managedRuntimeServices) {
   const filesDirectory = path.join(artifactDirectory, 'files');
@@ -527,14 +535,16 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
   const aggregate = phpunitAggregate(output);
   let results;
   try { results = json(await readFile(testResultsPath, 'utf8'), null); } catch { results = null; }
-  if (!results && aggregate) {
-    results = { schema: 'wp-codebox/test-results/v1', status: aggregate.failed > 0 ? 'failed' : 'passed', summary: aggregate };
+  const validResults = validTestResults(results);
+  if (!validResults) {
+    results = { schema: 'wp-codebox/test-results/v1', status: 'unknown', summary: aggregate || emptyTestSummary(), suites: [], rawLogReferences: [] };
   }
   if (results && typeof results === 'object') {
     const summary = isObject(results.summary) ? results.summary : {};
     if (aggregate) {
       results.summary = { ...summary, ...aggregate };
     }
+    results.status = normalizedTestStatus(results, aggregate, execution.status, validResults);
     const references = Array.isArray(results.rawLogReferences) ? results.rawLogReferences : [];
     results.rawLogReferences = [
       ...references.filter((reference) => reference?.path !== 'files/phpunit-output.log'),
@@ -558,6 +568,32 @@ async function preservePhpunitOutput(artifactDirectory, execution, managedRuntim
   if (managedRuntimeServices.length > 0) {
     process.stdout.write('Managed runtime service evidence: artifact://files/managed-runtime-services.json\n');
   }
+  return results.status;
+}
+function validTestResults(results) {
+  if (!isObject(results) || results.schema !== 'wp-codebox/test-results/v1' || !['passed', 'failed', 'skipped', 'unknown'].includes(results.status) || !isObject(results.summary)) {
+    return false;
+  }
+  return ['total', 'passed', 'failed', 'skipped'].every((key) => Number.isInteger(results.summary[key]) && results.summary[key] >= 0);
+}
+function emptyTestSummary() {
+  return { total: 0, passed: 0, failed: 0, skipped: 0, unknown: 0 };
+}
+function normalizedTestStatus(results, aggregate, executionStatus, validResults) {
+  if (executionStatus !== 0 || (validResults && results.status === 'failed') || aggregate?.failed > 0) {
+    return 'failed';
+  }
+  if (!validResults) {
+    return 'unknown';
+  }
+  const total = aggregate?.total ?? results.summary.total;
+  if (total === 0) {
+    return ['skip', 'skipped'].includes(settings.phpunit_no_tests || 'skipped') ? 'skipped' : 'failed';
+  }
+  if (results.status === 'unknown' && aggregate) {
+    return 'passed';
+  }
+  return results.status;
 }
 function extractPhpunitOutput(stdout, stderr) {
   const payload = json(stdout.trim(), null);
