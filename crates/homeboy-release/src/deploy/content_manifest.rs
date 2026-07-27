@@ -64,6 +64,33 @@ pub(super) fn compare(local: &Path, remote: &str, client: &SshClient) -> Content
     comparison(&local, Some(&remote), status, differences, None)
 }
 
+/// Compare a deployed tree with the canonical archive selected for deployment.
+/// Archive entries are the package contract; source-only checkout files are not.
+pub(super) fn compare_archive(
+    archive: &Path,
+    remote: &str,
+    client: &SshClient,
+) -> ContentManifestComparison {
+    let local = match archive_manifest(archive) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            return unavailable(format!("canonical package manifest unavailable: {error}"))
+        }
+    };
+    let remote = match remote_manifest(remote, client) {
+        Ok(Some(manifest)) => manifest,
+        Ok(None) => return comparison(&local, None, "missing", Vec::new(), None),
+        Err(error) => return unavailable(format!("remote manifest unavailable: {error}")),
+    };
+    let differences = differences(&local, &remote);
+    let status = if differences.is_empty() {
+        "match"
+    } else {
+        "different"
+    };
+    comparison(&local, Some(&remote), status, differences, None)
+}
+
 fn comparison(
     local: &Manifest,
     remote: Option<&Manifest>,
@@ -101,6 +128,59 @@ fn local_manifest(root: &Path) -> Result<Manifest, String> {
     let mut manifest = Manifest::default();
     visit(root, root, &mut manifest)?;
     Ok(manifest)
+}
+
+fn archive_manifest(path: &Path) -> Result<Manifest, String> {
+    let file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|error| error.to_string())?;
+    let mut names = Vec::new();
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).map_err(|error| error.to_string())?;
+        if !entry.is_dir() {
+            names.push(entry.name().trim_matches('/').to_string());
+        }
+    }
+    let root = archive_root(&names);
+    let mut manifest = Manifest::default();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name().trim_matches('/');
+        if name.is_empty() || ignored(name) {
+            continue;
+        }
+        let relative = root
+            .as_deref()
+            .and_then(|root| {
+                name.strip_prefix(root)
+                    .and_then(|path| path.strip_prefix('/'))
+            })
+            .unwrap_or(name)
+            .to_string();
+        let mut hash = Sha256::new();
+        std::io::copy(&mut entry, &mut hash).map_err(|error| error.to_string())?;
+        manifest.entries.insert(
+            relative,
+            Entry {
+                kind: 'f',
+                mode: executable_mode(entry.unix_mode().unwrap_or(0)),
+                value: format!("{:x}", hash.finalize()),
+            },
+        );
+    }
+    Ok(manifest)
+}
+
+fn archive_root(names: &[String]) -> Option<String> {
+    let first = names.first()?.split('/').next()?;
+    (!first.is_empty()
+        && names.iter().all(|name| {
+            name.strip_prefix(first)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+        }))
+    .then(|| first.to_string())
 }
 
 fn visit(root: &Path, path: &Path, manifest: &mut Manifest) -> Result<(), String> {
@@ -255,7 +335,7 @@ mod tests {
     fn local_manifest_detects_content_add_delete_mode_symlink_and_ignores_runtime() {
         let temp = tempfile::tempdir().expect("temp");
         let local = temp.path().join("local");
-        let remote = temp.path().join("remote");
+        let remote = temp.path().join("plugin");
         fs::create_dir_all(&local).expect("local");
         fs::create_dir_all(&remote).expect("remote");
         fs::write(local.join("same"), "same").expect("same");
@@ -302,7 +382,7 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("temp");
         let local = temp.path().join("local");
-        let remote = temp.path().join("remote");
+        let remote = temp.path().join("plugin");
         fs::create_dir_all(&local).expect("local");
         fs::create_dir_all(&remote).expect("remote");
         fs::write(local.join("script"), "same").expect("local script");
@@ -326,5 +406,95 @@ mod tests {
             ),
             vec!["script"]
         );
+    }
+
+    #[test]
+    fn canonical_package_manifest_ignores_source_only_files_and_detects_production_drift() {
+        let temp = tempfile::tempdir().expect("temp");
+        let package = temp.path().join("plugin.zip");
+        let remote = temp.path().join("remote");
+        fs::create_dir_all(&remote).expect("remote");
+        write_zip(
+            &package,
+            &[
+                ("plugin/plugin.php", "<?php // 1.0.0"),
+                ("plugin/assets/app.js", "production"),
+            ],
+        );
+        fs::write(remote.join("plugin.php"), "<?php // 1.0.0").expect("plugin");
+        fs::create_dir_all(remote.join("assets")).expect("assets");
+        fs::write(remote.join("assets/app.js"), "production").expect("asset");
+
+        // README, tests, build output, and git metadata are source-only and
+        // therefore absent from the authoritative package comparison.
+        let source = temp.path().join("source");
+        fs::create_dir_all(source.join("tests")).expect("tests");
+        fs::create_dir_all(source.join("build")).expect("build");
+        fs::write(source.join("README.md"), "source only").expect("readme");
+        fs::write(source.join("tests/test.php"), "source only").expect("test");
+        fs::write(source.join("build/plugin.zip"), "source only").expect("build");
+
+        let client = local_client();
+        assert_eq!(
+            compare_archive(&package, remote.to_str().expect("path"), &client).status,
+            "match"
+        );
+
+        fs::write(remote.join("assets/app.js"), "modified").expect("drift");
+        let drift = compare_archive(&package, remote.to_str().expect("path"), &client);
+        assert_eq!(drift.status, "different");
+        assert_eq!(drift.differences, vec!["assets/app.js"]);
+
+        fs::remove_file(remote.join("plugin.php")).expect("missing");
+        let missing = compare_archive(&package, remote.to_str().expect("path"), &client);
+        assert!(missing.differences.contains(&"plugin.php".to_string()));
+    }
+
+    #[test]
+    fn canonical_package_manifest_rejects_stale_or_missing_artifacts() {
+        let temp = tempfile::tempdir().expect("temp");
+        let stale = temp.path().join("stale.zip");
+        let remote = temp.path().join("remote");
+        fs::create_dir_all(&remote).expect("remote");
+        write_zip(&stale, &[("plugin/version", "1.0.0")]);
+        fs::write(remote.join("version"), "2.0.0").expect("remote version");
+        let client = local_client();
+
+        assert_eq!(
+            compare_archive(&stale, remote.to_str().expect("path"), &client).status,
+            "different"
+        );
+        assert_eq!(
+            compare_archive(
+                &temp.path().join("missing.zip"),
+                remote.to_str().expect("path"),
+                &client
+            )
+            .status,
+            "unavailable"
+        );
+    }
+
+    fn write_zip(path: &Path, entries: &[(&str, &str)]) {
+        let file = fs::File::create(path).expect("zip");
+        let mut zip = zip::ZipWriter::new(file);
+        for (name, contents) in entries {
+            zip.start_file(*name, zip::write::FileOptions::default())
+                .expect("zip entry");
+            std::io::Write::write_all(&mut zip, contents.as_bytes()).expect("zip contents");
+        }
+        zip.finish().expect("finish zip");
+    }
+
+    fn local_client() -> SshClient {
+        SshClient {
+            host: "local".to_string(),
+            user: "test".to_string(),
+            port: 22,
+            identity_file: None,
+            auth: None,
+            is_local: true,
+            env: Default::default(),
+        }
     }
 }
