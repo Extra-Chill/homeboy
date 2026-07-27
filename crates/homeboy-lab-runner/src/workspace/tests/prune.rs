@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use crate::workspace::sync::{
     prune_scan_command, prune_workspaces, ssh_process_liveness_command, ssh_prune_delete_command,
@@ -735,6 +736,70 @@ fn ssh_prune_scan_command_bounds_thousands_of_entries() {
         resumed_stdout.contains("__homeboy_prune_scan__\t5\tpartial"),
         "{resumed_stdout}"
     );
+}
+
+#[test]
+fn ssh_prune_scan_command_advances_past_a_timed_out_size_measurement() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_orphan_workspace(&temp.path().join("workspace-00000"));
+    write_orphan_workspace(&temp.path().join("workspace-00001"));
+    let commands = tempfile::tempdir().expect("fake command tempdir");
+    let bin = commands.path().join("bin");
+    fs::create_dir_all(&bin).expect("fake command dir");
+    fs::write(bin.join("du"), "#!/bin/sh\n/bin/sleep 5\nexit 1\n").expect("fake du");
+    Command::new("chmod")
+        .args(["+x", &bin.join("du").display().to_string()])
+        .status()
+        .expect("make fake du executable");
+
+    let started = Instant::now();
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(prune_scan_command(
+            &temp.path().display().to_string(),
+            0,
+            1,
+            None,
+        ))
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH")),
+        )
+        .output()
+        .expect("run generated prune scan command");
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\tunknown\n"), "{stdout}");
+    assert!(
+        stdout.contains("__homeboy_prune_scan__\t1\tpartial"),
+        "{stdout}"
+    );
+
+    let after = temp.path().join("workspace-00000");
+    let resumed = Command::new("sh")
+        .arg("-c")
+        .arg(prune_scan_command(
+            &temp.path().display().to_string(),
+            0,
+            1,
+            Some(&after),
+        ))
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH")),
+        )
+        .output()
+        .expect("resume generated prune scan command");
+    let resumed_stdout = String::from_utf8_lossy(&resumed.stdout);
+    assert!(resumed.status.success(), "{resumed:?}");
+    assert!(
+        resumed_stdout.contains("workspace-00001\t"),
+        "{resumed_stdout}"
+    );
+    assert!(resumed_stdout.contains("\tunknown\n"), "{resumed_stdout}");
+    assert!(resumed_stdout.contains("__homeboy_prune_scan__\t1\tcomplete\t\n"));
 }
 
 #[test]
