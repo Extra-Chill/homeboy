@@ -10,8 +10,6 @@
 //! rigs, so rig-scoped resolution is empty and the rig HTTP endpoints return
 //! empty results.
 
-use std::sync::Mutex;
-
 use serde_json::Value;
 
 use crate::component::Component;
@@ -62,23 +60,14 @@ impl RigProvider for NoopProvider {
     }
 }
 
-fn provider_slot() -> &'static Mutex<Option<Box<dyn RigProvider>>> {
-    static PROVIDER: Mutex<Option<Box<dyn RigProvider>>> = Mutex::new(None);
-    &PROVIDER
-}
-
-/// Register the rig provider. Called once at startup by the rig layer.
-pub fn register_rig_provider(provider: Box<dyn RigProvider>) {
-    let mut slot = provider_slot().lock().expect("rig provider lock");
-    *slot = Some(provider);
-}
-
-fn with_provider<T>(f: impl FnOnce(&dyn RigProvider) -> T) -> T {
-    let slot = provider_slot().lock().expect("rig provider lock");
-    match slot.as_deref() {
-        Some(provider) => f(provider),
-        None => f(&NoopProvider),
-    }
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn RigProvider,
+    noop: NoopProvider,
+    /// Register the rig provider. Called once at startup by the rig layer.
+    register: pub fn register_rig_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none
+    /// is registered.
+    with: fn with_provider,
 }
 
 pub(crate) fn rig_list_json() -> Result<Value> {

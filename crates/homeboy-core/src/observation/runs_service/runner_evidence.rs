@@ -222,15 +222,15 @@ impl RunnerEvidenceProvider for NoopRunnerEvidenceProvider {
     }
 }
 
-static PROVIDER: Mutex<Option<Box<dyn RunnerEvidenceProvider>>> = Mutex::new(None);
-
-/// Register the runner-evidence provider. Called once at binary startup by the
-/// runner layer (via the CLI). Replaces any previously registered provider.
-pub fn register_runner_evidence_provider(provider: Box<dyn RunnerEvidenceProvider>) {
-    let mut guard = PROVIDER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn RunnerEvidenceProvider,
+    noop: NoopRunnerEvidenceProvider,
+    /// Register the runner-evidence provider. Called once at binary startup by the
+    /// runner layer (via the CLI). Replaces any previously registered provider.
+    register: pub fn register_runner_evidence_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none is
+    /// registered. Keeps the lock held only for the duration of the call.
+    with: pub fn with_runner_evidence,
 }
 
 /// Refresh runner-owned evidence and return its authenticated runner/job
@@ -249,24 +249,14 @@ pub fn mirrored_runner_job_identities(run_id: &str) -> Result<Vec<(String, Strin
     Ok(identities)
 }
 
-/// Whether a runner-evidence provider is currently registered.
+/// Whether a runner-evidence provider is currently registered. Distinct from
+/// [`with_runner_evidence`], which cannot tell a registered provider from the
+/// no-op fallback, so it reads the registry slot directly.
 pub fn has_runner_evidence_provider() -> bool {
-    PROVIDER
+    provider_slot()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .is_some()
-}
-
-/// Run `f` against the registered provider, or the no-op provider if none is
-/// registered. Keeps the lock held only for the duration of the call.
-pub fn with_runner_evidence<T>(f: impl FnOnce(&dyn RunnerEvidenceProvider) -> T) -> T {
-    let guard = PROVIDER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match guard.as_ref() {
-        Some(provider) => f(provider.as_ref()),
-        None => f(&NoopRunnerEvidenceProvider),
-    }
 }
 
 #[cfg(test)]

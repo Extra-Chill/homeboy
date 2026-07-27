@@ -11,8 +11,6 @@
 //! subsystem present) the no-op reports empty/None so status reporting degrades
 //! gracefully rather than failing.
 
-use std::sync::Mutex;
-
 use homeboy_release_contract::{
     ChangelogSnapshotData, ComponentDeployStatus, ComponentVersionSnapshot,
     FinalizedReleaseSnapshot, ReleaseState, ReleaseStateBuckets, ReleaseStateStatus,
@@ -142,23 +140,14 @@ impl ReleaseProvider for NoopProvider {
     }
 }
 
-fn provider_slot() -> &'static Mutex<Option<Box<dyn ReleaseProvider>>> {
-    static PROVIDER: Mutex<Option<Box<dyn ReleaseProvider>>> = Mutex::new(None);
-    &PROVIDER
-}
-
-/// Register the release provider. Called once at startup by the release layer.
-pub fn register_release_provider(provider: Box<dyn ReleaseProvider>) {
-    let mut slot = provider_slot().lock().expect("release provider lock");
-    *slot = Some(provider);
-}
-
-fn with_provider<T>(f: impl FnOnce(&dyn ReleaseProvider) -> T) -> T {
-    let slot = provider_slot().lock().expect("release provider lock");
-    match slot.as_deref() {
-        Some(provider) => f(provider),
-        None => f(&NoopProvider),
-    }
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn ReleaseProvider,
+    noop: NoopProvider,
+    /// Register the release provider. Called once at startup by the release layer.
+    register: pub fn register_release_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none
+    /// is registered.
+    with: fn with_provider,
 }
 
 pub(crate) fn deploy_component_statuses(project_id: &str) -> Result<Vec<ComponentDeployStatus>> {

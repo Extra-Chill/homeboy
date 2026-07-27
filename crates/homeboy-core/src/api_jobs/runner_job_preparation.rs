@@ -12,7 +12,6 @@
 //! the correct behavior when there is no runner to dispatch to.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 use crate::lab_contract::LabRunnerWorkload;
 use crate::secret_env_plan::SecretEnvPlan;
@@ -82,29 +81,15 @@ impl RunnerJobPreparationProvider for NoopRunnerJobPreparationProvider {
     }
 }
 
-static PROVIDER: Mutex<Option<Box<dyn RunnerJobPreparationProvider>>> = Mutex::new(None);
-
-/// Register the runner job-preparation provider. Called once at binary startup
-/// by the runner layer (via the CLI).
-pub fn register_runner_job_preparation_provider(provider: Box<dyn RunnerJobPreparationProvider>) {
-    let mut guard = PROVIDER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard = Some(provider);
-}
-
-/// Run `f` against the registered provider, or the no-op provider if none is
-/// registered.
-pub(crate) fn with_runner_job_preparation<T>(
-    f: impl FnOnce(&dyn RunnerJobPreparationProvider) -> T,
-) -> T {
-    let guard = PROVIDER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match guard.as_ref() {
-        Some(provider) => f(provider.as_ref()),
-        None => f(&NoopRunnerJobPreparationProvider),
-    }
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn RunnerJobPreparationProvider,
+    noop: NoopRunnerJobPreparationProvider,
+    /// Register the runner job-preparation provider. Called once at binary startup
+    /// by the runner layer (via the CLI).
+    register: pub fn register_runner_job_preparation_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none is
+    /// registered.
+    with: pub(crate) fn with_runner_job_preparation,
 }
 
 #[cfg(test)]

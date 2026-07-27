@@ -11,7 +11,6 @@
 //! only reached when a Lab command was actually dispatched.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
 use crate::error::{Error, Result};
 use crate::lab_contract::{
@@ -99,29 +98,19 @@ impl LabOffloadProvider for NoopProvider {
     }
 }
 
-fn provider_slot() -> &'static Mutex<Option<Arc<dyn LabOffloadProvider>>> {
-    static PROVIDER: Mutex<Option<Arc<dyn LabOffloadProvider>>> = Mutex::new(None);
-    &PROVIDER
-}
-
-/// Register the Lab-offload provider. Called once at startup by the runner layer.
-pub fn register_lab_offload_provider(provider: Arc<dyn LabOffloadProvider>) {
-    let mut slot = provider_slot().lock().expect("lab offload provider lock");
-    *slot = Some(provider);
+homeboy_engine_primitives::provider_registry_arc! {
+    provider: dyn LabOffloadProvider,
+    noop: NoopProvider,
+    /// Register the Lab-offload provider. Called once at startup by the runner layer.
+    register: pub fn register_lab_offload_provider,
+    /// The active provider (or the no-op provider). The `Arc` is cloned out so
+    /// the registry lock is not held during the (potentially long) offload.
+    active: fn active_provider,
 }
 
 /// Execute a Lab offload via the registered provider (or the no-op provider).
-/// The provider `Arc` is cloned out before executing so the registry lock is
-/// not held during the (potentially long) offload.
 pub(crate) fn execute_lab_offload(
     request: crate::lab_routing::LabRoutingRequest<'_>,
 ) -> Result<LabOffloadOutcome> {
-    let provider = {
-        let slot = provider_slot().lock().expect("lab offload provider lock");
-        slot.as_ref().map(Arc::clone)
-    };
-    match provider {
-        Some(provider) => provider.execute_lab_offload(request),
-        None => NoopProvider.execute_lab_offload(request),
-    }
+    active_provider().execute_lab_offload(request)
 }

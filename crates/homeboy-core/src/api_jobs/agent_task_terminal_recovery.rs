@@ -10,8 +10,6 @@
 //! With no provider registered (no agent-task subsystem present) the no-op
 //! recovers nothing.
 
-use std::sync::Mutex;
-
 use serde_json::Value;
 
 use super::store::RecoveredTerminalJob;
@@ -31,32 +29,21 @@ impl AgentTaskTerminalRecoveryProvider for NoopProvider {
     }
 }
 
-fn provider_slot() -> &'static Mutex<Option<Box<dyn AgentTaskTerminalRecoveryProvider>>> {
-    static PROVIDER: Mutex<Option<Box<dyn AgentTaskTerminalRecoveryProvider>>> = Mutex::new(None);
-    &PROVIDER
-}
-
-/// Register the agent-task terminal-recovery provider. Called once at startup by
-/// the agent-task layer.
-pub fn register_agent_task_terminal_recovery_provider(
-    provider: Box<dyn AgentTaskTerminalRecoveryProvider>,
-) {
-    let mut slot = provider_slot()
-        .lock()
-        .expect("agent-task terminal recovery provider lock");
-    *slot = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn AgentTaskTerminalRecoveryProvider,
+    noop: NoopProvider,
+    /// Register the agent-task terminal-recovery provider. Called once at startup by
+    /// the agent-task layer.
+    register: pub fn register_agent_task_terminal_recovery_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none
+    /// is registered.
+    with: fn with_provider,
 }
 
 /// Recover the terminal job for a durable agent-task run via the registered
 /// provider (or none when the agent-task subsystem is absent).
 pub(crate) fn recovered_terminal_agent_task_job(run_id: &str) -> Option<RecoveredTerminalJob> {
-    let slot = provider_slot()
-        .lock()
-        .expect("agent-task terminal recovery provider lock");
-    match slot.as_deref() {
-        Some(provider) => provider.recovered_terminal_agent_task_job(run_id),
-        None => NoopProvider.recovered_terminal_agent_task_job(run_id),
-    }
+    with_provider(|p| p.recovered_terminal_agent_task_job(run_id))
 }
 
 /// Build a [`RecoveredTerminalJob`] from its parts. Used by the agent-task

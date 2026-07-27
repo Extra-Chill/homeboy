@@ -10,8 +10,6 @@
 //! back on, so the caller reports the same "requires workspace_root" error it
 //! would for a runner without one.
 
-use std::sync::Mutex;
-
 /// Looks up configured fields from a runner's config by id, for the daemon's
 /// runner-broker endpoints (file API, job claim).
 pub trait RunnerWorkspaceRootProvider: Send + Sync {
@@ -34,38 +32,23 @@ impl RunnerWorkspaceRootProvider for NoopProvider {
     }
 }
 
-fn provider_slot() -> &'static Mutex<Option<Box<dyn RunnerWorkspaceRootProvider>>> {
-    static PROVIDER: Mutex<Option<Box<dyn RunnerWorkspaceRootProvider>>> = Mutex::new(None);
-    &PROVIDER
-}
-
-/// Register the runner workspace-root provider. Called once at startup by the
-/// runner layer.
-pub fn register_runner_workspace_root_provider(provider: Box<dyn RunnerWorkspaceRootProvider>) {
-    let mut slot = provider_slot()
-        .lock()
-        .expect("runner workspace root provider lock");
-    *slot = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn RunnerWorkspaceRootProvider,
+    noop: NoopProvider,
+    /// Register the runner workspace-root provider. Called once at startup by the
+    /// runner layer.
+    register: pub fn register_runner_workspace_root_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none
+    /// is registered.
+    with: fn with_provider,
 }
 
 /// Resolve a runner's configured workspace root via the registered provider.
 pub(crate) fn runner_workspace_root(runner_id: &str) -> Option<String> {
-    let slot = provider_slot()
-        .lock()
-        .expect("runner workspace root provider lock");
-    match slot.as_deref() {
-        Some(provider) => provider.runner_workspace_root(runner_id),
-        None => NoopProvider.runner_workspace_root(runner_id),
-    }
+    with_provider(|p| p.runner_workspace_root(runner_id))
 }
 
 /// Resolve a runner's configured concurrency limit via the registered provider.
 pub(crate) fn runner_concurrency_limit(runner_id: &str) -> Option<usize> {
-    let slot = provider_slot()
-        .lock()
-        .expect("runner workspace root provider lock");
-    match slot.as_deref() {
-        Some(provider) => provider.runner_concurrency_limit(runner_id),
-        None => NoopProvider.runner_concurrency_limit(runner_id),
-    }
+    with_provider(|p| p.runner_concurrency_limit(runner_id))
 }

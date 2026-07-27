@@ -10,7 +10,6 @@
 //! returns a not-supported error, so callers degrade gracefully.
 
 use std::path::Path;
-use std::sync::Mutex;
 
 use homeboy_extension_contract::{ExtensionCapability, ExtensionPhaseTiming};
 
@@ -57,18 +56,15 @@ pub trait ComponentScriptRunner: Send + Sync {
     ) -> Result<ComponentScriptOutput>;
 }
 
-fn provider_slot() -> &'static Mutex<Option<Box<dyn ComponentScriptRunner>>> {
-    static PROVIDER: Mutex<Option<Box<dyn ComponentScriptRunner>>> = Mutex::new(None);
-    &PROVIDER
-}
-
-/// Register the component-script runner. Called once at startup by the
-/// extension layer.
-pub fn register_component_script_runner(provider: Box<dyn ComponentScriptRunner>) {
-    let mut slot = provider_slot()
-        .lock()
-        .expect("component script runner lock");
-    *slot = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn ComponentScriptRunner,
+    /// Register the component-script runner. Called once at startup by the
+    /// extension layer.
+    register: pub fn register_component_script_runner,
+    /// Run `f` against the registered runner, or `None` when none is registered.
+    /// This registry has no no-op implementation: each dispatch function below
+    /// reports its own "extension subsystem not available" error.
+    with_optional: fn with_provider,
 }
 
 /// Run a pre-resolved execution context through the registered provider.
@@ -78,16 +74,13 @@ pub fn run_with_context(
     path_override: Option<String>,
     script_args: &[String],
 ) -> Result<ComponentScriptOutput> {
-    let slot = provider_slot()
-        .lock()
-        .expect("component script runner lock");
-    match slot.as_deref() {
-        Some(provider) => provider.run_with_context(context, component, path_override, script_args),
+    with_provider(|runner| match runner {
+        Some(runner) => runner.run_with_context(context, component, path_override, script_args),
         None => Err(Error::internal_io(
             "no component-script runner registered; the extension subsystem is not available",
             None,
         )),
-    }
+    })
 }
 
 /// Run a component's scripts for a capability through the registered provider.
@@ -99,11 +92,8 @@ pub fn run_component_scripts_with_env(
     extra_env: &[(String, String)],
     script_args: &[String],
 ) -> Result<ComponentScriptOutput> {
-    let slot = provider_slot()
-        .lock()
-        .expect("component script runner lock");
-    match slot.as_deref() {
-        Some(provider) => provider.run_component_scripts_with_env(
+    with_provider(|runner| match runner {
+        Some(runner) => runner.run_component_scripts_with_env(
             component,
             capability,
             source_path,
@@ -115,5 +105,5 @@ pub fn run_component_scripts_with_env(
             "no component-script runner registered; the extension subsystem is not available",
             None,
         )),
-    }
+    })
 }

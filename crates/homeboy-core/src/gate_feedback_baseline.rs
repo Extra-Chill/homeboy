@@ -13,7 +13,6 @@
 //! of a gate-feedback baseline — the safe default.
 
 use std::path::Path;
-use std::sync::Mutex;
 
 use serde_json::Value;
 
@@ -49,18 +48,15 @@ impl GateFeedbackBaselineProvider for NoopProvider {
     }
 }
 
-fn provider_slot() -> &'static Mutex<Option<Box<dyn GateFeedbackBaselineProvider>>> {
-    static PROVIDER: Mutex<Option<Box<dyn GateFeedbackBaselineProvider>>> = Mutex::new(None);
-    &PROVIDER
-}
-
-/// Register the gate-feedback candidate-baseline provider. Called once at
-/// startup by the agent-task layer.
-pub fn register_gate_feedback_baseline_provider(provider: Box<dyn GateFeedbackBaselineProvider>) {
-    let mut slot = provider_slot()
-        .lock()
-        .expect("gate feedback baseline provider lock");
-    *slot = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn GateFeedbackBaselineProvider,
+    noop: NoopProvider,
+    /// Register the gate-feedback candidate-baseline provider. Called once at
+    /// startup by the agent-task layer.
+    register: pub fn register_gate_feedback_baseline_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none
+    /// is registered.
+    with: fn with_provider,
 }
 
 /// Verify a gate-feedback candidate baseline via the registered provider (or the
@@ -70,11 +66,5 @@ pub(crate) fn validate_gate_feedback_candidate_baseline(
     root: &Path,
     baseline: &Value,
 ) -> Result<String> {
-    let slot = provider_slot()
-        .lock()
-        .expect("gate feedback baseline provider lock");
-    match slot.as_deref() {
-        Some(provider) => provider.validate_gate_feedback_candidate_baseline(root, baseline),
-        None => NoopProvider.validate_gate_feedback_candidate_baseline(root, baseline),
-    }
+    with_provider(|p| p.validate_gate_feedback_candidate_baseline(root, baseline))
 }

@@ -7,8 +7,6 @@
 //! With no provider registered (no stack subsystem present) the no-op reports
 //! no stacks, so the stack HTTP endpoints return empty results.
 
-use std::sync::Mutex;
-
 use serde_json::Value;
 
 use crate::Result;
@@ -39,23 +37,14 @@ impl StackProvider for NoopProvider {
     }
 }
 
-fn provider_slot() -> &'static Mutex<Option<Box<dyn StackProvider>>> {
-    static PROVIDER: Mutex<Option<Box<dyn StackProvider>>> = Mutex::new(None);
-    &PROVIDER
-}
-
-/// Register the stack provider. Called once at startup by the stack layer.
-pub fn register_stack_provider(provider: Box<dyn StackProvider>) {
-    let mut slot = provider_slot().lock().expect("stack provider lock");
-    *slot = Some(provider);
-}
-
-fn with_provider<T>(f: impl FnOnce(&dyn StackProvider) -> T) -> T {
-    let slot = provider_slot().lock().expect("stack provider lock");
-    match slot.as_deref() {
-        Some(provider) => f(provider),
-        None => f(&NoopProvider),
-    }
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn StackProvider,
+    noop: NoopProvider,
+    /// Register the stack provider. Called once at startup by the stack layer.
+    register: pub fn register_stack_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none
+    /// is registered.
+    with: fn with_provider,
 }
 
 pub(crate) fn stack_list_json() -> Result<Value> {
