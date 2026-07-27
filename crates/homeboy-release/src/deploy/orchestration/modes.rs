@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
+use homeboy_core::git::release_download::ReleaseArtifactLease;
 use homeboy_core::project::Project;
 use homeboy_core::server::SshClient;
 
@@ -27,6 +28,7 @@ pub(super) fn run_check_mode(
     base_path: &str,
     config: &DeployConfig,
     client: &SshClient,
+    canonical_packages: &HashMap<String, ReleaseArtifactLease>,
 ) -> DeployOrchestrationResult {
     let mut git_probe_cache = GitProbeCache::default();
     let mut results: Vec<ComponentDeployResult> = components
@@ -35,12 +37,21 @@ pub(super) fn run_check_mode(
             let mut status =
                 calculate_component_status_with_git_cache(c, remote_versions, &mut git_probe_cache);
             let release_state = calculate_release_state(c);
-            let manifest = super::super::content_manifest::compare(
-                std::path::Path::new(&c.local_path),
-                &super::super::path_roots::resolve_effective_remote_path(project, c, base_path)
-                    .unwrap_or_default(),
-                client,
-            );
+            let manifest = if let Some(package) = canonical_packages.get(&c.id) {
+                super::super::content_manifest::compare_archive(
+                    &package.path,
+                    &super::super::path_roots::resolve_effective_remote_path(project, c, base_path)
+                        .unwrap_or_default(),
+                    client,
+                )
+            } else {
+                super::super::content_manifest::compare(
+                    std::path::Path::new(&c.local_path),
+                    &super::super::path_roots::resolve_effective_remote_path(project, c, base_path)
+                        .unwrap_or_default(),
+                    client,
+                )
+            };
             if manifest.status == "missing" {
                 status = ComponentStatus::Missing;
             } else if manifest.status == "different" && matches!(status, ComponentStatus::UpToDate)
@@ -626,6 +637,7 @@ mod tests {
             "/srv/site",
             &config,
             &local_client(),
+            &HashMap::new(),
         );
         assert_eq!(checked.results[0].status, "checked");
         assert_eq!(checked.results[0].local_version.as_deref(), Some("1.2.3"));
@@ -643,6 +655,90 @@ mod tests {
         assert_eq!(planned.results[0].status, "planned");
         assert_eq!(planned.results[0].local_version.as_deref(), Some("1.2.3"));
         assert_eq!(planned.results[0].remote_version.as_deref(), Some("1.3.0"));
+    }
+
+    #[test]
+    fn check_uses_canonical_package_for_clean_and_modified_production_trees() {
+        let temp = tempfile::tempdir().expect("temp");
+        let source = temp.path().join("source");
+        let remote = temp.path().join("plugin");
+        std::fs::create_dir_all(source.join("tests")).expect("source tests");
+        std::fs::create_dir_all(&remote).expect("remote");
+        std::fs::write(source.join("README.md"), "source only").expect("readme");
+        std::fs::write(source.join("tests/test.php"), "source only").expect("test");
+        std::fs::write(source.join("plugin.php"), "Version: 1.0.0\nrelease")
+            .expect("source plugin");
+        std::fs::write(remote.join("plugin.php"), "Version: 1.0.0\nrelease")
+            .expect("remote plugin");
+
+        let package = temp.path().join("plugin.zip");
+        let file = std::fs::File::create(&package).expect("package");
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file("plugin/plugin.php", zip::write::FileOptions::default())
+            .expect("entry");
+        use std::io::Write as _;
+        zip.write_all(b"Version: 1.0.0\nrelease").expect("contents");
+        zip.finish().expect("finish");
+        let bytes = std::fs::read(&package).expect("package bytes");
+        let package =
+            ReleaseArtifactLease::test_new(homeboy_core::git::release_download::ReleaseArtifact {
+                path: package,
+                tag: "v1.0.0".to_string(),
+                commit: Some("release".to_string()),
+                url: "https://example.test/plugin.zip".to_string(),
+                name: "plugin.zip".to_string(),
+                size: bytes.len() as u64,
+                sha256: crate::deploy::sha256_file(temp.path().join("plugin.zip").as_path())
+                    .expect("sha"),
+            })
+            .expect("lease");
+        let component = Component {
+            id: "plugin".to_string(),
+            local_path: source.to_string_lossy().to_string(),
+            remote_path: remote.to_string_lossy().to_string(),
+            version_targets: Some(vec![homeboy_core::component::VersionTarget {
+                file: "plugin.php".to_string(),
+                pattern: Some(r"Version:\s*([0-9.]+)".to_string()),
+                artifact_path: None,
+            }]),
+            ..Component::default()
+        };
+        let versions = HashMap::from([("plugin".to_string(), "1.0.0".to_string())]);
+        let config = DeployConfig::check_all_no_pull_head();
+        let packages = HashMap::from([("plugin".to_string(), package)]);
+
+        let clean = run_check_mode(
+            std::slice::from_ref(&component),
+            &versions,
+            &versions,
+            &[],
+            &Project::default(),
+            ".",
+            &config,
+            &local_client(),
+            &packages,
+        );
+        assert_eq!(
+            clean.results[0].component_status,
+            Some(ComponentStatus::UpToDate)
+        );
+
+        std::fs::write(remote.join("plugin.php"), "modified").expect("drift");
+        let drift = run_check_mode(
+            &[component],
+            &versions,
+            &versions,
+            &[],
+            &Project::default(),
+            ".",
+            &config,
+            &local_client(),
+            &packages,
+        );
+        assert_eq!(
+            drift.results[0].component_status,
+            Some(ComponentStatus::RemoteModified)
+        );
     }
 
     fn git(path: &Path, args: &[&str]) {

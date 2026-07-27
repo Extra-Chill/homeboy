@@ -224,6 +224,7 @@ pub(super) fn deploy_components(
             base_path,
             config,
             &ctx.client,
+            &resolved_release_artifacts,
         ));
     }
     if config.dry_run {
@@ -556,19 +557,16 @@ pub(super) fn deploy_components(
 /// bytes from GitHub (which can 404 or otherwise fail per component) so a real
 /// deploy can reuse the same run-scoped bytes across every target.
 ///
-/// Read-only modes (`--check`, `--dry-run`) return before the resolved map is
-/// ever consumed, so resolving here would only waste work and — worse — abort
-/// the entire project probe on the first unresolvable component (e.g. a release
-/// tag with no matching asset, or a component whose path resolution yields an
-/// empty path). Non-mutating modes therefore resolve nothing, matching the
-/// remote-path guard (#8190) and the exact-ref checkout guard. (#9169)
+/// Check mode consumes the same canonical release package selected for deploy
+/// when it is available. A failed optional lookup retains legacy source-tree
+/// checking rather than failing the complete read-only project probe.
 fn resolve_release_artifacts_for_deploy(
     components: &[Component],
     config: &DeployConfig,
     release_artifacts: &mut ReleaseArtifactStore,
 ) -> Result<HashMap<String, ReleaseArtifactLease>> {
     let mut resolved_release_artifacts: HashMap<String, ReleaseArtifactLease> = HashMap::new();
-    if config.check || config.dry_run {
+    if config.dry_run {
         return Ok(resolved_release_artifacts);
     }
 
@@ -576,10 +574,29 @@ fn resolve_release_artifacts_for_deploy(
         if let ReleaseArtifactPlan::Reuse { tag, .. } =
             release_artifact_plan(component, config, false, false)
         {
-            let artifact = resolve_planned_release_artifact(component, &tag, release_artifacts)
-                .map_err(|error| {
-                    Error::validation_invalid_argument("releaseArtifact", error, None, None)
-                })?;
+            let artifact = match resolve_planned_release_artifact(
+                component,
+                &tag,
+                release_artifacts,
+            ) {
+                Ok(artifact) => artifact,
+                Err(error) if config.check => {
+                    homeboy_core::log_status!(
+                        "deploy",
+                        "Canonical release package unavailable for '{}' ({error}); using legacy source-tree check",
+                        component.id
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    return Err(Error::validation_invalid_argument(
+                        "releaseArtifact",
+                        error,
+                        None,
+                        None,
+                    ))
+                }
+            };
             homeboy_core::log_status!(
                 "deploy",
                 "Verified release asset: tag={} name={} size={} sha256={} source={}",
@@ -1042,12 +1059,11 @@ mod tests {
         assert_eq!(err.details["field"].as_str(), Some("build_command"));
     }
 
-    // A project `deploy --check` must not resolve/download release assets: that
-    // network step can fail per component (missing asset, empty path) and would
-    // abort the whole read-only probe. Check and dry-run resolve nothing; only a
-    // real deploy resolves (and would surface the failure). (#9169)
+    // A check resolves the canonical package when available, but an unavailable
+    // release asset must retain legacy source-tree checking rather than abort a
+    // project-wide read-only probe. Dry-run still resolves nothing. (#10253)
     #[test]
-    fn check_and_dry_run_skip_release_asset_resolution() {
+    fn check_tolerates_missing_canonical_package_and_dry_run_skips_resolution() {
         with_isolated_home(|_| {
             // A component whose release plan is `Reuse` (github remote_url +
             // build_artifact + expected_version) but whose asset cannot resolve.
@@ -1067,10 +1083,10 @@ mod tests {
                 &check_config,
                 &mut store,
             )
-            .expect("check mode must not abort on release-asset resolution");
+            .expect("check mode must retain legacy behavior when canonical package is missing");
             assert!(
                 resolved.is_empty(),
-                "check mode must resolve no release assets"
+                "missing canonical package must not produce a partial authority"
             );
 
             let mut dry_run_config = base_deploy_config();
