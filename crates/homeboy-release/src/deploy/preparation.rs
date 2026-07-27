@@ -629,7 +629,7 @@ fn configured_artifact_path(component: &Component) -> Result<PathBuf> {
 }
 
 fn artifact_pattern(component: &Component) -> Result<String> {
-    homeboy_core::component::resolve_artifact(component).ok_or_else(|| {
+    homeboy_core::component::resolve_artifact(component)?.ok_or_else(|| {
         Error::validation_invalid_argument(
             "build_artifact",
             "Component has no build artifact configured by itself or a linked extension",
