@@ -7,12 +7,52 @@ use std::sync::{Mutex, OnceLock};
 use crate::workspace::snapshot::{
     copy_snapshot_to_directory, ensure_no_runner_workspace_metadata_collision,
     scratch_scoped_command, snapshot_archive_command, snapshot_install_command,
-    synthetic_checkout_value, workspace_content_hash, workspace_content_hash_algorithm,
-    workspace_content_hash_for_policy, workspace_content_hash_v1,
-    workspace_content_manifest_for_policy, WORKSPACE_CONTENT_PERMISSION_PORTABLE,
-    WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
+    snapshot_materialization_command, snapshot_overlay_install_command, synthetic_checkout_value,
+    workspace_content_hash, workspace_content_hash_algorithm, workspace_content_hash_for_policy,
+    workspace_content_hash_v1, workspace_content_manifest_for_policy,
+    WORKSPACE_CONTENT_PERMISSION_PORTABLE, WORKSPACE_CONTENT_PERMISSION_UNIX_EXECUTABLE,
     WORKSPACE_CONTENT_PERMISSION_UNIX_OWNER_EXECUTABLE,
 };
+
+/// Parse `command` without executing it, under every POSIX shell on the host.
+///
+/// `sh -n` alone is a weak portability check. Where `/bin/sh` is bash, its
+/// parser accepts bash-only syntax that dash rejects outright -- process
+/// substitution `<(...)`, the `function` keyword, and array assignments -- so a
+/// developer machine reports green while the runner's dash refuses the same
+/// program. Preferring `dash` when it is installed makes the check as strict as
+/// the shell that actually executes these commands (#10399).
+///
+/// A parse check cannot catch every bashism: `[[ ... ]]` and `((...))` parse as
+/// ordinary words under dash and only fail when run. It does reliably catch the
+/// structural errors this boundary keeps producing, including the assignment
+/// prefix on a `(...)` subshell that both shells reject.
+fn assert_parses_under_posix_shells(command: &str, label: &str) {
+    let mut parsed_by = Vec::new();
+    for shell in ["dash", "sh"] {
+        let output = match std::process::Command::new(shell)
+            .arg("-n")
+            .arg("-c")
+            .arg(command)
+            .output()
+        {
+            Ok(output) => output,
+            // `dash` is not installed everywhere; `sh` always is.
+            Err(_) if shell == "dash" => continue,
+            Err(error) => panic!("failed to run `{shell} -n` for {label}: {error}"),
+        };
+        assert!(
+            output.status.success(),
+            "{label} must parse under `{shell}`: {}\ncommand: {command}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        parsed_by.push(shell);
+    }
+    assert!(
+        parsed_by.contains(&"sh"),
+        "{label} was never parsed by a shell"
+    );
+}
 
 #[test]
 fn snapshot_git_readback_failure_fails_materialization_contract() {
@@ -1381,16 +1421,73 @@ fn scratch_scoped_snapshot_command_parses_under_posix_sh() {
             "scratch scoping must export rather than prefix an assignment: {scoped}"
         );
 
-        let parsed = std::process::Command::new("sh")
-            .arg("-n")
-            .arg("-c")
-            .arg(&scoped)
-            .output()
-            .expect("run sh -n");
-        assert!(
-            parsed.status.success(),
-            "scratch-scoped snapshot command must parse under POSIX sh: {}\ncommand: {scoped}",
-            String::from_utf8_lossy(&parsed.stderr)
+        assert_parses_under_posix_shells(&scoped, "scratch-scoped snapshot command");
+    }
+}
+
+/// Cover the command production actually executes, not a re-composition of its
+/// parts. `materialize_snapshot_piped` used to assemble the archive pipeline and
+/// the scratch prefix inline, so no test observed the assembled program; the
+/// scratch branch is taken unconditionally by `sync_workspace`, which is why a
+/// malformed composition took out every workspace-prune behavior test at once
+/// instead of a single targeted assertion (#10399).
+#[test]
+fn snapshot_materialization_command_parses_under_posix_shells() {
+    use homeboy_core::engine::shell;
+
+    let local_target = format!(
+        "sh -c {}",
+        shell::quote_arg(&snapshot_install_command(
+            "/var/lib/sampleplugin/workspace/_lab_workspaces/homeboy-abc"
+        ))
+    );
+
+    for excludes in [
+        vec![],
+        vec!["node_modules".to_string()],
+        vec!["./target".to_string(), "node_modules".to_string()],
+    ] {
+        for target in [local_target.as_str(), "ssh runner 'tar -xf -'"] {
+            for scratch in [
+                None,
+                Some(Path::new("/var/lib/homeboy/scratch dir")),
+                Some(Path::new("/var/lib/homeboy/scratch")),
+            ] {
+                let command = snapshot_materialization_command(
+                    Path::new("/Users/user/Developer/wp-site-generator"),
+                    target,
+                    &excludes,
+                    scratch,
+                );
+
+                assert_eq!(
+                    scratch.is_some(),
+                    command.starts_with("export TMPDIR="),
+                    "scratch scoping must be applied exactly when a scratch filesystem is admitted: {command}"
+                );
+
+                assert_parses_under_posix_shells(&command, "snapshot materialization command");
+            }
+        }
+    }
+}
+
+/// The install commands cross the same `sh -c` boundary as the archive
+/// pipeline, on both the local and the SSH runner path, so hold them to the
+/// same portability contract (#10399).
+#[test]
+fn snapshot_install_commands_parse_under_posix_shells() {
+    for remote_path in [
+        "/var/lib/sampleplugin/workspace/_lab_workspaces/homeboy-abc",
+        "/var/lib/homeboy/work spaces/homeboy-abc",
+    ] {
+        assert_parses_under_posix_shells(
+            &snapshot_install_command(remote_path),
+            "snapshot install command",
+        );
+        assert_parses_under_posix_shells(
+            &snapshot_overlay_install_command(remote_path),
+            "snapshot overlay install command",
         );
     }
 }

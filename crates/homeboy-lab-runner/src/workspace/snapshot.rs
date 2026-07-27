@@ -1703,11 +1703,30 @@ fn materialize_snapshot_piped(
     action: &str,
     scratch: Option<&Path>,
 ) -> Result<()> {
-    let mut command = snapshot_archive_command(local_path, target_command, excludes);
-    if let Some(scratch) = scratch {
-        command = scratch_scoped_command(&command, scratch);
-    }
+    let command = snapshot_materialization_command(local_path, target_command, excludes, scratch);
     run_shell_command(&command, action)
+}
+
+/// Build the exact shell program a snapshot materialization hands to `sh -c`.
+///
+/// This is the single construction point for that program so a test can assert
+/// against the byte-for-byte string production runs. Composing the archive
+/// pipeline and scratch scoping inline in the caller left the assembled command
+/// unobservable: `scratch_scoped_command` was individually well-formed, yet the
+/// only thing that ever exercised the *composition* was a full materialization,
+/// so a shell-syntax regression reached `sh -c` with no test able to see it and
+/// surfaced as ten unrelated workspace-prune behavior failures (#10399).
+pub(super) fn snapshot_materialization_command(
+    local_path: &Path,
+    target_command: &str,
+    excludes: &[String],
+    scratch: Option<&Path>,
+) -> String {
+    let command = snapshot_archive_command(local_path, target_command, excludes);
+    match scratch {
+        Some(scratch) => scratch_scoped_command(&command, scratch),
+        None => command,
+    }
 }
 
 /// Scope one snapshot command to an admitted controller scratch filesystem.
@@ -1825,7 +1844,7 @@ pub(super) fn snapshot_install_command(remote_path: &str) -> String {
         .command()
 }
 
-fn snapshot_overlay_install_command(remote_path: &str) -> String {
+pub(super) fn snapshot_overlay_install_command(remote_path: &str) -> String {
     let remote_path = shell::quote_arg(remote_path);
     format!(
         "dest={remote_path}; tmp=\"${{dest}}.overlay.$$\"; rm -rf \"$tmp\" && mkdir -p \"$tmp\" && trap 'rm -rf \"$tmp\"' EXIT && tar -C \"$tmp\" -xf - && find \"$dest\" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {{}} + && cp -a \"$tmp\"/. \"$dest\"/"
