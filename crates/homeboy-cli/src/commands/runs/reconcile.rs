@@ -83,6 +83,9 @@ pub(crate) fn reconcile_owned_stale_running_run(
     store: &ObservationStore,
     run: &RunRecord,
 ) -> homeboy::core::Result<Option<ReconciledRunSummary>> {
+    if run.status != RunStatus::Running.as_str() {
+        return Ok(None);
+    }
     reconcile_orphaned_running_run(store, run, false, pid_is_running)
 }
 
@@ -435,6 +438,37 @@ mod tests {
             assert!(reconciled.is_empty());
             assert_eq!(unchanged.status, "running");
             assert!(unchanged.finished_at.is_none());
+        });
+    }
+
+    #[test]
+    fn targeted_reconcile_preserves_a_terminal_refresh() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run(
+                    "bench",
+                    "homeboy",
+                    "studio",
+                    serde_json::json!({
+                        "homeboy_run_owner": { "pid": u32::MAX },
+                    }),
+                ))
+                .expect("run");
+            let terminal = store
+                .finish_run(&run.id, RunStatus::Pass, None)
+                .expect("terminal refresh");
+
+            let reconciled =
+                reconcile_owned_stale_running_run(&store, &terminal).expect("targeted reconcile");
+            let unchanged = store
+                .get_run(&run.id)
+                .expect("get run")
+                .expect("run exists");
+
+            assert!(reconciled.is_none());
+            assert_eq!(unchanged.status, RunStatus::Pass.as_str());
         });
     }
 
