@@ -805,42 +805,48 @@ where
     let cooks = Arc::new(options.cooks);
     let next = Arc::new(Mutex::new(0usize));
     let (tx, rx) = mpsc::channel();
+    // The caller's route is thread-local, so each worker must re-bind it or its
+    // children submit unrouted and never notify the originating destination.
+    let notification_route = homeboy_core::notification_route::capture();
     std::thread::scope(|scope| {
         for _ in 0..workers {
             let cooks = Arc::clone(&cooks);
             let next = Arc::clone(&next);
             let tx = tx.clone();
             let executor = executor.clone();
-            scope.spawn(move || loop {
-                let index = {
-                    let mut next = next.lock().expect("cook batch work queue");
-                    if *next == cooks.len() {
-                        return;
-                    }
-                    let index = *next;
-                    *next += 1;
-                    index
-                };
-                let cook = cooks[index].clone();
-                let cell = match run_cook(cook.clone(), executor.clone()) {
-                    Ok(result) => AgentTaskCookBatchCellReport {
-                        cook_id: cook.cook_id,
-                        initial_run_id: cook.initial_run_id,
-                        status: result.value.status.clone(),
-                        exit_code: result.exit_code,
-                        result: Some(result.value),
-                        error: None,
-                    },
-                    Err(error) => AgentTaskCookBatchCellReport {
-                        cook_id: cook.cook_id,
-                        initial_run_id: cook.initial_run_id,
-                        status: "failed".to_string(),
-                        exit_code: 1,
-                        result: None,
-                        error: Some(error.to_string()),
-                    },
-                };
-                let _ = tx.send((index, cell));
+            let notification_route = notification_route.clone();
+            scope.spawn(move || {
+                notification_route.bind(|| loop {
+                    let index = {
+                        let mut next = next.lock().expect("cook batch work queue");
+                        if *next == cooks.len() {
+                            return;
+                        }
+                        let index = *next;
+                        *next += 1;
+                        index
+                    };
+                    let cook = cooks[index].clone();
+                    let cell = match run_cook(cook.clone(), executor.clone()) {
+                        Ok(result) => AgentTaskCookBatchCellReport {
+                            cook_id: cook.cook_id,
+                            initial_run_id: cook.initial_run_id,
+                            status: result.value.status.clone(),
+                            exit_code: result.exit_code,
+                            result: Some(result.value),
+                            error: None,
+                        },
+                        Err(error) => AgentTaskCookBatchCellReport {
+                            cook_id: cook.cook_id,
+                            initial_run_id: cook.initial_run_id,
+                            status: "failed".to_string(),
+                            exit_code: 1,
+                            result: None,
+                            error: Some(error.to_string()),
+                        },
+                    };
+                    let _ = tx.send((index, cell));
+                })
             });
         }
     });

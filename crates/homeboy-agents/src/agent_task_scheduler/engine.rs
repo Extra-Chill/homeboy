@@ -629,15 +629,20 @@ where
                     join_handle: None,
                 });
 
+                // Re-bind the caller's notification route: it is thread-local,
+                // so provider work dispatched here would otherwise run unrouted.
+                let notification_route = homeboy_core::notification_route::capture();
                 let join_handle = thread::spawn(move || {
-                    let _attempt_workspace = attempt_workspace;
-                    let outcome = executor.execute(request, context);
-                    let _ = tx.send(SchedulerEvent::TaskResult(TaskResult {
-                        task_id,
-                        attempt,
-                        outcome,
-                        scratch,
-                    }));
+                    notification_route.bind(|| {
+                        let _attempt_workspace = attempt_workspace;
+                        let outcome = executor.execute(request, context);
+                        let _ = tx.send(SchedulerEvent::TaskResult(TaskResult {
+                            task_id,
+                            attempt,
+                            outcome,
+                            scratch,
+                        }));
+                    })
                 });
                 running
                     .last_mut()
