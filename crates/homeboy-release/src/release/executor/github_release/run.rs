@@ -165,8 +165,14 @@ pub(crate) fn run_github_release(
 
         let metadata = gh_release_metadata(&github, &component.github, &tag, &repo_flag)
             .map_err(|error| Error::internal_unexpected(error))?;
-        let (uploads, existing) = reconcile_release_publications(&publications, &metadata.assets)
-            .map_err(|error| {
+        let (uploads, existing) = reconcile_release_publications(
+            &publications,
+            &metadata.assets,
+            &github,
+            &component.github,
+            &repo_flag,
+        )
+        .map_err(|error| {
             Error::validation_invalid_argument("release assets", error, None, None)
         })?;
         homeboy_core::log_status!(
@@ -234,7 +240,13 @@ pub(crate) fn run_github_release(
                 ))
             }
         };
-        if let Err(error) = verify_release_publications(&publications, &metadata.assets) {
+        if let Err(error) = verify_release_publications(
+            &publications,
+            &metadata.assets,
+            &github,
+            &component.github,
+            &repo_flag,
+        ) {
             return Ok(upload_failed_result(
                 &tag,
                 &github,
@@ -386,7 +398,13 @@ pub(crate) fn run_github_release(
             ))
         }
     };
-    if let Err(error) = verify_release_publications(&publications, &metadata.assets) {
+    if let Err(error) = verify_release_publications(
+        &publications,
+        &metadata.assets,
+        &github,
+        &component.github,
+        &repo_flag,
+    ) {
         return Ok(upload_failed_result(
             &tag,
             &github,
