@@ -38,6 +38,24 @@ jobs:
       - name: Compile all workspace test targets
         run: cargo check --workspace --tests --locked
 
+  # Fail-fast mirror of the release `Windows Build` gate. Unix-only `libc`
+  # constants (`SIGKILL` has no Windows definition) and other cfg-gating misses
+  # compile fine on Linux, so they only surfaced after merge when the release
+  # workflow ran `cargo build --workspace` on windows-latest and turned `main`
+  # red (#10398). Same crate scope as that gate, but codegen-free so it stays
+  # cheap enough to run on every PR. Deliberately no `--tests`: the release gate
+  # does not build test targets, and some Unix-only test helpers rely on that.
+  windows-compile:
+    name: homeboy / Windows Compile
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check all workspace crates for Windows
+        run: cargo check --workspace --locked
+
   # Keep `main` rustfmt-clean so a feature branch's `cargo fmt` only ever touches
   # the files it changed. Without this gate, unformatted files drift onto main
   # and get pulled into unrelated PRs (a bare `cargo fmt` reformats them, or a

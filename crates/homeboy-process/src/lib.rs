@@ -10,6 +10,27 @@ use uuid::Uuid;
 #[cfg(target_os = "linux")]
 const PROCESS_SCOPE_ENV: &str = "HOMEBOY_PROCESS_SCOPE";
 
+/// Graceful-termination signal number for [`signal_pid`].
+///
+/// Named here rather than used as `libc::SIGTERM` at call sites so every
+/// lifecycle caller routes its platform assumption through this crate.
+pub const SIGNAL_TERMINATE: libc::c_int = libc::SIGTERM;
+
+/// Forced-kill signal number for [`signal_pid`].
+///
+/// `libc`'s Windows shim does not define `SIGKILL`, so a call site that writes
+/// `libc::SIGKILL` directly fails to compile for `*-pc-windows-*` even when the
+/// surrounding code is only ever reached on Unix. Naming the constant here
+/// keeps cross-target builds compiling while [`signal_pid`] remains the single
+/// place that rejects signaling on platforms without POSIX signals.
+#[cfg(unix)]
+pub const SIGNAL_KILL: libc::c_int = libc::SIGKILL;
+
+/// Placeholder forced-kill number on platforms without POSIX signals. It is
+/// never delivered: [`signal_pid`] fails closed before the value is used.
+#[cfg(not(unix))]
+pub const SIGNAL_KILL: libc::c_int = 9;
+
 /// Owns a process group and, on Linux, an inherited scope marker that survives
 /// descendants changing sessions or outliving their direct parent.
 pub struct ProcessContainment {
