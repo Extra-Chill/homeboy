@@ -98,10 +98,20 @@ pub fn route_after_parse(
 
     let lab_command = lab_offload_command(&cli.command)?;
 
+    // Keep the readiness verdict, not just the selected id: when no runner is
+    // eligible the reasons and remediation commands are the only thing that can
+    // explain a local fallback to the operator.
+    let lab_readiness = if lab_command.is_some() && cli.runner.is_none() {
+        runners::lab_runner_readiness().ok()
+    } else {
+        None
+    };
     let inferred_runner_id = if lab_command.is_some() {
-        cli.runner
-            .clone()
-            .or_else(|| runners::resolve_default_lab_runner().ok().flatten())
+        cli.runner.clone().or_else(|| {
+            lab_readiness
+                .as_ref()
+                .and_then(|readiness| readiness.selected_runner_id.clone())
+        })
     } else {
         None
     };
@@ -254,7 +264,9 @@ pub fn route_after_parse(
             if destructive_fuzz_requires_lab(&cli.command) {
                 return Err(destructive_fuzz_local_execution_error());
             }
-            if let Some(warning) = agent_task_local_fanout_warning(&cli.command) {
+            if let Some(warning) =
+                agent_task_local_fanout_warning(&cli.command, lab_readiness.as_ref())
+            {
                 eprintln!("{warning}");
             }
             Ok(None)
@@ -1385,25 +1397,83 @@ fn validate_lab_env_name(source: &str, name: &str) -> homeboy::core::Result<Stri
     Ok(name.to_string())
 }
 
-fn agent_task_local_fanout_warning(command: &Commands) -> Option<String> {
+/// Warn before N provider attempts run on the controller instead of the Lab.
+///
+/// Batch fanout is the command most likely to overwhelm a controller, so it is
+/// covered here alongside `cook`. When a Lab runner was looked for and none was
+/// eligible, the readiness verdict carries the only explanation of why, and its
+/// remediation commands are the operator's shortest path back to the Lab.
+fn agent_task_local_fanout_warning(
+    command: &Commands,
+    readiness: Option<&runners::LabRunnerReadiness>,
+) -> Option<String> {
+    use crate::commands::agent_task::{
+        AgentTaskArgs, AgentTaskCommand, AgentTaskFanoutArgs, AgentTaskFanoutCommand,
+    };
+
     let (label, concurrency, task_count) = match command {
-        Commands::AgentTask(crate::commands::agent_task::AgentTaskArgs {
-            command: crate::commands::agent_task::AgentTaskCommand::Cook(args),
-        }) => (
-            "agent-task cook local fanout",
-            args.dispatch.concurrency,
-            args.dispatch.tasks.len()
+        Commands::AgentTask(AgentTaskArgs {
+            command: AgentTaskCommand::Cook(args),
+        }) => {
+            let tasks = args.dispatch.tasks.len()
                 + usize::from(args.dispatch.prompt.is_some())
-                + usize::from(args.dispatch.core.tasks_json.is_some()),
+                + usize::from(args.dispatch.core.tasks_json.is_some());
+            if args.dispatch.concurrency <= 1 && tasks <= 1 {
+                return None;
+            }
+            (
+                "agent-task cook local fanout",
+                args.dispatch.concurrency.to_string(),
+                tasks.to_string(),
+            )
+        }
+        Commands::AgentTask(AgentTaskArgs {
+            command:
+                AgentTaskCommand::Fanout(AgentTaskFanoutArgs {
+                    command: AgentTaskFanoutCommand::CookBatch(args),
+                }),
+        }) if args.run_plan && !args.dry_run => {
+            if args.issues.len() <= 1 {
+                return None;
+            }
+            // cook-batch has no --concurrency flag: local workers are capped by
+            // available parallelism, so report what will actually run.
+            let workers = std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(1)
+                .min(args.issues.len());
+            (
+                "agent-task fanout cook-batch local fanout",
+                workers.to_string(),
+                args.issues.len().to_string(),
+            )
+        }
+        Commands::AgentTask(AgentTaskArgs {
+            command:
+                AgentTaskCommand::Fanout(AgentTaskFanoutArgs {
+                    command: AgentTaskFanoutCommand::RunPlan(_),
+                }),
+        }) => (
+            // The plan is read downstream, so the child count is not known here.
+            "agent-task fanout run-plan local fanout",
+            "available-parallelism".to_string(),
+            "plan-defined".to_string(),
         ),
         _ => return None,
     };
 
-    (concurrency > 1 || task_count > 1).then(|| {
-        format!(
-            "HOMEBOY_LOCAL_FANOUT_WARNING: {label} will execute on this controller with concurrency={concurrency}, tasks={task_count}, execution_location=local. Use --runner <runner-id> or --placement lab to prevent local provider fanout."
-        )
-    })
+    let mut warning = format!(
+        "HOMEBOY_LOCAL_FANOUT_WARNING: {label} will execute on this controller with concurrency={concurrency}, tasks={task_count}, execution_location=local. Use --runner <runner-id> or --placement lab to prevent local provider fanout."
+    );
+    if let Some(readiness) = readiness {
+        for reason in &readiness.reasons {
+            warning.push_str(&format!(" lab_unavailable_reason={reason}"));
+        }
+        for remediation in &readiness.remediation_commands {
+            warning.push_str(&format!(" remediation=`{remediation}`"));
+        }
+    }
+    Some(warning)
 }
 
 fn inject_lab_changed_files(
