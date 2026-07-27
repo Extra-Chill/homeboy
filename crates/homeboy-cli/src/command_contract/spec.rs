@@ -465,6 +465,15 @@ const fn with_risk_exemption(
     }
 }
 
+/// Operator-gated but non-mutating: an explicit operator entry point that only
+/// renders a plan.
+const fn operator_read_only() -> CommandSafetySpec {
+    CommandSafetySpec {
+        operator: true,
+        ..CommandSafetySpec::read_only()
+    }
+}
+
 const fn paths_safety(
     paths: &'static [&'static str],
     safety: CommandSafetySpec,
@@ -658,6 +667,98 @@ const FUZZ_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
         FUZZ_MEASUREMENT_PATHS,
         guarded_safety(FUZZ_DANGEROUS_FLAGS),
         "read-only fuzz planning/execution contract by default; --allow-destructive infers isolated mode and attaches an auditable homeboy/isolation-proof/v1 unless one is supplied",
+    ),
+];
+
+const WORKTREE_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        &["queue-create"],
+        with_dry_run(mutating_safety(), "--dry-run"),
+        "default output creates task worktrees one-at-a-time; pass --dry-run to plan without creating",
+    ),
+    paths_safety(
+        &["create"],
+        mutating_safety(),
+        "creates a task worktree from a registered component checkout",
+    ),
+    paths_safety(
+        &["remove"],
+        guarded_mutating_safety(&["--force"]),
+        "removes a task worktree after safety checks",
+    ),
+    paths_safety(
+        &["cleanup"],
+        operator_safety(
+            Some("--dry-run"),
+            &["--apply", "--force", "--cleanup-artifacts"],
+        ),
+        "default output is a non-mutating task-worktree cleanup plan; pass --apply to remove eligible worktrees, and --cleanup-artifacts to include rebuildable Homeboy artifacts",
+    ),
+];
+
+const TUNNEL_SERVICE_DECLARATION_PATHS: &[&str] =
+    &["service expose", "service set", "service remove"];
+const TUNNEL_PREVIEW_RUNTIME_PATHS: &[&str] = &[
+    "preview-client start",
+    "preview-consumer run",
+    "preview-ingress serve",
+    "artifact-origin serve",
+];
+
+const TUNNEL_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        TUNNEL_SERVICE_DECLARATION_PATHS,
+        operator_safety(None, &[]),
+        "mutates private service tunnel declarations",
+    ),
+    paths_safety(
+        &["service start", "service stop"],
+        operator_safety(None, &[]),
+        "mutates private service tunnel runtime state",
+    ),
+    paths_safety(
+        TUNNEL_PREVIEW_RUNTIME_PATHS,
+        operator_safety(None, &[]),
+        "starts or supervises tunnel preview runtime state",
+    ),
+    paths_safety(
+        &["preview-ingress route", "preview-ingress unroute"],
+        operator_safety(None, &[]),
+        "mutates preview ingress route state",
+    ),
+    paths_safety(
+        &["preview-ingress install"],
+        operator_read_only(),
+        "renders a non-destructive operator install plan",
+    ),
+];
+
+const STACK_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        &["create", "add-pr", "remove-pr"],
+        mutating_safety(),
+        "mutates persisted stack specification metadata",
+    ),
+    paths_safety(
+        &["apply", "rebase"],
+        with_risk_exemption(
+            operator_safety(None, &[]),
+            "stack command name is the explicit branch mutation action; status/sync --dry-run are the planning paths",
+        ),
+        "mutates the configured stack target branch",
+    ),
+    paths_safety(
+        &["sync"],
+        operator_safety(Some("--dry-run"), &[]),
+        "mutates the configured stack target branch and may update the stack spec unless --dry-run is passed",
+    ),
+    paths_safety(
+        &["push"],
+        with_risk_exemption(
+            operator_safety(None, &[]),
+            "push is the explicit remote publication action; no dry-run contract exists yet",
+        ),
+        "pushes the configured stack target branch to its remote",
     ),
 ];
 
@@ -1165,32 +1266,38 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
             ),
         )
     },
-    command_spec_with_representative_argv(
-        &["homeboy", "worktree", "cleanup"],
-        lab_command_spec_with_summary(
-            "worktree",
-            CommandJsonFamily::Workspace,
-            "Lab runner routing covers runner-resident task worktree cleanup",
-            WORKTREE_LAB_SUPPORT,
-        ),
-    ),
-    command_spec_with_representative_argv(
-        &[
-            "homeboy",
-            "tunnel",
-            "service",
-            "start",
-            "example-service",
-            "--command",
-            "npm start",
-        ],
-        lab_command_spec_with_summary(
-            "tunnel",
-            CommandJsonFamily::Workspace,
-            "Lab runner routing covers tunnel preview and service workflows",
-            TUNNEL_LAB_SUPPORT,
-        ),
-    ),
+    CommandSpec {
+        subcommand_safety: WORKTREE_SUBCOMMAND_SAFETY,
+        ..command_spec_with_representative_argv(
+            &["homeboy", "worktree", "cleanup"],
+            lab_command_spec_with_summary(
+                "worktree",
+                CommandJsonFamily::Workspace,
+                "Lab runner routing covers runner-resident task worktree cleanup",
+                WORKTREE_LAB_SUPPORT,
+            ),
+        )
+    },
+    CommandSpec {
+        subcommand_safety: TUNNEL_SUBCOMMAND_SAFETY,
+        ..command_spec_with_representative_argv(
+            &[
+                "homeboy",
+                "tunnel",
+                "service",
+                "start",
+                "example-service",
+                "--command",
+                "npm start",
+            ],
+            lab_command_spec_with_summary(
+                "tunnel",
+                CommandJsonFamily::Workspace,
+                "Lab runner routing covers tunnel preview and service workflows",
+                TUNNEL_LAB_SUPPORT,
+            ),
+        )
+    },
     CommandSpec {
         subcommand_safety: RUNS_SUBCOMMAND_SAFETY,
         ..command_spec_with_output_notes(
@@ -1200,7 +1307,10 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         )
     },
     crate::ops_command_spec!(self_cmd),
-    command_spec("stack", CommandJsonFamily::Workspace),
+    CommandSpec {
+        subcommand_safety: STACK_SUBCOMMAND_SAFETY,
+        ..command_spec("stack", CommandJsonFamily::Workspace)
+    },
     crate::ops_command_spec!(api),
     crate::ops_command_spec!(upgrade),
 ];
