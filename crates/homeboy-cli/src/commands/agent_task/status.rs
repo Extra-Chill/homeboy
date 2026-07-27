@@ -82,7 +82,6 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
         }
     }
     let mut value = serde_json::to_value(&record).unwrap_or(Value::Null);
-    attach_persisted_runner_enrichment_state(&mut value);
     enrich_with_diagnostic_summary(&mut value, &args.run_id)?;
     attach_transport_proxy_recovery_guidance(&mut value, &args.run_id);
     if args.full {

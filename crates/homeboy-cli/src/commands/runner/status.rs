@@ -150,11 +150,10 @@ pub(super) fn status(
             .find(|report| report.runner_id == runner_id)
             .cloned()
     });
-    let selected_lab_runner = selected_lab_runner_status(
-        preferred_lab_runner.as_deref(),
-        selected_status.clone(),
-    )?;
-    let managed_followups = runner_followups(preferred_lab_runner.as_deref(), selected_status.as_ref());
+    let selected_lab_runner =
+        selected_lab_runner_status(preferred_lab_runner.as_deref(), selected_status.clone())?;
+    let managed_followups =
+        runner_followups(preferred_lab_runner.as_deref(), selected_status.as_ref());
     // Collected last so every bounded probe issued above is represented.
     operator_hints.extend(probe_degradation_hints());
     Ok((
