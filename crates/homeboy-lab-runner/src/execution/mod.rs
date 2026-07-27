@@ -915,7 +915,7 @@ pub(crate) fn exec_with_status_snapshot(
     let capability_preflight = super::workload::merge_lab_runner_workload_capability_preflight(
         remote_execution_preflight(&options.command, options.capability_preflight.as_ref()),
         options.lab_runner_workload.as_ref(),
-    )?;
+    );
     let run_capability_preflight = |runner: &Runner| -> Result<()> {
         preflight_runner_capability_plan(runner, capability_preflight.as_ref(), &request_env)
     };

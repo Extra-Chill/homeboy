@@ -2,19 +2,20 @@ use clap::Parser;
 use homeboy_agents::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::lab_contract::{
-    LabRunnerWorkload, LabRunnerWorkloadAgentTask, LabRunnerWorkloadAgentTaskDispatchKind,
-    LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy, LabRunnerWorkloadAssignment,
-    LabRunnerWorkloadCapability, LabRunnerWorkloadCommandFamily,
+    lab_capability_is_pipeline_enforced, LabRunnerWorkload, LabRunnerWorkloadAgentTask,
+    LabRunnerWorkloadAgentTaskDispatchKind, LabRunnerWorkloadAgentTaskLifecycleMirrorPolicy,
+    LabRunnerWorkloadAssignment, LabRunnerWorkloadCapability, LabRunnerWorkloadCommandFamily,
     LabRunnerWorkloadExtensionRevision, LabRunnerWorkloadKind, LabRunnerWorkloadMutationPolicy,
     LabRunnerWorkloadResultRefs, LabRunnerWorkloadSecrets, LabRunnerWorkloadState,
-    LabRunnerWorkloadWorkspaceMappings, LAB_RUNNER_WORKLOAD_SCHEMA,
+    LabRunnerWorkloadWorkspaceMappings, LAB_CAPABILITY_EXTENSION_PARITY,
+    LAB_RUNNER_WORKLOAD_SCHEMA,
 };
 use homeboy_core::plan::HomeboyPlan;
 use homeboy_core::secret_env_plan::SecretEnvPlan;
 
 use super::{
     LabOffloadCommand, LabOffloadSourcePathMode, LabOffloadWorkspaceModePolicy,
-    RunnerCapabilityPreflight,
+    RunnerCapabilityPreflight, RunnerRequiredTool,
 };
 
 pub(crate) struct LabRunnerWorkloadBuildInput<'a> {
@@ -573,15 +574,40 @@ fn dispatched_positional_command_parts(command_args: &[String]) -> Vec<&str> {
     parts
 }
 
+/// Union the workload's declared capabilities into the dispatch capability
+/// preflight so a runner that cannot satisfy them is refused before execution.
+///
+/// The workload is the controller's declaration of what the runner must be able
+/// to do; without this merge those declarations are shipped to the runner and
+/// never gated (Extra-Chill/homeboy#10287). Capability names map to runner tool
+/// requirements — the declarative tool registry probes any tool id — except for
+/// pipeline-enforced capabilities like `extension_parity`, which are gated by
+/// their own execution-pipeline step and name no runner binary.
 pub(crate) fn merge_lab_runner_workload_capability_preflight(
-    preflight: Option<RunnerCapabilityPreflight>,
+    mut preflight: Option<RunnerCapabilityPreflight>,
     workload: Option<&LabRunnerWorkload>,
-) -> Result<Option<RunnerCapabilityPreflight>> {
+) -> Option<RunnerCapabilityPreflight> {
     let Some(workload) = workload else {
-        return Ok(preflight);
+        return preflight;
     };
-    let _ = workload;
-    Ok(preflight)
+    for capability in &workload.required_capabilities {
+        if !capability.required {
+            continue;
+        }
+        let name = capability.name.trim();
+        if name.is_empty() || lab_capability_is_pipeline_enforced(name) {
+            continue;
+        }
+        let tool = RunnerRequiredTool::new(name);
+        let preflight = preflight.get_or_insert_with(|| RunnerCapabilityPreflight {
+            command: workload.kind.command_label.clone(),
+            ..Default::default()
+        });
+        if !preflight.required_tools.contains(&tool) {
+            preflight.required_tools.push(tool);
+        }
+    }
+    preflight
 }
 
 pub(crate) fn merge_lab_runner_workload_required_extensions(
@@ -628,7 +654,7 @@ fn required_capabilities(command: &LabOffloadCommand) -> Vec<LabRunnerWorkloadCa
     let mut capabilities = Vec::new();
     if command.routing_policy.requires_extension_parity || !command.required_extensions.is_empty() {
         capabilities.push(LabRunnerWorkloadCapability {
-            name: "extension_parity".to_string(),
+            name: LAB_CAPABILITY_EXTENSION_PARITY.to_string(),
             required: true,
         });
     }
@@ -923,6 +949,73 @@ mod tests {
         );
         assert_eq!(workload.result_refs.plan_id, "lab_offload.test");
         assert_eq!(workload.result_refs.proof_id.as_deref(), Some("proof-1"));
+    }
+
+    /// A workload-declared tool capability must reach the dispatch preflight, or
+    /// the runner is never gated on it (Extra-Chill/homeboy#10287).
+    #[test]
+    fn lab_runner_workload_capabilities_merge_into_preflight() {
+        let workload = workload();
+
+        let preflight = merge_lab_runner_workload_capability_preflight(None, Some(&workload))
+            .expect("workload capabilities create a preflight");
+
+        assert_eq!(preflight.command, "trace");
+        assert!(preflight
+            .required_tools
+            .contains(&RunnerRequiredTool::new("playwright")));
+    }
+
+    /// `extension_parity` names an execution-pipeline gate, not a runner binary.
+    /// Merging it as a required tool would probe a `extension_parity` executable
+    /// that no runner has and refuse every parity-bearing dispatch.
+    #[test]
+    fn pipeline_enforced_capabilities_are_not_merged_as_runner_tools() {
+        let workload = workload();
+
+        let preflight = merge_lab_runner_workload_capability_preflight(None, Some(&workload))
+            .expect("workload capabilities create a preflight");
+
+        assert!(workload
+            .required_capabilities
+            .iter()
+            .any(|capability| capability.name == LAB_CAPABILITY_EXTENSION_PARITY));
+        assert!(!preflight
+            .required_tools
+            .contains(&RunnerRequiredTool::new(LAB_CAPABILITY_EXTENSION_PARITY)));
+    }
+
+    /// Merging must extend an explicit preflight rather than replace it, and must
+    /// leave the caller's preflight untouched when there is no workload.
+    #[test]
+    fn capability_merge_preserves_the_explicit_preflight_and_no_workload_case() {
+        let workload = workload();
+        let explicit = RunnerCapabilityPreflight {
+            command: "runner.exec".to_string(),
+            required_tools: vec![RunnerRequiredTool::homeboy()],
+            ..Default::default()
+        };
+
+        let merged =
+            merge_lab_runner_workload_capability_preflight(Some(explicit.clone()), Some(&workload))
+                .expect("explicit preflight is retained");
+
+        assert_eq!(merged.command, "runner.exec");
+        assert!(merged
+            .required_tools
+            .contains(&RunnerRequiredTool::homeboy()));
+        assert!(merged
+            .required_tools
+            .contains(&RunnerRequiredTool::new("playwright")));
+
+        assert_eq!(
+            merge_lab_runner_workload_capability_preflight(Some(explicit.clone()), None),
+            Some(explicit)
+        );
+        assert_eq!(
+            merge_lab_runner_workload_capability_preflight(None, None),
+            None
+        );
     }
 
     #[test]

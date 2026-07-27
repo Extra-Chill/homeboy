@@ -928,7 +928,7 @@ fn operator_only_reference(value: &str) -> bool {
         || host.ends_with(".local")
         || host.ends_with(".internal")
         || host.ends_with(".test")
-        || host.parse::<std::net::IpAddr>().is_ok()
+        || host_ip_literal(host).is_some()
 }
 
 fn is_internal_run_id(value: &str) -> bool {
@@ -1006,10 +1006,58 @@ fn validate_reviewer_url(field: &str, value: &str, provenance: &str) -> Result<(
         Err(_) => return invalid_reviewer_url(field, value, provenance, "is invalid"),
     };
     let host = url.host_str().unwrap_or_default();
-    if url.scheme() != "https" || operator_only_reference(value) || host.is_empty() {
+    if url.scheme() != "https"
+        || operator_only_reference(value)
+        || host.is_empty()
+        || non_public_reviewer_host(host)
+    {
         return invalid_reviewer_url(field, value, provenance, "must be a public HTTPS URL");
     }
     Ok(())
+}
+/// `Url::host_str` serializes IPv6 literals in bracketed form (`[::1]`), which
+/// `IpAddr::from_str` rejects. Strip the brackets so IPv6 hosts are recognised
+/// as IP literals instead of being misread as DNS names.
+fn host_ip_literal(host: &str) -> Option<std::net::IpAddr> {
+    let literal = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host);
+    literal.parse::<std::net::IpAddr>().ok()
+}
+/// Reviewer evidence URLs are shown to reviewers and may be fetched, so a host
+/// that only resolves inside the producing machine or network is an SSRF pivot
+/// rather than review evidence. `operator_only_reference` already rejects these
+/// as a side effect of its broader operator-only policy; stating the SSRF
+/// intent explicitly at the security boundary keeps a future relaxation of that
+/// policy from silently reopening the hole.
+fn non_public_reviewer_host(host: &str) -> bool {
+    let lower = host.to_ascii_lowercase();
+    if lower == "localhost" || lower.ends_with(".localhost") {
+        return true;
+    }
+    host_ip_literal(host).is_some_and(is_non_public_ip)
+}
+/// Loopback, private, link-local, unique-local, and unspecified addresses are
+/// never reachable for a reviewer. The IPv4 link-local range covers the cloud
+/// metadata endpoint `169.254.169.254`, the classic SSRF target.
+fn is_non_public_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => {
+            ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
+        }
+        std::net::IpAddr::V6(ip) => {
+            // `Ipv6Addr::is_unique_local` and `is_unicast_link_local` are still
+            // unstable, so match `fc00::/7` and `fe80::/10` by prefix.
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || (ip.segments()[0] & 0xfe00) == 0xfc00
+                || (ip.segments()[0] & 0xffc0) == 0xfe80
+                || ip
+                    .to_ipv4_mapped()
+                    .is_some_and(|mapped| is_non_public_ip(std::net::IpAddr::V4(mapped)))
+        }
+    }
 }
 fn invalid_reviewer_url(field: &str, value: &str, provenance: &str, problem: &str) -> Result<()> {
     invalid(
@@ -1517,6 +1565,53 @@ mod tests {
         value.evidence.push(AgentTaskReviewEvidence {
             summary: "private".into(),
             url: Some("https://example.com/evidence?token=secret".into()),
+        });
+        assert!(value.validate(&default_profile()).is_err());
+    }
+
+    #[test]
+    fn reviewer_urls_reject_non_public_hosts() {
+        for value in [
+            "https://localhost/x",
+            "https://sub.localhost/x",
+            "https://127.0.0.1/x",
+            "https://10.0.0.1/x",
+            "https://192.168.1.1/x",
+            // Cloud instance metadata endpoint, the classic SSRF target.
+            "https://169.254.169.254/x",
+            // IPv6 literals: `host_str` yields the bracketed form, which used to
+            // fall through the IP-literal check and be treated as a DNS name.
+            "https://[::1]/x",
+            "https://[::]/x",
+            "https://[::ffff:127.0.0.1]/x",
+            "https://[fe80::1]/x",
+            "https://[fd00::1]/x",
+        ] {
+            assert!(
+                validate_reviewer_url("evidence.url", value, "test").is_err(),
+                "accepted non-public reviewer URL {value}"
+            );
+        }
+
+        // The guard must not over-tighten: ordinary public evidence still passes.
+        for value in [
+            "https://example.com/evidence",
+            "https://github.com/owner/repo/pull/1#issuecomment-2",
+        ] {
+            assert!(
+                validate_reviewer_url("evidence.url", value, "test").is_ok(),
+                "rejected legitimate public reviewer URL {value}"
+            );
+        }
+
+        // IPv6 literals are now operator-only, matching the IPv4 literal policy.
+        assert!(!is_reviewer_url("https://[::1]/evidence"));
+
+        // The rejection reaches the real validation boundary, not just the helper.
+        let mut value = dossier();
+        value.evidence.push(AgentTaskReviewEvidence {
+            summary: "loopback".into(),
+            url: Some("https://[::1]/evidence".into()),
         });
         assert!(value.validate(&default_profile()).is_err());
     }

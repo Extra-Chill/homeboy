@@ -612,8 +612,8 @@ const TASK_WORKTREES_METADATA: CleanupInventoryCategoryMetadata =
     CleanupInventoryCategoryMetadata {
         category: "task_worktrees",
         include_arg: "task-worktrees",
-        dry_run_command: "homeboy worktree cleanup --dry-run --cleanup-branches",
-        apply_command: "homeboy worktree cleanup --cleanup-branches",
+        dry_run_command: "homeboy worktree cleanup --cleanup-branches",
+        apply_command: "homeboy worktree cleanup --cleanup-branches --apply",
     };
 
 const WORKTREE_PROVIDERS_METADATA: CleanupInventoryCategoryMetadata =
@@ -1307,6 +1307,7 @@ fn remote_lab_workspace_categories(
                 min_age_hours: 24,
                 limit: 25,
                 passes: if apply { 10 } else { 1 },
+                cursor: None,
             },
         ) {
             Ok((output, _)) => output,
@@ -1382,7 +1383,7 @@ fn cleanup_actionable(
             format!("{} cleanup", category.category.replace('_', " ")),
             if category.category == REPO_ARTIFACTS_METADATA.category {
                 apply_command(&category.canonical_cleanup_command)
-            } else if apply || category.category == TASK_WORKTREES_METADATA.category {
+            } else if apply {
                 category.specialist_command.clone()
             } else {
                 apply_command(&category.specialist_command)
@@ -2023,8 +2024,8 @@ mod tests {
                 TASK_WORKTREES_METADATA,
                 "task_worktrees",
                 "task-worktrees",
-                "homeboy worktree cleanup --dry-run --cleanup-branches",
                 "homeboy worktree cleanup --cleanup-branches",
+                "homeboy worktree cleanup --cleanup-branches --apply",
             ),
             (
                 TERMINAL_RUNS_METADATA,
@@ -2089,11 +2090,8 @@ mod tests {
     #[test]
     fn task_worktree_cleanup_next_actions_preserve_mode_specific_commands() {
         let cases = [
-            (
-                false,
-                "homeboy worktree cleanup --dry-run --cleanup-branches",
-            ),
-            (true, "homeboy worktree cleanup --cleanup-branches"),
+            (false, "homeboy worktree cleanup --cleanup-branches --apply"),
+            (true, "homeboy worktree cleanup --cleanup-branches --apply"),
         ];
 
         for (apply, command) in cases {

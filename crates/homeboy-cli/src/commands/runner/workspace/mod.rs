@@ -138,6 +138,10 @@ pub(super) enum RunnerWorkspaceCommand {
         /// Maximum apply passes to run. Each pass re-scans and removes at most --limit candidates.
         #[arg(long, default_value_t = 1)]
         passes: usize,
+
+        /// Opaque continuation cursor returned by an incomplete workspace-prune scan.
+        #[arg(long)]
+        cursor: Option<String>,
     },
 }
 
@@ -212,6 +216,7 @@ pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceO
             min_age_hours,
             limit,
             passes,
+            cursor,
         } => runner::prune_workspaces(
             &runner_id,
             runner::RunnerWorkspacePruneOptions {
@@ -219,6 +224,7 @@ pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceO
                 min_age_hours,
                 limit,
                 passes,
+                cursor,
             },
         )
         .map(|(output, exit_code)| (RunnerWorkspaceOutput::Prune(output), exit_code)),

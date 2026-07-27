@@ -144,7 +144,7 @@ pub(super) fn exec_worker_local_with_process_output(
         super::super::workload::merge_lab_runner_workload_capability_preflight(
             options.capability_preflight.clone(),
             options.lab_runner_workload.as_ref(),
-        )?;
+        );
     preflight_worker_local_capability_plan(&plan.runner, capability_preflight.as_ref(), &plan.env)?;
     let output = execute(&plan)?;
     let (mut output, exit_code) = exec_output(

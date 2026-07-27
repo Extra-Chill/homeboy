@@ -3,6 +3,10 @@
 use super::workload::LabRunnerWorkloadCapability;
 
 pub const LAB_CAPABILITY_PLAYWRIGHT: &str = "playwright";
+/// Capability naming the extension-parity guarantee. Unlike tool capabilities,
+/// this one is satisfied by the execution pipeline's own parity gate rather than
+/// by probing a runner binary.
+pub const LAB_CAPABILITY_EXTENSION_PARITY: &str = "extension_parity";
 pub const LAB_TRACE_EXTRA_CAPABILITIES: &[&str] = &[LAB_CAPABILITY_PLAYWRIGHT];
 pub const LAB_NO_SECRET_ENV_SOURCES: &[LabSecretEnvSource] = &[];
 /// Runner identity retained by a child already executing on Lab. Unlike the
@@ -15,6 +19,18 @@ pub const LAB_TRACE_SECRET_ENV_SOURCES: &[LabSecretEnvSource] = &[LabSecretEnvSo
 pub const LAB_TUNNEL_SECRET_ENV_SOURCES: &[LabSecretEnvSource] = &[LabSecretEnvSource::Tunnel];
 pub const RIG_UP_LAB_UNSUPPORTED_REASON: &str = "`rig up` stays local because rig pipelines manage local services, leases, ports, and declared filesystem paths that the current single-workspace Lab snapshot cannot safely mirror. For Lab/offloaded dependency preparation and verification, run `homeboy rig check <rig-id> --runner <runner-id>` or the rig's benchmark profile through `homeboy rig run <rig-id> --runner <runner-id>`.";
 pub const RIG_SOURCE_MANAGEMENT_LAB_UNSUPPORTED_REASON: &str = "rig source-management commands (`rig install`, `rig update`, `rig sync`, and `rig sources`) manage the controller's local rig registry and may read arbitrary local package paths. They are not Lab-portable yet. Install or refresh the rig locally first, then run Lab-compatible verification with `homeboy rig check <rig-id> --runner <runner-id>` or `homeboy rig run <rig-id> --runner <runner-id>`.";
+
+/// Whether a workload-declared capability is satisfied by a dedicated
+/// execution-pipeline gate instead of a runner tool probe.
+///
+/// Capability names default to runner tools (fail closed): an unrecognised name
+/// becomes a required tool the runner must actually provide. Only the names
+/// listed here are exempt, because a separate gate already enforces them —
+/// `extension_parity` is enforced by `plan_extension_parity` /
+/// `ensure_extension_materialized` in the lab-runner execution pipeline.
+pub fn lab_capability_is_pipeline_enforced(name: &str) -> bool {
+    name.trim() == LAB_CAPABILITY_EXTENSION_PARITY
+}
 
 /// Routing-policy flags owned by the Lab command contract and retained through
 /// route planning, offload, and runner dispatch.
