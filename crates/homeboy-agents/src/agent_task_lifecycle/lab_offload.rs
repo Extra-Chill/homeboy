@@ -162,6 +162,47 @@ pub fn record_lab_staging_controller_job(
     Ok(record)
 }
 
+/// Name a reserved Lab admission on the durable run the moment it is taken,
+/// before any further dispatch work can fail.
+///
+/// A reservation that exists only inside the controller process is unfindable:
+/// a caller killed between reservation and runner acceptance leaves capacity
+/// held by an admission nothing can associate with a run id, which is what
+/// forced manual job-ID cancellation in #9163. The daemon's admission-lease
+/// sweep still owns automatic reclaim; this write owns *identity*, so an
+/// operator can see which run holds which reservation and when it self-expires.
+pub fn record_lab_admission_reservation(
+    run_id: &str,
+    runner_id: &str,
+    daemon_lease_id: &str,
+    reservation_job_id: &str,
+    lease_expires_at_ms: u64,
+) -> Result<AgentTaskRunRecord> {
+    let mut record = store::read_record(&sanitize_run_id(run_id))?;
+    if record.state.is_terminal() {
+        return Ok(record);
+    }
+    record.updated_at = Some(now_timestamp());
+    let reserved_at = record.updated_at.clone().unwrap_or_else(now_timestamp);
+    let record_run_id = record.run_id.clone();
+    let metadata = record.ensure_metadata_object();
+    metadata.insert(
+        "lab_admission_reservation".to_string(),
+        json!({
+            "state": "reserved",
+            "runner_id": runner_id,
+            "daemon_lease_id": daemon_lease_id,
+            "reservation_job_id": reservation_job_id,
+            "lease_expires_at_ms": lease_expires_at_ms,
+            "reserved_at": reserved_at,
+            "reclaim": "the runner daemon reconciles this reservation automatically once its lease expires without a live controller",
+            "cancel_command": format!("homeboy agent-task cancel {record_run_id}"),
+        }),
+    );
+    store::write_record(&record)?;
+    Ok(record)
+}
+
 /// Preserve the controller-stage terminal context on the durable parent after
 /// its generic controller job has failed.
 pub fn record_lab_staging_controller_failure(

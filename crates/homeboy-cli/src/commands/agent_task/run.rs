@@ -29,6 +29,39 @@ use super::args::{
 
 const MAX_PROMOTION_PROVIDER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Operator-facing durable identity block for a Cook that has just become
+/// addressable.
+///
+/// A Cook's run id is the only handle an interrupted caller has. Everything
+/// after durable submission — gate toolchain preflight, transport preparation,
+/// Lab materialization, provider execution — can outlive a client timeout, so
+/// the handle and its follow-up commands are assembled here and printed the
+/// first time the controller reports identity (#10419, #9163).
+pub(crate) fn durable_cook_identity_lines(cook_id: Option<&str>, run_id: &str) -> Vec<String> {
+    let cook_suffix = cook_id
+        .filter(|cook_id| *cook_id != run_id)
+        .map(|cook_id| format!(" (cook `{cook_id}`)"))
+        .unwrap_or_default();
+    vec![
+        format!("cook: durable run id `{run_id}`{cook_suffix} — persisted before materialization."),
+        format!("cook: status -> homeboy agent-task status {run_id}"),
+        format!("cook: logs   -> homeboy agent-task logs {run_id}"),
+        format!("cook: cancel -> homeboy agent-task cancel {run_id}"),
+    ]
+}
+
+/// Print the durable identity block unconditionally.
+///
+/// Deliberately not TTY-gated. The clients that most need this — agent/Discord
+/// bridges, CI, and anything invoking Homeboy as a tool call — are exactly the
+/// non-TTY callers that a TTY-gated status line silently skips, which is how an
+/// interrupted Lab Cook ended up with no reported task identity at all (#10419).
+pub(crate) fn announce_durable_cook_identity(cook_id: Option<&str>, run_id: &str) {
+    for line in durable_cook_identity_lines(cook_id, run_id) {
+        eprintln!("{line}");
+    }
+}
+
 /// Serialize a completed run aggregate and, when the run did not fully succeed,
 /// surface a prominent top-level `failure_reasons` summary so the operator sees
 /// the root cause (recipe validation, PHP fatal, provider registration, missing
@@ -894,7 +927,31 @@ pub(super) fn retry(args: RetryArgs) -> CmdResult<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::cook_report_with_continuation;
+    use super::{cook_report_with_continuation, durable_cook_identity_lines};
+
+    #[test]
+    fn durable_cook_identity_block_leads_with_the_run_id_and_follow_up_commands() {
+        let lines = durable_cook_identity_lines(Some("cook-10419"), "cook-10419-attempt-1");
+
+        // The very first thing an interrupted caller sees must be the handle.
+        assert!(
+            lines[0].contains("cook-10419-attempt-1"),
+            "identity block must lead with the durable run id: {lines:?}"
+        );
+        assert!(lines[0].contains("cook-10419"));
+        let joined = lines.join("\n");
+        assert!(joined.contains("homeboy agent-task status cook-10419-attempt-1"));
+        assert!(joined.contains("homeboy agent-task logs cook-10419-attempt-1"));
+        assert!(joined.contains("homeboy agent-task cancel cook-10419-attempt-1"));
+    }
+
+    #[test]
+    fn durable_cook_identity_block_omits_a_cook_alias_equal_to_the_run_id() {
+        let lines = durable_cook_identity_lines(Some("run-9163"), "run-9163");
+
+        assert!(!lines[0].contains("(cook"), "no redundant alias: {lines:?}");
+        assert!(lines[0].contains("run-9163"));
+    }
 
     #[test]
     fn in_flight_cook_report_keeps_provider_state_and_managed_continuation_separate() {

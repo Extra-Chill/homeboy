@@ -1703,6 +1703,21 @@ where
     validate_cook_workspace(&options)?;
     validate_cook_candidate_group(&options.initial_plan)?;
     materialize_initial_cook_attempt(&options)?;
+    // Durable identity now exists and resolves through the Cook alias. Publish
+    // it before every remaining long controller phase — gate toolchain
+    // preflight, transport preparation, and Lab materialization — so a caller
+    // interrupted at any later point can still answer "what did I just start?"
+    // from the first identity-bearing bytes it received. `provider_ready` used
+    // to be the first identity-bearing observer event, which put the operator
+    // handle behind work that can outlive a client timeout (#10419, #9163).
+    report_cook_progress(
+        durable_observer,
+        &options.cook_id,
+        &options.initial_run_id,
+        "durable_identity",
+        1,
+        None,
+    )?;
     let required_toolchains = options.gates.required_toolchains();
     let preflight = required_toolchains
         .is_empty()

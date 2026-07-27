@@ -1520,14 +1520,18 @@ pub(crate) fn run_lab_offload_inner(
             None,
         )
         })?;
-        if request.local_output_file.is_some() {
-            emit_durable_run_id_before_execution(
-                run_id,
-                runner_id,
-                request.local_output_file,
-                &mut messages,
-            );
-        }
+        // Emit unconditionally. `emit_durable_run_id_before_execution` already
+        // treats `--output` as optional and still prints the handle plus its
+        // follow-up commands to stderr. Gating the whole call on `--output`
+        // meant the most common detached invocation — no `--output`, submitted
+        // by an interruptible non-TTY client — got no identity at all before
+        // controller staging began (#10419).
+        emit_durable_run_id_before_execution(
+            run_id,
+            runner_id,
+            request.local_output_file,
+            &mut messages,
+        );
         let controller_job_id = match crate::lab_staging_controller::submit_detached_staging(
             run_id,
             runner_id,
@@ -1949,6 +1953,16 @@ pub(crate) fn run_lab_offload_inner(
     // retry to repeat the entire prep sequence with new identities (#9469).
     // Preserve the prepared workspace so a retry can resume against the current
     // healthy daemon instead; a genuine terminal outcome still reaps as before.
+    //
+    // The lease protocol is REQUIRED here, matching the durable staging
+    // dispatcher (`lab_staging_controller`). A legacy, leaseless reservation is
+    // release-only: its sole reclaim path is this process's `Drop`, so a caller
+    // killed by a timeout leaves a reservation the daemon's existing
+    // `reconcile_expired_admissions` sweep can never see — the orphan that
+    // required manual job-ID surgery in #9163. Requiring the lease puts every
+    // Lab reservation under that automatic reclaim. Rejection is fail-safe:
+    // `strict_admission_rejection` releases the reservation and returns a
+    // remediation-bearing error rather than proceeding.
     let admission_started = std::time::Instant::now();
     let admission = match direct_daemon_admission_coordinates(
         runner_id,
@@ -1964,7 +1978,7 @@ pub(crate) fn run_lab_offload_inner(
                     &redact_argv_shell_display(&command_prefix.argv),
                     expected_daemon_lease_id,
                     agent_task_run_id.as_deref(),
-                    DaemonAdmissionPolicy::LegacyCompatible,
+                    DaemonAdmissionPolicy::DurableLeaseRequired,
                 )
             })
             .transpose()
@@ -1986,6 +2000,21 @@ pub(crate) fn run_lab_offload_inner(
         }
     };
     overhead.record(LabOffloadPhase::QueueAdmission, admission_started.elapsed());
+    // Name the reservation on the durable record before anything else can fail.
+    // Until this write lands the reservation exists only in this process, so an
+    // operator who lost the caller cannot tell which admission belongs to which
+    // run. The daemon lease reclaims it automatically; this makes it findable by
+    // run id in the meantime (#9163).
+    if let (Some(run_id), Some(reservation)) = (agent_task_run_id.as_deref(), admission.as_ref()) {
+        let authority = reservation.authority();
+        agent_task_lifecycle::record_lab_admission_reservation(
+            run_id,
+            runner_id,
+            authority.daemon_lease_id(),
+            authority.reservation_job_id(),
+            authority.lease_expires_at_ms(),
+        )?;
+    }
     lab_metadata["execution_bundle"] = serde_json::json!({
         "schema": crate::execution_bundle::LAB_EXECUTION_BUNDLE_SCHEMA,
         "binary": crate::execution_bundle::binary(
