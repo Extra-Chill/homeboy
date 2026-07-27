@@ -277,7 +277,23 @@ fn active_runner_job_summaries(status: Option<&str>) -> ActiveRunnerJobEnrichmen
     // every draining generation and can block local run discovery behind a
     // wedged runner. The indexed snapshot makes one bounded current-session
     // request per runner instead of scanning its historical generations.
-    let snapshots = runner::statuses_indexed().unwrap_or_default();
+    let snapshots = match runner::statuses_indexed() {
+        Ok(snapshots) => snapshots,
+        Err(error) => {
+            return ActiveRunnerJobEnrichment {
+                runs: Vec::new(),
+                state: Some(super::types::RunsRunnerEnrichment {
+                    status: "partial",
+                    partial: true,
+                    runner_unavailable: vec![super::types::RunsRunnerUnavailable {
+                        runner_id: "controller".to_string(),
+                        code: error.code.as_str().to_string(),
+                        message: error.message,
+                    }],
+                }),
+            };
+        }
+    };
     let unavailable = snapshots
         .iter()
         .filter_map(|snapshot| {
