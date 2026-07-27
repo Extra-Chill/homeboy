@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::process::Command;
 
 use homeboy::core::agent_runtime_manifest::{
     discover_agent_runtime_catalog, AgentRuntimeDiagnosticFollowup,
@@ -82,6 +83,7 @@ pub(super) fn status(
         let mut operator_hints = runner_status_operator_hints(&report);
         let operator_commands = runner_status_operator_commands(&report);
         let selected_lab_runner = selected_lab_runner_status(Some(id), Some(report.clone()))?;
+        let managed_followups = runner_followups(Some(id), Some(&report));
         // Collected last so every bounded probe issued above is represented.
         operator_hints.extend(probe_degradation_hints());
         return Ok((
@@ -94,7 +96,7 @@ pub(super) fn status(
                     generation_inventory,
                     preferred_lab_runner,
                     selected_lab_runner,
-                    managed_followups: runner_followups(Some(id)),
+                    managed_followups,
                     operator_hints,
                     operator_commands,
                     probe_degradations: readonly_probe::take_degradations(),
@@ -142,7 +144,7 @@ pub(super) fn status(
         .flat_map(runner_status_operator_commands)
         .collect();
     let selected_lab_runner = selected_lab_runner_status(preferred_lab_runner.as_deref(), None)?;
-    let managed_followups = runner_followups(preferred_lab_runner.as_deref());
+    let managed_followups = runner_followups(preferred_lab_runner.as_deref(), None);
     // Collected last so every bounded probe issued above is represented.
     operator_hints.extend(probe_degradation_hints());
     Ok((
@@ -338,7 +340,7 @@ pub(super) fn lab_runner_homeboy_output(
             status,
             has_drift,
         ),
-        refresh_commands: lab_runner_homeboy_refresh_commands(runner_id),
+        refresh_commands: lab_runner_homeboy_refresh_commands(runner_id, status),
         upgrade_command: format!(
             "homeboy upgrade --force --upgrade-runner {}",
             shell_arg(runner_id)
@@ -840,19 +842,26 @@ pub(super) fn runner_artifact_feature_diagnostics(
     }
 }
 
-fn lab_runner_homeboy_refresh_commands(runner_id: &str) -> Vec<String> {
+fn lab_runner_homeboy_refresh_commands(
+    runner_id: &str,
+    status: &RunnerStatusReport,
+) -> Vec<String> {
     let runner_arg = shell_arg(runner_id);
+    let refresh_ref = recovery_refresh_ref(status);
     vec![
         format!(
             "homeboy runner refresh-homeboy {runner_arg} --ref {} --reconnect",
-            controller_refresh_ref()
+            refresh_ref
         ),
         format!("homeboy runner disconnect {runner_arg}"),
         format!("homeboy runner connect {runner_arg}"),
     ]
 }
 
-pub(super) fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
+pub(super) fn runner_followups(
+    runner_id: Option<&str>,
+    status: Option<&RunnerStatusReport>,
+) -> Vec<LabFollowup> {
     let mut followups = declared_run_followups(None, runner_id);
     let Some(runner_id) = runner_id else {
         return followups;
@@ -868,7 +877,7 @@ pub(super) fn runner_followups(runner_id: Option<&str>) -> Vec<LabFollowup> {
             label: "refresh_homeboy".to_string(),
             command: format!(
                 "homeboy runner refresh-homeboy {runner_arg} --ref {} --reconnect",
-                controller_refresh_ref()
+                status.map_or_else(controller_refresh_ref, recovery_refresh_ref)
             ),
             purpose: "Materialize a clean runner-side Homeboy binary, select it for Lab jobs, and refresh the daemon session.".to_string(),
         },
@@ -923,6 +932,57 @@ fn controller_refresh_ref() -> String {
     homeboy_product_identity::build_identity()
         .git_commit
         .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()))
+}
+
+/// Preserve a verified runner descendant rather than using an older controller
+/// revision to regenerate its recovery command.
+fn recovery_refresh_ref(status: &RunnerStatusReport) -> String {
+    let controller = homeboy_product_identity::build_identity();
+    let Some(controller_commit) = controller.git_commit.as_deref() else {
+        return controller_refresh_ref();
+    };
+    let runner_commit = status
+        .session
+        .as_ref()
+        .and_then(|session| session.homeboy_build_identity.as_deref())
+        .and_then(build_identity_commit);
+    recovery_refresh_ref_with(
+        &controller_refresh_ref(),
+        controller_commit,
+        runner_commit,
+        commits_are_ancestral,
+    )
+}
+
+fn build_identity_commit(identity: &str) -> Option<&str> {
+    let commit = identity.rsplit_once('+')?.1;
+    let commit = commit.strip_suffix("-dirty").unwrap_or(commit);
+    (commit.len() >= 7 && commit.len() <= 64 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then_some(commit)
+}
+
+fn recovery_refresh_ref_with(
+    controller_ref: &str,
+    controller_commit: &str,
+    runner_commit: Option<&str>,
+    mut is_ancestor: impl FnMut(&str, &str) -> bool,
+) -> String {
+    match runner_commit {
+        Some(runner_commit)
+            if runner_commit != controller_commit
+                && is_ancestor(controller_commit, runner_commit) =>
+        {
+            runner_commit.to_string()
+        }
+        _ => controller_ref.to_string(),
+    }
+}
+
+fn commits_are_ancestral(older: &str, newer: &str) -> bool {
+    Command::new("git")
+        .args(["merge-base", "--is-ancestor", older, newer])
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 pub(crate) fn declared_run_followups(
@@ -1312,8 +1372,9 @@ mod tests {
     #[test]
     fn active_refresh_guidance_uses_the_controller_commit_when_known() {
         let expected = controller_refresh_ref();
-        let commands = lab_runner_homeboy_refresh_commands("homeboy-lab");
-        let followups = runner_followups(Some("homeboy-lab"));
+        let report = stale_daemon_report();
+        let commands = lab_runner_homeboy_refresh_commands("homeboy-lab", &report);
+        let followups = runner_followups(Some("homeboy-lab"), Some(&report));
 
         assert_eq!(
             commands[0],
@@ -1326,6 +1387,33 @@ mod tests {
                 .expect("refresh followup")
                 .command,
             commands[0]
+        );
+    }
+
+    #[test]
+    fn recovery_guidance_keeps_a_verified_newer_same_semver_runner_build() {
+        let post_tag_controller = "99ec629c04ca";
+        let newer_runner = "c7367571a217";
+        let runner_identity = "homeboy 0.320.0+c7367571a217";
+
+        let refresh_ref = recovery_refresh_ref_with(
+            post_tag_controller,
+            post_tag_controller,
+            build_identity_commit(runner_identity),
+            |older, newer| older == post_tag_controller && newer == newer_runner,
+        );
+
+        assert_eq!(refresh_ref, newer_runner);
+    }
+
+    #[test]
+    fn recovery_guidance_does_not_select_an_unverified_runner_build() {
+        let controller = "99ec629c04ca";
+        let runner = "c7367571a217";
+
+        assert_eq!(
+            recovery_refresh_ref_with(controller, controller, Some(runner), |_, _| false),
+            controller
         );
     }
 

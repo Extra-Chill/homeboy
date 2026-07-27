@@ -239,7 +239,7 @@ fn disconnected_split_view_status_exposes_bounded_reconciliation_command() {
 
 #[test]
 fn runner_followups_include_workspace_prune_for_disk_pressure_recovery() {
-    let followups = runner_followups(Some("homeboy-lab"));
+    let followups = runner_followups(Some("homeboy-lab"), None);
     let serialized = serde_json::to_string(&followups).expect("serialize followups");
 
     assert!(serialized.contains("workspace_prune_preview"));
