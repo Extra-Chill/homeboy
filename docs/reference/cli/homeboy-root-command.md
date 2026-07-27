@@ -42,6 +42,11 @@ commands, Homeboy auto-selects the default runner when `--runner` is omitted.
 Use `--placement local` only when controller-machine execution is intentional;
 use `--placement lab` when local fallback is unacceptable. Removed placement
 flags are rejected with a migration error; Homeboy provides no legacy support.
+When `--runner <RUNNER_ID>` explicitly routes a portable command, resource
+output reports controller preflight and transport overhead separately from the
+runner workload; it does not recommend the supplied runner again or describe
+the workload as starting locally. Any authorized local fallback is reported by
+the Lab offload transition with its exact reason.
 
 Not every hot command is offloadable. Lab offload only applies to commands with
 a portable runner contract; local-only hot commands keep running locally and

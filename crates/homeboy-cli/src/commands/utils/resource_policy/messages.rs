@@ -101,6 +101,20 @@ pub(super) fn warning_message(
     )
 }
 
+pub(super) fn runner_pinned_controller_notice(
+    command: HotCommand,
+    recommendation: ResourceRecommendation,
+    resources: &DoctorOutput,
+    runner_id: &str,
+) -> String {
+    let severity = severity_str(recommendation);
+    let reason = primary_reason(resources);
+    format!(
+        "Resource policy: controller is {severity}. {reason} Workload `{}` is routed to Lab runner `{runner_id}`. Controller preflight and transport overhead remain local; Lab offload reports any authorized local fallback separately.",
+        command.label,
+    )
+}
+
 fn primary_reason(resources: &DoctorOutput) -> String {
     if resources.load.recommendation == ResourceRecommendation::Hot
         || resources.load.recommendation == ResourceRecommendation::Warm
