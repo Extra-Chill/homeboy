@@ -16,6 +16,6 @@ For multi-PR orchestration, start with `homeboy --output homeboy-results/worktre
 
 Removal refuses dirty worktrees, unpushed commits, primary checkouts, and paths outside the component checkout parent. `--force` only bypasses dirty/unpushed checks; primary checkout and containment gates always apply.
 
-`worktree cleanup` reports a task-worktree cleanup plan by default. Pass `--apply` to remove planned worktrees after the existing safety gates pass. `--dry-run` remains a deprecated plan-only alias for one release; it conflicts with `--apply`.
+`worktree cleanup` reports a task-worktree cleanup plan by default. Pass `--apply` to remove planned worktrees after the existing safety gates pass. `--dry-run` remains a deprecated plan-only alias for one release; it conflicts with `--apply` and reports `deprecated_flag: "--dry-run"` in JSON output.
 
 Use `homeboy cleanup artifacts` to plan rebuildable artifact cleanup, then pass `--apply` when the plan is acceptable. `worktree cleanup --cleanup-artifacts` includes declared rebuildable artifacts from the Homeboy checkout that built the active binary; it remains plan-only unless `--apply` is also passed.
