@@ -3,8 +3,8 @@
  * External dependencies
  */
 import { createWriteStream } from 'node:fs';
-import { access, copyFile, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { access, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { hostname, tmpdir } from 'node:os';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
@@ -482,36 +482,251 @@ async function handoffArtifacts(artifactRoot, execution) {
     // A crashed workload may never write a runtime pointer. Preserve and parse
     // the captured aggregate at the stable artifact root rather than reporting
     // a zero-test run.
-    const status = await preservePhpunitOutput(artifactRoot, execution, []);
-    if (process.env.HOMEBOY_TEST_RESULTS_FILE) {
-      runScript('parse-test-results.sh', [artifactRoot]);
-    }
-    if (process.env.HOMEBOY_TEST_FAILURES_FILE) {
-      runScript('parse-test-failures.sh', [artifactRoot, componentPath]);
-    }
-    return status;
+    return parsePublishedArtifacts(await publishPhpunitArtifacts(
+      artifactRoot,
+      await preservePhpunitOutput(artifactRoot, execution, []),
+    ));
   }
   const runtime = pointer?.paths?.runtimeDirectory;
   if (typeof runtime !== 'string' || !/^runtime-[A-Za-z0-9][A-Za-z0-9-]*$/.test(runtime)) {
-    const status = await preservePhpunitOutput(artifactRoot, execution, []);
-    if (process.env.HOMEBOY_TEST_RESULTS_FILE) {
-      runScript('parse-test-results.sh', [artifactRoot]);
-    }
-    if (process.env.HOMEBOY_TEST_FAILURES_FILE) {
-      runScript('parse-test-failures.sh', [artifactRoot, componentPath]);
-    }
-    return status;
+    return parsePublishedArtifacts(await publishPhpunitArtifacts(
+      artifactRoot,
+      await preservePhpunitOutput(artifactRoot, execution, []),
+    ));
   }
   const artifactDirectory = path.join(artifactRoot, runtime);
   const managedRuntimeServices = Array.isArray(pointer.managedRuntimeServices) ? pointer.managedRuntimeServices : [];
-  const status = await preservePhpunitOutput(artifactDirectory, execution, managedRuntimeServices);
+  return parsePublishedArtifacts(await publishPhpunitArtifacts(
+    artifactDirectory,
+    await preservePhpunitOutput(artifactDirectory, execution, managedRuntimeServices),
+  ));
+}
+async function publishPhpunitArtifacts(artifactDirectory, status) {
+  const invocationArtifacts = process.env.HOMEBOY_INVOCATION_ARTIFACT_DIR;
+  if (!invocationArtifacts) {
+    return { directory: artifactDirectory, status, failuresPath: '' };
+  }
+
+  const publishedDirectory = path.join(invocationArtifacts, 'wp-codebox-phpunit');
+  const publishedFilesDirectory = path.join(publishedDirectory, 'files');
+  const files = [
+    { name: 'test-results.json', kind: 'test-results', role: 'structured-test-results', semantic_key: 'test_results', content_type: 'application/json' },
+    { name: 'phpunit-output.log', kind: 'phpunit-output', role: 'raw-test-output', semantic_key: 'phpunit_output', content_type: 'text/plain' },
+    { name: 'test-failures.json', kind: 'test-failures', role: 'structured-test-failures', semantic_key: 'test_failures', content_type: 'application/json' },
+  ];
+  await withInvocationArtifactLock(invocationArtifacts, async () => {
+    await assertDirectoryTree(invocationArtifacts, ['wp-codebox-phpunit', 'files']);
+    await assertDirectoryTree(artifactDirectory, ['files']);
+    for (const file of files.slice(0, 2)) {
+      await atomicCopy(path.join(artifactDirectory, 'files', file.name), path.join(publishedFilesDirectory, file.name));
+    }
+    // The parser replaces this durable placeholder atomically. Its registration
+    // survives a parser crash so reviewers can still locate the expected evidence.
+    await atomicWrite(path.join(publishedFilesDirectory, 'test-failures.json'), '{}\n');
+    await registerInvocationArtifacts(invocationArtifacts, files.map((file) => ({
+      ...file,
+      path: path.join('wp-codebox-phpunit', 'files', file.name).replaceAll(path.sep, '/'),
+    })));
+  });
+  return { directory: publishedDirectory, status, failuresPath: path.join(publishedFilesDirectory, 'test-failures.json') };
+}
+async function parsePublishedArtifacts(published) {
   if (process.env.HOMEBOY_TEST_RESULTS_FILE) {
-    runScript('parse-test-results.sh', [artifactDirectory]);
+    runScript('parse-test-results.sh', [published.directory]);
   }
-  if (process.env.HOMEBOY_TEST_FAILURES_FILE) {
-    runScript('parse-test-failures.sh', [artifactDirectory, componentPath]);
+  if (process.env.HOMEBOY_TEST_FAILURES_FILE || published.failuresPath) {
+    const requestedFailuresPath = process.env.HOMEBOY_TEST_FAILURES_FILE;
+    const temporaryFailuresPath = published.failuresPath ? `${published.failuresPath}.${process.pid}.parse` : requestedFailuresPath;
+    if (published.failuresPath) {
+      process.env.HOMEBOY_TEST_FAILURES_FILE = temporaryFailuresPath;
+    }
+    try {
+      runScript('parse-test-failures.sh', [published.directory, componentPath]);
+      if (published.failuresPath) {
+        await withInvocationArtifactLock(process.env.HOMEBOY_INVOCATION_ARTIFACT_DIR, async () => {
+          await assertDirectoryTree(process.env.HOMEBOY_INVOCATION_ARTIFACT_DIR, ['wp-codebox-phpunit', 'files']);
+          await atomicCopy(temporaryFailuresPath, published.failuresPath);
+        });
+        if (requestedFailuresPath && requestedFailuresPath !== published.failuresPath) {
+          await atomicCopy(published.failuresPath, requestedFailuresPath);
+        }
+      }
+    } finally {
+      if (published.failuresPath) { await unlink(temporaryFailuresPath).catch(() => {}); }
+      if (requestedFailuresPath) {
+        process.env.HOMEBOY_TEST_FAILURES_FILE = requestedFailuresPath;
+      } else {
+        delete process.env.HOMEBOY_TEST_FAILURES_FILE;
+      }
+    }
   }
-  return status;
+  return published.status;
+}
+async function registerInvocationArtifacts(invocationRoot, publishedArtifacts) {
+  const manifestPath = path.join(invocationRoot, 'homeboy-artifact-manifest.json');
+  await assertRegularOrMissing(manifestPath);
+  let manifest = { schema: 'homeboy/artifact-manifest/v1', artifacts: [] };
+  try {
+    manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  } catch (error) {
+    if (error.code !== 'ENOENT') { throw error; }
+  }
+  if (!isObject(manifest) || manifest.schema !== 'homeboy/artifact-manifest/v1' || (Object.hasOwn(manifest, 'artifacts') && !Array.isArray(manifest.artifacts))) {
+    throw new Error('HOMEBOY_INVOCATION_ARTIFACT_DIR contains an invalid artifact manifest');
+  }
+  const existing = Array.isArray(manifest.artifacts) ? manifest.artifacts : [];
+  manifest.artifacts = [
+    ...existing.filter((entry) => !publishedArtifacts.some((artifact) => artifact.path === entry?.path)),
+    ...publishedArtifacts.map(({ name, ...artifact }) => ({ id: name, label: name, ...artifact })),
+  ];
+  await atomicWrite(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+async function withInvocationArtifactLock(invocationRoot, action) {
+  await assertDirectoryTree(invocationRoot, []);
+  const lockPath = path.join(invocationRoot, '.wp-codebox-phpunit-publication.lock');
+  let lease;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      const startToken = await processStartToken(process.pid);
+      if (!startToken) { throw new Error('Cannot establish WP Codebox publication lock process identity'); }
+      await mkdir(lockPath, { mode: 0o700 });
+      const metadata = { schema: 'homeboy/wp-codebox-publication-lease/v1', pid: process.pid, hostname: hostname(), start_token: startToken, acquired_at: new Date().toISOString(), token: `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}` };
+      await atomicWrite(path.join(lockPath, 'owner.json'), `${JSON.stringify(metadata)}\n`);
+      const readyFile = process.env.HOMEBOY_WP_CODEBOX_PUBLICATION_LOCK_READY_FILE;
+      if (readyFile) { await atomicWrite(readyFile, `${JSON.stringify(metadata)}\n`); }
+      const holdMilliseconds = Number(process.env.HOMEBOY_WP_CODEBOX_PUBLICATION_LOCK_HOLD_MS || 0);
+      if (Number.isFinite(holdMilliseconds) && holdMilliseconds > 0) { await new Promise((resolve) => setTimeout(resolve, holdMilliseconds)); }
+      lease = { path: lockPath, token: metadata.token };
+      break;
+    } catch (error) {
+      if (error.code !== 'EEXIST') { throw error; }
+      const reclaimed = await reclaimDeadInvocationArtifactLock(lockPath);
+      if (reclaimed) { continue; }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  if (!lease) { throw new Error('Timed out waiting to publish WP Codebox test artifacts'); }
+  try {
+    return await action();
+  } finally {
+    const metadata = await readInvocationArtifactLease(path.join(lease.path, 'owner.json'));
+    if (metadata?.token === lease.token) {
+      await rm(lease.path, { recursive: true, force: true });
+    }
+  }
+}
+async function reclaimDeadInvocationArtifactLock(lockPath) {
+  let stat;
+  try { stat = await lstat(lockPath); } catch (error) {
+    if (error.code === 'ENOENT') { return true; }
+    throw error;
+  }
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error('WP Codebox publication lock has unknown ownership');
+  }
+  const metadata = await readInvocationArtifactLease(path.join(lockPath, 'owner.json'));
+  // A contender can observe the directory between atomic mkdir acquisition and
+  // atomic owner metadata publication. Wait out that short setup window; a
+  // crashed owner without a lease remains fail-closed when the bounded wait ends.
+  if (!metadata) { return false; }
+  const liveness = await invocationArtifactLeaseLiveness(metadata);
+  if (liveness === 'live') { return false; }
+  if (liveness !== 'dead') { throw new Error('WP Codebox publication lock has unknown ownership'); }
+
+  const quarantine = `${lockPath}.reclaimed-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  try {
+    await rename(lockPath, quarantine);
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'EEXIST') { return true; }
+    throw error;
+  }
+  const quarantinedMetadata = await readInvocationArtifactLease(path.join(quarantine, 'owner.json'));
+  if (await invocationArtifactLeaseLiveness(quarantinedMetadata) !== 'dead') {
+    throw new Error('WP Codebox publication lock ownership changed during reclaim');
+  }
+  await rm(quarantine, { recursive: true, force: true });
+  return true;
+}
+async function readInvocationArtifactLease(leasePath) {
+  try {
+    await assertRegularOrMissing(leasePath);
+    const metadata = JSON.parse(await readFile(leasePath, 'utf8'));
+    return isObject(metadata) && metadata.schema === 'homeboy/wp-codebox-publication-lease/v1' && Number.isInteger(metadata.pid) && metadata.pid > 0 && typeof metadata.hostname === 'string' && metadata.hostname !== '' && typeof metadata.start_token === 'string' && metadata.start_token !== '' && typeof metadata.token === 'string' && metadata.token !== '' ? metadata : null;
+  } catch {
+    return null;
+  }
+}
+async function invocationArtifactLeaseLiveness(metadata) {
+  if (!metadata || metadata.hostname !== hostname()) { return 'unknown'; }
+  try {
+    process.kill(metadata.pid, 0);
+  } catch (error) {
+    if (error.code === 'ESRCH') { return 'dead'; }
+    return 'unknown';
+  }
+  const startToken = await processStartToken(metadata.pid);
+  if (!startToken) { return 'unknown'; }
+  return startToken === metadata.start_token ? 'live' : 'dead';
+}
+async function processStartToken(pid) {
+  if (process.platform === 'linux') {
+    try {
+      const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
+      const close = stat.lastIndexOf(')');
+      const fields = close === -1 ? [] : stat.slice(close + 1).trim().split(/\s+/);
+      const startTime = fields[19];
+      if (/^\d+$/.test(startTime || '')) { return `linux:${startTime}`; }
+    } catch {}
+  }
+  if (['darwin', 'linux', 'freebsd'].includes(process.platform)) {
+    const result = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 1000 });
+    const startTime = result.status === 0 ? result.stdout.trim().replace(/\s+/g, ' ') : '';
+    if (startTime) { return `ps:${startTime}`; }
+  }
+  return '';
+}
+async function assertDirectoryTree(directoryRoot, segments) {
+  const rootStat = await lstat(directoryRoot);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error(`WP Codebox artifact directory must be a non-symlink directory: ${directoryRoot}`);
+  }
+  const canonicalRoot = await realpath(directoryRoot);
+  let current = directoryRoot;
+  for (const segment of segments) {
+    current = path.join(current, segment);
+    try {
+      const stat = await lstat(current);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) { throw new Error(`WP Codebox artifact directory contains a symlink or non-directory: ${current}`); }
+    } catch (error) {
+      if (error.code !== 'ENOENT') { throw error; }
+      await mkdir(current);
+    }
+    const canonicalCurrent = await realpath(current);
+    if (canonicalCurrent !== canonicalRoot && !canonicalCurrent.startsWith(`${canonicalRoot}${path.sep}`)) {
+      throw new Error(`WP Codebox artifact directory escapes its invocation root: ${current}`);
+    }
+  }
+}
+async function assertRegularOrMissing(target) {
+  try {
+    const stat = await lstat(target);
+    if (!stat.isFile() || stat.isSymbolicLink()) { throw new Error(`WP Codebox artifact target must be a non-symlink file: ${target}`); }
+  } catch (error) {
+    if (error.code !== 'ENOENT') { throw error; }
+  }
+}
+async function atomicCopy(source, target) {
+  await assertRegularOrMissing(source);
+  await assertRegularOrMissing(target);
+  const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
+  await copyFile(source, temporary);
+  await rename(temporary, target);
+}
+async function atomicWrite(target, content) {
+  await assertRegularOrMissing(target);
+  const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(temporary, content);
+  await rename(temporary, target);
 }
 async function preservePhpunitOutput(artifactDirectory, execution, managedRuntimeServices) {
   const filesDirectory = path.join(artifactDirectory, 'files');
