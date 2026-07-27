@@ -65,6 +65,7 @@ const METADATA_SSH_RECOVERY_ATTEMPTS: usize = 2;
 const WORKSPACE_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 const WORKSPACE_METADATA_OUTPUT_LIMIT: usize = 4 * 1024;
 const WORKSPACE_PRUNE_TIMEOUT: Duration = Duration::from_secs(30);
+const STALE_MATERIALIZED_WORKSPACE_REASON: &str = "stale_materialized_workspace_lifecycle";
 // A page must leave time for its transport timeout and advance past a directory
 // whose size cannot be measured. Size is advisory, never a deletion proof.
 const WORKSPACE_PRUNE_SCAN_BUDGET: Duration = Duration::from_secs(20);
@@ -2660,12 +2661,56 @@ fn prune_candidate_reason(
     if !Path::new(source_path).exists() {
         return Ok(Some("source_path_missing".to_string()));
     }
+    if is_stale_materialized_workspace_lifecycle(metadata, path) {
+        return Ok(Some(STALE_MATERIALIZED_WORKSPACE_REASON.to_string()));
+    }
     Ok(None)
 }
 
+fn is_stale_materialized_workspace_lifecycle(metadata: &serde_json::Value, path: &Path) -> bool {
+    let absent_owner = |key: &str| {
+        metadata
+            .get(key)
+            .and_then(|value| value.as_str())
+            .is_none_or(|value| value.trim().is_empty())
+    };
+    let Some(resource) = metadata
+        .get("resource_lifecycle")
+        .and_then(|value| value.as_object())
+    else {
+        return false;
+    };
+
+    absent_owner("run_id")
+        && absent_owner("job_id")
+        && metadata.get("sync_mode").and_then(|value| value.as_str()) == Some("snapshot")
+        && metadata
+            .get("snapshot_identity")
+            .and_then(|value| value.as_str())
+            .is_some_and(|identity| identity.starts_with("snapshot:"))
+        && metadata.get("remote_path").and_then(|value| value.as_str()) == path.to_str()
+        && resource.get("owner").and_then(|value| value.as_str()) == Some("runner.workspace")
+        && resource.get("run_id").and_then(|value| value.as_str()) == Some("materialized-workspace")
+        && resource.get("kind").and_then(|value| value.as_str()) == Some("runner_workspace")
+        && resource
+            .get("cleanup_policy")
+            .and_then(|value| value.as_str())
+            == Some("delete_on_success")
+        && resource.get("status").and_then(|value| value.as_str()) == Some("active")
+        && resource.get("path").and_then(|value| value.as_str()) == path.to_str()
+}
+
+pub(crate) fn encoded_materialized_workspace_metadata_is_valid(encoded: &str, path: &Path) -> bool {
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()
+        .and_then(|contents| serde_json::from_slice(&contents).ok())
+        .is_some_and(|metadata| is_stale_materialized_workspace_lifecycle(&metadata, path))
+}
+
 /// Bulk pruning is intentionally stricter than run-owned reaping.  Age and a
-/// missing controller source identify an orphan candidate, but they cannot
-/// prove that no independently surviving workload still owns its files.
+/// an orphan reason identify a candidate, but they cannot prove that no
+/// independently surviving workload still owns its files.
 fn workspace_liveness(
     runner: &super::super::Runner,
     metadata: &serde_json::Value,
@@ -3035,7 +3080,11 @@ fn prune_candidates_ssh(
         let Some(source_path) = metadata.get("local_path").and_then(|value| value.as_str()) else {
             continue;
         };
-        let reason = prune_candidate_reason_from_decoded_metadata(&metadata, age_seconds);
+        let reason = prune_candidate_reason_from_decoded_metadata(
+            &metadata,
+            age_seconds,
+            Path::new(&parts[2]),
+        );
         let Some(reason) = reason else {
             continue;
         };
@@ -3099,6 +3148,7 @@ fn prune_candidates_ssh(
 fn prune_candidate_reason_from_decoded_metadata(
     metadata: &serde_json::Value,
     age_seconds: u64,
+    path: &Path,
 ) -> Option<String> {
     if let Some(resource) = metadata.get("resource_lifecycle") {
         if resource
@@ -3119,7 +3169,11 @@ fn prune_candidate_reason_from_decoded_metadata(
     let source_path = metadata
         .get("local_path")
         .and_then(|value| value.as_str())?;
-    (!Path::new(source_path).exists()).then(|| "source_path_missing".to_string())
+    if !Path::new(source_path).exists() {
+        return Some("source_path_missing".to_string());
+    }
+    is_stale_materialized_workspace_lifecycle(metadata, path)
+        .then(|| STALE_MATERIALIZED_WORKSPACE_REASON.to_string())
 }
 
 pub(crate) fn prune_scan_command(
@@ -3179,6 +3233,20 @@ fn remove_prune_candidate(
 ) -> Result<Option<RunnerWorkspaceLivenessEvidence>> {
     match runner.kind {
         RunnerKind::Local => {
+            if candidate.reason == STALE_MATERIALIZED_WORKSPACE_REASON {
+                let path = Path::new(&candidate.remote_path);
+                let metadata = fs::read(path.join(WORKSPACE_METADATA_FILE))
+                    .ok()
+                    .and_then(|contents| serde_json::from_slice(&contents).ok());
+                if !metadata.is_some_and(|metadata| {
+                    is_stale_materialized_workspace_lifecycle(&metadata, path)
+                }) {
+                    return Ok(Some(liveness(
+                        "unknown",
+                        vec!["materialized_workspace_lifecycle_changed".to_string()],
+                    )));
+                }
+            }
             remove_workspace(runner, root, &candidate.remote_path)?;
             Ok(None)
         }
@@ -3193,18 +3261,43 @@ fn remove_ssh_prune_candidate(
 ) -> Result<Option<RunnerWorkspaceLivenessEvidence>> {
     let (_server, mut client) = ssh_client_for_runner(runner)?;
     client.env.extend(runner.env.clone());
-    let terminal_owner_run_id = candidate.run_id.as_deref().filter(|run_id| {
-        homeboy_agents::agent_task_lifecycle::exact_record(run_id)
-            .is_ok_and(|record| record.state.is_terminal())
-    });
-    let output = client.execute_with_timeout(
-        &ssh_prune_delete_command_with_terminal_owner(
+    let command = if candidate.reason == STALE_MATERIALIZED_WORKSPACE_REASON {
+        let metadata_path = Path::new(&candidate.remote_path).join(WORKSPACE_METADATA_FILE);
+        let metadata_command = format!(
+            "meta={}; [ -f \"$meta\" ] && base64 < \"$meta\" | tr -d '\\n'",
+            shell::quote_arg(&metadata_path.display().to_string())
+        );
+        let metadata_output =
+            client.execute_with_timeout(&metadata_command, WORKSPACE_PRUNE_TIMEOUT);
+        let encoded_metadata = metadata_output.stdout.trim();
+        if !metadata_output.success
+            || !encoded_materialized_workspace_metadata_is_valid(
+                encoded_metadata,
+                Path::new(&candidate.remote_path),
+            )
+        {
+            return Ok(Some(liveness(
+                "unknown",
+                vec!["materialized_workspace_lifecycle_changed".to_string()],
+            )));
+        }
+        ssh_prune_delete_materialized_workspace_command(
+            root,
+            &candidate.remote_path,
+            encoded_metadata,
+        )
+    } else {
+        let terminal_owner_run_id = candidate.run_id.as_deref().filter(|run_id| {
+            homeboy_agents::agent_task_lifecycle::exact_record(run_id)
+                .is_ok_and(|record| record.state.is_terminal())
+        });
+        ssh_prune_delete_command_with_terminal_owner(
             root,
             &candidate.remote_path,
             terminal_owner_run_id,
-        ),
-        WORKSPACE_PRUNE_TIMEOUT,
-    );
+        )
+    };
+    let output = client.execute_with_timeout(&command, WORKSPACE_PRUNE_TIMEOUT);
     if !output.success {
         return Err(Error::internal_unexpected(format!(
             "remove runner workspace failed: {}",
@@ -3247,6 +3340,35 @@ pub(crate) fn ssh_prune_delete_command_with_terminal_owner(
         root = shell::quote_arg(root),
         path = shell::quote_arg(remote_path),
         meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
+    )
+}
+
+pub(crate) fn ssh_prune_delete_materialized_workspace_command(
+    root: &str,
+    remote_path: &str,
+    expected_metadata: &str,
+) -> String {
+    format!(
+        concat!(
+            "root={root}; p={path}; meta_rel={meta}; expected={expected}; ",
+            "case \"$p\" in \"$root\"/*) ;; *) printf unknown:workspace_path; exit 0 ;; esac; ",
+            "meta=\"$p/$meta_rel\"; [ -f \"$meta\" ] || {{ printf unknown:metadata; exit 0; }}; ",
+            "actual=$(base64 < \"$meta\" | tr -d '\\n') || {{ printf unknown:metadata; exit 0; }}; ",
+            "[ \"$actual\" = \"$expected\" ] || {{ printf unknown:materialized_workspace_lifecycle_changed; exit 0; }}; ",
+            "command -v ps >/dev/null 2>&1 && command -v lsof >/dev/null 2>&1 || {{ printf unknown:process_probe_unavailable; exit 0; }}; ",
+            "ps_output=$(ps -eo pid=,ppid=,args=) || {{ printf unknown:process_probe_failed; exit 0; }}; ",
+            "printf '%s\n' \"$ps_output\" | awk -v p=\"$p\" -v self=\"$$\" -v parent=\"$PPID\" '$1 != self && $1 != parent && $2 != self && index($0, p) {{ found=1 }} END {{ exit !found }}'; state=$?; ",
+            "[ \"$state\" -eq 0 ] && {{ printf live:remote_process_ownership; exit 0; }}; [ \"$state\" -eq 1 ] || {{ printf unknown:process_probe_failed; exit 0; }}; ",
+            "cwd=$(lsof -w -Fn -a -d cwd +D \"$p\" 2>/dev/null); state=$?; ",
+            "[ \"$state\" -eq 0 ] && [ -n \"$cwd\" ] && {{ printf live:remote_process_ownership; exit 0; }}; {{ [ \"$state\" -eq 1 ] && [ -z \"$cwd\" ]; }} || {{ printf unknown:process_probe_failed; exit 0; }}; ",
+            "open=$(lsof -w -Fn +D \"$p\" 2>/dev/null); state=$?; ",
+            "[ \"$state\" -eq 0 ] && [ -n \"$open\" ] && {{ printf live:remote_process_ownership; exit 0; }}; {{ [ \"$state\" -eq 1 ] && [ -z \"$open\" ]; }} || {{ printf unknown:process_probe_failed; exit 0; }}; ",
+            "rm -rf -- \"$p\" && printf removed || printf unknown:delete_failed"
+        ),
+        root = shell::quote_arg(root),
+        path = shell::quote_arg(remote_path),
+        meta = shell::quote_arg(WORKSPACE_METADATA_FILE),
+        expected = shell::quote_arg(expected_metadata),
     )
 }
 

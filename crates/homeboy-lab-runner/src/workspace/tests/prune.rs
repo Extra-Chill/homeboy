@@ -3,11 +3,13 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use base64::Engine;
+
 use crate::workspace::sync::{
-    active_resource_lifecycle_liveness, prune_scan_command, prune_workspaces,
-    ssh_process_liveness_command, ssh_prune_delete_command,
-    ssh_prune_delete_command_with_terminal_owner, sync_workspace,
-    update_workspace_resource_lifecycle, workspace_liveness_with_size_observation,
+    active_resource_lifecycle_liveness, encoded_materialized_workspace_metadata_is_valid,
+    prune_scan_command, prune_workspaces, ssh_process_liveness_command, ssh_prune_delete_command,
+    ssh_prune_delete_command_with_terminal_owner, ssh_prune_delete_materialized_workspace_command,
+    sync_workspace, update_workspace_resource_lifecycle, workspace_liveness_with_size_observation,
     ActiveResourceLifecycleLiveness, RunAuthority, WORKSPACE_METADATA_FILE,
 };
 use crate::workspace::types::{
@@ -117,14 +119,17 @@ fn prune_workspaces_apply_removes_only_metadata_backed_orphans() {
 
         assert_eq!(exit_code, 0);
         assert!(!output.dry_run);
-        assert_eq!(output.removed.len(), 1);
-        assert_eq!(output.total_candidate_count, 1);
+        assert_eq!(output.removed.len(), 2);
+        assert_eq!(output.total_candidate_count, 2);
         assert!(output.total_candidate_bytes >= output.total_removed_bytes);
         assert_eq!(output.remaining_candidate_count, 0);
         assert!(!output.has_more);
-        assert_eq!(output.removed[0].remote_path, orphan.remote_path);
+        assert!(output
+            .removed
+            .iter()
+            .any(|entry| entry.remote_path == orphan.remote_path));
         assert!(!Path::new(&orphan.remote_path).exists());
-        assert!(Path::new(&live.remote_path).exists());
+        assert!(!Path::new(&live.remote_path).exists());
         assert!(unmanaged.exists());
     });
 }
@@ -311,6 +316,51 @@ fn prune_workspaces_reaps_ttl_expired_lifecycle_workspace_with_live_source() {
         assert_eq!(output.candidates[0].remote_path, synced.remote_path);
         assert_eq!(output.candidates[0].reason, "resource_ttl_expired");
         assert!(Path::new(&synced.remote_path).exists());
+        assert!(source.exists());
+    });
+}
+
+#[test]
+fn prune_workspaces_reaps_stale_materialized_workspace_with_live_source() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let source_parent = tempfile::tempdir().expect("source parent");
+        let source = source_parent.path().join("live-source");
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        fs::create_dir_all(&source).expect("source dir");
+        fs::write(source.join("file.txt"), "live\n").expect("source file");
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-local-prune-materialized","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+        let (synced, _) = sync_workspace(
+            "lab-local-prune-materialized",
+            sync_options(source.display().to_string()),
+        )
+        .expect("sync workspace");
+
+        let (output, exit_code) = prune_workspaces(
+            "lab-local-prune-materialized",
+            RunnerWorkspacePruneOptions {
+                apply: true,
+                min_age_hours: 0,
+                limit: 10,
+                passes: 1,
+                cursor: None,
+            },
+        )
+        .expect("prune stale materialized workspace");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(output.removed.len(), 1);
+        assert_eq!(
+            output.removed[0].reason,
+            "stale_materialized_workspace_lifecycle"
+        );
+        assert!(!Path::new(&synced.remote_path).exists());
         assert!(source.exists());
     });
 }
@@ -1003,6 +1053,85 @@ fn ssh_shaped_prune_delete_revalidates_lifecycle_and_deletes_atomically() {
 }
 
 #[test]
+fn ssh_materialized_workspace_delete_requires_exact_inactive_lifecycle() {
+    let root = tempfile::tempdir().expect("workspace root");
+    let workspaces = root.path().join("_lab_workspaces");
+    let eligible = workspaces.join("eligible");
+    write_materialized_workspace(&eligible);
+    let expected_metadata = encoded_workspace_metadata(&eligible);
+
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(ssh_prune_delete_materialized_workspace_command(
+            &workspaces.display().to_string(),
+            &eligible.display().to_string(),
+            &expected_metadata,
+        ))
+        .output()
+        .expect("delete stale materialized workspace");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "removed");
+    assert!(!eligible.exists());
+
+    let ambiguous = workspaces.join("ambiguous");
+    write_materialized_workspace(&ambiguous);
+    let expected_metadata = encoded_workspace_metadata(&ambiguous);
+    let metadata_path = ambiguous.join(WORKSPACE_METADATA_FILE);
+    let mut metadata: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
+            .expect("metadata json");
+    metadata["run_id"] = serde_json::json!("unexpected-owner");
+    fs::write(&metadata_path, metadata.to_string()).expect("write ambiguous metadata");
+    assert!(!encoded_materialized_workspace_metadata_is_valid(
+        &encoded_workspace_metadata(&ambiguous),
+        &ambiguous,
+    ));
+    assert!(!encoded_materialized_workspace_metadata_is_valid(
+        &base64::engine::general_purpose::STANDARD.encode(b"{malformed"),
+        &ambiguous,
+    ));
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(ssh_prune_delete_materialized_workspace_command(
+            &workspaces.display().to_string(),
+            &ambiguous.display().to_string(),
+            &expected_metadata,
+        ))
+        .output()
+        .expect("retain ambiguous materialized workspace");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "unknown:materialized_workspace_lifecycle_changed"
+    );
+    assert!(ambiguous.exists());
+
+    let process_owned = workspaces.join("process-owned");
+    write_materialized_workspace(&process_owned);
+    let expected_metadata = encoded_workspace_metadata(&process_owned);
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg("sleep 30")
+        .current_dir(&process_owned)
+        .spawn()
+        .expect("hold materialized workspace cwd");
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(ssh_prune_delete_materialized_workspace_command(
+            &workspaces.display().to_string(),
+            &process_owned.display().to_string(),
+            &expected_metadata,
+        ))
+        .output()
+        .expect("retain process-owned materialized workspace");
+    child.kill().expect("stop held process");
+    child.wait().expect("reap held process");
+    assert!(output.status.success(), "{output:?}");
+    assert_ne!(String::from_utf8_lossy(&output.stdout), "removed");
+    assert!(process_owned.exists());
+}
+
+#[test]
 fn ssh_terminal_lifecycle_delete_revalidates_process_ownership() {
     let root = tempfile::tempdir().expect("workspace root");
     let workspace = root.path().join("_lab_workspaces/terminal");
@@ -1112,6 +1241,37 @@ fn write_orphan_workspace(path: &Path) {
         .to_string(),
     )
     .expect("workspace metadata");
+}
+
+fn write_materialized_workspace(path: &Path) {
+    write_orphan_workspace(path);
+    fs::write(
+        path.join(WORKSPACE_METADATA_FILE),
+        serde_json::json!({
+            "schema": "homeboy/runner-workspace/v1",
+            "runner_id": "lab-ssh-prune-materialized",
+            "local_path": "/existing/source",
+            "remote_path": path.display().to_string(),
+            "sync_mode": "snapshot",
+            "snapshot_identity": "snapshot:synthetic",
+            "resource_lifecycle": {
+                "owner": "runner.workspace",
+                "run_id": "materialized-workspace",
+                "path": path.display().to_string(),
+                "kind": "runner_workspace",
+                "cleanup_policy": "delete_on_success",
+                "status": "active"
+            }
+        })
+        .to_string(),
+    )
+    .expect("materialized workspace metadata");
+}
+
+fn encoded_workspace_metadata(path: &Path) -> String {
+    base64::engine::general_purpose::STANDARD.encode(
+        fs::read(path.join(WORKSPACE_METADATA_FILE)).expect("read workspace metadata for compare"),
+    )
 }
 
 fn active_lifecycle_metadata(run_id: &str, resource_run_id: &str) -> serde_json::Value {
