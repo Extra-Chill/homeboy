@@ -42,30 +42,6 @@ pub struct DriftOptions {
 }
 
 impl DriftOptions {
-    /// Create options with common defaults for a PHP project.
-    pub fn php(root: &Path, since: &str) -> Self {
-        Self {
-            root: root.to_path_buf(),
-            since: since.to_string(),
-            source_patterns: vec![
-                "src/**/*.php".into(),
-                "inc/**/*.php".into(),
-                "lib/**/*.php".into(),
-            ],
-            test_patterns: vec!["tests/**/*.php".into()],
-        }
-    }
-
-    /// Create options with common defaults for a Rust project.
-    pub fn rust(root: &Path, since: &str) -> Self {
-        Self {
-            root: root.to_path_buf(),
-            since: since.to_string(),
-            source_patterns: vec!["src/**/*.rs".into()],
-            test_patterns: vec!["tests/**/*.rs".into()],
-        }
-    }
-
     /// Create options from an extension-declared drift selection contract.
     pub fn from_config(
         root: &Path,
@@ -1215,7 +1191,13 @@ mod tests {
 
     #[test]
     fn has_usable_patterns_reflects_config() {
-        let configured = DriftOptions::rust(Path::new("/tmp"), "HEAD");
+        let config = TestDriftConfig {
+            source_dirs: vec!["src".to_string()],
+            test_dirs: vec!["tests".to_string()],
+            file_extensions: vec!["rs".to_string()],
+            inline_tests: true,
+        };
+        let configured = DriftOptions::from_config(Path::new("/tmp"), "HEAD", &config, &[]);
         assert!(configured.has_usable_patterns());
 
         let empty = DriftOptions {
