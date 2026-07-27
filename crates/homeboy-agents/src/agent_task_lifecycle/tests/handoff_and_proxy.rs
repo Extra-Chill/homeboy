@@ -565,6 +565,77 @@ fn controller_proxy_is_queued_before_handoff_then_binds_runner_child() {
 }
 
 #[test]
+fn reserved_lab_admission_is_named_on_the_durable_run_before_acceptance() {
+    with_isolated_home(|_| {
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "cook".to_string(),
+        ];
+        record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id: "agent-task-admission-identity",
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/repo",
+            remote_command: &command,
+            durable_plan: None,
+        })
+        .expect("controller proxy recorded before admission");
+
+        let reserved = record_lab_admission_reservation(
+            "agent-task-admission-identity",
+            "homeboy-lab",
+            "lease-abc",
+            "job-reservation-9163",
+            1_700_000_000_000,
+        )
+        .expect("reservation named on the durable run");
+
+        // The reservation is findable by run id the moment it is taken, so a
+        // caller killed before runner acceptance never leaves an admission that
+        // only manual job-ID surgery can identify (#9163).
+        assert_eq!(
+            reserved.metadata["lab_admission_reservation"]["reservation_job_id"],
+            "job-reservation-9163"
+        );
+        assert_eq!(
+            reserved.metadata["lab_admission_reservation"]["daemon_lease_id"],
+            "lease-abc"
+        );
+        assert_eq!(
+            reserved.metadata["lab_admission_reservation"]["runner_id"],
+            "homeboy-lab"
+        );
+        assert_eq!(
+            reserved.metadata["lab_admission_reservation"]["lease_expires_at_ms"],
+            1_700_000_000_000u64
+        );
+        assert_eq!(
+            reserved.metadata["lab_admission_reservation"]["cancel_command"],
+            "homeboy agent-task cancel agent-task-admission-identity"
+        );
+        // Naming a reservation is evidence, never acceptance.
+        assert_eq!(reserved.state, AgentTaskRunState::Queued);
+        assert!(reserved.metadata.get("runner_job_id").is_none());
+
+        // A terminal run is never reopened by a late reservation write.
+        cancel_run("agent-task-admission-identity", Some("caller lost"))
+            .expect("cancel the reserved run");
+        let after_cancel = record_lab_admission_reservation(
+            "agent-task-admission-identity",
+            "homeboy-lab",
+            "lease-def",
+            "job-reservation-late",
+            1_700_000_000_001,
+        )
+        .expect("late reservation write is a no-op");
+        assert_eq!(
+            after_cancel.metadata["lab_admission_reservation"]["reservation_job_id"],
+            "job-reservation-9163"
+        );
+    });
+}
+
+#[test]
 fn accepted_handoff_replays_idempotently_and_rejects_a_different_identity() {
     with_isolated_home(|_| {
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];

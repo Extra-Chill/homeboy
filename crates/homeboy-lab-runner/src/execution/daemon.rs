@@ -502,6 +502,13 @@ impl DaemonAdmissionReservationAuthority {
         &self.reservation_job_id
     }
 
+    /// When the daemon reclaims this reservation without a controller. Recorded
+    /// on the durable run so an operator can see the automatic-reclaim deadline
+    /// instead of guessing whether a lost caller stranded capacity (#9163).
+    pub(crate) fn lease_expires_at_ms(&self) -> u64 {
+        self.lease_expires_at_ms
+    }
+
     /// Proves that the daemon, rather than local Drop cleanup, still owns the
     /// lease expiry/cancellation contract before the dispatcher submits `/exec`.
     pub(crate) fn prove_server_owned_expiry_or_cancellation_authority(&self) -> Result<()> {
