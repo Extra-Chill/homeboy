@@ -240,10 +240,16 @@ pub fn file_from_audit_fingerprint(fingerprint: &str) -> Option<String> {
     Some(rest[..next].to_string())
 }
 
-/// Reject full-audit baselines that retain source-file fingerprints for paths
-/// removed by a tree move. Artifact portability uses a synthetic identity in
-/// place of a file path, so it remains valid even when identity text resembles
-/// a source path.
+/// Reject full-audit baselines that retain fingerprints for paths removed by a
+/// tree move. Artifact portability uses a synthetic identity in place of a file
+/// path, so it remains valid even when identity text resembles a source path.
+///
+/// Existence — not file-ness — is the test. Not every finding is file-scoped:
+/// `DirectorySprawl` records the *directory* it measured (see
+/// `structural::directory_sprawl`), so an `is_file()` check rejected live rows
+/// like `structural::crates/homeboy-core/src::DirectorySprawl` forever. Because
+/// a full audit re-records those rows on the next run, that turned a correct
+/// baseline into a permanently red audit gate that pruning could not clear.
 pub fn validate_fingerprint_paths(
     source_path: &Path,
     baseline: &AuditBaseline,
@@ -255,7 +261,7 @@ pub fn validate_fingerprint_paths(
             let file = file_from_audit_fingerprint(fingerprint)?;
             (!is_synthetic_fingerprint(fingerprint)).then_some((file, fingerprint))
         })
-        .filter(|(file, _)| !source_path.join(file).is_file())
+        .filter(|(file, _)| !source_path.join(file).exists())
         .map(|(_, fingerprint)| fingerprint.as_str())
         .collect::<Vec<_>>();
 
@@ -266,7 +272,7 @@ pub fn validate_fingerprint_paths(
     Err(homeboy_error::Error::validation_invalid_argument(
         "baselines.audit.known_fingerprints",
         format!(
-            "{} baseline fingerprint(s) reference source files that no longer exist: {}. Regenerate or prune the stale baseline rows.",
+            "{} baseline fingerprint(s) reference paths that no longer exist: {}. Regenerate or prune the stale baseline rows.",
             missing.len(),
             missing.join(", ")
         ),
@@ -567,7 +573,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_stale_source_file_fingerprints_but_keeps_synthetic_rows() {
+    fn rejects_stale_fingerprints_but_keeps_synthetic_and_directory_rows() {
         let result = make_result(Vec::new(), "stale_fingerprint_paths");
         let root = Path::new(&result.source_path);
         std::fs::create_dir_all(root.join("crates/example/src")).expect("source directory");
@@ -579,6 +585,8 @@ mod tests {
             item_count: 3,
             known_fingerprints: vec![
                 "structural::crates/example/src/live.rs::GodFile".to_string(),
+                // Directory-scoped finding: the path exists but is not a file.
+                "structural::crates/example/src::DirectorySprawl".to_string(),
                 "structural::src/retired.json::GodFile".to_string(),
                 "artifact_portability::artifact_portability/path/sidecar.rs::NonPortableArtifactPath"
                     .to_string(),
@@ -598,6 +606,10 @@ mod tests {
         assert!(!error
             .to_string()
             .contains("artifact_portability/path/sidecar.rs"));
+        assert!(
+            !error.to_string().contains("DirectorySprawl"),
+            "a directory-scoped finding whose directory still exists is not stale: {error}"
+        );
     }
 
     #[test]
