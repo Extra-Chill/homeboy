@@ -1535,7 +1535,7 @@ fn batch_cook_options(
 struct CandidateAdoptionFixture {
     _temp: tempfile::TempDir,
     _source: std::path::PathBuf,
-    _target: std::path::PathBuf,
+    target: std::path::PathBuf,
     candidate: String,
     cook_id: String,
     run_id: String,
@@ -1669,7 +1669,7 @@ impl CandidateAdoptionFixture {
         let mut fixture = Self {
             _temp: temp,
             _source: source,
-            _target: target,
+            target,
             candidate,
             cook_id: cook_id.to_string(),
             run_id,
@@ -3651,6 +3651,28 @@ fn adoption_replays_provider_discovery_failure_in_the_same_recipe_attempt() {
         assert_eq!(failed_recipe.attempts.len(), 2);
         let failed_run_id = failed_recipe.attempts[1].run_id.clone();
         assert!(retryable_provider_discovery_failure(&failed_run_id));
+        let continuation_plan = agent_task_lifecycle::load_plan(&failed_run_id)
+            .expect("provider replay persists its baseline-bound continuation plan");
+        let baseline_root = continuation_plan.tasks[0]
+            .workspace
+            .root
+            .clone()
+            .expect("continuation plan has an authenticated baseline root");
+        let mut reconstructed = super::super::reconstruct_adoption_options(&failed_recipe)
+            .expect("reconstruct adoption policy");
+        super::rebind_baseline_continuation_workspace(&mut reconstructed, &continuation_plan)
+            .expect("restore the active task-worktree identity");
+        assert_eq!(reconstructed.to_worktree, fixture.options.to_worktree);
+        assert_eq!(
+            std::fs::canonicalize(reconstructed.source_worktree_path.unwrap()).unwrap(),
+            std::fs::canonicalize(&fixture.target).unwrap(),
+            "continuation reconstruction resolves the recipe handle to the active target worktree"
+        );
+        assert_ne!(
+            baseline_root,
+            fixture.target.display().to_string(),
+            "the persisted baseline is evidence, not the continuation workspace"
+        );
         agent_task_lifecycle::rewrite_record_for_test(&fixture.run_id, |record| {
             record
                 .candidate_adoption
