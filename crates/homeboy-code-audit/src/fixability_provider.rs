@@ -15,8 +15,6 @@
 //! e.g. audit running standalone — the no-op provider yields no fixes, which the
 //! caller already treats as "not fixable / fixability unavailable".
 
-use std::sync::Mutex;
-
 use super::fingerprint::FileFingerprint;
 use super::CodeAuditResult;
 use homeboy_audit_contract::AuditFinding;
@@ -67,15 +65,15 @@ impl AuditFixabilityProvider for NoopProvider {
     }
 }
 
-static PROVIDER: Mutex<Option<Box<dyn AuditFixabilityProvider>>> = Mutex::new(None);
-
-/// Register the audit fixability provider. Called once at binary startup by the
-/// refactor layer (via the CLI). Replaces any previously registered provider.
-pub fn register_audit_fixability_provider(provider: Box<dyn AuditFixabilityProvider>) {
-    let mut guard = PROVIDER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn AuditFixabilityProvider,
+    noop: NoopProvider,
+    /// Register the audit fixability provider. Called once at binary startup by the
+    /// refactor layer (via the CLI). Replaces any previously registered provider.
+    register: pub fn register_audit_fixability_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none
+    /// is registered.
+    with: fn with_provider,
 }
 
 /// Plan fixability verdicts for an audit result via the registered provider.
@@ -85,16 +83,6 @@ pub(crate) fn plan_fixability(
     fingerprints: &[FileFingerprint],
 ) -> Vec<FixabilityVerdict> {
     with_provider(|p| p.plan(result, source_path, fingerprints))
-}
-
-fn with_provider<T>(f: impl FnOnce(&dyn AuditFixabilityProvider) -> T) -> T {
-    let guard = PROVIDER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match guard.as_ref() {
-        Some(provider) => f(provider.as_ref()),
-        None => f(&NoopProvider),
-    }
 }
 
 #[cfg(test)]

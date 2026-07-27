@@ -13,8 +13,6 @@
 //! With no provider registered (no extension subsystem present) the no-op
 //! returns a not-supported error, so callers degrade gracefully.
 
-use std::sync::Mutex;
-
 use serde_json::Value;
 
 use crate::component::Component;
@@ -35,48 +33,44 @@ pub trait ComponentBuildRunner: Send + Sync {
     fn build_component(&self, component: &Component) -> (Option<i32>, Option<String>);
 }
 
-fn provider_slot() -> &'static Mutex<Option<Box<dyn ComponentBuildRunner>>> {
-    static PROVIDER: Mutex<Option<Box<dyn ComponentBuildRunner>>> = Mutex::new(None);
-    &PROVIDER
-}
-
-/// Register the component-build runner. Called once at startup by the extension
-/// layer.
-pub fn register_component_build_runner(provider: Box<dyn ComponentBuildRunner>) {
-    let mut slot = provider_slot().lock().expect("component build runner lock");
-    *slot = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn ComponentBuildRunner,
+    /// Register the component-build runner. Called once at startup by the extension
+    /// layer.
+    register: pub fn register_component_build_runner,
+    /// Run `f` against the registered runner, or `None` when none is registered.
+    /// This registry has no no-op implementation: each dispatch function below
+    /// reports its own "no runner registered" outcome.
+    with_optional: fn with_provider,
 }
 
 /// Build the component (exit_code, error) via the registered provider.
 pub fn build_component(component: &Component) -> (Option<i32>, Option<String>) {
-    let slot = provider_slot().lock().expect("component build runner lock");
-    match slot.as_deref() {
-        Some(provider) => provider.build_component(component),
+    with_provider(|runner| match runner {
+        Some(runner) => runner.build_component(component),
         None => (
             None,
             Some("no component-build runner registered".to_string()),
         ),
-    }
+    })
 }
 
 /// Whether the registered provider can build the component.
 pub fn can_build(component: &Component) -> bool {
-    let slot = provider_slot().lock().expect("component build runner lock");
-    match slot.as_deref() {
-        Some(provider) => provider.can_build(component),
+    with_provider(|runner| match runner {
+        Some(runner) => runner.can_build(component),
         None => false,
-    }
+    })
 }
 
 /// Build a component through the registered provider. Returns
 /// `(json_result, exit_code)`.
 pub fn run_component_build(component: &Component) -> Result<(Value, i32)> {
-    let slot = provider_slot().lock().expect("component build runner lock");
-    match slot.as_deref() {
-        Some(provider) => provider.run_component_build(component),
+    with_provider(|runner| match runner {
+        Some(runner) => runner.run_component_build(component),
         None => Err(Error::internal_io(
             "no component-build runner registered; the extension subsystem is not available",
             None,
         )),
-    }
+    })
 }

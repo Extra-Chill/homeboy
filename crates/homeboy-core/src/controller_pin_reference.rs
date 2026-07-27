@@ -16,7 +16,6 @@
 //! retention report, and pruning is always an explicit caller opt-in.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use crate::Result;
 
@@ -38,31 +37,20 @@ impl ControllerPinReferenceProvider for NoopProvider {
     }
 }
 
-fn provider_slot() -> &'static Mutex<Option<Box<dyn ControllerPinReferenceProvider>>> {
-    static PROVIDER: Mutex<Option<Box<dyn ControllerPinReferenceProvider>>> = Mutex::new(None);
-    &PROVIDER
-}
-
-/// Register the controller pin-reference provider. Called once at startup by the
-/// agent-task layer.
-pub fn register_controller_pin_reference_provider(
-    provider: Box<dyn ControllerPinReferenceProvider>,
-) {
-    let mut slot = provider_slot()
-        .lock()
-        .expect("controller pin reference provider lock");
-    *slot = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn ControllerPinReferenceProvider,
+    noop: NoopProvider,
+    /// Register the controller pin-reference provider. Called once at startup by the
+    /// agent-task layer.
+    register: pub fn register_controller_pin_reference_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none
+    /// is registered.
+    with: fn with_provider,
 }
 
 /// The controller-runtime pins still referenced by nonterminal agent-task
 /// records, via the registered provider (or an empty set when the agent-task
 /// subsystem is absent).
 pub(crate) fn referenced_controller_pins() -> Result<Vec<PathBuf>> {
-    let slot = provider_slot()
-        .lock()
-        .expect("controller pin reference provider lock");
-    match slot.as_deref() {
-        Some(provider) => provider.referenced_controller_pins(),
-        None => NoopProvider.referenced_controller_pins(),
-    }
+    with_provider(|p| p.referenced_controller_pins())
 }

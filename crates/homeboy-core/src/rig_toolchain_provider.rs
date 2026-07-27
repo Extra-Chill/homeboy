@@ -15,7 +15,6 @@
 //! path, so the exec env's `PATH` is left unchanged.
 
 use std::ffi::OsString;
-use std::sync::Mutex;
 
 /// Supplies the rig toolchain command-step PATH.
 pub trait RigToolchainProvider: Send + Sync {
@@ -35,23 +34,18 @@ impl RigToolchainProvider for NoopProvider {
     }
 }
 
-fn provider_slot() -> &'static Mutex<Option<Box<dyn RigToolchainProvider>>> {
-    static PROVIDER: Mutex<Option<Box<dyn RigToolchainProvider>>> = Mutex::new(None);
-    &PROVIDER
-}
-
-/// Register the rig toolchain provider. Called once at startup by the rig layer.
-pub fn register_rig_toolchain_provider(provider: Box<dyn RigToolchainProvider>) {
-    let mut slot = provider_slot().lock().expect("rig toolchain provider lock");
-    *slot = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn RigToolchainProvider,
+    noop: NoopProvider,
+    /// Register the rig toolchain provider. Called once at startup by the rig layer.
+    register: pub fn register_rig_toolchain_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none
+    /// is registered.
+    with: fn with_provider,
 }
 
 /// The rig toolchain command-step PATH via the registered provider (or none when
 /// the rig layer is absent).
 pub fn command_step_path(rig_id: Option<&str>) -> Option<OsString> {
-    let slot = provider_slot().lock().expect("rig toolchain provider lock");
-    match slot.as_deref() {
-        Some(provider) => provider.command_step_path(rig_id),
-        None => NoopProvider.command_step_path(rig_id),
-    }
+    with_provider(|p| p.command_step_path(rig_id))
 }

@@ -12,8 +12,6 @@
 //! fail (so the caller annotates "runner disconnected"), and existence /
 //! connection checks report `false`.
 
-use std::sync::Mutex;
-
 use homeboy_core::api_jobs::{
     Job, RemoteRunnerJobRequest, RemoteRunnerSubmissionLookup, RunnerJobLogSnapshot,
 };
@@ -129,18 +127,15 @@ impl RunnerContinuationProvider for NoopProvider {
     }
 }
 
-fn provider_slot() -> &'static Mutex<Option<Box<dyn RunnerContinuationProvider>>> {
-    static PROVIDER: Mutex<Option<Box<dyn RunnerContinuationProvider>>> = Mutex::new(None);
-    &PROVIDER
-}
-
-/// Register the runner-continuation provider. Called once at startup by the
-/// runner subsystem when it is present.
-pub fn register_runner_continuation_provider(provider: Box<dyn RunnerContinuationProvider>) {
-    let mut slot = provider_slot()
-        .lock()
-        .expect("runner continuation provider lock");
-    *slot = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn RunnerContinuationProvider,
+    noop: NoopProvider,
+    /// Register the runner-continuation provider. Called once at startup by the
+    /// runner subsystem when it is present.
+    register: pub fn register_runner_continuation_provider,
+    /// Run `f` against the registered provider, falling back to the no-op provider
+    /// when the runner subsystem is absent.
+    with: pub(crate) fn with_runner_continuation,
 }
 
 /// Clear any registered runner-continuation provider so a fresh test starts from
@@ -175,19 +170,5 @@ impl RunnerContinuationTestGuard {
 impl Drop for RunnerContinuationTestGuard {
     fn drop(&mut self) {
         clear_runner_continuation_provider_for_test();
-    }
-}
-
-/// Run `f` against the registered provider, falling back to the no-op provider
-/// when the runner subsystem is absent.
-pub(crate) fn with_runner_continuation<R>(
-    f: impl FnOnce(&dyn RunnerContinuationProvider) -> R,
-) -> R {
-    let slot = provider_slot()
-        .lock()
-        .expect("runner continuation provider lock");
-    match slot.as_deref() {
-        Some(provider) => f(provider),
-        None => f(&NoopProvider),
     }
 }

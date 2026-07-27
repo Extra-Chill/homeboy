@@ -18,7 +18,6 @@
 //! and falls back to its built-in grammars / extension fingerprint scripts.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 /// The grammar-source contract the audit engine depends on. Implemented by the
 /// extension layer and registered at startup; audit calls it without depending
@@ -42,31 +41,21 @@ impl GrammarSourceProvider for NoopProvider {
     }
 }
 
-static PROVIDER: Mutex<Option<Box<dyn GrammarSourceProvider>>> = Mutex::new(None);
-
-/// Register the grammar-source provider. Called once at binary startup by the
-/// extension layer (via the CLI). Replaces any previously registered provider.
-pub fn register_grammar_source_provider(provider: Box<dyn GrammarSourceProvider>) {
-    let mut guard = PROVIDER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn GrammarSourceProvider,
+    noop: NoopProvider,
+    /// Register the grammar-source provider. Called once at binary startup by the
+    /// extension layer (via the CLI). Replaces any previously registered provider.
+    register: pub fn register_grammar_source_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none
+    /// is registered.
+    with: fn with_provider,
 }
 
 /// Resolve the grammar directory for `file_extension` via the registered
 /// provider.
 pub(crate) fn grammar_dir_for_ext(file_extension: &str) -> Option<PathBuf> {
     with_provider(|p| p.grammar_dir(file_extension))
-}
-
-fn with_provider<T>(f: impl FnOnce(&dyn GrammarSourceProvider) -> T) -> T {
-    let guard = PROVIDER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match guard.as_ref() {
-        Some(provider) => f(provider.as_ref()),
-        None => f(&NoopProvider),
-    }
 }
 
 #[cfg(test)]

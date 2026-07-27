@@ -14,8 +14,6 @@
 //! standalone — the no-op provider yields no runs, which the detector already
 //! treats as "nothing recorded to check".
 
-use std::sync::Mutex;
-
 /// A recorded artifact, projected to what the portability detector needs.
 #[derive(Debug, Clone, Default)]
 pub struct AuditRecordedArtifact {
@@ -54,27 +52,21 @@ impl AuditRecordedArtifactProvider for NoopProvider {
     }
 }
 
-static PROVIDER: Mutex<Option<Box<dyn AuditRecordedArtifactProvider>>> = Mutex::new(None);
-
-/// Register the recorded-artifact provider. Called once at binary startup by the
-/// observation layer (via the CLI). Replaces any previously registered provider.
-pub fn register_audit_recorded_artifact_provider(provider: Box<dyn AuditRecordedArtifactProvider>) {
-    let mut guard = PROVIDER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn AuditRecordedArtifactProvider,
+    noop: NoopProvider,
+    /// Register the recorded-artifact provider. Called once at binary startup by the
+    /// observation layer (via the CLI). Replaces any previously registered provider.
+    register: pub fn register_audit_recorded_artifact_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none
+    /// is registered.
+    with: fn with_provider,
 }
 
 /// Recent recorded runs (with artifacts) for a component via the registered
 /// provider.
 pub(crate) fn recent_recorded_runs(component_id: &str, limit: usize) -> Vec<AuditRecordedRun> {
-    let guard = PROVIDER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match guard.as_ref() {
-        Some(provider) => provider.recent_runs(component_id, limit),
-        None => NoopProvider.recent_runs(component_id, limit),
-    }
+    with_provider(|p| p.recent_runs(component_id, limit))
 }
 
 #[cfg(test)]

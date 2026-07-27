@@ -8,8 +8,6 @@
 //! With no provider registered (no agent-task subsystem present) the no-op
 //! resolves nothing, so trace resolution falls through to its other sources.
 
-use std::sync::Mutex;
-
 /// Resolves secret-env values from the agent-task secret store.
 pub trait AgentTaskSecretProvider: Send + Sync {
     /// Resolve the named secret-env variables from the agent-task secret store,
@@ -25,28 +23,19 @@ impl AgentTaskSecretProvider for NoopProvider {
     }
 }
 
-fn provider_slot() -> &'static Mutex<Option<Box<dyn AgentTaskSecretProvider>>> {
-    static PROVIDER: Mutex<Option<Box<dyn AgentTaskSecretProvider>>> = Mutex::new(None);
-    &PROVIDER
-}
-
-/// Register the agent-task secret provider. Called once at startup by the
-/// agent-task layer.
-pub fn register_agent_task_secret_provider(provider: Box<dyn AgentTaskSecretProvider>) {
-    let mut slot = provider_slot()
-        .lock()
-        .expect("agent-task secret provider lock");
-    *slot = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn AgentTaskSecretProvider,
+    noop: NoopProvider,
+    /// Register the agent-task secret provider. Called once at startup by the
+    /// agent-task layer.
+    register: pub fn register_agent_task_secret_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none
+    /// is registered.
+    with: fn with_provider,
 }
 
 /// Resolve agent-task secret-env values via the registered provider (or none
 /// when the agent-task subsystem is absent).
 pub(crate) fn resolve_agent_task_secret_env(names: &[String]) -> Vec<(String, String)> {
-    let slot = provider_slot()
-        .lock()
-        .expect("agent-task secret provider lock");
-    match slot.as_deref() {
-        Some(provider) => provider.resolve_agent_task_secret_env(names),
-        None => NoopProvider.resolve_agent_task_secret_env(names),
-    }
+    with_provider(|p| p.resolve_agent_task_secret_env(names))
 }

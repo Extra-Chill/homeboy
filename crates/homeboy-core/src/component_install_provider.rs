@@ -10,7 +10,6 @@
 //! returns a not-supported error, so callers degrade gracefully.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use crate::component::Component;
 use crate::{Error, Result};
@@ -44,18 +43,15 @@ pub trait ComponentInstallRunner: Send + Sync {
     ) -> Result<ComponentInstallResult>;
 }
 
-fn provider_slot() -> &'static Mutex<Option<Box<dyn ComponentInstallRunner>>> {
-    static PROVIDER: Mutex<Option<Box<dyn ComponentInstallRunner>>> = Mutex::new(None);
-    &PROVIDER
-}
-
-/// Register the component-install runner. Called once at startup by the
-/// extension layer.
-pub fn register_component_install_runner(provider: Box<dyn ComponentInstallRunner>) {
-    let mut slot = provider_slot()
-        .lock()
-        .expect("component install runner lock");
-    *slot = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn ComponentInstallRunner,
+    /// Register the component-install runner. Called once at startup by the
+    /// extension layer.
+    register: pub fn register_component_install_runner,
+    /// Run `f` against the registered runner, or `None` when none is registered.
+    /// This registry has no no-op implementation: the dispatch function below
+    /// reports its own "extension subsystem not available" error.
+    with_optional: fn with_provider,
 }
 
 /// Install a component's extensions from a source through the registered
@@ -64,14 +60,11 @@ pub fn install_for_component(
     component: &Component,
     source: &str,
 ) -> Result<ComponentInstallResult> {
-    let slot = provider_slot()
-        .lock()
-        .expect("component install runner lock");
-    match slot.as_deref() {
-        Some(provider) => provider.install_for_component(component, source),
+    with_provider(|runner| match runner {
+        Some(runner) => runner.install_for_component(component, source),
         None => Err(Error::internal_io(
             "no component-install runner registered; the extension subsystem is not available",
             None,
         )),
-    }
+    })
 }

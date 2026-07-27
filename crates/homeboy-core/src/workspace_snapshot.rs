@@ -11,7 +11,6 @@
 //! [`NoopProvider`] errors clearly.
 
 use std::path::Path;
-use std::sync::Mutex;
 
 use crate::error::{Error, Result};
 
@@ -43,18 +42,15 @@ impl WorkspaceSnapshotProvider for NoopProvider {
     }
 }
 
-fn provider_slot() -> &'static Mutex<Option<Box<dyn WorkspaceSnapshotProvider>>> {
-    static PROVIDER: Mutex<Option<Box<dyn WorkspaceSnapshotProvider>>> = Mutex::new(None);
-    &PROVIDER
-}
-
-/// Register the workspace-snapshot provider. Called once at startup by the
-/// runner subsystem when it is present.
-pub fn register_workspace_snapshot_provider(provider: Box<dyn WorkspaceSnapshotProvider>) {
-    let mut slot = provider_slot()
-        .lock()
-        .expect("workspace snapshot provider lock");
-    *slot = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn WorkspaceSnapshotProvider,
+    noop: NoopProvider,
+    /// Register the workspace-snapshot provider. Called once at startup by the
+    /// runner subsystem when it is present.
+    register: pub fn register_workspace_snapshot_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none
+    /// is registered.
+    with: fn with_provider,
 }
 
 /// Copy a local directory snapshot into `destination`, delegating to the
@@ -64,11 +60,5 @@ pub(crate) fn copy_snapshot_to_directory(
     destination: &Path,
     excludes: &[String],
 ) -> Result<()> {
-    let slot = provider_slot()
-        .lock()
-        .expect("workspace snapshot provider lock");
-    match slot.as_deref() {
-        Some(provider) => provider.copy_snapshot_to_directory(local_path, destination, excludes),
-        None => NoopProvider.copy_snapshot_to_directory(local_path, destination, excludes),
-    }
+    with_provider(|p| p.copy_snapshot_to_directory(local_path, destination, excludes))
 }

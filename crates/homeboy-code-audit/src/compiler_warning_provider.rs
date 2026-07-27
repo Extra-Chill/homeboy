@@ -19,7 +19,6 @@
 //! ships a compiler-warning script).
 
 use std::path::Path;
-use std::sync::Mutex;
 
 /// One compiler warning surfaced by an extension's compiler-warning script,
 /// reduced to the fields the audit detector maps into a finding.
@@ -56,30 +55,20 @@ impl CompilerWarningProvider for NoopProvider {
     }
 }
 
-static PROVIDER: Mutex<Option<Box<dyn CompilerWarningProvider>>> = Mutex::new(None);
-
-/// Register the compiler-warning provider. Called once at binary startup by the
-/// extension layer (via the CLI). Replaces any previously registered provider.
-pub fn register_compiler_warning_provider(provider: Box<dyn CompilerWarningProvider>) {
-    let mut guard = PROVIDER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn CompilerWarningProvider,
+    noop: NoopProvider,
+    /// Register the compiler-warning provider. Called once at binary startup by the
+    /// extension layer (via the CLI). Replaces any previously registered provider.
+    register: pub fn register_compiler_warning_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none
+    /// is registered.
+    with: fn with_provider,
 }
 
 /// Collect compiler warnings for `root` via the registered provider.
 pub(crate) fn compiler_warnings_for_root(root: &Path) -> Vec<AuditCompilerWarning> {
     with_provider(|p| p.compiler_warnings(root))
-}
-
-fn with_provider<T>(f: impl FnOnce(&dyn CompilerWarningProvider) -> T) -> T {
-    let guard = PROVIDER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match guard.as_ref() {
-        Some(provider) => f(provider.as_ref()),
-        None => f(&NoopProvider),
-    }
 }
 
 #[cfg(test)]

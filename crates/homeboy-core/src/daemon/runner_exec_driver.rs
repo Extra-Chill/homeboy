@@ -16,7 +16,7 @@
 //! reached when a runner job was actually dispatched.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -172,25 +172,14 @@ impl RunnerExecDriver for NoopRunnerExecDriver {
     }
 }
 
-fn driver_slot() -> &'static Mutex<Option<Arc<dyn RunnerExecDriver>>> {
-    static DRIVER: Mutex<Option<Arc<dyn RunnerExecDriver>>> = Mutex::new(None);
-    &DRIVER
-}
-
-/// Resolve the active driver, cloning the `Arc` so the registry lock is not
-/// held while a (potentially long-running) child process executes.
-fn active_driver() -> Arc<dyn RunnerExecDriver> {
-    let slot = driver_slot().lock().expect("runner exec driver lock");
-    match slot.as_ref() {
-        Some(driver) => Arc::clone(driver),
-        None => Arc::new(NoopRunnerExecDriver),
-    }
-}
-
-/// Register the runner exec driver. Called once at startup by the runner layer.
-pub fn register_runner_exec_driver(driver: Arc<dyn RunnerExecDriver>) {
-    let mut slot = driver_slot().lock().expect("runner exec driver lock");
-    *slot = Some(driver);
+homeboy_engine_primitives::provider_registry_arc! {
+    provider: dyn RunnerExecDriver,
+    noop: NoopRunnerExecDriver,
+    /// Register the runner exec driver. Called once at startup by the runner layer.
+    register: pub fn register_runner_exec_driver,
+    /// Resolve the active driver, cloning the `Arc` so the registry lock is not
+    /// held while a (potentially long-running) child process executes.
+    active: fn active_driver,
 }
 
 /// Prepare a runner process via the registered driver (or the no-op driver).

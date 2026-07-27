@@ -11,8 +11,6 @@
 //! validates nothing (an install without the agent-task subsystem has no
 //! agent-task providers to discover).
 
-use std::sync::Mutex;
-
 use crate::Result;
 
 /// Validates that an installed extension's declared agent-runtime providers are
@@ -32,30 +30,19 @@ impl ExtensionProviderDiscoveryValidator for NoopProvider {
     }
 }
 
-fn provider_slot() -> &'static Mutex<Option<Box<dyn ExtensionProviderDiscoveryValidator>>> {
-    static PROVIDER: Mutex<Option<Box<dyn ExtensionProviderDiscoveryValidator>>> = Mutex::new(None);
-    &PROVIDER
-}
-
-/// Register the extension provider-discovery validator. Called once at startup
-/// by the agent-task layer.
-pub fn register_extension_provider_discovery_validator(
-    provider: Box<dyn ExtensionProviderDiscoveryValidator>,
-) {
-    let mut slot = provider_slot()
-        .lock()
-        .expect("extension provider discovery validator lock");
-    *slot = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn ExtensionProviderDiscoveryValidator,
+    noop: NoopProvider,
+    /// Register the extension provider-discovery validator. Called once at startup
+    /// by the agent-task layer.
+    register: pub fn register_extension_provider_discovery_validator,
+    /// Run `f` against the registered provider, or the no-op provider if none
+    /// is registered.
+    with: fn with_provider,
 }
 
 /// Validate an installed extension's agent-runtime provider discovery via the
 /// registered validator (or the no-op when the agent-task subsystem is absent).
 pub fn validate_installed_extension_provider_discovery(extension_id: &str) -> Result<()> {
-    let slot = provider_slot()
-        .lock()
-        .expect("extension provider discovery validator lock");
-    match slot.as_deref() {
-        Some(provider) => provider.validate_installed_extension_provider_discovery(extension_id),
-        None => NoopProvider.validate_installed_extension_provider_discovery(extension_id),
-    }
+    with_provider(|p| p.validate_installed_extension_provider_discovery(extension_id))
 }

@@ -12,7 +12,6 @@
 //! only reached when a snapshot was actually signaled by a runner.
 
 use std::path::Path;
-use std::sync::Mutex;
 
 use crate::source_snapshot::SourceSnapshot;
 
@@ -101,31 +100,15 @@ impl LabWorkspaceProvenanceProvider for NoopLabWorkspaceProvenanceProvider {
     }
 }
 
-static PROVIDER: Mutex<Option<Box<dyn LabWorkspaceProvenanceProvider>>> = Mutex::new(None);
-
-/// Register the lab-workspace provenance provider. Called once at startup by the
-/// runner layer (via the CLI).
-pub fn register_lab_workspace_provenance_provider(
-    provider: Box<dyn LabWorkspaceProvenanceProvider>,
-) {
-    let mut guard = PROVIDER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard = Some(provider);
-}
-
-/// Run `f` against the registered provider, or the no-op provider if none is
-/// registered.
-pub fn with_lab_workspace_provenance<T>(
-    f: impl FnOnce(&dyn LabWorkspaceProvenanceProvider) -> T,
-) -> T {
-    let guard = PROVIDER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match guard.as_ref() {
-        Some(provider) => f(provider.as_ref()),
-        None => f(&NoopLabWorkspaceProvenanceProvider),
-    }
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn LabWorkspaceProvenanceProvider,
+    noop: NoopLabWorkspaceProvenanceProvider,
+    /// Register the lab-workspace provenance provider. Called once at startup by the
+    /// runner layer (via the CLI).
+    register: pub fn register_lab_workspace_provenance_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none is
+    /// registered.
+    with: pub fn with_lab_workspace_provenance,
 }
 
 #[cfg(test)]

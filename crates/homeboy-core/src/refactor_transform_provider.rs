@@ -10,7 +10,6 @@
 //! nothing.
 
 use std::path::Path;
-use std::sync::Mutex;
 
 use homeboy_refactor_contract::TransformSet;
 
@@ -58,18 +57,15 @@ impl RefactorTransformProvider for NoopProvider {
     }
 }
 
-fn provider_slot() -> &'static Mutex<Option<Box<dyn RefactorTransformProvider>>> {
-    static PROVIDER: Mutex<Option<Box<dyn RefactorTransformProvider>>> = Mutex::new(None);
-    &PROVIDER
-}
-
-/// Register the refactor transform provider. Called once at startup by the
-/// refactor layer.
-pub fn register_refactor_transform_provider(provider: Box<dyn RefactorTransformProvider>) {
-    let mut slot = provider_slot()
-        .lock()
-        .expect("refactor transform provider lock");
-    *slot = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn RefactorTransformProvider,
+    noop: NoopProvider,
+    /// Register the refactor transform provider. Called once at startup by the
+    /// refactor layer.
+    register: pub fn register_refactor_transform_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none
+    /// is registered.
+    with: fn with_provider,
 }
 
 /// Apply a transform set via the registered provider (or the no-op when the
@@ -82,13 +78,5 @@ pub fn apply_transform_set(
     rerun_hint: Option<String>,
     extra_hints: Vec<String>,
 ) -> Result<AppliedTransformSummary> {
-    let slot = provider_slot()
-        .lock()
-        .expect("refactor transform provider lock");
-    match slot.as_deref() {
-        Some(provider) => {
-            provider.apply_transform_set(root, name, set, write, rerun_hint, extra_hints)
-        }
-        None => NoopProvider.apply_transform_set(root, name, set, write, rerun_hint, extra_hints),
-    }
+    with_provider(|p| p.apply_transform_set(root, name, set, write, rerun_hint, extra_hints))
 }

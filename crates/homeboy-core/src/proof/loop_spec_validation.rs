@@ -12,8 +12,6 @@
 //! provider reports that the loop-spec schema cannot be validated, so a proof
 //! carrying that schema is flagged rather than silently accepted.
 
-use std::sync::Mutex;
-
 use serde_json::Value;
 
 use homeboy_gate_contract::proof::HomeboyProofValidationDiagnostic;
@@ -46,30 +44,21 @@ impl LoopSpecValidationProvider for NoopProvider {
     }
 }
 
-fn provider_slot() -> &'static Mutex<Option<Box<dyn LoopSpecValidationProvider>>> {
-    static PROVIDER: Mutex<Option<Box<dyn LoopSpecValidationProvider>>> = Mutex::new(None);
-    &PROVIDER
-}
-
-/// Register the loop-spec validation provider. Called once at startup by the
-/// agent-task layer.
-pub fn register_loop_spec_validation_provider(provider: Box<dyn LoopSpecValidationProvider>) {
-    let mut slot = provider_slot()
-        .lock()
-        .expect("loop spec validation provider lock");
-    *slot = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn LoopSpecValidationProvider,
+    noop: NoopProvider,
+    /// Register the loop-spec validation provider. Called once at startup by the
+    /// agent-task layer.
+    register: pub fn register_loop_spec_validation_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none
+    /// is registered.
+    with: fn with_provider,
 }
 
 /// Validate a materialized loop-spec `spec` value via the registered provider
 /// (or the no-op provider when the agent-task subsystem is absent).
 pub(crate) fn validate_materialized_loop_spec(spec: &Value) -> Vec<LoopSpecValidationDiagnostic> {
-    let slot = provider_slot()
-        .lock()
-        .expect("loop spec validation provider lock");
-    match slot.as_deref() {
-        Some(provider) => provider.validate_materialized_loop_spec(spec),
-        None => NoopProvider.validate_materialized_loop_spec(spec),
-    }
+    with_provider(|p| p.validate_materialized_loop_spec(spec))
 }
 
 /// Validate a `homeboy/agent-task-loop-spec-materialization/v1` proof record:

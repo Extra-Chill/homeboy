@@ -14,8 +14,6 @@
 //! yields no manifests, which every call site already treats as "no extension
 //! contributed anything".
 
-use std::sync::Mutex;
-
 use homeboy_audit_contract::AuditConfig;
 
 use homeboy_audit_contract::TestMappingConfig;
@@ -68,17 +66,15 @@ impl AuditExtensionManifestProvider for NoopProvider {
     }
 }
 
-static PROVIDER: Mutex<Option<Box<dyn AuditExtensionManifestProvider>>> = Mutex::new(None);
-
-/// Register the audit manifest provider. Called once at binary startup by the
-/// extension layer (via the CLI). Replaces any previously registered provider.
-pub fn register_audit_extension_manifest_provider(
-    provider: Box<dyn AuditExtensionManifestProvider>,
-) {
-    let mut guard = PROVIDER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard = Some(provider);
+homeboy_engine_primitives::provider_registry! {
+    provider: dyn AuditExtensionManifestProvider,
+    noop: NoopProvider,
+    /// Register the audit manifest provider. Called once at binary startup by the
+    /// extension layer (via the CLI). Replaces any previously registered provider.
+    register: pub fn register_audit_extension_manifest_provider,
+    /// Run `f` against the registered provider, or the no-op provider if none
+    /// is registered.
+    with: fn with_provider,
 }
 
 /// Load every installed extension's audit view via the registered provider.
@@ -89,16 +85,6 @@ pub(crate) fn load_all_audit_manifests() -> Vec<AuditExtensionManifest> {
 /// Load a single extension's audit view via the registered provider.
 pub(crate) fn load_audit_manifest(id: &str) -> Option<AuditExtensionManifest> {
     with_provider(|p| p.load(id))
-}
-
-fn with_provider<T>(f: impl FnOnce(&dyn AuditExtensionManifestProvider) -> T) -> T {
-    let guard = PROVIDER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match guard.as_ref() {
-        Some(provider) => f(provider.as_ref()),
-        None => f(&NoopProvider),
-    }
 }
 
 #[cfg(test)]
