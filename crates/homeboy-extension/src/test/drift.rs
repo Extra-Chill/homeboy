@@ -64,16 +64,30 @@ impl DriftOptions {
     }
 }
 
+/// Build match patterns for one set of configured directories.
+///
+/// Each directory yields two patterns: one anchored at the component root and
+/// one that matches the same directory at any depth. A monorepo keeps its real
+/// code in per-member subtrees — `crates/<member>/src`, `packages/<pkg>/src`,
+/// and so on — so a root-anchored `src/**` alone matches only the thin root
+/// package. Everything else silently reads as "not source", which disables both
+/// drift-based test selection and the `#8340` zero-selection guard that is
+/// supposed to fail closed. Matching the directory name at any depth keeps this
+/// language-agnostic: it is driven entirely by the configured directory names,
+/// with no build-system knowledge.
 fn glob_patterns(dirs: &[String], extensions: &[String]) -> Vec<String> {
     dirs.iter()
         .flat_map(|dir| {
-            extensions.iter().map(move |extension| {
+            extensions.iter().flat_map(move |extension| {
                 let extension = extension.trim_start_matches('.');
                 if dir.is_empty() || dir == "." {
-                    format!("**/*.{}", extension)
-                } else {
-                    format!("{}/**/*.{}", dir.trim_end_matches('/'), extension)
+                    return vec![format!("**/*.{}", extension)];
                 }
+                let dir = dir.trim_end_matches('/');
+                vec![
+                    format!("{dir}/**/*.{extension}"),
+                    format!("**/{dir}/**/*.{extension}"),
+                ]
             })
         })
         .collect()
@@ -1341,5 +1355,152 @@ class FooTest extends TestCase {
         let drifted = find_drift_references(&changes, &test_files, root);
         assert_eq!(drifted.len(), 1); // Only the actual code line, not comments
         assert_eq!(drifted[0].line, 4);
+    }
+}
+
+#[cfg(test)]
+mod workspace_layout_tests {
+    use super::*;
+    use crate::TestDriftConfig;
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git command");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn rust_extension_options() -> DriftOptions {
+        // Exactly what `.config/homeboy/extensions/rust/rust.json` declares.
+        DriftOptions::from_config(
+            Path::new("/repo"),
+            "HEAD~1",
+            &TestDriftConfig {
+                source_dirs: vec!["src".to_string()],
+                test_dirs: vec!["tests".to_string()],
+                file_extensions: vec!["rs".to_string()],
+                inline_tests: true,
+            },
+            &["rs".to_string()],
+        )
+    }
+
+    /// A Cargo workspace keeps its real code in `crates/<member>/src/**`, not in
+    /// the root package's `src/**`. The changed-scope test gate must recognize
+    /// those files as source; otherwise a change to any member crate is
+    /// invisible to drift detection AND to the `#8340` fail-closed guard, so the
+    /// gate reports green without running that crate's tests.
+
+    /// Drift detection must see a change inside a monorepo member crate as a
+    /// production change and route it to the test that references the changed
+    /// symbol. With only a root-anchored `src/**` pattern, `prod_files` was
+    /// empty for every `crates/<member>/src/**` edit, so `detect_drift` returned
+    /// early with zero drifted tests and the changed-scope gate selected nothing
+    /// from that crate.
+    #[test]
+    fn drift_selects_tests_for_workspace_member_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        run_git(root, &["init", "-q", "-b", "main"]);
+        run_git(root, &["config", "user.email", "test@example.com"]);
+        run_git(root, &["config", "user.name", "Test"]);
+
+        std::fs::create_dir_all(root.join("crates/member/src")).unwrap();
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::write(
+            root.join("crates/member/src/hydration.rs"),
+            "pub fn prepared_source_view_is_ready() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("tests/hydration_contract.rs"),
+            "fn check() { prepared_source_view_is_ready(); }\n",
+        )
+        .unwrap();
+        run_git(root, &["add", "crates", "tests"]);
+        run_git(root, &["commit", "-q", "-m", "initial"]);
+
+        std::fs::write(
+            root.join("crates/member/src/hydration.rs"),
+            "pub fn prepared_source_cache_is_ready() {}\n",
+        )
+        .unwrap();
+
+        let opts = DriftOptions::from_config(
+            root,
+            "HEAD",
+            &TestDriftConfig {
+                source_dirs: vec!["src".to_string()],
+                test_dirs: vec!["tests".to_string()],
+                file_extensions: vec!["rs".to_string()],
+                inline_tests: true,
+            },
+            &["rs".to_string()],
+        );
+
+        let report = detect_drift("fixture", &opts).expect("drift report");
+
+        assert!(
+            report
+                .production_changes
+                .iter()
+                .any(|change| change.old_symbol == "prepared_source_view_is_ready"),
+            "workspace member source change must be detected as production: {:?}",
+            report.production_changes
+        );
+        assert!(
+            report
+                .drifted_tests
+                .iter()
+                .any(|drifted| drifted.test_file.ends_with("hydration_contract.rs")),
+            "the referencing test must be selected: {:?}",
+            report.drifted_tests
+        );
+    }
+
+    #[test]
+    fn workspace_member_sources_are_source_relevant() {
+        let opts = rust_extension_options();
+
+        for path in [
+            "crates/homeboy-lab-runner/src/lab/offload/hydration.rs",
+            "crates/homeboy-core/src/daemon/stop.rs",
+            "crates/contracts/homeboy-audit-contract/src/finding.rs",
+        ] {
+            assert!(
+                is_source_relevant_change(&opts, path),
+                "workspace member source must be source-relevant: {path}"
+            );
+        }
+    }
+
+    /// The root package still counts, so the fix must widen coverage rather
+    /// than move it.
+    #[test]
+    fn root_package_sources_remain_source_relevant() {
+        let opts = rust_extension_options();
+
+        assert!(is_source_relevant_change(&opts, "src/lib.rs"));
+        assert!(is_source_relevant_change(
+            &opts,
+            "src/bin/bench-audit-self.rs"
+        ));
+    }
+
+    /// Docs and config must stay non-source so documentation-only PRs are not
+    /// forced to select tests.
+    #[test]
+    fn documentation_and_config_remain_non_source() {
+        let opts = rust_extension_options();
+
+        assert!(!is_source_relevant_change(&opts, "README.md"));
+        assert!(!is_source_relevant_change(&opts, "docs/commands/test.md"));
     }
 }

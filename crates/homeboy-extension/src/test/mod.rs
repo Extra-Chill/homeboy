@@ -949,8 +949,22 @@ mod tests {
 
         let opts = DriftOptions::from_config(dir.path(), "HEAD~1", &config, &["rs".to_string()]);
 
-        assert_eq!(opts.source_patterns, vec!["src/**/*.php", "inc/**/*.php"]);
-        assert_eq!(opts.test_patterns, vec!["tests/**/*.php"]);
+        // Each configured directory contributes a root-anchored pattern and an
+        // any-depth pattern so monorepo members (`packages/<pkg>/src`, ...) are
+        // recognized as source instead of silently reading as non-source.
+        assert_eq!(
+            opts.source_patterns,
+            vec![
+                "src/**/*.php",
+                "**/src/**/*.php",
+                "inc/**/*.php",
+                "**/inc/**/*.php"
+            ]
+        );
+        assert_eq!(
+            opts.test_patterns,
+            vec!["tests/**/*.php", "**/tests/**/*.php"]
+        );
     }
 
     #[test]
@@ -965,8 +979,11 @@ mod tests {
 
         let opts = DriftOptions::from_config(dir.path(), "HEAD~1", &config, &["rs".to_string()]);
 
-        assert_eq!(opts.source_patterns, vec!["src/**/*.rs"]);
-        assert_eq!(opts.test_patterns, vec!["tests/**/*.rs"]);
+        assert_eq!(opts.source_patterns, vec!["src/**/*.rs", "**/src/**/*.rs"]);
+        assert_eq!(
+            opts.test_patterns,
+            vec!["tests/**/*.rs", "**/tests/**/*.rs"]
+        );
     }
 
     #[test]
@@ -1552,7 +1569,11 @@ mod tests {
     }
 
     fn commit_change(root: &Path, rel: &str, contents: &str) {
-        fs::write(root.join(rel), contents).expect("write change");
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("change parent directory");
+        }
+        fs::write(path, contents).expect("write change");
         for args in [vec!["add", rel], vec!["commit", "-m", "change"]] {
             Command::new("git")
                 .args(&args)
