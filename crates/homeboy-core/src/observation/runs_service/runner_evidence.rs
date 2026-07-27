@@ -10,7 +10,6 @@
 //! how the callers already behave when no runner is connected.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use homeboy_lab_runner_contract::RunnerArtifactRef;
 use serde_json::Value;
@@ -262,7 +261,7 @@ pub fn has_runner_evidence_provider() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, OnceLock};
+    use std::sync::{Arc, Mutex, OnceLock};
 
     use crate::observation::{ObservationStore, RunStatus};
     use crate::test_support::with_isolated_home;
@@ -361,7 +360,7 @@ mod tests {
 
         // Reset so the registered fake doesn't leak into other tests sharing the
         // process-global provider.
-        PROVIDER
+        provider_slot()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
@@ -534,7 +533,7 @@ mod tests {
             ]
         );
 
-        PROVIDER
+        provider_slot()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
@@ -634,7 +633,10 @@ mod tests {
             );
             assert!(calls.lock().expect("calls").is_empty());
         });
-        PROVIDER.lock().expect("provider").take();
+        provider_slot()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
     }
 
     #[test]
@@ -672,7 +674,10 @@ mod tests {
                 404
             );
         });
-        PROVIDER.lock().expect("provider").take();
+        provider_slot()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
     }
 
     #[test]
@@ -702,7 +707,10 @@ mod tests {
                 RunStatus::Running.as_str()
             );
         });
-        PROVIDER.lock().expect("provider").take();
+        provider_slot()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
     }
 
     #[test]
@@ -745,6 +753,9 @@ mod tests {
                 RunStatus::Running.as_str()
             );
         });
-        PROVIDER.lock().expect("provider").take();
+        provider_slot()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
     }
 }

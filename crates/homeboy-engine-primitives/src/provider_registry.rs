@@ -194,7 +194,7 @@ macro_rules! __provider_registry_slot {
 
 #[cfg(test)]
 mod tests {
-    trait Greeter: Send + Sync {
+    pub(crate) trait Greeter: Send + Sync {
         fn greet(&self) -> String;
     }
 
@@ -218,7 +218,7 @@ mod tests {
         provider: dyn Greeter,
         noop: NoopGreeter,
         /// Register the greeter used by this test module.
-        register: pub fn register_greeter,
+        register: pub(crate) fn register_greeter,
         with: fn with_greeter,
     }
 
