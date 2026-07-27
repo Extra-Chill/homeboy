@@ -127,7 +127,7 @@ Example handoff row:
 Preview cleanup first:
 
 ```bash
-homeboy worktree cleanup --dry-run
+homeboy worktree cleanup
 ```
 
 Remove one safe worktree when the branch is merged or no longer needed:
@@ -137,6 +137,11 @@ homeboy worktree remove <worktree-id> --cleanup-branch
 ```
 
 Use `--force` and unmerged branch cleanup flags only as explicit operator decisions after reading the safety report.
+Apply an approved plan explicitly:
+
+```bash
+homeboy worktree cleanup --apply
+```
 
 ## Reference
 

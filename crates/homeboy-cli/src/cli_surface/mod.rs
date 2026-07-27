@@ -984,6 +984,19 @@ mod tests {
     }
 
     #[test]
+    fn worktree_cleanup_manifest_requires_explicit_apply() {
+        let manifest = current_command_safety_manifest();
+        let cleanup = manifest
+            .find_path(&["worktree", "cleanup"])
+            .expect("worktree cleanup must be present in the command safety manifest");
+
+        assert!(cleanup.operator);
+        assert!(cleanup.output.notes.contains("non-mutating"));
+        assert_eq!(cleanup.dry_run.flag.as_deref(), Some("--dry-run"));
+        assert!(cleanup.dangerous_flags.iter().any(|flag| flag == "--apply"));
+    }
+
+    #[test]
     fn documented_docs_surface_matches_manifest_and_parser() {
         let readme = std::fs::read_to_string(workspace_root().join("README.md"))
             .expect("failed to read README");
