@@ -18,9 +18,13 @@ const GENERATIONS: &str = "runtime-generations";
 const CURRENT: &str = "current";
 const JOURNAL: &str = "refresh.json";
 const JOURNAL_SCHEMA: &str = "homeboy/runtime-generation-refresh/v1";
+const BOUNDARY_MIGRATION: &str = ".agent-runtimes-migration.json";
+const BOUNDARY_MIGRATION_SCHEMA: &str = "homeboy/runtime-boundary-migration/v1";
 
 #[cfg(test)]
 static CRASH_AFTER_BOUNDARY_BOOTSTRAP: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static CRASH_AFTER_BOUNDARY_BACKUP_RENAME: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone)]
 pub struct RuntimePackageRefreshResult {
@@ -67,6 +71,13 @@ struct RefreshJournal {
     generation: String,
     #[serde(default)]
     switched: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BoundaryMigration {
+    schema: String,
+    backup: String,
+    temporary: String,
 }
 
 pub fn refresh(
@@ -281,6 +292,17 @@ fn crash_after_boundary_bootstrap() -> Result<()> {
         return Err(Error::internal_io(
             "injected crash after stable runtime boundary bootstrap",
             Some("test runtime generation crash".to_string()),
+        ));
+    }
+    Ok(())
+}
+
+fn crash_after_boundary_backup_rename() -> Result<()> {
+    #[cfg(test)]
+    if CRASH_AFTER_BOUNDARY_BACKUP_RENAME.swap(false, Ordering::SeqCst) {
+        return Err(Error::internal_io(
+            "injected crash after legacy runtime boundary backup rename",
+            Some("test runtime boundary migration crash".to_string()),
         ));
     }
     Ok(())
@@ -631,25 +653,47 @@ fn ensure_stable_runtime_boundary(config_root: &Path) -> Result<()> {
     #[cfg(windows)]
     let linked = std::os::windows::fs::symlink_dir(&expected, &temporary);
     linked.map_err(io("stage stable runtime boundary"))?;
+    sync_dir(config_root)?;
+    write_boundary_migration(
+        config_root,
+        &BoundaryMigration {
+            schema: BOUNDARY_MIGRATION_SCHEMA.to_string(),
+            backup: backup
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("generated boundary backup name is valid UTF-8")
+                .to_string(),
+            temporary: temporary
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("generated boundary temporary name is valid UTF-8")
+                .to_string(),
+        },
+    )?;
     if fs::symlink_metadata(&boundary).is_ok() {
-        if let Err(error) = fs::rename(&boundary, &backup) {
-            let _ = remove_if_exists(&temporary, "clean staged runtime boundary");
-            return Err(io("migrate legacy runtime boundary")(error));
-        }
+        fs::rename(&boundary, &backup).map_err(io("migrate legacy runtime boundary"))?;
+        sync_dir(config_root)?;
+        crash_after_boundary_backup_rename()?;
     }
-    if let Err(error) = fs::rename(&temporary, &boundary) {
-        if fs::symlink_metadata(&backup).is_ok() {
-            let _ = fs::rename(&backup, &boundary);
-        }
-        let _ = remove_if_exists(&temporary, "clean staged runtime boundary");
-        return Err(io("publish stable runtime boundary")(error));
-    }
+    fs::rename(&temporary, &boundary).map_err(io("publish stable runtime boundary"))?;
     sync_dir(config_root)?;
     remove_if_exists(&backup, "remove migrated legacy runtime boundary")?;
+    sync_dir(config_root)?;
+    remove_if_exists(
+        &config_root.join(BOUNDARY_MIGRATION),
+        "finalize runtime boundary migration",
+    )?;
     sync_dir(config_root)
 }
 
 fn recover(store: &Path) -> Result<()> {
+    let config_root = store.parent().ok_or_else(|| {
+        Error::internal_io(
+            "runtime generation store has no config root",
+            Some("recover runtime boundary migration".to_string()),
+        )
+    })?;
+    recover_boundary_migration(config_root)?;
     let journal = store.join(JOURNAL);
     let Ok(raw) = fs::read(&journal) else {
         return Ok(());
@@ -682,6 +726,89 @@ fn recover(store: &Path) -> Result<()> {
     }
     remove_if_exists(&journal, "finalize recovered runtime generation")?;
     sync_dir(store)
+}
+
+fn write_boundary_migration(config_root: &Path, migration: &BoundaryMigration) -> Result<()> {
+    let bytes = serde_json::to_vec(migration).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("serialize runtime boundary migration".to_string()),
+        )
+    })?;
+    let intent = config_root.join(BOUNDARY_MIGRATION);
+    let temporary = config_root.join(format!(".{BOUNDARY_MIGRATION}-{}", nonce()));
+    write_synced(&temporary, &bytes, "write runtime boundary migration")?;
+    fs::rename(&temporary, &intent).map_err(io("publish runtime boundary migration"))?;
+    sync_dir(config_root)
+}
+
+fn recover_boundary_migration(config_root: &Path) -> Result<()> {
+    let intent = config_root.join(BOUNDARY_MIGRATION);
+    let Ok(raw) = fs::read(&intent) else {
+        return Ok(());
+    };
+    let migration: BoundaryMigration = serde_json::from_slice(&raw).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("read runtime boundary migration".to_string()),
+        )
+    })?;
+    if migration.schema != BOUNDARY_MIGRATION_SCHEMA {
+        return Err(Error::validation_invalid_argument(
+            "runtime_generation",
+            "unknown runtime boundary migration",
+            Some(migration.schema),
+            None,
+        ));
+    }
+    let backup = config_root.join(single_config_entry(&migration.backup, "runtime_boundary")?);
+    let temporary = config_root.join(single_config_entry(
+        &migration.temporary,
+        "runtime_boundary",
+    )?);
+    let boundary = paths::legacy_agent_runtimes()?;
+    let expected = Path::new(GENERATIONS).join(CURRENT).join("agent-runtimes");
+
+    if fs::read_link(&boundary).ok().as_deref() != Some(expected.as_path()) {
+        if fs::symlink_metadata(&boundary).is_err()
+            && fs::read_link(&temporary).ok().as_deref() == Some(expected.as_path())
+        {
+            fs::rename(&temporary, &boundary)
+                .map_err(io("recover stable runtime boundary publication"))?;
+            sync_dir(config_root)?;
+        } else if fs::symlink_metadata(&boundary).is_err() && fs::symlink_metadata(&backup).is_ok()
+        {
+            fs::rename(&backup, &boundary).map_err(io("restore legacy runtime boundary"))?;
+            sync_dir(config_root)?;
+        }
+    }
+
+    if fs::read_link(&boundary).ok().as_deref() == Some(expected.as_path()) {
+        remove_if_exists(&backup, "finalize recovered runtime boundary backup")?;
+    } else if fs::symlink_metadata(&boundary).is_err() {
+        return Err(Error::validation_invalid_argument(
+            "runtime_generation",
+            "runtime boundary migration has no recoverable boundary",
+            Some(intent.display().to_string()),
+            None,
+        ));
+    }
+    remove_if_exists(&temporary, "finalize recovered runtime boundary stage")?;
+    remove_if_exists(&intent, "finalize recovered runtime boundary migration")?;
+    sync_dir(config_root)
+}
+
+fn single_config_entry<'a>(value: &'a str, field: &str) -> Result<&'a Path> {
+    let path = safe_relative(value, field)?;
+    if path.components().count() != 1 {
+        return Err(Error::validation_invalid_argument(
+            field,
+            "path is not a config-root entry",
+            Some(value.to_string()),
+            None,
+        ));
+    }
+    Ok(path)
 }
 
 fn write_journal(store: &Path, journal: &RefreshJournal) -> Result<()> {
@@ -941,6 +1068,44 @@ mod tests {
                 "old"
             );
             assert!(!boundary.join("neutral").exists());
+        });
+    }
+
+    #[test]
+    fn recovery_after_boundary_backup_rename_restores_a_coherent_stable_boundary() {
+        with_isolated_home(|_| {
+            let root = paths::homeboy().unwrap();
+            package(&root, "legacy", "old");
+            let source = tempfile::tempdir().unwrap();
+            package(source.path(), "neutral", "new");
+            let store = root.join(GENERATIONS);
+
+            CRASH_AFTER_BOUNDARY_BACKUP_RENAME.store(true, Ordering::SeqCst);
+            assert!(refresh("neutral", &source.path().to_string_lossy(), None).is_err());
+
+            let boundary = paths::legacy_agent_runtimes().unwrap();
+            assert!(fs::symlink_metadata(&boundary).is_err());
+            let current = active_current_generation(&store).unwrap().unwrap();
+            assert_eq!(
+                fs::read_to_string(current.join("agent-runtimes/legacy/marker")).unwrap(),
+                "old"
+            );
+
+            recover(&store).unwrap();
+
+            assert_eq!(
+                fs::read_link(&boundary).unwrap(),
+                Path::new("runtime-generations/current/agent-runtimes")
+            );
+            assert_eq!(
+                fs::read_to_string(boundary.join("legacy/marker")).unwrap(),
+                "old"
+            );
+            assert_eq!(
+                fs::read_to_string(current.join("agent-runtimes/legacy/marker")).unwrap(),
+                "old"
+            );
+            assert!(!root.join(BOUNDARY_MIGRATION).exists());
         });
     }
 
