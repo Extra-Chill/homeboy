@@ -2599,13 +2599,8 @@ fn classify_local_candidate(
         return Ok(None);
     };
     let size = bounded_directory_size(path);
-    let liveness = match size {
-        Some(_) => workspace_liveness(runner, &metadata, path),
-        None => liveness(
-            "unknown",
-            vec!["workspace_size_measurement_unavailable".to_string()],
-        ),
-    };
+    let liveness =
+        workspace_liveness_with_size_observation(runner, &metadata, path, size.is_some());
     Ok(Some(RunnerWorkspacePruneEntry {
         remote_path: path.display().to_string(),
         source_path: source_path.to_string(),
@@ -2717,6 +2712,21 @@ fn workspace_liveness(
         RunnerKind::Local => local_process_liveness(path),
         RunnerKind::Ssh => ssh_process_liveness(runner, &path.display().to_string()),
     }
+}
+
+pub(crate) fn workspace_liveness_with_size_observation(
+    runner: &super::super::Runner,
+    metadata: &serde_json::Value,
+    path: &Path,
+    size_measured: bool,
+) -> RunnerWorkspaceLivenessEvidence {
+    let mut evidence = workspace_liveness(runner, metadata, path);
+    if !size_measured {
+        evidence
+            .observations
+            .push("workspace_size_measurement_unavailable".to_string());
+    }
+    evidence
 }
 
 pub(crate) enum RunAuthority {
@@ -3029,14 +3039,12 @@ fn prune_candidates_ssh(
         let Some(reason) = reason else {
             continue;
         };
-        let liveness = if parts[4] == "measured" {
-            workspace_liveness(runner, &metadata, Path::new(&parts[2]))
-        } else {
-            liveness(
-                "unknown",
-                vec!["workspace_size_measurement_unavailable".to_string()],
-            )
-        };
+        let liveness = workspace_liveness_with_size_observation(
+            runner,
+            &metadata,
+            Path::new(&parts[2]),
+            parts[4] == "measured",
+        );
         let entry = RunnerWorkspacePruneEntry {
             remote_path,
             source_path: source_path.to_string(),
