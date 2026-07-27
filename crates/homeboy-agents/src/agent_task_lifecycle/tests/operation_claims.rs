@@ -40,6 +40,33 @@ fn first_claim_is_acquired_and_second_pass_sees_lease_held() {
 }
 
 #[test]
+fn resubmitting_a_plan_preserves_its_live_operation_claim() {
+    with_isolated_home(|_| {
+        seed_run("op-claim-resubmit");
+        claim_cook_operation("op-claim-resubmit", "retry:attempt-2", LEASE)
+            .expect("reserve retry dispatch");
+
+        // A dispatcher may submit the same durable plan while executing its
+        // claimed handoff. That write must not erase exactly-once ownership.
+        submit_plan(&test_plan(), Some("op-claim-resubmit")).expect("resubmit plan");
+        complete_cook_operation(
+            "op-claim-resubmit",
+            "retry:attempt-2",
+            json!({"dispatched_run_id": "attempt-2"}),
+        )
+        .expect("complete retained claim");
+
+        assert_eq!(
+            operation_claim("op-claim-resubmit", "retry:attempt-2")
+                .expect("read claim")
+                .expect("claim retained")
+                .state,
+            ClaimState::Completed
+        );
+    });
+}
+
+#[test]
 fn completed_operation_returns_immutable_result_without_release() {
     with_isolated_home(|_| {
         seed_run("op-claim-2");

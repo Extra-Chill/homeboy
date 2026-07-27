@@ -1601,11 +1601,28 @@ impl CandidateAdoptionFixture {
         git(&source, &["add", "lib.rs"]);
         git(&source, &["commit", "-m", "base"]);
         let base = git_output(&source, &["rev-parse", "HEAD"]);
-        assert!(Command::new("git")
-            .args(["clone", source.to_str().unwrap(), target.to_str().unwrap()])
-            .status()
-            .unwrap()
-            .success());
+        git(
+            &source,
+            &["remote", "add", "origin", source.to_str().unwrap()],
+        );
+        git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "fixture-candidate",
+                target.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        homeboy_core::worktree::adopt(homeboy_core::worktree::WorktreeAdoptOptions {
+            handle: format!("fixture@{cook_id}"),
+            path: target.display().to_string(),
+            kind: Some("test-fixture".to_string()),
+            provenance: None,
+        })
+        .expect("register adopted candidate target workspace");
         std::fs::write(source.join("lib.rs"), "candidate\n").unwrap();
         git(&source, &["commit", "-am", "candidate"]);
         let candidate = git_output(&source, &["rev-parse", "HEAD"]);
@@ -3492,7 +3509,11 @@ fn legacy_adoption_budget_failure_reenters_once_through_review_authority() {
             .adopt(|_| Ok(None), ReviewFormOnlyExecutor, &mut backend)
             .expect("legacy budget failure re-enters through repaired review authority");
 
-        assert_eq!(result.value.status, "green_no_finalize");
+        assert_eq!(
+            result.value.status, "green_no_finalize",
+            "continuation failure: {:#?}",
+            result.value.failure_context,
+        );
         let follow_up = result.value.latest_run_id.as_deref().unwrap();
         let follow_up_plan = agent_task_lifecycle::load_plan(follow_up).unwrap();
         assert_eq!(
@@ -3655,7 +3676,11 @@ fn adoption_replays_provider_discovery_failure_in_the_same_recipe_attempt() {
             )
             .expect("provider discovery repair replays the durable attempt");
 
-        assert_eq!(result.value.status, "green_no_finalize");
+        assert_eq!(
+            result.value.status, "green_no_finalize",
+            "continuation failure: {:#?}",
+            result.value.failure_context,
+        );
         assert_eq!(dispatcher.dispatches.load(Ordering::SeqCst), 2);
         assert_eq!(result.value.attempts[1].attempt, 2);
         assert_ne!(result.value.attempts[1].run_id, failed_run_id);

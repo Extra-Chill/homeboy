@@ -1581,8 +1581,6 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
-    validate_cook_workspace(&options)?;
-    validate_cook_candidate_group(&options.initial_plan)?;
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are
     // caller-owned overrides and retain their existing behavior. A typed
@@ -1662,6 +1660,38 @@ where
         {
             reconstructed.initial_run_id = attempt.run_id.clone();
             reconstructed.initial_plan = attempt.plan.clone();
+            if agent_task_lifecycle::run_record_exists(&attempt.run_id)? {
+                // The recipe freezes the task-worktree handle, while the
+                // durable run plan freezes the baseline-bound continuation.
+                // Resolve the former back to its active path: the baseline is
+                // execution evidence, not a task-worktree identity.
+                let continuation_plan = agent_task_lifecycle::load_plan(&attempt.run_id)?;
+                let baseline_bound_continuation =
+                    continuation_plan.tasks.first().is_some_and(|task| {
+                        task.inputs
+                            .pointer("/cook_loop/artifact_provenance/source_run_id")
+                            .is_some()
+                            || task
+                                .metadata
+                                .get("cook_initial_candidate_baseline")
+                                .is_some()
+                    });
+                if baseline_bound_continuation {
+                    if std::path::Path::new(&reconstructed.to_worktree).is_dir() {
+                        reconstructed.source_worktree_path =
+                            Some(reconstructed.to_worktree.clone().into());
+                    } else if let Some(worktree) =
+                        homeboy_core::worktree::resolve_workspace_ref_if_present(
+                            &reconstructed.to_worktree,
+                        )?
+                    {
+                        if worktree.state() == &homeboy_core::worktree::TaskWorktreeState::Active {
+                            reconstructed.source_worktree_path = Some(worktree.path().into());
+                        }
+                    }
+                }
+                reconstructed.initial_plan = continuation_plan;
+            }
         }
         reconstructed
     } else {
