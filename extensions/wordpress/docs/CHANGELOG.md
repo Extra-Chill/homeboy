@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.9] - 2026-07-27
+
+### Fixed
+- bind Codebox locks to process instances
+- recover stale Codebox publication locks
+- harden Codebox artifact publication
+- publish Codebox test artifacts
+
 ## [3.34.8] - 2026-07-27
 
 ### Fixed
