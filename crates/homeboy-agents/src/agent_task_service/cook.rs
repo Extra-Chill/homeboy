@@ -1683,30 +1683,7 @@ where
                 // Resolve the former back to its active path: the baseline is
                 // execution evidence, not a task-worktree identity.
                 let continuation_plan = agent_task_lifecycle::load_plan(&attempt.run_id)?;
-                let baseline_bound_continuation =
-                    continuation_plan.tasks.first().is_some_and(|task| {
-                        task.inputs
-                            .pointer("/cook_loop/artifact_provenance/source_run_id")
-                            .is_some()
-                            || task
-                                .metadata
-                                .get("cook_initial_candidate_baseline")
-                                .is_some()
-                    });
-                if baseline_bound_continuation {
-                    if std::path::Path::new(&reconstructed.to_worktree).is_dir() {
-                        reconstructed.source_worktree_path =
-                            Some(reconstructed.to_worktree.clone().into());
-                    } else if let Some(worktree) =
-                        homeboy_core::worktree::resolve_workspace_ref_if_present(
-                            &reconstructed.to_worktree,
-                        )?
-                    {
-                        if worktree.state() == &homeboy_core::worktree::TaskWorktreeState::Active {
-                            reconstructed.source_worktree_path = Some(worktree.path().into());
-                        }
-                    }
-                }
+                rebind_baseline_continuation_workspace(&mut reconstructed, &continuation_plan)?;
                 reconstructed.initial_plan = continuation_plan;
             }
         }
@@ -2734,6 +2711,37 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
             Some(options.to_worktree.clone()),
             Some(vec!["Re-run Cook without a source CWD override so Homeboy binds the declared task worktree.".to_string()]),
         ));
+    }
+    Ok(())
+}
+
+/// A baseline is immutable provider evidence. Continue provider and controller
+/// work from the active task-worktree named by the recipe, never from that
+/// temporary baseline path.
+fn rebind_baseline_continuation_workspace(
+    options: &mut AgentTaskCookServiceOptions,
+    continuation_plan: &AgentTaskPlan,
+) -> Result<()> {
+    let baseline_bound_continuation = continuation_plan.tasks.first().is_some_and(|task| {
+        task.inputs
+            .pointer("/cook_loop/artifact_provenance/source_run_id")
+            .is_some()
+            || task
+                .metadata
+                .get("cook_initial_candidate_baseline")
+                .is_some()
+    });
+    if !baseline_bound_continuation {
+        return Ok(());
+    }
+    if std::path::Path::new(&options.to_worktree).is_dir() {
+        options.source_worktree_path = Some(options.to_worktree.clone().into());
+    } else if let Some(worktree) =
+        homeboy_core::worktree::resolve_workspace_ref_if_present(&options.to_worktree)?
+    {
+        if worktree.state() == &homeboy_core::worktree::TaskWorktreeState::Active {
+            options.source_worktree_path = Some(worktree.path().into());
+        }
     }
     Ok(())
 }

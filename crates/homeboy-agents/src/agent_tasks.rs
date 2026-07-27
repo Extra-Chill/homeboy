@@ -252,6 +252,8 @@ pub mod gate {
 
 /// Durable run lifecycle: submit, run-record state, log/artifact loaders.
 pub mod lifecycle {
+    #[cfg(feature = "test-support")]
+    pub use super::super::agent_task_lifecycle::rewrite_record_for_test;
     pub use super::super::agent_task_lifecycle::{
         aggregate_source, artifacts, cancel, cancel_run, claim_next_queued_run,
         cook_attempt_run_id, cook_index, has_accepted_runner_handoff, list_records,

@@ -886,8 +886,8 @@ pub fn record_provider_execution_terminal(
     })
 }
 
-#[cfg(test)]
-pub(crate) fn rewrite_record_for_test<F>(run_id: &str, mut rewrite: F) -> Result<AgentTaskRunRecord>
+#[cfg(any(test, feature = "test-support"))]
+pub fn rewrite_record_for_test<F>(run_id: &str, mut rewrite: F) -> Result<AgentTaskRunRecord>
 where
     F: FnMut(&mut AgentTaskRunRecord),
 {
