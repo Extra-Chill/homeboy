@@ -1,6 +1,6 @@
 use homeboy_core::error::{Error, Result};
+use homeboy_engine_primitives::content_hash;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 use super::{step_success, ReleaseArtifact, ReleaseState, ReleaseStepResult};
@@ -170,20 +170,12 @@ fn artifact_target_name(artifact: &ReleaseArtifact) -> Result<String> {
 }
 
 fn sha256_file(path: &str) -> Result<String> {
-    let mut file = std::fs::File::open(path).map_err(|error| {
+    content_hash::sha256_file(std::path::Path::new(path)).map_err(|error| {
         Error::internal_io(
             format!("Failed to hash release artifact '{}': {}", path, error),
             Some(path.to_string()),
         )
-    })?;
-    let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher).map_err(|error| {
-        Error::internal_io(
-            format!("Failed to hash release artifact '{}': {}", path, error),
-            Some(path.to_string()),
-        )
-    })?;
-    Ok(format!("{:x}", hasher.finalize()))
+    })
 }
 
 fn is_package_recovery_manifest(manifest_path: &std::path::Path) -> bool {

@@ -5,10 +5,9 @@
 //! capture (which source/ref produced the payload, whether a fresh build ran, and
 //! the identity of the artifact that shipped).
 
+use homeboy_engine_primitives::content_hash;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
-
-use sha2::{Digest, Sha256};
 
 use homeboy_core::component::Component;
 use homeboy_core::engine::command;
@@ -82,19 +81,7 @@ fn resolve_artifact_identity(path: &Path) -> Option<ArtifactIdentity> {
 }
 
 fn sha256_file(path: &Path) -> Option<String> {
-    use std::io::Read;
-
-    let mut file = std::fs::File::open(path).ok()?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).ok()?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Some(format!("{:x}", hasher.finalize()))
+    content_hash::sha256_file(path).ok()
 }
 
 pub use homeboy_core::tag_gap::{detect_tag_gap, warn_tag_gap};

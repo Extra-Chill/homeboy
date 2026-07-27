@@ -1,8 +1,8 @@
+use homeboy_engine_primitives::content_hash;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use homeboy_core::component::Component;
 use homeboy_core::engine::canonical_json::canonical_json;
@@ -113,8 +113,8 @@ impl ComponentPayloadPreparationRequest {
 
 fn digest_json(value: &serde_json::Value) -> String {
     format!(
-        "sha256:{:x}",
-        Sha256::digest(serde_json::to_vec(value).expect("canonical JSON serializes"))
+        "sha256:{}",
+        content_hash::sha256_hex(&serde_json::to_vec(value).expect("canonical JSON serializes"))
     )
 }
 

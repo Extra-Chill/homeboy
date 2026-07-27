@@ -1,9 +1,8 @@
+use homeboy_engine_primitives::content_hash;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::Path;
-use std::{fs, io::Read};
-
-use sha2::{Digest, Sha256};
 
 use homeboy_core::artifact_inputs::ResolvedArtifactInput;
 use homeboy_core::component::Component;
@@ -285,24 +284,7 @@ impl PreparedDeployArtifact {
 }
 
 pub(crate) fn sha256_file(path: &Path) -> Result<String> {
-    let mut file = fs::File::open(path).map_err(|error| {
-        homeboy_core::error::Error::internal_io(error.to_string(), Some(path.display().to_string()))
-    })?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).map_err(|error| {
-            homeboy_core::error::Error::internal_io(
-                error.to_string(),
-                Some(path.display().to_string()),
-            )
-        })?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+    content_hash::sha256_file(path)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
