@@ -35,11 +35,20 @@ pub(crate) fn index_published_artifact_refs(
             }
         }
     }
-    index_manifest_refs(store, source, &manifest, |locator| {
-        let Some(path) = artifact_store_path(&artifact_root, locator) else {
+    index_manifest_refs(store, source, &manifest, |reference| {
+        if reference.locator_type == "public-url" {
+            let url = reference
+                .public_url
+                .as_deref()
+                .expect("public URL ref has URL");
+            return Ok(Some(IndexedArtifactPath::PublicUrl(url.to_string())));
+        }
+        let Some(path) = artifact_store_path(&artifact_root, &reference.locator) else {
             return Ok(None);
         };
-        if path.is_file() || materialize_artifact_store_path(&path, locator, &source_bases)? {
+        if path.is_file()
+            || materialize_artifact_store_path(&path, &reference.locator, &source_bases)?
+        {
             Ok(Some(IndexedArtifactPath::Local(path)))
         } else {
             Ok(Some(IndexedArtifactPath::Missing))
@@ -70,12 +79,19 @@ pub fn index_remote_published_artifact_refs_for_run(
         else {
             continue;
         };
-        index_manifest_refs(store, &artifact, &manifest, |locator| {
+        index_manifest_refs(store, &artifact, &manifest, |reference| {
+            if reference.locator_type == "public-url" {
+                let url = reference
+                    .public_url
+                    .as_deref()
+                    .expect("public URL ref has URL");
+                return Ok(Some(IndexedArtifactPath::PublicUrl(url.to_string())));
+            }
             Ok(Some(IndexedArtifactPath::Remote(
                 crate::execution_contract::runner_artifact_store_token(
                     &runner_id,
                     &remote_run_id,
-                    locator,
+                    &reference.locator,
                 ),
             )))
         })?;
@@ -87,6 +103,7 @@ pub fn index_remote_published_artifact_refs_for_run(
 enum IndexedArtifactPath {
     Local(PathBuf),
     Remote(String),
+    PublicUrl(String),
     Missing,
 }
 
@@ -101,7 +118,7 @@ fn index_manifest_refs(
     store: &ObservationStore,
     source: &ArtifactRecord,
     manifest: &Value,
-    mut resolve_path: impl FnMut(&str) -> Result<Option<IndexedArtifactPath>>,
+    mut resolve_path: impl FnMut(&ManifestArtifactRef<'_>) -> Result<Option<IndexedArtifactPath>>,
 ) -> Result<()> {
     let manifest_id = manifest
         .get("id")
@@ -113,7 +130,7 @@ fn index_manifest_refs(
 
     for reference in refs {
         let locator = reference.locator.as_str();
-        let Some(indexed_path) = resolve_path(locator)? else {
+        let Some(indexed_path) = resolve_path(&reference)? else {
             continue;
         };
         let (artifact_type, path) = match indexed_path {
@@ -121,11 +138,13 @@ fn index_manifest_refs(
                 ("file".to_string(), path.to_string_lossy().to_string())
             }
             IndexedArtifactPath::Remote(path) => ("remote_file".to_string(), path),
+            IndexedArtifactPath::PublicUrl(url) => ("url".to_string(), url),
             IndexedArtifactPath::Missing => continue,
         };
         let original_manifest_id = reference
             .reference
             .get("id")
+            .or_else(|| reference.reference.get("artifact_id"))
             .and_then(Value::as_str)
             .unwrap_or(locator);
         let id = published_artifact_id(&source.id, original_manifest_id, locator);
@@ -195,8 +214,8 @@ fn index_manifest_refs(
             kind,
             artifact_type,
             path,
-            url: None,
-            public_url: None,
+            url: reference.public_url.clone(),
+            public_url: reference.public_url.clone(),
             viewer_url: None,
             viewer_links: Vec::new(),
             sha256,
@@ -237,6 +256,13 @@ fn collect_publication_artifact_refs<'a>(
                         .and_then(Value::as_str)
                         .map(str::to_string),
                 });
+            } else if let Some(url) = explicit_public_artifact_url(value) {
+                refs.push(ManifestArtifactRef {
+                    reference: value,
+                    locator: url.to_string(),
+                    locator_type: "public-url",
+                    public_url: Some(url.to_string()),
+                });
             }
             for child in object.values() {
                 collect_publication_artifact_refs(child, url_bases, refs);
@@ -249,6 +275,28 @@ fn collect_publication_artifact_refs<'a>(
         }
         _ => {}
     }
+}
+
+/// A Homeboy-owned run summary can emit a nested artifact reference directly
+/// instead of wrapping it in a publication-manifest locator. Accept only an
+/// explicit artifact identity plus an HTTP(S) URL, preserving the declared
+/// public access boundary rather than reconstructing runner-local paths.
+fn explicit_public_artifact_url(reference: &Value) -> Option<&str> {
+    let has_identity = reference.get("id").and_then(Value::as_str).is_some()
+        || reference
+            .get("artifact_id")
+            .and_then(Value::as_str)
+            .is_some();
+    if !has_identity {
+        return None;
+    }
+    let url = reference
+        .get("public_url")
+        .or_else(|| reference.get("publicUrl"))
+        .or_else(|| reference.get("url"))
+        .and_then(Value::as_str)?;
+    let parsed = reqwest::Url::parse(url).ok()?;
+    matches!(parsed.scheme(), "http" | "https").then_some(url)
 }
 
 fn artifact_store_locator(reference: &Value) -> Option<&str> {

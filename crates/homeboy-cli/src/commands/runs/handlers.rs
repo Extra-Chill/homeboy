@@ -567,6 +567,37 @@ fn pull_artifacts_to_local(
                     }
                 }
             }
+            runs_service::ArtifactStorage::PublicUrl => {
+                let output = pull_dir.map(|dir| dir.join(sanitize_artifact_filename(&artifact.id)));
+                match runs_service::download_public_artifact(artifact.clone(), output) {
+                    Ok(outcome) => {
+                        pulled_count += 1;
+                        RunsArtifactPullEntry {
+                            artifact_id: artifact.id.clone(),
+                            storage: "public_url",
+                            status: "pulled",
+                            output_path: Some(outcome.output_path.display().to_string()),
+                            size_bytes: outcome.size_bytes,
+                            content_type: outcome.content_type,
+                            sha256: outcome.sha256,
+                            error: None,
+                        }
+                    }
+                    Err(err) => {
+                        failed_count += 1;
+                        RunsArtifactPullEntry {
+                            artifact_id: artifact.id.clone(),
+                            storage: "public_url",
+                            status: "failed",
+                            output_path: None,
+                            size_bytes: None,
+                            content_type: None,
+                            sha256: None,
+                            error: Some(err.message),
+                        }
+                    }
+                }
+            }
             runs_service::ArtifactStorage::MetadataOnly => {
                 skipped_count += 1;
                 RunsArtifactPullEntry {
@@ -854,6 +885,28 @@ fn artifact_get_inner(args: RunsArtifactGetArgs) -> CmdResult<RunsOutput> {
             ))
         }
         runs_service::ArtifactStorage::Remote => remote_artifact::get(artifact, args.output),
+        runs_service::ArtifactStorage::PublicUrl => {
+            let source_content_url = artifact
+                .url
+                .clone()
+                .or_else(|| artifact.public_url.clone());
+            let outcome = runs_service::download_public_artifact(artifact, args.output)?;
+            Ok((
+                RunsOutput::ArtifactGet(RunsArtifactGetOutput {
+                    command: "runs.artifact.get",
+                    run_id: outcome.run_id,
+                    artifact_id: outcome.artifact_id,
+                    runner_id: None,
+                    source_content_url,
+                    output_path: outcome.output_path.display().to_string(),
+                    content_type: outcome.content_type,
+                    size_bytes: outcome.size_bytes,
+                    sha256: outcome.sha256,
+                    artifact_ref: None,
+                }),
+                0,
+            ))
+        }
         runs_service::ArtifactStorage::MetadataOnly => Err(Error::validation_invalid_argument(
             "artifact_id",
             format!(

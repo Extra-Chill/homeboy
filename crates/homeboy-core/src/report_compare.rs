@@ -239,6 +239,20 @@ fn read_artifact_record(artifact: ArtifactRecord) -> crate::Result<(String, Valu
             let value = read_json_file(&download.output_path)?;
             Ok((format!("{}:{}", artifact.run_id, artifact.id), value))
         }
+        runs_service::ArtifactStorage::PublicUrl => {
+            let tempdir = tempfile::Builder::new()
+                .prefix("homeboy-report-compare-")
+                .tempdir()
+                .map_err(|e| {
+                    Error::internal_io(e.to_string(), Some("create tempdir".to_string()))
+                })?;
+            let output = tempdir
+                .path()
+                .join(format!("{}.json", safe_file_component(&artifact.id)));
+            let download = runs_service::download_public_artifact(artifact.clone(), Some(output))?;
+            let value = read_json_file(&download.output_path)?;
+            Ok((format!("{}:{}", artifact.run_id, artifact.id), value))
+        }
         runs_service::ArtifactStorage::MetadataOnly => Err(Error::validation_invalid_argument(
             "old/new",
             format!(

@@ -1256,6 +1256,83 @@ fn artifact_get_fetches_nested_publication_artifact_store_ref() {
 }
 
 #[test]
+fn artifacts_index_and_fetch_nested_visual_summary_refs_from_public_urls() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(sample_run(
+                "fixture.matrix",
+                "static-site-importer",
+                "ssi",
+                Value::Null,
+            ))
+            .expect("run");
+        // The local runner directory has already been cleaned. The declared
+        // public URLs are the only valid evidence source for this run.
+        let public_url = serve_public_artifact_base_once(200);
+        let summary = home.path().join("fixture-result.json");
+        std::fs::write(
+            &summary,
+            serde_json::json!({
+                "fixtures": [{
+                    "fixture_id": "15-saas",
+                    "visual_compare": { "artifacts": [
+                        { "id": "visual_compare_15-saas_source", "kind": "visual_source", "path": "/gone/source.png", "public_url": format!("{public_url}/source.png") },
+                        { "id": "visual_compare_15-saas_candidate", "kind": "visual_candidate", "path": "/gone/candidate.png", "public_url": format!("{public_url}/candidate.png") },
+                        { "id": "visual_compare_15-saas_diff", "kind": "visual_diff", "path": "/gone/diff.png", "public_url": format!("{public_url}/diff.png") },
+                        { "artifact_id": "visual_compare_15-saas_dom", "kind": "dom_snapshot", "path": "/gone/dom.html", "public_url": format!("{public_url}/dom.html") }
+                    ]}
+                }]
+            })
+            .to_string(),
+        )
+        .expect("summary");
+        store
+            .record_artifact(&run.id, "fixture_result", &summary)
+            .expect("record summary");
+
+        let (listed, _) = artifacts(&run.id).expect("list artifacts");
+        let RunsOutput::Artifacts(listed) = listed else {
+            panic!("expected artifacts")
+        };
+        assert_eq!(listed.artifacts.len(), 5);
+        for id in [
+            "visual_compare_15-saas_source",
+            "visual_compare_15-saas_candidate",
+            "visual_compare_15-saas_diff",
+            "visual_compare_15-saas_dom",
+        ] {
+            assert!(
+                listed.artifacts.iter().any(|artifact| {
+                    artifact.metadata_json["original_manifest_id"] == id
+                        && artifact.artifact_type == "url"
+                }),
+                "missing indexed {id}"
+            );
+        }
+
+        let output_path = home.path().join("visual-source.png");
+        let (fetched, _) = artifact_get(RunsArtifactGetArgs {
+            run_id: run.id.clone(),
+            artifact_id: "visual_compare_15-saas_source".to_string(),
+            runner: None,
+            output: Some(output_path.clone()),
+            field: Vec::new(),
+        })
+        .expect("fetch public fallback");
+        let RunsOutput::ArtifactGet(fetched) = fetched else {
+            panic!("expected artifact get")
+        };
+        assert_eq!(
+            std::fs::read(&output_path).expect("downloaded bytes"),
+            b"{}"
+        );
+        assert_eq!(fetched.size_bytes, Some(2));
+    });
+}
+
+#[test]
 fn artifacts_command_derives_viewer_links_from_public_artifact_url_metadata() {
     with_isolated_home(|home| {
         let _xdg = XdgGuard::unset();

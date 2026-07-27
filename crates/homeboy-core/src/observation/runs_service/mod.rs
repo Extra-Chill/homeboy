@@ -166,6 +166,7 @@ struct RunnerDownloadCleanupPreview {
 pub enum ArtifactStorage {
     LocalFile,
     Remote,
+    PublicUrl,
     MetadataOnly,
     Other,
 }
