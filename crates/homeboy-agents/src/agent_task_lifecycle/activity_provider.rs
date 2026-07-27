@@ -21,6 +21,23 @@ use homeboy_core::Result;
 struct AgentTaskActivityProvider;
 
 impl ActivityAgentTaskProvider for AgentTaskActivityProvider {
+    /// Resolve one durable record by its primary key (`exact_record`, a single
+    /// indexed `get_run`) instead of listing and refreshing every record.
+    ///
+    /// This read is deliberately not `status()`: `activity` is documented as a
+    /// read model that does not mutate persisted state, and `status()` is a
+    /// reconciling read that writes. Resolving one id must not enter that path
+    /// (#10308).
+    ///
+    /// An id that is not a durable agent-task record — an observation run id, a
+    /// daemon job UUID, a malformed record — is `None`, not an error, so id
+    /// resolution falls through to the next provider.
+    fn probe_by_id(&self, id: &str) -> Result<Option<ActivityItem>> {
+        Ok(agent_task_lifecycle::exact_record(id)
+            .ok()
+            .map(item_from_agent_task))
+    }
+
     fn agent_task_activity_items(&self) -> Result<Vec<ActivityItem>> {
         Ok(agent_task_lifecycle::list_records()?
             .into_iter()
@@ -150,6 +167,25 @@ pub fn register() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_task_lifecycle::tests::{succeeded_aggregate, test_plan};
+    use homeboy_core::observation::{NewRunRecord, ObservationStore};
+    use homeboy_core::test_support::with_isolated_home;
+
+    fn seed_record(run_id: &str) -> String {
+        let plan = test_plan();
+        let aggregate = succeeded_aggregate(&plan);
+        agent_task_lifecycle::record_completed_run(&plan, &aggregate, Some(run_id))
+            .expect("durable agent-task record")
+            .run_id
+    }
+
+    fn controller_admission_stamped(run_id: &str) -> bool {
+        agent_task_lifecycle::exact_record(run_id)
+            .expect("durable record")
+            .metadata
+            .get("controller_admission")
+            .is_some()
+    }
 
     #[test]
     fn runner_backed_actions_execute_on_the_owning_runner() {
@@ -159,5 +195,80 @@ mod tests {
             action.command
                 == "homeboy runner exec lab-a -- homeboy agent-task reconcile run-1 --dry-run"
         }));
+    }
+
+    #[test]
+    fn probe_by_id_resolves_one_record_without_scanning_or_writing() {
+        // #10308: resolving a single agent-task id must be an indexed read, not
+        // a full-corpus refresh. The scanning path refreshes every record
+        // through `status()`, which stamps `controller_admission` on each one —
+        // so the absence of that stamp is durable evidence that neither the
+        // probed record nor its siblings were scanned or written.
+        with_isolated_home(|_| {
+            let target = seed_record("run-probe-target");
+            let sibling = seed_record("run-probe-sibling");
+            assert!(!controller_admission_stamped(&target));
+            assert!(!controller_admission_stamped(&sibling));
+
+            let item = AgentTaskActivityProvider
+                .probe_by_id(&target)
+                .expect("probe")
+                .expect("agent-task activity item");
+
+            assert_eq!(item.id, target);
+            assert_eq!(item.kind, "agent-task");
+            assert_eq!(item.source_store, "agent-task.lifecycle");
+            assert_eq!(
+                item.refs.agent_task_run_id.as_deref(),
+                Some(target.as_str())
+            );
+            assert!(!controller_admission_stamped(&target));
+            assert!(!controller_admission_stamped(&sibling));
+
+            // Control: the scanning path the probe replaces does refresh — and
+            // therefore write — every record, which is the cost being avoided.
+            agent_task_lifecycle::list_records().expect("records listed");
+            assert!(controller_admission_stamped(&target));
+            assert!(controller_admission_stamped(&sibling));
+        });
+    }
+
+    #[test]
+    fn probe_by_id_ignores_ids_that_are_not_durable_agent_task_records() {
+        // An observation run id or an unknown id is "not found here", not an
+        // error, so core's resolver falls through to the next probe.
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().expect("observation store");
+            let run = store
+                .start_run(NewRunRecord::builder("bench").build())
+                .expect("observation run");
+
+            assert!(AgentTaskActivityProvider
+                .probe_by_id(&run.id)
+                .expect("probe")
+                .is_none());
+            assert!(AgentTaskActivityProvider
+                .probe_by_id("no-such-run")
+                .expect("probe")
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn show_activity_resolves_an_agent_task_id_through_the_indexed_probe() {
+        // End-to-end: `homeboy activity show <agent-task-id>` resolves the
+        // authoritative lifecycle projection — the same source that wins the id
+        // in `activity list` — without entering the reconciling scan.
+        with_isolated_home(|_| {
+            register();
+            let run_id = seed_record("run-show-probe");
+
+            let report = homeboy_core::activity::show_activity(&run_id).expect("show activity");
+
+            assert_eq!(report.items.len(), 1);
+            assert_eq!(report.items[0].id, run_id);
+            assert_eq!(report.items[0].source_store, "agent-task.lifecycle");
+            assert!(!controller_admission_stamped(&run_id));
+        });
     }
 }

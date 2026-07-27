@@ -17,6 +17,16 @@ use crate::Result;
 
 /// Supplies the agent-task contribution to the activity report.
 pub trait ActivityAgentTaskProvider: Send + Sync {
+    /// Resolve a single agent-task activity item by id through an indexed
+    /// lookup, without listing every durable record.
+    ///
+    /// Defaults to `Ok(None)` so a provider without an indexed lookup — and the
+    /// no-op provider when no agent-task subsystem is present — contributes
+    /// nothing and id resolution falls through to the next probe.
+    fn probe_by_id(&self, _id: &str) -> Result<Option<ActivityItem>> {
+        Ok(None)
+    }
+
     /// Project every durable agent-task record into an activity item.
     fn agent_task_activity_items(&self) -> Result<Vec<ActivityItem>>;
 
@@ -46,6 +56,12 @@ homeboy_engine_primitives::provider_registry! {
     /// Run `f` against the registered provider, or the no-op provider if none
     /// is registered.
     with: fn with_provider,
+}
+
+/// Resolve one agent-task activity item by id via the registered provider's
+/// indexed lookup (or none when the agent-task subsystem is absent).
+pub(crate) fn probe_by_id(id: &str) -> Result<Option<ActivityItem>> {
+    with_provider(|p| p.probe_by_id(id))
 }
 
 /// The agent-task activity items via the registered provider (or none when the
