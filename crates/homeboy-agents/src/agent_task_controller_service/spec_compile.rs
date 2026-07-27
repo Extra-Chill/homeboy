@@ -3,6 +3,7 @@
 use super::*;
 use homeboy_core::component::{self, TargetSpec};
 use homeboy_core::plan::PlanStepDependencyKind;
+use homeboy_engine_primitives::content_hash;
 
 pub(super) const REPO_LOOP_SPEC_METADATA_KEY: &str = "repo_loop_spec";
 pub(super) const REPO_LOOP_SPEC_WORKFLOW_REASON: &str = "repo loop spec workflow";
@@ -21,9 +22,7 @@ pub(super) fn repo_loop_spec_fingerprint(spec: &AgentTaskRepoLoopSpec) -> Result
             Some("agent-task controller from-spec".to_string()),
         )
     })?;
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    Ok(format!("sha256:{}", content_hash::sha256_hex(&bytes)))
 }
 
 pub(super) fn repo_loop_spec_fingerprint_from_metadata(

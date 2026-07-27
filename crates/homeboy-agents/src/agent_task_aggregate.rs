@@ -1,6 +1,6 @@
+use homeboy_engine_primitives::content_hash;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::fmt;
 
 use super::agent_task::{
@@ -434,7 +434,7 @@ fn is_verified_recoverable_patch(outcome: &AgentTaskOutcome, artifact: &AgentTas
     };
     !content.is_empty()
         && artifact.size_bytes == Some(content.len() as u64)
-        && expected_sha256 == format!("{:x}", Sha256::digest(&content))
+        && expected_sha256 == content_hash::sha256_hex(&content)
 }
 
 fn non_empty_metadata_string(artifact: &AgentTaskArtifact, key: &str) -> bool {
@@ -563,6 +563,7 @@ fn aggregate_schema() -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use sha2::{Digest, Sha256};
 
     #[test]
     fn aggregate_outcomes_classifies_apply_retry_issue_and_review_candidates() {

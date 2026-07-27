@@ -4,6 +4,7 @@ use crate::release::types::ReleaseState;
 use homeboy_core::component::GithubConfig;
 use homeboy_core::engine::shell::quote_arg;
 use homeboy_core::git::release_download::GitHubRepo;
+use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -231,20 +232,8 @@ fn publication_from_path(
 }
 
 fn file_sha256(path: &str) -> Result<String, String> {
-    let mut file = std::fs::File::open(path)
-        .map_err(|error| format!("could not hash release artifact '{path}': {error}"))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0; 8192];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| format!("could not hash release artifact '{path}': {error}"))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+    content_hash::sha256_file(std::path::Path::new(path))
+        .map_err(|error| format!("could not hash release artifact '{path}': {error}"))
 }
 
 /// Split publications into assets that must be uploaded and assets already
@@ -455,20 +444,7 @@ pub(crate) fn verify_release_assets(
             .as_deref()
             .and_then(|value| value.strip_prefix("sha256:"))
         {
-            let mut file = std::fs::File::open(path)
-                .map_err(|error| format!("could not hash release artifact '{path}': {error}"))?;
-            let mut hasher = Sha256::new();
-            let mut buffer = [0; 8192];
-            loop {
-                let read = file.read(&mut buffer).map_err(|error| {
-                    format!("could not hash release artifact '{path}': {error}")
-                })?;
-                if read == 0 {
-                    break;
-                }
-                hasher.update(&buffer[..read]);
-            }
-            if format!("{:x}", hasher.finalize()) != digest {
+            if file_sha256(path)? != digest {
                 return Err(format!(
                     "GitHub Release asset '{name}' digest does not match uploaded artifact"
                 ));

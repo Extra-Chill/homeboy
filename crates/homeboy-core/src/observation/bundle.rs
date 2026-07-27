@@ -10,8 +10,8 @@ use std::fs;
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 
+use homeboy_engine_primitives::content_hash;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::build_identity;
 use crate::execution_contract::is_reportable_artifact_evidence_path;
@@ -164,7 +164,7 @@ fn portable_artifact_with_bytes(
     archive_format: Option<&str>,
     extension: Option<&str>,
 ) -> crate::Result<(ArtifactRecord, Option<ObservationBundleArtifactBytes>)> {
-    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let sha256 = content_hash::sha256_hex(&bytes);
     let size_bytes = i64::try_from(bytes.len()).map_err(|_| {
         Error::internal_unexpected(format!(
             "artifact {} is too large to record a portable size",
@@ -575,7 +575,7 @@ fn validate_artifact_bytes(
                 Some(format!("read bundled artifact bytes {}", path.display())),
             )
         })?;
-        let sha256 = format!("{:x}", Sha256::digest(&raw));
+        let sha256 = content_hash::sha256_hex(&raw);
         let size_bytes = i64::try_from(raw.len()).map_err(|_| {
             Error::internal_unexpected(format!(
                 "bundled artifact {} is too large to record a portable size",

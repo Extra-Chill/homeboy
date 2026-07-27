@@ -1,6 +1,6 @@
+use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -229,7 +229,7 @@ fn persist_patch_run(input: PatchRunInput<'_>) -> Result<()> {
             public_url: None,
             viewer_url: None,
             viewer_links: Vec::new(),
-            sha256: Some(format!("{:x}", Sha256::digest(&bytes))),
+            sha256: Some(content_hash::sha256_hex(&bytes)),
             size_bytes: i64::try_from(bytes.len()).ok(),
             mime: Some("text/x-diff".to_string()),
             metadata_json: serde_json::json!({}),

@@ -1,12 +1,12 @@
 //! Owner-only immutable payloads associated with an authoritative agent-task run.
 
+use homeboy_engine_primitives::content_hash;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use homeboy_core::engine::canonical_json::canonical_json_bytes;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::{sanitize_run_id, store, Error, Result};
@@ -69,7 +69,7 @@ fn canonical_bytes<T: Serialize>(payload: &T) -> Result<Vec<u8>> {
 
 fn digest<T: Serialize>(payload: &T) -> Result<String> {
     let bytes = canonical_bytes(payload)?;
-    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+    Ok(format!("sha256:{}", content_hash::sha256_hex(&bytes)))
 }
 
 fn validate<T: Serialize>(

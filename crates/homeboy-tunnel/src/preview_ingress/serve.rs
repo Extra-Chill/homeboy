@@ -1,7 +1,7 @@
 use base64::Engine;
+use homeboy_engine_primitives::content_hash;
 use serde::Deserialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read};
 use std::net::{TcpListener, TcpStream};
@@ -663,8 +663,9 @@ fn authorized_preview_client(request: &IngressHttpRequest, auth: &PreviewIngress
     }) else {
         return false;
     };
-    let digest = Sha256::digest(token.as_bytes());
-    format!("{digest:x}").eq_ignore_ascii_case(expected)
+    // Deliberately case-insensitive: `expected` is operator-supplied config
+    // and is not guaranteed to be lowercase.
+    content_hash::sha256_hex(token.as_bytes()).eq_ignore_ascii_case(expected)
 }
 
 fn parse_json_body<T: for<'de> Deserialize<'de>>(body: &[u8], context: &str) -> Result<T> {

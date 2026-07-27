@@ -1,3 +1,4 @@
+use homeboy_engine_primitives::content_hash;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -6,7 +7,6 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use homeboy_core::engine::shell::{quote_arg, quote_path};
 use homeboy_core::error::{Error, Result};
@@ -2000,26 +2000,16 @@ fn dev_binary_path(workspace_root: &str, sha256: &str) -> String {
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
-    let mut file = fs::File::open(path).map_err(|err| {
+    // Keep this call site's validation-shaped error: callers surface it as a
+    // bad `homeboy_binary` argument, not as an internal IO fault.
+    content_hash::sha256_file(path).map_err(|err| {
         Error::validation_invalid_argument(
             "homeboy_binary",
             format!("could not read binary: {err}"),
             Some(path.display().to_string()),
             None,
         )
-    })?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|err| Error::internal_json(err.to_string(), None))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+    })
 }
 
 fn validate_dev_sync_binary_for_runner(runner: &super::Runner, binary: &Path) -> Result<()> {

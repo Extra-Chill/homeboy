@@ -5,8 +5,8 @@
 //! stored prompts and deriving deterministic task ids. Extracted from
 //! `agent_task_dispatch_plan` to keep the plan builder focused on plan shape.
 
+use homeboy_engine_primitives::content_hash;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::agent_task_prompts;
 use homeboy_core::{config, Error, Result};
@@ -38,7 +38,7 @@ pub(crate) struct ResolvedPromptSpec {
 pub(crate) fn read_prompt_spec(spec: &str) -> Result<ResolvedPromptSpec> {
     if let Some(id) = agent_task_prompts::stored_prompt_ref_id(spec) {
         let content = agent_task_prompts::read_prompt(id)?;
-        let sha256 = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
+        let sha256 = format!("sha256:{}", content_hash::sha256_hex(content.as_bytes()));
         let id = agent_task_prompts::prompt_id(id)?;
         return Ok(ResolvedPromptSpec {
             content,

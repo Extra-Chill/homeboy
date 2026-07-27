@@ -7,7 +7,7 @@
 //! and building the promoted-output/structured-summary views. It operates on
 //! core runner types, not command types.
 
-use sha2::{Digest, Sha256};
+use homeboy_engine_primitives::content_hash;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -196,8 +196,8 @@ fn runner_exec_directory_child_id(
     relative_child: &str,
 ) -> String {
     format!(
-        "runner-exec-dir-{:x}",
-        Sha256::digest(
+        "runner-exec-dir-{}",
+        content_hash::sha256_hex(
             format!("{run_id}\0{binding}\0artifact_dir\0{declaration}\0{relative_child}")
                 .as_bytes()
         )
@@ -360,8 +360,8 @@ fn record_runner_exec_output(
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
     let artifact_id = format!(
-        "runner-exec-{:x}",
-        Sha256::digest(
+        "runner-exec-{}",
+        content_hash::sha256_hex(
             format!("{run_id}\0{binding}\0{role}\0{declaration}\0{content_hash}").as_bytes()
         )
     );

@@ -1,7 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
+use homeboy_engine_primitives::content_hash;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use crate::execution_contract::{decode_uri_component, EXECUTION_CONTRACT};
 use crate::observation::{ArtifactRecord, ObservationStore};
@@ -475,8 +475,9 @@ fn remote_artifact_runner_context(path: &str) -> Option<(String, String)> {
 }
 
 fn published_artifact_id(source_artifact_id: &str, manifest_id: &str, locator: &str) -> String {
-    let hash = Sha256::digest(format!("{source_artifact_id}\0{manifest_id}\0{locator}").as_bytes());
-    let hex = format!("{hash:x}");
+    let hex = content_hash::sha256_hex(
+        format!("{source_artifact_id}\0{manifest_id}\0{locator}").as_bytes(),
+    );
     format!("{source_artifact_id}-published-{}", &hex[..16])
 }
 

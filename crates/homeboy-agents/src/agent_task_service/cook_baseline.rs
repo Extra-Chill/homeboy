@@ -8,8 +8,8 @@
 //! build them from a source root or a prior promotion. The private `git_output`
 //! helpers live here because this cluster is their only user.
 
+use homeboy_engine_primitives::content_hash;
 use serde_json::Value;
-use sha2::Digest;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -238,7 +238,7 @@ pub(crate) fn materialize_initial_candidate_baseline(
             canonical_path,
             commit,
             tree: tree.clone(),
-            artifact_sha256: format!("{:x}", sha2::Sha256::digest(tree.as_bytes())),
+            artifact_sha256: content_hash::sha256_hex(tree.as_bytes()),
             source_run_id: source_run_id.to_string(),
             source_task_id: task_id.to_string(),
             bound_task_id: task_id.to_string(),
@@ -333,7 +333,7 @@ fn materialize_follow_up_baseline_at(
             Some("read promoted patch artifact".to_string()),
         )
     })?;
-    let artifact_sha256 = format!("{:x}", sha2::Sha256::digest(&artifact_bytes));
+    let artifact_sha256 = content_hash::sha256_hex(&artifact_bytes);
     if let Some(expected) = promotion.patch_artifact.sha256.as_deref() {
         if expected != artifact_sha256 {
             return Err(Error::validation_invalid_argument(

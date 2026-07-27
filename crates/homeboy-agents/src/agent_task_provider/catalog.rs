@@ -10,7 +10,7 @@ use super::secrets::{
     provider_secret_sources_for_plan_with_providers,
 };
 use super::*;
-use sha2::{Digest, Sha256};
+use homeboy_engine_primitives::content_hash;
 
 #[cfg(not(test))]
 static PROVIDER_CATALOG: OnceLock<RwLock<AgentTaskProviderCatalog>> = OnceLock::new();
@@ -194,7 +194,7 @@ fn provider_catalog_version(
     // detectable without treating an unchanged rediscovery as drift.
     let content = serde_json::to_vec(&(providers, diagnostics))
         .expect("agent-task provider catalog must serialize");
-    format!("resolved:{:x}", Sha256::digest(content))
+    format!("resolved:{}", content_hash::sha256_hex(&content))
 }
 
 #[cfg(test)]

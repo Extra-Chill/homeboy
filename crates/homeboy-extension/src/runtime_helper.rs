@@ -1,9 +1,9 @@
 use homeboy_core::error::{Error, Result};
 use homeboy_core::paths;
+use homeboy_engine_primitives::content_hash;
 use homeboy_engine_primitives::local_files;
 use homeboy_extension_contract::RuntimeHelperRequirement;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -154,7 +154,10 @@ fn ensure_helper(runtime_dir: &std::path::Path, helper: &RuntimeHelper) -> Resul
 }
 
 fn helper_revision(helper: &RuntimeHelper) -> String {
-    format!("sha256:{:x}", Sha256::digest(helper.content.as_bytes()))
+    format!(
+        "sha256:{}",
+        content_hash::sha256_hex(helper.content.as_bytes())
+    )
 }
 
 /// Materialize manifest-declared helpers under an identity-and-revision path.

@@ -1,6 +1,6 @@
+use homeboy_engine_primitives::content_hash;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -2578,9 +2578,7 @@ fn controller_job_id_from_path(path: &str, suffix: &str) -> Result<Uuid> {
 fn hex_digest(value: &serde_json::Value) -> Result<String> {
     let encoded =
         serde_json::to_vec(value).map_err(|error| Error::internal_unexpected(error.to_string()))?;
-    let mut hasher = Sha256::new();
-    hasher.update(encoded);
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(content_hash::sha256_hex(&encoded))
 }
 
 fn exec_request_run_ref_metadata(
@@ -3802,9 +3800,13 @@ pub(crate) fn current_binary_sha256() -> Result<Option<String>> {
     sha256_file_optional(&exe)
 }
 
+/// Hash a file, treating "does not exist" as absence rather than failure.
+///
+/// The absent-is-not-an-error contract is this call site's own; the digest
+/// itself comes from the shared primitive.
 fn sha256_file_optional(path: &Path) -> Result<Option<String>> {
-    let mut file = match fs::File::open(path) {
-        Ok(file) => file,
+    match fs::File::open(path) {
+        Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(Error::internal_io(
@@ -3812,19 +3814,8 @@ fn sha256_file_optional(path: &Path) -> Result<Option<String>> {
                 Some(format!("open {}", path.display())),
             ))
         }
-    };
-    let mut hasher = Sha256::new();
-    let mut buffer = [0; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-        })?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
     }
-    Ok(Some(format!("{:x}", hasher.finalize())))
+    content_hash::sha256_file(path).map(Some)
 }
 
 fn handle_connection<R>(

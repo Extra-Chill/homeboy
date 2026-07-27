@@ -19,8 +19,8 @@ use std::sync::Arc;
 use crate::component::{Component, GithubConfig};
 use crate::error::{Error, Result};
 use crate::git::github_cli_env;
+use homeboy_engine_primitives::content_hash;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 const PACKAGE_DEPENDENCY_FIELDS: &[&str] = &[
     "dependencies",
@@ -598,28 +598,7 @@ fn resolve_release_asset_metadata(
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path).map_err(|error| {
-        Error::internal_io(
-            format!("Failed to hash downloaded artifact: {error}"),
-            Some(path.display().to_string()),
-        )
-    })?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0; 8192];
-    loop {
-        let count = file.read(&mut buffer).map_err(|error| {
-            Error::internal_io(
-                format!("Failed to hash downloaded artifact: {error}"),
-                Some(path.display().to_string()),
-            )
-        })?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+    content_hash::sha256_file(path)
 }
 
 fn release_asset_name_matches(asset_name: &str, artifact_name: &str) -> bool {
@@ -857,6 +836,10 @@ pub fn detect_remote_url(repo_path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    // Hashed independently of the shared primitive so this stays a real
+    // cross-check on the digest the downloader records.
+    use sha2::{Digest, Sha256};
 
     use crate::component::GithubHostConfig;
 

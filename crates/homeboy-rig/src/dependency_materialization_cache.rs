@@ -9,6 +9,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use fs4::fs_std::FileExt;
+use homeboy_engine_primitives::content_hash;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -641,23 +642,10 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     .map_err(|error| io_error("write dependency cache manifest", error))
 }
 fn hash_bytes(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    content_hash::sha256_hex(bytes)
 }
 fn hash_file(path: &Path) -> Result<String> {
-    let mut file =
-        File::open(path).map_err(|error| io_error("read dependency cache file", error))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0; 8192];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| io_error("hash dependency cache file", error))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+    content_hash::sha256_file(path)
 }
 fn hash_path(path: &Path) -> Result<String> {
     if path.is_file() {

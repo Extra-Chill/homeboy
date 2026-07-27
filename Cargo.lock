@@ -790,6 +790,7 @@ dependencies = [
  "homeboy-agents",
  "homeboy-cli-contract",
  "homeboy-core",
+ "homeboy-engine-primitives",
  "homeboy-extension",
  "homeboy-extension-contract",
  "homeboy-fuzz",
@@ -940,6 +941,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "toml",
 ]
@@ -982,7 +984,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_path_to_error",
- "sha2",
  "shellexpand",
  "tempfile",
  "uuid",
@@ -1017,9 +1018,9 @@ name = "homeboy-fuzz"
 version = "0.1.0"
 dependencies = [
  "homeboy-core",
+ "homeboy-engine-primitives",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
 ]
 
@@ -1064,6 +1065,7 @@ dependencies = [
  "homeboy-agents",
  "homeboy-cli-contract",
  "homeboy-core",
+ "homeboy-engine-primitives",
  "homeboy-extension",
  "homeboy-fuzz",
  "homeboy-lab-runner-contract",
@@ -1175,6 +1177,7 @@ dependencies = [
  "glob",
  "glob-match",
  "homeboy-core",
+ "homeboy-engine-primitives",
  "homeboy-extension",
  "homeboy-product-identity",
  "homeboy-release-contract",
@@ -1217,6 +1220,7 @@ dependencies = [
  "chrono",
  "fs4",
  "homeboy-core",
+ "homeboy-engine-primitives",
  "homeboy-extension",
  "homeboy-lab-runner-contract",
  "homeboy-lifecycle-contract",
@@ -1282,12 +1286,12 @@ dependencies = [
  "chrono",
  "glob-match",
  "homeboy-core",
+ "homeboy-engine-primitives",
  "libc",
  "regex",
  "reqwest",
  "serde",
  "serde_json",
- "sha2",
  "uuid",
 ]
 

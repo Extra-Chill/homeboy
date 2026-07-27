@@ -1,7 +1,6 @@
+use homeboy_engine_primitives::content_hash;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-use sha2::{Digest, Sha256};
 
 use super::*;
 
@@ -380,7 +379,7 @@ fn committed_patch_artifact(
 }
 
 fn patch_sha256(contents: impl AsRef<[u8]>) -> String {
-    format!("{:x}", Sha256::digest(contents.as_ref()))
+    content_hash::sha256_hex(contents.as_ref())
 }
 
 fn attempt_patch_path(running: &RunningTask, kind: &str) -> Result<PathBuf, HarvestError> {
@@ -641,6 +640,7 @@ mod committed_harvest_tests {
         AGENT_TASK_REQUEST_SCHEMA,
     };
     use homeboy_core::source_snapshot::SourceSnapshot;
+    use sha2::{Digest, Sha256};
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
 

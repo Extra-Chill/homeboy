@@ -1,6 +1,6 @@
+use homeboy_engine_primitives::content_hash;
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
@@ -232,17 +232,7 @@ fn visit(root: &Path, path: &Path, manifest: &mut Manifest) -> Result<(), String
 }
 
 fn sha256(path: &Path) -> Result<String, String> {
-    let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
-    let mut hash = Sha256::new();
-    let mut buffer = [0; 65536];
-    loop {
-        let read = file.read(&mut buffer).map_err(|e| e.to_string())?;
-        if read == 0 {
-            break;
-        }
-        hash.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", hash.finalize()))
+    content_hash::sha256_file(path).map_err(|error| error.to_string())
 }
 
 fn remote_manifest(root: &str, client: &SshClient) -> Result<Option<Manifest>, String> {

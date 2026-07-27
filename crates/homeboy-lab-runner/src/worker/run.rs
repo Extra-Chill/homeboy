@@ -1,3 +1,4 @@
+use homeboy_engine_primitives::content_hash;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -437,8 +438,6 @@ impl PrivateAtFileCleanup {
 pub(super) fn verify_private_at_files(
     envelope: &mut homeboy_core::runner_execution_envelope::RunnerExecutionEnvelope,
 ) -> Result<PrivateAtFileCleanup> {
-    use sha2::{Digest, Sha256};
-
     #[cfg(not(unix))]
     {
         if envelope.dispatch.as_ref().is_some_and(|dispatch| {
@@ -567,7 +566,7 @@ pub(super) fn verify_private_at_files(
                 );
             }
         };
-        if format!("{:x}", Sha256::digest(&content)) != expected {
+        if content_hash::sha256_hex(&content) != expected {
             return private_at_file_error(
                 &mut cleanup,
                 "private runner @file content does not match its SHA-256 identity",
@@ -810,7 +809,6 @@ fn materialize_command_assets(
     envelope: &mut homeboy_core::runner_execution_envelope::RunnerExecutionEnvelope,
 ) -> homeboy_core::error::Result<Option<CommandAssetDirectory>> {
     use base64::Engine;
-    use sha2::{Digest, Sha256};
 
     let Some(assets) = envelope
         .metadata
@@ -894,7 +892,7 @@ fn materialize_command_assets(
                 None,
             ));
         }
-        let digest = format!("{:x}", Sha256::digest(&content));
+        let digest = content_hash::sha256_hex(&content);
         if asset.get("sha256").and_then(serde_json::Value::as_str) != Some(digest.as_str()) {
             return Err(homeboy_core::error::Error::internal_json(
                 "command asset content identity mismatch",

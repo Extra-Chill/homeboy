@@ -1,7 +1,7 @@
+use homeboy_engine_primitives::content_hash;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use homeboy::rig::trace_experiment;
 use homeboy_extension::trace as extension_trace;
@@ -406,10 +406,11 @@ fn rig_components(input: &TraceAggregateInput) -> Vec<TraceExperimentComponentMa
 }
 
 fn sha256_file(path: &Path) -> homeboy::core::Result<String> {
+    // Read through the overlay helper rather than hashing the path directly:
+    // it owns the `trace.experiment.overlay.sha256` error context this call
+    // site reports on failure.
     let bytes = trace_experiment::read_experiment_overlay_for_checksum(path)?;
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(content_hash::sha256_hex(&bytes))
 }
 
 fn sanitize_path_component(value: &str) -> String {

@@ -5,9 +5,9 @@
 //! references, and a prominent risk-flag section (#4398). The full verbose
 //! payload is available behind `--full`.
 
+use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 use homeboy::agents::agent_task_service as agent_task_service_direct;
@@ -88,8 +88,8 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
 fn bound_full_reader_payload(value: &mut Value) {
     match value {
         Value::String(text) if text.len() > FULL_TEXT_LIMIT => {
-            let digest = Sha256::digest(text.as_bytes());
-            *text = format!("[omitted {} bytes; sha256={:x}]", text.len(), digest);
+            let digest = content_hash::sha256_hex(text.as_bytes());
+            *text = format!("[omitted {} bytes; sha256={digest}]", text.len());
         }
         Value::Array(items) => {
             for item in items {

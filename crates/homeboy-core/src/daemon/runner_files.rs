@@ -7,8 +7,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
+use homeboy_engine_primitives::content_hash;
 use serde_json::json;
-use sha2::Digest;
 
 use super::remote_runner;
 use super::runner_workspace_root;
@@ -78,7 +78,7 @@ pub(super) fn upload_runner_file(
             )
         })?;
     if let Some(expected) = request.sha256.as_deref() {
-        let actual = format!("{:x}", sha2::Sha256::digest(&content));
+        let actual = content_hash::sha256_hex(&content);
         if actual != expected {
             return Err(Error::validation_invalid_argument(
                 "sha256",

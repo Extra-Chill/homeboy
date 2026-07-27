@@ -1,5 +1,6 @@
 //! Immutable execution facts captured after Lab admission and before dispatch.
 
+use homeboy_engine_primitives::content_hash;
 use std::collections::HashMap;
 
 pub(crate) const LAB_EXECUTION_BUNDLE_ENV: &str = "HOMEBOY_LAB_EXECUTION_BUNDLE";
@@ -67,9 +68,7 @@ pub(crate) fn validate_bundle_env(
                 && overlay
                     .get("content_hash")
                     .and_then(serde_json::Value::as_str)
-                    .is_some_and(|hash| {
-                        hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-                    })
+                    .is_some_and(content_hash::is_sha256_hex)
         })
     })
 }

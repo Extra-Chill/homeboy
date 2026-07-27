@@ -1,9 +1,9 @@
+use homeboy_engine_primitives::content_hash;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::agent_task::AgentTaskOutcome;
 use homeboy_core::observation::ObservationStore;
@@ -1326,14 +1326,11 @@ fn recovered_workspace_matches(resource: &ControllerScratchResource, workspace: 
 }
 
 fn file_sha256(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-    })?;
-    Ok(sha256(&bytes))
+    content_hash::sha256_file(path)
 }
 
 fn sha256(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    content_hash::sha256_hex(bytes)
 }
 
 fn scratch_recovery_command(resource: &ControllerScratchResource) -> Option<String> {

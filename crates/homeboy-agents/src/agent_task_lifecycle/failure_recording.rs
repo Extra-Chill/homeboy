@@ -1,4 +1,5 @@
 use super::*;
+use homeboy_engine_primitives::content_hash;
 use sha2::Digest;
 use std::path::{Path, PathBuf};
 
@@ -732,7 +733,7 @@ pub(crate) fn project_runner_evidence_refs(
             if !evidence.uri.starts_with("file://") {
                 continue;
             }
-            let reference_digest = format!("{:x}", sha2::Sha256::digest(evidence.uri.as_bytes()));
+            let reference_digest = content_hash::sha256_hex(evidence.uri.as_bytes());
             let encoded_task_id =
                 homeboy_core::execution_contract::encode_uri_component(&outcome.task_id);
             evidence.uri = format!(
@@ -1605,7 +1606,7 @@ pub fn verified_controller_artifact_projection(
             None,
         )
     })?;
-    let actual_sha256 = format!("{:x}", sha2::Sha256::digest(&bytes));
+    let actual_sha256 = content_hash::sha256_hex(&bytes);
     if candidate.sha256.as_deref() != Some(expected_sha256)
         || candidate.size_bytes != Some(bytes.len() as i64)
         || actual_sha256 != expected_sha256

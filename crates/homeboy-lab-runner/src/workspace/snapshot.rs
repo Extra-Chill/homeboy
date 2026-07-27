@@ -1,3 +1,4 @@
+use homeboy_engine_primitives::content_hash;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
@@ -318,7 +319,10 @@ fn collect_content_hash_entries_v2(
                         &mut manifest,
                         relative,
                         "symlink",
-                        Some(format!("sha256:{:x}", Sha256::digest(target.as_bytes()))),
+                        Some(format!(
+                            "sha256:{}",
+                            content_hash::sha256_hex(target.as_bytes())
+                        )),
                         Some(target.len() as u64),
                         None,
                     );
@@ -385,7 +389,7 @@ fn collect_content_hash_entries_v2(
                 &mut manifest,
                 relative,
                 "file",
-                Some(format!("sha256:{:x}", Sha256::digest(&contents))),
+                Some(format!("sha256:{}", content_hash::sha256_hex(&contents))),
                 Some(contents.len() as u64),
                 executable_capability.owner_value(&metadata),
             );

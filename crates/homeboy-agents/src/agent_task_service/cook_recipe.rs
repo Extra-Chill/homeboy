@@ -1,5 +1,6 @@
 //! Durable, versioned input boundary for cook continuation scheduling.
 
+use homeboy_engine_primitives::content_hash;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -7,7 +8,6 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::Digest;
 
 use crate::agent_task_lifecycle;
 use crate::agent_task_scheduler::AgentTaskPlan;
@@ -873,7 +873,7 @@ pub fn claim_continuation_for(
     run_id: &str,
 ) -> Result<Option<ClaimedCookContinuation>> {
     let key = format!("{cook_id}:{run_id}");
-    let hash = format!("{:x}", sha2::Sha256::digest(key.as_bytes()));
+    let hash = content_hash::sha256_hex(key.as_bytes());
     let root = queue_root()?;
     fs::create_dir_all(&root)
         .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?;
@@ -1230,7 +1230,7 @@ impl DurableCookContinuationQueue {
         fs::create_dir_all(&root).map_err(|error| {
             Error::internal_io(error.to_string(), Some(root.display().to_string()))
         })?;
-        let hash = format!("{:x}", sha2::Sha256::digest(continuation.key.as_bytes()));
+        let hash = content_hash::sha256_hex(continuation.key.as_bytes());
         let path = root.join(format!("{hash}.pending"));
         if root.join(format!("{hash}.completed")).exists()
             || fs::read_dir(&root)
@@ -1506,6 +1506,7 @@ mod tests {
         AgentTaskAggregate, AgentTaskAggregateStatus, AgentTaskAggregateTotals,
         AgentTaskProgressEvent, AgentTaskState,
     };
+    use sha2::Digest;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Debug)]

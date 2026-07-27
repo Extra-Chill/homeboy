@@ -1,10 +1,10 @@
+use homeboy_engine_primitives::content_hash;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use crate::agent_task::{
     AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus, AGENT_TASK_OUTCOME_SCHEMA,
@@ -1117,7 +1117,7 @@ fn has_recoverable_candidate_provenance(
 }
 
 fn valid_sha256(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    content_hash::is_sha256_hex(value)
 }
 
 #[cfg(test)]
@@ -1222,7 +1222,7 @@ fn promote_committed_changes(
             )),
         )
     })?;
-    let actual_sha256 = format!("{:x}", Sha256::digest(patch.as_bytes()));
+    let actual_sha256 = content_hash::sha256_hex(patch.as_bytes());
     if actual_sha256 != committed_patch.sha256 {
         return Err(Error::validation_invalid_argument(
             "committed_changes.sha256",
@@ -2320,7 +2320,7 @@ pub fn canonical_recoverable_patch_artifacts(
                 continue;
             }
         };
-        let digest = format!("{:x}", Sha256::digest(normalized.content.as_bytes()));
+        let digest = content_hash::sha256_hex(normalized.content.as_bytes());
         let identity = canonical_patch_identity_with_digest(&artifact, &digest);
         if !canonical.iter().any(|(existing, _)| existing == &identity) {
             canonical.push((identity, artifact));

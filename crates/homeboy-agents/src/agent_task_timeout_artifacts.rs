@@ -1,8 +1,8 @@
+use homeboy_engine_primitives::content_hash;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::agent_task::{
     AgentTaskArtifact, AgentTaskDiagnostic, AgentTaskEvidenceRef, AgentTaskOutcome,
@@ -588,11 +588,9 @@ fn mime_from_path(path: &Path) -> Option<String> {
 
 fn file_size_and_sha256(path: &Path) -> (Option<u64>, Option<String>) {
     let size_bytes = fs::metadata(path).ok().map(|metadata| metadata.len());
-    let sha256 = fs::read(path).ok().map(|bytes| {
-        let mut hasher = Sha256::new();
-        hasher.update(bytes);
-        format!("{:x}", hasher.finalize())
-    });
+    let sha256 = fs::read(path)
+        .ok()
+        .map(|bytes| content_hash::sha256_hex(&bytes));
     (size_bytes, sha256)
 }
 
