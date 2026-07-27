@@ -277,7 +277,14 @@ fn active_runner_job_summaries(status: Option<&str>) -> ActiveRunnerJobEnrichmen
     // every draining generation and can block local run discovery behind a
     // wedged runner. The indexed snapshot makes one bounded current-session
     // request per runner instead of scanning its historical generations.
-    let snapshots = match runner::statuses_indexed() {
+    active_runner_job_summaries_from_snapshots(runner::statuses_indexed(), status)
+}
+
+fn active_runner_job_summaries_from_snapshots(
+    snapshots: homeboy::core::Result<Vec<runner::RunnerActiveJobsSnapshot>>,
+    status: Option<&str>,
+) -> ActiveRunnerJobEnrichment {
+    let snapshots = match snapshots {
         Ok(snapshots) => snapshots,
         Err(error) => {
             return ActiveRunnerJobEnrichment {
@@ -327,6 +334,29 @@ fn active_runner_job_summaries(status: Option<&str>) -> ActiveRunnerJobEnrichmen
         runner_unavailable: unavailable,
     });
     ActiveRunnerJobEnrichment { runs, state }
+}
+
+#[cfg(test)]
+mod runner_enrichment_tests {
+    use super::*;
+
+    #[test]
+    fn total_indexed_snapshot_failure_is_typed_partial_output() {
+        let enrichment = active_runner_job_summaries_from_snapshots(
+            Err(Error::internal_unexpected("wedged runner probe")),
+            None,
+        );
+        let state = enrichment.state.expect("partial state");
+
+        assert!(enrichment.runs.is_empty());
+        assert_eq!(state.status, "partial");
+        assert!(state.partial);
+        assert_eq!(state.runner_unavailable.len(), 1);
+        assert_eq!(state.runner_unavailable[0].runner_id, "controller");
+        assert!(state.runner_unavailable[0]
+            .message
+            .contains("wedged runner probe"));
+    }
 }
 
 fn active_runner_job_run_summary_if_durable(

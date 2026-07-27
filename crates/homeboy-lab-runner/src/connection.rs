@@ -2379,6 +2379,22 @@ pub fn disconnect(runner_id: &str) -> Result<RunnerDisconnectReport> {
     stop_transport_recovery::disconnect_with_force(runner_id, false)
 }
 
+#[cfg(test)]
+mod indexed_inspection_tests {
+    #[test]
+    fn indexed_discovery_has_no_reconnect_or_ssh_path() {
+        let source = include_str!("connection.rs");
+        let start = source
+            .find("pub fn statuses_indexed()")
+            .expect("indexed discovery exists");
+        let body = &source[start..source.find("pub fn disconnect").expect("next function")];
+
+        assert!(!body.contains("recover_dead_direct_tunnel"));
+        assert!(!body.contains("connect("));
+        assert!(!body.contains("SshClient"));
+    }
+}
+
 mod remote_daemon;
 mod session_store;
 
