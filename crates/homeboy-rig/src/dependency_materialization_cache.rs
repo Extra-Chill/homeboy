@@ -147,13 +147,14 @@ impl DependencyMaterializationCache {
         for (key, value) in settings {
             environment.insert(format!("setting:{key}"), value.clone());
         }
-        environment.insert(
-            "PATH".to_string(),
-            crate::toolchain::command_step_path()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned(),
-        );
+        // The assembled toolchain PATH is deliberately NOT hashed here. It is a
+        // host-shaped string that changes whenever an unrelated version-managed
+        // toolchain is installed or removed, which invalidated every cached
+        // materialization on the machine. The stable identity the cache needs is
+        // `provenance.tools` (resolved executable path + version), which is
+        // resolved *through* that PATH. A step that declares its own `PATH` in
+        // `step.env` keeps it in the key via the `step.env` loop above — the
+        // previous unconditional insert clobbered that declared value.
         environment.insert(
             "homeboy".to_string(),
             homeboy_product_identity::product_version().to_string(),
