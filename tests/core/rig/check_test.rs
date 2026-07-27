@@ -34,6 +34,7 @@ fn minimal_rig() -> RigSpec {
         bench_profiles: Default::default(),
         fuzz_profiles: Default::default(),
         app_launcher: None,
+        toolchain: None,
     }
 }
 

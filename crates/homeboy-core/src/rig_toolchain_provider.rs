@@ -1,10 +1,15 @@
 //! Rig toolchain command-step PATH hook.
 //!
 //! Building the exec environment for an extension command step can prepend the
-//! rig toolchain's discovered bin directories (home bin dirs, nvm node bins,
-//! absolute toolchain dirs) to `PATH`. That path assembly is rig-toolchain
-//! behavior, so it is inverted behind this provider: core owns exec-env
-//! construction, the rig layer supplies the command-step PATH.
+//! rig toolchain's declared bin directories to `PATH`. That path assembly is
+//! rig-toolchain behavior, so it is inverted behind this provider: core owns
+//! exec-env construction, the rig layer supplies the command-step PATH.
+//!
+//! `rig_id` selects whose declaration applies. `None` means "no rig context is
+//! known here", which resolves to Homeboy's built-in default. That is the
+//! override seam: a caller with rig context can opt a specific rig's
+//! `toolchain` declaration into the exec environment instead of inheriting a
+//! process-global guess.
 //!
 //! With no provider registered (no rig layer present) the no-op contributes no
 //! path, so the exec env's `PATH` is left unchanged.
@@ -16,13 +21,16 @@ use std::sync::Mutex;
 pub trait RigToolchainProvider: Send + Sync {
     /// The `PATH` value (rig toolchain bin dirs prepended to the current PATH)
     /// for an extension command step, or `None` when no toolchain path applies.
-    fn command_step_path(&self) -> Option<OsString>;
+    ///
+    /// `rig_id` names the rig whose `toolchain` declaration applies; `None`
+    /// falls back to the built-in default.
+    fn command_step_path(&self, rig_id: Option<&str>) -> Option<OsString>;
 }
 
 struct NoopProvider;
 
 impl RigToolchainProvider for NoopProvider {
-    fn command_step_path(&self) -> Option<OsString> {
+    fn command_step_path(&self, _rig_id: Option<&str>) -> Option<OsString> {
         None
     }
 }
@@ -40,10 +48,10 @@ pub fn register_rig_toolchain_provider(provider: Box<dyn RigToolchainProvider>) 
 
 /// The rig toolchain command-step PATH via the registered provider (or none when
 /// the rig layer is absent).
-pub fn command_step_path() -> Option<OsString> {
+pub fn command_step_path(rig_id: Option<&str>) -> Option<OsString> {
     let slot = provider_slot().lock().expect("rig toolchain provider lock");
     match slot.as_deref() {
-        Some(provider) => provider.command_step_path(),
-        None => NoopProvider.command_step_path(),
+        Some(provider) => provider.command_step_path(rig_id),
+        None => NoopProvider.command_step_path(rig_id),
     }
 }

@@ -69,6 +69,7 @@ fn minimal_spec(id: &str) -> RigSpec {
         bench_profiles: HashMap::new(),
         fuzz_profiles: HashMap::new(),
         app_launcher: None,
+        toolchain: None,
     }
 }
 
@@ -707,6 +708,7 @@ fn test_run_down_cleans_state_owned_shared_paths() {
             bench_profiles: HashMap::new(),
             fuzz_profiles: HashMap::new(),
             app_launcher: None,
+            toolchain: None,
         };
 
         let up = crate::pipeline::run_pipeline(&rig, "up", true).expect("up pipeline");
@@ -769,6 +771,7 @@ fn test_run_status() {
             fuzz: None,
             trace: Default::default(),
             app_launcher: None,
+            toolchain: None,
             bench_workloads: HashMap::new(),
             trace_workloads: HashMap::new(),
             fuzz_workloads: Default::default(),
@@ -961,6 +964,7 @@ fn test_snapshot_state() {
         bench_profiles: HashMap::new(),
         fuzz_profiles: HashMap::new(),
         app_launcher: None,
+        toolchain: None,
     };
 
     let snapshot = snapshot_state(&rig);
@@ -1425,13 +1429,14 @@ fn dependency_materialization_cache_key_ignores_irrelevant_toolchain_path_entrie
         };
 
         let baseline = key();
-        let baseline_path = crate::toolchain::command_step_path().expect("toolchain path");
+        let baseline_path =
+            crate::toolchain::command_step_path(Some(&rig)).expect("toolchain path");
 
         // An unrelated version-managed toolchain appears on the host. It is
         // discovered into the command-step PATH but resolves nothing this step
         // uses.
         std::fs::create_dir_all(home.join(".nvm/versions/node/v24.13.1/bin")).expect("node bin");
-        let noisy_path = crate::toolchain::command_step_path().expect("toolchain path");
+        let noisy_path = crate::toolchain::command_step_path(Some(&rig)).expect("toolchain path");
 
         assert_ne!(
             baseline_path, noisy_path,

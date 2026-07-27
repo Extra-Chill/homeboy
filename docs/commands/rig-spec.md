@@ -50,6 +50,7 @@ touching component checkouts.
 | `fuzz_workloads` | object | No | Rig-owned out-of-tree fuzz workloads keyed by extension ID. |
 | `bench_profiles` | object | No | Named benchmark scenario profiles keyed by profile name. |
 | `app_launcher` | object | No | Optional desktop launcher wrapper config. |
+| `toolchain` | object | No | Declarative `PATH` assembly for `command` steps. Omit to keep the built-in default. |
 
 ## Workload Lifecycle Contracts
 
@@ -658,6 +659,55 @@ Workload paths support `~`, `${env.NAME}`, `${components.<id>.path}`, and `${pac
 ```
 
 Linux launchers use the same block with `"platform": "linux"` and write a `.desktop` file that invokes the target executable after preflight and `rig up` succeed.
+
+## `toolchain`
+
+`toolchain` declares which bin directories a rig's `command` steps see. Omitting
+it keeps Homeboy's built-in default, so rigs authored before this field are
+unchanged. Declaring it **replaces** the default outright — the rig states its
+whole toolchain rather than extending an orchestrator-owned guess.
+
+| Field | Type | Description |
+|---|---|---|
+| `prepend_paths` | array | Directories placed ahead of everything else, in declared order. |
+| `discover` | array | Version-manager style scans applied after `prepend_paths`. |
+| `append_paths` | array | Directories placed after `discover`, still ahead of the inherited `PATH`. |
+
+Resolution order is `prepend_paths` → `discover` → `append_paths` → inherited
+`PATH`. Entries are variable-expanded, dropped when the directory does not
+exist, and de-duplicated keeping the highest-priority occurrence.
+
+Each `discover` entry:
+
+| Field | Type | Description |
+|---|---|---|
+| `root` | string | Directory whose immediate children are scanned. |
+| `glob` | string | Optional `*`-wildcard filter on each child's file name. All children when omitted. |
+| `bin_subdir` | string | Optional subdirectory appended to each match. The match itself when omitted. |
+| `sort` | enum | `descending` (default), `ascending`, or `unsorted`. |
+
+```jsonc
+{
+  "toolchain": {
+    "prepend_paths": ["~/.local/bin", "${components.studio.path}/node_modules/.bin"],
+    "discover": [
+      {
+        "root": "~/.nvm/versions/node",
+        "glob": "v*",
+        "bin_subdir": "bin",
+        "sort": "descending"
+      }
+    ],
+    "append_paths": ["/opt/homebrew/bin", "/usr/local/bin"]
+  }
+}
+```
+
+The built-in default is equivalent to `prepend_paths` of `~/.local/bin`,
+`~/.cargo/bin`, `~/.kimaki/bin`, the nvm `discover` entry above, and
+`append_paths` of `/opt/homebrew/bin`, `/usr/local/bin`. Those language- and
+product-specific entries are legacy: they belong in host or rig configuration,
+and this field is the migration path.
 
 ## Variable Expansion
 

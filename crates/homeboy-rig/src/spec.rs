@@ -15,6 +15,7 @@ use homeboy_extension::bench::{BenchGate, BenchGateOp};
 mod check;
 mod dependencies;
 mod pipeline;
+mod toolchain;
 mod trace;
 mod workload;
 
@@ -29,6 +30,7 @@ pub use dependencies::{
 pub use pipeline::{
     GitOp, HostMutationOp, PatchOp, PipelineStep, ServiceOp, SharedPathOp, StackOp, SymlinkOp,
 };
+pub use toolchain::{PathDiscoverySort, PathDiscoverySpec, ToolchainSpec};
 pub use trace::{
     TraceDependencySpec, TraceExperimentArtifactSpec, TraceExperimentCommandSpec,
     TraceExperimentSpec, TraceGuardrailSpec, TraceNativePublicPreviewSpec,
@@ -187,6 +189,17 @@ pub struct RigSpec {
     /// `homeboy rig up` before opening the target app.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_launcher: Option<AppLauncherSpec>,
+
+    /// Declarative toolchain `PATH` assembly for this rig's `command` steps and
+    /// for extension executions that inherit the rig command-step PATH.
+    ///
+    /// Absent means "use Homeboy's built-in default discovery", which is what
+    /// every rig authored before this field gets — the default is unchanged.
+    /// Present replaces that default entirely, so a rig can state exactly which
+    /// bin directories its commands see instead of inheriting whatever
+    /// language-specific guesses the orchestrator ships with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolchain: Option<ToolchainSpec>,
 }
 
 /// Rig-level resource lifecycle defaults.

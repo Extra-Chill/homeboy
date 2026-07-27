@@ -58,6 +58,7 @@ fn rig(id: &str, resources: RigResourcesSpec) -> RigSpec {
         bench_profiles: Default::default(),
         fuzz_profiles: Default::default(),
         app_launcher: None,
+        toolchain: None,
     }
 }
 
