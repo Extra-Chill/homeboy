@@ -578,7 +578,13 @@ fn run_provider_resolve_command(
         .iter()
         .map(|argument| argument.replace("{handle}", handle))
         .collect::<Vec<_>>();
-    run_provider_lookup_command(provider_id, provider, &command, "resolve")
+    run_provider_lookup_command(
+        provider_id,
+        provider,
+        &command,
+        "resolve",
+        &provider.commands.resolve_not_found_exit_codes,
+    )
 }
 
 fn run_provider_list_command(
@@ -586,7 +592,7 @@ fn run_provider_list_command(
     provider: &WorktreeProviderConfig,
     command: &[String],
 ) -> Result<Vec<WorktreeProviderHandle>> {
-    run_provider_lookup_command(provider_id, provider, command, "list")
+    run_provider_lookup_command(provider_id, provider, command, "list", &[])
 }
 
 fn run_provider_lookup_command(
@@ -594,6 +600,7 @@ fn run_provider_lookup_command(
     provider: &WorktreeProviderConfig,
     command: &[String],
     operation: &str,
+    not_found_exit_codes: &[i32],
 ) -> Result<Vec<WorktreeProviderHandle>> {
     let (program, args) = command
         .split_first()
@@ -656,6 +663,13 @@ fn run_provider_lookup_command(
     }
     let output = output.output.into_output();
     if !output.status.success() {
+        if output
+            .status
+            .code()
+            .is_some_and(|code| not_found_exit_codes.contains(&code))
+        {
+            return Ok(Vec::new());
+        }
         return Err(Error::validation_invalid_argument_with_evidence(
             "to_worktree",
             format!(
@@ -1756,7 +1770,7 @@ mod tests {
         fs::write(
             &script,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -f '{}' ]; then\n    printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-9908\",\"path\":\"{}\",\"branch\":\"fix/9908\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n  else\n    printf '%s\\n' '{{\"worktrees\":[]}}'\n  fi\nelse\n  git init -b fix/9908 '{}' >/dev/null\n  printf '%s|%s|%s|%s|%s|%s' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" > '{}'\nfi\n",
+                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -f '{}' ]; then\n    printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-9908\",\"path\":\"{}\",\"branch\":\"fix/9908\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n  else\n    exit 1\n  fi\nelse\n  git init -b fix/9908 '{}' >/dev/null\n  printf '%s|%s|%s|%s|%s|%s' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" > '{}'\nfi\n",
                 state.display(),
                 workspace.display(),
                 workspace.display(),
@@ -1780,6 +1794,7 @@ mod tests {
                         "resolve".to_string(),
                         "{handle}".to_string(),
                     ]),
+                    resolve_not_found_exit_codes: vec![1],
                     ensure: Some(vec![
                         script.display().to_string(),
                         "create".to_string(),

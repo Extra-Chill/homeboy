@@ -2,6 +2,8 @@
 
 use super::support::*;
 use crate::agents::agent_task_service::DerivedCookBaselineCapability;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn promotion_source_resolves_completed_run_id() {
@@ -445,19 +447,64 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
             .status()
             .expect("fetch source base");
         assert!(status.success());
-        let status = Command::new("git")
-            .args([
-                "-C",
-                source.to_str().expect("source path"),
-                "worktree",
-                "add",
-                "-b",
-                "fixture-promoted",
-                target.to_str().expect("target path"),
-            ])
-            .status()
-            .expect("create target worktree");
-        assert!(status.success());
+        let provider = temp.path().join("worktree-provider.sh");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nset -eu\nif [ \"$1\" = resolve ]; then\n  if [ -d '{}' ]; then\n    printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@promoted\",\"path\":\"{}\",\"branch\":\"fixture-promoted\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n  else\n    exit 1\n  fi\nelse\n  git -C '{}' worktree add -b \"$5\" '{}' \"$4\" >/dev/null\nfi\n",
+                target.display(),
+                target.display(),
+                source.display(),
+                target.display(),
+            ),
+        )
+        .expect("write worktree provider");
+        let mut permissions = std::fs::metadata(&provider)
+            .expect("worktree provider metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&provider, permissions)
+            .expect("make worktree provider executable");
+        let mut config = homeboy::core::defaults::load_config();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            homeboy::core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy::core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                commands: homeboy::core::defaults::WorktreeProviderCommands {
+                    resolve: Some(vec![
+                        provider.display().to_string(),
+                        "resolve".to_string(),
+                        "{handle}".to_string(),
+                    ]),
+                    resolve_not_found_exit_codes: vec![1],
+                    ensure: Some(vec![
+                        provider.display().to_string(),
+                        "ensure".to_string(),
+                        "{handle}".to_string(),
+                        "{repo}".to_string(),
+                        "{base}".to_string(),
+                        "{head}".to_string(),
+                        "{task_url}".to_string(),
+                        "{idempotency_key}".to_string(),
+                    ]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy::core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                    },
+                ),
+            },
+        );
+        homeboy::core::defaults::save_config(&config).expect("save worktree provider config");
         std::fs::write(source.join("pre-existing-candidate.txt"), "preserve me\n")
             .expect("write pre-existing candidate");
         let expected_patch = temp.path().join("expected.patch");
@@ -492,7 +539,9 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                     cwd: Some(source.display().to_string()),
                     workspace: None,
                     repo: Some("fixture-component".to_string()),
-                    task_url: None,
+                    task_url: Some(
+                        "https://github.com/Extra-Chill/homeboy/issues/9908".to_string(),
+                    ),
                     backend: Some("fixture".to_string()),
                     selector: None,
                     model: None,
@@ -516,7 +565,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 attempt_run_id: None,
                 attempt_plan: None,
                 goal: None,
-                to_worktree: target.display().to_string(),
+                to_worktree: "fixture@promoted".to_string(),
                 provider_command: None,
                 provider_argv: vec!["sh".to_string(), provider.display().to_string()],
                 gates: VerifyGateArgs {
@@ -538,7 +587,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 no_finalize: true,
                 full: true,
                 base: "main".to_string(),
-                head: None,
+                head: Some("fixture-promoted".to_string()),
                 title: None,
                 commit_message: None,
                 protected_branches: review::default_protected_branches(),
@@ -565,6 +614,10 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
             .as_str()
             .expect("cook report attempt run id");
         let lifecycle = lifecycle_status(attempt_run_id).expect("local cook lifecycle");
+        assert_eq!(
+            lifecycle.metadata["worktree_provision"]["action"],
+            "ensured"
+        );
         assert_eq!(lifecycle.lifecycle.provider_runtime.len(), 1);
         assert_eq!(
             lifecycle.lifecycle.provider_runtime[0].metadata["model"],
@@ -605,7 +658,7 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
             request["schema"],
             "homeboy/agent-task-promotion-apply-request/v1"
         );
-        assert_eq!(request["to_workspace"], target.display().to_string());
+        assert_eq!(request["to_workspace"], "fixture@promoted");
         assert_eq!(request["changed_files"], json!(["agent-change.txt"]));
         assert!(request["patch"]
             .as_str()
