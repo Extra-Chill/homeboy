@@ -1,4 +1,7 @@
 use std::fs;
+use std::fs::OpenOptions;
+use std::hash::{Hash, Hasher};
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, SystemTime};
@@ -26,9 +29,9 @@ use super::git::{
 use super::snapshot::{
     effective_snapshot_excludes, ensure_no_runner_workspace_metadata_collision,
     local_snapshot_stats, materialize_prepared_workspace_update, materialize_snapshot,
-    materialize_snapshot_git, materialize_snapshot_incremental, snapshot_identity,
-    snapshot_manifest_delta, workspace_content_manifest_for_policy, SnapshotManifestDelta,
-    WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
+    materialize_snapshot_git, materialize_snapshot_incremental, materialize_snapshot_with_scratch,
+    snapshot_identity, snapshot_manifest_delta, workspace_content_manifest_for_policy,
+    SnapshotManifestDelta, WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
 };
 use super::types::{
     canonical_workspace_path, ByteFileCounts, LocalGitState, RunnerWorkspaceCurrentSummary,
@@ -137,6 +140,14 @@ pub fn sync_workspace(
                 &excludes,
                 WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
             )?;
+            let admission = require_snapshot_filesystem_admission(
+                &runner,
+                &local_path,
+                &remote_path,
+                &stats,
+                content_manifest.entry_count as u64,
+            )?;
+            let scratch = admission.scratch();
             let git_backed_snapshot = git_output(&local_path, &["rev-parse", "HEAD"]).is_ok();
             let (synthetic_checkout, fallback_reason) = if options.mode
                 == RunnerWorkspaceSyncMode::SnapshotGit
@@ -154,9 +165,13 @@ pub fn sync_workspace(
                     }
                     Err(_) => {
                         rollback_materialized_workspace(&runner, workspace_root, &remote_path);
-                        if let Err(snapshot_error) =
-                            materialize_snapshot(&runner, &local_path, &remote_path, &excludes)
-                        {
+                        if let Err(snapshot_error) = materialize_snapshot_with_scratch(
+                            &runner,
+                            &local_path,
+                            &remote_path,
+                            &excludes,
+                            Some(scratch),
+                        ) {
                             rollback_materialized_workspace(&runner, workspace_root, &remote_path);
                             return Err(snapshot_error);
                         }
@@ -209,9 +224,13 @@ pub fn sync_workspace(
                         }
                     },
                     None => {
-                        if let Err(error) =
-                            materialize_snapshot(&runner, &local_path, &remote_path, &excludes)
-                        {
+                        if let Err(error) = materialize_snapshot_with_scratch(
+                            &runner,
+                            &local_path,
+                            &remote_path,
+                            &excludes,
+                            Some(scratch),
+                        ) {
                             rollback_materialized_workspace(&runner, workspace_root, &remote_path);
                             return Err(error);
                         }
@@ -1829,6 +1848,442 @@ struct RunnerWorkspaceDiskProbe {
     total_bytes: u64,
 }
 
+/// Capacity needed while snapshot transport has both the archive-preparation
+/// tree and the runner's atomic destination temporary alive.  The fixed margin
+/// covers tar metadata and bounded control files; the multiplier deliberately
+/// models the two live copies rather than relying on the destination mount's
+/// aggregate free space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SnapshotFilesystemRequirement {
+    bytes: u64,
+    inodes: u64,
+}
+
+fn snapshot_filesystem_requirement(
+    logical_bytes: u64,
+    entry_count: u64,
+) -> SnapshotFilesystemRequirement {
+    const SAFETY_BYTES: u64 = 64 * 1024 * 1024;
+    const SAFETY_INODES: u64 = 128;
+    SnapshotFilesystemRequirement {
+        bytes: logical_bytes.saturating_mul(2).saturating_add(SAFETY_BYTES),
+        inodes: entry_count.saturating_mul(2).saturating_add(SAFETY_INODES),
+    }
+}
+
+/// Refuse before the archive pipeline or runner extraction creates a partial
+/// workspace. The controller scratch path and runner destination are probed
+/// independently: a roomy root filesystem cannot mask a constrained `/tmp`.
+fn require_snapshot_filesystem_admission(
+    runner: &super::super::Runner,
+    local_path: &Path,
+    remote_path: &str,
+    stats: &ByteFileCounts,
+    entry_count: u64,
+) -> Result<SnapshotFilesystemAdmission> {
+    let requirement = snapshot_filesystem_requirement(stats.bytes, entry_count);
+    let scratch = std::env::var_os("TMPDIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    // A stale or constrained configured TMPDIR is not an admission dead end.
+    // The source parent is deterministic and avoids reconstructing an ad-hoc
+    // shell environment; it is selected only when it passes the same probe.
+    let fallback_scratch = local_path.parent().unwrap_or(local_path).to_path_buf();
+    let scratch_probe = local_snapshot_filesystem_probe(&scratch, "controller snapshot scratch")?;
+    let (selected_scratch, scratch_probe) =
+        if snapshot_probe_has_capacity(&scratch_probe, requirement) {
+            (scratch, scratch_probe)
+        } else {
+            let fallback_probe = local_snapshot_filesystem_probe(
+                &fallback_scratch,
+                "controller alternate snapshot scratch",
+            )?;
+            if !snapshot_probe_has_capacity(&fallback_probe, requirement) {
+                return Err(snapshot_capacity_error(
+                    &scratch_probe,
+                    requirement,
+                    runner,
+                    Some(&fallback_scratch),
+                ));
+            }
+            (fallback_scratch, fallback_probe)
+        };
+    let destination_probe = match runner.kind {
+        RunnerKind::Local => {
+            local_snapshot_filesystem_probe(Path::new(remote_path), "runner snapshot destination")?
+        }
+        RunnerKind::Ssh => ssh_snapshot_filesystem_probe(runner, remote_path)?,
+    };
+    let admission = SnapshotFilesystemAdmission::acquire(
+        selected_scratch,
+        &[scratch_probe, destination_probe],
+        requirement,
+        runner,
+    )
+    .map_err(|mut error| {
+        error.retryable = Some(true);
+        error.details["snapshot_logical_bytes"] = serde_json::json!(stats.bytes);
+        error.details["snapshot_entry_count"] = serde_json::json!(entry_count);
+        error.details["copy_amplification"] = serde_json::json!(2);
+        error.details["safety_margin_bytes"] = serde_json::json!(64 * 1024 * 1024_u64);
+        error.details["required_bytes"] = serde_json::json!(requirement.bytes);
+        error.details["required_inodes"] = serde_json::json!(requirement.inodes);
+        error
+    })?;
+    Ok(admission)
+}
+
+#[derive(Debug, Clone)]
+struct SnapshotFilesystemProbe {
+    identity: String,
+    path: String,
+    role: &'static str,
+    available_bytes: u64,
+    available_inodes: u64,
+}
+
+fn snapshot_probe_has_capacity(
+    probe: &SnapshotFilesystemProbe,
+    requirement: SnapshotFilesystemRequirement,
+) -> bool {
+    probe.available_bytes >= requirement.bytes && probe.available_inodes >= requirement.inodes
+}
+
+#[cfg(unix)]
+fn local_snapshot_filesystem_probe(
+    path: &Path,
+    role: &'static str,
+) -> Result<SnapshotFilesystemProbe> {
+    let probe_path = existing_ancestor(path).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "snapshot_filesystem",
+            "snapshot capacity probe has no existing path ancestor",
+            Some(path.display().to_string()),
+            None,
+        )
+    })?;
+    let c_path = std::ffi::CString::new(probe_path.to_string_lossy().as_bytes()).map_err(|_| {
+        Error::validation_invalid_argument(
+            "snapshot_filesystem",
+            "snapshot capacity probe path contains an interior NUL",
+            Some(probe_path.display().to_string()),
+            None,
+        )
+    })?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return Err(Error::internal_io(
+            std::io::Error::last_os_error().to_string(),
+            Some("probe snapshot filesystem capacity".to_string()),
+        ));
+    }
+    let stat = unsafe { stat.assume_init() };
+    let available_bytes =
+        u64::try_from(u128::from(stat.f_bavail).saturating_mul(u128::from(stat.f_frsize.max(1))))
+            .unwrap_or(u64::MAX);
+    let available_inodes = stat.f_favail as u64;
+    Ok(SnapshotFilesystemProbe {
+        identity: format!("local:{:?}", stat.f_fsid),
+        path: probe_path.display().to_string(),
+        role,
+        available_bytes,
+        available_inodes,
+    })
+}
+
+#[cfg(not(unix))]
+fn local_snapshot_filesystem_probe(
+    _path: &Path,
+    role: &'static str,
+) -> Result<SnapshotFilesystemProbe> {
+    Ok(SnapshotFilesystemProbe {
+        identity: format!("local:{role}"),
+        path: String::new(),
+        role,
+        available_bytes: u64::MAX,
+        available_inodes: u64::MAX,
+    })
+}
+
+fn ssh_snapshot_filesystem_probe(
+    runner: &super::super::Runner,
+    path: &str,
+) -> Result<SnapshotFilesystemProbe> {
+    let (_, client) = ssh_client_for_runner(runner)?;
+    let command = format!(
+        "p={}; while [ ! -e \"$p\" ] && [ \"$p\" != / ]; do p=$(dirname \"$p\"); done; df -Pk \"$p\" | awk 'NR==2 {{print $1 \" \" $4}}'; df -Pi \"$p\" | awk 'NR==2 {{print $4}}'",
+        shell::quote_arg(path)
+    );
+    let output = client.execute_with_timeout(&command, WORKSPACE_PRUNE_TIMEOUT);
+    let mut values = output.stdout.split_whitespace();
+    let identity = values.next().unwrap_or("unknown");
+    let available_bytes = values
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|value| value.saturating_mul(1024));
+    let available_inodes = values.next().and_then(|value| value.parse::<u64>().ok());
+    match (available_bytes, available_inodes) {
+        (Some(available_bytes), Some(available_inodes)) => Ok(SnapshotFilesystemProbe {
+            // A runner ID scopes a device name to its host. `df` device names
+            // are only meaningful within one runner's namespace.
+            identity: format!("runner:{}:{identity}", runner.id),
+            path: path.to_string(),
+            role: "runner snapshot destination",
+            available_bytes,
+            available_inodes,
+        }),
+        _ => Err(Error::internal_unexpected(
+            "runner did not return a bounded filesystem capacity probe",
+        )
+        .with_retryable(true)),
+    }
+}
+
+fn snapshot_capacity_error(
+    probe: &SnapshotFilesystemProbe,
+    requirement: SnapshotFilesystemRequirement,
+    runner: &super::super::Runner,
+    alternate_scratch: Option<&Path>,
+) -> Error {
+    let alternate_command = format!(
+        "Retry with `TMPDIR={}` after ensuring that filesystem has capacity.",
+        shell_arg(
+            &alternate_scratch
+                .unwrap_or_else(|| Path::new(&probe.path))
+                .display()
+                .to_string()
+        )
+    );
+    let cleanup_command = format!(
+        "Reclaim stale Lab workspaces with `homeboy runner workspace prune {} --apply`.",
+        shell_arg(&runner.id)
+    );
+    let mut error = Error::validation_invalid_argument(
+        "snapshot_filesystem",
+        format!(
+            "{} filesystem `{}` lacks capacity for snapshot materialization",
+            probe.role, probe.identity
+        ),
+        Some(probe.path.clone()),
+        Some(vec![alternate_command.clone(), cleanup_command.clone()]),
+    )
+    .with_hint(alternate_command)
+    .with_hint(cleanup_command);
+    error.retryable = Some(true);
+    error.details["constrained_path"] = serde_json::json!(probe.path);
+    error.details["filesystem_identity"] = serde_json::json!(probe.identity);
+    error.details["available_bytes"] = serde_json::json!(probe.available_bytes);
+    error.details["available_inodes"] = serde_json::json!(probe.available_inodes);
+    error.details["required_bytes"] = serde_json::json!(requirement.bytes);
+    error.details["required_inodes"] = serde_json::json!(requirement.inodes);
+    error.details["active_reservations"] = serde_json::json!([]);
+    error
+}
+
+const SNAPSHOT_RESERVATION_TTL: Duration = Duration::from_secs(15 * 60);
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct SnapshotFilesystemReservationRecord {
+    lease_id: String,
+    controller_pid: u32,
+    created_unix_seconds: u64,
+    bytes: u64,
+    inodes: u64,
+}
+
+/// Admission stays live only during materialization. The ledger survives an
+/// interrupted controller so the next admission can recover a dead lease.
+#[derive(Debug)]
+struct SnapshotFilesystemAdmission {
+    scratch: std::path::PathBuf,
+    leases: Vec<(std::path::PathBuf, String)>,
+}
+
+impl SnapshotFilesystemAdmission {
+    fn scratch(&self) -> &Path {
+        &self.scratch
+    }
+
+    fn acquire(
+        scratch: std::path::PathBuf,
+        probes: &[SnapshotFilesystemProbe],
+        requirement: SnapshotFilesystemRequirement,
+        runner: &super::super::Runner,
+    ) -> Result<Self> {
+        let mut unique = std::collections::BTreeMap::new();
+        for probe in probes {
+            unique.entry(probe.identity.clone()).or_insert(probe);
+        }
+        let lease_id = uuid::Uuid::new_v4().to_string();
+        let mut leases = Vec::new();
+        for probe in unique.into_values() {
+            let path = snapshot_reservation_path(&probe.identity)?;
+            let _lock = snapshot_reservation_lock(&path)?;
+            let mut records = read_snapshot_reservation_records(&path)?;
+            records.retain(snapshot_reservation_is_live);
+            let reserved_bytes = records.iter().map(|record| record.bytes).sum::<u64>();
+            let reserved_inodes = records.iter().map(|record| record.inodes).sum::<u64>();
+            if probe.available_bytes.saturating_sub(reserved_bytes) < requirement.bytes
+                || probe.available_inodes.saturating_sub(reserved_inodes) < requirement.inodes
+            {
+                let mut error = snapshot_capacity_error(probe, requirement, runner, None);
+                error.details["active_reservations"] = serde_json::json!(records);
+                error.details["reserved_bytes"] = serde_json::json!(reserved_bytes);
+                error.details["reserved_inodes"] = serde_json::json!(reserved_inodes);
+                drop(leases);
+                return Err(error);
+            }
+            records.push(SnapshotFilesystemReservationRecord {
+                lease_id: lease_id.clone(),
+                controller_pid: std::process::id(),
+                created_unix_seconds: snapshot_reservation_now(),
+                bytes: requirement.bytes,
+                inodes: requirement.inodes,
+            });
+            write_snapshot_reservation_records_unlocked(&path, &records)?;
+            leases.push((path, lease_id.clone()));
+        }
+        Ok(Self { scratch, leases })
+    }
+}
+
+impl Drop for SnapshotFilesystemAdmission {
+    fn drop(&mut self) {
+        for (path, lease_id) in &self.leases {
+            let Ok(_lock) = snapshot_reservation_lock(path) else {
+                continue;
+            };
+            if let Ok(mut records) = read_snapshot_reservation_records(path) {
+                records.retain(|record| {
+                    record.lease_id != *lease_id && snapshot_reservation_is_live(record)
+                });
+                let _ = write_snapshot_reservation_records_unlocked(path, &records);
+            }
+        }
+    }
+}
+
+fn snapshot_reservation_path(identity: &str) -> Result<std::path::PathBuf> {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    identity.hash(&mut hasher);
+    let root = homeboy_core::paths::homeboy_data()?.join("snapshot-filesystem-reservations");
+    fs::create_dir_all(&root).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create snapshot reservation ledger".to_string()),
+        )
+    })?;
+    Ok(root.join(format!("{:016x}.json", hasher.finish())))
+}
+
+#[cfg(test)]
+fn snapshot_reservation_records(path: &Path) -> Result<Vec<SnapshotFilesystemReservationRecord>> {
+    let _lock = snapshot_reservation_lock(path)?;
+    read_snapshot_reservation_records(path)
+}
+
+fn read_snapshot_reservation_records(
+    path: &Path,
+) -> Result<Vec<SnapshotFilesystemReservationRecord>> {
+    match fs::read_to_string(path) {
+        Ok(value) => serde_json::from_str(&value).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("parse snapshot reservation ledger".to_string()),
+            )
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(Error::internal_io(
+            error.to_string(),
+            Some("read snapshot reservation ledger".to_string()),
+        )),
+    }
+}
+
+fn write_snapshot_reservation_records_unlocked(
+    path: &Path,
+    records: &[SnapshotFilesystemReservationRecord],
+) -> Result<()> {
+    let json = serde_json::to_vec(records).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("encode snapshot reservation ledger".to_string()),
+        )
+    })?;
+    let mut staged =
+        tempfile::NamedTempFile::new_in(parent_or_current_dir(path)).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("stage snapshot reservation ledger".to_string()),
+            )
+        })?;
+    staged.write_all(&json).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("write snapshot reservation ledger".to_string()),
+        )
+    })?;
+    staged.persist(path).map_err(|error| {
+        Error::internal_io(
+            error.error.to_string(),
+            Some("publish snapshot reservation ledger".to_string()),
+        )
+    })?;
+    Ok(())
+}
+
+fn snapshot_reservation_lock(path: &Path) -> Result<std::fs::File> {
+    let lock = path.with_extension("lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(lock)
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("lock snapshot reservation ledger".to_string()),
+            )
+        })?;
+    #[cfg(unix)]
+    if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_EX) } != 0 {
+        return Err(Error::internal_io(
+            std::io::Error::last_os_error().to_string(),
+            Some("lock snapshot reservation ledger".to_string()),
+        ));
+    }
+    Ok(file)
+}
+
+fn snapshot_reservation_now() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn snapshot_reservation_is_live(record: &SnapshotFilesystemReservationRecord) -> bool {
+    let fresh = snapshot_reservation_now().saturating_sub(record.created_unix_seconds)
+        < SNAPSHOT_RESERVATION_TTL.as_secs();
+    fresh && snapshot_reservation_pid_is_live(record.controller_pid)
+}
+
+#[cfg(unix)]
+fn snapshot_reservation_pid_is_live(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    unsafe {
+        libc::kill(pid, 0) == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+}
+
+#[cfg(not(unix))]
+fn snapshot_reservation_pid_is_live(_pid: u32) -> bool {
+    true
+}
+
 fn require_runner_workspace_disk_headroom(
     runner: &super::super::Runner,
     workspace_root: &str,
@@ -2792,7 +3247,10 @@ fn local_git_state(local_path: &Path) -> LocalGitState {
 mod tests {
     use super::{
         is_runner_git_auth_or_network_failure, retry_idempotent_ssh_operation,
-        runner_workspace_disk_is_critical, RunnerWorkspaceDiskProbe,
+        runner_workspace_disk_is_critical, snapshot_capacity_error,
+        snapshot_filesystem_requirement, snapshot_reservation_path, snapshot_reservation_records,
+        RunnerWorkspaceDiskProbe, SnapshotFilesystemAdmission, SnapshotFilesystemProbe,
+        SnapshotFilesystemRequirement,
     };
     use homeboy_core::error::{Error, ErrorCode};
     use homeboy_core::server::CommandOutput;
@@ -2939,5 +3397,145 @@ mod tests {
                 total_bytes: 500 * 1024 * 1024 * 1024,
             }
         ));
+    }
+
+    #[test]
+    fn snapshot_requirement_models_two_live_copies_and_inode_margin() {
+        let requirement = snapshot_filesystem_requirement(5 * 1024 * 1024 * 1024, 257_000);
+        assert_eq!(
+            requirement.bytes,
+            10 * 1024 * 1024 * 1024 + 64 * 1024 * 1024
+        );
+        assert_eq!(requirement.inodes, 514_128);
+    }
+
+    #[test]
+    fn snapshot_requirement_rejects_inode_exhaustion_independently_of_bytes() {
+        let requirement = snapshot_filesystem_requirement(1024, 10_000);
+        assert!(requirement.bytes < 64 * 1024 * 1024 + 4096);
+        assert!(requirement.inodes > 10_000);
+    }
+
+    fn probe(identity: &str, bytes: u64, inodes: u64) -> SnapshotFilesystemProbe {
+        SnapshotFilesystemProbe {
+            identity: identity.to_string(),
+            path: format!("/{identity}"),
+            role: "snapshot test",
+            available_bytes: bytes,
+            available_inodes: inodes,
+        }
+    }
+
+    fn reservation_runner() -> crate::Runner {
+        serde_json::from_value(serde_json::json!({ "id": "snapshot-reservation", "kind": "local" }))
+            .expect("runner")
+    }
+
+    #[test]
+    fn snapshot_admission_reports_constrained_tmpfs_with_retry_actions() {
+        let runner = reservation_runner();
+        let requirement = SnapshotFilesystemRequirement {
+            bytes: 100,
+            inodes: 100,
+        };
+        let error =
+            snapshot_capacity_error(&probe("tmpfs", 10_000, 10), requirement, &runner, None);
+
+        assert_eq!(error.retryable, Some(true));
+        assert_eq!(error.details["filesystem_identity"], "tmpfs");
+        assert_eq!(error.details["constrained_path"], "/tmpfs");
+        assert_eq!(error.details["required_inodes"], 100);
+        assert!(error
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("TMPDIR=")));
+        assert!(error
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("workspace prune")));
+    }
+
+    #[test]
+    fn snapshot_reservations_prevent_overcommit_then_release() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let runner = reservation_runner();
+            let requirement = SnapshotFilesystemRequirement {
+                bytes: 100,
+                inodes: 100,
+            };
+            let filesystem = probe("tmpfs-concurrent", 150, 150);
+            let first = SnapshotFilesystemAdmission::acquire(
+                tempfile::tempdir().expect("scratch").keep(),
+                &[filesystem.clone()],
+                requirement,
+                &runner,
+            )
+            .expect("first reservation");
+            let error = SnapshotFilesystemAdmission::acquire(
+                tempfile::tempdir().expect("scratch").keep(),
+                &[filesystem.clone()],
+                requirement,
+                &runner,
+            )
+            .expect_err("second reservation must not overcommit");
+            assert_eq!(error.retryable, Some(true));
+            assert_eq!(
+                error.details["active_reservations"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1
+            );
+            drop(first);
+            SnapshotFilesystemAdmission::acquire(
+                tempfile::tempdir().expect("scratch").keep(),
+                &[filesystem],
+                requirement,
+                &runner,
+            )
+            .expect("released reservation admits retry");
+        });
+    }
+
+    #[test]
+    fn snapshot_reservation_reclaims_dead_lease() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let runner = reservation_runner();
+            let requirement = SnapshotFilesystemRequirement {
+                bytes: 100,
+                inodes: 100,
+            };
+            let filesystem = probe("root-recovery", 150, 150);
+            let path = snapshot_reservation_path(&filesystem.identity).expect("ledger path");
+            let _lock = super::snapshot_reservation_lock(&path).expect("lock");
+            super::write_snapshot_reservation_records_unlocked(
+                &path,
+                &[super::SnapshotFilesystemReservationRecord {
+                    lease_id: "dead".to_string(),
+                    controller_pid: u32::MAX,
+                    created_unix_seconds: 0,
+                    bytes: 100,
+                    inodes: 100,
+                }],
+            )
+            .expect("write stale lease");
+            drop(_lock);
+
+            let admission = SnapshotFilesystemAdmission::acquire(
+                tempfile::tempdir().expect("scratch").keep(),
+                &[filesystem],
+                requirement,
+                &runner,
+            )
+            .expect("dead lease must be recovered");
+            assert_eq!(
+                snapshot_reservation_records(&path).expect("records").len(),
+                1
+            );
+            drop(admission);
+            assert!(snapshot_reservation_records(&path)
+                .expect("records")
+                .is_empty());
+        });
     }
 }
