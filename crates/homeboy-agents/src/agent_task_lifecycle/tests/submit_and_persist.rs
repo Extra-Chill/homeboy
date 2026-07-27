@@ -368,6 +368,62 @@ fn accepted_lab_runner_execution_preserves_controller_runtime_pin_across_host_id
 }
 
 #[test]
+fn planned_lab_runner_execution_preserves_controller_runtime_pin_before_acceptance() {
+    with_isolated_home(|_| {
+        let run_id = "cross-host-controller-pin-planned";
+        let controller_runtime = json!({
+            "schema": "homeboy/controller-runtime-pin/v2",
+            "originating": {
+                "build_identity": "homeboy 0.300.0+macos",
+                "pinned_executable": "/Users/chubes/.local/share/homeboy/controller-runtimes/macos/homeboy",
+                "sha256": "macos-controller-sha256"
+            }
+        });
+        let runner_runtime = json!({
+            "schema": "homeboy/controller-runtime-pin/v2",
+            "originating": {
+                "build_identity": "homeboy 0.300.0+linux",
+                "pinned_executable": "/home/chubes/.local/share/homeboy/controller-runtimes/linux/homeboy",
+                "sha256": "linux-runner-sha256"
+            }
+        });
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+        ];
+
+        submit_plan_with_runtime_admission(&test_plan(), Some(run_id), |_| {
+            Ok(controller_runtime.clone())
+        })
+        .expect("controller submits the durable run");
+        record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id,
+            runner_id: "linux-lab",
+            remote_workspace: "/home/chubes/homeboy",
+            remote_command: &command,
+            durable_plan: None,
+        })
+        .expect("controller records planned handoff");
+
+        submit_plan_with_runtime_admission_on_runner(
+            &test_plan(),
+            Some(run_id),
+            Some("linux-lab".to_string()),
+            |_| Ok(runner_runtime.clone()),
+        )
+        .expect("runner preserves controller-seat runtime before acceptance");
+
+        let record = status(run_id).expect("controller record");
+        assert_eq!(
+            record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY],
+            controller_runtime
+        );
+        assert_eq!(record.metadata["runner_execution_runtime"], runner_runtime);
+    });
+}
+
+#[test]
 fn accepted_lab_runner_execution_rejects_missing_controller_runtime_pin() {
     with_isolated_home(|_| {
         let run_id = "missing-cross-host-controller-pin";
