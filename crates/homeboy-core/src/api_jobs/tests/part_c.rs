@@ -8,6 +8,7 @@ use serde_json::json;
 use super::persistence::recovered_terminal_from_result;
 use super::store::{LinkedDurableRunResolution, RecoveredTerminalJob};
 use super::*;
+use crate::observation::{ArtifactRecord, RunRecord};
 use crate::secret_env_plan::SecretEnvPlan;
 use crate::source_snapshot::SourceSnapshot;
 use uuid::Uuid;
@@ -204,6 +205,8 @@ fn remote_runner_job_claim_respects_concurrency_limit() {
                 mutation_artifacts: None,
                 data: None,
                 observation_run_ids: Vec::new(),
+                observation_run_details: Vec::new(),
+                observation_run_details_compatibility_degraded: false,
                 artifacts: Vec::new(),
                 artifact_refs: Vec::new(),
                 metrics: None,
@@ -276,6 +279,8 @@ fn remote_runner_job_result_records_terminal_state_and_artifacts() {
                 mutation_artifacts: None,
                 data: Some(json!({ "summary": "passed" })),
                 observation_run_ids: Vec::new(),
+                observation_run_details: Vec::new(),
+                observation_run_details_compatibility_degraded: false,
                 artifacts: vec![JobArtifactMetadata {
                     id: "report".to_string(),
                     name: Some("report.json".to_string()),
@@ -312,6 +317,78 @@ fn remote_runner_job_result_records_terminal_state_and_artifacts() {
 }
 
 #[test]
+fn remote_runner_result_observation_details_are_additive_and_validate_declared_runs() {
+    let legacy: RemoteRunnerJobResult = serde_json::from_value(json!({ "exit_code": 0 }))
+        .expect("old result payload remains readable");
+    assert!(legacy.observation_run_details.is_empty());
+
+    let run = RunRecord {
+        id: "run-1".to_string(),
+        kind: "fuzz".to_string(),
+        component_id: None,
+        started_at: "2026-01-01T00:00:00Z".to_string(),
+        finished_at: Some("2026-01-01T00:01:00Z".to_string()),
+        status: "succeeded".to_string(),
+        command: None,
+        cwd: None,
+        homeboy_version: None,
+        git_sha: None,
+        rig_id: None,
+        metadata_json: json!({}),
+    };
+    let artifact = ArtifactRecord {
+        id: "report".to_string(),
+        run_id: run.id.clone(),
+        kind: "report".to_string(),
+        artifact_type: "file".to_string(),
+        path: "/runner/report.json".to_string(),
+        url: None,
+        public_url: None,
+        viewer_url: None,
+        viewer_links: Vec::new(),
+        sha256: Some("abc123".to_string()),
+        size_bytes: Some(42),
+        mime: Some("application/json".to_string()),
+        metadata_json: json!({ "complete": true }),
+        created_at: "2026-01-01T00:01:00Z".to_string(),
+    };
+    let result = RemoteRunnerJobResult {
+        exit_code: 0,
+        stdout: None,
+        stderr: None,
+        patch: None,
+        mutation_artifacts: None,
+        data: None,
+        observation_run_ids: vec![run.id.clone()],
+        observation_run_details: vec![RemoteRunnerObservationRunDetail::v1(run, vec![artifact])],
+        observation_run_details_compatibility_degraded: false,
+        artifacts: Vec::new(),
+        artifact_refs: Vec::new(),
+        metrics: None,
+        capture: None,
+    };
+    result
+        .validate_observation_run_details()
+        .expect("declared run has exactly one complete detail record");
+    let serialized = serde_json::to_value(&result).expect("serialize result");
+    assert_eq!(
+        serialized["observation_run_details"][0]["schema"],
+        RemoteRunnerObservationRunDetail::SCHEMA_V1
+    );
+
+    let mut unexpected = result.clone();
+    unexpected.observation_run_details[0].run.id = "unexpected-run".to_string();
+    unexpected.observation_run_details[0].artifacts.clear();
+    assert!(unexpected.validate_observation_run_details().is_err());
+
+    let mut missing = result;
+    missing.observation_run_details.clear();
+    missing
+        .validate_observation_run_details()
+        .expect("legacy declared run IDs remain accepted for fallback reconciliation");
+}
+
+#[test]
 fn remote_runner_job_failed_result_records_error_and_terminal_state() {
     let store = JobStore::default();
     let job = store
@@ -336,6 +413,8 @@ fn remote_runner_job_failed_result_records_error_and_terminal_state() {
                 mutation_artifacts: None,
                 data: None,
                 observation_run_ids: Vec::new(),
+                observation_run_details: Vec::new(),
+                observation_run_details_compatibility_degraded: false,
                 artifacts: Vec::new(),
                 artifact_refs: Vec::new(),
                 metrics: None,
@@ -595,6 +674,8 @@ fn dead_daemon_recovery_preserves_remote_work_and_uses_broker_claim_reconciliati
                 mutation_artifacts: None,
                 data: None,
                 observation_run_ids: Vec::new(),
+                observation_run_details: Vec::new(),
+                observation_run_details_compatibility_degraded: false,
                 artifacts: Vec::new(),
                 artifact_refs: Vec::new(),
                 metrics: None,

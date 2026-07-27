@@ -23,10 +23,11 @@ use super::records::{
 };
 use crate::{paths, Error, Result};
 pub use artifacts::directory_tree_sha256;
+pub use artifacts::ArtifactPublication;
 
 pub(crate) use helpers::*;
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 9;
+pub const CURRENT_SCHEMA_VERSION: i64 = 11;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ObservationDbStatus {

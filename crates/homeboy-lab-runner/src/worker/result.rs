@@ -1,10 +1,13 @@
 use base64::Engine;
 use serde_json::json;
+use std::collections::HashSet;
 
 use crate::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events;
 use homeboy_core::api_jobs::{
     Job, JobArtifactMetadata, RemoteRunnerJobRequest, RemoteRunnerJobResult,
+    RemoteRunnerObservationRunDetail,
 };
+use homeboy_core::execution_contract::EXECUTION_CONTRACT;
 use homeboy_core::run_outcome_envelope::RunOutcomeEnvelope;
 
 use super::super::capabilities::RunnerCapabilityPreflight;
@@ -105,7 +108,25 @@ pub(super) fn remote_runner_result_from_exec_output(
         );
     }
     data["outcome"] = serde_json::to_value(outcome).unwrap_or(serde_json::Value::Null);
-    let artifacts = mirror_file_artifact_content(exec_output.artifacts, &exec_output.remote_cwd);
+    let observation_run_ids: Vec<String> = exec_output.mirror_run_id.into_iter().collect();
+    let durable_details = durable_observation_run_details(&observation_run_ids);
+    let artifacts = mirror_file_artifact_content(
+        durable_detail_artifacts(&durable_details)
+            .into_iter()
+            .chain(exec_output.artifacts)
+            .collect(),
+        &exec_output.remote_cwd,
+    );
+    let observation_run_details = canonicalize_detail_artifact_paths(
+        durable_details,
+        &exec_output.runner_id,
+        exec_output.job_id.as_deref(),
+    );
+    let artifacts = canonicalize_broker_artifact_paths(
+        artifacts,
+        &exec_output.runner_id,
+        exec_output.job_id.as_deref(),
+    );
     RemoteRunnerJobResult {
         exit_code,
         stdout: Some(exec_output.stdout),
@@ -113,7 +134,9 @@ pub(super) fn remote_runner_result_from_exec_output(
         patch,
         mutation_artifacts,
         data: Some(data),
-        observation_run_ids: exec_output.mirror_run_id.into_iter().collect(),
+        observation_run_details,
+        observation_run_details_compatibility_degraded: false,
+        observation_run_ids,
         artifacts,
         artifact_refs: exec_output
             .runner_result
@@ -140,12 +163,98 @@ pub(super) fn remote_runner_result_from_exec_output(
     }
 }
 
+fn canonicalize_detail_artifact_paths(
+    mut details: Vec<RemoteRunnerObservationRunDetail>,
+    runner_id: &str,
+    job_id: Option<&str>,
+) -> Vec<RemoteRunnerObservationRunDetail> {
+    let Some(job_id) = job_id.filter(|id| !id.trim().is_empty()) else {
+        return details;
+    };
+    for detail in &mut details {
+        for artifact in &mut detail.artifacts {
+            if artifact.artifact_type == "file" {
+                artifact.path = broker_artifact_token(runner_id, job_id, &artifact.id);
+            }
+        }
+    }
+    details
+}
+
+fn canonicalize_broker_artifact_paths(
+    mut artifacts: Vec<JobArtifactMetadata>,
+    runner_id: &str,
+    job_id: Option<&str>,
+) -> Vec<JobArtifactMetadata> {
+    let Some(job_id) = job_id.filter(|id| !id.trim().is_empty()) else {
+        return artifacts;
+    };
+    for artifact in &mut artifacts {
+        artifact.path = Some(broker_artifact_token(runner_id, job_id, &artifact.id));
+    }
+    artifacts
+}
+
+fn broker_artifact_token(runner_id: &str, job_id: &str, artifact_id: &str) -> String {
+    EXECUTION_CONTRACT
+        .artifacts
+        .runner_artifact_ref(runner_id, job_id, artifact_id)
+}
+
+/// The broker retains terminal result payloads after the worker exits. Mirror
+/// every durable file artifact into that payload so its authenticated content
+/// route remains a byte source for every declared observation detail.
+fn durable_detail_artifacts(
+    details: &[RemoteRunnerObservationRunDetail],
+) -> Vec<JobArtifactMetadata> {
+    let mut ids = HashSet::new();
+    details
+        .iter()
+        .flat_map(|detail| detail.artifacts.iter())
+        .filter(|artifact| artifact.artifact_type == "file" && ids.insert(artifact.id.clone()))
+        .map(|artifact| JobArtifactMetadata {
+            id: artifact.id.clone(),
+            name: std::path::Path::new(&artifact.path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string),
+            path: Some(artifact.path.clone()),
+            url: artifact.public_url.clone().or_else(|| artifact.url.clone()),
+            mime: artifact.mime.clone(),
+            size_bytes: artifact
+                .size_bytes
+                .and_then(|size| u64::try_from(size).ok()),
+            sha256: artifact.sha256.clone(),
+            content_base64: None,
+            metadata: Some(artifact.metadata_json.clone()),
+        })
+        .collect()
+}
+
+pub(super) fn durable_observation_run_details(
+    run_ids: &[String],
+) -> Vec<RemoteRunnerObservationRunDetail> {
+    let Ok(store) = homeboy_core::observation::ObservationStore::open_initialized() else {
+        return Vec::new();
+    };
+    run_ids
+        .iter()
+        .filter_map(|run_id| {
+            let run = store.get_run(run_id).ok()??;
+            let artifacts = store.list_artifacts(run_id).ok()?;
+            Some(RemoteRunnerObservationRunDetail::v1(run, artifacts))
+        })
+        .collect()
+}
+
 fn mirror_file_artifact_content(
     artifacts: Vec<JobArtifactMetadata>,
     remote_cwd: &str,
 ) -> Vec<JobArtifactMetadata> {
+    let mut ids = HashSet::new();
     artifacts
         .into_iter()
+        .filter(|artifact| ids.insert(artifact.id.clone()))
         .map(|mut artifact| {
             if artifact.content_base64.is_none() {
                 if let Some(path) = artifact.path.as_deref().map(|path| {

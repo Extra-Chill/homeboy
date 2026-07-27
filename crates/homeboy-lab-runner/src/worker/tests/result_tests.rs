@@ -5,11 +5,14 @@ use crate::{
     RunnerResourceMetrics,
 };
 use homeboy_core::api_jobs::{JobArtifactMetadata, JobEvent, JobEventKind};
+use homeboy_core::observation::{ObservationStore, RunRecord};
 use homeboy_core::runner_execution_envelope::{
     BinaryProvenance, OrchestrationTargetProvenance, RunnerExecutionRecord,
 };
 
-use super::super::result::remote_runner_result_from_exec_output;
+use super::super::result::{
+    durable_observation_run_details, remote_runner_result_from_exec_output,
+};
 
 #[test]
 fn reverse_worker_result_preserves_exec_patch_and_artifacts() {
@@ -91,6 +94,135 @@ fn reverse_worker_result_preserves_exec_patch_and_artifacts() {
             .map(|artifact| artifact.artifact_id.as_str()),
         Some("patch.diff")
     );
+}
+
+#[test]
+fn reverse_worker_result_reads_persisted_observation_run_details() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run = RunRecord {
+            id: "durable-run".to_string(),
+            kind: "fuzz".to_string(),
+            component_id: None,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            finished_at: Some("2026-01-01T00:01:00Z".to_string()),
+            status: "succeeded".to_string(),
+            command: None,
+            cwd: None,
+            homeboy_version: None,
+            git_sha: None,
+            rig_id: None,
+            metadata_json: json!({}),
+        };
+        ObservationStore::open_initialized()
+            .expect("store")
+            .import_run(&run)
+            .expect("persist terminal run");
+
+        let details = durable_observation_run_details(&[run.id.clone()]);
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].run, run);
+        assert!(details[0].artifacts.is_empty());
+    });
+}
+
+#[test]
+fn reverse_worker_result_transports_every_durable_file_artifact_once() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = RunRecord {
+            id: "durable-multi-artifact-run".to_string(),
+            kind: "test".to_string(),
+            component_id: None,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            finished_at: Some("2026-01-01T00:01:00Z".to_string()),
+            status: "pass".to_string(),
+            command: None,
+            cwd: None,
+            homeboy_version: None,
+            git_sha: None,
+            rig_id: None,
+            metadata_json: json!({}),
+        };
+        store.import_run(&run).expect("persist run");
+        for (id, bytes) in [
+            ("first", b"direct first".as_slice()),
+            ("second", b"direct second".as_slice()),
+        ] {
+            let source = home.path().join(id);
+            std::fs::write(&source, bytes).expect("write direct artifact");
+            store
+                .record_artifact_with_id(&run.id, "test_output", &source, id, json!({}))
+                .expect("persist durable artifact");
+        }
+
+        let result = remote_runner_result_from_exec_output(
+            RunnerExecOutput {
+                variant: "exec",
+                command: "runner.exec",
+                runner_id: "lab".to_string(),
+                dry_run: false,
+                mode: RunnerExecMode::Local,
+                argv: vec!["true".to_string()],
+                remote_cwd: home.path().display().to_string(),
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                source_snapshot: None,
+                job: None,
+                runner_job: None,
+                job_id: Some("broker-job-1".to_string()),
+                job_events: None,
+                mirror_run_id: Some(run.id.clone()),
+                patch: None,
+                mutation_artifacts: None,
+                artifacts: vec![JobArtifactMetadata {
+                    id: "first".to_string(),
+                    name: None,
+                    path: None,
+                    url: None,
+                    mime: None,
+                    size_bytes: None,
+                    sha256: None,
+                    content_base64: None,
+                    metadata: None,
+                }],
+                promoted_outputs: Vec::new(),
+                structured_summaries: Vec::new(),
+                metrics: None,
+                capture: None,
+                execution_record: None,
+                runner_result: None,
+                handoff: None,
+                diagnostics: None,
+            },
+            0,
+            None,
+        );
+
+        assert_eq!(result.observation_run_details[0].artifacts.len(), 2);
+        assert_eq!(
+            result.observation_run_details[0].artifacts[0].path,
+            "runner-artifact://lab/broker-job-1/first"
+        );
+        assert!(!result.observation_run_details[0].artifacts[0]
+            .path
+            .starts_with(home.path().to_str().expect("home path")));
+        assert_eq!(result.artifacts.len(), 2);
+        assert_eq!(
+            result.artifacts[0].path.as_deref(),
+            Some("runner-artifact://lab/broker-job-1/first")
+        );
+        assert_eq!(result.artifacts[0].id, "first");
+        assert_eq!(
+            result.artifacts[0].content_base64.as_deref(),
+            Some("ZGlyZWN0IGZpcnN0")
+        );
+        assert_eq!(result.artifacts[1].id, "second");
+        assert_eq!(
+            result.artifacts[1].content_base64.as_deref(),
+            Some("ZGlyZWN0IHNlY29uZA==")
+        );
+    });
 }
 
 #[test]

@@ -341,7 +341,11 @@ pub(super) fn exec_via_daemon(
             .as_ref()
             .and_then(|workload| workload.notification_route.as_ref()),
     );
-    let artifacts = job.artifacts.clone();
+    let artifacts = mirror
+        .as_ref()
+        .map(|evidence| crate::evidence::controller_artifact_metadata(&evidence.runs))
+        .transpose()?
+        .unwrap_or_default();
     if let Some(session) = accepted_session.as_ref() {
         super::super::generation_store::record_job_artifacts(
             &runner.id,

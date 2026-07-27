@@ -24,11 +24,13 @@ impl ObservationStore {
 
         let connection = schema::open_connection(&path)?;
         schema::apply_migrations(&connection)?;
-        Ok(Self {
+        let store = Self {
             connection,
             path,
             readonly: false,
-        })
+        };
+        store.reconcile_unfinished_artifact_publications()?;
+        Ok(store)
     }
 
     /// Open an existing observation database without any initialization work.
@@ -595,6 +597,47 @@ impl ObservationStore {
             ensure_identical("run", &run.id, &existing, run)?;
         }
         Ok(())
+    }
+
+    /// Insert a synthetic controller run exactly once. The caller that wins the
+    /// insert owns `publication_token`; concurrent readers must not inherit it.
+    pub fn import_synthetic_run(&self, run: &RunRecord, publication_token: &str) -> Result<bool> {
+        validate_required("run.id", &run.id)?;
+        let token = run
+            .metadata_json
+            .pointer("/lab/synthetic_publication_token")
+            .and_then(serde_json::Value::as_str);
+        if token != Some(publication_token) {
+            return Err(Error::internal_unexpected(
+                "synthetic run publication token does not match its metadata",
+            ));
+        }
+        let metadata_json = serialize_metadata(&run.metadata_json)?;
+        execute_with_retry("import synthetic run record", || {
+            self.connection.execute(
+                r#"
+                INSERT OR IGNORE INTO runs(
+                    id, kind, component_id, started_at, finished_at, status,
+                    command, cwd, homeboy_version, git_sha, rig_id, metadata_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                "#,
+                params![
+                    run.id,
+                    run.kind,
+                    run.component_id,
+                    run.started_at,
+                    run.finished_at,
+                    run.status,
+                    run.command,
+                    run.cwd,
+                    run.homeboy_version,
+                    run.git_sha,
+                    run.rig_id,
+                    metadata_json,
+                ],
+            )
+        })
+        .map(|inserted| inserted == 1)
     }
 
     pub fn upsert_imported_run(&self, run: &RunRecord) -> Result<()> {

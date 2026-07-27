@@ -1,7 +1,9 @@
 use super::*;
+use base64::Engine;
 use homeboy_core::api_jobs::JobEventKind;
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 #[test]
@@ -1187,6 +1189,7 @@ fn reverse_broker_exec_submits_job_and_polls_result() {
         let broker_url = format!("http://{addr}");
         let worker_broker_url = broker_url.clone();
         let worker = std::thread::spawn(move || {
+            let artifact_bytes = b"reverse patch";
             let client = Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()
@@ -1242,8 +1245,9 @@ fn reverse_broker_exec_submits_job_and_polls_result() {
                             "name": "reverse.patch",
                             "path": "/srv/homeboy/.homeboy/artifacts/reverse.patch",
                             "mime": "text/x-diff",
-                            "size_bytes": 12,
-                            "sha256": "abc123",
+                            "size_bytes": artifact_bytes.len(),
+                            "sha256": format!("{:x}", Sha256::digest(artifact_bytes)),
+                            "content_base64": base64::engine::general_purpose::STANDARD.encode(artifact_bytes),
                             "metadata": { "kind": "lab_fix_patch" }
                         }]
                     }
@@ -1282,13 +1286,12 @@ fn reverse_broker_exec_submits_job_and_polls_result() {
         assert!(output.job_id.is_some());
         let mirror_run_id = output.mirror_run_id.as_deref().expect("mirror run id");
         assert!(mirror_run_id.starts_with("runner-exec-test-lab-"));
-        assert_eq!(
-            output
-                .patch
-                .as_ref()
-                .and_then(|patch| patch.get("patch_artifact_path").and_then(Value::as_str)),
-            Some("metadata-only:reverse-patch")
-        );
+        let patch_path = output
+            .patch
+            .as_ref()
+            .and_then(|patch| patch.get("patch_artifact_path").and_then(Value::as_str))
+            .expect("controller patch path");
+        assert!(!patch_path.starts_with("metadata-only:"));
         assert_eq!(
             output
                 .mutation_artifacts
@@ -1339,7 +1342,11 @@ fn reverse_broker_exec_submits_job_and_polls_result() {
             .expect("read reverse artifact")
             .expect("reverse artifact");
         assert_eq!(artifact.run_id, mirror_run_id);
-        assert_eq!(artifact.path, "metadata-only:reverse-patch");
+        assert_eq!(artifact.path, patch_path);
+        assert_eq!(
+            std::fs::read(&artifact.path).expect("controller patch bytes"),
+            b"reverse patch"
+        );
     });
 }
 

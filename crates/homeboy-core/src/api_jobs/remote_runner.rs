@@ -1,10 +1,10 @@
-use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 
 use homeboy_engine_primitives::content_hash;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use super::persistence::{
@@ -427,6 +427,15 @@ pub struct RemoteRunnerJobResult {
     pub data: Option<Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub observation_run_ids: Vec<String>,
+    /// Durable terminal observations retained by a reverse worker. Each record
+    /// carries its complete artifact metadata so disconnected reconciliation
+    /// never needs a live runner endpoint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observation_run_details: Vec<RemoteRunnerObservationRunDetail>,
+    /// Set by the broker when a legacy worker declared run IDs without the
+    /// typed terminal records needed for disconnected reconciliation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub observation_run_details_compatibility_degraded: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<JobArtifactMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -435,6 +444,96 @@ pub struct RemoteRunnerJobResult {
     pub metrics: Option<RunnerResourceMetrics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture: Option<CommandCaptureMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteRunnerObservationRunDetail {
+    pub schema: String,
+    pub run: crate::observation::RunRecord,
+    #[serde(default)]
+    pub artifacts: Vec<crate::observation::ArtifactRecord>,
+}
+
+impl RemoteRunnerObservationRunDetail {
+    pub const SCHEMA_V1: &'static str = "homeboy/remote-runner-observation-run-detail/v1";
+
+    pub fn v1(
+        run: crate::observation::RunRecord,
+        artifacts: Vec<crate::observation::ArtifactRecord>,
+    ) -> Self {
+        Self {
+            schema: Self::SCHEMA_V1.to_string(),
+            run,
+            artifacts,
+        }
+    }
+}
+
+impl RemoteRunnerJobResult {
+    pub fn validate_observation_run_details(&self) -> Result<()> {
+        let declared = self
+            .observation_run_ids
+            .iter()
+            .map(|id| id.trim())
+            .collect::<HashSet<_>>();
+        if declared.len() != self.observation_run_ids.len()
+            || declared.iter().any(|id| id.is_empty())
+        {
+            return Err(Error::validation_invalid_argument(
+                "observation_run_ids",
+                "declared observation run ids must be unique non-empty strings",
+                None,
+                None,
+            ));
+        }
+
+        let mut detail_ids = HashSet::new();
+        for detail in &self.observation_run_details {
+            if detail.schema != RemoteRunnerObservationRunDetail::SCHEMA_V1 {
+                return Err(Error::validation_invalid_argument(
+                    "observation_run_details.schema",
+                    "unsupported observation run detail schema",
+                    Some(detail.schema.clone()),
+                    None,
+                ));
+            }
+            if detail.run.id.trim().is_empty() || !detail_ids.insert(detail.run.id.clone()) {
+                return Err(Error::validation_invalid_argument(
+                    "observation_run_details",
+                    "observation run detail records must have unique non-empty run ids",
+                    None,
+                    None,
+                ));
+            }
+            if detail
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.run_id != detail.run.id)
+            {
+                return Err(Error::validation_invalid_argument(
+                    "observation_run_details.artifacts",
+                    "observation run detail artifacts must belong to their embedded run",
+                    Some(detail.run.id.clone()),
+                    None,
+                ));
+            }
+        }
+        // Legacy workers only published identities. Keep accepting that wire
+        // shape so the controller can use its durable artifact fallback.
+        if self.observation_run_details.is_empty() {
+            return Ok(());
+        }
+        if declared.len() != detail_ids.len() || declared.iter().any(|id| !detail_ids.contains(*id))
+        {
+            return Err(Error::validation_invalid_argument(
+                "observation_run_details",
+                "every declared observation run id requires one matching detail record",
+                None,
+                None,
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -799,9 +898,12 @@ impl JobStore {
         job_id: Uuid,
         runner_id: &str,
         claim_id: &str,
-        result: RemoteRunnerJobResult,
+        mut result: RemoteRunnerJobResult,
     ) -> Result<Job> {
         self.ensure_remote_runner_claim(job_id, runner_id, claim_id)?;
+        result.validate_observation_run_details()?;
+        result.observation_run_details_compatibility_degraded =
+            !result.observation_run_ids.is_empty() && result.observation_run_details.is_empty();
         let status = if result.exit_code == 0 {
             JobStatus::Succeeded
         } else {
@@ -998,6 +1100,14 @@ impl JobStore {
     }
 
     pub(crate) fn reconcile_expired_remote_runner_claims(&self, now_ms: u64) -> Result<Vec<Job>> {
+        self.reconcile_expired_remote_runner_claims_for_runner(now_ms, None)
+    }
+
+    pub(crate) fn reconcile_expired_remote_runner_claims_for_runner(
+        &self,
+        now_ms: u64,
+        runner_id: Option<&str>,
+    ) -> Result<Vec<Job>> {
         let expired_ids = {
             let inner = self.inner.lock().expect("job store mutex poisoned");
             inner
@@ -1006,6 +1116,9 @@ impl JobStore {
                 .filter(|stored| {
                     stored.remote_runner.is_some()
                         && stored.job.status == JobStatus::Running
+                        && runner_id.is_none_or(|runner_id| {
+                            stored.job.target_runner_id.as_deref() == Some(runner_id)
+                        })
                         && stored
                             .job
                             .claim_expires_at_ms

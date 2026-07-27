@@ -21,8 +21,8 @@ pub use download::{download_remote_artifact, RemoteArtifactDownload};
 pub use homeboy_core::api_jobs::RunnerJobLogSnapshot;
 pub use mirror::runner_job_log_snapshot_for_session;
 pub use mirror::{
-    mirror_connected_runner_run, mirror_daemon_evidence, mirror_daemon_job_progress,
-    mirror_reverse_broker_evidence, mirrored_runner_job_identity, refresh_mirrored_daemon_evidence,
-    runner_job_log_snapshot, terminalize_mirrored_daemon_job,
+    controller_artifact_metadata, mirror_connected_runner_run, mirror_daemon_evidence,
+    mirror_daemon_job_progress, mirror_reverse_broker_evidence, mirrored_runner_job_identity,
+    refresh_mirrored_daemon_evidence, runner_job_log_snapshot, terminalize_mirrored_daemon_job,
 };
 pub(crate) use util::{local_job_run_id, runner_exec_run_label};

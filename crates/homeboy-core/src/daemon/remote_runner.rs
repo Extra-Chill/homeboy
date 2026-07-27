@@ -40,18 +40,17 @@ impl BrokerAuthContext {
         &self,
         required: BrokerScope,
         runner_id: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<Option<crate::broker_auth::BrokerAuthGrant>> {
         if self.trusted_local {
-            return Ok(());
+            return Ok(None);
         }
         let store = BrokerAuthStore::load()?;
-        store.authorize(
+        Ok(Some(store.authorize(
             self.loopback_bind,
             self.token.as_deref(),
             required,
             runner_id,
-        )?;
-        Ok(())
+        )?))
     }
 }
 
@@ -130,15 +129,15 @@ pub(in crate::daemon) fn route(
             Ok(body) => daemon_endpoint_response("runner.jobs.submissions.lookup", body),
             Err(err) => auth_or_bad_request(err),
         },
-        ("POST", "/runner/jobs/reconcile") => match reconcile(job_store) {
+        ("POST", "/runner/jobs/reconcile") => match reconcile(body, job_store, auth) {
             Ok(body) => daemon_endpoint_response("runner.jobs.reconcile", body),
-            Err(err) => error_response(400, err),
+            Err(err) => auth_or_bad_request(err),
         },
         ("POST", "/runner/jobs/claim") => match claim(body, job_store, auth) {
             Ok(body) => daemon_endpoint_response("runner.jobs.claim", body),
             Err(err) => auth_or_bad_request(err),
         },
-        ("GET", path) if path.starts_with("/runner/jobs/") => lookup(path, job_store),
+        ("GET", path) if path.starts_with("/runner/jobs/") => lookup(path, job_store, auth),
         ("POST", path) if path.starts_with("/runner/jobs/") => update(path, body, job_store, auth),
         _ => error_response(
             404,
@@ -156,7 +155,13 @@ pub(in crate::daemon) fn route(
     }
 }
 
-fn lookup(path: &str, job_store: &JobStore) -> HttpResponse {
+fn lookup(path: &str, job_store: &JobStore, auth: &BrokerAuthContext) -> HttpResponse {
+    if let Some((job_id, run_id)) = job_run_path(path) {
+        return match lookup_run(job_id, &run_id, job_store, auth) {
+            Ok(body) => daemon_endpoint_response("runner.jobs.runs.lookup", body),
+            Err(err) => lookup_run_error_response(err),
+        };
+    }
     let Some((job_id, artifact_id, content)) = job_artifact_path(path) else {
         return error_response(
             404,
@@ -172,17 +177,114 @@ fn lookup(path: &str, job_store: &JobStore) -> HttpResponse {
     };
 
     let result = if content {
-        lookup_artifact_content(job_id, &artifact_id, job_store)
+        lookup_artifact_content(job_id, &artifact_id, job_store, auth)
     } else {
-        lookup_artifact(job_id, &artifact_id, job_store)
+        lookup_artifact(job_id, &artifact_id, job_store, auth)
     };
     match result {
         Ok(body) => daemon_endpoint_response("runner.jobs.artifacts.lookup", body),
-        Err(err) => error_response(404, err),
+        Err(err) => lookup_run_error_response(err),
     }
 }
 
-fn lookup_artifact(job_id: Uuid, artifact_id: &str, job_store: &JobStore) -> Result<Value> {
+fn lookup_run(
+    job_id: Uuid,
+    run_id: &str,
+    job_store: &JobStore,
+    auth: &BrokerAuthContext,
+) -> Result<Value> {
+    authorize_job_read(job_id, job_store, auth)?;
+    let result = job_store
+        .events(job_id)?
+        .into_iter()
+        .rev()
+        .find(|event| event.kind == JobEventKind::Result)
+        .and_then(|event| event.data)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_id",
+                "terminal job result is unavailable",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    let result: RemoteRunnerJobResult = serde_json::from_value(result).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("parse persisted reverse runner result".to_string()),
+        )
+    })?;
+    result.validate_observation_run_details().map_err(|error| {
+        Error::internal_json(
+            error.message,
+            Some("validate persisted reverse runner run details".to_string()),
+        )
+    })?;
+    let detail = result
+        .observation_run_details
+        .iter()
+        .find(|detail| detail.run.id == run_id)
+        .cloned()
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "run_id",
+                "declared observation run not found for job",
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    Ok(json!({ "job_id": job_id.to_string(), "run": detail }))
+}
+
+fn lookup_run_error_response(err: Error) -> HttpResponse {
+    let status = match err.code {
+        crate::error::ErrorCode::BrokerAuthDenied => 401,
+        crate::error::ErrorCode::RunnerPolicyDenied => 403,
+        crate::error::ErrorCode::InternalIoError
+        | crate::error::ErrorCode::InternalJsonError
+        | crate::error::ErrorCode::InternalUnexpected => 500,
+        _ => 404,
+    };
+    error_response(status, err)
+}
+
+fn job_run_path(path: &str) -> Option<(Uuid, String)> {
+    let parts = path
+        .strip_prefix("/runner/jobs/")?
+        .split('/')
+        .collect::<Vec<_>>();
+    (parts.len() == 3 && parts[1] == "runs")
+        .then(|| Some((Uuid::parse_str(parts[0]).ok()?, parts[2].to_string())))?
+}
+
+fn authorize_job_read(job_id: Uuid, job_store: &JobStore, auth: &BrokerAuthContext) -> Result<()> {
+    // Authenticate before revealing whether the broker holds this job.
+    let grant = match auth.authorize(BrokerScope::Work, None) {
+        Ok(grant) => grant,
+        // Controllers need to observe jobs they submit, but that must not give
+        // their Submit credential any unrelated worker privileges.
+        Err(_) => auth.authorize(BrokerScope::Submit, None)?,
+    };
+    let job = job_store.get(job_id)?;
+    if let Some(grant) = grant {
+        if job.target_runner_id.as_deref() != Some(grant.runner_id.as_str()) {
+            return Err(Error::new(
+                crate::error::ErrorCode::RunnerPolicyDenied,
+                "remote runner job is not owned by this runner",
+                json!({ "runner_id": grant.runner_id }),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn lookup_artifact(
+    job_id: Uuid,
+    artifact_id: &str,
+    job_store: &JobStore,
+    auth: &BrokerAuthContext,
+) -> Result<Value> {
+    authorize_job_read(job_id, job_store, auth)?;
     let job = job_store.get(job_id)?;
     let encoded_artifact_id = crate::execution_contract::encode_uri_component(artifact_id);
     let content_path = format!("/runner/jobs/{job_id}/artifacts/{encoded_artifact_id}/content");
@@ -222,7 +324,13 @@ fn lookup_artifact(job_id: Uuid, artifact_id: &str, job_store: &JobStore) -> Res
     }))
 }
 
-fn lookup_artifact_content(job_id: Uuid, artifact_id: &str, job_store: &JobStore) -> Result<Value> {
+fn lookup_artifact_content(
+    job_id: Uuid,
+    artifact_id: &str,
+    job_store: &JobStore,
+    auth: &BrokerAuthContext,
+) -> Result<Value> {
+    authorize_job_read(job_id, job_store, auth)?;
     let artifact = mirrored_artifact_content(job_id, artifact_id, job_store)?.ok_or_else(|| {
         Error::validation_invalid_argument(
             "artifact_id",
@@ -293,9 +401,20 @@ fn inline_content_retrieval() -> Value {
     })
 }
 
-fn reconcile(job_store: &JobStore) -> Result<Value> {
+#[derive(Debug, Clone, Deserialize)]
+struct ReconcileRequest {
+    #[serde(default)]
+    runner_id: Option<String>,
+}
+
+fn reconcile(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) -> Result<Value> {
+    let request: ReconcileRequest = parse_body(body, "remote runner reconcile request")?;
+    let grant = auth.authorize(BrokerScope::Submit, request.runner_id.as_deref())?;
     let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
-    let reconciled = job_store.reconcile_expired_remote_runner_claims(now_ms)?;
+    let reconciled = job_store.reconcile_expired_remote_runner_claims_for_runner(
+        now_ms,
+        grant.as_ref().map(|grant| grant.runner_id.as_str()),
+    )?;
     Ok(json!({
         "command": "api.runner.jobs.reconcile",
         "reconciled": reconciled,
@@ -362,8 +481,8 @@ fn register_session(body: Option<Value>, auth: &BrokerAuthContext) -> Result<Val
 }
 
 fn enqueue(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) -> Result<Value> {
-    auth.authorize(BrokerScope::Submit, None)?;
     let mut request: RemoteRunnerJobRequest = parse_body(body, "remote runner job request")?;
+    auth.authorize(BrokerScope::Submit, Some(request.runner_id.as_str()))?;
     request.normalize();
     let public_request = request.public_metadata();
     let job = job_store.submit_remote_runner_job(request)?;
@@ -380,6 +499,7 @@ fn enqueue(body: Option<Value>, job_store: &JobStore, auth: &BrokerAuthContext) 
 
 #[derive(Deserialize)]
 struct SubmissionLookupRequest {
+    runner_id: String,
     submission_key: String,
 }
 
@@ -388,11 +508,23 @@ fn submission_lookup(
     job_store: &JobStore,
     auth: &BrokerAuthContext,
 ) -> Result<Value> {
-    auth.authorize(BrokerScope::Submit, None)?;
     let request: SubmissionLookupRequest = parse_body(body, "remote runner submission lookup")?;
+    let grant = auth.authorize(BrokerScope::Submit, Some(request.runner_id.as_str()))?;
+    let result = job_store.lookup_remote_runner_submission(&request.submission_key);
+    if let crate::api_jobs::RemoteRunnerSubmissionLookup::Accepted { job } = &result {
+        if let Some(grant) = grant {
+            if job.target_runner_id.as_deref() != Some(grant.runner_id.as_str()) {
+                return Err(Error::new(
+                    crate::error::ErrorCode::RunnerPolicyDenied,
+                    "remote runner submission is not owned by this runner",
+                    json!({ "runner_id": grant.runner_id }),
+                ));
+            }
+        }
+    }
     Ok(json!({
         "command": "api.runner.jobs.submissions.lookup",
-        "result": job_store.lookup_remote_runner_submission(&request.submission_key),
+        "result": result,
     }))
 }
 
@@ -559,7 +691,7 @@ fn heartbeat(
 }
 
 fn cancel(job_id: Uuid, job_store: &JobStore, auth: &BrokerAuthContext) -> Result<Value> {
-    auth.authorize(BrokerScope::Submit, None)?;
+    authorize_job_submit(job_id, job_store, auth)?;
     let job = job_store.cancel_remote_runner_job(job_id, "cancel requested via broker API")?;
     let events = job_store.events(job_id)?;
     Ok(json!({
@@ -567,6 +699,25 @@ fn cancel(job_id: Uuid, job_store: &JobStore, auth: &BrokerAuthContext) -> Resul
         "job": job,
         "events": events,
     }))
+}
+
+fn authorize_job_submit(
+    job_id: Uuid,
+    job_store: &JobStore,
+    auth: &BrokerAuthContext,
+) -> Result<()> {
+    let grant = auth.authorize(BrokerScope::Submit, None)?;
+    let job = job_store.get(job_id)?;
+    if let Some(grant) = grant {
+        if job.target_runner_id.as_deref() != Some(grant.runner_id.as_str()) {
+            return Err(Error::new(
+                crate::error::ErrorCode::RunnerPolicyDenied,
+                "remote runner job is not owned by this submitting controller",
+                json!({ "runner_id": grant.runner_id }),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Map a handler error to an HTTP response. Broker auth rejections become
@@ -663,6 +814,277 @@ mod auth_tests {
             "command": ["homeboy", "test", "sample"],
             "cwd": "/tmp/sample"
         })
+    }
+
+    fn typed_result(run_id: &str) -> Value {
+        json!({
+            "exit_code": 0,
+            "observation_run_ids": [run_id],
+            "observation_run_details": [{
+                "schema": "homeboy/remote-runner-observation-run-detail/v1",
+                "run": {
+                    "id": run_id,
+                    "kind": "test",
+                    "component_id": null,
+                    "started_at": "2026-01-01T00:00:00Z",
+                    "finished_at": "2026-01-01T00:01:00Z",
+                    "status": "succeeded",
+                    "command": null,
+                    "cwd": null,
+                    "homeboy_version": null,
+                    "git_sha": null,
+                    "rig_id": null,
+                    "metadata_json": {}
+                },
+                "artifacts": []
+            }]
+        })
+    }
+
+    fn terminal_typed_job(store: &JobStore, runner_id: &str, run_id: &str) -> String {
+        let submit = route(
+            "POST",
+            "/runner/jobs",
+            Some(json!({
+                "runner_id": runner_id,
+                "command": ["homeboy", "test"],
+                "cwd": "/tmp/x"
+            })),
+            store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        let job_id = submit.body["body"]["job"]["id"]
+            .as_str()
+            .expect("job id")
+            .to_string();
+        let claim = route(
+            "POST",
+            "/runner/jobs/claim",
+            Some(json!({ "runner_id": runner_id, "lease_ms": 30000 })),
+            store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        let claim_id = claim.body["body"]["claim"]["job"]["claim_id"]
+            .as_str()
+            .expect("claim id")
+            .to_string();
+        let finish = route(
+            "POST",
+            &format!("/runner/jobs/{job_id}/finish"),
+            Some(json!({
+                "runner_id": runner_id,
+                "claim_id": claim_id,
+                "result": typed_result(run_id)
+            })),
+            store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(finish.status_code, 200, "finish body: {}", finish.body);
+        job_id
+    }
+
+    #[test]
+    fn run_detail_requires_a_bearer_token() {
+        let _home = HomeGuard::new();
+        pair("runner-a", BrokerScope::Work);
+        let response = route(
+            "GET",
+            &format!("/runner/jobs/{}/runs/run-1", Uuid::new_v4()),
+            None,
+            &JobStore::default(),
+            &enforcing_auth(None),
+        );
+        assert_eq!(response.status_code, 401);
+        assert_eq!(response.body["error"], "broker.auth_denied");
+    }
+
+    #[test]
+    fn run_detail_rejects_an_invalid_bearer_token() {
+        let _home = HomeGuard::new();
+        pair("runner-a", BrokerScope::Work);
+        let response = route(
+            "GET",
+            &format!("/runner/jobs/{}/runs/run-1", Uuid::new_v4()),
+            None,
+            &JobStore::default(),
+            &enforcing_auth(Some("not-a-paired-token")),
+        );
+        assert_eq!(response.status_code, 401);
+        assert_eq!(response.body["error"], "broker.auth_denied");
+    }
+
+    #[test]
+    fn run_detail_rejects_a_valid_token_for_a_different_runner() {
+        let _home = HomeGuard::new();
+        let token = pair("runner-b", BrokerScope::Work);
+        let store = JobStore::default();
+        let job_id = terminal_typed_job(&store, "runner-a", "run-1");
+
+        let response = route(
+            "GET",
+            &format!("/runner/jobs/{job_id}/runs/run-not-owned"),
+            None,
+            &store,
+            &enforcing_auth(Some(&token)),
+        );
+        assert_eq!(response.status_code, 403);
+        assert_eq!(response.body["error"], "runner.policy_denied");
+    }
+
+    #[test]
+    fn run_detail_returns_not_found_for_a_missing_job_or_run() {
+        let _home = HomeGuard::new();
+        let token = pair("runner-a", BrokerScope::Work);
+        let store = JobStore::default();
+        let missing_job = route(
+            "GET",
+            &format!("/runner/jobs/{}/runs/run-1", Uuid::new_v4()),
+            None,
+            &store,
+            &enforcing_auth(Some(&token)),
+        );
+        assert_eq!(missing_job.status_code, 404);
+
+        let job_id = terminal_typed_job(&store, "runner-a", "run-1");
+        let missing_run = route(
+            "GET",
+            &format!("/runner/jobs/{job_id}/runs/run-missing"),
+            None,
+            &store,
+            &enforcing_auth(Some(&token)),
+        );
+        assert_eq!(missing_run.status_code, 404);
+    }
+
+    #[test]
+    fn run_detail_returns_typed_details_to_the_owning_runner() {
+        let _home = HomeGuard::new();
+        let token = pair("runner-a", BrokerScope::Work);
+        let store = JobStore::default();
+        let job_id = terminal_typed_job(&store, "runner-a", "run-1");
+
+        let response = route(
+            "GET",
+            &format!("/runner/jobs/{job_id}/runs/run-1"),
+            None,
+            &store,
+            &enforcing_auth(Some(&token)),
+        );
+        assert_eq!(
+            response.status_code, 200,
+            "response body: {}",
+            response.body
+        );
+        assert_eq!(
+            response.body["body"]["run"]["schema"],
+            "homeboy/remote-runner-observation-run-detail/v1"
+        );
+        assert_eq!(response.body["body"]["run"]["run"]["id"], "run-1");
+    }
+
+    #[test]
+    fn submit_token_reads_its_own_job_but_not_another_runners_job() {
+        let _home = HomeGuard::new();
+        let submit_token = pair("runner-a", BrokerScope::Submit);
+        let store = JobStore::default();
+        let owned_job = terminal_typed_job(&store, "runner-a", "run-1");
+        let foreign_job = terminal_typed_job(&store, "runner-b", "run-2");
+
+        let owned = route(
+            "GET",
+            &format!("/runner/jobs/{owned_job}/runs/run-1"),
+            None,
+            &store,
+            &enforcing_auth(Some(&submit_token)),
+        );
+        assert_eq!(owned.status_code, 200);
+
+        let foreign = route(
+            "GET",
+            &format!("/runner/jobs/{foreign_job}/runs/run-2"),
+            None,
+            &store,
+            &enforcing_auth(Some(&submit_token)),
+        );
+        assert_eq!(foreign.status_code, 403);
+        assert_eq!(foreign.body["error"], "runner.policy_denied");
+    }
+
+    #[test]
+    fn artifact_routes_require_the_owning_work_bearer_and_preserve_not_found() {
+        let _home = HomeGuard::new();
+        let owner_token = pair("runner-a", BrokerScope::Work);
+        let other_token = pair_extra("runner-b-work", "runner-b", BrokerScope::Work);
+        let store = JobStore::default();
+        let job_id = terminal_typed_job(&store, "runner-a", "run-1");
+
+        for suffix in ["artifacts/missing", "artifacts/missing/content"] {
+            let path = format!("/runner/jobs/{job_id}/{suffix}");
+            let unauthenticated = route("GET", &path, None, &store, &enforcing_auth(None));
+            assert_eq!(unauthenticated.status_code, 401, "{suffix}");
+            assert_eq!(unauthenticated.body["error"], "broker.auth_denied");
+
+            let foreign = route(
+                "GET",
+                &path,
+                None,
+                &store,
+                &enforcing_auth(Some(&other_token)),
+            );
+            assert_eq!(foreign.status_code, 403, "{suffix}");
+            assert_eq!(foreign.body["error"], "runner.policy_denied");
+
+            let missing = route(
+                "GET",
+                &path,
+                None,
+                &store,
+                &enforcing_auth(Some(&owner_token)),
+            );
+            assert_eq!(missing.status_code, 404, "{suffix}");
+        }
+    }
+
+    #[test]
+    fn run_detail_reports_malformed_persisted_details_as_a_server_error() {
+        let _home = HomeGuard::new();
+        let token = pair("runner-a", BrokerScope::Work);
+        let store = JobStore::default();
+        let submit = route(
+            "POST",
+            "/runner/jobs",
+            Some(json!({
+                "runner_id": "runner-a",
+                "command": ["homeboy", "test"],
+                "cwd": "/tmp/x"
+            })),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        let job_id = submit.body["body"]["job"]["id"]
+            .as_str()
+            .expect("job id")
+            .to_string();
+        let mut malformed = typed_result("run-1");
+        malformed["observation_run_details"][0]["schema"] = json!("invalid-schema");
+        store
+            .append_event(
+                Uuid::parse_str(&job_id).expect("valid job id"),
+                JobEventKind::Result,
+                None,
+                Some(malformed),
+            )
+            .expect("persist malformed result for lookup regression coverage");
+
+        let response = route(
+            "GET",
+            &format!("/runner/jobs/{job_id}/runs/run-1"),
+            None,
+            &store,
+            &enforcing_auth(Some(&token)),
+        );
+        assert_eq!(response.status_code, 500);
+        assert_eq!(response.body["error"], "internal.json_error");
     }
 
     #[test]
@@ -846,6 +1268,103 @@ mod auth_tests {
             content.body["body"]["content_base64"],
             json!("d29ya2VyIGFydGlmYWN0IGJ5dGVz")
         );
+    }
+
+    #[test]
+    fn broker_retains_every_declared_run_artifact_after_reverse_worker_completion() {
+        let _home = HomeGuard::new();
+        let store = JobStore::default();
+        let submit = route(
+            "POST",
+            "/runner/jobs",
+            Some(submit_body()),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        let job_id = submit.body["body"]["job"]["id"]
+            .as_str()
+            .expect("job id")
+            .to_string();
+        let claim = route(
+            "POST",
+            "/runner/jobs/claim",
+            Some(json!({ "runner_id": "homeboy-lab", "lease_ms": 30000 })),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        let claim_id = claim.body["body"]["claim"]["job"]["claim_id"]
+            .as_str()
+            .expect("claim id")
+            .to_string();
+        let artifacts = [
+            ("direct-first", "ZGlyZWN0IGZpcnN0"),
+            ("direct-second", "ZGlyZWN0IHNlY29uZA=="),
+        ];
+        let detail_artifacts = artifacts
+            .iter()
+            .map(|(id, _)| {
+                json!({
+                    "id": id,
+                    "run_id": "declared-run",
+                    "kind": "test_output",
+                    "artifact_type": "file",
+                    "path": format!("/worker/{id}"),
+                    "metadata_json": {},
+                    "created_at": "2026-01-01T00:01:00Z"
+                })
+            })
+            .collect::<Vec<_>>();
+        let transported_artifacts = artifacts
+            .iter()
+            .map(|(id, content_base64)| {
+                json!({
+                    "id": id,
+                    "name": format!("{id}.txt"),
+                    "path": format!("/worker/{id}"),
+                    "mime": "text/plain",
+                    "size_bytes": 12,
+                    "content_base64": content_base64
+                })
+            })
+            .collect::<Vec<_>>();
+        let finish = route(
+            "POST",
+            &format!("/runner/jobs/{job_id}/finish"),
+            Some(json!({
+                "runner_id": "homeboy-lab",
+                "claim_id": claim_id,
+                "result": {
+                    "exit_code": 0,
+                    "observation_run_ids": ["declared-run"],
+                    "observation_run_details": [{
+                        "schema": "homeboy/remote-runner-observation-run-detail/v1",
+                        "run": {
+                            "id": "declared-run", "kind": "test", "component_id": null,
+                            "started_at": "2026-01-01T00:00:00Z", "finished_at": "2026-01-01T00:01:00Z",
+                            "status": "pass", "command": null, "cwd": null, "homeboy_version": null,
+                            "git_sha": null, "rig_id": null, "metadata_json": {}
+                        },
+                        "artifacts": detail_artifacts
+                    }],
+                    "artifacts": transported_artifacts
+                }
+            })),
+            &store,
+            &BrokerAuthContext::trusted_local(),
+        );
+        assert_eq!(finish.status_code, 200, "finish body: {}", finish.body);
+
+        for (id, direct_output) in artifacts {
+            let content = route(
+                "GET",
+                &format!("/runner/jobs/{job_id}/artifacts/{id}/content"),
+                None,
+                &store,
+                &BrokerAuthContext::trusted_local(),
+            );
+            assert_eq!(content.status_code, 200, "content body: {}", content.body);
+            assert_eq!(content.body["body"]["content_base64"], direct_output);
+        }
     }
 
     #[test]

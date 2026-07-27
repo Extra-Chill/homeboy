@@ -341,6 +341,8 @@ fn run_once_output(
                     "error": err.to_string(),
                 })),
                 observation_run_ids: Vec::new(),
+                observation_run_details: Vec::new(),
+                observation_run_details_compatibility_degraded: false,
                 artifacts: Vec::new(),
                 artifact_refs: Vec::new(),
                 metrics: None,

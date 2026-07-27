@@ -8,7 +8,348 @@ use uuid::Uuid;
 
 use super::*;
 
+const PUBLICATION_LEASE_MS: i64 = 5 * 60 * 1000;
+
+/// A file staged by a caller for atomic publication with its run record.
+/// The store computes controller-owned integrity metadata from `source_path`.
+#[derive(Debug, Clone)]
+pub struct ArtifactPublication {
+    pub id: String,
+    pub kind: String,
+    pub source_path: PathBuf,
+    pub mime: Option<String>,
+    pub metadata_json: serde_json::Value,
+    /// Provenance advertised by the producer. Terminal projections require
+    /// both fields; other store callers may omit them for local files.
+    pub expected_size_bytes: Option<i64>,
+    pub expected_sha256: Option<String>,
+}
+
 impl ObservationStore {
+    /// Publish a run and all of its file artifacts as one reader-visible unit.
+    ///
+    /// Files are copied and verified before the SQLite transaction begins. The
+    /// rows become visible together at commit; files created for a failed
+    /// publication are removed so a retry starts from the same durable state.
+    pub fn publish_run_artifacts_atomically(
+        &self,
+        run: &RunRecord,
+        publications: &[ArtifactPublication],
+    ) -> Result<Vec<ArtifactRecord>> {
+        validate_required("run.id", &run.id)?;
+        let mut seen = HashSet::new();
+        let publication_id = Uuid::new_v4().to_string();
+        let owner_token = Uuid::new_v4().to_string();
+        let lease_expires_at_ms = chrono::Utc::now().timestamp_millis() + PUBLICATION_LEASE_MS;
+        let mut prepared = Vec::with_capacity(publications.len());
+        let mut staged_paths = Vec::new();
+        let mut intent_count = 0usize;
+
+        let result = (|| -> Result<()> {
+            for publication in publications {
+                validate_required("artifact.id", &publication.id)?;
+                validate_required("artifact.kind", &publication.kind)?;
+                if !seen.insert(&publication.id) {
+                    return Err(Error::validation_invalid_argument(
+                        "artifact.id",
+                        "an atomic publication contains duplicate artifact ids",
+                        Some(publication.id.clone()),
+                        None,
+                    ));
+                }
+                let source = &publication.source_path;
+                let metadata = fs::symlink_metadata(source).map_err(|error| {
+                    Error::internal_io(
+                        error.to_string(),
+                        Some(format!("inspect staged artifact {}", source.display())),
+                    )
+                })?;
+                if !metadata.is_file() {
+                    return Err(Error::validation_invalid_argument(
+                        "artifact.path",
+                        "atomic artifact publication requires a regular file",
+                        Some(source.display().to_string()),
+                        None,
+                    ));
+                }
+                // A concurrent publisher may be preparing the same logical
+                // artifact before either SQLite transaction commits. Its final
+                // bytes must therefore be owned by this publication token.
+                let stored_path =
+                    publication_artifact_path(&run.id, &publication.id, source, &publication_id)?;
+                let size_bytes = i64::try_from(metadata.len()).ok();
+                let sha256 = crate::artifact_metadata::sha256_file(source)?;
+                if publication.expected_size_bytes.is_some()
+                    && publication.expected_size_bytes != size_bytes
+                {
+                    return Err(Error::validation_invalid_argument(
+                        "artifact.size_bytes",
+                        "artifact bytes do not match the advertised provenance",
+                        size_bytes.map(|value| value.to_string()),
+                        None,
+                    ));
+                }
+                if let Some(expected_sha256) = &publication.expected_sha256 {
+                    if expected_sha256 != &sha256 {
+                        return Err(Error::validation_invalid_argument(
+                            "artifact.sha256",
+                            "artifact bytes do not match the advertised provenance",
+                            Some(sha256),
+                            None,
+                        ));
+                    }
+                }
+                if let Some(existing) = self.get_artifact(&publication.id)? {
+                    let matches = existing.run_id == run.id
+                        && existing.kind == publication.kind
+                        && existing.artifact_type == "file"
+                        && existing.size_bytes == size_bytes
+                        && existing.sha256.as_deref() == Some(sha256.as_str())
+                        && Path::new(&existing.path).is_file();
+                    if !matches {
+                        return Err(Error::validation_invalid_argument(
+                            "artifact.id",
+                            "an existing artifact has different controller ownership or bytes",
+                            Some(publication.id.clone()),
+                            None,
+                        ));
+                    }
+                    prepared.push((existing, None, None));
+                    continue;
+                }
+                let staged_path = staged_artifact_path(&stored_path, Uuid::new_v4());
+                staged_paths.push(staged_path.clone());
+                copy_artifact_file(source, &staged_path)?;
+                if crate::artifact_metadata::sha256_file(&staged_path)? != sha256 {
+                    return Err(Error::internal_unexpected(
+                        "staged artifact checksum changed before publication",
+                    ));
+                }
+                let mut artifact = ArtifactRecord {
+                    id: publication.id.clone(),
+                    run_id: run.id.clone(),
+                    kind: publication.kind.clone(),
+                    artifact_type: "file".to_string(),
+                    path: stored_path.display().to_string(),
+                    url: None,
+                    public_url: None,
+                    viewer_url: None,
+                    viewer_links: Vec::new(),
+                    sha256: Some(sha256),
+                    size_bytes,
+                    mime: publication
+                        .mime
+                        .clone()
+                        .or_else(|| crate::artifact_metadata::content_type_from_path(source)),
+                    metadata_json: publication.metadata_json.clone(),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                };
+                crate::artifact_links::annotate_public_artifact_url_validation(&mut artifact);
+                prepared.push((artifact, Some(staged_path), Some(stored_path)));
+            }
+            // Copying can be slow. Journal only after all staging completes so
+            // recovery never reaps an active copy that has not yet entered its
+            // finalization window.
+            // Readers only consult `runs` and `artifacts`, neither of which is
+            // written until the complete finalization transaction below.
+            let tx = self
+                .connection
+                .unchecked_transaction()
+                .map_err(sqlite_error("begin atomic observation publication"))?;
+            for (artifact, staged_path, final_path) in &prepared {
+                let (Some(staged_path), Some(final_path)) = (staged_path, final_path) else {
+                    continue;
+                };
+                tx.execute(
+                    "INSERT INTO artifact_publication_intents(publication_id, artifact_id, staging_path, final_path, owner_token, lease_expires_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![publication_id, artifact.id, staged_path.display().to_string(), final_path.display().to_string(), owner_token, lease_expires_at_ms],
+                ).map_err(sqlite_error("journal artifact publication"))?;
+                intent_count += 1;
+            }
+            tx.commit()
+                .map_err(sqlite_error("commit artifact publication intent"))?;
+
+            for (_, staged_path, final_path) in &prepared {
+                let (Some(staged_path), Some(final_path)) = (staged_path, final_path) else {
+                    continue;
+                };
+                self.renew_artifact_publication_lease(&publication_id, &owner_token, intent_count)?;
+                fs::rename(staged_path, final_path).map_err(|error| {
+                    Error::internal_io(
+                        error.to_string(),
+                        Some("finalize staged artifact".to_string()),
+                    )
+                })?;
+            }
+
+            self.renew_artifact_publication_lease(&publication_id, &owner_token, intent_count)?;
+            let tx = self
+                .connection
+                .unchecked_transaction()
+                .map_err(sqlite_error("begin artifact publication finalization"))?;
+            // Revoking the exact leased intents is the final ownership check.
+            // It happens before durable rows are inserted, so a reclaimer that
+            // won after the last renewal leaves no visible run or artifact rows.
+            let released = tx.execute(
+                "DELETE FROM artifact_publication_intents WHERE publication_id = ?1 AND owner_token = ?2 AND lease_expires_at_ms >= ?3",
+                params![publication_id, owner_token, chrono::Utc::now().timestamp_millis()],
+            ).map_err(sqlite_error("claim artifact publication finalization"))?;
+            if released != intent_count {
+                return Err(Error::internal_unexpected(
+                    "artifact publication lost its durable finalization lease",
+                ));
+            }
+            let metadata_json = serialize_metadata(&run.metadata_json)?;
+            tx.execute(
+                r#"INSERT INTO runs(id, kind, component_id, started_at, finished_at, status, command, cwd, homeboy_version, git_sha, rig_id, metadata_json)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                   ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, component_id=excluded.component_id, started_at=excluded.started_at, finished_at=excluded.finished_at, status=excluded.status, command=excluded.command, cwd=excluded.cwd, homeboy_version=excluded.homeboy_version, git_sha=excluded.git_sha, rig_id=excluded.rig_id, metadata_json=excluded.metadata_json"#,
+                params![run.id, run.kind, run.component_id, run.started_at, run.finished_at, run.status, run.command, run.cwd, run.homeboy_version, run.git_sha, run.rig_id, metadata_json],
+            ).map_err(sqlite_error("publish observation run"))?;
+            for (artifact, staged_path, _) in &prepared {
+                if staged_path.is_none() {
+                    continue;
+                }
+                tx.execute(
+                    "INSERT INTO artifacts(id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                    params![artifact.id, artifact.run_id, artifact.kind, artifact.artifact_type, artifact.path, artifact.url, artifact.public_url, artifact.viewer_url, serialize_metadata(&serde_json::json!(artifact.viewer_links))?, artifact.sha256, artifact.size_bytes, artifact.mime, serialize_metadata(&artifact.metadata_json)?, artifact.created_at],
+                ).map_err(sqlite_error("publish observation artifact"))?;
+            }
+            tx.commit()
+                .map_err(sqlite_error("commit artifact publication finalization"))?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            for path in staged_paths {
+                fs::remove_file(path).ok();
+            }
+            self.reconcile_artifact_publication(&publication_id, &owner_token)
+                .ok();
+            return Err(error);
+        }
+        prepared
+            .into_iter()
+            .map(|(artifact, _, _)| {
+                self.get_artifact(&artifact.id)?.ok_or_else(|| {
+                    Error::internal_unexpected("committed artifact record is unreadable")
+                })
+            })
+            .collect()
+    }
+
+    /// Remove only expired publication-token paths. Final paths are immutable
+    /// and token-scoped, so reclaiming an expired owner can never remove bytes
+    /// selected by a competing publisher for the same logical artifact.
+    pub(super) fn reconcile_unfinished_artifact_publications(&self) -> Result<()> {
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut statement = self
+            .connection
+            .prepare("SELECT publication_id, artifact_id, staging_path, final_path, owner_token, lease_expires_at_ms FROM artifact_publication_intents WHERE lease_expires_at_ms IS NULL OR lease_expires_at_ms < ?1")
+            .map_err(sqlite_error("read unfinished artifact publications"))?;
+        let paths = statement
+            .query_map([now], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                ))
+            })
+            .map_err(sqlite_error("query unfinished artifact publications"))?;
+        let paths = collect_rows(paths, "collect unfinished artifact publications")?;
+        for (
+            publication_id,
+            artifact_id,
+            staging_path,
+            final_path,
+            owner_token,
+            lease_expires_at,
+        ) in paths
+        {
+            // Revocation is the ownership boundary: delete the exact snapshot
+            // first. A renewal that wins changes its lease and this CAS deletes
+            // nothing, so this recovery pass must not touch either path.
+            let claimed = self.connection.execute(
+                "DELETE FROM artifact_publication_intents WHERE publication_id = ?1 AND artifact_id = ?2 AND ((owner_token IS NULL AND ?3 IS NULL) OR owner_token = ?3) AND ((lease_expires_at_ms IS NULL AND ?4 IS NULL) OR lease_expires_at_ms = ?4) AND (lease_expires_at_ms IS NULL OR lease_expires_at_ms < ?5)",
+                params![publication_id, artifact_id, owner_token, lease_expires_at, now],
+            ).map_err(sqlite_error("claim expired artifact publication"))?;
+            if claimed == 1 {
+                fs::remove_file(staging_path).ok();
+                fs::remove_file(final_path).ok();
+            }
+        }
+        Ok(())
+    }
+
+    fn reconcile_artifact_publication(
+        &self,
+        publication_id: &str,
+        owner_token: &str,
+    ) -> Result<()> {
+        let mut statement = self.connection.prepare(
+            "SELECT staging_path, final_path FROM artifact_publication_intents WHERE publication_id = ?1 AND owner_token = ?2",
+        ).map_err(sqlite_error("read owned artifact publication"))?;
+        let paths = statement
+            .query_map(params![publication_id, owner_token], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(sqlite_error("query owned artifact publication"))?;
+        for (staging_path, final_path) in collect_rows(paths, "collect owned artifact publication")?
+        {
+            fs::remove_file(staging_path).ok();
+            fs::remove_file(final_path).ok();
+        }
+        self.connection.execute(
+            "DELETE FROM artifact_publication_intents WHERE publication_id = ?1 AND owner_token = ?2",
+            params![publication_id, owner_token],
+        ).map_err(sqlite_error("clear owned artifact publication"))?;
+        Ok(())
+    }
+
+    fn renew_artifact_publication_lease(
+        &self,
+        publication_id: &str,
+        owner_token: &str,
+        expected_intents: usize,
+    ) -> Result<()> {
+        let expires_at = chrono::Utc::now().timestamp_millis() + PUBLICATION_LEASE_MS;
+        let updated = self.connection.execute(
+            "UPDATE artifact_publication_intents SET lease_expires_at_ms = ?1 WHERE publication_id = ?2 AND owner_token = ?3",
+            params![expires_at, publication_id, owner_token],
+        ).map_err(sqlite_error("renew artifact publication lease"))?;
+        if updated != expected_intents {
+            return Err(Error::internal_unexpected(
+                "artifact publication lost its durable finalization lease",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Roll back a synthetic controller run when its terminal artifact
+    /// publication cannot complete. Callers must never use this for a run
+    /// identity owned by another lifecycle.
+    pub fn discard_synthetic_run(&self, run_id: &str, publication_token: &str) -> Result<()> {
+        let tx = self
+            .connection
+            .unchecked_transaction()
+            .map_err(sqlite_error("begin synthetic run rollback"))?;
+        let owned: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runs WHERE id = ?1 AND json_extract(metadata_json, '$.lab.synthetic_publication_token') = ?2)",
+            params![run_id, publication_token],
+            |row| row.get(0),
+        ).map_err(sqlite_error("read synthetic run ownership"))?;
+        if !owned {
+            return Ok(());
+        }
+        tx.execute("DELETE FROM artifacts WHERE run_id = ?1", [run_id])
+            .map_err(sqlite_error("delete synthetic run artifacts"))?;
+        tx.execute("DELETE FROM runs WHERE id = ?1", [run_id])
+            .map_err(sqlite_error("delete synthetic run"))?;
+        tx.commit()
+            .map_err(sqlite_error("commit synthetic run rollback"))
+    }
     pub fn import_artifact(&self, artifact: &ArtifactRecord) -> Result<()> {
         let artifact = artifact_with_link_metadata(artifact);
         validate_required("artifact.id", &artifact.id)?;
@@ -1080,6 +1421,20 @@ impl ObservationStore {
     }
 }
 
+fn publication_artifact_path(
+    run_id: &str,
+    artifact_id: &str,
+    source: &Path,
+    publication_id: &str,
+) -> Result<PathBuf> {
+    let canonical = persisted_artifact_path(run_id, artifact_id, source)?;
+    let file_name = canonical
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| Error::internal_unexpected("persisted artifact path has no filename"))?;
+    Ok(canonical.with_file_name(format!("{publication_id}-{file_name}")))
+}
+
 /// Hash a directory tree independent of traversal order. Paths and entry types
 /// are included so a rename or file/directory swap cannot reuse prior evidence.
 pub fn directory_tree_sha256(path: &Path) -> Result<String> {
@@ -1245,6 +1600,239 @@ mod tests {
                     .file_name()
                     .to_string_lossy()
                     .starts_with(".artifact-")));
+        });
+    }
+
+    #[test]
+    fn atomic_publication_rolls_back_earlier_artifacts_and_retries_cleanly() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("test").cwd_path(home.path()).build())
+                .expect("run");
+            let first = home.path().join("first.json");
+            let second = home.path().join("second.json");
+            fs::write(&first, b"first").expect("first bytes");
+            fs::write(&second, b"second").expect("second bytes");
+            let publication = |id: &str, source_path: PathBuf| ArtifactPublication {
+                id: id.to_string(),
+                kind: "test".to_string(),
+                source_path,
+                mime: None,
+                metadata_json: serde_json::json!({}),
+                expected_size_bytes: None,
+                expected_sha256: None,
+            };
+
+            let error = store
+                .publish_run_artifacts_atomically(
+                    &run,
+                    &[
+                        publication("first", first.clone()),
+                        publication("second", home.path().join("missing.json")),
+                    ],
+                )
+                .expect_err("later source failure rolls back earlier publication");
+            assert_eq!(error.code.as_str(), "internal.io_error");
+            assert!(store.get_artifact("first").expect("first lookup").is_none());
+
+            let published = store
+                .publish_run_artifacts_atomically(
+                    &run,
+                    &[publication("first", first), publication("second", second)],
+                )
+                .expect("retry publishes complete set");
+            assert_eq!(published.len(), 2);
+            assert!(published
+                .iter()
+                .all(|artifact| Path::new(&artifact.path).is_file()));
+        });
+    }
+
+    #[test]
+    fn opening_store_recovers_unfinished_journaled_finalization() {
+        with_isolated_home(|home| {
+            let database = home.path().join("observation.sqlite");
+            let store = ObservationStore::open_initialized_at(&database).expect("store");
+            let staging = home.path().join("orphan.staging");
+            let final_path = home.path().join("orphan.final");
+            fs::write(&staging, b"staged").expect("staging bytes");
+            fs::write(&final_path, b"finalized before crash").expect("final bytes");
+            store.connection.execute(
+                "INSERT INTO artifact_publication_intents(publication_id, artifact_id, staging_path, final_path, owner_token, lease_expires_at_ms) VALUES ('crash', 'artifact', ?1, ?2, 'dead-owner', 0)",
+                params![staging.display().to_string(), final_path.display().to_string()],
+            ).expect("journal intent");
+            drop(store);
+
+            let recovered =
+                ObservationStore::open_initialized_at(&database).expect("recover store");
+            assert!(!staging.exists());
+            assert!(!final_path.exists());
+            let intents: i64 = recovered
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM artifact_publication_intents",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count intents");
+            assert_eq!(intents, 0);
+        });
+    }
+
+    #[test]
+    fn opening_store_reclaims_v10_null_lease_intent_as_stale() {
+        with_isolated_home(|home| {
+            let database = home.path().join("observation.sqlite");
+            let store = ObservationStore::open_initialized_at(&database).expect("store");
+            let staging = home.path().join("legacy.staging");
+            let final_path = home.path().join("legacy.final");
+            fs::write(&staging, b"staged").expect("staging bytes");
+            fs::write(&final_path, b"final").expect("final bytes");
+            store.connection.execute(
+                "INSERT INTO artifact_publication_intents(publication_id, artifact_id, staging_path, final_path, owner_token, lease_expires_at_ms) VALUES ('legacy', 'artifact', ?1, ?2, NULL, NULL)",
+                params![staging.display().to_string(), final_path.display().to_string()],
+            ).expect("legacy intent");
+            drop(store);
+
+            ObservationStore::open_initialized_at(&database).expect("reopen migrated store");
+            assert!(!staging.exists());
+            assert!(!final_path.exists());
+        });
+    }
+
+    #[test]
+    fn opening_second_store_preserves_a_live_publication_lease() {
+        with_isolated_home(|home| {
+            let database = home.path().join("observation.sqlite");
+            let store = ObservationStore::open_initialized_at(&database).expect("store");
+            let staging = home.path().join("live.staging");
+            let final_path = home.path().join("live.final");
+            fs::write(&staging, b"staged").expect("staging bytes");
+            store.connection.execute(
+                "INSERT INTO artifact_publication_intents(publication_id, artifact_id, staging_path, final_path, owner_token, lease_expires_at_ms) VALUES ('live', 'artifact', ?1, ?2, 'owner', ?3)",
+                params![staging.display().to_string(), final_path.display().to_string(), chrono::Utc::now().timestamp_millis() + PUBLICATION_LEASE_MS],
+            ).expect("journal live intent");
+
+            let second = ObservationStore::open_initialized_at(&database).expect("second store");
+            assert!(staging.exists());
+            let intents: i64 = second.connection.query_row(
+                "SELECT COUNT(*) FROM artifact_publication_intents WHERE publication_id = 'live'", [], |row| row.get(0),
+            ).expect("count live intent");
+            assert_eq!(intents, 1);
+        });
+    }
+
+    #[test]
+    fn finalization_after_lease_expiry_and_reclaim_never_advertises_files() {
+        with_isolated_home(|home| {
+            let database = home.path().join("observation.sqlite");
+            let store = ObservationStore::open_initialized_at(&database).expect("store");
+            let staging = home.path().join("paused.staging");
+            let final_path = home.path().join("paused.final");
+            fs::write(&staging, b"staged").expect("staging bytes");
+            fs::write(&final_path, b"renamed before pause").expect("final bytes");
+            store.connection.execute(
+                "INSERT INTO artifact_publication_intents(publication_id, artifact_id, staging_path, final_path, owner_token, lease_expires_at_ms) VALUES ('paused', 'artifact', ?1, ?2, 'owner', 0)",
+                params![staging.display().to_string(), final_path.display().to_string()],
+            ).expect("journal intent");
+
+            // Simulate a publisher paused past its lease while a second store
+            // reclaims its exact intent and the already-renamed bytes.
+            let reclaimer = ObservationStore::open_initialized_at(&database).expect("reclaimer");
+            assert!(!staging.exists());
+            assert!(!final_path.exists());
+            let tx = reclaimer
+                .connection
+                .unchecked_transaction()
+                .expect("begin delayed finalization");
+            let released = tx.execute(
+                "DELETE FROM artifact_publication_intents WHERE publication_id = ?1 AND owner_token = ?2 AND lease_expires_at_ms >= ?3",
+                params!["paused", "owner", chrono::Utc::now().timestamp_millis()],
+            ).expect("verify delayed ownership");
+            assert_eq!(released, 0, "reclaimed intent cannot finalize rows");
+            tx.rollback().expect("rollback delayed finalization");
+            assert!(reclaimer
+                .get_run("paused-run")
+                .expect("run lookup")
+                .is_none());
+            assert!(reclaimer
+                .get_artifact("artifact")
+                .expect("artifact lookup")
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn synthetic_cleanup_is_scoped_to_its_publication_token() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            for (id, token) in [("synthetic-a", "token-a"), ("synthetic-b", "token-b")] {
+                store
+                    .import_run(&RunRecord {
+                        id: id.to_string(),
+                        kind: "runner-exec".to_string(),
+                        component_id: None,
+                        started_at: "2026-01-01T00:00:00Z".to_string(),
+                        finished_at: None,
+                        status: "running".to_string(),
+                        command: None,
+                        cwd: Some(home.path().display().to_string()),
+                        homeboy_version: None,
+                        git_sha: None,
+                        rig_id: None,
+                        metadata_json: serde_json::json!({"lab": {"synthetic_publication_token": token}}),
+                    })
+                    .expect("synthetic run");
+            }
+
+            store
+                .discard_synthetic_run("synthetic-a", "token-a")
+                .expect("discard owned run");
+            assert!(store.get_run("synthetic-a").expect("first run").is_none());
+            assert!(store.get_run("synthetic-b").expect("second run").is_some());
+            store
+                .discard_synthetic_run("synthetic-b", "unrelated-token")
+                .expect("ignore unowned run");
+            assert!(store.get_run("synthetic-b").expect("second run").is_some());
+        });
+    }
+
+    #[test]
+    fn synthetic_run_claim_loser_cannot_discard_the_concurrent_winner() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let synthetic = |token: &str| RunRecord {
+                id: "synthetic-concurrent".to_string(),
+                kind: "runner-exec".to_string(),
+                component_id: None,
+                started_at: "2026-01-01T00:00:00Z".to_string(),
+                finished_at: None,
+                status: "running".to_string(),
+                command: None,
+                cwd: Some(home.path().display().to_string()),
+                homeboy_version: None,
+                git_sha: None,
+                rig_id: None,
+                metadata_json: serde_json::json!({"lab": {"synthetic_publication_token": token}}),
+            };
+            let winner = synthetic("winner-token");
+            let loser = synthetic("loser-token");
+
+            assert!(store
+                .import_synthetic_run(&winner, "winner-token")
+                .expect("winner claims synthetic run"));
+            assert!(!store
+                .import_synthetic_run(&loser, "loser-token")
+                .expect("loser observes winner"));
+            store
+                .discard_synthetic_run(&loser.id, "loser-token")
+                .expect("loser rollback is idempotent");
+            assert!(store.get_run(&winner.id).expect("winner run").is_some());
+            store
+                .discard_synthetic_run(&winner.id, "winner-token")
+                .expect("winner rollback");
+            assert!(store.get_run(&winner.id).expect("winner removed").is_none());
         });
     }
 

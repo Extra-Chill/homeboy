@@ -112,8 +112,8 @@ mod store_init_tests {
 
             assert!(status.exists);
             assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-            assert_eq!(status.migration_count, 9);
-            assert_eq!(status.table_count, 7);
+            assert_eq!(status.migration_count, 11);
+            assert_eq!(status.table_count, 8);
         });
     }
 
@@ -127,8 +127,8 @@ mod store_init_tests {
             let status = second.status().expect("status");
 
             assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-            assert_eq!(status.migration_count, 9);
-            assert_eq!(status.table_count, 7);
+            assert_eq!(status.migration_count, 11);
+            assert_eq!(status.table_count, 8);
         });
     }
 
@@ -149,7 +149,7 @@ mod store_init_tests {
             let status = reopened.status().expect("status");
 
             assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-            assert_eq!(status.migration_count, 9);
+            assert_eq!(status.migration_count, 11);
         });
     }
 
@@ -175,7 +175,7 @@ mod store_init_tests {
             for handle in handles {
                 let status = handle.join().expect("worker joined");
                 assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-                assert_eq!(status.migration_count, 9);
+                assert_eq!(status.migration_count, 11);
             }
         });
     }
@@ -229,7 +229,7 @@ mod store_init_tests {
             let store = ObservationStore::open_initialized_at(&path).expect("migrate version 8");
             let status = store.status().expect("status");
             assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-            assert_eq!(status.migration_count, 9);
+            assert_eq!(status.migration_count, 11);
 
             let db = rusqlite::Connection::open(path).expect("inspect migrated db");
             let indexes = db
@@ -1080,7 +1080,13 @@ mod store_artifact_tests {
                 std::fs::read_to_string(persisted.join("nested/detail.txt")).expect("read nested"),
                 "detail"
             );
-            assert_eq!(artifact.url, None);
+            assert_eq!(
+                artifact.url,
+                Some(
+                    crate::observation::directory_tree_sha256(&persisted)
+                        .expect("directory digest")
+                )
+            );
             assert_eq!(artifact.size_bytes, None);
             assert_eq!(artifact.mime, None);
             assert_eq!(artifact.sha256, None);
