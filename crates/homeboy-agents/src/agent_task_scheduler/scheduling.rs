@@ -722,46 +722,55 @@ impl AgentTaskScheduleSupport {
                 workspace_key: task.workspace_key.clone(),
             });
             if let (Some(join_handle), Some(action_path)) = (task.join_handle.take(), action_path) {
+                // Deferred cleanup outlives the scheduler thread, so it must
+                // carry the caller's route to keep recovery attributable.
+                let notification_route = homeboy_core::notification_route::capture();
                 std::thread::spawn(move || {
-                    let joined = join_handle
-                        .join()
-                        .map_err(|_| "provider worker panicked".to_string());
-                    let mut recovered = deferred_timeout_outcome(
-                        &task.task_id,
-                        task.timeout_ms.unwrap_or_default(),
-                        "deferred_cleanup",
-                    );
-                    // A completed join proves the provider no longer owns the
-                    // checkout, so its committed candidate is safe to harvest.
-                    recovered.status = AgentTaskOutcomeStatus::Succeeded;
-                    recovered.failure_classification = None;
-                    let harvest = joined.and_then(|_| {
-                        super::harvest_uncommitted_patch(&mut recovered, &task)
-                            .and_then(|_| super::harvest_committed_patch(&mut recovered, &task))
-                            .map_err(|error| format!("{error:?}"))
-                    });
-                    if harvest.is_ok() {
-                        // The provider has exited, so runtime artifact discovery can no
-                        // longer race its writes to the isolated attempt workspace.
-                        Self::reconcile_timeout_artifacts(
-                            &mut recovered,
-                            &task.request,
+                    notification_route.bind(|| {
+                        let joined = join_handle
+                            .join()
+                            .map_err(|_| "provider worker panicked".to_string());
+                        let mut recovered = deferred_timeout_outcome(
+                            &task.task_id,
+                            task.timeout_ms.unwrap_or_default(),
                             "deferred_cleanup",
                         );
-                        super::finalize_candidate_artifacts(&mut recovered, &task);
-                    }
-                    super::engine::release_scratch(
-                        &task.scratch,
-                        "scheduler_timeout_completion",
-                        &recovered,
-                    );
-                    let cleanup = harvest.and_then(|_| {
-                        task._attempt_workspace
-                            .as_ref()
-                            .map(|workspace| workspace.cleanup())
-                            .unwrap_or(Ok(()))
-                    });
-                    super::complete_deferred_cleanup_recovery(&action_path, &recovered, cleanup);
+                        // A completed join proves the provider no longer owns the
+                        // checkout, so its committed candidate is safe to harvest.
+                        recovered.status = AgentTaskOutcomeStatus::Succeeded;
+                        recovered.failure_classification = None;
+                        let harvest = joined.and_then(|_| {
+                            super::harvest_uncommitted_patch(&mut recovered, &task)
+                                .and_then(|_| super::harvest_committed_patch(&mut recovered, &task))
+                                .map_err(|error| format!("{error:?}"))
+                        });
+                        if harvest.is_ok() {
+                            // The provider has exited, so runtime artifact discovery can no
+                            // longer race its writes to the isolated attempt workspace.
+                            Self::reconcile_timeout_artifacts(
+                                &mut recovered,
+                                &task.request,
+                                "deferred_cleanup",
+                            );
+                            super::finalize_candidate_artifacts(&mut recovered, &task);
+                        }
+                        super::engine::release_scratch(
+                            &task.scratch,
+                            "scheduler_timeout_completion",
+                            &recovered,
+                        );
+                        let cleanup = harvest.and_then(|_| {
+                            task._attempt_workspace
+                                .as_ref()
+                                .map(|workspace| workspace.cleanup())
+                                .unwrap_or(Ok(()))
+                        });
+                        super::complete_deferred_cleanup_recovery(
+                            &action_path,
+                            &recovered,
+                            cleanup,
+                        );
+                    })
                 });
             }
         }

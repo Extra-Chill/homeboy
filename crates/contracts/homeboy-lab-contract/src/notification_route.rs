@@ -135,6 +135,31 @@ pub fn current() -> Option<NotificationRoute> {
     CURRENT_NOTIFICATION_ROUTE.with(|current| current.borrow().clone())
 }
 
+/// A route captured from one thread so it can be re-bound on another.
+///
+/// The current route is thread-local, so work moved onto a worker thread
+/// (`thread::spawn`, `thread::scope`) starts with no route and silently stops
+/// attributing its runs to the caller's destination. Capture on the parent
+/// thread and re-bind inside the child body.
+#[derive(Debug, Clone, Default)]
+pub struct PropagatedNotificationRoute(Option<NotificationRoute>);
+
+impl PropagatedNotificationRoute {
+    /// Re-bind the captured route for the duration of `operation`.
+    pub fn bind<T>(&self, operation: impl FnOnce() -> T) -> T {
+        with_current(self.0.clone(), operation)
+    }
+
+    pub fn route(&self) -> Option<&NotificationRoute> {
+        self.0.as_ref()
+    }
+}
+
+/// Capture the calling thread's route for propagation onto worker threads.
+pub fn capture() -> PropagatedNotificationRoute {
+    PropagatedNotificationRoute(current())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +203,30 @@ mod tests {
         assert_eq!(first.join().unwrap(), "first");
         assert_eq!(second.join().unwrap(), "second");
         assert!(current().is_none());
+    }
+
+    #[test]
+    fn captured_route_is_rebound_on_a_worker_thread() {
+        let observed = with_current(
+            Some(NotificationRoute::new("extension", "parent-route").unwrap()),
+            || {
+                let propagated = capture();
+                std::thread::spawn(move || propagated.bind(current))
+                    .join()
+                    .unwrap()
+            },
+        );
+        assert_eq!(observed.unwrap().route, "parent-route");
+    }
+
+    #[test]
+    fn capture_without_a_bound_route_leaves_workers_unrouted() {
+        let propagated = capture();
+        assert!(propagated.route().is_none());
+        let observed = std::thread::spawn(move || propagated.bind(current))
+            .join()
+            .unwrap();
+        assert!(observed.is_none());
     }
 
     #[test]

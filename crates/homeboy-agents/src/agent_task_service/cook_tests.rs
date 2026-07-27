@@ -1256,6 +1256,42 @@ struct BatchAttemptDispatcher {
     fail: bool,
 }
 
+/// Records the notification route observed from inside the batch worker
+/// thread, so a lost thread-local binding is caught at the fanout boundary
+/// rather than only at the primitive.
+#[derive(Debug)]
+struct RouteObservingAttemptDispatcher {
+    observed: Arc<Mutex<Vec<Option<String>>>>,
+}
+
+impl AgentTaskCookAttemptDispatcher for RouteObservingAttemptDispatcher {
+    fn durable_recipe(&self) -> Result<Value> {
+        Ok(serde_json::json!({ "kind": "test-route-observer" }))
+    }
+
+    fn dispatch_attempt(
+        &self,
+        _plan: AgentTaskPlan,
+        run_id: &str,
+        _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    ) -> Result<()> {
+        self.observed
+            .lock()
+            .expect("observed routes")
+            .push(homeboy_core::notification_route::current().map(|route| route.route));
+        agent_task_lifecycle::record_detached_lab_run(
+            agent_task_lifecycle::DetachedLabRunRecord {
+                run_id,
+                runner_id: "fixture-lab",
+                runner_job_id: "fixture-job",
+                remote_workspace: "/runner/workspace",
+                remote_command: &["homeboy".to_string(), "agent-task".to_string()],
+            },
+        )?;
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 struct AdmissionFailingAttemptDispatcher {
     message: &'static str,
@@ -2552,6 +2588,67 @@ fn cook_batch_preserves_order_concurrency_and_failure_isolation() {
             .status()
             .expect("run process-isolated cook batch");
     assert!(status.success());
+}
+
+#[test]
+fn cook_batch_children_inherit_the_callers_notification_route() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let status = context
+            .controller_runtime_command(homeboy_core::test_support::TestBinary::CurrentTest)
+            .args([
+                "--ignored",
+                "--exact",
+                "agent_task_service::cook::tests::cook_batch_children_inherit_the_callers_notification_route_process",
+            ])
+            .status()
+            .expect("run process-isolated cook batch route propagation");
+    assert!(status.success());
+}
+
+#[test]
+#[ignore = "invoked by cook_batch_children_inherit_the_callers_notification_route"]
+fn cook_batch_children_inherit_the_callers_notification_route_process() {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let cooks = ["first", "second"]
+        .into_iter()
+        .map(|cook_id| {
+            batch_cook_options(
+                cook_id,
+                Arc::new(RouteObservingAttemptDispatcher {
+                    observed: Arc::clone(&observed),
+                }),
+            )
+        })
+        .collect::<Vec<_>>();
+    for cook in &cooks {
+        agent_task_lifecycle::submit_plan(&cook.initial_plan, Some(&cook.initial_run_id))
+            .expect("submit attempt");
+    }
+
+    let route = homeboy_core::notification_route::NotificationRoute::new(
+        "extension",
+        "opaque-fanout-route",
+    )
+    .expect("route");
+    homeboy_core::notification_route::with_current(Some(route), || {
+        run_cook_batch(
+            AgentTaskCookBatchOptions {
+                batch_id: "fixture-route-batch".to_string(),
+                cooks,
+                max_concurrency: 2,
+            },
+            UnusedExecutor,
+        )
+        .expect("batch completes")
+    });
+
+    // Every worker runs on its own thread; without propagation each would
+    // observe None and the originating destination would never be notified.
+    let observed = observed.lock().expect("observed routes").clone();
+    assert_eq!(observed.len(), 2);
+    for route in observed {
+        assert_eq!(route.as_deref(), Some("opaque-fanout-route"));
+    }
 }
 
 #[test]
