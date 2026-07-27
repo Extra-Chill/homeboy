@@ -556,9 +556,8 @@ pub fn negotiate_lab_capability_handshake(
     if rejection_reason.is_none()
         && handshake.runner_command.source_revision != handshake.daemon.source_revision
     {
-        rejection_reason = Some(
-            "runner command and active daemon source revisions differ".to_string(),
-        );
+        rejection_reason =
+            Some("runner command and active daemon source revisions differ".to_string());
     }
 
     if rejection_reason.is_none()
@@ -577,9 +576,8 @@ pub fn negotiate_lab_capability_handshake(
         && handshake.ancestry == LabRuntimeAncestry::ExactSource
         && handshake.controller.source_revision != handshake.runner_command.source_revision
     {
-        rejection_reason = Some(
-            "exact-source ancestry does not match the controller source revision".to_string(),
-        );
+        rejection_reason =
+            Some("exact-source ancestry does not match the controller source revision".to_string());
     }
 
     let required = capability_versions(&handshake.required_capabilities);
@@ -596,22 +594,23 @@ pub fn negotiate_lab_capability_handshake(
                     .collect::<BTreeSet<_>>()
                     .len())
     {
-        rejection_reason = Some(
-            "controller capability requirements are incomplete or contradictory".to_string(),
-        );
+        rejection_reason =
+            Some("controller capability requirements are incomplete or contradictory".to_string());
     }
     let command = advertised_capability_versions(&handshake.runner_command_capabilities);
     let daemon = advertised_capability_versions(&handshake.daemon_capabilities);
     let negotiated_capabilities = required
         .iter()
         .filter_map(|(id, version)| {
-            (command.get(id).is_some_and(|versions| versions.contains(version))
-                && daemon.get(id).is_some_and(|versions| versions.contains(version)))
-            .then(|| {
-                LabCapabilityVersion {
-                    id: id.clone(),
-                    version: *version,
-                }
+            (command
+                .get(id)
+                .is_some_and(|versions| versions.contains(version))
+                && daemon
+                    .get(id)
+                    .is_some_and(|versions| versions.contains(version)))
+            .then(|| LabCapabilityVersion {
+                id: id.clone(),
+                version: *version,
             })
         })
         .collect();
@@ -770,10 +769,12 @@ mod capability_handshake_tests {
     #[test]
     fn accepts_a_newer_capability_that_explicitly_advertises_the_required_version() {
         let mut handshake = handshake(LabRuntimeAncestry::VerifiedNewerDescendant);
-        handshake.runner_command_capabilities.push(LabCapabilityVersion {
-            id: "result-schema".to_string(),
-            version: 2,
-        });
+        handshake
+            .runner_command_capabilities
+            .push(LabCapabilityVersion {
+                id: "result-schema".to_string(),
+                version: 2,
+            });
         handshake.daemon_capabilities.push(LabCapabilityVersion {
             id: "result-schema".to_string(),
             version: 2,
