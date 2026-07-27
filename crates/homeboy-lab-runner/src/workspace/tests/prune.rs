@@ -4,8 +4,11 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crate::workspace::sync::{
-    prune_scan_command, prune_workspaces, ssh_process_liveness_command, ssh_prune_delete_command,
-    sync_workspace, update_workspace_resource_lifecycle, WORKSPACE_METADATA_FILE,
+    active_resource_lifecycle_liveness, prune_scan_command, prune_workspaces,
+    ssh_process_liveness_command, ssh_prune_delete_command,
+    ssh_prune_delete_command_with_terminal_owner, sync_workspace,
+    update_workspace_resource_lifecycle, ActiveResourceLifecycleLiveness, RunAuthority,
+    WORKSPACE_METADATA_FILE,
 };
 use crate::workspace::types::{
     RunnerWorkspacePruneOptions, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
@@ -222,6 +225,44 @@ fn prune_preserves_active_job_lifecycle_lease() {
         assert_eq!(output.skipped_live_count, 1);
         assert!(workspace.exists());
     });
+}
+
+#[test]
+fn active_lifecycle_lease_requires_unambiguous_terminal_run_authority() {
+    let metadata = active_lifecycle_metadata("run-terminal", "run-terminal");
+    assert!(matches!(
+        active_resource_lifecycle_liveness(&metadata, |_| RunAuthority::Terminal),
+        ActiveResourceLifecycleLiveness::Terminal(owner) if owner == "run-terminal"
+    ));
+    assert!(matches!(
+        active_resource_lifecycle_liveness(&metadata, |_| RunAuthority::Active),
+        ActiveResourceLifecycleLiveness::Live
+    ));
+    assert!(matches!(
+        active_resource_lifecycle_liveness(&metadata, |_| RunAuthority::Unavailable),
+        ActiveResourceLifecycleLiveness::Unknown("active_resource_lifecycle_authority_unavailable")
+    ));
+
+    let absent = serde_json::json!({ "resource_lifecycle": { "status": "active" } });
+    assert!(matches!(
+        active_resource_lifecycle_liveness(&absent, |_| RunAuthority::Terminal),
+        ActiveResourceLifecycleLiveness::NotActive
+    ));
+
+    let job_owned = serde_json::json!({
+        "job_id": "active-job",
+        "resource_lifecycle": { "status": "active" }
+    });
+    assert!(matches!(
+        active_resource_lifecycle_liveness(&job_owned, |_| RunAuthority::Terminal),
+        ActiveResourceLifecycleLiveness::Live
+    ));
+
+    let ambiguous = active_lifecycle_metadata("run-terminal", "other-run");
+    assert!(matches!(
+        active_resource_lifecycle_liveness(&ambiguous, |_| RunAuthority::Terminal),
+        ActiveResourceLifecycleLiveness::Unknown("active_resource_lifecycle_owner_ambiguous")
+    ));
 }
 
 #[test]
@@ -917,6 +958,91 @@ fn ssh_shaped_prune_delete_revalidates_lifecycle_and_deletes_atomically() {
     assert!(active.exists());
 }
 
+#[test]
+fn ssh_terminal_lifecycle_delete_revalidates_process_ownership() {
+    let root = tempfile::tempdir().expect("workspace root");
+    let workspace = root.path().join("_lab_workspaces/terminal");
+    write_orphan_workspace(&workspace);
+    let metadata_path = workspace.join(WORKSPACE_METADATA_FILE);
+    fs::write(
+        &metadata_path,
+        active_lifecycle_metadata("terminal-run", "terminal-run").to_string(),
+    )
+    .expect("write terminal lifecycle metadata");
+
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg("sleep 30")
+        .current_dir(&workspace)
+        .spawn()
+        .expect("hold workspace cwd after terminal authority");
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(ssh_prune_delete_command_with_terminal_owner(
+            &root.path().join("_lab_workspaces").display().to_string(),
+            &workspace.display().to_string(),
+            Some("terminal-run"),
+        ))
+        .output()
+        .expect("revalidate process ownership before terminal lifecycle delete");
+
+    child.kill().expect("stop held process");
+    child.wait().expect("reap held process");
+    assert!(output.status.success(), "{output:?}");
+    assert_ne!(String::from_utf8_lossy(&output.stdout), "removed");
+    assert!(workspace.exists());
+}
+
+#[test]
+fn ssh_terminal_lifecycle_delete_requires_matching_owner_in_pretty_metadata() {
+    let root = tempfile::tempdir().expect("workspace root");
+    let workspaces = root.path().join("_lab_workspaces");
+    let terminal = workspaces.join("terminal");
+    write_orphan_workspace(&terminal);
+    fs::write(
+        terminal.join(WORKSPACE_METADATA_FILE),
+        serde_json::to_string_pretty(&active_lifecycle_metadata("terminal-run", "terminal-run"))
+            .expect("pretty terminal metadata"),
+    )
+    .expect("write terminal lifecycle metadata");
+
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(ssh_prune_delete_command_with_terminal_owner(
+            &workspaces.display().to_string(),
+            &terminal.display().to_string(),
+            Some("terminal-run"),
+        ))
+        .output()
+        .expect("delete terminal-owned workspace");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "removed");
+    assert!(!terminal.exists());
+
+    let ambiguous = workspaces.join("ambiguous");
+    write_orphan_workspace(&ambiguous);
+    fs::write(
+        ambiguous.join(WORKSPACE_METADATA_FILE),
+        active_lifecycle_metadata("terminal-run", "other-run").to_string(),
+    )
+    .expect("write ambiguous lifecycle metadata");
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(ssh_prune_delete_command_with_terminal_owner(
+            &workspaces.display().to_string(),
+            &ambiguous.display().to_string(),
+            Some("terminal-run"),
+        ))
+        .output()
+        .expect("retain ambiguous workspace");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "live:active_resource_lifecycle_lease"
+    );
+    assert!(ambiguous.exists());
+}
+
 fn sync_options(path: String) -> RunnerWorkspaceSyncOptions {
     RunnerWorkspaceSyncOptions {
         path,
@@ -942,4 +1068,16 @@ fn write_orphan_workspace(path: &Path) {
         .to_string(),
     )
     .expect("workspace metadata");
+}
+
+fn active_lifecycle_metadata(run_id: &str, resource_run_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "homeboy/runner-workspace/v1",
+        "run_id": run_id,
+        "local_path": "/missing/source",
+        "resource_lifecycle": {
+            "run_id": resource_run_id,
+            "status": "active"
+        }
+    })
 }
