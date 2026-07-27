@@ -33,7 +33,7 @@ use homeboy_core::run_lifecycle_record::{
 use sha2::Digest;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Barrier, Condvar};
+use std::sync::{Arc, Barrier, Condvar};
 
 /// Seed a terminal aggregate whose last outcome carries a valid AI-authored
 /// review form under `outputs["review_form"]`, so cook finalization (which now
@@ -2023,13 +2023,6 @@ fn retryable_pre_provider_retry_repairs_lifecycle_reserved_attempts_idempotently
         // was written but before Cook metadata/index binding.
         let options = retryable_pre_provider_cook("cook-retry-submitted-repair", 2);
         let submitted_run_id = agent_task_lifecycle::cook_attempt_run_id(&options.cook_id, 2);
-        super::super::record_recipe_attempt(
-            &options.cook_id,
-            2,
-            &submitted_run_id,
-            &options.initial_plan,
-        )
-        .expect("reserve submitted retry");
         agent_task_lifecycle::retry(&options.initial_run_id, Some(&submitted_run_id))
             .expect("submit retry before Cook metadata binding");
 
@@ -2052,7 +2045,98 @@ fn retryable_pre_provider_retry_repairs_lifecycle_reserved_attempts_idempotently
                 .len(),
             2
         );
+        assert_eq!(
+            agent_task_lifecycle::list_records()
+                .expect("durable lifecycle records")
+                .len(),
+            2,
+            "repair binds the indexed reservation instead of orphaning another run"
+        );
     });
+}
+
+#[test]
+fn retryable_pre_provider_retry_concurrently_claims_one_successor() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = retryable_pre_provider_cook("cook-retry-concurrent", 2);
+        let barrier = Arc::new(Barrier::new(4));
+        let retries = (0..4)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                let run_id = options.initial_run_id.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    crate::agent_task_service::retry(&run_id, None, false)
+                        .expect("concurrent retry converges")
+                        .record
+                        .run_id
+                })
+            })
+            .collect::<Vec<_>>();
+        let run_ids = retries
+            .into_iter()
+            .map(|retry| retry.join().expect("retry thread"))
+            .collect::<Vec<_>>();
+
+        assert!(run_ids.iter().all(|run_id| run_id == &run_ids[0]));
+        let recipe = super::super::load_recipe(&options.cook_id).expect("bound recipe");
+        let index = agent_task_lifecycle::cook_index(&options.cook_id).expect("bound index");
+        assert_eq!(recipe.attempts.len(), 2);
+        assert_eq!(recipe.attempts[1].run_id, run_ids[0]);
+        assert_eq!(index.attempts.len(), 2);
+        assert_eq!(index.latest_run_id, run_ids[0]);
+        assert_eq!(
+            agent_task_lifecycle::list_records()
+                .expect("durable lifecycle records")
+                .len(),
+            2,
+            "the source and one bound successor are the only durable runs"
+        );
+    });
+}
+
+#[test]
+fn retryable_pre_provider_retry_concurrently_claims_one_successor_across_processes() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = retryable_pre_provider_cook("cook-retry-process", 2);
+        let test_binary = std::env::current_exe().expect("test binary path");
+        let mut workers = (0..2)
+            .map(|_| {
+                Command::new(&test_binary)
+                    .args([
+                        "--exact",
+                        "agent_task_service::cook::tests::retryable_pre_provider_retry_process_worker",
+                    ])
+                    .env("HOMEBOY_RETRY_PROCESS_WORKER", &options.initial_run_id)
+                    .spawn()
+                    .expect("start retry worker")
+            })
+            .collect::<Vec<_>>();
+        assert!(workers
+            .iter_mut()
+            .all(|worker| worker.wait().expect("wait for retry worker").success()));
+
+        let recipe = super::super::load_recipe(&options.cook_id).expect("bound recipe");
+        let index = agent_task_lifecycle::cook_index(&options.cook_id).expect("bound index");
+        assert_eq!(recipe.attempts.len(), 2);
+        assert_eq!(index.attempts.len(), 2);
+        assert_eq!(recipe.attempts[1].run_id, index.latest_run_id);
+        assert_eq!(
+            agent_task_lifecycle::list_records()
+                .expect("durable lifecycle records")
+                .len(),
+            2,
+            "the source and one bound successor are the only durable runs"
+        );
+    });
+}
+
+#[test]
+fn retryable_pre_provider_retry_process_worker() {
+    let Ok(run_id) = std::env::var("HOMEBOY_RETRY_PROCESS_WORKER") else {
+        return;
+    };
+    crate::agent_task_service::retry(&run_id, None, false).expect("process retry converges");
 }
 
 #[test]

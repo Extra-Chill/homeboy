@@ -368,6 +368,35 @@ impl ObservationStore {
         collect_rows(rows, "collect run records")
     }
 
+    /// Return a bounded set of runs linked to the given retry predecessor.
+    /// The literal JSON path matches the `idx_runs_metadata_retry_of` index.
+    pub fn list_runs_by_retry_of(
+        &self,
+        kind: &str,
+        retry_of: &str,
+        limit: usize,
+    ) -> Result<Vec<RunRecord>> {
+        let limit = i64::try_from(limit.clamp(1, 1000)).expect("bounded run query limit");
+        let mut statement = self
+            .connection
+            .prepare(
+                r#"
+                SELECT id, kind, component_id, started_at, finished_at, status, command, cwd,
+                       homeboy_version, git_sha, rig_id, metadata_json
+                FROM runs
+                WHERE kind = ?1
+                  AND json_extract(metadata_json, '$.agent_task_run.metadata.retry_of') = ?2
+                ORDER BY started_at DESC, id DESC
+                LIMIT ?3
+                "#,
+            )
+            .map_err(sqlite_error("prepare metadata-indexed run query"))?;
+        let rows = statement
+            .query_map(params![kind, retry_of, limit], row_to_run_record)
+            .map_err(sqlite_error("query metadata-indexed run records"))?;
+        collect_rows(rows, "collect metadata-indexed run records")
+    }
+
     /// List every currently running run so callers can retain active work when
     /// applying a separate display limit to recent history.
     pub fn list_active_runs(&self) -> Result<Vec<RunRecord>> {

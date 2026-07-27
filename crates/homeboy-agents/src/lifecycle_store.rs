@@ -283,6 +283,15 @@ pub(super) fn read_records() -> Result<Vec<AgentTaskRunRecord>> {
     Ok(read_records_with_health()?.0)
 }
 
+pub(super) fn read_retry_successors(source_run_id: &str) -> Result<Vec<AgentTaskRunRecord>> {
+    let runs = ObservationStore::open_initialized()?.list_runs_by_retry_of(
+        "agent-task",
+        source_run_id,
+        16,
+    )?;
+    runs.iter().map(record_from_run).collect()
+}
+
 pub(super) fn read_records_with_health(
 ) -> Result<(Vec<AgentTaskRunRecord>, super::AgentTaskRecordHealthSummary)> {
     let mut health = super::AgentTaskRecordHealthSummary::healthy();

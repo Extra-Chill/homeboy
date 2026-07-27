@@ -3,7 +3,9 @@
 //! and the shared `AgentTaskRunResult` envelope. Pure move out of the former
 //! `agent_task_service.rs` god-file.
 
-use serde_json::Value;
+use std::time::Duration;
+
+use serde_json::{json, Value};
 
 use crate::agent_task::{AgentTaskRequest, AgentTaskWorkspaceMode};
 use crate::agent_task_lifecycle::{
@@ -389,11 +391,19 @@ pub fn retry(
     let cook_retry = retryable_cook_attempt(&source)?;
     let record = match cook_retry {
         Some(cook_retry) => {
-            let retry_run_id = cook_retry
+            let discovered_run_id = agent_task_lifecycle::find_unbound_cook_retry_successor(
+                &source.run_id,
+                &cook_retry.cook_id,
+                cook_retry.attempt,
+                &cook_retry.plan,
+            )?
+            .map(|record| record.run_id);
+            let mut retry_run_id = cook_retry
                 .pending_run_id
                 .as_deref()
                 .or(new_run_id)
                 .map(str::to_string)
+                .or(discovered_run_id)
                 .unwrap_or_else(|| {
                     agent_task_lifecycle::cook_attempt_run_id(
                         &cook_retry.cook_id,
@@ -415,19 +425,25 @@ pub fn retry(
             // before recipe/index binding, so recovery can prove ownership without
             // adopting an unrelated same-plan run.
             if !retry_exists {
-                agent_task_lifecycle::retry(&source.run_id, Some(&retry_run_id))?;
+                retry_run_id = reserve_cook_retry_lifecycle(&source, &cook_retry, &retry_run_id)?;
             }
-            super::record_recipe_attempt(
-                &cook_retry.cook_id,
-                cook_retry.attempt,
-                &retry_run_id,
-                &cook_retry.plan,
-            )?;
-            agent_task_lifecycle::record_cook_attempt(
-                &cook_retry.cook_id,
-                cook_retry.attempt,
-                &retry_run_id,
-            )?;
+            // Recipe and index are one Cook-owned binding boundary. Serialize
+            // concurrent claim observers so neither can overwrite the other's
+            // append-only recipe revision between its read and write.
+            config::with_config_lock(|| {
+                super::record_recipe_attempt(
+                    &cook_retry.cook_id,
+                    cook_retry.attempt,
+                    &retry_run_id,
+                    &cook_retry.plan,
+                )?;
+                agent_task_lifecycle::record_cook_attempt(
+                    &cook_retry.cook_id,
+                    cook_retry.attempt,
+                    &retry_run_id,
+                )?;
+                Ok(())
+            })?;
             let record = agent_task_lifecycle::status(&retry_run_id)?;
             if record.state.is_terminal() {
                 return Ok(AgentTaskRetryServiceResult { record, run: false });
@@ -437,6 +453,60 @@ pub fn retry(
         None => agent_task_lifecycle::retry(&source.run_id, new_run_id)?,
     };
     Ok(AgentTaskRetryServiceResult { record, run })
+}
+
+fn reserve_cook_retry_lifecycle(
+    source: &agent_task_lifecycle::AgentTaskRunRecord,
+    retry: &CookRetryAttempt,
+    retry_run_id: &str,
+) -> Result<String> {
+    let operation_key = format!("retry:{}:{}", retry.cook_id, retry.attempt);
+    match agent_task_lifecycle::claim_cook_operation(
+        &source.run_id,
+        &operation_key,
+        Duration::from_secs(30),
+    )? {
+        agent_task_lifecycle::ClaimOutcome::Acquired => {
+            agent_task_lifecycle::retry(&source.run_id, Some(retry_run_id))?;
+            agent_task_lifecycle::complete_cook_operation(
+                &source.run_id,
+                &operation_key,
+                json!({ "run_id": retry_run_id }),
+            )?;
+            Ok(retry_run_id.to_string())
+        }
+        agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(result) => {
+            let recorded_run_id = result["run_id"].as_str().ok_or_else(|| {
+                Error::internal_unexpected("completed Cook retry claim has no run id")
+            })?;
+            Ok(recorded_run_id.to_string())
+        }
+        agent_task_lifecycle::ClaimOutcome::LeaseHeld => {
+            // The winner writes its lifecycle reservation before completing the
+            // claim. Re-read through the indexed successor path on the next
+            // retry rather than allocating a competing run id.
+            // Controller admission can take up to the normal local lease
+            // handoff window. Bound the observer wait above that window so a
+            // crashed winner remains recoverable rather than waiting forever.
+            for _ in 0..2_000 {
+                if let Some(record) = agent_task_lifecycle::find_unbound_cook_retry_successor(
+                    &source.run_id,
+                    &retry.cook_id,
+                    retry.attempt,
+                    &retry.plan,
+                )? {
+                    return Ok(record.run_id);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(Error::validation_invalid_argument(
+                "run_id",
+                "Cook retry reservation is still being finalized",
+                Some(source.run_id.clone()),
+                None,
+            ))
+        }
+    }
 }
 
 /// A retryable failure before provider execution has no candidate or execution
