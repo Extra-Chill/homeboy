@@ -581,7 +581,6 @@ pub fn force_terminate_process_tree_bounded(pid: u32, timeout: Duration) -> Resu
         let mut targets = linux_descendant_pids(pid)?;
         #[cfg(not(target_os = "linux"))]
         let mut targets = Vec::new();
-        targets.push(pid);
         targets.retain(|target| *target != std::process::id());
         targets.sort_unstable();
         targets.dedup();
@@ -598,7 +597,10 @@ pub fn force_terminate_process_tree_bounded(pid: u32, timeout: Duration) -> Resu
         }
         signal_pids(&targets, libc::SIGKILL)?;
         let survivors = wait_for_exit(&targets, timeout);
-        if survivors.is_empty() && !process_group_is_running(pid as i32) {
+        // The caller owns and reaps the direct child. Waiting for it here
+        // misidentifies an unreaped zombie as a surviving process on Unix
+        // platforms without Linux's procfs state inspection.
+        if survivors.is_empty() {
             return Ok(());
         }
         return Err(Error::internal_unexpected(format!(
@@ -986,6 +988,40 @@ mod tests {
             descendant_pids_from_rows(&[(10, 1), (11, 10), (12, 11), (13, 1)], 10),
             vec![11, 12]
         );
+    }
+
+    #[test]
+    fn bounded_force_termination_kills_session_escapee() {
+        use std::os::unix::process::CommandExt;
+
+        let pid_file = std::env::temp_dir().join(format!(
+            "homeboy-process-escaped-descendant-{}.pid",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&pid_file);
+        let script = format!("setsid sleep 30 & echo $! > {}; wait", pid_file.display());
+        let mut command = Command::new("sh");
+        command.args(["-c", &script]).process_group(0);
+        let mut child = command.spawn().expect("spawn owned process tree");
+        for _ in 0..100 {
+            if pid_file.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let escaped_pid = std::fs::read_to_string(&pid_file)
+            .expect("escaped descendant pid")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric escaped descendant pid");
+
+        let started = Instant::now();
+        force_terminate_process_tree_bounded(child.id(), Duration::from_millis(500))
+            .expect("force-terminate owned tree");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let _ = child.wait();
+        let _ = std::fs::remove_file(&pid_file);
+        assert!(!pid_is_running(escaped_pid));
     }
 
     #[test]

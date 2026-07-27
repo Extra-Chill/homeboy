@@ -632,9 +632,9 @@ fn run_bounded_asset_download(
                 let remaining = expected_size.saturating_sub(size).min(bytes.len() as u64) as usize;
                 let accepted = bytes.len().min(remaining);
                 if accepted > 0 {
-                    output_file
-                        .write_all(&bytes[..accepted])
-                        .map_err(|error| format!("could not write temporary asset bytes: {error}"))?;
+                    output_file.write_all(&bytes[..accepted]).map_err(|error| {
+                        format!("could not write temporary asset bytes: {error}")
+                    })?;
                     hasher.update(&bytes[..accepted]);
                     size += accepted as u64;
                 }
@@ -646,25 +646,29 @@ fn run_bounded_asset_download(
                 Ok(())
             }) {
                 Ok(open) => open,
-                Err(error) => break Err(format!(
-                    "could not download GitHub Release asset '{}': {error}",
-                    asset_name
-                )),
+                Err(error) => {
+                    break Err(format!(
+                        "could not download GitHub Release asset '{}': {error}",
+                        asset_name
+                    ))
+                }
             };
         }
         if stderr_open {
             stderr_open = match drain_available_pipe(&mut stderr, |bytes| {
-                let remaining = GITHUB_RELEASE_DOWNLOAD_DIAGNOSTIC_BYTES
-                    .saturating_sub(diagnostics.len());
+                let remaining =
+                    GITHUB_RELEASE_DOWNLOAD_DIAGNOSTIC_BYTES.saturating_sub(diagnostics.len());
                 diagnostics.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
                 diagnostics_truncated |= bytes.len() > remaining;
                 Ok(())
             }) {
                 Ok(open) => open,
-                Err(error) => break Err(format!(
-                    "could not read GitHub Release asset '{}' diagnostics: {error}",
-                    asset_name
-                )),
+                Err(error) => {
+                    break Err(format!(
+                        "could not read GitHub Release asset '{}' diagnostics: {error}",
+                        asset_name
+                    ))
+                }
             };
         }
         if !stdout_open && !stderr_open {
@@ -692,9 +696,9 @@ fn run_bounded_asset_download(
                     ));
                 }
             }
-        } else if exited_at.is_some_and(|exit| {
-            exit.elapsed() >= GITHUB_RELEASE_DOWNLOAD_READER_CLEANUP_TIMEOUT
-        }) {
+        } else if exited_at
+            .is_some_and(|exit| exit.elapsed() >= GITHUB_RELEASE_DOWNLOAD_READER_CLEANUP_TIMEOUT)
+        {
             break Err(format!(
                 "GitHub Release asset '{}' pipes remained open after the download process exited",
                 asset_name
@@ -1118,6 +1122,10 @@ mod tests {
         .expect_err("stalled output must time out");
 
         assert!(error.contains("timed out"));
+        assert!(
+            !error.contains("owned process tree"),
+            "reaping the direct child must not be reported as failed tree cleanup: {error}"
+        );
         assert_eq!(
             std::fs::read_dir(temp.path())
                 .expect("read tempdir")
@@ -1186,13 +1194,8 @@ mod tests {
             let mut command = Command::new("sh");
             command.args(["-c", &script]);
             let started = Instant::now();
-            let result = run_bounded_asset_download(
-                &mut command,
-                "asset.zip",
-                4,
-                timeout,
-                Some(&downloads),
-            );
+            let result =
+                run_bounded_asset_download(&mut command, "asset.zip", 4, timeout, Some(&downloads));
             let _ = result_tx.send((result, started.elapsed()));
         });
 
@@ -1239,9 +1242,7 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(25));
         }
-        panic!(
-            "download process group {leader_pid} or descendant {descendant_pid} remained alive"
-        );
+        panic!("download process group {leader_pid} or descendant {descendant_pid} remained alive");
     }
 
     #[test]
