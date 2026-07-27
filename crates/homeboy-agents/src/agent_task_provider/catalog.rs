@@ -122,6 +122,44 @@ impl AgentTaskProviderCatalog {
         apply_provider_runner_secret_env_contracts_with_providers(plan, &self.providers);
     }
 
+    /// Validate explicit model requests before provider dispatch when a provider
+    /// declares its supported models. Providers with no declarations retain a
+    /// provider-generic model namespace.
+    pub fn validate_explicit_models(&self, plan: &AgentTaskPlan) -> homeboy_core::Result<()> {
+        for task in &plan.tasks {
+            let Some(requested) = task.metadata["model_selection"]["requested"].as_str() else {
+                continue;
+            };
+            let ProviderResolution::Resolved(provider) = resolve_provider_for_backend(
+                &self.providers,
+                &task.executor.backend,
+                task.executor.selector.as_deref(),
+            ) else {
+                continue;
+            };
+            let mut supported = provider
+                .cli
+                .profiles
+                .iter()
+                .filter_map(|profile| profile.model.clone())
+                .collect::<Vec<_>>();
+            supported.sort();
+            supported.dedup();
+            if !supported.is_empty() && !supported.iter().any(|model| model == requested) {
+                return Err(Error::validation_invalid_argument(
+                    "model",
+                    format!(
+                        "provider `{}` does not support requested model `{requested}`",
+                        provider.id
+                    ),
+                    Some(requested.to_string()),
+                    Some(vec![format!("supported models: {}", supported.join(", "))]),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Run declared runtime preflight checks for each task's resolved provider.
     pub fn enforce_runtime_preflight_checks_for_plan(
         &self,
@@ -255,6 +293,38 @@ mod tests {
         assert_eq!(
             catalog.ai_disclosure_for("no-such-backend", None, Some("m")),
             None
+        );
+    }
+
+    #[test]
+    fn declared_provider_rejects_unsupported_explicit_model_with_diagnostics() {
+        let catalog = disclosure_catalog();
+        let mut plan = AgentTaskPlan::new("model-preflight", Vec::new());
+        plan.tasks.push(
+            serde_json::from_value(serde_json::json!({
+                "schema": crate::agent_task::AGENT_TASK_REQUEST_SCHEMA,
+                "task_id": "task",
+                "executor": { "backend": "opencode" },
+                "instructions": "Cook",
+                "workspace": { "mode": "existing" },
+                "metadata": {
+                    "model_selection": {
+                        "requested": "openai/gpt-5.6-unknown",
+                        "selected": "openai/gpt-5.6-unknown",
+                        "reason": "explicit-request"
+                    }
+                }
+            }))
+            .expect("task"),
+        );
+
+        let error = catalog
+            .validate_explicit_models(&plan)
+            .expect_err("unsupported model");
+        assert!(error.message.contains("does not support requested model"));
+        assert_eq!(
+            error.details["tried"][0].as_str(),
+            Some("supported models: openai/gpt-5.6-sol, openai/gpt-5.6-terra")
         );
     }
 }

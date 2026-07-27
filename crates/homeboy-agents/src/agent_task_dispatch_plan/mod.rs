@@ -19,7 +19,9 @@ use crate::agent_task_scheduler::{AgentTaskExecutionBudget, AgentTaskPlan, Agent
 use crate::agent_task_secrets::validate_secret_env;
 use homeboy_core::{defaults, worktree, worktree_providers, Error, Result};
 
-use super::agent_task_dispatch_service::AgentTaskDispatchRequest;
+use super::agent_task_dispatch_service::{
+    AgentTaskDispatchRequest, AgentTaskModelSelection, AgentTaskModelSelectionReason,
+};
 
 mod prompt_spec;
 use prompt_spec::{
@@ -166,12 +168,12 @@ pub fn build_dispatch_plan_with_provider_requirements(
         .resolved_provider_policy
         .as_ref()
         .and_then(|policy| policy.rotation.clone());
-    if request
+    let rotation_selected_initial_model = request
         .core
         .resolved_provider_policy
         .as_ref()
-        .is_some_and(|policy| policy.rotation_starts_with_first_entry)
-    {
+        .is_some_and(|policy| policy.rotation_starts_with_first_entry);
+    if rotation_selected_initial_model {
         if let Some(rotation) = resolved_rotation.as_mut() {
             if !rotation.entries.is_empty() {
                 let first = rotation.entries.remove(0);
@@ -181,6 +183,17 @@ pub fn build_dispatch_plan_with_provider_requirements(
             }
         }
     }
+    let model_selection = AgentTaskModelSelection {
+        requested: request.model.clone(),
+        selected: policy_model.clone(),
+        reason: if request.model.is_some() {
+            AgentTaskModelSelectionReason::ExplicitRequest
+        } else if rotation_selected_initial_model {
+            AgentTaskModelSelectionReason::PolicyRotation
+        } else {
+            AgentTaskModelSelectionReason::Default
+        },
+    };
     let component_contracts = dispatch_component_contracts(&provider_config, &client_context)?;
     // Resolve + materialize the declared runtime dependency graph at known refs
     // and preflight-fail before dispatch when a required runtime dependency is
@@ -325,6 +338,12 @@ pub fn build_dispatch_plan_with_provider_requirements(
         format!("agent-task-dispatch-{}", uuid::Uuid::new_v4()),
         tasks,
     );
+    let model_selection = serde_json::to_value(&model_selection)
+        .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    plan.metadata["model_selection"] = model_selection.clone();
+    for task in &mut plan.tasks {
+        task.metadata["model_selection"] = model_selection.clone();
+    }
     plan.group_key = repo.clone();
     plan.options.max_concurrency = request.concurrency.max(1);
     plan.options.timeout_ms = request.core.timeout_ms;

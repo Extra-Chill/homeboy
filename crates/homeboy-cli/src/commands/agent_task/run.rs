@@ -529,6 +529,11 @@ where
         .commit_message
         .clone()
         .unwrap_or_else(|| default_loop_commit_message(&args));
+    let selected_model = initial_plan
+        .tasks
+        .first()
+        .and_then(|task| task.executor.model())
+        .map(str::to_string);
     let durable_observer = |phase: &str, cook_id: &str, run_id: &str| {
         progress
             .map(|progress| progress(phase, Some(cook_id), Some(run_id)))
@@ -567,7 +572,7 @@ where
             // `OpenCode (GPT-5.5)` is presentation, not execution provenance, and
             // must not be reverse-parsed into a model — an omitted model stays
             // omitted so finalization records only real model identity (#9789).
-            ai_model: args.dispatch.model,
+            ai_model: selected_model,
             ai_used_for: args.ai_used_for,
             attempt_dispatcher,
             harvest_context:
@@ -648,6 +653,8 @@ pub(crate) fn compile_cook_plan(
         })?;
         task.metadata["cook_workspace_identity"] = workspace_identity_attestation(Path::new(root))?;
     }
+    homeboy::agents::agent_task_provider::AgentTaskProviderCatalog::discover()
+        .validate_explicit_models(&plan)?;
     record_cook_goal(&mut plan, args.goal.as_deref());
     Ok(plan)
 }
