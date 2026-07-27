@@ -193,6 +193,31 @@ const MIGRATIONS: &[Migration] = &[
             ON runs(json_extract(metadata_json, '$.agent_task_run.metadata.retry_of'));
         "#,
     },
+    Migration {
+        version: 11,
+        sql: r#"
+        -- A publication is journaled before final paths are materialized. On
+        -- startup unfinished intents are removed with their unowned files.
+        CREATE TABLE IF NOT EXISTS artifact_publication_intents (
+            publication_id TEXT NOT NULL,
+            artifact_id TEXT NOT NULL,
+            staging_path TEXT NOT NULL,
+            final_path TEXT NOT NULL,
+            PRIMARY KEY(publication_id, artifact_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_artifact_publication_intents_publication
+            ON artifact_publication_intents(publication_id);
+        "#,
+    },
+    Migration {
+        version: 12,
+        sql: r#"
+        ALTER TABLE artifact_publication_intents ADD COLUMN owner_token TEXT;
+        ALTER TABLE artifact_publication_intents ADD COLUMN lease_expires_at_ms INTEGER;
+        CREATE INDEX IF NOT EXISTS idx_artifact_publication_intents_lease
+            ON artifact_publication_intents(lease_expires_at_ms);
+        "#,
+    },
 ];
 
 static MIGRATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();

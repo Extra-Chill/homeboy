@@ -1,3 +1,6 @@
+use std::io::Write;
+
+use base64::Engine;
 use serde_json::{json, Value};
 
 use crate::agent_task_lifecycle_event::{
@@ -5,10 +8,12 @@ use crate::agent_task_lifecycle_event::{
     agent_task_run_plan_lifecycle_event_from_value,
 };
 use homeboy_core::api_jobs::{Job, JobArtifactMetadata, JobEvent, JobStatus, RunnerJobLogSnapshot};
-use homeboy_core::error::{Error, Result};
-use homeboy_core::execution_contract::{encode_uri_component, EXECUTION_CONTRACT};
+use homeboy_core::error::{Error, ErrorCode, Result};
+use homeboy_core::execution_contract::encode_uri_component;
 use homeboy_core::notification_route::NotificationRoute;
-use homeboy_core::observation::{ArtifactRecord, ObservationStore, RunRecord, RunStatus};
+use homeboy_core::observation::{
+    ArtifactPublication, ArtifactRecord, ObservationStore, RunRecord, RunStatus,
+};
 use homeboy_core::redaction::redact_argv_shell_display;
 
 use super::super::execution::{canonical_daemon_body, daemon_api_get, result_event_data};
@@ -16,7 +21,6 @@ use super::super::{load, Runner};
 use super::detail::{
     explicit_observation_run_ids, remote_detail_artifacts, remote_detail_to_run_record,
 };
-use super::tokens::{is_retrievable_runner_artifact, runner_artifact_token};
 use super::util::{
     job_status_as_run_status, local_job_run_id, ms_to_rfc3339, result_summary,
     runner_exec_run_label, runner_metadata, source_snapshot_from_result,
@@ -28,7 +32,39 @@ pub(super) const MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT: usize = 1_024;
 #[derive(Debug)]
 pub struct MirroredDaemonEvidence {
     pub run: RunRecord,
+    pub runs: Vec<RunRecord>,
     pub patch: Option<Value>,
+}
+
+/// Terminal responses expose only controller-owned records, never the runner's
+/// original artifact metadata or paths.
+pub fn controller_artifact_metadata(runs: &[RunRecord]) -> Result<Vec<JobArtifactMetadata>> {
+    let store = ObservationStore::open_initialized()?;
+    let artifacts = runs.iter().try_fold(Vec::new(), |mut artifacts, run| {
+        artifacts.extend(store.list_artifacts(&run.id)?);
+        Ok::<_, Error>(artifacts)
+    })?;
+    artifacts
+        .into_iter()
+        .map(|artifact| {
+            let controller_run_id = artifact.run_id.clone();
+            Ok(JobArtifactMetadata {
+                id: artifact.id,
+                name: None,
+                path: Some(artifact.path),
+                url: artifact.public_url.or(artifact.url),
+                mime: artifact.mime,
+                size_bytes: artifact
+                    .size_bytes
+                    .and_then(|size| u64::try_from(size).ok()),
+                sha256: artifact.sha256,
+                content_base64: None,
+                metadata: Some(
+                    json!({ "controller_run_id": controller_run_id, "controller_owned": true }),
+                ),
+            })
+        })
+        .collect()
 }
 
 pub fn mirror_daemon_evidence(
@@ -54,11 +90,33 @@ pub fn mirror_daemon_evidence(
         notification_route,
     )?;
     let remote_runs =
-        mirror_remote_observation_runs(&store, runner, job, result, notification_route)?;
+        match mirror_remote_observation_runs(&store, runner, job, result, notification_route) {
+            Ok(runs) => runs,
+            Err(error) => {
+                if run_id.is_none() {
+                    store.discard_synthetic_run(&local_job_run.id).ok();
+                }
+                return Err(error);
+            }
+        };
+    if remote_runs.is_empty() {
+        if let Err(error) = mirror_terminal_job_artifacts(&store, runner, job, &local_job_run) {
+            if run_id.is_none() {
+                store.discard_synthetic_run(&local_job_run.id).ok();
+            }
+            return Err(error);
+        }
+    }
     let patch = mirrored_patch_result(&store, runner, job, result.get("patch"))?;
-    let primary_run = primary_mirrored_run(&remote_runs).unwrap_or(local_job_run);
+    let runs = if remote_runs.is_empty() {
+        vec![local_job_run.clone()]
+    } else {
+        remote_runs
+    };
+    let primary_run = primary_mirrored_run(&runs).unwrap_or_else(|| runs[0].clone());
     Ok(Some(MirroredDaemonEvidence {
         run: primary_run,
+        runs,
         patch,
     }))
 }
@@ -86,7 +144,17 @@ pub fn mirror_reverse_broker_evidence(
         run_id,
         notification_route,
     )?;
-    let artifacts = mirror_reverse_broker_artifacts(&store, runner, broker_url, &run.id, job)?;
+    let artifacts = mirror_terminal_job_artifacts_with(&store, runner, job, &run, |artifact_id| {
+        terminal_artifact_bytes(
+            crate::connection::reverse_broker_artifact_content_at(
+                broker_url,
+                &runner.id,
+                &job.id.to_string(),
+                artifact_id,
+            )?,
+            artifact_id,
+        )
+    })?;
 
     let mut metadata = run.metadata_json.clone();
     metadata["lab"]["reverse_broker"] = json!({
@@ -108,7 +176,11 @@ pub fn mirror_reverse_broker_evidence(
             .get("patch")
             .or_else(|| result.pointer("/data/patch")),
     )?;
-    Ok(Some(MirroredDaemonEvidence { run, patch }))
+    Ok(Some(MirroredDaemonEvidence {
+        run: run.clone(),
+        runs: vec![run],
+        patch,
+    }))
 }
 
 pub fn mirror_daemon_job_progress(
@@ -303,26 +375,21 @@ pub(super) fn mirrored_patch_result(
         return Ok(Some(patch.clone()));
     }
 
-    let expected_run_id = format!("runner-exec-{}", job.id);
     let artifact = store
         .get_artifact(artifact_id)?
-        .filter(|artifact| artifact.run_id == expected_run_id)
         .ok_or_else(|| {
             Error::internal_unexpected(format!(
-                "runner capture-patch artifact {artifact_id} was reported by remote run {expected_run_id}, but no mirrored artifact record is available"
+                "runner capture-patch artifact {artifact_id} was reported by job '{}', but no controller-owned artifact record is available",
+                job.id
             ))
         })?;
 
     let mut patched = patch.clone();
     if let Some(object) = patched.as_object_mut() {
-        // The controller cannot rely on the runner-local artifact path. Keep
-        // the patch on the daemon artifact route so promotion can fetch it.
-        let path = if is_retrievable_runner_artifact(&artifact.path) {
-            artifact.path
-        } else {
-            runner_artifact_token(&runner.id, &expected_run_id, artifact_id)
-        };
-        object.insert("patch_artifact_path".to_string(), Value::String(path));
+        object.insert(
+            "patch_artifact_path".to_string(),
+            Value::String(artifact.path),
+        );
     }
     Ok(Some(patched))
 }
@@ -463,6 +530,131 @@ fn mirror_remote_observation_runs(
     Ok(Vec::new())
 }
 
+/// Legacy terminal producers may advertise artifacts without a durable
+/// observation run. Their controller-owned runner-exec mirror is the stable
+/// terminal identity, and every advertised job artifact must be materialized
+/// before that terminal response can be returned.
+fn mirror_terminal_job_artifacts(
+    store: &ObservationStore,
+    runner: &Runner,
+    job: &Job,
+    run: &RunRecord,
+) -> Result<Vec<ArtifactRecord>> {
+    mirror_terminal_job_artifacts_with(store, runner, job, run, |artifact_id| {
+        terminal_artifact_bytes(
+            crate::runner_artifact_content(&runner.id, &job.id.to_string(), artifact_id)?,
+            artifact_id,
+        )
+    })
+}
+
+fn terminal_artifact_bytes(response: Value, artifact_id: &str) -> Result<Vec<u8>> {
+    let content = response
+        .get("content_base64")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "artifact.content_base64",
+                "terminal artifact retrieval did not return bytes",
+                Some(artifact_id.to_string()),
+                None,
+            )
+        })?;
+    base64::engine::general_purpose::STANDARD
+        .decode(content)
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "artifact.content_base64",
+                format!("terminal artifact bytes are not valid base64: {error}"),
+                Some(artifact_id.to_string()),
+                None,
+            )
+        })
+}
+
+pub(super) fn mirror_terminal_job_artifacts_with<F>(
+    store: &ObservationStore,
+    runner: &Runner,
+    job: &Job,
+    run: &RunRecord,
+    mut fetch: F,
+) -> Result<Vec<ArtifactRecord>>
+where
+    F: FnMut(&str) -> Result<Vec<u8>>,
+{
+    let mut staged = Vec::with_capacity(job.artifacts.len());
+    let mut publications = Vec::with_capacity(job.artifacts.len());
+    for artifact in &job.artifacts {
+        let size_bytes = artifact
+            .size_bytes
+            .and_then(|size| i64::try_from(size).ok());
+        let sha256 = artifact.sha256.clone().filter(|sha| !sha.is_empty());
+        if size_bytes.is_none() || sha256.is_none() {
+            return Err(artifact_projection_error(
+                runner,
+                job,
+                &run.id,
+                Error::validation_invalid_argument(
+                    "artifact.provenance",
+                    "terminal artifact is missing required size_bytes or sha256 provenance",
+                    Some(artifact.id.clone()),
+                    None,
+                ),
+            ));
+        }
+        let mut file = tempfile::NamedTempFile::new().map_err(|error| {
+            artifact_projection_error(
+                runner,
+                job,
+                &run.id,
+                Error::internal_io(
+                    error.to_string(),
+                    Some("stage terminal artifact".to_string()),
+                ),
+            )
+        })?;
+        file.write_all(
+            &fetch(&artifact.id)
+                .map_err(|error| artifact_projection_error(runner, job, &run.id, error))?,
+        )
+        .map_err(|error| {
+            artifact_projection_error(
+                runner,
+                job,
+                &run.id,
+                Error::internal_io(
+                    error.to_string(),
+                    Some("write terminal artifact".to_string()),
+                ),
+            )
+        })?;
+        publications.push(ArtifactPublication {
+            id: artifact.id.clone(),
+            kind: artifact
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("kind"))
+                .and_then(Value::as_str)
+                .unwrap_or("runner_job_artifact")
+                .to_string(),
+            source_path: file.path().to_path_buf(),
+            mime: artifact.mime.clone(),
+            metadata_json: json!({
+                "runner_id": runner.id,
+                "runner_job_id": job.id.to_string(),
+                "name": artifact.name,
+                "terminal_artifact": true,
+            }),
+            expected_size_bytes: size_bytes,
+            expected_sha256: sha256,
+        });
+        staged.push(file);
+    }
+    store
+        .publish_run_artifacts_atomically(run, &publications)
+        .map_err(|error| artifact_projection_error(runner, job, &run.id, error))
+}
+
 fn mirror_remote_observation_runs_by_id(
     store: &ObservationStore,
     runner: &Runner,
@@ -487,38 +679,187 @@ fn mirror_remote_observation_runs_by_id(
     )
 }
 
+/// Project terminal runner observations and their artifacts into controller
+/// storage before terminal command output can expose their references.
+///
+/// A runner result that declares an observation run ID has made that run part
+/// of its reviewer-facing contract. Treating a missing `/runs/<id>` response as
+/// optional leaves callers with URLs that only existed on the disconnected
+/// runner, so reconciliation must fail closed instead.
 pub(super) fn mirror_remote_observation_runs_by_id_with<F>(
     store: &ObservationStore,
     runner: &Runner,
     job: &Job,
     run_ids: &[String],
     notification_route: Option<&NotificationRoute>,
-    mut fetch_detail: F,
+    fetch_detail: F,
 ) -> Result<Vec<RunRecord>>
 where
     F: FnMut(&str) -> Result<Option<Value>>,
+{
+    mirror_remote_observation_runs_by_id_with_downloader(
+        store,
+        runner,
+        job,
+        run_ids,
+        notification_route,
+        fetch_detail,
+        |path| Ok(super::download::download_remote_artifact(path, None)?.output_path),
+    )
+}
+
+pub(super) fn mirror_remote_observation_runs_by_id_with_downloader<F, D>(
+    store: &ObservationStore,
+    runner: &Runner,
+    job: &Job,
+    run_ids: &[String],
+    notification_route: Option<&NotificationRoute>,
+    mut fetch_detail: F,
+    mut download: D,
+) -> Result<Vec<RunRecord>>
+where
+    F: FnMut(&str) -> Result<Option<Value>>,
+    D: FnMut(&str) -> Result<std::path::PathBuf>,
 {
     let mut mirrored = Vec::new();
     for run_id in run_ids {
         let detail = match fetch_detail(run_id) {
             Ok(Some(detail)) => detail,
-            Ok(None) => continue,
-            // The terminal daemon job and its events are authoritative. A
-            // durable-run projection is optional and can be unavailable.
-            Err(error) if missing_optional_run_projection(&error, run_id) => continue,
+            Ok(None) => return Err(missing_required_run_projection(runner, job, run_id, None)),
+            Err(error) if missing_optional_run_projection(&error, run_id) => {
+                return Err(missing_required_run_projection(
+                    runner,
+                    job,
+                    run_id,
+                    Some(error),
+                ))
+            }
             Err(error) => return Err(error),
         };
         let mut run = remote_detail_to_run_record(&detail, runner, Some(job))?;
         if let Some(notification_route) = notification_route {
             notification_route.insert_into_metadata(&mut run.metadata_json);
         }
-        import_run_if_absent(store, &run)?;
-        for artifact in remote_detail_artifacts(&detail, runner, &run.id)? {
-            import_mirrored_artifact(store, &artifact)?;
-        }
-        mirrored.push(run);
+        let publications = remote_detail_artifacts(&detail, runner, &run.id)?
+            .into_iter()
+            .map(|artifact| {
+                if artifact.size_bytes.is_none()
+                    || artifact.sha256.as_deref().is_none_or(str::is_empty)
+                {
+                    return Err(Error::validation_invalid_argument(
+                        "artifact.provenance",
+                        "declared terminal artifact is missing required size_bytes or sha256 provenance",
+                        Some(artifact.id),
+                        None,
+                    ));
+                }
+                let source_path = download(&artifact.path)?;
+                Ok(ArtifactPublication {
+                    id: artifact.id,
+                    kind: artifact.kind,
+                    source_path,
+                    mime: artifact.mime,
+                    metadata_json: artifact.metadata_json,
+                    expected_size_bytes: artifact.size_bytes,
+                    expected_sha256: artifact.sha256,
+                })
+            })
+            .collect::<Result<Vec<_>>>()
+            .map_err(|error| artifact_projection_error(runner, job, run_id, error))?;
+        store
+            .publish_run_artifacts_atomically(&run, &publications)
+            .map_err(|error| artifact_projection_error(runner, job, run_id, error))?;
+        mirrored.push(
+            store.get_run(&run.id)?.ok_or_else(|| {
+                Error::internal_unexpected("published controller run is unreadable")
+            })?,
+        );
     }
     Ok(mirrored)
+}
+
+fn artifact_projection_error(runner: &Runner, job: &Job, run_id: &str, source: Error) -> Error {
+    let retryable = !permanent_artifact_provenance_error(&source);
+    Error::new(
+        source.code,
+        format!(
+            "controller could not durably project all artifacts for Lab runner job '{}' run '{}'; terminal output is withheld",
+            job.id, run_id
+        ),
+        json!({
+            "runner_id": runner.id,
+            "runner_job_id": job.id.to_string(),
+            "run_id": run_id,
+            "source_error": { "code": source.code.as_str(), "message": source.message, "details": source.details },
+            "reconciliation_command": format!("homeboy runs show {run_id}"),
+            "artifact_reconciliation_command": format!("homeboy runs artifacts {run_id}"),
+        }),
+    )
+    .with_retryable(retryable)
+    .with_hint(if retryable {
+        format!("Reconnect runner '{}' and retry job '{}' to reconcile its complete artifact set.", runner.id, job.id)
+    } else {
+        format!("Repair the malformed artifact provenance reported for job '{}' before retrying.", job.id)
+    })
+}
+
+/// Only invalid producer provenance is terminal. Transport/session errors may
+/// use validation-shaped public errors (for example an absent live session),
+/// so code alone cannot turn every invalid-argument into a permanent result.
+fn permanent_artifact_provenance_error(error: &Error) -> bool {
+    matches!(error.code, ErrorCode::ValidationInvalidArgument)
+        && matches!(
+            error.details.get("field").and_then(Value::as_str),
+            Some("artifact.provenance")
+                | Some("artifact.size_bytes")
+                | Some("artifact.sha256")
+                | Some("artifact.content_base64")
+        )
+}
+
+fn missing_required_run_projection(
+    runner: &Runner,
+    job: &Job,
+    run_id: &str,
+    source: Option<Error>,
+) -> Error {
+    let permanently_missing = source
+        .as_ref()
+        .is_some_and(|error| missing_optional_run_projection(error, run_id));
+    let mut details = json!({
+        "runner_id": runner.id,
+        "runner_job_id": job.id.to_string(),
+        "run_id": run_id,
+        "reconciliation_command": format!("homeboy runs show {run_id}"),
+        "artifact_reconciliation_command": format!("homeboy runs artifacts {run_id}"),
+    });
+    if let Some(source) = source {
+        details["source_error"] = json!({
+            "code": source.code.as_str(),
+            "message": source.message,
+            "details": source.details,
+        });
+    }
+    Error::new(
+        ErrorCode::InternalUnexpected,
+        format!(
+            "Lab runner job '{}' completed, but controller durability projection for declared run '{}' is unavailable; terminal output is withheld until its run and artifacts are persisted",
+            job.id, run_id
+        ),
+        details,
+    )
+    .with_retryable(!permanently_missing)
+    .with_hint(if permanently_missing {
+        format!(
+            "The runner no longer has declared run '{run_id}'. Repair the producer provenance for job '{}' and rerun it before sharing artifact URLs.",
+            job.id
+        )
+    } else {
+        format!(
+            "Reconnect runner '{}' and retry the command to reconcile job '{}' before sharing artifact URLs.",
+            runner.id, job.id
+        )
+    })
 }
 
 fn missing_optional_run_projection(error: &Error, run_id: &str) -> bool {
@@ -597,76 +938,6 @@ where
 
 pub(super) fn primary_mirrored_run(remote_runs: &[RunRecord]) -> Option<RunRecord> {
     remote_runs.iter().find(|run| run.kind == "fuzz").cloned()
-}
-
-fn mirror_reverse_broker_artifacts(
-    store: &ObservationStore,
-    runner: &Runner,
-    broker_url: &str,
-    run_id: &str,
-    job: &Job,
-) -> Result<Vec<ArtifactRecord>> {
-    let mut mirrored = Vec::new();
-    for artifact in &job.artifacts {
-        let record = reverse_broker_artifact_record(runner, broker_url, run_id, job, artifact);
-        import_artifact_if_absent(store, &record)?;
-        mirrored.push(record);
-    }
-    Ok(mirrored)
-}
-
-fn reverse_broker_artifact_record(
-    runner: &Runner,
-    broker_url: &str,
-    run_id: &str,
-    job: &Job,
-    artifact: &JobArtifactMetadata,
-) -> ArtifactRecord {
-    ArtifactRecord {
-        id: artifact.id.clone(),
-        run_id: run_id.to_string(),
-        kind: artifact
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("kind"))
-            .and_then(Value::as_str)
-            .unwrap_or("reverse_broker_artifact")
-            .to_string(),
-        artifact_type: "metadata".to_string(),
-        path: EXECUTION_CONTRACT.artifacts.metadata_only_ref(&artifact.id),
-        url: artifact.url.clone(),
-        public_url: None,
-        viewer_url: None,
-        viewer_links: Vec::new(),
-        sha256: artifact.sha256.clone(),
-        size_bytes: artifact
-            .size_bytes
-            .and_then(|size| i64::try_from(size).ok()),
-        mime: artifact.mime.clone(),
-        metadata_json: json!({
-            "runner_id": runner.id.clone(),
-            "job_id": job.id.to_string(),
-            "broker_url": broker_url,
-            "name": artifact.name.clone(),
-            "remote_path": artifact.path.clone(),
-            "url": artifact.url.clone(),
-            "broker_artifact_metadata_path": format!(
-                "/runner/jobs/{}/artifacts/{}",
-                job.id,
-                encode_uri_component(&artifact.id)
-            ),
-            "content_available": false,
-            "broker_artifact_retrieval": {
-                "mode": "metadata_only",
-                "content_available": false,
-                "content_url": null,
-                "fetch_command": null,
-                "hint": "Reverse broker artifact mirroring preserves metadata only; broker byte retrieval is a future content-proxy slice."
-            },
-            "metadata": artifact.metadata.clone(),
-        }),
-        created_at: ms_to_rfc3339(job.finished_at_ms.unwrap_or(job.updated_at_ms)),
-    }
 }
 
 fn mirrored_reverse_patch_result(

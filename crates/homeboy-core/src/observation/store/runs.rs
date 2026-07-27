@@ -24,11 +24,13 @@ impl ObservationStore {
 
         let connection = schema::open_connection(&path)?;
         schema::apply_migrations(&connection)?;
-        Ok(Self {
+        let store = Self {
             connection,
             path,
             readonly: false,
-        })
+        };
+        store.reconcile_unfinished_artifact_publications()?;
+        Ok(store)
     }
 
     /// Open an existing observation database without any initialization work.

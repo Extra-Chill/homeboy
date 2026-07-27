@@ -1896,11 +1896,23 @@ pub fn reverse_broker_artifact_content(
     artifact_id: &str,
 ) -> Result<Value> {
     let broker_url = reverse_broker_url(runner_id)?;
+    reverse_broker_artifact_content_at(&broker_url, runner_id, job_id, artifact_id)
+}
+
+/// Fetch terminal artifact bytes from an already-authorized reverse broker.
+/// Terminal reconciliation receives this endpoint directly, so it must not
+/// depend on a still-live runner session lookup.
+pub(crate) fn reverse_broker_artifact_content_at(
+    broker_url: &str,
+    runner_id: &str,
+    job_id: &str,
+    artifact_id: &str,
+) -> Result<Value> {
     let artifact_id = homeboy_core::execution_contract::encode_uri_component(artifact_id);
     let client = broker_client("build broker artifact content client")?;
     broker_http::get_json(
         &client,
-        &broker_url,
+        broker_url,
         &format!("/runner/jobs/{job_id}/artifacts/{artifact_id}/content"),
         "fetch reverse runner broker artifact content",
         broker_auth::broker_submit_token_for_runner(runner_id)?.as_deref(),
