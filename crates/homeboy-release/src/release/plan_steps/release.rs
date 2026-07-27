@@ -105,7 +105,7 @@ pub(in crate::release) fn build_release_steps(
         version_config,
     ));
 
-    let commit_needs = if has_prepare_capability(extensions) {
+    let package_needs = if has_prepare_capability(extensions) {
         steps.push(ready_step(
             "release.prepare",
             "release.prepare",
@@ -118,20 +118,12 @@ pub(in crate::release) fn build_release_steps(
         vec!["version".to_string()]
     };
 
-    steps.push(ready_step(
-        "git.commit",
-        "git.commit",
-        format!("Commit release: v{}", new_version),
-        commit_needs,
-        StepConfig::new(),
-    ));
-
-    let tag_needs = if package_step_needed {
+    let commit_needs = if package_step_needed {
         steps.push(ready_step(
             "package",
             "package",
-            "Package release artifacts",
-            vec!["git.commit".to_string()],
+            "Preflight release package ownership",
+            package_needs,
             StepConfig::new(),
         ));
         steps.push(ready_step(
@@ -143,14 +135,22 @@ pub(in crate::release) fn build_release_steps(
         ));
         vec!["artifacts.authority".to_string()]
     } else {
-        vec!["git.commit".to_string()]
+        package_needs
     };
+
+    steps.push(ready_step(
+        "git.commit",
+        "git.commit",
+        format!("Commit release: v{}", new_version),
+        commit_needs,
+        StepConfig::new(),
+    ));
 
     steps.push(ready_step(
         "git.tag",
         "git.tag",
         format!("Tag {}", tag_name),
-        tag_needs,
+        vec!["git.commit".to_string()],
         string_config("name", tag_name),
     ));
 

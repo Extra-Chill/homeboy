@@ -80,8 +80,10 @@ pub(crate) fn run_artifact_inventory(
 }
 
 /// Select one generic publication authority for every remote target filename.
-/// Final package output supersedes preflight output, while a disagreement
-/// between equally authoritative final producers fails before tag/push.
+/// Final package output supersedes preflight output. Within one phase, a
+/// previously declared canonical recovery artifact wins, followed by an
+/// explicit component `scripts.build` artifact; identical lower-precedence
+/// duplicates collapse, while differing bytes fail before commit/tag/push.
 pub(crate) fn establish_publication_authority(state: &mut ReleaseState) -> Result<Vec<String>> {
     let mut selected: BTreeMap<String, usize> = BTreeMap::new();
     let mut diagnostics = Vec::new();
@@ -92,7 +94,6 @@ pub(crate) fn establish_publication_authority(state: &mut ReleaseState) -> Resul
             .filter(|path| std::path::Path::new(path).is_file())
             .unwrap_or(&artifact.path);
         artifact.sha256 = Some(sha256_file(path)?);
-        artifact.publication_authority = false;
     }
     for index in 0..state.artifacts.len() {
         let target = artifact_target_name(&state.artifacts[index])?;
@@ -106,7 +107,7 @@ pub(crate) fn establish_publication_authority(state: &mut ReleaseState) -> Resul
         let existing_final = existing.phase == "final";
         let candidate_final = candidate.phase == "final";
         if same_bytes {
-            if !existing_final && candidate_final {
+            if artifact_precedence(candidate) > artifact_precedence(existing) {
                 selected.insert(target, index);
             }
             continue;
@@ -133,10 +134,23 @@ pub(crate) fn establish_publication_authority(state: &mut ReleaseState) -> Resul
             ));
         }
     }
+    for artifact in &mut state.artifacts {
+        artifact.publication_authority = false;
+    }
     for index in selected.into_values() {
         state.artifacts[index].publication_authority = true;
     }
     Ok(diagnostics)
+}
+
+fn artifact_precedence(artifact: &ReleaseArtifact) -> (u8, u8, u8) {
+    (
+        u8::from(artifact.phase == "final"),
+        u8::from(artifact.publication_authority),
+        // `scripts.build` is the generic component-owned build_artifact
+        // contract. Extensions remain free to produce additional targets.
+        u8::from(artifact.producer == "scripts.build"),
+    )
 }
 
 fn artifact_target_name(artifact: &ReleaseArtifact) -> Result<String> {
@@ -693,6 +707,63 @@ mod tests {
             1
         );
         assert!(state.artifacts[1].publication_authority);
+    }
+
+    #[test]
+    fn identical_component_build_artifact_is_the_canonical_package_owner() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let extension_dir = temp.path().join("extension");
+        let component_dir = temp.path().join("component");
+        std::fs::create_dir_all(&extension_dir).expect("extension dir");
+        std::fs::create_dir_all(&component_dir).expect("component dir");
+        let extension = extension_dir.join("plugin.zip");
+        let component = component_dir.join("plugin.zip");
+        std::fs::write(&extension, b"same").expect("extension bytes");
+        std::fs::write(&component, b"same").expect("component bytes");
+        let mut state = ReleaseState {
+            artifacts: vec![
+                artifact(&extension, "final", "extension:wordpress"),
+                artifact(&component, "final", "scripts.build"),
+            ],
+            ..ReleaseState::default()
+        };
+
+        establish_publication_authority(&mut state).expect("identical assets");
+        let publications = github_release_publications(&state).expect("publications");
+
+        assert!(state.artifacts[1].publication_authority);
+        assert_eq!(publications.len(), 1);
+        assert_eq!(
+            std::fs::read(&publications[0].source_path).expect("canonical bytes"),
+            b"same"
+        );
+    }
+
+    #[test]
+    fn recovery_preserves_the_declared_canonical_artifact_without_rebuild() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let canonical = temp.path().join("canonical/plugin.zip");
+        let duplicate = temp.path().join("duplicate/plugin.zip");
+        std::fs::create_dir_all(canonical.parent().unwrap()).expect("canonical dir");
+        std::fs::create_dir_all(duplicate.parent().unwrap()).expect("duplicate dir");
+        std::fs::write(&canonical, b"same").expect("canonical bytes");
+        std::fs::write(&duplicate, b"same").expect("duplicate bytes");
+        let mut selected = artifact(&canonical, "recovery", "from-artifacts");
+        selected.publication_authority = true;
+        let mut state = ReleaseState {
+            artifacts: vec![selected, artifact(&duplicate, "recovery", "from-artifacts")],
+            ..ReleaseState::default()
+        };
+
+        establish_publication_authority(&mut state).expect("recovery authority");
+        let publications = github_release_publications(&state).expect("publications");
+
+        assert!(state.artifacts[0].publication_authority);
+        assert_eq!(publications.len(), 1);
+        assert_eq!(
+            std::fs::read(&publications[0].source_path).expect("canonical bytes"),
+            b"same"
+        );
     }
 
     #[test]

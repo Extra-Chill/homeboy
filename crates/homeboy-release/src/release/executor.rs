@@ -294,7 +294,10 @@ pub(crate) fn run_git_commit(
     let options = homeboy_core::git::CommitOptions {
         staged_only: false,
         files: None,
-        exclude: None,
+        // Package ownership is established before the release commit so target
+        // conflicts fail before commit/tag/push. Keep those generated outputs
+        // out of the version/changelog commit.
+        exclude: (!state.package_owned_paths.is_empty()).then(|| state.package_owned_paths.clone()),
         amend: should_amend,
     };
 
