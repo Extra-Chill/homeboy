@@ -112,7 +112,7 @@ mod store_init_tests {
 
             assert!(status.exists);
             assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-            assert_eq!(status.migration_count, 8);
+            assert_eq!(status.migration_count, 9);
             assert_eq!(status.table_count, 7);
         });
     }
@@ -127,7 +127,7 @@ mod store_init_tests {
             let status = second.status().expect("status");
 
             assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-            assert_eq!(status.migration_count, 8);
+            assert_eq!(status.migration_count, 9);
             assert_eq!(status.table_count, 7);
         });
     }
@@ -149,7 +149,7 @@ mod store_init_tests {
             let status = reopened.status().expect("status");
 
             assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-            assert_eq!(status.migration_count, 8);
+            assert_eq!(status.migration_count, 9);
         });
     }
 
@@ -175,7 +175,98 @@ mod store_init_tests {
             for handle in handles {
                 let status = handle.join().expect("worker joined");
                 assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-                assert_eq!(status.migration_count, 8);
+                assert_eq!(status.migration_count, 9);
+            }
+        });
+    }
+
+    #[test]
+    fn migration_from_version_8_preserves_artifacts_and_adds_query_indexes() {
+        with_isolated_home(|_home| {
+            let _xdg = XdgGuard::unset();
+            let path = store::database_path().expect("db path");
+            std::fs::create_dir_all(path.parent().expect("db parent")).expect("create db parent");
+            let db = rusqlite::Connection::open(&path).expect("open version 8 db");
+            db.execute_batch(
+                r#"
+                CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL
+                );
+                INSERT INTO schema_migrations(version, applied_at)
+                VALUES (1, '2026-01-01T00:00:00Z'), (2, '2026-01-01T00:00:00Z'),
+                       (3, '2026-01-01T00:00:00Z'), (4, '2026-01-01T00:00:00Z'),
+                       (5, '2026-01-01T00:00:00Z'), (6, '2026-01-01T00:00:00Z'),
+                       (7, '2026-01-01T00:00:00Z'), (8, '2026-01-01T00:00:00Z');
+                CREATE TABLE runs (id TEXT PRIMARY KEY);
+                CREATE TABLE artifacts (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    artifact_type TEXT NOT NULL DEFAULT 'file',
+                    path TEXT NOT NULL,
+                    url TEXT,
+                    public_url TEXT,
+                    viewer_url TEXT,
+                    viewer_links_json TEXT NOT NULL DEFAULT '[]',
+                    sha256 TEXT,
+                    size_bytes INTEGER,
+                    mime TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(run_id) REFERENCES runs(id)
+                );
+                INSERT INTO runs(id) VALUES ('run-1'), ('run-2');
+                INSERT INTO artifacts(id, run_id, kind, path, created_at)
+                VALUES ('artifact-1', 'run-1', 'log', '/tmp/one', '2026-01-01T00:00:00Z'),
+                       ('artifact-2', 'run-1', 'log', '/tmp/two', '2026-01-01T00:01:00Z'),
+                       ('artifact-3', 'run-2', 'log', '/tmp/three', '2026-01-01T00:02:00Z');
+                "#,
+            )
+            .expect("create version 8 fixture");
+            drop(db);
+
+            let store = ObservationStore::open_initialized_at(&path).expect("migrate version 8");
+            let status = store.status().expect("status");
+            assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
+            assert_eq!(status.migration_count, 9);
+
+            let db = rusqlite::Connection::open(path).expect("inspect migrated db");
+            let indexes = db
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'artifacts' ORDER BY name")
+                .expect("prepare indexes")
+                .query_map([], |row| row.get::<_, String>(0))
+                .expect("query indexes")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect indexes");
+            assert!(indexes.contains(&"idx_artifacts_run_created".to_string()));
+            assert!(indexes.contains(&"idx_artifacts_created_at".to_string()));
+
+            let artifact_count: i64 = db
+                .query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
+                .expect("count migrated artifacts");
+            assert_eq!(artifact_count, 3);
+
+            for (sql, index) in [
+                (
+                    "EXPLAIN QUERY PLAN SELECT id FROM artifacts WHERE run_id = 'run-1' ORDER BY created_at ASC, id ASC",
+                    "idx_artifacts_run_created",
+                ),
+                (
+                    "EXPLAIN QUERY PLAN SELECT id FROM artifacts WHERE created_at < '2026-01-02T00:00:00Z' ORDER BY created_at ASC, id ASC LIMIT 1000",
+                    "idx_artifacts_created_at",
+                ),
+            ] {
+                let plan = db
+                    .prepare(sql)
+                    .expect("prepare query plan")
+                    .query_map([], |row| row.get::<_, String>(3))
+                    .expect("query plan")
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("collect query plan")
+                    .join(" ");
+                assert!(plan.contains(index), "expected {index} in query plan: {plan}");
+                assert!(!plan.contains("TEMP B-TREE"), "unexpected sort: {plan}");
             }
         });
     }
