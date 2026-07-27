@@ -315,19 +315,11 @@ fn dispatch(
         CommandDispatchFamily::Quality => quality::dispatch(command, global),
         CommandDispatchFamily::Workspace => workspace::dispatch(command, global),
         CommandDispatchFamily::Ops => ops::dispatch(command, global),
-        CommandDispatchFamily::RawOnly => {
-            unsupported_raw_command("List command uses raw output mode")
-        }
     }
 }
 
 fn map<T: serde::Serialize>(result: super::CmdResult<T>) -> JsonRun {
     crate::commands::utils::response::map_cmd_result_to_json(result)
-}
-
-fn unsupported_raw_command(message: &'static str) -> JsonRun {
-    let err = homeboy::core::Error::validation_invalid_argument("output_mode", message, None, None);
-    crate::commands::utils::response::map_cmd_result_to_json::<Value>(Err(err))
 }
 
 #[cfg(test)]

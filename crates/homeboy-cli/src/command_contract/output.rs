@@ -66,7 +66,6 @@ pub enum CommandJsonFamily {
     Quality,
     Workspace,
     Ops,
-    RawOnly,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,7 +73,6 @@ pub enum CommandDispatchFamily {
     Quality,
     Workspace,
     Ops,
-    RawOnly,
 }
 
 impl From<CommandJsonFamily> for CommandDispatchFamily {
@@ -83,7 +81,6 @@ impl From<CommandJsonFamily> for CommandDispatchFamily {
             CommandJsonFamily::Quality => CommandDispatchFamily::Quality,
             CommandJsonFamily::Workspace => CommandDispatchFamily::Workspace,
             CommandJsonFamily::Ops => CommandDispatchFamily::Ops,
-            CommandJsonFamily::RawOnly => CommandDispatchFamily::RawOnly,
         }
     }
 }
@@ -91,7 +88,6 @@ impl From<CommandJsonFamily> for CommandDispatchFamily {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandOutputContractKind {
     JsonEnvelope,
-    RawOnly,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
