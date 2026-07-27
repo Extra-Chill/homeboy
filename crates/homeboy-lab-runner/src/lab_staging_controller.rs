@@ -1673,6 +1673,22 @@ pub enum LabStagingPhase {
     Completed,
 }
 
+/// Controller-owned timing evidence for one durable staging operation. These
+/// records live on the checkpoint so a resumed job retains the original wall
+/// time instead of reporting only the final retry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LabStagingPhaseTiming {
+    pub phase: String,
+    pub owner: String,
+    pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    pub status: String,
+}
+
 /// An operation is durably declared before its remote effect. Its fixed name is
 /// also the idempotency/reconciliation key used after a controller restart.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1697,6 +1713,8 @@ pub struct LabStagingCheckpoint {
     pub hydration_id: Option<String>,
     pub final_runner_job_id: Option<String>,
     pub stage_intent: Option<LabStagingStageIntent>,
+    #[serde(default)]
+    pub phase_timings: Vec<LabStagingPhaseTiming>,
 }
 
 impl LabStagingCheckpoint {
@@ -1713,10 +1731,32 @@ impl LabStagingCheckpoint {
             hydration_id: None,
             final_runner_job_id: None,
             stage_intent: None,
+            phase_timings: Vec::new(),
         }
     }
 
     fn public_projection(&self) -> Value {
+        let mut slowest = self
+            .phase_timings
+            .iter()
+            .filter_map(|timing| {
+                timing.duration_ms.map(|duration_ms| {
+                    json!({
+                        "phase": timing.phase,
+                        "owner": timing.owner,
+                        "duration_ms": duration_ms,
+                        "status": timing.status,
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        slowest.sort_by(|left, right| {
+            right["duration_ms"]
+                .as_u64()
+                .cmp(&left["duration_ms"].as_u64())
+                .then_with(|| left["phase"].as_str().cmp(&right["phase"].as_str()))
+        });
+        slowest.truncate(3);
         json!({
             "run_id": self.run_id,
             "runner_id": self.runner_id,
@@ -1729,7 +1769,68 @@ impl LabStagingCheckpoint {
                 LabStagingPhase::Completed => "completed",
             },
             "final_runner_job_id": self.final_runner_job_id,
+            "staging_latency": {
+                "phases": self.phase_timings,
+                "slowest": slowest,
+            },
         })
+    }
+
+    fn phase_timing_name(phase: &LabStagingPhase) -> &'static str {
+        match phase {
+            LabStagingPhase::AcceptedMaterializeWorkspace => "workspace",
+            LabStagingPhase::MaterializeRuntime => "runtime",
+            LabStagingPhase::HydrateDependencies => "hydration",
+            LabStagingPhase::DispatchRunner => "dispatch",
+            LabStagingPhase::ObserveRunner => "observe",
+            LabStagingPhase::Completed => "completed",
+        }
+    }
+
+    fn start_phase_timing(&mut self) {
+        let phase = Self::phase_timing_name(&self.phase);
+        if self
+            .phase_timings
+            .iter()
+            .any(|timing| timing.phase == phase)
+        {
+            return;
+        }
+        self.phase_timings.push(LabStagingPhaseTiming {
+            phase: phase.to_string(),
+            owner: if self.phase == LabStagingPhase::ObserveRunner {
+                "runner".to_string()
+            } else {
+                "controller".to_string()
+            },
+            started_at: chrono::Utc::now().to_rfc3339(),
+            ended_at: None,
+            duration_ms: None,
+            status: "running".to_string(),
+        });
+    }
+
+    fn finish_phase_timing(&mut self, status: &str) {
+        let phase = Self::phase_timing_name(&self.phase);
+        let Some(timing) = self
+            .phase_timings
+            .iter_mut()
+            .find(|timing| timing.phase == phase)
+        else {
+            return;
+        };
+        let ended_at = chrono::Utc::now();
+        timing.duration_ms = chrono::DateTime::parse_from_rfc3339(&timing.started_at)
+            .ok()
+            .and_then(|started_at| {
+                ended_at
+                    .signed_duration_since(started_at)
+                    .num_milliseconds()
+                    .try_into()
+                    .ok()
+            });
+        timing.ended_at = Some(ended_at.to_rfc3339());
+        timing.status = status.to_string();
     }
 
     fn validate(&self) -> Result<()> {
@@ -1745,6 +1846,25 @@ impl LabStagingCheckpoint {
             ));
         }
         self.input.validate()?;
+        if self.phase_timings.len() > 5
+            || self.phase_timings.iter().any(|timing| {
+                timing.phase.trim().is_empty()
+                    || timing.owner.trim().is_empty()
+                    || chrono::DateTime::parse_from_rfc3339(&timing.started_at).is_err()
+                    || !matches!(
+                        timing.status.as_str(),
+                        "running" | "succeeded" | "failed" | "cancelled"
+                    )
+                    || (timing.duration_ms.is_some() != timing.ended_at.is_some())
+            })
+        {
+            return Err(Error::validation_invalid_argument(
+                "checkpoint.phase_timings",
+                "Lab staging timing evidence must be bounded, timestamped, and internally consistent",
+                None,
+                None,
+            ));
+        }
         if self.input.run_id() != self.run_id {
             return Err(Error::validation_invalid_argument(
                 "checkpoint.input.run_id",
@@ -3238,6 +3358,8 @@ impl StageExecutionAdapter {
             .validate_recorded_identities(request, &checkpoint)?;
         loop {
             if cancellation.is_cancelled() {
+                checkpoint.finish_phase_timing("cancelled");
+                persist(&checkpoint)?;
                 return Err(Self::cancellation_error());
             }
             if checkpoint.phase == LabStagingPhase::Completed {
@@ -3251,71 +3373,103 @@ impl StageExecutionAdapter {
                 .unwrap_or_else(|| checkpoint.intent_for_current_action());
             if !recovering {
                 checkpoint.stage_intent = Some(intent.clone());
+                checkpoint.start_phase_timing();
                 checkpoint = LabStagingCheckpoint::validated_transition(&prior, checkpoint)?;
                 // Intent must survive a crash before the effect can begin.
+                persist(&checkpoint)?;
+            } else if !checkpoint.phase_timings.iter().any(|timing| {
+                timing.phase == LabStagingCheckpoint::phase_timing_name(&checkpoint.phase)
+            }) {
+                // Checkpoints written before timing evidence was introduced keep
+                // their exact-once intent and begin measuring from this resume.
+                checkpoint.start_phase_timing();
                 persist(&checkpoint)?;
             }
             let recovered = recovering
                 .then(|| self.operations.recover_stage(request, &checkpoint, &intent))
                 .transpose()?
                 .flatten();
-            let effect = match recovered {
-                Some(effect) => effect,
-                None => match checkpoint.next_action() {
-                    LabStagingPhase::AcceptedMaterializeWorkspace => {
-                        let handoff_identity =
-                            self.operations.validate_handoff_identity(request)?;
-                        let (source_snapshot_id, workspace_id) = self
-                            .operations
-                            .materialize_workspace(request, &checkpoint, handoff_identity)?;
-                        LabStagingStageEffect::Workspace(source_snapshot_id, workspace_id)
-                    }
-                    LabStagingPhase::MaterializeRuntime => LabStagingStageEffect::Runtime(
-                        self.operations
-                            .materialize_runtime(request, &checkpoint, cancellation)?,
-                    ),
-                    LabStagingPhase::HydrateDependencies => LabStagingStageEffect::Hydration(
-                        self.operations
-                            .hydrate_dependencies(request, &checkpoint, cancellation)?,
-                    ),
-                    LabStagingPhase::DispatchRunner => LabStagingStageEffect::Dispatch(
-                        self.operations
-                            .dispatch_runner(request, &checkpoint, cancellation)?,
-                    ),
-                    LabStagingPhase::ObserveRunner => {
-                        let runner_job_id =
-                            checkpoint.final_runner_job_id.as_deref().ok_or_else(|| {
-                                Error::internal_unexpected(
-                                    "Lab staging observation has no final runner job identity",
-                                )
-                            })?;
-                        loop {
-                            if cancellation.is_cancelled() {
-                                return Err(Self::cancellation_error());
-                            }
-                            match self.operations.observe_runner(
+            let effect = (|| -> Result<LabStagingStageEffect> {
+                Ok(match recovered {
+                    Some(effect) => effect,
+                    None => match checkpoint.next_action() {
+                        LabStagingPhase::AcceptedMaterializeWorkspace => {
+                            let handoff_identity =
+                                self.operations.validate_handoff_identity(request)?;
+                            let (source_snapshot_id, workspace_id) = self
+                                .operations
+                                .materialize_workspace(request, &checkpoint, handoff_identity)?;
+                            LabStagingStageEffect::Workspace(source_snapshot_id, workspace_id)
+                        }
+                        LabStagingPhase::MaterializeRuntime => {
+                            LabStagingStageEffect::Runtime(self.operations.materialize_runtime(
                                 request,
                                 &checkpoint,
-                                runner_job_id,
                                 cancellation,
-                            ) {
-                                Ok(()) => break,
-                                Err(error) if error.retryable == Some(true) => {
-                                    std::thread::sleep(Duration::from_millis(200));
-                                }
-                                Err(error) => return Err(error),
-                            }
+                            )?)
                         }
-                        LabStagingStageEffect::Observe
-                    }
-                    LabStagingPhase::Completed => return Ok(checkpoint),
-                },
+                        LabStagingPhase::HydrateDependencies => {
+                            LabStagingStageEffect::Hydration(self.operations.hydrate_dependencies(
+                                request,
+                                &checkpoint,
+                                cancellation,
+                            )?)
+                        }
+                        LabStagingPhase::DispatchRunner => LabStagingStageEffect::Dispatch(
+                            self.operations
+                                .dispatch_runner(request, &checkpoint, cancellation)?,
+                        ),
+                        LabStagingPhase::ObserveRunner => {
+                            let runner_job_id =
+                                checkpoint.final_runner_job_id.as_deref().ok_or_else(|| {
+                                    Error::internal_unexpected(
+                                        "Lab staging observation has no final runner job identity",
+                                    )
+                                })?;
+                            loop {
+                                if cancellation.is_cancelled() {
+                                    return Err(Self::cancellation_error());
+                                }
+                                match self.operations.observe_runner(
+                                    request,
+                                    &checkpoint,
+                                    runner_job_id,
+                                    cancellation,
+                                ) {
+                                    Ok(()) => break,
+                                    Err(error) if error.retryable == Some(true) => {
+                                        std::thread::sleep(Duration::from_millis(200));
+                                    }
+                                    Err(error) => return Err(error),
+                                }
+                            }
+                            LabStagingStageEffect::Observe
+                        }
+                        LabStagingPhase::Completed => {
+                            unreachable!("completed staging has no effect")
+                        }
+                    },
+                })
+            })();
+            let effect = match effect {
+                Ok(effect) => effect,
+                Err(error) => {
+                    checkpoint.finish_phase_timing("failed");
+                    persist(&checkpoint)?;
+                    return Err(error);
+                }
             };
+            checkpoint.finish_phase_timing("succeeded");
             // `dispatch_runner` binds the accepted job before returning. Once
             // that binding exists, generation ownership moves to the durable
             // runner record and this temporary admission pin can be released.
             if matches!(effect, LabStagingStageEffect::Dispatch(_)) {
                 runtime_generation_pin.take();
+            }
+            if cancellation.is_cancelled() {
+                checkpoint.finish_phase_timing("cancelled");
+                persist(&checkpoint)?;
+                return Err(Self::cancellation_error());
             }
             checkpoint = match effect {
                 LabStagingStageEffect::Workspace(source_snapshot_id, workspace_id) => {
@@ -3351,9 +3505,6 @@ impl StageExecutionAdapter {
                     ..checkpoint
                 },
             };
-            if cancellation.is_cancelled() {
-                return Err(Self::cancellation_error());
-            }
             checkpoint = LabStagingCheckpoint::validated_transition(&prior, checkpoint)?;
             // Persist before beginning another effect, so recovery cannot repeat
             // an already admitted remote operation.
@@ -3966,6 +4117,56 @@ mod tests {
         assert_eq!(recovered, checkpoint);
         assert_eq!(recovered.phase, LabStagingPhase::MaterializeRuntime);
         assert_eq!(recovered.workspace_id.as_deref(), Some("workspace-1"));
+    }
+
+    #[test]
+    fn public_projection_compactly_attributes_slowest_staging_owner() {
+        let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
+        checkpoint.phase_timings = vec![
+            LabStagingPhaseTiming {
+                phase: "workspace".to_string(),
+                owner: "controller".to_string(),
+                started_at: "2026-07-27T00:00:00Z".to_string(),
+                ended_at: Some("2026-07-27T00:09:12.317Z".to_string()),
+                duration_ms: Some(552_317),
+                status: "succeeded".to_string(),
+            },
+            LabStagingPhaseTiming {
+                phase: "observe".to_string(),
+                owner: "runner".to_string(),
+                started_at: "2026-07-27T00:09:12.317Z".to_string(),
+                ended_at: Some("2026-07-27T00:09:13.628Z".to_string()),
+                duration_ms: Some(1_311),
+                status: "succeeded".to_string(),
+            },
+            LabStagingPhaseTiming {
+                phase: "hydration".to_string(),
+                owner: "controller".to_string(),
+                started_at: "2026-07-27T00:09:13.628Z".to_string(),
+                ended_at: Some("2026-07-27T00:09:15.628Z".to_string()),
+                duration_ms: Some(2_000),
+                status: "succeeded".to_string(),
+            },
+            LabStagingPhaseTiming {
+                phase: "dispatch".to_string(),
+                owner: "controller".to_string(),
+                started_at: "2026-07-27T00:09:15.628Z".to_string(),
+                ended_at: Some("2026-07-27T00:09:16.128Z".to_string()),
+                duration_ms: Some(500),
+                status: "succeeded".to_string(),
+            },
+        ];
+
+        let projection = checkpoint.public_projection();
+        let slowest = projection["staging_latency"]["slowest"]
+            .as_array()
+            .expect("slowest staging phases");
+        assert_eq!(slowest.len(), 3);
+        assert_eq!(slowest[0]["phase"], "workspace");
+        assert_eq!(slowest[0]["owner"], "controller");
+        assert_eq!(slowest[0]["duration_ms"], 552_317);
+        assert_eq!(slowest[1]["phase"], "hydration");
+        assert_eq!(slowest[2]["phase"], "observe");
     }
 
     #[derive(Default)]
@@ -4925,9 +5126,16 @@ mod tests {
                     },
                 )
                 .is_err());
-            assert_eq!(persisted.len(), 1);
-            assert_eq!(persisted[0].phase, LabStagingPhase::HydrateDependencies);
-            assert!(persisted[0].stage_intent.is_some());
+            assert_eq!(persisted.len(), 2);
+            assert!(persisted.iter().all(|checkpoint| {
+                checkpoint.phase == LabStagingPhase::HydrateDependencies
+                    && checkpoint.stage_intent.is_some()
+            }));
+            assert_eq!(persisted[1].phase_timings[0].phase, "hydration");
+            assert_eq!(
+                persisted[1].phase_timings[0].status,
+                if cancelled { "cancelled" } else { "failed" }
+            );
             assert_eq!(operations.calls(), ["validate", "hydration"]);
         }
     }
