@@ -11,8 +11,22 @@ fn aggregate_repo_artifact_next_action_runs_outside_a_checkout() {
     std::fs::create_dir_all(repository.join("target/debug")).expect("target directory");
     std::fs::create_dir_all(&invocation_dir).expect("operator directory");
     std::fs::create_dir_all(&components_dir).expect("components directory");
+    std::fs::write(repository.join(".gitignore"), "target/\n").expect("target ignore rule");
     std::fs::write(repository.join("target/debug/app"), "artifact").expect("target artifact");
     run_git(&repository, &["init", "-b", "main"]);
+    run_git(&repository, &["add", ".gitignore"]);
+    run_git(
+        &repository,
+        &[
+            "-c",
+            "user.name=Homeboy Test",
+            "-c",
+            "user.email=homeboy@example.test",
+            "commit",
+            "-m",
+            "initial",
+        ],
+    );
     std::fs::write(
         components_dir.join("fixture.json"),
         serde_json::to_vec(&serde_json::json!({
@@ -50,6 +64,52 @@ fn aggregate_repo_artifact_next_action_runs_outside_a_checkout() {
     let applied = run_cleanup(fixture.path(), &invocation_dir, &args);
     assert_eq!(applied["success"], true, "{applied:#}");
     assert!(!repository.join("target").exists());
+}
+
+#[test]
+fn aggregate_repo_artifact_next_action_excludes_unignored_work() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let repository = fixture.path().join("repository");
+    let invocation_dir = fixture.path().join("operator-cwd");
+    let components_dir = fixture.path().join(".config/homeboy/components");
+    std::fs::create_dir_all(repository.join("target/debug")).expect("target directory");
+    std::fs::create_dir_all(&invocation_dir).expect("operator directory");
+    std::fs::create_dir_all(&components_dir).expect("components directory");
+    std::fs::write(repository.join("target/debug/notes.txt"), "operator work")
+        .expect("unignored work");
+    run_git(&repository, &["init", "-b", "main"]);
+    std::fs::write(
+        components_dir.join("fixture.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "local_path": repository,
+            "remote_path": "fixture"
+        }))
+        .expect("component JSON"),
+    )
+    .expect("component registration");
+
+    let inventory = run_cleanup(
+        fixture.path(),
+        &invocation_dir,
+        &["--include", "repo-artifacts"],
+    );
+    assert_eq!(inventory["success"], true, "{inventory:#}");
+    assert!(
+        inventory
+            .get("next_actions")
+            .is_none_or(|actions| actions.as_array().is_some_and(Vec::is_empty)),
+        "{inventory:#}"
+    );
+    assert!(inventory["data"]["categories"][0]["output"]
+        .as_array()
+        .expect("repo artifact diagnostics")[0]["output"]["skipped"]
+        .as_array()
+        .expect("skipped artifacts")
+        .iter()
+        .any(|row| row["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("untracked work"))));
+    assert!(repository.join("target/debug/notes.txt").exists());
 }
 
 fn run_cleanup(home: &Path, cwd: &Path, args: &[&str]) -> Value {

@@ -1507,7 +1507,11 @@ mod tests {
             "[package]\nname = \"fixture\"\n",
         );
         write_file(&repo.path().join("src/lib.rs"), "source");
-        git(repo.path(), &["add", "Cargo.toml", "src/lib.rs"]);
+        write_file(&repo.path().join(".gitignore"), "target/\n");
+        git(
+            repo.path(),
+            &["add", "Cargo.toml", "src/lib.rs", ".gitignore"],
+        );
         git(
             repo.path(),
             &[
@@ -2332,7 +2336,7 @@ mod tests {
             &repo.path().join("target/generated.rs"),
             "tracked artifact source",
         );
-        git(repo.path(), &["add", "target/generated.rs"]);
+        git(repo.path(), &["add", "--force", "target/generated.rs"]);
         git(
             repo.path(),
             &[
@@ -2580,7 +2584,14 @@ mod tests {
             &repo.path().join("homeboy.json"),
             r#"{"artifact_cleanup_paths":["target","node_modules","dist"]}"#,
         );
-        git(repo.path(), &["add", "src/lib.rs", "homeboy.json"]);
+        write_file(
+            &repo.path().join(".gitignore"),
+            "target/\nnode_modules/\ndist/\n",
+        );
+        git(
+            repo.path(),
+            &["add", "src/lib.rs", "homeboy.json", ".gitignore"],
+        );
         git(
             repo.path(),
             &[
