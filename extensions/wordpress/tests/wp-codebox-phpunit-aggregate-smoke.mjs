@@ -192,9 +192,11 @@ printf '%s\\n' '${JSON.stringify({ data: { entity: { local_path: conflictingData
   await writeFile(path.join(concurrentInvocation, 'homeboy-artifact-manifest.json'), JSON.stringify({ schema: 'homeboy/artifact-manifest/v1', artifacts: [{ id: 'unrelated', path: 'unrelated.json', kind: 'proof', provenance: { producer: 'fixture' } }] }));
   await writeFile(path.join(concurrentInvocation, 'unrelated.json'), '{}\n');
   const concurrentRun = (index) => new Promise((resolve, reject) => {
-    const child = spawn(runner, [], { env: { ...process.env, FIXTURE: JSON.stringify({ sidecar: unknownSidecar, output: green }), HOMEBOY_COMPONENT_PATH: component, COMPONENT_ID: 'component', HOMEBOY_WP_CODEBOX_BIN: cli, HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: path.join(root, `concurrent-run-${index}`), HOMEBOY_INVOCATION_ARTIFACT_DIR: concurrentInvocation, HOMEBOY_RUNTIME_WRITE_TEST_RESULTS: resultsWriter, HOMEBOY_TEST_RESULTS_FILE: path.join(root, `concurrent-results-${index}.json`), HOMEBOY_SETTINGS_JSON: '{}' }, stdio: 'ignore' });
+    const child = spawn(runner, [], { env: { ...process.env, FIXTURE: JSON.stringify({ sidecar: unknownSidecar, output: green }), HOMEBOY_COMPONENT_PATH: component, COMPONENT_ID: 'component', HOMEBOY_WP_CODEBOX_BIN: cli, HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: path.join(root, `concurrent-run-${index}`), HOMEBOY_INVOCATION_ARTIFACT_DIR: concurrentInvocation, HOMEBOY_RUNTIME_WRITE_TEST_RESULTS: resultsWriter, HOMEBOY_TEST_RESULTS_FILE: path.join(root, `concurrent-results-${index}.json`), HOMEBOY_SETTINGS_JSON: '{}' }, stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
     child.on('error', reject);
-    child.on('close', (status) => resolve(status));
+    child.on('close', (status) => resolve({ status, stderr }));
   });
   let atomicReaderError;
   let atomicReaderReads = 0;
@@ -203,14 +205,49 @@ printf '%s\\n' '${JSON.stringify({ data: { entity: { local_path: conflictingData
   }, 1);
   const concurrentStatuses = await Promise.all([concurrentRun(1), concurrentRun(2)]);
   clearInterval(reader);
-  assert.deepEqual(concurrentStatuses, [0, 0]);
+  assert.deepEqual(concurrentStatuses.map(({ status }) => status), [0, 0], concurrentStatuses.map(({ stderr }) => stderr).join('\n'));
   assert.ok(atomicReaderReads > 0);
   assert.equal(atomicReaderError, undefined);
   const concurrentManifest = JSON.parse(await readFile(path.join(concurrentInvocation, 'homeboy-artifact-manifest.json'), 'utf8'));
   assert.equal(concurrentManifest.artifacts.find((artifact) => artifact.id === 'unrelated').provenance.producer, 'fixture');
   assert.equal(concurrentManifest.artifacts.filter((artifact) => artifact.path === 'wp-codebox-phpunit/files/test-results.json').length, 1);
+
+  const crashedInvocation = path.join(root, 'crashed-invocation');
+  const crashedReady = path.join(root, 'crashed-lock-ready.json');
+  await mkdir(crashedInvocation);
+  await writeFile(path.join(crashedInvocation, 'homeboy-artifact-manifest.json'), JSON.stringify({ schema: 'homeboy/artifact-manifest/v1', artifacts: [{ id: 'unrelated', path: 'unrelated.json', kind: 'proof', provenance: { producer: 'fixture' } }] }));
+  await writeFile(path.join(crashedInvocation, 'unrelated.json'), '{}\n');
+  const crashedOwner = spawn(runner, [], { env: { ...process.env, FIXTURE: JSON.stringify({ sidecar: unknownSidecar, output: green }), HOMEBOY_COMPONENT_PATH: component, COMPONENT_ID: 'component', HOMEBOY_WP_CODEBOX_BIN: cli, HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: path.join(root, 'crashed-owner-run'), HOMEBOY_INVOCATION_ARTIFACT_DIR: crashedInvocation, HOMEBOY_RUNTIME_WRITE_TEST_RESULTS: resultsWriter, HOMEBOY_TEST_RESULTS_FILE: path.join(root, 'crashed-owner-results.json'), HOMEBOY_WP_CODEBOX_PUBLICATION_LOCK_READY_FILE: crashedReady, HOMEBOY_WP_CODEBOX_PUBLICATION_LOCK_HOLD_MS: '5000', HOMEBOY_SETTINGS_JSON: '{}' }, stdio: 'ignore' });
+  const ownerLease = JSON.parse(await waitForFile(crashedReady));
+  const liveContender = spawnSync(runner, [], { env: { ...process.env, FIXTURE: JSON.stringify({ sidecar: unknownSidecar, output: green }), HOMEBOY_COMPONENT_PATH: component, COMPONENT_ID: 'component', HOMEBOY_WP_CODEBOX_BIN: cli, HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: path.join(root, 'live-contender-run'), HOMEBOY_INVOCATION_ARTIFACT_DIR: crashedInvocation, HOMEBOY_RUNTIME_WRITE_TEST_RESULTS: resultsWriter, HOMEBOY_TEST_RESULTS_FILE: path.join(root, 'live-contender-results.json'), HOMEBOY_SETTINGS_JSON: '{}' }, encoding: 'utf8' });
+  assert.notEqual(liveContender.status, 0);
+  assert.match(liveContender.stderr, /Timed out waiting/);
+  assert.equal(JSON.parse(await readFile(path.join(crashedInvocation, '.wp-codebox-phpunit-publication.lock', 'owner.json'), 'utf8')).token, ownerLease.token);
+  crashedOwner.kill('SIGKILL');
+  await new Promise((resolve) => crashedOwner.once('close', resolve));
+
+  const recoverRun = (index) => new Promise((resolve, reject) => {
+    const child = spawn(runner, [], { env: { ...process.env, FIXTURE: JSON.stringify({ sidecar: unknownSidecar, output: green }), HOMEBOY_COMPONENT_PATH: component, COMPONENT_ID: 'component', HOMEBOY_WP_CODEBOX_BIN: cli, HOMEBOY_WP_CODEBOX_ARTIFACTS_DIR: path.join(root, `recovered-run-${index}`), HOMEBOY_INVOCATION_ARTIFACT_DIR: crashedInvocation, HOMEBOY_RUNTIME_WRITE_TEST_RESULTS: resultsWriter, HOMEBOY_TEST_RESULTS_FILE: path.join(root, `recovered-results-${index}.json`), HOMEBOY_SETTINGS_JSON: '{}' }, stdio: 'ignore' });
+    child.on('error', reject);
+    child.on('close', (status) => resolve(status));
+  });
+  assert.deepEqual(await Promise.all([recoverRun(1), recoverRun(2)]), [0, 0]);
+  assert.deepEqual(JSON.parse(await readFile(path.join(root, 'recovered-results-1.json'), 'utf8')), { total: 3, passed: 3, failed: 0, skipped: 0 });
+  const recoveredManifest = JSON.parse(await readFile(path.join(crashedInvocation, 'homeboy-artifact-manifest.json'), 'utf8'));
+  assert.equal(recoveredManifest.artifacts.find((artifact) => artifact.id === 'unrelated').provenance.producer, 'fixture');
+  assert.equal(recoveredManifest.artifacts.filter((artifact) => artifact.path === 'wp-codebox-phpunit/files/test-results.json').length, 1);
 } finally {
   await rm(root, { recursive: true, force: true });
 }
 
 console.log('WP Codebox PHPUnit aggregate smoke passed.');
+
+async function waitForFile(target) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try { return await readFile(target, 'utf8'); } catch (error) {
+      if (error.code !== 'ENOENT') { throw error; }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  throw new Error(`Timed out waiting for ${target}`);
+}

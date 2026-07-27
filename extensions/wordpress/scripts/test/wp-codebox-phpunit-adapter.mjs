@@ -3,8 +3,8 @@
  * External dependencies
  */
 import { createWriteStream } from 'node:fs';
-import { access, copyFile, lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { access, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { hostname, tmpdir } from 'node:os';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
@@ -584,22 +584,84 @@ async function registerInvocationArtifacts(invocationRoot, publishedArtifacts) {
 async function withInvocationArtifactLock(invocationRoot, action) {
   await assertDirectoryTree(invocationRoot, []);
   const lockPath = path.join(invocationRoot, '.wp-codebox-phpunit-publication.lock');
-  let lock;
+  let lease;
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
-      lock = await open(lockPath, 'wx', 0o600);
+      await mkdir(lockPath, { mode: 0o700 });
+      const metadata = { schema: 'homeboy/wp-codebox-publication-lease/v1', pid: process.pid, hostname: hostname(), acquired_at: new Date().toISOString(), token: `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}` };
+      await atomicWrite(path.join(lockPath, 'owner.json'), `${JSON.stringify(metadata)}\n`);
+      const readyFile = process.env.HOMEBOY_WP_CODEBOX_PUBLICATION_LOCK_READY_FILE;
+      if (readyFile) { await atomicWrite(readyFile, `${JSON.stringify(metadata)}\n`); }
+      const holdMilliseconds = Number(process.env.HOMEBOY_WP_CODEBOX_PUBLICATION_LOCK_HOLD_MS || 0);
+      if (Number.isFinite(holdMilliseconds) && holdMilliseconds > 0) { await new Promise((resolve) => setTimeout(resolve, holdMilliseconds)); }
+      lease = { path: lockPath, token: metadata.token };
       break;
     } catch (error) {
       if (error.code !== 'EEXIST') { throw error; }
+      const reclaimed = await reclaimDeadInvocationArtifactLock(lockPath);
+      if (reclaimed) { continue; }
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
   }
-  if (!lock) { throw new Error('Timed out waiting to publish WP Codebox test artifacts'); }
+  if (!lease) { throw new Error('Timed out waiting to publish WP Codebox test artifacts'); }
   try {
     return await action();
   } finally {
-    await lock.close();
-    await unlink(lockPath).catch(() => {});
+    const metadata = await readInvocationArtifactLease(path.join(lease.path, 'owner.json'));
+    if (metadata?.token === lease.token) {
+      await rm(lease.path, { recursive: true, force: true });
+    }
+  }
+}
+async function reclaimDeadInvocationArtifactLock(lockPath) {
+  let stat;
+  try { stat = await lstat(lockPath); } catch (error) {
+    if (error.code === 'ENOENT') { return true; }
+    throw error;
+  }
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error('WP Codebox publication lock has unknown ownership');
+  }
+  const metadata = await readInvocationArtifactLease(path.join(lockPath, 'owner.json'));
+  // A contender can observe the directory between atomic mkdir acquisition and
+  // atomic owner metadata publication. Wait out that short setup window; a
+  // crashed owner without a lease remains fail-closed when the bounded wait ends.
+  if (!metadata) { return false; }
+  const liveness = invocationArtifactLeaseLiveness(metadata);
+  if (liveness === 'live') { return false; }
+  if (liveness !== 'dead') { throw new Error('WP Codebox publication lock has unknown ownership'); }
+
+  const quarantine = `${lockPath}.reclaimed-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  try {
+    await rename(lockPath, quarantine);
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'EEXIST') { return true; }
+    throw error;
+  }
+  const quarantinedMetadata = await readInvocationArtifactLease(path.join(quarantine, 'owner.json'));
+  if (invocationArtifactLeaseLiveness(quarantinedMetadata) !== 'dead') {
+    throw new Error('WP Codebox publication lock ownership changed during reclaim');
+  }
+  await rm(quarantine, { recursive: true, force: true });
+  return true;
+}
+async function readInvocationArtifactLease(leasePath) {
+  try {
+    await assertRegularOrMissing(leasePath);
+    const metadata = JSON.parse(await readFile(leasePath, 'utf8'));
+    return isObject(metadata) && metadata.schema === 'homeboy/wp-codebox-publication-lease/v1' && Number.isInteger(metadata.pid) && metadata.pid > 0 && typeof metadata.hostname === 'string' && metadata.hostname !== '' && typeof metadata.token === 'string' && metadata.token !== '' ? metadata : null;
+  } catch {
+    return null;
+  }
+}
+function invocationArtifactLeaseLiveness(metadata) {
+  if (!metadata || metadata.hostname !== hostname()) { return 'unknown'; }
+  try {
+    process.kill(metadata.pid, 0);
+    return 'live';
+  } catch (error) {
+    if (error.code === 'ESRCH') { return 'dead'; }
+    return 'unknown';
   }
 }
 async function assertDirectoryTree(directoryRoot, segments) {
