@@ -195,6 +195,8 @@ pub(super) fn audit_internal(
         .flat_map(|(_, _, fps)| fps.iter())
         .collect();
 
+    source_policy::validate_configured_paths(&all_fingerprints, &audit_config)?;
+
     if plan.detector_enabled("core_boundary_leaks") {
         let rules = audit_config.core_boundary_leaks.to_source_policy_rules();
         source_policy::validate_source_roots(&all_fingerprints, &rules)?;

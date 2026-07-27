@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use homeboy_audit_contract::{
-    SourcePolicyMatchMode, SourcePolicyRule, SourcePolicyRuleBody, SourcePolicyTerm,
+    AuditConfig, SourcePolicyMatchMode, SourcePolicyRule, SourcePolicyRuleBody, SourcePolicyTerm,
 };
 
 use super::conventions::{AuditFinding, Language};
@@ -50,6 +50,87 @@ pub(crate) fn validate_source_roots(
         "audit.source_policies",
         format!(
             "configured source root(s) matched zero files: {}. Update the configured path or remove the stale source root.",
+            missing.join(", ")
+        ),
+        None,
+        None,
+    ))
+}
+
+/// Reject stale path-scoped audit configuration before it silently stops
+/// protecting the intended source surface.
+pub(crate) fn validate_configured_paths(
+    fingerprints: &[&FileFingerprint],
+    config: &AuditConfig,
+) -> homeboy_error::Result<()> {
+    let paths = fingerprints
+        .iter()
+        .map(|fingerprint| fingerprint.relative_path.as_str())
+        .collect::<Vec<_>>();
+    let mut missing = Vec::new();
+
+    for rule in &config.source_policies {
+        for (kind, values) in [
+            ("include", &rule.include_path_contains),
+            ("exclude", &rule.exclude_path_contains),
+        ] {
+            for value in values {
+                if !paths.iter().any(|path| path.contains(value)) {
+                    missing.push(format!("source policy {} {kind}: {value}", rule.id));
+                }
+            }
+        }
+    }
+
+    for glob in &config.convention_exception_globs {
+        if !paths.iter().any(|path| glob_match::glob_match(glob, path)) {
+            missing.push(format!("convention exception glob: {glob}"));
+        }
+    }
+
+    for policy in &config.test_wiring.policies {
+        for (kind, globs) in [
+            ("source", &policy.source_path_globs),
+            ("test", &policy.test_path_globs),
+            (
+                "auto-discovered test",
+                &policy.auto_discovered_test_path_globs,
+            ),
+            ("support test", &policy.support_test_path_globs),
+        ] {
+            for glob in globs {
+                if !paths.iter().any(|path| glob_match::glob_match(glob, path)) {
+                    missing.push(format!("test wiring {} {kind} glob: {glob}", policy.id));
+                }
+            }
+        }
+    }
+
+    for (kind, values) in [
+        (
+            "include",
+            &config.thin_command_adapter.include_path_contains,
+        ),
+        (
+            "exclude",
+            &config.thin_command_adapter.exclude_path_contains,
+        ),
+    ] {
+        for value in values {
+            if !paths.iter().any(|path| path.contains(value)) {
+                missing.push(format!("thin command adapter {kind}: {value}"));
+            }
+        }
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(homeboy_error::Error::validation_invalid_argument(
+        "audit.path_scopes",
+        format!(
+            "configured audit path scope(s) matched zero files: {}. Update the configured path or remove the stale scope.",
             missing.join(", ")
         ),
         None,
@@ -534,6 +615,46 @@ mod tests { const PACKAGE: &str = "widget-package.json"; }
         assert!(error.to_string().contains("synthetic-source-boundary"));
         assert!(error.to_string().contains("crates/renamed-core/src/"));
         assert!(error.to_string().contains("matched zero files"));
+    }
+
+    #[test]
+    fn rejects_stale_exclusions_globs_and_thin_adapter_scopes() {
+        let fp = rust_fp("crates/homeboy-cli/src/commands/audit.rs", "fn run() {}");
+        let mut config = AuditConfig::default();
+        let mut policy = rule();
+        policy.include_path_contains = vec!["crates/homeboy-cli/".to_string()];
+        policy.exclude_path_contains = vec!["crates/retired/".to_string()];
+        config.source_policies = vec![policy];
+        config.convention_exception_globs = vec!["src/commands/*.rs".to_string()];
+        config.thin_command_adapter.include_path_contains =
+            vec!["crates/homeboy-cli/src/commands/".to_string()];
+        config.thin_command_adapter.exclude_path_contains =
+            vec!["src/commands/legacy.rs".to_string()];
+        config
+            .test_wiring
+            .policies
+            .push(homeboy_audit_contract::TestWiringPolicy {
+                id: "synthetic-test-wiring".to_string(),
+                source_path_globs: vec!["src/**/*.rs".to_string()],
+                test_path_globs: vec!["tests/**/*_test.rs".to_string()],
+                auto_discovered_test_path_globs: Vec::new(),
+                support_test_path_globs: Vec::new(),
+                require_explicit_wiring: false,
+                explicit_wiring_marker_patterns: Vec::new(),
+                convention: "test_wiring".to_string(),
+                severity: "warning".to_string(),
+                description: String::new(),
+                suggestion: String::new(),
+            });
+
+        let error = validate_configured_paths(&[&fp], &config)
+            .expect_err("stale configured scopes must fail");
+
+        let message = error.to_string();
+        assert!(message.contains("source policy synthetic-source-boundary exclude"));
+        assert!(message.contains("convention exception glob"));
+        assert!(message.contains("thin command adapter exclude"));
+        assert!(message.contains("test wiring synthetic-test-wiring test glob"));
     }
 
     // ------------------------------------------------------------------------

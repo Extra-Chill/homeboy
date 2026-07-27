@@ -4,7 +4,8 @@
 
 use super::{
     apply_finding_filters, build_comparison_output, compute_fixability_if_requested,
-    default_audit_exit_code, scope_convention_outliers_to_findings, AuditRunWorkflowArgs,
+    default_audit_exit_code, requires_full_baseline_path_validation,
+    scope_convention_outliers_to_findings, AuditRunWorkflowArgs,
 };
 use crate::checks::CheckStatus;
 use crate::conventions::{Deviation, Outlier};
@@ -51,6 +52,12 @@ fn make_analysis() -> AuditAnalysisContext {
 
 fn make_timing() -> crate::AuditTiming {
     crate::AuditTiming::default()
+}
+
+#[test]
+fn baseline_path_validation_is_full_audit_only() {
+    assert!(requires_full_baseline_path_validation(None));
+    assert!(!requires_full_baseline_path_validation(Some("origin/main")));
 }
 
 fn make_convention_report(name: &str, outliers: Vec<Outlier>) -> ConventionReport {
