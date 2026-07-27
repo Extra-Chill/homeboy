@@ -60,9 +60,17 @@ pub struct Cli {
     )]
     pub placement: Placement,
 
-    /// Return after a runner daemon accepts the job instead of waiting for remote completion.
-    #[arg(long, global = true)]
+    /// Submit to Lab and return after durable controller handoff. Use --wait to
+    /// keep observing the remote lifecycle. The default remains --wait for
+    /// compatibility with existing automation.
+    #[arg(long, global = true, conflicts_with = "wait")]
     pub detach_after_handoff: bool,
+
+    /// Keep observing a Lab submission until the remote lifecycle completes.
+    /// This is the legacy default; specify it when callers need the wait policy
+    /// to be explicit. Use --detach-after-handoff to submit and return.
+    #[arg(long, global = true, conflicts_with = "detach_after_handoff")]
+    pub wait: bool,
 
     /// Directory where persisted run artifacts are copied.
     /// Overrides HOMEBOY_ARTIFACT_ROOT and global config /artifact_root.

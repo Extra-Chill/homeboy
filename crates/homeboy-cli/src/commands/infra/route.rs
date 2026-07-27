@@ -16,7 +16,9 @@ use homeboy::core::Error;
 use homeboy::runner::runners::{self, RunnerExecOptions};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::agents::agent_task_service::DerivedCookBaselineCapability;
 use crate::core::io::output_file::write_output_file;
@@ -560,11 +562,16 @@ fn run_split_placement_cook(
         source_path,
         job_overrides: lab_job_overrides(cli)?,
     });
+    let progress = |phase: &str, cook_id: Option<&str>, run_id: Option<&str>| {
+        crate::commands::agent_task::emit_cook_progress(phase, cook_id, run_id);
+        Ok(())
+    };
     let (value, exit_code) =
-        crate::commands::agent_task::run::run_cook_with_executor_and_dispatcher(
+        crate::commands::agent_task::run::run_cook_with_executor_and_dispatcher_with_progress(
             controller,
             homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor::discover(),
             Some(dispatcher),
+            Some(&progress),
         )?;
     let stdout = serde_json::to_string_pretty(&value).map_err(|error| {
         Error::internal_json(
@@ -763,40 +770,58 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
             &provider_args,
             &plan,
         )?;
-        let outcome = match lab_routing::dispatch_lab_offload(
-            LabRoutingRequest {
-                command: lab_offload_command(&provider_cli.command)?,
-                normalized_args: &provider_args,
-                explicit_runner: Some(&self.runner_id),
-                placement: homeboy::cli_surface::Placement::Lab,
-                allow_local_fallback: self.allow_local_fallback,
-                allow_dirty_lab_workspace: self.allow_dirty_lab_workspace,
-                skip_deps_hydration: self.skip_deps_hydration,
-                preserve_workspace_on_failure: false,
-                capture_patch: false,
-                mutation_flag: None,
-                timeout: None,
-                active_run_id: Some(run_id),
-                detach_after_handoff: self.detach_after_handoff,
-                output_file_requested: false,
-                read_only_polling: false,
-                require_controller_git_bundle: false,
-                reuse_compatible_snapshot: false,
-                local_output_file: None,
-                durable_agent_task_plan: Some(&durable_agent_task_plan),
-                // A retry's baseline is controller-owned capability, not plan
-                // data. Stage that exact clean checkout; never substitute the
-                // controller's original workspace during nested Lab dispatch.
-                source_path: cook_attempt_source_path(
-                    derived_cook_baseline,
-                    self.source_path.as_deref(),
-                ),
-                verified_cook_baseline: verified_cook_baseline.as_ref(),
-                job_overrides: self.job_overrides.clone(),
-            },
-            Some(&self.runner_id),
-            Box::new(NoopLabDispatchObserver),
-        ) {
+        let (heartbeat_stop, heartbeat_wait) = mpsc::channel();
+        let heartbeat_run_id = run_id.to_string();
+        let outcome = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                while let Err(mpsc::RecvTimeoutError::Timeout) =
+                    heartbeat_wait.recv_timeout(Duration::from_secs(15))
+                {
+                    crate::commands::agent_task::emit_cook_progress(
+                        "heartbeat",
+                        None,
+                        Some(&heartbeat_run_id),
+                    );
+                }
+            });
+            let outcome = lab_routing::dispatch_lab_offload(
+                LabRoutingRequest {
+                    command: lab_offload_command(&provider_cli.command)?,
+                    normalized_args: &provider_args,
+                    explicit_runner: Some(&self.runner_id),
+                    placement: homeboy::cli_surface::Placement::Lab,
+                    allow_local_fallback: self.allow_local_fallback,
+                    allow_dirty_lab_workspace: self.allow_dirty_lab_workspace,
+                    skip_deps_hydration: self.skip_deps_hydration,
+                    preserve_workspace_on_failure: false,
+                    capture_patch: false,
+                    mutation_flag: None,
+                    timeout: None,
+                    active_run_id: Some(run_id),
+                    detach_after_handoff: self.detach_after_handoff,
+                    output_file_requested: false,
+                    read_only_polling: false,
+                    require_controller_git_bundle: false,
+                    reuse_compatible_snapshot: false,
+                    local_output_file: None,
+                    durable_agent_task_plan: Some(&durable_agent_task_plan),
+                    // A retry's baseline is controller-owned capability, not plan
+                    // data. Stage that exact clean checkout; never substitute the
+                    // controller's original workspace during nested Lab dispatch.
+                    source_path: cook_attempt_source_path(
+                        derived_cook_baseline,
+                        self.source_path.as_deref(),
+                    ),
+                    verified_cook_baseline: verified_cook_baseline.as_ref(),
+                    job_overrides: self.job_overrides.clone(),
+                },
+                Some(&self.runner_id),
+                Box::new(NoopLabDispatchObserver),
+            );
+            let _ = heartbeat_stop.send(());
+            outcome
+        });
+        let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(_error) if agent_task_lifecycle::has_accepted_runner_handoff(run_id)? => {
                 // The daemon owns an accepted job. A controller session can

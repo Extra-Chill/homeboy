@@ -62,6 +62,33 @@ fn cook_rejects_local_detach_before_worktree_resolution() {
 }
 
 #[test]
+fn non_tty_client_must_choose_one_lab_observation_mode() {
+    // Command::output supplies pipes, matching an interruptible bridge client
+    // rather than an interactive terminal. Reject ambiguity before any worktree
+    // or provider work can begin.
+    let output = homeboy()
+        .args([
+            "--wait",
+            "--detach-after-handoff",
+            "agent-task",
+            "cook",
+            "--prompt",
+            "implement the fix",
+            "--to-worktree",
+            "missing@worktree",
+            "--verify",
+            "true",
+        ])
+        .output()
+        .expect("run homeboy");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
+    assert!(!stderr.contains("worktree provider"), "{stderr}");
+}
+
+#[test]
 fn cook_rejects_queue_only_before_worktree_resolution() {
     let output = homeboy()
         .args([
@@ -92,5 +119,8 @@ fn cook_help_does_not_advertise_queue_only() {
         .expect("run homeboy help");
 
     assert!(output.status.success());
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("\n      --queue-only\n"));
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(!help.contains("\n      --queue-only\n"));
+    assert!(help.contains("--detach-after-handoff"), "{help}");
+    assert!(help.contains("--wait"), "{help}");
 }

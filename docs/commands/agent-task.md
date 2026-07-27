@@ -297,6 +297,31 @@ expected to outlive the local shell. Homeboy returns after the runner daemon
 accepts the job and prints follow/cancel commands instead of waiting for remote
 provider completion.
 
+Lab Cook has two explicit observation modes. Submit and return when an
+interruptible client should hand the provider attempt to the Lab controller:
+
+```bash
+homeboy --runner homeboy-lab --detach-after-handoff agent-task cook \
+  --to-worktree homeboy@fix-issue-6453 --verify 'cargo test --lib' --prompt @task.txt
+```
+
+Wait for the completed Cook when the caller owns a synchronous workflow:
+
+```bash
+homeboy --runner homeboy-lab --wait agent-task cook \
+  --to-worktree homeboy@fix-issue-6453 --verify 'cargo test --lib' --prompt @task.txt
+```
+
+`--wait` is the compatibility default for existing scripts. A future migration to
+submit-by-default can therefore update callers mechanically; new interruptible
+clients should specify `--detach-after-handoff`. Both modes print bounded phase
+heartbeats with the durable run id. Reconnect and retrieve durable state with:
+
+```bash
+homeboy agent-task status <run-id>
+homeboy agent-task evidence <run-id> --full
+```
+
 `--placement local` is safe only when local execution on this
 controller is intentional. For agent-task waves with concurrency greater than 1
 or multiple tasks, Homeboy prints `HOMEBOY_LOCAL_FANOUT_WARNING` before provider
