@@ -1702,6 +1702,122 @@ fn reverse_broker_refresh_uses_persisted_transport_after_store_reopen() {
 }
 
 #[test]
+fn reverse_result_refresh_treats_preterminal_absence_as_pending_then_projects_terminal_once() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let mut job = terminal_runner_job();
+        job.status = JobStatus::Queued;
+        job.finished_at_ms = None;
+        let command = vec!["homeboy".to_string(), "bench".to_string()];
+
+        for status in [JobStatus::Queued, JobStatus::Running] {
+            job.status = status;
+            let evidence = mirror_reverse_broker_evidence(
+                &ssh_runner(),
+                "http://broker.invalid",
+                "/runner/project",
+                &command,
+                &job,
+                &[],
+                &json!({}),
+                None,
+                None,
+            )
+            .expect("preterminal result is pending")
+            .expect("pending evidence");
+            assert_eq!(
+                evidence.run.metadata_json["lab"]["result_availability"]["state"],
+                "pending"
+            );
+            assert_eq!(
+                evidence.run.metadata_json["lab"]["result_availability"]["last_observed_phase"],
+                serde_json::to_value(status).expect("status JSON"),
+            );
+            assert_eq!(
+                evidence.run.metadata_json["lab"]["result_availability"]["next_poll_action"],
+                "refresh_mirrored_daemon_evidence"
+            );
+        }
+
+        job.status = JobStatus::Succeeded;
+        job.finished_at_ms = Some(job.updated_at_ms);
+        let terminal = mirror_reverse_broker_evidence(
+            &ssh_runner(),
+            "http://broker.invalid",
+            "/runner/project",
+            &command,
+            &job,
+            &[],
+            &json!({ "exit_code": 0 }),
+            None,
+            None,
+        )
+        .expect("valid terminal result")
+        .expect("terminal evidence");
+        assert_eq!(
+            terminal.run.metadata_json["lab"]["result_availability"]["state"],
+            "terminal"
+        );
+        assert_eq!(store.list_runs(Default::default()).expect("runs").len(), 1);
+    });
+}
+
+#[test]
+fn direct_result_refresh_treats_preterminal_absence_as_pending() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut job = terminal_runner_job();
+        job.status = JobStatus::Running;
+        job.finished_at_ms = None;
+        let evidence = mirror_daemon_evidence(
+            &ssh_runner(),
+            "/runner/project",
+            &["homeboy".to_string(), "bench".to_string()],
+            &job,
+            &[],
+            &json!({}),
+            None,
+            None,
+        )
+        .expect("preterminal direct result is pending")
+        .expect("pending direct evidence");
+
+        assert_eq!(
+            evidence.run.metadata_json["lab"]["result_availability"]["state"],
+            "pending"
+        );
+        assert_eq!(
+            evidence.run.metadata_json["lab"]["result_availability"]["last_observed_phase"],
+            "running"
+        );
+    });
+}
+
+#[test]
+fn malformed_terminal_reverse_result_keeps_transport_and_payload_diagnostics() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let job = terminal_runner_job();
+        let error = mirror_reverse_broker_evidence(
+            &ssh_runner(),
+            "http://broker.invalid",
+            "/runner/project",
+            &["homeboy".to_string(), "bench".to_string()],
+            &job,
+            &[],
+            &json!({ "stdout": "missing exit code" }),
+            None,
+            None,
+        )
+        .expect_err("malformed terminal result is actionable");
+
+        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+        assert!(error.message.contains(&job.id.to_string()));
+        assert!(error.message.contains("reverse-broker"));
+        assert!(error.message.contains("RemoteRunnerJobResult"));
+        assert!(error.message.contains("missing exit code"));
+    });
+}
+
+#[test]
 fn legacy_terminal_artifacts_use_the_controller_runner_run_and_survive_runner_disconnect() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let store = ObservationStore::open_initialized().expect("store");
