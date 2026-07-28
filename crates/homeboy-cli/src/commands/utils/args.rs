@@ -10,6 +10,7 @@ use clap::{Arg, ArgAction, Args, Command, CommandFactory};
 
 use crate::cli_surface::Cli;
 use homeboy::core::component::{self, Component};
+use homeboy::core::scope::{Scope, ScopeKind};
 
 pub(crate) const EXPLICIT_PASSTHROUGH_SENTINEL: &str = "__homeboy_explicit_passthrough__";
 
@@ -658,6 +659,235 @@ mod normalize_tests {
             super::filter_passthrough_args(super::PassthroughCommand::Test, &args),
             argv(&["--coverage", "--baseline", "runner-value"])
         );
+    }
+}
+
+// ============================================================================
+// ScopeArgs: --project + --fleet + --component + --rig + --path + --workspace
+// ============================================================================
+
+/// The shared six-way entity selector.
+///
+/// [`Scope`] is already the single entity primitive commands resolve against
+/// (`resolve_scope_components`, `resolve_scope_component_records`), but every
+/// command that let an operator *choose* an entity re-declared the same
+/// six-way switch by hand — `triage` declared it twice inside one command
+/// (#10312). This group owns the spelling once so a command only has to
+/// flatten it and call [`ScopeArgs::resolve`].
+///
+/// The selectors are mutually exclusive by construction: a scope is one
+/// entity, not a set. Commands that genuinely operate on several components at
+/// once (`refactor --component a --component b`) are a different shape and
+/// keep their own args.
+///
+/// Deliberately long-flag-only. Short flags are already spoken for by several
+/// of the commands this group is flattened into (`deploy -c`, `refactor -c`),
+/// and adding a short here would silently change what those letters mean.
+#[derive(Args, Debug, Clone, Default)]
+pub struct ScopeArgs {
+    /// Scope: project id.
+    #[arg(long, value_name = "ID", conflicts_with_all = ["fleet", "component", "rig", "path", "workspace"])]
+    pub project: Option<String>,
+
+    /// Scope: fleet id.
+    #[arg(long, value_name = "ID", conflicts_with_all = ["project", "component", "rig", "path", "workspace"])]
+    pub fleet: Option<String>,
+
+    /// Scope: registered component id.
+    #[arg(long, value_name = "ID", conflicts_with_all = ["project", "fleet", "rig", "path", "workspace"])]
+    pub component: Option<String>,
+
+    /// Scope: local rig id.
+    #[arg(long, value_name = "ID", conflicts_with_all = ["project", "fleet", "component", "path", "workspace"])]
+    pub rig: Option<String>,
+
+    /// Scope: checkout path, bypassing the registry.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["project", "fleet", "component", "rig", "workspace"])]
+    pub path: Option<String>,
+
+    /// Scope: every configured workspace repo.
+    #[arg(long, conflicts_with_all = ["project", "fleet", "component", "rig", "path"])]
+    pub workspace: bool,
+}
+
+impl ScopeArgs {
+    /// The explicitly selected scope, or `None` when the operator supplied no
+    /// selector at all. Commands whose unscoped default is CWD discovery (or
+    /// anything else that is not the workspace) branch on this.
+    pub fn selection(&self) -> Option<Scope> {
+        if let Some(project) = &self.project {
+            return Some(Scope::Project(project.clone()));
+        }
+        if let Some(fleet) = &self.fleet {
+            return Some(Scope::Fleet(fleet.clone()));
+        }
+        if let Some(component) = &self.component {
+            return Some(Scope::Component(component.clone()));
+        }
+        if let Some(rig) = &self.rig {
+            return Some(Scope::Rig(rig.clone()));
+        }
+        if let Some(path) = &self.path {
+            return Some(Scope::Path {
+                path: path.clone(),
+                component_id: None,
+            });
+        }
+        if self.workspace {
+            return Some(Scope::Workspace);
+        }
+        None
+    }
+
+    /// Resolve the selected scope, defaulting to the whole workspace.
+    ///
+    /// `--workspace` is therefore explicit *and* implicit: passing it is the
+    /// same as passing nothing, which is what the commands using this group
+    /// already documented.
+    pub fn resolve(&self) -> Scope {
+        self.selection().unwrap_or(Scope::Workspace)
+    }
+
+    /// True when no selector was supplied.
+    pub fn is_unscoped(&self) -> bool {
+        self.selection().is_none()
+    }
+
+    /// The selected scope kind, if any.
+    pub fn kind(&self) -> Option<ScopeKind> {
+        self.selection().map(|scope| scope.kind())
+    }
+}
+
+#[cfg(test)]
+mod scope_args_tests {
+    use super::ScopeArgs;
+    use clap::Parser;
+    use homeboy::core::scope::{Scope, ScopeKind};
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        scope: ScopeArgs,
+    }
+
+    fn parse(args: &[&str]) -> ScopeArgs {
+        TestCli::try_parse_from(args)
+            .expect("scope selector should parse")
+            .scope
+    }
+
+    #[test]
+    fn each_selector_resolves_to_its_scope_variant() {
+        assert_eq!(
+            parse(&["scoped", "--project", "growth"]).resolve(),
+            Scope::Project("growth".to_string())
+        );
+        assert_eq!(
+            parse(&["scoped", "--fleet", "growth"]).resolve(),
+            Scope::Fleet("growth".to_string())
+        );
+        assert_eq!(
+            parse(&["scoped", "--component", "homeboy"]).resolve(),
+            Scope::Component("homeboy".to_string())
+        );
+        assert_eq!(
+            parse(&["scoped", "--rig", "studio"]).resolve(),
+            Scope::Rig("studio".to_string())
+        );
+        assert_eq!(
+            parse(&["scoped", "--path", "/src/homeboy"]).resolve(),
+            Scope::Path {
+                path: "/src/homeboy".to_string(),
+                component_id: None,
+            }
+        );
+        assert_eq!(
+            parse(&["scoped", "--workspace"]).resolve(),
+            Scope::Workspace
+        );
+    }
+
+    #[test]
+    fn inline_value_forms_parse_identically() {
+        assert_eq!(
+            parse(&["scoped", "--project=growth"]).resolve(),
+            Scope::Project("growth".to_string())
+        );
+        assert_eq!(
+            parse(&["scoped", "--path=/src/homeboy"]).resolve(),
+            Scope::Path {
+                path: "/src/homeboy".to_string(),
+                component_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn no_selector_is_unscoped_and_defaults_to_workspace() {
+        let args = parse(&["scoped"]);
+        assert!(args.is_unscoped());
+        assert!(args.selection().is_none());
+        assert!(args.kind().is_none());
+        assert_eq!(args.resolve(), Scope::Workspace);
+    }
+
+    #[test]
+    fn explicit_workspace_is_scoped() {
+        let args = parse(&["scoped", "--workspace"]);
+        assert!(!args.is_unscoped());
+        assert_eq!(args.kind(), Some(ScopeKind::Workspace));
+    }
+
+    #[test]
+    fn kind_matches_the_selected_variant() {
+        assert_eq!(
+            parse(&["scoped", "--project", "growth"]).kind(),
+            Some(ScopeKind::Project)
+        );
+        assert_eq!(
+            parse(&["scoped", "--fleet", "growth"]).kind(),
+            Some(ScopeKind::Fleet)
+        );
+        assert_eq!(
+            parse(&["scoped", "--component", "homeboy"]).kind(),
+            Some(ScopeKind::Component)
+        );
+        assert_eq!(
+            parse(&["scoped", "--rig", "studio"]).kind(),
+            Some(ScopeKind::Rig)
+        );
+        assert_eq!(
+            parse(&["scoped", "--path", "/src/homeboy"]).kind(),
+            Some(ScopeKind::Path)
+        );
+    }
+
+    #[test]
+    fn selectors_are_mutually_exclusive() {
+        let valued = ["--project", "--fleet", "--component", "--rig", "--path"];
+        for (index, first) in valued.iter().enumerate() {
+            for second in valued.iter().skip(index + 1) {
+                let argv = vec!["scoped", first, "a", second, "b"];
+                assert!(
+                    TestCli::try_parse_from(&argv).is_err(),
+                    "{first} and {second} should conflict"
+                );
+            }
+
+            let with_workspace = vec!["scoped", first, "a", "--workspace"];
+            assert!(
+                TestCli::try_parse_from(&with_workspace).is_err(),
+                "{first} and --workspace should conflict"
+            );
+        }
+    }
+
+    #[test]
+    fn default_is_an_unscoped_group() {
+        let args = ScopeArgs::default();
+        assert!(args.is_unscoped());
+        assert_eq!(args.resolve(), Scope::Workspace);
     }
 }
 
