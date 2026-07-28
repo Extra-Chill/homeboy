@@ -29,16 +29,19 @@ fn hermetic_fixture_command_cannot_use_operator_paths_or_installed_homeboy() {
     let command = context.command(TestBinary::HomeboyFixture);
     let configured_env = command
         .get_envs()
-        .map(|(key, value)| {
-            (
-                key.to_string_lossy().into_owned(),
-                value
-                    .expect("hermetic context only sets values")
-                    .to_string_lossy()
-                    .into_owned(),
-            )
+        .filter_map(|(key, value)| {
+            value.map(|value| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.to_string_lossy().into_owned(),
+                )
+            })
         })
         .collect::<std::collections::BTreeMap<_, _>>();
+    let removed_env = command
+        .get_envs()
+        .filter_map(|(key, value)| value.is_none().then(|| key.to_string_lossy().into_owned()))
+        .collect::<std::collections::BTreeSet<_>>();
 
     assert_eq!(
         command.get_program(),
@@ -62,6 +65,8 @@ fn hermetic_fixture_command_cannot_use_operator_paths_or_installed_homeboy() {
         configured_env["HOMEBOY_RUNTIME_TMPDIR"],
         context.runtime_dir().display().to_string()
     );
+    assert!(removed_env.contains(homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV));
+    assert!(removed_env.contains(homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV));
     assert!(context.config_dir().starts_with(context.root()));
     assert!(context.data_dir().starts_with(context.root()));
     assert!(context.artifact_dir().starts_with(context.root()));
