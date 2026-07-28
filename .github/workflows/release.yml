@@ -242,7 +242,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.release_tag || github.ref }}
+          # Recovery checks out an older release tag downstream, but the
+          # finalizer must include the current recovery contract from main.
+          ref: ${{ github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -883,14 +885,46 @@ jobs:
         run: |
           rm -f artifacts/*-dist-manifest.json
 
+      - name: Create remote draft adoption manifest
+        if: needs.prepare.outputs.recovery-release == 'true'
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs['release-version'] }}
+          EXPECTED_ASSETS: ${{ needs.plan.outputs.expected-assets }}
+        run: |
+          set -euo pipefail
+          mkdir -p draft-adoption
+          COMMIT="$(git rev-parse "${RELEASE_TAG}^{}")"
+          jq -n \
+            --arg schema homeboy.draft-adoption \
+            --argjson schema_version 1 \
+            --arg component_id homeboy \
+            --arg tag "${RELEASE_TAG}" \
+            --arg version "${RELEASE_VERSION}" \
+            --arg commit "${COMMIT}" \
+            --argjson expected_assets "${EXPECTED_ASSETS}" \
+            '{schema: $schema, schema_version: $schema_version, component_id: $component_id, tag: $tag, version: $version, commit: $commit, expected_assets: $expected_assets}' > draft-adoption/manifest.json
+
+      - name: Download current Homeboy finalizer
+        if: needs.prepare.outputs.recovery-release == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: homeboy-binary
+          path: .homeboy-bin
+
+      - name: Verify current Homeboy finalizer
+        if: needs.prepare.outputs.recovery-release == 'true'
+        run: chmod +x .homeboy-bin/homeboy
+
       - name: Finish Homeboy release pipeline at tag
         uses: Extra-Chill/homeboy-action@v2
         with:
           source: '.'
           component: homeboy
           commands: release
+          binary-path: ${{ needs.prepare.outputs.recovery-release == 'true' && '.homeboy-bin/homeboy' || '' }}
           release-head: 'true'
-          release-from-artifacts: artifacts
+          release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && 'draft-adoption' || 'artifacts' }}
           release-skip-publish: 'true'
 
   # ── Step 5b: Fail loudly if a prepared release did not publish ──
