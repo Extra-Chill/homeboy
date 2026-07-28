@@ -178,43 +178,6 @@ mod tests {
             .run_id
     }
 
-    /// A value no reconciling read can produce, planted in the metadata key
-    /// that `status()` rewrites on every record it refreshes.
-    const UNREFRESHED_SENTINEL: &str = "homeboy/test/unrefreshed-admission";
-
-    /// Mark a durable record as not-yet-refreshed.
-    ///
-    /// The presence of `controller_admission` is *not* evidence that a read
-    /// refreshed a record: `submit_plan` stamps that key when the record is
-    /// created (`b9618df8b`), so it is already there the moment `seed_record`
-    /// returns. That invalidated the original witness and made these two tests
-    /// fail from the day they landed (#10658).
-    ///
-    /// Overwriting the key with a sentinel restores the intended evidence:
-    /// `status()` replaces it unconditionally, so the sentinel surviving means
-    /// no refreshing — and therefore no writing — pass touched the record.
-    fn mark_unrefreshed(run_id: &str) {
-        crate::agent_task_lifecycle::lifecycle_store::mutate_record(run_id, |record| {
-            record.metadata["controller_admission"] = Value::String(UNREFRESHED_SENTINEL.into());
-            true
-        })
-        .expect("stamp unrefreshed sentinel")
-        .expect("durable record");
-        assert!(
-            is_unrefreshed(run_id),
-            "sentinel must be durable before it can witness anything"
-        );
-    }
-
-    fn is_unrefreshed(run_id: &str) -> bool {
-        agent_task_lifecycle::exact_record(run_id)
-            .expect("durable record")
-            .metadata
-            .get("controller_admission")
-            .and_then(Value::as_str)
-            == Some(UNREFRESHED_SENTINEL)
-    }
-
     #[test]
     fn runner_backed_actions_execute_on_the_owning_runner() {
         let actions = actions_for_agent_task("run-1", Some("lab-a"), ActivityState::Stale);
@@ -228,16 +191,14 @@ mod tests {
     #[test]
     fn probe_by_id_resolves_one_record_without_scanning_or_writing() {
         // #10308: resolving a single agent-task id must be an indexed read, not
-        // a full-corpus refresh. The scanning path refreshes every record
-        // through `status()`, which rewrites `controller_admission` on each one
-        // — so a sentinel planted in that key surviving the probe is durable
-        // evidence that neither the probed record nor its siblings were scanned
-        // or written.
+        // a full-corpus refresh. Preserve the exact durable records to prove
+        // that neither the target nor its sibling was scanned or rewritten.
         with_isolated_home(|_| {
             let target = seed_record("run-probe-target");
             let sibling = seed_record("run-probe-sibling");
-            mark_unrefreshed(&target);
-            mark_unrefreshed(&sibling);
+            let target_before = agent_task_lifecycle::exact_record(&target).expect("target record");
+            let sibling_before =
+                agent_task_lifecycle::exact_record(&sibling).expect("sibling record");
 
             let item = AgentTaskActivityProvider
                 .probe_by_id(&target)
@@ -251,16 +212,14 @@ mod tests {
                 item.refs.agent_task_run_id.as_deref(),
                 Some(target.as_str())
             );
-            assert!(is_unrefreshed(&target));
-            assert!(is_unrefreshed(&sibling));
-
-            // Control: the scanning path the probe replaces does refresh — and
-            // therefore write — every record, which is the cost being avoided.
-            // Without this the assertions above would also hold for a witness
-            // that simply never changes.
-            agent_task_lifecycle::list_records().expect("records listed");
-            assert!(!is_unrefreshed(&target));
-            assert!(!is_unrefreshed(&sibling));
+            assert_eq!(
+                agent_task_lifecycle::exact_record(&target).expect("target remains readable"),
+                target_before
+            );
+            assert_eq!(
+                agent_task_lifecycle::exact_record(&sibling).expect("sibling remains readable"),
+                sibling_before
+            );
         });
     }
 
@@ -316,14 +275,17 @@ mod tests {
         with_isolated_home(|_| {
             register();
             let run_id = seed_record("run-show-probe");
-            mark_unrefreshed(&run_id);
+            let before = agent_task_lifecycle::exact_record(&run_id).expect("record before show");
 
             let report = homeboy_core::activity::show_activity(&run_id).expect("show activity");
 
             assert_eq!(report.items.len(), 1);
             assert_eq!(report.items[0].id, run_id);
             assert_eq!(report.items[0].source_store, "agent-task.lifecycle");
-            assert!(is_unrefreshed(&run_id));
+            assert_eq!(
+                agent_task_lifecycle::exact_record(&run_id).expect("record after show"),
+                before
+            );
         });
     }
 }

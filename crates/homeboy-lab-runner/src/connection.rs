@@ -1321,7 +1321,11 @@ pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
     // A dead controller tunnel must be reattached or reported as disconnected
     // before polling every draining local projection.
     if connected {
-        super::generation_store::reconcile(runner_id, session.as_ref())?;
+        if let Ok(Some((_, _, client))) = remote_daemon::resolve_ssh_runner(&runner) {
+            super::generation_store::reconcile_with_ssh(runner_id, session.as_ref(), &client)?;
+        } else {
+            super::generation_store::reconcile(runner_id, session.as_ref())?;
+        }
     }
     let stale_daemon = stale_daemon_warning(&runner, session.as_ref(), connected)?;
     let local_daemon_freshness = runner_daemon_freshness(&runner, session.as_ref(), connected)?;

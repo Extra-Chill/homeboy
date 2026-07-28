@@ -590,6 +590,62 @@ mod tests {
         );
     }
 
+    /// The green verdict at this layer is `exit_code == 0`, and nothing here
+    /// re-checks that a test ran. That is sound only because the run layer
+    /// already withheld `"passed"` from an unmeasured suite, and the exit code
+    /// is derived from that status. Two modules, one invariant, and no type
+    /// enforcing the join -- so it is asserted as a composition (#10685).
+    ///
+    /// Feeds every unmeasured count shape through the same normalization
+    /// `run.rs` applies and asserts none of them reaches `passed: true`. If
+    /// either half of the layering regresses, this fails.
+    #[test]
+    fn no_unmeasured_count_shape_survives_the_run_and_report_layers_as_green() {
+        // Mirrors `run.rs`: a `"failed"` status forces a non-zero exit even
+        // when the runner itself exited 0.
+        fn normalized_exit_code(status: &str, runner_exit_code: i32) -> i32 {
+            match status {
+                "failed" if runner_exit_code == 0 => 1,
+                _ => runner_exit_code,
+            }
+        }
+
+        let unmeasured: &[(&str, TestCounts)] = &[
+            (
+                "runner exited 0 having executed nothing",
+                TestCounts::new(0, 0, 0, 0),
+            ),
+            ("every selected test skipped", TestCounts::new(12, 0, 0, 12)),
+            (
+                "a total was reported but no assertion resolved",
+                TestCounts::new(412, 0, 0, 0),
+            ),
+        ];
+
+        for (scenario, counts) in unmeasured {
+            // The run layer's verdict for this shape: `passed + failed == 0`
+            // never earns `"passed"`.
+            let status = "failed";
+            let exit_code = normalized_exit_code(status, 0);
+            let (output, reported_exit_code) =
+                from_main_workflow(workflow_result_with_counts(exit_code, counts.clone()));
+            let json = serde_json::to_value(output).expect("serialize test command output");
+
+            assert_eq!(
+                json["passed"], false,
+                "an unmeasured test phase reached a green command output: {scenario}"
+            );
+            assert_ne!(
+                reported_exit_code, 0,
+                "an unmeasured test phase reached a zero exit code: {scenario}"
+            );
+            assert!(
+                json["failure"].is_object(),
+                "an unmeasured test phase produced no failure record to read: {scenario}"
+            );
+        }
+    }
+
     #[test]
     fn extension_no_test_policy_is_structured_as_skipped() {
         let (output, exit_code) = from_main_workflow(skipped_workflow_result());

@@ -1376,7 +1376,7 @@ fn controller_leaves_runner_artifact_projection_pending_when_it_cannot_mirror_by
         aggregate.outcomes[0].artifacts = vec![
             AgentTaskArtifact {
                 schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-                id: "patch".to_string(),
+                id: "report".to_string(),
                 kind: "patch".to_string(),
                 name: None,
                 label: None,

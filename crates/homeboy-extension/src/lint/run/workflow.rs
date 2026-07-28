@@ -49,18 +49,54 @@ pub fn run_main_lint_workflow(
     args: LintRunWorkflowArgs,
     run_dir: &RunDir,
 ) -> homeboy_core::Result<LintRunWorkflowResult> {
-    let scoped_runs = resolve_scoped_lint_runs(component, &args)?;
+    let scoped_plan = resolve_scoped_lint_runs(component, &args)?;
 
-    // Early exit if changed-file mode produced no files
-    if let Some(ref runs) = scoped_runs {
-        if runs.is_empty() {
+    // Early exit if changed-file mode produced no runnable scope.
+    //
+    // This exit renders `passed` having linted nothing, and until #10685 it did
+    // so without recording how many files it declined to lint. Two states
+    // reached it and rendered identically:
+    //
+    //   * `changed_files_considered == 0` — the diff was empty. An honest
+    //     green; `measurement_ok` classifies it `EmptyPopulation`.
+    //   * `changed_files_considered > 0` with zero runs — files changed and no
+    //     declared lint route claimed any of them. Usually still honest (a
+    //     documentation-only diff), occasionally a route glob that stopped
+    //     matching.
+    //
+    // The verdict is deliberately NOT moved for the second case. Every
+    // documentation-only pull request lands there, so failing closed would make
+    // the lint gate red on a large and entirely legitimate class of change —
+    // and a gate that is red for everyone is ignored, which is the same end
+    // state as the false green. The predicate also genuinely cannot adjudicate
+    // here: the route matcher is both the instrument and the only source of the
+    // population, so a broken matcher is indistinguishable from an empty
+    // population from the inside. See `ScopedLintPlan`.
+    //
+    // What does change is that the state stops being invisible. The count is
+    // logged and carried into the hints, so "0 files linted because nothing
+    // changed" and "0 files linted because 47 changed files matched no route"
+    // read differently to an operator and to the PR comment.
+    if let Some(ref plan) = scoped_plan {
+        if plan.runs.is_empty() {
+            let hints = (plan.changed_files_considered > 0).then(|| {
+                vec![format!(
+                    "Lint ran no scopes: {} changed file(s) were considered and none matched any \
+                     extension-declared lint route. If that is unexpected, the route globs no \
+                     longer cover these files (#10685).",
+                    plan.changed_files_considered
+                )]
+            });
+            if let Some(ref hints) = hints {
+                eprintln!("{}", hints[0]);
+            }
             return Ok(LintRunWorkflowResult {
                 status: "passed".to_string(),
                 component: args.component_label,
                 exit_code: 0,
                 harness_error: false,
                 autofix: None,
-                hints: None,
+                hints,
                 baseline_comparison: None,
                 formatting_findings: None,
                 findings: None,
@@ -77,7 +113,8 @@ pub fn run_main_lint_workflow(
     }
 
     // Run lint
-    let (output, evidence, child_run_dirs) = if let Some(ref runs) = scoped_runs {
+    let (output, evidence, child_run_dirs) = if let Some(ref plan) = scoped_plan {
+        let runs = &plan.runs;
         let scoped = run_scoped_lint_runs(component, &args, run_dir, runs)?;
         (scoped.output, scoped.evidence, scoped.child_run_dirs)
     } else {

@@ -825,16 +825,17 @@ mod baseline_tests {
         assert!(report.stderr.contains("was cancelled"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn bounded_baseline_gate_reaps_background_descendants_before_reader_join() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let marker = temp.path().join("descendant-survived");
+        let pid_file = temp.path().join("descendant.pid");
         let report = run_gate_command_with_timeout(
             temp.path(),
             1,
             &format!(
-                "(sleep 0.2; touch '{}') & while :; do sleep 1; done",
-                marker.display()
+                "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & echo $! > '{}'; wait",
+                pid_file.display()
             ),
             AgentTaskGateVisibility::Visible,
             AgentTaskGateRevealPolicy::FullEvidence,
@@ -845,8 +846,12 @@ mod baseline_tests {
         .expect("bounded gate report");
 
         assert_eq!(report.exit_code, 124);
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(!marker.exists(), "background descendant survived timeout");
+        let descendant_pid = std::fs::read_to_string(pid_file)
+            .expect("descendant pid")
+            .trim()
+            .parse::<libc::pid_t>()
+            .expect("numeric descendant pid");
+        assert_ne!(unsafe { libc::kill(descendant_pid, 0) }, 0);
     }
 }
 
@@ -1935,7 +1940,7 @@ mod tests {
     /// change what the gate means. `c3462d472` made preflight opt-in for that
     /// reason and this test tracked the removed inference until #10658.
     #[test]
-    fn only_declared_gate_toolchains_are_preflight_requirements() {
+    fn gate_toolchain_requirements_are_explicit() {
         let options = VerifyGateOptions {
             verify: vec!["cargo test --lib".to_string()],
             private_verify: vec!["npm test".to_string()],

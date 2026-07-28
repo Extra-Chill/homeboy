@@ -1,7 +1,7 @@
 //! Changed-file scope resolution — maps `--changed-only`/`--changed-since`
 //! flags into runner-compatible globbed lint runs via extension routes.
 
-use super::types::{LintRunWorkflowArgs, ScopedLintRun};
+use super::types::{LintRunWorkflowArgs, ScopedLintPlan, ScopedLintRun};
 use crate as extension;
 use crate::LintChangedFileRoute;
 use homeboy_core::component::Component;
@@ -20,13 +20,16 @@ pub struct LintFixRoute {
 
 /// Resolve runner-compatible scopes from --changed-only or --changed-since flags.
 ///
-/// Returns `Some(Vec::new())` when changed-file mode is active but no compatible
-/// files were found — the caller should treat this as an early "passed" exit.
+/// Returns a [`ScopedLintPlan`] with an empty `runs` when changed-file mode is
+/// active but no compatible files were found — the caller should treat this as
+/// an early "passed" exit. `changed_files_considered` distinguishes the two
+/// very different ways that can happen (#10685): a genuinely empty diff, or a
+/// non-empty diff that no declared lint route claimed.
 /// Returns `None` when no changed-file scoping is active (use args.glob directly).
 pub(super) fn resolve_scoped_lint_runs(
     component: &Component,
     args: &LintRunWorkflowArgs,
-) -> homeboy_core::Result<Option<Vec<ScopedLintRun>>> {
+) -> homeboy_core::Result<Option<ScopedLintPlan>> {
     if args.changed_only {
         let changed_files = if let Some(files) = &args.precomputed_changed_files {
             files.clone()
@@ -42,7 +45,10 @@ pub(super) fn resolve_scoped_lint_runs(
         let changed_files = component_relative_changed_files(component, changed_files);
         if changed_files.is_empty() {
             println!("No files in working tree changes");
-            return Ok(Some(Vec::new()));
+            return Ok(Some(ScopedLintPlan {
+                runs: Vec::new(),
+                changed_files_considered: 0,
+            }));
         }
 
         eprintln!(
@@ -50,7 +56,10 @@ pub(super) fn resolve_scoped_lint_runs(
             changed_files.len()
         );
 
-        Ok(Some(build_changed_lint_runs(component, &changed_files)))
+        Ok(Some(ScopedLintPlan {
+            runs: build_changed_lint_runs(component, &changed_files),
+            changed_files_considered: changed_files.len(),
+        }))
     } else if let Some(ref git_ref) = args.changed_since {
         let changed_files = match &args.precomputed_changed_files {
             Some(files) => files.clone(),
@@ -60,10 +69,16 @@ pub(super) fn resolve_scoped_lint_runs(
         let changed_files = component_relative_changed_files(component, changed_files);
         if changed_files.is_empty() {
             println!("No files changed since {}", git_ref);
-            return Ok(Some(Vec::new()));
+            return Ok(Some(ScopedLintPlan {
+                runs: Vec::new(),
+                changed_files_considered: 0,
+            }));
         }
 
-        Ok(Some(build_changed_lint_runs(component, &changed_files)))
+        Ok(Some(ScopedLintPlan {
+            runs: build_changed_lint_runs(component, &changed_files),
+            changed_files_considered: changed_files.len(),
+        }))
     } else {
         Ok(None)
     }
