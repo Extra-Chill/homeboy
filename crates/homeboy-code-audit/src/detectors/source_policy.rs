@@ -82,12 +82,6 @@ pub(crate) fn validate_configured_paths(
         }
     }
 
-    for glob in &config.convention_exception_globs {
-        if !paths.iter().any(|path| glob_match::glob_match(glob, path)) {
-            missing.push(format!("convention exception glob: {glob}"));
-        }
-    }
-
     for policy in &config.test_wiring.policies {
         for (kind, globs) in [
             ("source", &policy.source_path_globs),
@@ -724,14 +718,13 @@ mod tests { const PACKAGE: &str = "widget-package.json"; }
     }
 
     #[test]
-    fn rejects_stale_exclusions_globs_and_thin_adapter_scopes() {
+    fn rejects_stale_exclusions_and_thin_adapter_scopes() {
         let fp = rust_fp("crates/homeboy-cli/src/commands/audit.rs", "fn run() {}");
         let mut config = AuditConfig::default();
         let mut policy = rule();
         policy.include_path_contains = vec!["crates/homeboy-cli/".to_string()];
         policy.exclude_path_contains = vec!["crates/retired/".to_string()];
         config.source_policies = vec![policy];
-        config.convention_exception_globs = vec!["src/commands/*.rs".to_string()];
         config.thin_command_adapter.include_path_contains =
             vec!["crates/homeboy-cli/src/commands/".to_string()];
         config.thin_command_adapter.exclude_path_contains =
@@ -758,9 +751,18 @@ mod tests { const PACKAGE: &str = "widget-package.json"; }
 
         let message = error.to_string();
         assert!(message.contains("source policy synthetic-source-boundary exclude"));
-        assert!(message.contains("convention exception glob"));
         assert!(message.contains("thin command adapter exclude"));
         assert!(message.contains("test wiring synthetic-test-wiring test glob"));
+    }
+
+    #[test]
+    fn allows_convention_exception_globs_that_match_zero_files() {
+        let fp = rust_fp("crates/homeboy-cli/src/commands/audit.rs", "fn run() {}");
+        let mut config = AuditConfig::default();
+        config.convention_exception_globs = vec!["**/register.rs".to_string()];
+
+        validate_configured_paths(&[&fp], &config)
+            .expect("optional convention exceptions may match no files");
     }
 
     // ------------------------------------------------------------------------
