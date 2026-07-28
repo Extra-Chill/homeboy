@@ -146,6 +146,37 @@ fn controller_terminal_metadata_uses_exact_visual_artifact_shape_and_validates_b
 }
 
 #[test]
+fn controller_terminal_metadata_keeps_fetch_fallback_without_public_origin() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let prior_public_base = std::env::var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL").ok();
+        std::env::remove_var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL");
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(NewRunRecord::builder("runner-exec").build())
+            .expect("run");
+        let path = home.path().join("report.txt");
+        fs::write(&path, b"controller bytes").expect("artifact");
+        store
+            .record_artifact_with_id(&run.id, "report", &path, "report", json!({}))
+            .expect("controller artifact");
+
+        let metadata = controller_artifact_metadata(&[run.clone()]).expect("terminal metadata");
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].id, "report");
+        assert_eq!(metadata[0].url, None);
+        assert_eq!(
+            metadata[0].metadata.as_ref().expect("metadata")["fetch_command"],
+            format!("homeboy runs artifact get {} report -o <path>", run.id)
+        );
+
+        match prior_public_base {
+            Some(value) => std::env::set_var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL", value),
+            None => std::env::remove_var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL"),
+        }
+    });
+}
+
+#[test]
 fn test_download_remote_artifact_rejects_non_runner_token() {
     let err = download_remote_artifact("/tmp/raw-file", None).expect_err("reject raw path");
     assert_eq!(err.code.as_str(), "validation.invalid_argument");

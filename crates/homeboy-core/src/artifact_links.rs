@@ -85,7 +85,7 @@ pub fn public_artifact_url(artifact: &ArtifactRecord) -> Option<String> {
 /// Return the controller's stable artifact route rather than a filesystem
 /// layout URL. Terminal handoffs use this route because it remains valid when
 /// the runner's artifact layout is unavailable after completion.
-pub fn controller_artifact_url(artifact: &ArtifactRecord) -> Result<String> {
+pub fn controller_artifact_url(artifact: &ArtifactRecord) -> Result<Option<String>> {
     if artifact.artifact_type != "file" {
         return Err(Error::validation_invalid_argument(
             "artifact.type",
@@ -94,27 +94,31 @@ pub fn controller_artifact_url(artifact: &ArtifactRecord) -> Result<String> {
             None,
         ));
     }
-    let base = reviewer_public_artifact_base_url()?;
-    Ok(format!(
+    let Some(base) = reviewer_public_artifact_base_url()? else {
+        return Ok(None);
+    };
+    Ok(Some(format!(
         "{}/runs/{}/artifacts/{}",
         base,
         encode_uri_component(&artifact.run_id),
         encode_uri_component(&artifact.id)
-    ))
+    )))
 }
 
 /// Resolve the public artifact origin once at the configuration boundary.
 /// Terminal handoffs only advertise HTTPS URLs on reviewer-reachable hosts.
-pub fn reviewer_public_artifact_base_url() -> Result<String> {
-    let value = std::env::var(PUBLIC_ARTIFACT_BASE_URL_ENV).map_err(|_| {
-        Error::validation_invalid_argument(
-            PUBLIC_ARTIFACT_BASE_URL_ENV,
-            "a public HTTPS artifact origin is required before returning reviewer references",
-            None,
-            None,
-        )
-    })?;
+pub fn reviewer_public_artifact_base_url() -> Result<Option<String>> {
+    let configured = crate::defaults::load_config()
+        .artifact_origin
+        .public_base_url;
+    let value = configured.or_else(|| std::env::var(PUBLIC_ARTIFACT_BASE_URL_ENV).ok());
+    let Some(value) = value else {
+        return Ok(None);
+    };
     let value = value.trim().trim_end_matches('/');
+    if value.is_empty() {
+        return Ok(None);
+    }
     let url = reqwest::Url::parse(value).map_err(|error| {
         Error::validation_invalid_argument(
             PUBLIC_ARTIFACT_BASE_URL_ENV,
@@ -132,7 +136,7 @@ pub fn reviewer_public_artifact_base_url() -> Result<String> {
             None,
         ));
     }
-    Ok(value.to_string())
+    Ok(Some(value.to_string()))
 }
 
 fn non_public_host(host: &str) -> bool {
@@ -439,8 +443,10 @@ mod tests {
         };
 
         assert_eq!(
-            controller_artifact_url(&artifact).expect("reviewer URL"),
-            "https://artifacts.example.test/reviewer/runs/run%20%2F%3F%25/artifacts/source%20%2F%3F%25"
+            controller_artifact_url(&artifact)
+                .expect("valid reviewer origin")
+                .as_deref(),
+            Some("https://artifacts.example.test/reviewer/runs/run%20%2F%3F%25/artifacts/source%20%2F%3F%25")
         );
     }
 
@@ -450,6 +456,42 @@ mod tests {
             let _env = EnvGuard::set(PUBLIC_ARTIFACT_BASE_URL_ENV, value);
             assert!(reviewer_public_artifact_base_url().is_err(), "{value}");
         }
+    }
+
+    #[test]
+    fn controller_origin_uses_typed_config_before_legacy_environment() {
+        crate::test_support::with_isolated_home(|_| {
+            let _env = EnvGuard::set(PUBLIC_ARTIFACT_BASE_URL_ENV, "https://runner.example.test");
+            let mut config = crate::defaults::HomeboyConfig::default();
+            config.artifact_origin.public_base_url =
+                Some("https://controller.example.test/".to_string());
+            crate::defaults::save_config(&config).expect("save controller config");
+
+            assert_eq!(
+                reviewer_public_artifact_base_url()
+                    .expect("configured origin")
+                    .as_deref(),
+                Some("https://controller.example.test")
+            );
+        });
+    }
+
+    #[test]
+    fn controller_url_is_absent_without_controller_origin() {
+        crate::test_support::with_isolated_home(|_| {
+            let _env = EnvGuard::unset(PUBLIC_ARTIFACT_BASE_URL_ENV);
+            let artifact = ArtifactRecord {
+                id: "artifact-1".to_string(),
+                run_id: "run-1".to_string(),
+                artifact_type: "file".to_string(),
+                ..Default::default()
+            };
+
+            assert_eq!(
+                controller_artifact_url(&artifact).expect("optional URL"),
+                None
+            );
+        });
     }
 
     #[test]
@@ -513,6 +555,17 @@ mod tests {
             let lock = ENV_LOCK.lock().expect("environment lock");
             let prior = std::env::var(key).ok();
             std::env::set_var(key, value);
+            Self {
+                key,
+                prior,
+                _lock: lock,
+            }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let lock = ENV_LOCK.lock().expect("environment lock");
+            let prior = std::env::var(key).ok();
+            std::env::remove_var(key);
             Self {
                 key,
                 prior,

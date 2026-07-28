@@ -81,20 +81,26 @@ pub fn controller_artifact_metadata(runs: &[RunRecord]) -> Result<Vec<JobArtifac
             validate_controller_artifact(&artifact)?;
             let controller_run_id = artifact.run_id.clone();
             let url = homeboy_core::artifact_links::controller_artifact_url(&artifact)?;
+            let fetch_command = format!(
+                "homeboy runs artifact get {} {} -o <path>",
+                controller_run_id, artifact.id
+            );
             Ok(JobArtifactMetadata {
                 id: artifact.id,
                 name: None,
                 path: Some(artifact.path),
-                url: Some(url),
+                url,
                 mime: artifact.mime,
                 size_bytes: artifact
                     .size_bytes
                     .and_then(|size| u64::try_from(size).ok()),
                 sha256: artifact.sha256,
                 content_base64: None,
-                metadata: Some(
-                    json!({ "controller_run_id": controller_run_id, "controller_owned": true }),
-                ),
+                metadata: Some(json!({
+                    "controller_run_id": controller_run_id,
+                    "controller_owned": true,
+                    "fetch_command": fetch_command,
+                })),
             })
         })
         .collect()

@@ -759,7 +759,8 @@ mod tests {
             let client = reqwest::blocking::Client::new();
             for ((id, _, bytes), artifact) in fixture.iter().zip(artifacts) {
                 let public_url = crate::artifact_links::controller_artifact_url(&artifact)
-                    .expect("public reviewer URL");
+                    .expect("valid reviewer origin")
+                    .expect("configured public reviewer URL");
                 assert_eq!(
                     public_url,
                     format!(
