@@ -98,6 +98,12 @@ after `--`.
 
 Runs the build quality gate for one component or all project components.
 
+Accepts the shared scope selectors — `--component`, `--project`, `--fleet`,
+`--rig`, `--workspace` — in addition to the positional target forms
+(`<component-id>`, `<project-id> --all`, `<project-id> <component-id>...`).
+`--path` keeps its build-specific meaning: it overrides `local_path` for the
+positional or auto-discovered target rather than selecting an entity.
+
 ### `review ci`
 
 Owns CI reproduction profile and action-support utilities:
