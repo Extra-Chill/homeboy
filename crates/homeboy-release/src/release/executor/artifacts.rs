@@ -4,10 +4,13 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 
 use super::{step_success, ReleaseArtifact, ReleaseState, ReleaseStepResult};
+use crate::release::types::DraftAdoptionIntent;
 
 const PACKAGE_RECOVERY_MANIFEST: &str = "manifest.json";
 pub(crate) const PACKAGE_RECOVERY_MANIFEST_SCHEMA: &str = "homeboy.package-recovery";
 pub(crate) const PACKAGE_RECOVERY_MANIFEST_SCHEMA_VERSION: u32 = 1;
+const DRAFT_ADOPTION_MANIFEST_SCHEMA: &str = "homeboy.draft-adoption";
+const DRAFT_ADOPTION_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Deserialize)]
 struct PackageRecoveryManifest {
@@ -18,6 +21,17 @@ struct PackageRecoveryManifest {
     version: String,
     commit: String,
     artifacts: Vec<ReleaseArtifact>,
+}
+
+#[derive(Deserialize)]
+struct DraftAdoptionManifest {
+    schema: String,
+    schema_version: u32,
+    component_id: String,
+    tag: String,
+    version: String,
+    commit: String,
+    expected_assets: Vec<String>,
 }
 
 pub(crate) struct PackageRecoveryContext<'a> {
@@ -46,6 +60,19 @@ pub(crate) fn run_artifact_inventory(
     }
 
     let manifest_path = dir.join(PACKAGE_RECOVERY_MANIFEST);
+    if manifest_path.is_file() && is_draft_adoption_manifest(&manifest_path) {
+        let intent = inventory_draft_adoption_manifest(&manifest_path, recovery_context)?;
+        let count = intent.expected_assets.len();
+        state.draft_adoption = Some(intent);
+        return Ok(step_success(
+            "artifacts.inventory",
+            "artifacts.inventory",
+            Some(
+                serde_json::json!({ "dir": artifact_dir, "artifact_count": 0, "adoption_asset_count": count }),
+            ),
+            Vec::new(),
+        ));
+    }
     let mut artifacts = if manifest_path.is_file() && is_package_recovery_manifest(&manifest_path) {
         inventory_package_recovery_manifest(dir, &manifest_path, recovery_context)?
     } else {
@@ -85,6 +112,17 @@ pub(crate) fn run_artifact_inventory(
 /// explicit component `scripts.build` artifact; identical lower-precedence
 /// duplicates collapse, while differing bytes fail before commit/tag/push.
 pub(crate) fn establish_publication_authority(state: &mut ReleaseState) -> Result<Vec<String>> {
+    if state.draft_adoption.is_some() {
+        if !state.artifacts.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "release assets",
+                "draft adoption cannot include local artifacts",
+                None,
+                None,
+            ));
+        }
+        return Ok(Vec::new());
+    }
     let mut selected: BTreeMap<String, usize> = BTreeMap::new();
     let mut diagnostics = Vec::new();
     for artifact in &mut state.artifacts {
@@ -187,6 +225,97 @@ fn is_package_recovery_manifest(manifest_path: &std::path::Path) -> bool {
     };
     manifest.get("schema").and_then(serde_json::Value::as_str)
         == Some(PACKAGE_RECOVERY_MANIFEST_SCHEMA)
+}
+
+fn is_draft_adoption_manifest(manifest_path: &std::path::Path) -> bool {
+    let Ok(contents) = std::fs::read_to_string(manifest_path) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return false;
+    };
+    manifest.get("schema").and_then(serde_json::Value::as_str)
+        == Some(DRAFT_ADOPTION_MANIFEST_SCHEMA)
+}
+
+fn inventory_draft_adoption_manifest(
+    manifest_path: &std::path::Path,
+    context: &PackageRecoveryContext,
+) -> Result<DraftAdoptionIntent> {
+    let contents = std::fs::read_to_string(manifest_path).map_err(|error| {
+        Error::internal_io(
+            format!(
+                "Failed to read draft adoption manifest '{}': {error}",
+                manifest_path.display()
+            ),
+            Some(manifest_path.display().to_string()),
+        )
+    })?;
+    let manifest: DraftAdoptionManifest = serde_json::from_str(&contents).map_err(|error| {
+        Error::validation_invalid_argument(
+            "from-artifacts",
+            format!(
+                "Draft adoption manifest '{}' is invalid: {error}",
+                manifest_path.display()
+            ),
+            Some(manifest_path.display().to_string()),
+            None,
+        )
+    })?;
+    if manifest.schema_version != DRAFT_ADOPTION_MANIFEST_SCHEMA_VERSION {
+        return Err(Error::validation_invalid_argument(
+            "from-artifacts",
+            "Draft adoption manifest has unsupported schema version",
+            Some(manifest_path.display().to_string()),
+            None,
+        ));
+    }
+    let identity = PackageRecoveryManifest {
+        schema: manifest.schema,
+        schema_version: 1,
+        component_id: manifest.component_id,
+        tag: manifest.tag,
+        version: manifest.version,
+        commit: manifest.commit,
+        artifacts: Vec::new(),
+    };
+    validate_recovery_identity(&identity, manifest_path, context)?;
+    if manifest.expected_assets.is_empty()
+        || manifest
+            .expected_assets
+            .iter()
+            .any(|name| !valid_asset_name(name))
+    {
+        return Err(Error::validation_invalid_argument(
+            "from-artifacts",
+            "Draft adoption manifest must contain non-empty safe asset names",
+            Some(manifest_path.display().to_string()),
+            None,
+        ));
+    }
+    let mut names = manifest.expected_assets;
+    names.sort();
+    if names.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(Error::validation_invalid_argument(
+            "from-artifacts",
+            "Draft adoption manifest contains duplicate asset names",
+            Some(manifest_path.display().to_string()),
+            None,
+        ));
+    }
+    Ok(DraftAdoptionIntent {
+        expected_assets: names,
+    })
+}
+
+fn valid_asset_name(name: &str) -> bool {
+    !name.is_empty()
+        && std::path::Path::new(name)
+            .file_name()
+            .and_then(|value| value.to_str())
+            == Some(name)
+        && name != "."
+        && name != ".."
 }
 
 fn inventory_directory_files(
@@ -607,6 +736,62 @@ mod tests {
             "commit": "abc123",
             "artifacts": [{ "path": artifact }]
         })
+    }
+
+    #[test]
+    fn draft_adoption_manifest_records_remote_only_intent_and_rejects_bad_identity_or_names() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let manifest = |component: &str, names: serde_json::Value| {
+            serde_json::json!({
+                "schema": "homeboy.draft-adoption", "schema_version": 1,
+                "component_id": component, "tag": "v1.2.3", "version": "1.2.3", "commit": "abc123",
+                "expected_assets": names
+            })
+        };
+        std::fs::write(
+            temp.path().join(PACKAGE_RECOVERY_MANIFEST),
+            manifest(
+                "plugin",
+                serde_json::json!(["plugin.zip", "plugin.zip.sha256"]),
+            )
+            .to_string(),
+        )
+        .unwrap();
+        let mut state = ReleaseState::default();
+        run_artifact_inventory(
+            &mut state,
+            &temp.path().to_string_lossy(),
+            &recovery_context(),
+        )
+        .expect("adoption inventory");
+        assert!(state.artifacts.is_empty());
+        assert_eq!(
+            state.draft_adoption.unwrap().expected_assets,
+            ["plugin.zip", "plugin.zip.sha256"]
+        );
+
+        std::fs::write(
+            temp.path().join(PACKAGE_RECOVERY_MANIFEST),
+            manifest("other", serde_json::json!(["plugin.zip"])).to_string(),
+        )
+        .unwrap();
+        assert!(run_artifact_inventory(
+            &mut ReleaseState::default(),
+            &temp.path().to_string_lossy(),
+            &recovery_context()
+        )
+        .is_err());
+        std::fs::write(
+            temp.path().join(PACKAGE_RECOVERY_MANIFEST),
+            manifest("plugin", serde_json::json!(["plugin.zip", "plugin.zip"])).to_string(),
+        )
+        .unwrap();
+        assert!(run_artifact_inventory(
+            &mut ReleaseState::default(),
+            &temp.path().to_string_lossy(),
+            &recovery_context()
+        )
+        .is_err());
     }
 
     #[test]

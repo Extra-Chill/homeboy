@@ -21,8 +21,9 @@ use super::results::{
     upload_success_result_with_publications,
 };
 use super::{
-    gh_failure_detail, gh_release_metadata, github_release_upload_timeout,
-    reconcile_release_publications, run_gh_command, verify_release_publications,
+    download_small_release_asset, gh_failure_detail, gh_release_metadata,
+    github_release_upload_timeout, reconcile_release_publications, run_gh_command,
+    validate_draft_adoption, verify_release_publications,
 };
 
 /// Create a GitHub Release for the just-pushed tag.
@@ -176,6 +177,79 @@ pub(crate) fn run_github_release(
                 ));
             }
         };
+
+        if metadata.tag_name != tag {
+            return Err(Error::validation_invalid_argument(
+                "github.release",
+                format!(
+                    "GitHub Release tag '{}' does not match active tag '{}'",
+                    metadata.tag_name, tag
+                ),
+                None,
+                None,
+            ));
+        }
+        if let Some(adoption) = state.draft_adoption.as_ref() {
+            let sidecars = metadata
+                .assets
+                .iter()
+                .filter(|asset| asset.name.ends_with(".sha256") || asset.name == "sha256.sum")
+                .map(|asset| {
+                    download_small_release_asset(&github, &component.github, &repo_flag, asset)
+                        .map(|contents| (asset.name.clone(), contents))
+                })
+                .collect::<std::result::Result<std::collections::BTreeMap<_, _>, _>>()
+                .map_err(|error| {
+                    Error::validation_invalid_argument("release assets", error, None, None)
+                })?;
+            validate_draft_adoption(&tag, &adoption.expected_assets, &metadata, &sidecars)
+                .map_err(|error| {
+                    Error::validation_invalid_argument("release assets", error, None, None)
+                })?;
+            // Re-read immediately before un-drafting so a concurrent asset edit cannot race validation.
+            let current = gh_release_metadata(&github, &component.github, &tag, &repo_flag)
+                .map_err(|error| {
+                    Error::validation_invalid_argument("github.release", error, None, None)
+                })?;
+            let current_sidecars = current
+                .assets
+                .iter()
+                .filter(|asset| asset.name.ends_with(".sha256") || asset.name == "sha256.sum")
+                .map(|asset| {
+                    download_small_release_asset(&github, &component.github, &repo_flag, asset)
+                        .map(|contents| (asset.name.clone(), contents))
+                })
+                .collect::<std::result::Result<std::collections::BTreeMap<_, _>, _>>()
+                .map_err(|error| {
+                    Error::validation_invalid_argument("release assets", error, None, None)
+                })?;
+            validate_draft_adoption(&tag, &adoption.expected_assets, &current, &current_sidecars)
+                .map_err(|error| {
+                Error::validation_invalid_argument("release assets", error, None, None)
+            })?;
+            let output = run_gh_command(
+                gh_command(
+                    &github,
+                    &component.github,
+                    &["release", "edit", &tag, "--draft=false", "-R", &repo_flag],
+                ),
+                github_release_upload_timeout(),
+            );
+            if output.timed_out || output.exit_code != Some(0) {
+                return Err(Error::validation_invalid_argument(
+                    "github.release",
+                    gh_failure_detail("gh release edit --draft=false", &output),
+                    None,
+                    None,
+                ));
+            }
+            return Ok(published_existing_draft_result(
+                &tag,
+                &github,
+                current.assets.len(),
+                &published_release_url(&github, &tag, "", &output.stdout),
+            ));
+        }
 
         match existing_release_action(metadata.is_draft, has_artifacts, metadata.assets.len()) {
             ExistingReleaseAction::AlreadyPublished => {

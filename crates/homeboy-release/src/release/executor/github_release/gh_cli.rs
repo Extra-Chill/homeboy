@@ -30,6 +30,8 @@ pub(crate) struct GhCommandOutput {
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub(crate) struct GitHubReleaseMetadata {
+    #[serde(default)]
+    pub tag_name: String,
     #[serde(rename = "draft", alias = "isDraft")]
     pub is_draft: bool,
     #[serde(default)]
@@ -42,6 +44,8 @@ pub(crate) struct GitHubReleaseAsset {
     pub id: Option<u64>,
     pub name: String,
     pub size: u64,
+    #[serde(default)]
+    pub state: String,
     #[serde(default)]
     pub digest: Option<String>,
 }
@@ -625,6 +629,44 @@ pub(crate) fn download_release_asset_identity(
     )
 }
 
+pub(crate) fn download_small_release_asset(
+    github: &GitHubRepo,
+    config: &GithubConfig,
+    repo_flag: &str,
+    asset: &GitHubReleaseAsset,
+) -> Result<String, String> {
+    const MAX_CHECKSUM_BYTES: u64 = 64 * 1024;
+    if asset.size == 0 || asset.size > MAX_CHECKSUM_BYTES {
+        return Err(format!(
+            "checksum asset '{}' exceeds the 64 KiB adoption limit",
+            asset.name
+        ));
+    }
+    let id = asset
+        .id
+        .ok_or_else(|| format!("checksum asset '{}' has no GitHub asset ID", asset.name))?;
+    let endpoint = format!("repos/{repo_flag}/releases/assets/{id}");
+    let output = run_gh_command(
+        gh_command(
+            github,
+            config,
+            &["api", &endpoint, "-H", "Accept: application/octet-stream"],
+        ),
+        github_release_upload_timeout(),
+    );
+    if output.timed_out
+        || output.exit_code != Some(0)
+        || output.stdout.len() as u64 != asset.size
+        || output.stdout.len() as u64 > MAX_CHECKSUM_BYTES
+    {
+        return Err(format!(
+            "could not download bounded checksum asset '{}'",
+            asset.name
+        ));
+    }
+    Ok(output.stdout)
+}
+
 fn run_bounded_asset_download(
     command: &mut Command,
     asset_name: &str,
@@ -953,6 +995,99 @@ fn canonical_remote_digest(asset: &GitHubReleaseAsset) -> Result<Option<String>,
     Ok(Some(format!("sha256:{}", hex.to_ascii_lowercase())))
 }
 
+pub(crate) fn validate_draft_adoption(
+    tag: &str,
+    expected_names: &[String],
+    metadata: &GitHubReleaseMetadata,
+    sidecars: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    if !metadata.is_draft || metadata.tag_name != tag {
+        return Err("draft adoption requires the matching unpublished GitHub Release".to_string());
+    }
+    let expected = expected_names
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let actual = metadata
+        .assets
+        .iter()
+        .map(|asset| asset.name.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    if expected != actual || actual.len() != metadata.assets.len() {
+        return Err(
+            "draft adoption asset inventory does not exactly match the manifest".to_string(),
+        );
+    }
+    for asset in &metadata.assets {
+        if asset.state != "uploaded" || asset.size == 0 || canonical_remote_digest(asset)?.is_none()
+        {
+            return Err(format!(
+                "draft adoption asset '{}' is not an uploaded non-empty SHA-256 GitHub asset",
+                asset.name
+            ));
+        }
+    }
+    let payloads = expected
+        .iter()
+        .filter(|name| !name.ends_with(".sha256") && *name != "sha256.sum")
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    if payloads.is_empty() || sidecars.is_empty() {
+        return Err(
+            "draft adoption requires at least one checksum contract and payload".to_string(),
+        );
+    }
+    let mut references = BTreeMap::new();
+    for (sidecar, contents) in sidecars {
+        if !expected.contains(sidecar) {
+            return Err("checksum sidecar is not an expected asset".to_string());
+        }
+        let mut sidecar_references = 0;
+        for line in contents.lines().filter(|line| !line.trim().is_empty()) {
+            let mut fields = line.split_whitespace();
+            let digest = fields
+                .next()
+                .ok_or_else(|| format!("malformed checksum in {sidecar}"))?;
+            let name = fields
+                .next()
+                .ok_or_else(|| format!("malformed checksum in {sidecar}"))?
+                .trim_start_matches('*');
+            let digest = digest.to_ascii_lowercase();
+            if fields.next().is_some()
+                || digest.len() != 64
+                || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || !payloads.contains(name)
+                || (sidecar.ends_with(".sha256") && name != sidecar.trim_end_matches(".sha256"))
+            {
+                return Err(format!("invalid checksum contract in {sidecar}"));
+            }
+            if references
+                .insert(name.to_string(), digest.clone())
+                .is_some_and(|existing| existing != digest)
+            {
+                return Err(format!("inconsistent checksum contract in {sidecar}"));
+            }
+            sidecar_references += 1;
+        }
+        if sidecar_references == 0 || (sidecar.ends_with(".sha256") && sidecar_references != 1) {
+            return Err(format!("incomplete checksum contract in {sidecar}"));
+        }
+    }
+    for asset in &metadata.assets {
+        if let Some(expected_digest) = references.get(&asset.name) {
+            if canonical_remote_digest(asset)?.as_deref()
+                != Some(&format!("sha256:{expected_digest}"))
+            {
+                return Err(format!(
+                    "checksum contract does not match GitHub digest for '{}'",
+                    asset.name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn gh_failure_detail(command: &str, output: &GhCommandOutput) -> String {
     if output.timed_out {
         return format!("{command} timed out");
@@ -1140,8 +1275,112 @@ mod tests {
             id: Some(123),
             name: name.to_string(),
             size,
+            state: "uploaded".to_string(),
             digest,
         }
+    }
+
+    #[test]
+    fn draft_adoption_requires_exact_uploaded_digest_checked_inventory_and_complete_checksums() {
+        let digest = "a".repeat(64);
+        let metadata = GitHubReleaseMetadata {
+            tag_name: "v1.2.3".to_string(),
+            is_draft: true,
+            assets: vec![
+                remote_asset("app.zip", 1, Some(format!("sha256:{digest}"))),
+                remote_asset(
+                    "app.zip.sha256",
+                    70,
+                    Some(format!("sha256:{}", "b".repeat(64))),
+                ),
+            ],
+        };
+        let expected = vec!["app.zip".to_string(), "app.zip.sha256".to_string()];
+        let mut sidecars = BTreeMap::new();
+        sidecars.insert("app.zip.sha256".to_string(), format!("{digest}  app.zip\n"));
+        validate_draft_adoption("v1.2.3", &expected, &metadata, &sidecars).expect("valid adoption");
+
+        let mut extra = metadata.clone();
+        extra
+            .assets
+            .push(remote_asset("extra", 1, Some(format!("sha256:{digest}"))));
+        assert!(validate_draft_adoption("v1.2.3", &expected, &extra, &sidecars).is_err());
+        let mut missing = metadata.clone();
+        missing.assets.pop();
+        assert!(validate_draft_adoption("v1.2.3", &expected, &missing, &sidecars).is_err());
+        let mut duplicate = metadata.clone();
+        duplicate
+            .assets
+            .push(remote_asset("app.zip", 1, Some(format!("sha256:{digest}"))));
+        assert!(validate_draft_adoption("v1.2.3", &expected, &duplicate, &sidecars).is_err());
+        assert!(validate_draft_adoption("v9.9.9", &expected, &metadata, &sidecars).is_err());
+        assert!(validate_draft_adoption("v1.2.3", &expected, &metadata, &BTreeMap::new()).is_err());
+        sidecars.insert(
+            "app.zip.sha256".to_string(),
+            format!("{}  unknown.zip\n", "c".repeat(64)),
+        );
+        assert!(validate_draft_adoption("v1.2.3", &expected, &metadata, &sidecars).is_err());
+    }
+
+    #[test]
+    fn draft_adoption_accepts_consistent_individual_and_aggregate_checksums() {
+        let app_digest = "a".repeat(64);
+        let source_digest = "b".repeat(64);
+        let metadata = GitHubReleaseMetadata {
+            tag_name: "v1.2.3".to_string(),
+            is_draft: true,
+            assets: vec![
+                remote_asset("app.zip", 1, Some(format!("sha256:{app_digest}"))),
+                remote_asset("source.tar.gz", 1, Some(format!("sha256:{source_digest}"))),
+                remote_asset(
+                    "dist-manifest.json",
+                    1,
+                    Some(format!("sha256:{}", "c".repeat(64))),
+                ),
+                remote_asset(
+                    "app.zip.sha256",
+                    1,
+                    Some(format!("sha256:{}", "d".repeat(64))),
+                ),
+                remote_asset(
+                    "source.tar.gz.sha256",
+                    1,
+                    Some(format!("sha256:{}", "e".repeat(64))),
+                ),
+                remote_asset("sha256.sum", 1, Some(format!("sha256:{}", "f".repeat(64)))),
+            ],
+        };
+        let expected = metadata
+            .assets
+            .iter()
+            .map(|asset| asset.name.clone())
+            .collect::<Vec<_>>();
+        let mut sidecars = BTreeMap::from([
+            (
+                "app.zip.sha256".to_string(),
+                format!("{app_digest}  app.zip\n"),
+            ),
+            (
+                "source.tar.gz.sha256".to_string(),
+                format!("{source_digest}  source.tar.gz\n"),
+            ),
+            (
+                "sha256.sum".to_string(),
+                format!("{app_digest}  app.zip\n{source_digest}  source.tar.gz\n"),
+            ),
+        ]);
+
+        validate_draft_adoption("v1.2.3", &expected, &metadata, &sidecars)
+            .expect("matching duplicate references are valid");
+
+        sidecars.insert(
+            "sha256.sum".to_string(),
+            format!(
+                "{}  app.zip\n{source_digest}  source.tar.gz\n",
+                "0".repeat(64)
+            ),
+        );
+        assert!(validate_draft_adoption("v1.2.3", &expected, &metadata, &sidecars).is_err());
     }
 
     fn unexpected_download(_: &GitHubReleaseAsset, _: u64) -> Result<(u64, String), String> {

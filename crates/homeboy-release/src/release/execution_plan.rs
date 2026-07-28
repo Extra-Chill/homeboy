@@ -149,6 +149,7 @@ fn initial_release_state(
         artifacts: Vec::new(),
         package_owned_paths: Vec::new(),
         changelog_validation: None,
+        draft_adoption: None,
     })
 }
 

@@ -492,7 +492,12 @@ fn release_finish_head_pipeline_uses_homeboy_action_head_inputs() {
 
     assert!(host.contains("uses: Extra-Chill/homeboy-action@v2"));
     assert!(host.contains("release-head: 'true'"));
-    assert!(host.contains("release-from-artifacts: artifacts"));
+    assert!(host.contains("Create remote draft adoption manifest"));
+    assert!(host.contains("homeboy.draft-adoption"));
+    assert!(host.contains("expected_assets: $expected_assets"));
+    assert!(host.contains("Download current Homeboy finalizer"));
+    assert!(host.contains("binary-path: ${{ needs.prepare.outputs.recovery-release == 'true' && '.homeboy-bin/homeboy' || '' }}"));
+    assert!(host.contains("release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && 'draft-adoption' || 'artifacts' }}"));
 }
 
 #[test]

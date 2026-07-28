@@ -324,6 +324,14 @@ pub struct ReleaseState {
     /// created by the current package invocation.
     pub package_owned_paths: Vec<String>,
     pub changelog_validation: Option<crate::release::version::ChangelogValidationResult>,
+    /// A remote-only draft may be published only when this manifest-bound
+    /// intent has been validated against the active release identity.
+    pub draft_adoption: Option<DraftAdoptionIntent>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DraftAdoptionIntent {
+    pub expected_assets: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
