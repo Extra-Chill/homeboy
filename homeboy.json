@@ -551,7 +551,7 @@
     "audit": {
       "context_id": "homeboy",
       "created_at": "2026-07-27T04:11:26Z",
-      "item_count": 1520,
+      "item_count": 1519,
       "known_fingerprints": [
         "Commands::crates/homeboy-cli/src/commands/agent_task_dispatch.rs::MissingMethod",
         "Src::crates/contracts/homeboy-audit-contract/src/finding.rs::MissingMethod",
@@ -2030,7 +2030,6 @@
         "structural::crates/homeboy-lab-runner/src/workspace/tests/snapshot.rs::HighItemCount",
         "structural::crates/homeboy-lab-runner/src::DirectorySprawl",
         "structural::crates/homeboy-paths/src/lib.rs::HighItemCount",
-        "structural::crates/homeboy-process/src/lib.rs::HighItemCount",
         "structural::crates/homeboy-refactor/src/rename/tests.rs::GodFile",
         "structural::crates/homeboy-refactor/src/rename/tests.rs::HighItemCount",
         "structural::crates/homeboy-release/src/deploy/orchestration/mod.rs::GodFile",
