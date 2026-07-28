@@ -1440,14 +1440,7 @@ fn handoff_runner_execution_record(
                 .or_else(|| handoff.durable_run_id.clone()),
         )
         .with_path_materialization_plan(handoff.path_materialization_plan.clone())
-        .with_artifact_refs(handoff.evidence.artifact_refs.iter().map(|artifact| {
-            crate::core::runner_execution_envelope::RunnerExecutionArtifactRef {
-                id: artifact.id.clone(),
-                name: artifact.name.clone(),
-                path: artifact.path.clone(),
-                url: artifact.url.clone(),
-            }
-        }))
+        .with_artifact_refs(handoff.evidence.artifact_refs.iter().cloned())
         .with_next_actions(handoff.evidence.next_commands.iter().map(|command| {
             crate::core::runner_execution_envelope::RunnerExecutionNextAction {
                 label: command.label.clone(),

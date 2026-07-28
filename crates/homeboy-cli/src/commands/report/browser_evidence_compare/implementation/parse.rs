@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 use homeboy_extension::trace::{trace_browser_artifact_map_fields, trace_browser_summary_extract};
 use homeboy_extension::TraceBrowserEvidenceAdapterConfig;
 
-use super::super::types::{ArtifactRef, AssertionFailure, AssertionStats};
+use super::super::types::{AssertionFailure, AssertionStats, BrowserEvidenceArtifactLink};
 use super::BrowserEvidenceSample;
 
 pub(super) fn assertion_stats(value: Option<&Value>) -> AssertionStats {
@@ -118,7 +118,7 @@ pub(super) fn collect_declared_browser_summary_adapters(
 
 pub(super) fn collect_declared_artifact_map_adapters(
     object: &Map<String, Value>,
-    artifacts: &mut BTreeSet<ArtifactRef>,
+    artifacts: &mut BTreeSet<BrowserEvidenceArtifactLink>,
     adapters: &[TraceBrowserEvidenceAdapterConfig],
 ) {
     for field in trace_browser_artifact_map_fields(adapters) {
@@ -128,7 +128,7 @@ pub(super) fn collect_declared_artifact_map_adapters(
 
 pub(super) fn collect_artifacts(
     object: &Map<String, Value>,
-    artifacts: &mut BTreeSet<ArtifactRef>,
+    artifacts: &mut BTreeSet<BrowserEvidenceArtifactLink>,
 ) {
     let Some(values) = object.get("artifacts").and_then(Value::as_array) else {
         return;
@@ -138,19 +138,22 @@ pub(super) fn collect_artifacts(
             .unwrap_or_else(|| "artifact".to_string());
         let target = first_value_string(artifact, &["url", "href", "path", "target"]);
         if let Some(target) = target {
-            artifacts.insert(ArtifactRef { label, target });
+            artifacts.insert(BrowserEvidenceArtifactLink { label, target });
         }
     }
 }
 
-fn collect_artifact_map(value: Option<&Value>, artifacts: &mut BTreeSet<ArtifactRef>) {
+fn collect_artifact_map(
+    value: Option<&Value>,
+    artifacts: &mut BTreeSet<BrowserEvidenceArtifactLink>,
+) {
     let Some(files) = value.and_then(Value::as_object) else {
         return;
     };
     for (label, value) in files {
         match value {
             Value::String(target) if !target.is_empty() => {
-                artifacts.insert(ArtifactRef {
+                artifacts.insert(BrowserEvidenceArtifactLink {
                     label: label.clone(),
                     target: target.clone(),
                 });
@@ -161,7 +164,7 @@ fn collect_artifact_map(value: Option<&Value>, artifacts: &mut BTreeSet<Artifact
                     .filter_map(Value::as_str)
                     .filter(|target| !target.is_empty())
                 {
-                    artifacts.insert(ArtifactRef {
+                    artifacts.insert(BrowserEvidenceArtifactLink {
                         label: label.clone(),
                         target: target.to_string(),
                     });
@@ -234,7 +237,7 @@ pub(super) fn artifact_ref(
     path: &Path,
     include_local_paths: bool,
     label: Option<String>,
-) -> ArtifactRef {
+) -> BrowserEvidenceArtifactLink {
     let target = if include_local_paths {
         path.display().to_string()
     } else {
@@ -243,7 +246,7 @@ pub(super) fn artifact_ref(
             .display()
             .to_string()
     };
-    ArtifactRef {
+    BrowserEvidenceArtifactLink {
         label: label.unwrap_or_else(|| "source".to_string()),
         target,
     }

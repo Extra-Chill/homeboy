@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent_task::AgentTaskEvidenceRef;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -118,7 +119,7 @@ pub struct AgentTaskLoopFailedChildActionDiagnostic {
     pub repeated_failure: Option<AgentTaskLoopRepeatedFailureDiagnostic>,
     pub next_command: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub evidence_refs: Vec<AgentTaskLoopFailedChildEvidenceRef>,
+    pub evidence_refs: Vec<AgentTaskEvidenceRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -135,14 +136,6 @@ pub struct AgentTaskLoopRepeatedFailureDiagnostic {
     pub matching_failed_child_action_count: usize,
     pub guidance: String,
     pub next_command: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskLoopFailedChildEvidenceRef {
-    pub kind: String,
-    pub uri: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
 }
 
 /// Canonical projection from a (possibly absent) recorded gate-bundle result
@@ -203,6 +196,30 @@ pub struct AgentTaskLoopPendingActionDiagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #10310 collapsed `AgentTaskLoopFailedChildEvidenceRef` onto
+    /// `AgentTaskEvidenceRef`. Both were `{kind, uri, label}` with identical
+    /// serde attributes, so diagnostics written by an older binary must still
+    /// deserialize, and the re-serialized shape must be unchanged.
+    #[test]
+    fn failed_child_evidence_refs_keep_the_pre_collapse_wire_shape() {
+        let evidence_refs = serde_json::json!([
+            { "kind": "runner_job_log", "uri": "homeboy://jobs/1", "label": "runner job 1" },
+            { "kind": "run_evidence", "uri": "homeboy://runs/2" }
+        ]);
+        let refs: Vec<AgentTaskEvidenceRef> =
+            serde_json::from_value(evidence_refs.clone()).expect("legacy evidence refs");
+
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].kind, "runner_job_log");
+        assert_eq!(refs[0].label.as_deref(), Some("runner job 1"));
+        assert_eq!(refs[1].uri, "homeboy://runs/2");
+        assert_eq!(refs[1].label, None);
+        assert_eq!(
+            serde_json::to_value(&refs).expect("evidence refs serialize"),
+            evidence_refs
+        );
+    }
 
     #[test]
     fn acceptance_gate_status_bridges_from_bundle_status() {

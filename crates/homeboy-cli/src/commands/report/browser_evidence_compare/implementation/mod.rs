@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::types::{ArtifactRef, AssertionStats};
+use super::types::{AssertionStats, BrowserEvidenceArtifactLink};
 
 mod compare;
 mod parse;
@@ -16,7 +16,7 @@ pub(super) use visual::attach_visual_comparisons;
 #[derive(Debug, Clone)]
 pub(super) struct EvidenceSet {
     pub(super) samples: Vec<BrowserEvidenceSample>,
-    pub(super) artifacts: BTreeSet<ArtifactRef>,
+    pub(super) artifacts: BTreeSet<BrowserEvidenceArtifactLink>,
     pub(super) notes: Vec<String>,
 }
 
@@ -33,8 +33,8 @@ pub(super) struct BrowserEvidenceSample {
     pub(super) lifecycle_metrics: BTreeMap<String, f64>,
     pub(super) console_errors: Option<f64>,
     pub(super) page_errors: Option<f64>,
-    pub(super) artifacts: BTreeSet<ArtifactRef>,
-    pub(super) source_artifact: Option<ArtifactRef>,
+    pub(super) artifacts: BTreeSet<BrowserEvidenceArtifactLink>,
+    pub(super) source_artifact: Option<BrowserEvidenceArtifactLink>,
     pub(super) notes: Vec<String>,
 }
 

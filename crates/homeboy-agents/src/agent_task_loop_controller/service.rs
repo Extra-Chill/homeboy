@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent_task::AgentTaskEvidenceRef;
 use crate::agent_task_lifecycle;
 use chrono::{DateTime, Utc};
 use homeboy_core::engine::local_files::write_json_file as write_json;
@@ -513,12 +514,12 @@ fn load_child_aggregate_value(run_id: &str) -> Option<Value> {
 
 fn evidence_refs_from_run(
     run: &agent_task_lifecycle::AgentTaskRunRecord,
-) -> Vec<AgentTaskLoopFailedChildEvidenceRef> {
+) -> Vec<AgentTaskEvidenceRef> {
     let mut refs = Vec::new();
     for artifact in &run.artifact_refs {
         push_failed_child_evidence_ref(
             &mut refs,
-            AgentTaskLoopFailedChildEvidenceRef {
+            AgentTaskEvidenceRef {
                 kind: artifact.kind.clone(),
                 uri: artifact.uri.clone(),
                 label: artifact.label.clone(),
@@ -526,15 +527,10 @@ fn evidence_refs_from_run(
         );
     }
     if let Some(executor) = &run.latest_executor_evidence {
+        // `refs()` already yields `AgentTaskEvidenceRef`; before #10310 this had
+        // to be re-spelled field-by-field into a structurally identical clone.
         for evidence in executor.refs() {
-            push_failed_child_evidence_ref(
-                &mut refs,
-                AgentTaskLoopFailedChildEvidenceRef {
-                    kind: evidence.kind,
-                    uri: evidence.uri,
-                    label: evidence.label,
-                },
-            );
+            push_failed_child_evidence_ref(&mut refs, evidence);
         }
     }
     refs
@@ -564,8 +560,8 @@ fn root_cause_from_run_evidence(run: &agent_task_lifecycle::AgentTaskRunRecord) 
 }
 
 fn push_failed_child_evidence_ref(
-    refs: &mut Vec<AgentTaskLoopFailedChildEvidenceRef>,
-    reference: AgentTaskLoopFailedChildEvidenceRef,
+    refs: &mut Vec<AgentTaskEvidenceRef>,
+    reference: AgentTaskEvidenceRef,
 ) {
     if reference.uri.trim().is_empty() {
         return;
@@ -691,10 +687,7 @@ fn is_root_cause_message(message: &str) -> bool {
         || lower.contains("secret")
 }
 
-fn classify_failed_child_owner(
-    diagnostic: &str,
-    evidence_refs: &[AgentTaskLoopFailedChildEvidenceRef],
-) -> String {
+fn classify_failed_child_owner(diagnostic: &str, evidence_refs: &[AgentTaskEvidenceRef]) -> String {
     let lower = diagnostic.to_ascii_lowercase();
     if lower.contains("runtime_task_ability_unavailable") || lower.contains("ability unavailable") {
         "agent_runtime".to_string()

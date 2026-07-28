@@ -121,8 +121,8 @@ pub use crate::core::run_outcome_envelope::{
 };
 pub use crate::core::runner_execution_envelope::{
     PathMaterializationEntry, PathMaterializationMode, PathMaterializationPlan,
-    PathMaterializationProjection, RunnerExecutionArtifactRef, RunnerExecutionNextAction,
-    RunnerExecutionProjection, RunnerExecutionRecord, PATH_MATERIALIZATION_MODE_EXISTING_REMOTE,
+    PathMaterializationProjection, RunnerExecutionNextAction, RunnerExecutionProjection,
+    RunnerExecutionRecord, PATH_MATERIALIZATION_MODE_EXISTING_REMOTE,
     PATH_MATERIALIZATION_MODE_GIT, PATH_MATERIALIZATION_MODE_SNAPSHOT,
     PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_REQUIRE_PATHS,
     PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT, PATH_MATERIALIZATION_PLAN_SCHEMA,

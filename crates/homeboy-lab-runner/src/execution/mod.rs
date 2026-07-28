@@ -15,13 +15,12 @@ use homeboy_core::api_jobs::{Job, JobArtifactMetadata, JobEvent, JobStatus};
 use homeboy_core::engine::command::CommandCaptureMetadata;
 use homeboy_core::env_materialization_plan::EnvMaterializationPlan;
 use homeboy_core::error::{Error, ErrorCode, Result};
-use homeboy_core::lab_contract::LabRunnerWorkload;
+use homeboy_core::lab_contract::{LabRunnerWorkload, LabRunnerWorkloadArtifactRef};
 use homeboy_core::observation::{NewRunRecord, ObservationStore, RunStatus};
 use homeboy_core::runner_execution_envelope::{
     BinaryProvenance, ExtensionProvenance, OrchestrationTargetProvenance, PathMaterializationEntry,
-    PathMaterializationPlan, RunnerExecutionArtifactRef, RunnerExecutionNextAction,
-    RunnerExecutionRecord, SourceSnapshotIdentity,
-    PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT,
+    PathMaterializationPlan, RunnerExecutionNextAction, RunnerExecutionRecord,
+    SourceSnapshotIdentity, PATH_MATERIALIZATION_OWNER_RUNNER_EXEC_SOURCE_SNAPSHOT,
 };
 use homeboy_core::secret_env_plan::SecretEnvPlan;
 use homeboy_core::source_snapshot::SourceSnapshot;
@@ -373,7 +372,7 @@ fn runner_execution_record_for_output(
     let mut artifact_refs = job_artifact_refs(artifacts);
     if let Some(result) = runner_result {
         artifact_refs.extend(result.artifact_refs.iter().map(|artifact| {
-            RunnerExecutionArtifactRef {
+            LabRunnerWorkloadArtifactRef {
                 id: artifact.artifact_id.clone(),
                 name: artifact.name.clone(),
                 path: artifact.path.clone(),
@@ -522,10 +521,10 @@ fn extension_provenance(required_extensions: &[String]) -> Vec<ExtensionProvenan
     extensions
 }
 
-fn job_artifact_refs(artifacts: &[JobArtifactMetadata]) -> Vec<RunnerExecutionArtifactRef> {
+fn job_artifact_refs(artifacts: &[JobArtifactMetadata]) -> Vec<LabRunnerWorkloadArtifactRef> {
     artifacts
         .iter()
-        .map(|artifact| RunnerExecutionArtifactRef {
+        .map(|artifact| LabRunnerWorkloadArtifactRef {
             id: artifact.id.clone(),
             name: artifact.name.clone(),
             path: artifact.path.clone(),
