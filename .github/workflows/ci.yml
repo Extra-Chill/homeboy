@@ -84,14 +84,57 @@ jobs:
             title: Audit
             section_key: audit
             section_title: Audit
+            # Audit and Lint are nowhere near their budget; leave them at the
+            # action defaults so raising the Test gate cannot mask a genuine
+            # hang in either of them.
+            execution_timeout_seconds: '1800'
+            test_timeout_seconds: '1500'
           - command: review lint
             title: Lint
             section_key: lint
             section_title: Lint
+            execution_timeout_seconds: '1800'
+            test_timeout_seconds: '1500'
           - command: review test
             title: Test
             section_key: test
             section_title: Test
+            # See #10639. Two budgets bound this gate, and the *inner* one is
+            # the binding constraint that produced 17 false-red runs on
+            # 2026-07-28:
+            #
+            #   test_timeout_seconds      -> HOMEBOY_TEST_TIMEOUT_SECONDS,
+            #     enforced by Homeboy itself around the test child
+            #     (DEFAULT_TEST_TIMEOUT_SECONDS = 25*60 in
+            #     crates/homeboy-extension/src/test/run.rs). This is what
+            #     actually fired at 1500s; the action's 1800s never got the
+            #     chance.
+            #   execution_timeout_seconds -> the action's outer wrapper.
+            #
+            # These are deliberately ordered inner < outer, with 300s of
+            # margin. The inner path returns Homeboy's structured evidence
+            # (counts, findings, retained output); the outer path SIGKILLs the
+            # process group and loses it. The inner timeout must always win the
+            # race, so the outer one is a backstop for a genuinely wedged
+            # process rather than the normal exit.
+            #
+            # 2700s is 1.8x the ceiling that was being hit and roughly 2.3x a
+            # median successful phase (~17-20 min once ~10 min of setup is
+            # subtracted from the job). Worst case is 2 phases (candidate +
+            # differential baseline) x 45 min + setup ~= 100 min, well inside
+            # GitHub's 360-minute job cap.
+            #
+            # This raises the budget for *this* repository only. It is set here
+            # rather than by changing the action's global default so other
+            # homeboy-action consumers keep their existing bounds.
+            execution_timeout_seconds: '3000'
+            test_timeout_seconds: '2700'
+    # Job-level env reaches the composite action's `run:` steps, and therefore
+    # the `homeboy` child process, without needing an action input or an
+    # action release. (Callers of the *reusable workflow* have no such path --
+    # that gap is Extra-Chill/homeboy-action#303.)
+    env:
+      HOMEBOY_TEST_TIMEOUT_SECONDS: ${{ matrix.test_timeout_seconds }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -124,6 +167,7 @@ jobs:
           # lands a bot commit mid-review and supersedes in-flight CI runs,
           # which reads as a spurious failure (see #3819). Require manual fixes.
           autofix: 'false'
+          execution-timeout-seconds: ${{ matrix.execution_timeout_seconds }}
           app-token: ${{ steps.app-token.outputs.token || github.token }}
           comment-section-key: ${{ matrix.section_key }}
           comment-section-title: ${{ matrix.section_title }}

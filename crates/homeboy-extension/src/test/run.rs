@@ -56,7 +56,7 @@ const NO_TESTS_APPLICABLE_EXTENSION_ENV: &str = "HOMEBOY_NO_TESTS_APPLICABLE_EXT
 const NO_TESTS_APPLICABLE_STEP: &str = "test";
 const DEFAULT_TEST_TIMEOUT_SECONDS: u64 = 25 * 60;
 
-fn test_timeout() -> Duration {
+pub(crate) fn test_timeout() -> Duration {
     std::env::var("HOMEBOY_TEST_TIMEOUT_SECONDS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
