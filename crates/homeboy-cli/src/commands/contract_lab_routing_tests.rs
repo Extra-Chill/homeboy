@@ -209,6 +209,36 @@ fn agent_task_promote_with_controller_run_id_stays_with_finalized_artifacts() {
 }
 
 #[test]
+fn agent_task_promote_with_readable_controller_aggregate_stays_local() {
+    let aggregate = tempfile::NamedTempFile::new().expect("controller aggregate");
+    let command = parsed_command(&[
+        "homeboy",
+        "agent-task",
+        "promote",
+        aggregate.path().to_str().expect("UTF-8 aggregate path"),
+        "--to-worktree",
+        "homeboy@fix-10588",
+    ]);
+
+    assert_eq!(
+        command
+            .lab_contract()
+            .expect("promote contract")
+            .portability,
+        LabCommandPortability::LocalOnly(
+            crate::commands::contract_lab_routing::AGENT_TASK_PROMOTION_RUN_CONTROLLER_REASON
+        )
+    );
+    assert!(
+        !command
+            .lab_contract()
+            .expect("promote contract")
+            .routing_policy
+            .default_lab_offload
+    );
+}
+
+#[test]
 fn agent_task_promote_apply_captures_remote_target_mutation_for_controller_handoff() {
     let command = parsed_command(&[
         "homeboy",

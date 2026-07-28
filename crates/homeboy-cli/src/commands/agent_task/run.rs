@@ -92,17 +92,7 @@ pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
             agent_task_service::load_recipe_for_attempt(&args.cook_or_attempt_id)?.ok_or(cook_error)
         })?;
     let run_id = agent_task_service::resolve_cook_continuation_run_id(&args.cook_or_attempt_id)?;
-    let record = agent_task_lifecycle::status(&run_id)?;
-    if record.run_id != run_id
-        || record.metadata.get("cook_id").and_then(Value::as_str) != Some(recipe.cook_id.as_str())
-    {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "cook_or_attempt_id",
-            "durable lifecycle record does not match its immutable Cook recipe",
-            Some(run_id),
-            None,
-        ));
-    }
+    let record = agent_task_service::reconcile_recipe_attempt_for_continuation(&recipe, &run_id)?;
     if !matches!(
         record.state,
         agent_task_lifecycle::AgentTaskRunState::Succeeded

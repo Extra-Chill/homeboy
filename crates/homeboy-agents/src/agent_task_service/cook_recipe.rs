@@ -779,6 +779,79 @@ pub fn load_recipe_for_attempt(run_id: &str) -> Result<Option<AgentTaskCookRecip
     }
 }
 
+/// Prove that a lifecycle record is the exact attempt frozen by a Cook recipe.
+/// Older runner mirrors may omit `metadata.cook_id`; immutable recipe membership
+/// remains authoritative in that case, but an observed Cook identity may never
+/// disagree with it.
+pub fn validate_recipe_attempt_record(
+    recipe: &AgentTaskCookRecipe,
+    run_id: &str,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Result<()> {
+    let attempt = recipe
+        .attempts
+        .iter()
+        .find(|attempt| attempt.run_id == run_id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                format!(
+                    "immutable Cook recipe `{}` does not declare expected attempt `{run_id}`",
+                    recipe.cook_id
+                ),
+                Some(run_id.to_string()),
+                None,
+            )
+        })?;
+    let observed_cook_id = record.metadata.get("cook_id").and_then(Value::as_str);
+    if record.run_id != attempt.run_id
+        || observed_cook_id.is_some_and(|cook_id| cook_id != recipe.cook_id)
+    {
+        return Err(Error::validation_invalid_argument(
+            "cook_or_attempt_id",
+            format!(
+                "durable lifecycle identity mismatch: expected Cook `{}` attempt {} run `{}`; observed Cook `{}` run `{}`",
+                recipe.cook_id,
+                attempt.attempt,
+                attempt.run_id,
+                observed_cook_id.unwrap_or("<missing>"),
+                record.run_id,
+            ),
+            Some(run_id.to_string()),
+            Some(vec![
+                "Inspect the immutable Cook recipe and lifecycle record; do not continue or promote across Cook identities."
+                    .to_string(),
+            ]),
+        ));
+    }
+    Ok(())
+}
+
+/// Refresh terminal runner state, harvest its aggregate/artifacts into the
+/// controller store, and return only when promotion inputs are locally verified.
+pub fn reconcile_recipe_attempt_for_continuation(
+    recipe: &AgentTaskCookRecipe,
+    run_id: &str,
+) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
+    let record = agent_task_lifecycle::status(run_id)?;
+    validate_recipe_attempt_record(recipe, run_id, &record)?;
+    if let Some(reason) = agent_task_lifecycle::terminal_artifact_projection_readiness(run_id)? {
+        return Err(Error::validation_invalid_argument(
+            "cook_continuation.artifact_projection",
+            format!(
+                "Cook `{}` attempt `{run_id}` is terminal but its controller-owned artifact projection is not ready: {reason}",
+                recipe.cook_id
+            ),
+            Some(run_id.to_string()),
+            Some(vec![format!(
+                "Retry `homeboy agent-task cook-continue {run_id}` after the runner artifact can be harvested."
+            )]),
+        )
+        .with_retryable(true));
+    }
+    Ok(record)
+}
+
 pub fn enqueue_terminal_continuation(cook_id: &str, run_id: &str) -> Result<bool> {
     enqueue_terminal_continuation_with_recovery(cook_id, run_id, false)
 }
@@ -1174,6 +1247,18 @@ pub fn consume_claimed_with_dispatcher(
         }
     };
     let mut options = options;
+    if agent_task_lifecycle::run_record_exists(&claim.continuation().run_id)? {
+        if let Err(error) =
+            reconcile_recipe_attempt_for_continuation(&recipe, &claim.continuation().run_id)
+        {
+            if error.retryable == Some(true) {
+                claim.retry()?;
+            } else {
+                claim.fail(&error.message)?;
+            }
+            return Err(error);
+        }
+    }
     if let Some(attempt) = recipe
         .attempts
         .iter()
@@ -1598,6 +1683,40 @@ mod tests {
         (recipe, plan)
     }
 
+    #[test]
+    fn recipe_attempt_identity_accepts_missing_metadata_and_rejects_disagreement() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let (recipe, _) = persist_recipe_run();
+            let mut record = crate::agent_task_lifecycle::persisted_status("run").unwrap();
+            record.ensure_metadata_object().remove("cook_id");
+
+            validate_recipe_attempt_record(&recipe, "run", &record)
+                .expect("immutable recipe membership resolves legacy mirror");
+
+            record.ensure_metadata_object().insert(
+                "cook_id".to_string(),
+                Value::String("other-cook".to_string()),
+            );
+            let error = validate_recipe_attempt_record(&recipe, "run", &record).unwrap_err();
+            assert!(error
+                .message
+                .contains("expected Cook `cook` attempt 1 run `run`"));
+            assert!(error
+                .message
+                .contains("observed Cook `other-cook` run `run`"));
+        });
+    }
+
+    #[test]
+    fn continuation_resolution_accepts_cook_and_attempt_identifiers() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            persist_recipe_run();
+
+            assert_eq!(resolve_cook_continuation_run_id("cook").unwrap(), "run");
+            assert_eq!(resolve_cook_continuation_run_id("run").unwrap(), "run");
+        });
+    }
+
     fn succeeded_aggregate(plan: &AgentTaskPlan) -> AgentTaskAggregate {
         AgentTaskAggregate {
             schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
@@ -1973,6 +2092,10 @@ mod tests {
     fn status_only_enqueues_and_never_invokes_the_consumer() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let (_, plan) = persist_recipe_run();
+            crate::agent_task_lifecycle::rewrite_record_for_test("run", |record| {
+                record.ensure_metadata_object().remove("cook_id");
+            })
+            .unwrap();
             let aggregate = succeeded_aggregate(&plan);
             crate::agent_task_lifecycle::record_run_aggregate("run", &plan, &aggregate).unwrap();
             let executions = AtomicUsize::new(0);

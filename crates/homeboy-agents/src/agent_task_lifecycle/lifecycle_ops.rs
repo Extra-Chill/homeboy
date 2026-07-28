@@ -1317,50 +1317,76 @@ pub fn status_with_options(
             | AgentTaskRunState::CandidateRecoverable
             | AgentTaskRunState::PartialRecoverable
     ) {
-        if let Some(cook_id) = record
+        let recipe = record
             .metadata
             .get("cook_id")
             .and_then(Value::as_str)
-            .map(str::to_string)
-        {
-            if crate::agent_task_service::recipe_exists(&cook_id)? {
-                let existing_scheduler_status = record
-                    .metadata
-                    .get("cook_continuation_scheduler")
-                    .and_then(Value::as_object)
-                    .and_then(|scheduler| scheduler.get("status"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                match crate::agent_task_service::enqueue_terminal_continuation(
-                    &cook_id,
+            .map(crate::agent_task_service::load_recipe)
+            .transpose()
+            .and_then(|recipe| match recipe {
+                Some(recipe) => Ok(Some(recipe)),
+                None => crate::agent_task_service::load_recipe_for_attempt(&record.run_id),
+            });
+        match recipe {
+            Ok(Some(recipe)) => {
+                let cook_id = recipe.cook_id.clone();
+                match crate::agent_task_service::validate_recipe_attempt_record(
+                    &recipe,
                     &record.run_id,
+                    &record,
                 ) {
-                    Ok(enqueued) => {
-                        let run_id = record.run_id.clone();
-                        let candidate = record.latest_executor_evidence.as_ref().map(|evidence| {
-                            json!({
-                                "task_id": evidence.task_id,
-                                "provider_run_id": evidence.provider_run_id,
-                                "normalized_output_ref": evidence.normalized_output_ref,
-                            })
-                        });
-                        let status = if enqueued {
-                            "queued"
-                        } else {
-                            existing_scheduler_status
-                                .as_deref()
-                                .unwrap_or("already_queued_or_completed")
-                        };
-                        record.ensure_metadata_object().insert(
-                            "cook_continuation_scheduler".to_string(),
-                            json!({
-                                "status": status,
-                                "cook_id": cook_id,
-                                "run_id": run_id,
-                                "candidate": candidate,
-                            }),
-                        );
-                        store::write_record(&record)?;
+                    Ok(()) => {
+                        let existing_scheduler_status = record
+                            .metadata
+                            .get("cook_continuation_scheduler")
+                            .and_then(Value::as_object)
+                            .and_then(|scheduler| scheduler.get("status"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                        match crate::agent_task_service::enqueue_terminal_continuation(
+                            &cook_id,
+                            &record.run_id,
+                        ) {
+                            Ok(enqueued) => {
+                                let run_id = record.run_id.clone();
+                                let candidate =
+                                    record.latest_executor_evidence.as_ref().map(|evidence| {
+                                        json!({
+                                            "task_id": evidence.task_id,
+                                            "provider_run_id": evidence.provider_run_id,
+                                            "normalized_output_ref": evidence.normalized_output_ref,
+                                        })
+                                    });
+                                let status = if enqueued {
+                                    "queued"
+                                } else {
+                                    existing_scheduler_status
+                                        .as_deref()
+                                        .unwrap_or("already_queued_or_completed")
+                                };
+                                record.ensure_metadata_object().insert(
+                                    "cook_continuation_scheduler".to_string(),
+                                    json!({
+                                        "status": status,
+                                        "cook_id": cook_id,
+                                        "run_id": run_id,
+                                        "candidate": candidate,
+                                    }),
+                                );
+                                store::write_record(&record)?;
+                            }
+                            Err(error) => {
+                                record.ensure_metadata_object().insert(
+                                    "cook_continuation_scheduler".to_string(),
+                                    json!({
+                                        "status": "failed",
+                                        "error_code": error.code.as_str(),
+                                        "message": error.message,
+                                    }),
+                                );
+                                store::write_record(&record)?;
+                            }
+                        }
                     }
                     Err(error) => {
                         record.ensure_metadata_object().insert(
@@ -1374,6 +1400,18 @@ pub fn status_with_options(
                         store::write_record(&record)?;
                     }
                 }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                record.ensure_metadata_object().insert(
+                    "cook_continuation_scheduler".to_string(),
+                    json!({
+                        "status": "failed",
+                        "error_code": error.code.as_str(),
+                        "message": error.message,
+                    }),
+                );
+                store::write_record(&record)?;
             }
         }
     }
