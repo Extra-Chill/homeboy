@@ -141,6 +141,7 @@ pub fn download_remote_artifact_with_intent(
 ///
 /// Produced only by [`resolve_placement`], so no transport can build an output
 /// path without going through the containment check.
+#[derive(Debug)]
 pub(super) struct DownloadPlacement {
     pub(super) output_path: PathBuf,
     /// The cache directory to tag with the caller's intent, or `None` when the
