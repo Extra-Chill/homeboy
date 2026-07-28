@@ -248,7 +248,7 @@ pub mod utils;
 pub mod worktree;
 
 macro_rules! register_ops_command_modules {
-    ($(($module:ident, $variant:ident, $args:path, $spec:expr, $handler:path),)*) => {
+    ($(($module:ident, $variant:ident, $handler:path),)*) => {
         $(pub mod $module;)*
     };
 }
