@@ -20,7 +20,13 @@ set -euo pipefail
 
 homeboy_get_validation_dependencies_raw() {
     if ! type homeboy_setting_json >/dev/null 2>&1; then
-        local settings_helper="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-$(dirname "${BASH_SOURCE[0]}")/../../../scripts/lib/settings.sh}"
+        local settings_helper="${HOMEBOY_RUNTIME_SETTINGS_HELPER:-}"
+        local shared_lib_dir="${HOMEBOY_SHARED_LIB_DIR:-}"
+        if [ -z "$shared_lib_dir" ] && [ -n "${HOMEBOY_EXTENSION_PATH:-}" ] && [ -d "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" ]; then
+            shared_lib_dir="$(cd "${HOMEBOY_EXTENSION_PATH}/../scripts/lib" && pwd)"
+        fi
+        shared_lib_dir="${shared_lib_dir:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../scripts/lib" && pwd)}"
+        settings_helper="${settings_helper:-${shared_lib_dir}/settings.sh}"
         # shellcheck source=/dev/null
         source "$settings_helper"
     fi
