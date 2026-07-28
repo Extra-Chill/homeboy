@@ -63,11 +63,11 @@ Plan or delete orphaned Homeboy runtime temp entries
 | Option | Value | Description |
 | --- | --- | --- |
 | `--apply` | flag | Delete planned temp entries. Without this flag, only reports the plan |
-| `--older-than-days` | `<OLDER_THAN_DAYS>` | Only include entries older than this many days |
+| `--older-than-days` | `<OLDER_THAN_DAYS>` | Only include entries older than this many days. Defaults to the configured `retention.runtime_tmp_days` |
 | `--prefix` | `<PREFIX>` | Only include entries whose directory/file name starts with this prefix |
-| `--limit` | `<LIMIT>` | Maximum temp entries to inspect in one invocation |
-| `--run-max-bytes` | `<RUN_MAX_BYTES>` | Maximum aggregate bytes retained for failed runtime run evidence |
-| `--run-max-count` | `<RUN_MAX_COUNT>` | Maximum failed runtime run directories retained |
+| `--limit` | `<LIMIT>` | Maximum temp entries to inspect in one invocation. Defaults to the configured `retention.limit` |
+| `--run-max-bytes` | `<RUN_MAX_BYTES>` | Maximum aggregate bytes retained for failed runtime run evidence. Defaults to the configured `retention.runtime_run_max_bytes` |
+| `--run-max-count` | `<RUN_MAX_COUNT>` | Maximum failed runtime run directories retained. Defaults to the configured `retention.runtime_run_max_count` |
 | `--cursor` | `<CURSOR>` | Continue bounded runtime-run inspection from a prior next_cursor |
 
 ## `homeboy self docs`
