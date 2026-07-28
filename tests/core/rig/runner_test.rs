@@ -28,11 +28,11 @@ use crate::runner::{
 use crate::spec::{
     ComponentSpec, DependencyMaterializationOutputKind, DependencyMaterializationOutputSpec,
     DependencyMaterializationSafety, DependencyMaterializationStepSpec, DiscoverSpec,
-    ExecutableRequirementSpec, FilesystemAssertionKind, FilesystemAssertionSpec, PipelineStep,
-    RigRequirementsSpec, RigResourcesSpec, RigSpec, ServiceKind, ServiceSpec, SharedPathOp,
-    SharedPathSpec, SymlinkSpec,
+    ExecutableRequirementSpec, FilesystemAssertionKind, FilesystemAssertionSpec, LifecycleContract,
+    LifecyclePhaseKind, LifecycleSnapshotRef, PipelineStep, RigRequirementsSpec, RigResourcesSpec,
+    RigSpec, ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec, SymlinkSpec,
 };
-use crate::state::{RigState, ServiceState};
+use crate::state::{LifecycleSnapshotState, RigState, ServiceState};
 use homeboy_core::test_support::with_isolated_home;
 
 fn empty_pipeline(name: &str) -> PipelineOutcome {
@@ -1849,6 +1849,155 @@ fn dependency_materialization_cache_rejects_output_symlink_escapes() {
         assert!(
             !outside.join("value").exists(),
             "the materializer must not run through an output symlink"
+        );
+    });
+}
+
+// ------------------------------------------------------------------
+// repair: live lifecycle snapshot handles (#10319)
+//
+// Handles are captured at run time, not declared, so `repair` reads them back
+// from state. This class is deliberately report-only: the handle is opaque, so
+// deleting the record does not reap the environment behind it — it only makes
+// a live environment unaddressable. Repair reports, and never discards.
+// ------------------------------------------------------------------
+
+fn lifecycle_snapshot_rig(id: &str, step_id: Option<&str>) -> RigSpec {
+    let mut rig = minimal_spec(id);
+    if let Some(step_id) = step_id {
+        rig.pipeline.insert(
+            "up".to_string(),
+            vec![PipelineStep::Lifecycle {
+                step_id: Some(step_id.to_string()),
+                depends_on: Vec::new(),
+                component: None,
+                lifecycle: Some(LifecycleContract {
+                    schema: "homeboy/lifecycle-contract/v1".to_string(),
+                    version: 1,
+                    phases: Vec::new(),
+                    metadata: Default::default(),
+                }),
+                workload: None,
+                op: LifecyclePhaseKind::Snapshot,
+                label: None,
+            }],
+        );
+    }
+    rig
+}
+
+fn record_snapshot(rig_id: &str, snapshot_id: &str, step: &str) {
+    let mut state = RigState::load(rig_id).expect("state");
+    state.lifecycle_snapshots.insert(
+        snapshot_id.to_string(),
+        LifecycleSnapshotState {
+            step: step.to_string(),
+            component: None,
+            captured_at: "2026-01-01T00:00:00Z".to_string(),
+            snapshot: LifecycleSnapshotRef {
+                schema: "homeboy/lifecycle-snapshot-ref/v1".to_string(),
+                id: snapshot_id.to_string(),
+                kind: "sandbox".to_string(),
+                phase_id: Some("capture".to_string()),
+                artifact_id: None,
+                artifact: None,
+                locator: Some("opaque://sandbox/7f3".to_string()),
+                created_at: Some("2026-01-01T00:00:00Z".to_string()),
+                metadata: Default::default(),
+            },
+        },
+    );
+    state.save(rig_id).expect("save state");
+}
+
+#[test]
+fn test_run_repair_reports_owned_lifecycle_snapshot_as_skipped() {
+    with_isolated_home(|_dir| {
+        let rig = lifecycle_snapshot_rig("repair-owned-snapshot-fixture", Some("provision"));
+        record_snapshot(&rig.id, "sandbox-1", "provision");
+
+        let report = run_repair(&rig).expect("repair succeeds");
+
+        assert!(report.success, "an owned live handle is not a failure");
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.blocked, 0);
+        let handle = resource(&report, "lifecycle_snapshots");
+        assert_eq!(handle.status, "skipped");
+        assert_eq!(handle.path, "sandbox:sandbox-1");
+        assert_eq!(
+            handle.expected_target.as_deref(),
+            Some("opaque://sandbox/7f3")
+        );
+        assert!(handle.error.is_none());
+        assert!(
+            handle
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("teardown"),
+            "detail names the op that actually reaps: {:?}",
+            handle.detail
+        );
+
+        // Report-only: the record survives.
+        assert_eq!(
+            RigState::load(&rig.id)
+                .expect("state")
+                .lifecycle_snapshots
+                .len(),
+            1,
+            "repair must never drop a handle it cannot reap"
+        );
+    });
+}
+
+#[test]
+fn test_run_repair_blocks_on_orphaned_lifecycle_snapshot() {
+    with_isolated_home(|_dir| {
+        // The rig declares a lifecycle step, but under a different key than
+        // the one that captured the live handle — the owning step was renamed
+        // or removed, so nothing declared can tear this environment down.
+        let rig = lifecycle_snapshot_rig("repair-orphan-snapshot-fixture", Some("provision"));
+        record_snapshot(&rig.id, "sandbox-9", "retired-step");
+
+        let report = run_repair(&rig).expect("repair reports blocked resource");
+
+        assert!(!report.success);
+        assert_eq!(report.blocked, 1);
+        let handle = resource(&report, "lifecycle_snapshots");
+        assert_eq!(handle.status, "blocked");
+        assert!(handle
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("orphaned lifecycle snapshot"));
+
+        assert_eq!(
+            RigState::load(&rig.id)
+                .expect("state")
+                .lifecycle_snapshots
+                .len(),
+            1,
+            "a blocked handle is reported, never discarded"
+        );
+    });
+}
+
+#[test]
+fn test_run_repair_reports_no_lifecycle_snapshot_resource_when_state_is_clean() {
+    with_isolated_home(|_dir| {
+        let rig = lifecycle_snapshot_rig("repair-no-snapshot-fixture", Some("provision"));
+
+        let report = run_repair(&rig).expect("repair succeeds");
+
+        assert!(report.success);
+        assert!(
+            !report
+                .resources
+                .iter()
+                .any(|resource| resource.kind == "lifecycle_snapshots"),
+            "no handles means no rows: {:?}",
+            report.resources
         );
     });
 }

@@ -55,14 +55,37 @@ touching component checkouts.
 ## Workload Lifecycle Contracts
 
 Workload entries in `bench_workloads`, `trace_workloads`, and `fuzz_workloads`
-can declare optional `lifecycle` metadata using
+can declare an optional `lifecycle` contract using
 `homeboy/lifecycle-contract/v1`. The shared lifecycle vocabulary is `prepare`,
 `seed`, `snapshot`, `reset`, `rollback`, and `teardown`; runtime implementations
 are extension hooks. See `docs/architecture/lifecycle-contracts.md`.
 
-The same contract is executable from a pipeline through the
-[`lifecycle`](#lifecycle) step, which is how a rig declares a disposable
-workload and gets back a reusable handle to it.
+A workload-declared contract is executed by a [`lifecycle`](#lifecycle) pipeline
+step that references it:
+
+```jsonc
+{
+  "fuzz_workloads": {
+    "generic": [{
+      "path": "fuzz/sandboxed.workload.json",
+      "lifecycle": {
+        "phases": [
+          { "id": "make", "phase": "prepare", "extension_hook": "sandbox-runtime.create" },
+          { "id": "reap", "phase": "teardown", "extension_hook": "sandbox-runtime.destroy" }
+        ]
+      }
+    }]
+  },
+  "pipeline": {
+    "up":   [{ "kind": "lifecycle", "op": "prepare",  "workload": { "kind": "fuzz", "extension": "generic" } }],
+    "down": [{ "kind": "lifecycle", "op": "teardown", "workload": { "kind": "fuzz", "extension": "generic" } }]
+  }
+}
+```
+
+One declaration on the workload, every op the rig runs against it. The step can
+also carry the contract inline — see [contract source](#lifecycle) — but two
+copies of the same contract in `up` and `down` is the drift a reference avoids.
 
 ## Templates And Variants
 
@@ -549,12 +572,43 @@ without any orchestrator-side code.
 
 | Field | Type | Description |
 |---|---|---|
-| `lifecycle` | object | The `homeboy/lifecycle-contract/v1` payload. Required. |
+| `lifecycle` | object | Inline `homeboy/lifecycle-contract/v1` payload. Required unless `workload` is set. |
+| `workload` | object | Reference to a contract a rig-owned workload already declares. Required unless `lifecycle` is set. |
 | `op` | string | Phase to execute. One of `prepare`, `seed`, `snapshot`, `reset`, `rollback`, `teardown`. Defaults to `prepare`. |
 | `component` | string | Optional component ID. Must exist in `components` when set; its resolved path becomes the phase working directory. |
 
 Every contract phase whose `phase` matches `op` runs, in declared order. A step
 whose contract declares no phase for its `op` fails before anything executes.
+
+**Contract source.** A step declares its contract inline *or* references a
+workload that declares one — exactly one of `lifecycle` / `workload`. Declaring
+both, or neither, fails before any phase runs.
+
+```jsonc
+{
+  "kind": "lifecycle",
+  "op": "teardown",
+  "workload": {
+    "kind": "fuzz",
+    "extension": "generic",
+    "path": "fuzz/sandboxed.workload.json"
+  }
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `kind` | string | Which workload map to search: `bench`, `fuzz`, or `trace`. Required. |
+| `extension` | string | Extension ID key within that map. Required. |
+| `path` | string | The workload's declared `path`, matched verbatim. Required only when more than one workload for that extension declares a `lifecycle`. |
+
+Reference resolution is fail-closed: an unknown `extension`, a `path` matching
+no declared workload, an ambiguous selection, or a selected workload that
+declares no `lifecycle` all fail before a phase runs. Nothing is guessed.
+
+This is what a workload-declared contract is *for*. Restating the same contract
+in an `up` step and a `down` step is two copies that drift; a reference means
+one declaration governs every op the rig runs against it.
 
 **Phase invocation.** Each phase declares exactly one of:
 

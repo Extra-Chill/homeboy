@@ -16,7 +16,8 @@ use std::time::Duration;
 use super::super::expand::{expand_vars, settings_env};
 use super::super::spec::{
     LifecycleContract, LifecyclePhaseContract, LifecyclePhaseKind, LifecyclePhaseResult,
-    LifecyclePhaseStatus, LifecycleResultMetadata, LifecycleSnapshotRef, RigSpec,
+    LifecyclePhaseStatus, LifecycleResultMetadata, LifecycleSnapshotRef, LifecycleWorkloadRef,
+    RigSpec,
 };
 use super::super::state::{now_rfc3339, LifecycleSnapshotState, RigState};
 use super::super::toolchain;
@@ -35,14 +36,17 @@ use homeboy_core::server::{
 /// names the thing it is holding a handle to.
 const DEFAULT_SNAPSHOT_KIND: &str = "lifecycle_snapshot";
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn run_lifecycle_step(
     rig: &RigSpec,
     step_id: Option<&str>,
     component: Option<&str>,
-    contract: &LifecycleContract,
+    contract: Option<&LifecycleContract>,
+    workload: Option<&LifecycleWorkloadRef>,
     op: LifecyclePhaseKind,
     settings: &[(String, String)],
 ) -> Result<()> {
+    let contract = resolve_contract(rig, contract, workload)?;
     let (result, failure) = execute_lifecycle_phases(rig, component, contract, op, settings)?;
 
     // Persist before propagating a phase failure: a handle captured before the
@@ -56,8 +60,36 @@ pub(super) fn run_lifecycle_step(
     }
 }
 
+/// Pick the contract this step executes: the inline payload, or the one a
+/// rig-owned workload declares.
+///
+/// Exactly one source is legal. Declaring both is a spec bug that would leave
+/// the reader guessing which contract governs, and declaring neither leaves
+/// nothing to run — both fail here, before any phase executes and before any
+/// state is touched.
+fn resolve_contract<'a>(
+    rig: &'a RigSpec,
+    contract: Option<&'a LifecycleContract>,
+    workload: Option<&LifecycleWorkloadRef>,
+) -> Result<&'a LifecycleContract> {
+    match (contract, workload) {
+        (Some(contract), None) => Ok(contract),
+        (None, Some(reference)) => {
+            super::super::workloads::workload_lifecycle_contract(rig, reference)
+        }
+        (Some(_), Some(_)) => Err(step_error(
+            rig,
+            "lifecycle step declares both `lifecycle` and `workload`; declare the contract inline or reference a workload, not both",
+        )),
+        (None, None) => Err(step_error(
+            rig,
+            "lifecycle step declares neither `lifecycle` nor `workload`; provide an inline `homeboy/lifecycle-contract/v1` payload or reference a workload that declares one",
+        )),
+    }
+}
+
 /// Stable ownership key for the handles a step captures.
-fn step_key(step_id: Option<&str>, component: Option<&str>) -> String {
+pub(crate) fn step_key(step_id: Option<&str>, component: Option<&str>) -> String {
     step_id
         .map(str::trim)
         .filter(|value| !value.is_empty())

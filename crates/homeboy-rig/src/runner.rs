@@ -4,7 +4,7 @@
 //! JSON. Reports are the contract — they should be stable across minor
 //! homeboy versions.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -27,7 +27,10 @@ use super::resource_lifecycle::{
     rig_resource_lifecycle_index, RigResourceLifecycleOptions,
 };
 use super::service::{self, ServiceStatus};
-use super::spec::{DependencyMaterializationOutputKind, RigSpec, ServiceKind, SymlinkSpec};
+use super::spec::{
+    DependencyMaterializationOutputKind, PipelineStep, RigSpec, ServiceKind, SymlinkSpec,
+    RIG_RESOURCE_CLASS_LIFECYCLE_SNAPSHOTS,
+};
 use super::state::{
     now_rfc3339, ComponentSnapshot, MaterializedRigState, RigState, RigStateSnapshot,
 };
@@ -726,6 +729,13 @@ pub fn run_down_with_settings(rig: &RigSpec, settings: &[(String, String)]) -> R
 /// `resources.ports`, `resources.process_patterns` — are inspected read-only
 /// and reported as `skipped` with the reason, so the coverage gap is visible in
 /// the report rather than silently absent.
+///
+/// Live `lifecycle_snapshots` handles are reported the same way. They are the
+/// one class repair deliberately refuses to touch even though it *could*
+/// delete the record: the handle is opaque, so dropping it does not reap the
+/// environment behind it — it only makes a live environment unreachable. A
+/// handle no declared step still owns is reported `blocked`, because that is
+/// drift needing manual attention, not something repair may silently discard.
 pub fn run_repair(rig: &RigSpec) -> Result<RepairReport> {
     let _lease = acquire_active_run_lease(rig, "repair")?;
     let mut resources = Vec::new();
@@ -736,6 +746,7 @@ pub fn run_repair(rig: &RigSpec) -> Result<RepairReport> {
     resources.extend(repair_rig_shared_paths(rig)?);
     resources.extend(repair_services(rig)?);
     resources.extend(report_declared_resources(rig));
+    resources.extend(report_lifecycle_snapshots(rig)?);
 
     let mut repaired = 0;
     let mut unchanged = 0;
@@ -913,6 +924,81 @@ fn report_declared_resources(rig: &RigSpec) -> Vec<RepairResourceReport> {
     }
 
     reports
+}
+
+/// Report every live lifecycle snapshot handle recorded in rig state.
+///
+/// Repair never reaps and never forgets a handle. Reaping means running a
+/// `teardown` phase, which is a pipeline op the spec author declares — repair
+/// does not execute pipeline steps. Forgetting means deleting the state record,
+/// which would strand a live environment with no way to address it again. So
+/// this class is report-only by construction, not by omission:
+///
+/// - a handle a declared `lifecycle` step still owns is `skipped`, with the
+///   command that reaps it
+/// - a handle no declared step owns any more is `blocked` — the rig captured an
+///   environment and then lost the step that could tear it down
+fn report_lifecycle_snapshots(rig: &RigSpec) -> Result<Vec<RepairResourceReport>> {
+    let snapshots = RigState::load(&rig.id)?.lifecycle_snapshots;
+    if snapshots.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let owned = declared_lifecycle_step_keys(rig);
+
+    Ok(snapshots
+        .into_iter()
+        .map(|(id, entry)| {
+            let owns = owned.contains(&entry.step);
+            RepairResourceReport {
+                kind: RIG_RESOURCE_CLASS_LIFECYCLE_SNAPSHOTS.to_string(),
+                path: format!("{}:{}", entry.snapshot.kind, id),
+                expected_target: entry.snapshot.locator.clone(),
+                previous_target: Some(entry.captured_at.clone()),
+                status: if owns {
+                    REPAIR_STATUS_SKIPPED.to_string()
+                } else {
+                    REPAIR_STATUS_BLOCKED.to_string()
+                },
+                detail: Some(if owns {
+                    format!(
+                        "live handle captured by lifecycle step '{}'; repair does not run pipeline phases — run the declared `teardown` step (`homeboy rig down`) to reap it",
+                        entry.step
+                    )
+                } else {
+                    format!(
+                        "live handle captured by lifecycle step '{}', which the rig spec no longer declares; repair refuses to drop the record because that would strand the environment, not reap it",
+                        entry.step
+                    )
+                }),
+                error: (!owns).then(|| {
+                    format!(
+                        "orphaned lifecycle snapshot '{id}': no declared lifecycle step owns key '{}'",
+                        entry.step
+                    )
+                }),
+            }
+        })
+        .collect())
+}
+
+/// Ownership keys of every `lifecycle` step the rig declares, across all
+/// pipelines. Computed with the same key function the executor uses so the two
+/// cannot drift.
+fn declared_lifecycle_step_keys(rig: &RigSpec) -> BTreeSet<String> {
+    rig.pipeline
+        .values()
+        .flatten()
+        .filter_map(|step| match step {
+            PipelineStep::Lifecycle {
+                step_id, component, ..
+            } => Some(super::pipeline::lifecycle_step_key(
+                step_id.as_deref(),
+                component.as_deref(),
+            )),
+            _ => None,
+        })
+        .collect()
 }
 
 fn declared_resource(kind: &str, path: String, status: &str, detail: &str) -> RepairResourceReport {

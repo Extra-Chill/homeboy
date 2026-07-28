@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use homeboy_core::engine::invocation::InvocationRequirements;
 use homeboy_core::{Error, Result};
 
-use super::spec::{RigSpec, TraceDependencySpec};
+use super::spec::{
+    LifecycleContract, LifecycleWorkloadKind, LifecycleWorkloadRef, RigSpec, TraceDependencySpec,
+    WorkloadSpec,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RigWorkloadKind {
@@ -19,6 +22,16 @@ pub enum RigWorkloadKind {
 pub struct RigWorkloadPathExpansion {
     pub declared_path: String,
     pub expanded_path: PathBuf,
+}
+
+impl From<LifecycleWorkloadKind> for RigWorkloadKind {
+    fn from(kind: LifecycleWorkloadKind) -> Self {
+        match kind {
+            LifecycleWorkloadKind::Bench => RigWorkloadKind::Bench,
+            LifecycleWorkloadKind::Fuzz => RigWorkloadKind::Fuzz,
+            LifecycleWorkloadKind::Trace => RigWorkloadKind::Trace,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +91,122 @@ pub fn required_component_id_for_workload(
         None,
         None,
     ))
+}
+
+/// Resolve the `lifecycle` contract a rig-owned workload entry declares.
+///
+/// This is the reader that makes `WorkloadSpec.lifecycle` load-bearing: a
+/// `kind: "lifecycle"` pipeline step names a workload instead of restating the
+/// contract, so one declaration serves every op the rig runs against it.
+///
+/// Fail-closed by construction — every ambiguity is an error, never a guess:
+///
+/// - unknown extension key → error naming the keys that are declared
+/// - `path` matching no declared workload → error naming the declared paths
+/// - no `path` and zero or multiple workloads carrying a contract → error
+/// - selected workload declares no `lifecycle` → error
+pub fn workload_lifecycle_contract<'a>(
+    rig_spec: &'a RigSpec,
+    reference: &LifecycleWorkloadRef,
+) -> Result<&'a LifecycleContract> {
+    let kind_label = reference.kind.as_str();
+    let setting = format!("pipeline.lifecycle.workload.{kind_label}");
+    let extension = reference.extension.as_str();
+    let rig_id = rig_spec.id.as_str();
+    let workloads = workload_map(rig_spec, RigWorkloadKind::from(reference.kind));
+
+    let entries: &[WorkloadSpec] = match workloads.get(extension) {
+        Some(entries) => entries.as_slice(),
+        None => {
+            let mut declared = workloads.keys().cloned().collect::<Vec<String>>();
+            declared.sort();
+            return Err(workload_ref_error(
+                &setting,
+                format!(
+                    "rig '{rig_id}' declares no {kind_label}_workloads for extension '{extension}'{}",
+                    declared_suffix("declared extensions", &declared)
+                ),
+            ));
+        }
+    };
+
+    let selected: &WorkloadSpec = match reference.path.as_deref() {
+        Some(path) => match entries.iter().find(|entry| entry.path() == path) {
+            Some(entry) => entry,
+            None => {
+                let declared = entries
+                    .iter()
+                    .map(|entry| entry.path().to_string())
+                    .collect::<Vec<String>>();
+                return Err(workload_ref_error(
+                    &setting,
+                    format!(
+                        "rig '{rig_id}' declares no {kind_label} workload with path '{path}' for extension '{extension}'{}",
+                        declared_suffix("declared paths", &declared)
+                    ),
+                ));
+            }
+        },
+        None => {
+            let mut candidates = entries
+                .iter()
+                .filter(|entry| entry.lifecycle().is_some())
+                .collect::<Vec<&WorkloadSpec>>();
+            if candidates.len() != 1 {
+                let declared = candidates
+                    .iter()
+                    .map(|entry| entry.path().to_string())
+                    .collect::<Vec<String>>();
+                let problem = if candidates.is_empty() {
+                    format!(
+                        "no {kind_label} workload for extension '{extension}' in rig '{rig_id}' declares a lifecycle contract"
+                    )
+                } else {
+                    format!(
+                        "{} {kind_label} workloads for extension '{extension}' in rig '{rig_id}' declare a lifecycle contract; set `workload.path` to pick one{}",
+                        candidates.len(),
+                        declared_suffix("candidates", &declared)
+                    )
+                };
+                return Err(workload_ref_error(&setting, problem));
+            }
+            candidates.remove(0)
+        }
+    };
+
+    match selected.lifecycle() {
+        Some(contract) => Ok(contract),
+        None => Err(workload_ref_error(
+            &setting,
+            format!(
+                "{kind_label} workload '{}' for extension '{extension}' in rig '{rig_id}' declares no lifecycle contract",
+                selected.path()
+            ),
+        )),
+    }
+}
+
+fn workload_ref_error(setting: &str, problem: String) -> Error {
+    Error::validation_invalid_argument(setting, problem, None, None)
+}
+
+fn declared_suffix(label: &str, values: &[String]) -> String {
+    if values.is_empty() {
+        String::new()
+    } else {
+        format!(" ({label}: {})", values.join(", "))
+    }
+}
+
+fn workload_map(
+    rig_spec: &RigSpec,
+    kind: RigWorkloadKind,
+) -> &std::collections::HashMap<String, Vec<WorkloadSpec>> {
+    match kind {
+        RigWorkloadKind::Bench => &rig_spec.bench_workloads,
+        RigWorkloadKind::Fuzz => &rig_spec.fuzz_workloads,
+        RigWorkloadKind::Trace => &rig_spec.trace_workloads,
+    }
 }
 
 pub fn extension_ids_for_workloads(rig_spec: &RigSpec, kind: RigWorkloadKind) -> Vec<String> {
