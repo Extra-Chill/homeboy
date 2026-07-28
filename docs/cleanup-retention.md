@@ -10,6 +10,53 @@ Unsafe existing local artifact paths keep the run and its lifecycle directory.
 The existing cleanup inventory remains the only planner. This change does not
 add a second cleanup engine.
 
+Retention resolves the observation store and the artifact root once per sweep.
+Both used to be re-derived inside every per-run artifact plan, so a default
+`--limit 1000` sweep opened thousands of SQLite connections and re-ran the
+migration ladder for each one. The apply pass still re-plans each run
+immediately before deleting its bytes: the planning loop walks every candidate
+before any deletion happens, so the earliest plans are already stale by then.
+
+## Orphaned Artifact Bytes
+
+```bash
+homeboy cleanup --include orphaned-artifact-bytes
+homeboy cleanup --include orphaned-artifact-bytes --apply
+```
+
+Every other artifact-root cleanup surface is driven by `artifacts` rows, so
+bytes written before their row existed are structurally invisible to all of
+them. This category reclaims the two artifact-root path families that are
+created outside any durable journal and are otherwise only reclaimed by an
+in-process cleanup branch, which SIGKILL and OOM skip:
+
+- `<artifact_root>/<run_id>/.artifact-<uuid>.staging` — the staging sibling
+  written before a file artifact is hard-linked into place.
+- `<artifact_root>/_scratch/patch-<label>-<uuid>/` — the working-tree baseline
+  copy taken by daemon patch capture, reclaimed only by `impl Drop`.
+
+It is deliberately **not** a generic "filesystem path with no database row"
+reaper. The artifact root is a shared namespace: `runner/`, `runner-attach/`,
+`runner-exec-attach/`, `agent-task/`, `agent-task-loop-controller/`,
+`controller-scratch-recovery/`, `recovered-runner-artifacts/`,
+`executor-finalized/`, `preview-consumer/`, and `_scratch/` are all owned by
+other subsystems and carry no artifact row at those paths. Artifact bytes are
+also written *before* their row is inserted by design, so row absence is the
+normal state of a publication that is currently succeeding. Row absence
+therefore proves nothing, and the database is not consulted.
+
+Ownership is instead proven by name shape — both families come from a single
+private constructor whose format no other writer emits — plus a fixed 24-hour
+age floor covering the in-flight window. The floor is not operator-overridable.
+Anything else at those paths, including a lookalike name without a parseable
+UUID, a staging-shaped directory, a scratch-shaped file, or a symlink, is
+reported and kept.
+
+Reported sizes are advisory. Removal is a pure function of name shape, entry
+type, age, symlink-freedom, and root containment; a failed size measurement
+reports `size_measured: false` and does not change the verdict in either
+direction.
+
 ## Lab Failure Retention
 
 Lab offloads delete run-scoped workspaces on every known terminal outcome by
@@ -31,6 +78,9 @@ The following Issue #8648 portions remain independently owned and are not
 implemented by terminal-run retention:
 
 - Crash-orphaned `/tmp/hb-<uid>` invocation-root inventory and age-pruning.
+- Reverse reconciliation for the subsystem-owned artifact-root subtrees listed
+  above. Each needs its own lifecycle owner; none of them can be reclaimed by a
+  row join.
 - Controller-scratch index compaction for missing or deleted terminal tombstones.
 - Aging removed task-worktree records out of workspace registries.
 - Detecting collisions between task-worktree and adopted-workspace registry handles.

@@ -39,6 +39,21 @@ Configured worktree-provider previews run independently with a 30-second cancell
 
 Regular `homeboy cleanup` includes `repo-artifacts` inventory. After an agent-task provider exits, Homeboy also cleans declared rebuildable artifacts from that exact detached attempt worktree before applying its existing source-state and commit safety guard. Active sibling worktrees are not scanned by this lifecycle step.
 
+## Orphaned Artifact Bytes
+
+```bash
+homeboy cleanup --include orphaned-artifact-bytes
+homeboy cleanup --include orphaned-artifact-bytes --apply
+```
+
+Reclaims crash residue under the artifact root that no `artifacts` row can
+describe: staging siblings left behind when a publish is SIGKILLed, and
+patch-capture baseline copies whose `Drop` never ran. It is name-scoped rather
+than row-scoped on purpose — the artifact root is a shared namespace and
+artifact bytes are written before their row exists, so row absence is not
+evidence of an orphan. See `docs/cleanup-retention.md` for the full safety
+model.
+
 ## Shared Cargo Targets
 
 Homeboy-managed Cargo builds use shared stores below its local data directory. Inspect them through the normal cleanup inventory:

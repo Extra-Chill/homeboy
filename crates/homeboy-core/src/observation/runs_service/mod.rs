@@ -173,6 +173,7 @@ pub enum ArtifactStorage {
 
 mod artifact_links;
 mod artifact_resolve;
+mod orphaned_artifact_bytes;
 mod persisted_cleanup;
 mod run_lookup;
 mod runner_downloads;
@@ -180,6 +181,7 @@ pub mod runner_evidence;
 
 pub use artifact_links::*;
 pub use artifact_resolve::*;
+pub use orphaned_artifact_bytes::*;
 pub use persisted_cleanup::*;
 pub use run_lookup::*;
 pub use runner_downloads::*;
@@ -204,24 +206,22 @@ pub fn retain_terminal_runs(
         ));
     }
     let finished_before = (Utc::now() - Duration::days(options.older_than_days)).to_rfc3339();
+    // The store and artifact root are resolved once for the whole sweep. Both
+    // used to be re-derived inside each per-run plan call, which meant one
+    // connection open plus a full migration ladder per candidate run.
     let mut store = ObservationStore::open_initialized()?;
+    let artifact_root = crate::artifacts::root()?;
     let candidate_run_ids = store.terminal_run_ids_before(&finished_before, options.limit)?;
     let mut artifact_cleanup = Vec::new();
     let mut lifecycle_directories = Vec::new();
     let mut removable_run_ids = Vec::new();
     let mut skipped_run_ids = Vec::new();
     for run_id in &candidate_run_ids {
-        let artifacts = cleanup_persisted_artifacts(PersistedArtifactCleanupOptions {
-            apply: false,
-            older_than_days: 0,
-            run_id: Some(run_id.clone()),
-            kind: None,
-            artifact_type: None,
-            run_kind: None,
-            component_id: None,
-            limit: 10_000,
-            terminal_only: true,
-        })?;
+        let artifacts = cleanup_persisted_artifacts_with_store(
+            &store,
+            &artifact_root,
+            terminal_run_artifact_plan_options(run_id),
+        )?;
         let lifecycle_directory = terminal_run_lifecycle_directory(&store, run_id)?;
         let blocked = artifacts
             .rows
@@ -237,21 +237,25 @@ pub fn retain_terminal_runs(
             }
         }
     }
+    let mut removed_run_count = 0;
     if options.apply {
         // Revalidate and remove artifact bytes before deleting any provenance.
         // A blocked resource leaves the terminal run record and lifecycle root intact.
+        //
+        // This second plan pass is *not* redundant with the loop above: that
+        // loop walks every candidate before any deletion happens, so the
+        // earliest plans are already stale by the time apply begins. Re-reading
+        // each run's classification immediately before deleting its bytes is
+        // the only thing that catches a run whose artifacts became unsafe (or
+        // whose owning run left a terminal state) during the planning window.
+        // What was redundant, and is now gone, is reopening the store and
+        // re-resolving the artifact root on every one of these calls.
         for run_id in &removable_run_ids {
-            let artifacts = cleanup_persisted_artifacts(PersistedArtifactCleanupOptions {
-                apply: false,
-                older_than_days: 0,
-                run_id: Some(run_id.clone()),
-                kind: None,
-                artifact_type: None,
-                run_kind: None,
-                component_id: None,
-                limit: 10_000,
-                terminal_only: true,
-            })?;
+            let artifacts = cleanup_persisted_artifacts_with_store(
+                &store,
+                &artifact_root,
+                terminal_run_artifact_plan_options(run_id),
+            )?;
             if artifacts
                 .rows
                 .iter()
@@ -262,7 +266,6 @@ pub fn retain_terminal_runs(
             }
             let records = store.list_artifacts(run_id)?;
             let run = store.get_run(run_id)?;
-            let artifact_root = crate::artifacts::root()?;
             for row in artifacts.rows.iter().filter(|row| row.action == "remove") {
                 let artifact = records
                     .iter()
@@ -310,22 +313,37 @@ pub fn retain_terminal_runs(
             }
         }
         store.delete_terminal_runs(&deleted)?;
+        // Count what was actually deleted. Subtracting `skipped_run_ids` from
+        // `removable_run_ids` under-reported by every run the planning loop had
+        // already blocked, because those runs are in `skipped_run_ids` but were
+        // never in `removable_run_ids` to begin with.
+        removed_run_count = deleted.len();
     }
     Ok(TerminalRunRetentionOutcome {
         dry_run: !options.apply,
         older_than_days: options.older_than_days,
-        removed_run_count: if options.apply {
-            removable_run_ids
-                .len()
-                .saturating_sub(skipped_run_ids.len())
-        } else {
-            0
-        },
+        removed_run_count,
         candidate_run_ids,
         artifact_cleanup,
         lifecycle_directories,
         skipped_run_ids,
     })
+}
+
+/// Per-run artifact plan used by terminal retention. Always a dry-run plan:
+/// retention removes bytes itself and releases the rows with the owning run.
+fn terminal_run_artifact_plan_options(run_id: &str) -> PersistedArtifactCleanupOptions {
+    PersistedArtifactCleanupOptions {
+        apply: false,
+        older_than_days: 0,
+        run_id: Some(run_id.to_string()),
+        kind: None,
+        artifact_type: None,
+        run_kind: None,
+        component_id: None,
+        limit: 10_000,
+        terminal_only: true,
+    }
 }
 
 fn terminal_run_lifecycle_directory(
