@@ -420,6 +420,13 @@ impl ComparedMeasurement {
     }
 }
 
+/// Structural guard that a new green-producing gate cannot ship without
+/// declaring how it established a measurement. Kept in its own file because it
+/// carries the registry of every verdict site in the workspace.
+#[cfg(test)]
+#[path = "measurement_registry_test.rs"]
+mod measurement_registry_test;
+
 #[cfg(test)]
 mod tests {
     use super::*;
