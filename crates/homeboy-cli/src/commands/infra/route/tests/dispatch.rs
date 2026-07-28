@@ -1816,6 +1816,8 @@ fn cook_to_worktree_provider_workspace_survives_failed_attempt_and_lab_retry() {
                 enabled: true,
                 kind: homeboy::core::defaults::WorktreeProviderKind::Command,
                 apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy::core::defaults::WorktreeProviderCommands {
                     resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
                     ensure: Some(vec![provider.display().to_string(), "{handle}".to_string()]),

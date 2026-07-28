@@ -21,10 +21,6 @@ const PROVIDER_CLEANUP_HEARTBEAT: Duration = Duration::from_secs(5);
 const PROVIDER_CLEANUP_HEARTBEAT: Duration = Duration::from_millis(100);
 const PROVIDER_CLEANUP_OUTPUT_LIMIT: usize = 64 * 1024;
 #[cfg(not(test))]
-const PROVIDER_LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
-#[cfg(test)]
-const PROVIDER_LOOKUP_TIMEOUT: Duration = Duration::from_secs(1);
-#[cfg(not(test))]
 const PROVIDER_ENSURE_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const PROVIDER_ENSURE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -202,13 +198,26 @@ pub fn resolve_worktree_provider_path_from_config(
         if !provider.enabled {
             continue;
         }
-        let Some(command) = provider.commands.list.as_ref() else {
-            continue;
+        let worktree = if let Some(command) = provider.commands.resolve_path.as_ref() {
+            let worktrees = run_provider_resolve_path_command(
+                &provider_id,
+                provider,
+                command,
+                requested.as_path(),
+            )?;
+            targeted_path_result(&provider_id, worktrees, requested.as_path())?
+        } else {
+            let Some(command) = provider.commands.list.as_ref() else {
+                continue;
+            };
+            run_provider_list_command(&provider_id, provider, command)?
+                .into_iter()
+                .find(|worktree| {
+                    std::fs::canonicalize(&worktree.path).ok().as_deref()
+                        == Some(requested.as_path())
+                })
         };
-        let worktrees = run_provider_list_command(&provider_id, provider, command)?;
-        let Some(worktree) = worktrees.into_iter().find(|worktree| {
-            std::fs::canonicalize(&worktree.path).ok().as_deref() == Some(requested.as_path())
-        }) else {
+        let Some(worktree) = worktree else {
             continue;
         };
         validate_provider_handle(&provider_id, &worktree, None, None)?;
@@ -591,6 +600,51 @@ fn run_provider_resolve_command(
     )
 }
 
+fn run_provider_resolve_path_command(
+    provider_id: &str,
+    provider: &WorktreeProviderConfig,
+    command: &[String],
+    path: &std::path::Path,
+) -> Result<Vec<WorktreeProviderHandle>> {
+    let path = path.display().to_string();
+    let command = command
+        .iter()
+        .map(|argument| argument.replace("{path}", &path))
+        .collect::<Vec<_>>();
+    run_provider_lookup_command(
+        provider_id,
+        provider,
+        &command,
+        "resolve_path",
+        &provider.commands.resolve_not_found_exit_codes,
+    )
+}
+
+fn targeted_path_result(
+    provider_id: &str,
+    worktrees: Vec<WorktreeProviderHandle>,
+    requested: &std::path::Path,
+) -> Result<Option<WorktreeProviderHandle>> {
+    if worktrees.is_empty() {
+        return Ok(None);
+    }
+    if let Some(worktree) = worktrees
+        .into_iter()
+        .find(|worktree| std::fs::canonicalize(&worktree.path).ok().as_deref() == Some(requested))
+    {
+        return Ok(Some(worktree));
+    }
+    Err(Error::validation_invalid_argument(
+        "to_worktree",
+        format!(
+            "worktree provider `{provider_id}` resolve_path command did not return the requested canonical path {}",
+            requested.display()
+        ),
+        Some(provider_id.to_string()),
+        None,
+    ))
+}
+
 fn run_provider_list_command(
     provider_id: &str,
     provider: &WorktreeProviderConfig,
@@ -606,6 +660,8 @@ fn run_provider_lookup_command(
     operation: &str,
     not_found_exit_codes: &[i32],
 ) -> Result<Vec<WorktreeProviderHandle>> {
+    let timeout = provider_lookup_timeout(provider)?;
+    let output_limit = provider_lookup_output_limit(provider)?;
     let (program, args) = command
         .split_first()
         .filter(|(program, _)| !program.trim().is_empty())
@@ -635,10 +691,11 @@ fn run_provider_lookup_command(
             None,
         )
     })?;
+    let started = std::time::Instant::now();
     let output = crate::engine::command::wait_with_bounded_output_supervised(
         &mut child,
-        PROVIDER_LOOKUP_OUTPUT_LIMIT,
-        PROVIDER_LOOKUP_TIMEOUT,
+        output_limit,
+        timeout,
         Duration::from_millis(100),
         || false,
         |_, _| Ok(()),
@@ -651,12 +708,13 @@ fn run_provider_lookup_command(
             None,
         )
     })?;
+    let elapsed_ms = started.elapsed().as_millis();
     if output.termination != crate::engine::command::SupervisedCommandTermination::Completed {
         return Err(Error::validation_invalid_argument(
             "to_worktree",
             format!(
-                "worktree provider `{provider_id}` {operation} command timed out after {} ms",
-                PROVIDER_LOOKUP_TIMEOUT.as_millis()
+                "worktree provider `{provider_id}` {operation} command timed out after {elapsed_ms} ms (configured lookup_timeout_ms: {})",
+                timeout.as_millis()
             ),
             Some(provider_id.to_string()),
             Some(vec![
@@ -665,7 +723,21 @@ fn run_provider_lookup_command(
             ]),
         ));
     }
-    let output = output.output.into_output();
+    let output = output.output;
+    if output.capture.stdout.truncated {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            format!(
+                "worktree provider `{provider_id}` {operation} command output exceeded configured lookup_output_limit_bytes: {output_limit} (received {} bytes)",
+                output.capture.stdout.bytes_seen
+            ),
+            Some(provider_id.to_string()),
+            Some(vec![
+                "Increase the provider lookup_output_limit_bytes within its configured bound, then retry the operation.".to_string(),
+            ]),
+        ));
+    }
+    let output = output.into_output();
     if !output.status.success() {
         if output
             .status
@@ -710,6 +782,35 @@ fn run_provider_lookup_command(
         )
     })?;
     map_provider_list_result(provider_id, mapping, &value)
+}
+
+fn provider_lookup_timeout(provider: &WorktreeProviderConfig) -> Result<Duration> {
+    defaults::validate_worktree_provider_lookup_timeout_ms(provider.lookup_timeout_ms).map_err(
+        |message| {
+            Error::validation_invalid_argument(
+                "worktree_providers.lookup_timeout_ms",
+                message,
+                Some(provider.lookup_timeout_ms.to_string()),
+                None,
+            )
+        },
+    )?;
+    Ok(Duration::from_millis(provider.lookup_timeout_ms))
+}
+
+fn provider_lookup_output_limit(provider: &WorktreeProviderConfig) -> Result<usize> {
+    defaults::validate_worktree_provider_lookup_output_limit_bytes(
+        provider.lookup_output_limit_bytes,
+    )
+    .map_err(|message| {
+        Error::validation_invalid_argument(
+            "worktree_providers.lookup_output_limit_bytes",
+            message,
+            Some(provider.lookup_output_limit_bytes.to_string()),
+            None,
+        )
+    })?;
+    Ok(provider.lookup_output_limit_bytes)
 }
 
 fn provider_command_evidence(command: &[String], output: &std::process::Output) -> CommandEvidence {
@@ -1792,6 +1893,8 @@ mod tests {
                 enabled: true,
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     resolve: Some(vec![
                         script.display().to_string(),
@@ -1880,6 +1983,8 @@ mod tests {
                 enabled: true,
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     resolve: Some(vec![
                         script.display().to_string(),
@@ -1971,6 +2076,8 @@ mod tests {
                 enabled: true,
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     resolve: Some(vec![
                         script.display().to_string(),
@@ -2016,6 +2123,8 @@ mod tests {
                 enabled: true,
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: false,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     cleanup_preview: Some(vec![script, "preview".to_string()]),
                     cleanup_apply: None,
@@ -2045,6 +2154,8 @@ mod tests {
             enabled: true,
             kind: WorktreeProviderKind::Command,
             apply_enabled: false,
+            lookup_timeout_ms: 10_000,
+            lookup_output_limit_bytes: 64 * 1024,
             commands: WorktreeProviderCommands {
                 cleanup_preview: Some(vec![script]),
                 ..Default::default()
@@ -2116,6 +2227,8 @@ mod tests {
                 enabled: true,
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: false,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     cleanup_apply: Some(vec![script, "apply".to_string()]),
                     ..Default::default()
@@ -2147,6 +2260,8 @@ mod tests {
                 enabled: true,
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     cleanup_apply: Some(vec![script, "apply".to_string()]),
                     ..Default::default()
@@ -2182,6 +2297,8 @@ mod tests {
                 enabled: true,
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: false,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     resolve: Some(vec![script, "{handle}".to_string()]),
                     ..Default::default()
@@ -2212,6 +2329,8 @@ mod tests {
                 enabled: true,
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: false,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     list: Some(vec![script]),
                     ..Default::default()
@@ -2226,7 +2345,7 @@ mod tests {
     }
 
     #[test]
-    fn path_resolution_accepts_an_explicit_provider_worktree_identity() {
+    fn path_resolution_falls_back_to_list_when_resolve_path_is_absent() {
         let workspace = tempfile::tempdir().expect("workspace");
         git_init(workspace.path(), "fix/10251");
         let script = fake_list_provider_script(json!({ "worktrees": [{
@@ -2242,6 +2361,8 @@ mod tests {
                 enabled: true,
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: false,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     list: Some(vec![script]),
                     ..Default::default()
@@ -2261,12 +2382,122 @@ mod tests {
     }
 
     #[test]
+    fn path_resolution_prefers_resolve_path_and_expands_the_canonical_path() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "cook-target");
+        let requested = std::fs::canonicalize(workspace.path()).expect("canonical workspace");
+        let script = fake_provider_script_body(&format!(
+            "if [ \"$1\" != \"{}\" ]; then exit 44; fi\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@cook-target\",\"path\":\"{}\",\"branch\":\"cook-target\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
+            requested.display(),
+            requested.display(),
+        ));
+        let provider = WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: false,
+            lookup_timeout_ms: 10_000,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands {
+                resolve_path: Some(vec![script, "{path}".to_string()]),
+                ..Default::default()
+            },
+            list_result_mapping: Some(worktrees_mapping()),
+        };
+
+        let resolution = resolve_worktree_provider_path_from_config(
+            workspace.path(),
+            &config_with_provider(provider),
+        )
+        .expect("path lookup succeeds")
+        .expect("provider owns requested path");
+        assert_eq!(resolution.worktree.path, requested.display().to_string());
+    }
+
+    #[test]
+    fn path_resolution_resolve_path_not_found_does_not_fall_back_to_list() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let marker = workspace.path().join("list-invoked");
+        let list =
+            fake_list_provider_script_with_marker(serde_json::json!({ "worktrees": [] }), &marker);
+        let provider = WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: false,
+            lookup_timeout_ms: 10_000,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands {
+                resolve_path: Some(vec![
+                    fake_provider_script_body("exit 42\n"),
+                    "{path}".to_string(),
+                ]),
+                resolve_not_found_exit_codes: vec![42],
+                list: Some(vec![list]),
+                ..Default::default()
+            },
+            list_result_mapping: Some(worktrees_mapping()),
+        };
+
+        assert!(resolve_worktree_provider_path_from_config(
+            workspace.path(),
+            &config_with_provider(provider)
+        )
+        .expect("not found is not an error")
+        .is_none());
+        assert!(!marker.exists(), "list fallback must not run");
+    }
+
+    #[test]
+    fn path_resolution_resolve_path_rejects_malformed_or_mismatched_results() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "cook-target");
+        let other = tempfile::tempdir().expect("other workspace");
+        git_init(other.path(), "cook-target");
+        let mismatched = fake_list_provider_script(serde_json::json!({
+            "worktrees": [{
+                "handle": "fixture@other",
+                "path": other.path(),
+                "branch": "cook-target",
+                "safety": { "dirty": false, "unpushed": false, "primary": false }
+            }]
+        }));
+        for (script, expected) in [
+            (
+                fake_provider_script_body("printf '{'\n"),
+                "returned invalid JSON",
+            ),
+            (mismatched, "did not return the requested canonical path"),
+        ] {
+            let provider = WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: false,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: WorktreeProviderCommands {
+                    resolve_path: Some(vec![script, "{path}".to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(worktrees_mapping()),
+            };
+            let error = resolve_worktree_provider_path_from_config(
+                workspace.path(),
+                &config_with_provider(provider),
+            )
+            .expect_err("invalid targeted path result must fail closed");
+            assert!(error.message.contains(expected), "{}", error.message);
+        }
+    }
+
+    #[test]
     fn path_resolution_reports_provider_timeout() {
         let workspace = tempfile::tempdir().expect("workspace");
         let dir = unique_fixture_script_dir();
         let script = dir.join("provider");
-        fs::write(&script, "#!/bin/sh\nsleep 2\nprintf '{\"worktrees\":[]}'\n")
-            .expect("write provider");
+        fs::write(
+            &script,
+            "#!/bin/sh\nsleep 0.2\nprintf '{\"worktrees\":[]}'\n",
+        )
+        .expect("write provider");
         make_executable(&script);
 
         let error = resolve_worktree_provider_path_from_config(
@@ -2275,6 +2506,8 @@ mod tests {
                 enabled: true,
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: false,
+                lookup_timeout_ms: 25,
+                lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     list: Some(vec![script.to_string_lossy().to_string()]),
                     ..Default::default()
@@ -2285,6 +2518,70 @@ mod tests {
         .expect_err("a hung provider must be bounded");
 
         assert!(error.message.contains("timed out"));
+        assert!(error.message.contains("configured lookup_timeout_ms: 25"));
+    }
+
+    #[test]
+    fn configured_lookup_timeout_allows_a_slow_provider_response() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "cook-target");
+        let script = fake_provider_script_body(&format!(
+            "sleep 0.1\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@cook-target\",\"path\":\"{}\",\"branch\":\"cook-target\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
+            workspace.path().display()
+        ));
+        let provider = WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: false,
+            lookup_timeout_ms: 1_000,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands {
+                resolve: Some(vec![script, "{handle}".to_string()]),
+                ..Default::default()
+            },
+            list_result_mapping: Some(worktrees_mapping()),
+        };
+
+        let resolved = resolve_worktree_provider_handle_from_config(
+            "fixture@cook-target",
+            &config_with_provider(provider),
+        )
+        .expect("configured timeout allows provider response");
+        assert_eq!(resolved.path, workspace.path().display().to_string());
+    }
+
+    #[test]
+    fn configured_lookup_output_limit_accepts_large_provider_json() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "cook-target");
+        let script = fake_list_provider_script(serde_json::json!({
+            "worktrees": [{
+                "handle": "fixture@cook-target",
+                "path": workspace.path(),
+                "branch": "cook-target",
+                "safety": { "dirty": false, "unpushed": false, "primary": false }
+            }],
+            "padding": "x".repeat(70 * 1024),
+        }));
+        let provider = WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: false,
+            lookup_timeout_ms: 10_000,
+            lookup_output_limit_bytes: 128 * 1024,
+            commands: WorktreeProviderCommands {
+                resolve: Some(vec![script, "{handle}".to_string()]),
+                ..Default::default()
+            },
+            list_result_mapping: Some(worktrees_mapping()),
+        };
+
+        let resolved = resolve_worktree_provider_handle_from_config(
+            "fixture@cook-target",
+            &config_with_provider(provider),
+        )
+        .expect("configured output limit retains complete provider JSON");
+        assert_eq!(resolved.path, workspace.path().display().to_string());
     }
 
     #[test]
@@ -2323,6 +2620,8 @@ mod tests {
                     enabled: false,
                     kind: WorktreeProviderKind::Command,
                     apply_enabled: false,
+                    lookup_timeout_ms: 10_000,
+                    lookup_output_limit_bytes: 64 * 1024,
                     commands: WorktreeProviderCommands::default(),
                     list_result_mapping: None,
                 },
@@ -2363,6 +2662,8 @@ mod tests {
                 enabled: true,
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: false,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     resolve: Some(vec![resolve, "{handle}".to_string()]),
                     list: Some(vec![list]),
@@ -2412,6 +2713,8 @@ mod tests {
                 enabled: true,
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: false,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     resolve: Some(vec![script, "{handle}".to_string()]),
                     ..Default::default()
@@ -2451,6 +2754,8 @@ mod tests {
                 enabled: true,
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: false,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     list: Some(vec![script]),
                     ..Default::default()
@@ -2608,6 +2913,8 @@ mod tests {
                 enabled: true,
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     resolve: Some(vec![
                         script.display().to_string(),
@@ -2907,6 +3214,8 @@ mod tests {
                 enabled: true,
                 kind: WorktreeProviderKind::Command,
                 apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
                 commands: WorktreeProviderCommands {
                     cleanup_apply: Some(vec![script]),
                     ..Default::default()
@@ -2963,6 +3272,8 @@ mod tests {
             enabled: true,
             kind: WorktreeProviderKind::Command,
             apply_enabled: false,
+            lookup_timeout_ms: 10_000,
+            lookup_output_limit_bytes: 64 * 1024,
             commands: WorktreeProviderCommands {
                 list: Some(vec![script]),
                 ..Default::default()
