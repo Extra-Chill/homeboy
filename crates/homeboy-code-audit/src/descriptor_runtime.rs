@@ -33,6 +33,15 @@ pub(super) struct DetectorRunContext<'a> {
     /// the full corpus. Detectors keyed strictly to the file they inspect read
     /// this so scoped runs avoid O(repo) work.
     pub(super) per_file_fingerprints: &'a [&'a fingerprint::FileFingerprint],
+    /// Source-policy corpus: every extension-claimed source file, index files
+    /// (`mod.rs`/`lib.rs`/`main.rs`) included and single-file directories kept,
+    /// narrowed to the changed scope under `--changed-since` (#10558).
+    ///
+    /// Distinct from `per_file_fingerprints` because that view is derived from
+    /// the CONVENTION corpus, whose index-file exclusion and `len() < 2` group
+    /// drop exist for sibling detection and are meaningless for a term scan.
+    /// Detectors that scan file text for configured patterns read this.
+    pub(super) policy_fingerprints: &'a [&'a fingerprint::FileFingerprint],
     /// Shared source snapshot for whole-tree detectors. `None` only on the
     /// root-only fast path when no snapshot-backed detector is enabled.
     pub(super) source_snapshot: Option<&'a CodebaseSnapshot>,
@@ -123,11 +132,11 @@ fn run_generic_descriptor(
             unbounded_output_capture::run(context.per_file_fingerprints)
         }
         GenericDetectorRunner::CoreBoundaryLeaks => source_policy::run(
-            context.per_file_fingerprints,
+            context.policy_fingerprints,
             &config.core_boundary_leaks.to_source_policy_rules(),
         ),
         GenericDetectorRunner::SourcePolicy => {
-            source_policy::run(context.per_file_fingerprints, &config.source_policies)
+            source_policy::run(context.policy_fingerprints, &config.source_policies)
         }
         GenericDetectorRunner::MutatingResourceAccess => mutating_resource_access::run(
             context.per_file_fingerprints,
@@ -326,6 +335,7 @@ mod tests {
             audit_config: &audit_config,
             all_fingerprints: &[],
             per_file_fingerprints: &[],
+            policy_fingerprints: &[],
             source_snapshot: None,
             dead_code_references: None,
         };
@@ -427,6 +437,7 @@ mod tests {
             audit_config: &audit_config,
             all_fingerprints: &fingerprints,
             per_file_fingerprints: &fingerprints,
+            policy_fingerprints: &fingerprints,
             source_snapshot: None,
             dead_code_references: None,
         };

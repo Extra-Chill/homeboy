@@ -6,7 +6,7 @@ use std::path::Path;
 use super::conventions::Language;
 use super::fingerprint::{fingerprint_content, normalize_convention_tags, FileFingerprint};
 use super::walker::{
-    extension_provided_file_extensions, is_extension_provided_source_file, is_test_path,
+    extension_provided_file_extensions, is_extension_provided_file, is_index_file, is_test_path,
 };
 use homeboy_audit_contract::AuditConfig;
 use homeboy_engine_primitives::codebase_scan::CodebaseSnapshot;
@@ -17,6 +17,31 @@ type DiscoveryGroupKey = (String, Language, bool, Vec<String>);
 pub struct DiscoveryResult {
     /// Grouped files with conventions.
     pub groups: Vec<(String, String, Vec<FileFingerprint>)>,
+    /// Every extension-provided source file that fingerprinted, with NO
+    /// convention-discovery filtering applied (#10558).
+    ///
+    /// `groups` is the convention corpus. Two filters exist purely to make
+    /// convention *sibling* detection correct:
+    ///
+    ///   1. index files (`mod.rs`, `lib.rs`, `main.rs`, `index.*`,
+    ///      `__init__.py`) are dropped by [`is_index_file`] because they
+    ///      organize other files rather than being peers, and
+    ///   2. groups with fewer than two members are dropped by
+    ///      [`groups_from_dir_files`] because a convention needs peers to exist.
+    ///
+    /// Neither has any bearing on a whole-file term scan. When source policies
+    /// borrowed the convention corpus, those two filters silently made 264 of
+    /// this repository's 1819 `.rs` files (14.5%) — including every `mod.rs`,
+    /// `lib.rs`, `main.rs`, and every `build.rs` sitting alone in a crate root —
+    /// unscannable by ANY source policy, regardless of configuration. Module
+    /// roots are exactly where re-exports, feature wiring, and cross-layer glue
+    /// accumulate, so that blind spot was pointed at the most policy-relevant
+    /// files in the tree.
+    ///
+    /// This field is that unfiltered corpus. `entry::source_policy_findings_for_path`
+    /// already scanned this shape (it builds from
+    /// `walker::walk_all_source_files_snapshot`); the engine now agrees with it.
+    pub policy_fingerprints: Vec<FileFingerprint>,
     /// Total source files found by the walker.
     pub files_walked: usize,
     /// Files that were successfully fingerprinted by an extension.
@@ -28,9 +53,14 @@ pub struct DiscoveryResult {
 /// Returns groups of (group_name, glob_pattern, files) for directories that
 /// contain 2+ files of the same language, plus counts of walked vs fingerprinted files.
 ///
+/// Also returns [`DiscoveryResult::policy_fingerprints`]: the same walk WITHOUT
+/// the two convention-only filters, so path-scanning detectors (source policies)
+/// get an honest whole-tree corpus instead of borrowing the convention one.
+///
 /// Consumes a caller-provided source snapshot. Fingerprinting goes through
 /// [`fingerprint_content`] so the snapshot's already-loaded content is reused —
-/// no second `read_to_string`.
+/// no second `read_to_string`. Each file is fingerprinted exactly once and the
+/// result is shared between both corpora.
 pub(crate) fn auto_discover_groups_from_snapshot(
     root: &Path,
     audit_config: &AuditConfig,
@@ -42,38 +72,78 @@ pub(crate) fn auto_discover_groups_from_snapshot(
     // This prevents false positives like test files being flagged for
     // missing production methods (set_up, tear_down are optional hooks).
     let mut dir_files: HashMap<DiscoveryGroupKey, Vec<FileFingerprint>> = HashMap::new();
+    let mut policy_fingerprints: Vec<FileFingerprint> = Vec::new();
     let mut files_walked: usize = 0;
     let mut files_fingerprinted: usize = 0;
     let source_extensions = extension_provided_file_extensions();
 
     for (path, content) in snapshot.iter() {
-        if !is_extension_provided_source_file(path, &source_extensions) {
+        if !is_extension_provided_file(path, &source_extensions) {
             continue;
         }
-        files_walked += 1;
-        if let Some(mut fp) = fingerprint_content(path, root, content) {
-            files_fingerprinted += 1;
-            let parent = path
-                .parent()
-                .and_then(|p| p.strip_prefix(root).ok())
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let file_is_test = is_test_path(&fp.relative_path);
-            fp.convention_tags = convention_tags_for(&fp, audit_config);
-            let key = (
-                parent,
-                fp.language.clone(),
-                file_is_test,
-                fp.convention_tags.clone(),
-            );
-            dir_files.entry(key).or_default().push(fp);
+        // Convention discovery excludes index files; the policy corpus does not.
+        // `files_walked` / `files_fingerprinted` keep counting the convention
+        // corpus so the "no extension can fingerprint these files" warning below
+        // keeps its existing meaning.
+        let convention_eligible = !is_index_file(path);
+        if convention_eligible {
+            files_walked += 1;
         }
+        let Some(mut fp) = fingerprint_content(path, root, content) else {
+            continue;
+        };
+        fp.convention_tags = convention_tags_for(&fp, audit_config);
+        policy_fingerprints.push(policy_view(&fp));
+
+        if !convention_eligible {
+            continue;
+        }
+        files_fingerprinted += 1;
+        let parent = path
+            .parent()
+            .and_then(|p| p.strip_prefix(root).ok())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let file_is_test = is_test_path(&fp.relative_path);
+        let key = (
+            parent,
+            fp.language.clone(),
+            file_is_test,
+            fp.convention_tags.clone(),
+        );
+        dir_files.entry(key).or_default().push(fp);
     }
+
+    policy_fingerprints.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
 
     DiscoveryResult {
         groups: groups_from_dir_files(dir_files),
+        policy_fingerprints,
         files_walked,
         files_fingerprinted,
+    }
+}
+
+/// The slice of a fingerprint the source-policy corpus needs: path, language,
+/// and raw content.
+///
+/// Source policies are whole-file term scans — `source_policy::run`,
+/// `validate_source_roots`, and `validate_configured_paths` read exactly these
+/// three fields and nothing else. Copying only them keeps the second corpus at
+/// roughly the cost of the file text instead of duplicating every extracted
+/// fact vector (method hashes, call sites, aggregate facts, …) for the whole
+/// tree.
+///
+/// If a detector that needs richer facts is ever moved onto the policy corpus,
+/// widen this — or give it the convention corpus — rather than letting it read
+/// empty fact vectors.
+fn policy_view(fp: &FileFingerprint) -> FileFingerprint {
+    FileFingerprint {
+        relative_path: fp.relative_path.clone(),
+        language: fp.language,
+        content: fp.content.clone(),
+        convention_tags: fp.convention_tags.clone(),
+        ..FileFingerprint::default()
     }
 }
 

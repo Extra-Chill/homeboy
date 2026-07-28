@@ -178,11 +178,13 @@ fn post_merge_gates_never_mutate_the_repository() {
     assert!(!workflow.contains("git push"));
     assert!(!workflow.contains("pr-policy-merge: 'true'"));
     // `autofix` is not a homeboy-action@v2 input at all; passing it only earns
-    // an "Unexpected input(s)" warning.
-    for (name, gate) in release_blocking_gates() {
+    // an "Unexpected input(s)" warning while reading like an enforced property.
+    // Asserted on the YAML key shape (not the bare word) so the comments
+    // explaining its absence do not trip this.
+    for line in workflow.lines() {
         assert!(
-            !gate.contains("autofix"),
-            "{name} passes a non-existent input"
+            !line.trim_start().starts_with("autofix:"),
+            "workflow passes `autofix`, which is not a homeboy-action@v2 input: {line}"
         );
     }
 }
@@ -199,13 +201,105 @@ fn superseded_post_merge_runs_are_cancelled() {
     assert!(workflow.contains("github.event_name == 'push' && 'post-merge' || 'sweep'"));
 }
 
+/// The audit gate must be able to SEE the tree it claims to gate.
+///
+/// #10557: the previous version of this test asserted
+/// `gate.contains("review audit homeboy --profile=full")` and
+/// `!gate.contains("continue-on-error: true")`. Both held, and the gate was
+/// still passing in 7 seconds having scanned `files_scanned: 0` of 1817 source
+/// files — because invoking the raw binary skips homeboy-action's `Install
+/// extension` step, no extension declares `provides.file_extensions`, and the
+/// audit corpus comes back empty. The test proved the FLAG; it could not see
+/// the EFFECT.
+///
+/// The effect-level assertion now lives in two places:
+///
+///   * `crates/homeboy-code-audit/src/engine.rs` hard-errors on an empty
+///     corpus (`audit.corpus`), covered by
+///     `crates/homeboy-code-audit/src/engine_corpus_test.rs`. That is the
+///     durable fix — it holds for every consumer of `review audit`, not just
+///     this workflow.
+///   * this test, which asserts the two structural properties a YAML file can
+///     actually carry: the audit runs through the action that installs the
+///     extension, and the job carries an unconditionally-blocking corpus check.
 #[test]
-fn post_merge_full_audit_is_a_blocking_gate() {
+fn post_merge_full_audit_gate_can_actually_see_the_tree() {
     let gate = job("full-audit-gate");
 
     assert!(gate.contains("if: github.event_name == 'push'"));
-    assert!(gate.contains("review audit homeboy --profile=full"));
-    assert!(!gate.contains("continue-on-error: true"));
+
+    // The raw binary has no extension installed, so its corpus is empty. Only
+    // the action's `Install extension` step makes fingerprinting possible.
+    assert!(
+        gate.contains("uses: Extra-Chill/homeboy-action@v2"),
+        "the audit gate must run through homeboy-action, which owns the \
+         `Install extension` step; invoking the binary directly scans 0 files (#10557)"
+    );
+    // The defect verbatim: `.homeboy-bin/homeboy review audit ...` in a `run:`
+    // step. Checked over every non-comment line so a multi-line `run: |` block
+    // cannot smuggle it back.
+    for line in gate.lines() {
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        assert!(
+            !line.contains("homeboy review audit"),
+            "the audit gate must not invoke the binary directly — that skips the \
+             extension install and scans 0 files (#10557): {line}"
+        );
+    }
+    // The audit must reach homeboy through the action's command input, which is
+    // the path that has an extension installed.
+    assert!(gate.contains("commands: review audit"));
+    assert!(gate.contains("args: --profile=full"));
+}
+
+/// The corpus check is the part of the gate that blocks, and nothing may
+/// tolerate its failure.
+#[test]
+fn post_merge_full_audit_gate_blocks_on_an_empty_corpus() {
+    let gate = job("full-audit-gate");
+
+    let assertion = gate
+        .find("name: Assert the audit actually scanned the tree")
+        .expect("audit gate must carry a corpus assertion step");
+    assert!(
+        gate.contains("files_scanned"),
+        "the corpus assertion must read the audit's own files_scanned figure"
+    );
+
+    // Every `continue-on-error: true` in this job must precede the blocking
+    // assertion, so none of them can cover it.
+    for (offset, _) in gate.match_indices("continue-on-error: true") {
+        assert!(
+            offset < assertion,
+            "the corpus assertion step must not be covered by continue-on-error"
+        );
+    }
+}
+
+/// The findings verdict is deliberately reporting-only for now (main carries 37
+/// unbaselined findings plus the ~293 that #10558 makes visible, and baselining
+/// them needs the fixed binary that only exists after this merges). That state
+/// is allowed to exist — but only while it is tracked, so it cannot quietly
+/// become the permanent shape of the gate.
+#[test]
+fn reporting_only_audit_verdict_carries_a_follow_up_issue() {
+    let gate = job("full-audit-gate");
+
+    if !gate.contains("continue-on-error: true") {
+        // The follow-up landed and the verdict is blocking again. Nothing to guard.
+        return;
+    }
+
+    assert!(
+        gate.contains("#10569"),
+        "a reporting-only audit verdict must name the issue that flips it back to blocking"
+    );
+    assert!(
+        gate.contains("Reporting-only until"),
+        "the reporting-only state must be stated at the step it applies to"
+    );
 }
 
 #[test]

@@ -136,6 +136,48 @@ jobs:
           path: target/release/homeboy
           retention-days: 1
 
+  # ── Full-tree audit gate ──
+  #
+  # #10557: this job used to invoke `.homeboy-bin/homeboy review audit` directly.
+  # That skipped homeboy-action's `Install extension` step, so no extension
+  # declared `provides.file_extensions`, the audit corpus came back EMPTY, and
+  # the gate reported `files_scanned: 0, files_skipped: 1817, findings: [],
+  # passed: true` — green in 7 seconds on an 1800-file repository. The sibling
+  # lint/test gates below were unaffected because they already go through the
+  # action, which is why the workflow as a whole looked healthy.
+  #
+  # Two changes close it:
+  #
+  #   1. Route through Extra-Chill/homeboy-action, exactly like the lint/test
+  #      gates and the weekly sweep, so the extension is installed and the audit
+  #      has something to fingerprint.
+  #   2. `review audit` itself now hard-errors on an empty corpus
+  #      (engine.rs, "audit.corpus"), so the 7-second green run is impossible
+  #      for EVERY consumer, not just this workflow. The `Assert the audit
+  #      actually scanned` step below is the belt to that braces: it is
+  #      unconditionally blocking and fails closed.
+  #
+  # ── Why the findings verdict is reporting-only, for now ──
+  #
+  # Turning the findings verdict on today turns `main` red immediately, for debt
+  # nobody has triaged and that this PR did not create:
+  #
+  #   * 37 findings on `main` are already unbaselined (`drift_increased: true`,
+  #     28 resolved, net +9) — accumulated since the 2026-07-27 baseline.
+  #   * ~293 core_boundary_leak findings across 38 files become visible for the
+  #     first time now that the source-policy corpus is fixed (#10558): 182
+  #     index files (`mod.rs`/`lib.rs`/`main.rs`) plus 83 files sitting alone in
+  #     a directory were unscannable by ANY source policy.
+  #
+  # Baselining that set requires running the FIXED binary, which only exists
+  # after this merges. So the findings verdict lands reporting-only and the
+  # follow-up issue below flips it — with a regenerated baseline — as its own
+  # reviewed change. `continue-on-error` here is a dated, tracked state, not a
+  # permanent one; `tests/audit_debt_workflow_test.rs` requires the follow-up
+  # issue reference to sit next to it so it cannot quietly become permanent.
+  #
+  # FOLLOW-UP: #10569 — regenerate the audit baseline on main and remove
+  # `continue-on-error` from the audit step below.
   full-audit-gate:
     name: Full-tree audit gate
     if: github.event_name == 'push'
@@ -147,6 +189,8 @@ jobs:
       actions: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Download homeboy binary
         uses: actions/download-artifact@v4
@@ -162,8 +206,60 @@ jobs:
           fi
           chmod +x .homeboy-bin/homeboy
 
-      - name: Run blocking full-profile audit
-        run: .homeboy-bin/homeboy review audit homeboy --profile=full
+      # Reporting-only until #10569 baselines the pre-existing set. The action
+      # owns the `Install extension` step whose absence caused the 0-file scan.
+      - uses: Extra-Chill/homeboy-action@v2
+        id: audit
+        continue-on-error: true
+        with:
+          binary-path: .homeboy-bin/homeboy
+          commands: review audit
+          expected-commands: review audit,review lint,review test
+          # Full profile enables the whole-tree discovery detectors
+          # (duplication, dead code, source policies, core boundary leaks) that
+          # `--profile=pr` deliberately omits. No `--changed-since`: this gate
+          # exists to see the integrated tree.
+          args: --profile=full
+          # Pure pass/fail gate — the weekly sweep files the tracking issues.
+          # (No `autofix` input: homeboy-action@v2 has none, so passing one is
+          # dead configuration. This gate mutates nothing regardless.)
+          auto-issue: 'false'
+
+      # BLOCKING. #10557's defect was a gate that reported success while
+      # measuring nothing, so the one property this job enforces unconditionally
+      # is that the audit had a corpus at all.
+      #
+      # Reads the action's structured audit output. HOMEBOY_OUTPUT_DIR is
+      # exported to $GITHUB_ENV by the action's run-homeboy-commands.sh. If that
+      # ever moves, this step fails closed (missing file -> exit 1), which is the
+      # correct direction for a gate: it can produce a false RED, never a false
+      # green.
+      #
+      # `files_scanned` is the CONVENTION corpus (index files and single-file
+      # directories excluded — see #10558). It is a lower bound on what the
+      # audit actually read, which is exactly what a "did this run at all"
+      # assertion wants. `review audit` itself already errors when the wider
+      # source-policy corpus is empty, so the two checks bracket the failure.
+      - name: Assert the audit actually scanned the tree
+        run: |
+          set -euo pipefail
+          result="${HOMEBOY_OUTPUT_DIR:-}/audit.json"
+          if [ -z "${HOMEBOY_OUTPUT_DIR:-}" ] || [ ! -s "${result}" ]; then
+            echo "::error::Audit produced no structured output at '${result}'. The audit did not run to completion (or homeboy-action changed where it writes results). A gate that cannot read the audit result cannot claim the audit passed — see #10557." >&2
+            exit 1
+          fi
+          files_scanned="$(jq -r '.data.summary.files_scanned // 0' "${result}")"
+          echo "audit corpus: ${files_scanned} file(s)"
+          if [ "${files_scanned}" -lt 1 ]; then
+            echo "::error::Audit scanned ${files_scanned} files. An audit with an empty corpus has not passed — it has not run. The usual cause is a missing fingerprinting extension: this gate must go through Extra-Chill/homeboy-action, whose 'Install extension' step installs the extensions declared in homeboy.json. See #10557." >&2
+            jq -r '.data.summary' "${result}" >&2 || true
+            exit 1
+          fi
+
+      - name: Report the (non-blocking) audit findings verdict
+        if: steps.audit.outcome == 'failure'
+        run: |
+          echo "::warning::Full-profile audit reported findings. This verdict is REPORTING-ONLY until #10569 regenerates the baseline; the corpus assertion above is the blocking part. Expand the audit group in this job's log for the finding list."
 
   # ── Release-blocking suite, at full scope, on the merged result ──
   # `review lint` + `review test` is exactly release.yml's RELEASE_BLOCKING_COMMANDS
@@ -319,7 +415,8 @@ jobs:
           # auto-enables this on non-PR events, but set it explicitly so the
           # intent of this workflow is unambiguous.
           auto-issue: 'true'
-          # Advisory sweep — never autofix, never push. Findings become the
-          # roadmap; fixes land through their own reviewed PRs.
-          autofix: 'false'
+          # Advisory sweep — never pushes. Findings become the roadmap; fixes
+          # land through their own reviewed PRs. (There is no `autofix` input on
+          # homeboy-action@v2, so the `autofix: 'false'` that used to sit here
+          # was dead configuration asserting a property it did not enforce.)
           app-token: ${{ steps.app-token.outputs.token || '' }}

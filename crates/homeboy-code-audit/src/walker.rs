@@ -54,13 +54,17 @@ fn source_scan_config() -> ScanConfig {
     }
 }
 
-fn extension_matches(path: &Path, extensions: &[String]) -> bool {
+/// Whether an installed extension claims this file type at all.
+///
+/// This is the honest "is this a source file we can fingerprint" predicate, and
+/// the right admission test for any corpus that is NOT doing convention sibling
+/// detection. Source policies in particular have no reason to be blind to
+/// `mod.rs` / `lib.rs` / `main.rs`; pairing this with an explicit
+/// [`is_index_file`] check at the one call site that wants sibling semantics
+/// keeps the two decisions from silently fusing again (#10558).
+pub(crate) fn is_extension_provided_file(path: &Path, extensions: &[String]) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     extensions.iter().any(|candidate| candidate == ext)
-}
-
-pub(crate) fn is_extension_provided_source_file(path: &Path, extensions: &[String]) -> bool {
-    extension_matches(path, extensions) && !is_index_file(path)
 }
 
 /// Build the shared audit source snapshot for full audit runs.
