@@ -58,6 +58,7 @@ Return the current live daemon or start one when no live daemon exists
 | Option | Value | Description |
 | --- | --- | --- |
 | `--addr` | `<ADDR>` | _no help text_ |
+| `--replacement-operation-id` | `<REPLACEMENT_OPERATION_ID>` | Controller-generated idempotency key for a replacement operation |
 
 ## `homeboy daemon adopt-orphan`
 
@@ -120,6 +121,7 @@ Explicitly reconcile active jobs after proving a missing-lease store has no daem
 | --- | --- | --- |
 | `--confirm-no-daemon-owner` | flag | _no help text_ |
 | `--addr` | `<ADDR>` | _no help text_ |
+| `--replacement-operation-id` | `<REPLACEMENT_OPERATION_ID>` | Controller-generated idempotency key for a replacement operation |
 
 ## `homeboy daemon recover-missing-lease-state`
 
@@ -137,6 +139,7 @@ Recover one exact lease after its daemon state record was lost
 | `--confirm-pid-dead` | flag | Deprecated no-op retained for one release; recovery already refuses a running recorded PID |
 | `--confirm-control-plane-lost` | flag | Deprecated no-op retained for one release; recovery already requires an absent state record, a `lease_missing` freshness code, an unreachable daemon, and a failed probe of the recorded endpoint |
 | `--addr` | `<ADDR>` | _no help text_ |
+| `--replacement-operation-id` | `<REPLACEMENT_OPERATION_ID>` | Controller-generated idempotency key for a replacement operation |
 
 ## `homeboy daemon serve`
 
