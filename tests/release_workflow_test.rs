@@ -2,6 +2,10 @@ fn release_workflow() -> &'static str {
     include_str!("../.github/workflows/release.yml")
 }
 
+fn ci_workflow() -> &'static str {
+    include_str!("../.github/workflows/ci.yml")
+}
+
 fn release_quality_policy_script() -> &'static str {
     include_str!("../.github/release-quality-policy.sh")
 }
@@ -266,29 +270,20 @@ fn release_preflight_validates_the_private_workspace_build_before_mutating_relea
 }
 
 #[test]
-fn release_blocks_preparation_and_publication_on_a_native_windows_workspace_build() {
-    let windows_build = job_section(release_workflow(), "gate-windows-build");
-    let quality_policy = job_section(release_workflow(), "release-quality-policy");
-    let prepare = job_section(release_workflow(), "prepare");
+fn release_omits_unused_windows_artifacts_while_ci_checks_windows_source() {
+    let release = release_workflow();
+    let windows_compile = job_section(ci_workflow(), "windows-compile");
 
-    assert!(windows_build.contains("runs-on: windows-latest"));
-    assert!(windows_build.contains("run: cargo build --workspace --locked"));
     assert!(
-        quality_policy.contains("- gate-windows-build"),
-        "the release quality policy must wait for the native Windows build"
+        !release.contains("gate-windows-build"),
+        "release must not restore the unused native Windows artifact gate"
     );
     assert!(
-        quality_policy.contains("needs.gate-windows-build.result == 'success'"),
-        "the release quality policy must fail closed when the native Windows build fails"
+        !dist_workspace_manifest().contains("x86_64-pc-windows-msvc"),
+        "release must not publish an unconsumed Windows artifact"
     );
-    assert!(
-        prepare.contains("- gate-windows-build"),
-        "release preparation must wait for the native Windows build"
-    );
-    assert!(
-        prepare.contains("needs.gate-windows-build.result == 'success'"),
-        "a failed native Windows build must prevent tag preparation and publication"
-    );
+    assert!(windows_compile.contains("runs-on: windows-latest"));
+    assert!(windows_compile.contains("run: cargo check --workspace --locked"));
 }
 
 #[test]

@@ -38,13 +38,11 @@ jobs:
       - name: Compile all workspace test targets
         run: cargo check --workspace --tests --locked
 
-  # Fail-fast mirror of the release `Windows Build` gate. Unix-only `libc`
-  # constants (`SIGKILL` has no Windows definition) and other cfg-gating misses
-  # compile fine on Linux, so they only surfaced after merge when the release
-  # workflow ran `cargo build --workspace` on windows-latest and turned `main`
-  # red (#10398). Same crate scope as that gate, but codegen-free so it stays
-  # cheap enough to run on every PR. Deliberately no `--tests`: the release gate
-  # does not build test targets, and some Unix-only test helpers rely on that.
+  # Unix-only `libc` constants (`SIGKILL` has no Windows definition) and other
+  # cfg-gating misses compile fine on Linux (#10398). The release has no Windows
+  # artifact consumer, so keep this codegen-free source check on every PR rather
+  # than paying for a native release build. Deliberately no `--tests`: some
+  # Unix-only test helpers rely on that boundary.
   windows-compile:
     name: homeboy / Windows Compile
     runs-on: windows-latest
