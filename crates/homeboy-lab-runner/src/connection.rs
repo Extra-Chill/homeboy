@@ -1798,15 +1798,66 @@ fn parse_runner_jobs(
 
 pub fn reverse_broker_reconcile(runner_id: &str) -> Result<Value> {
     let broker_url = reverse_broker_url(runner_id)?;
+    reverse_broker_reconcile_at(runner_id, &broker_url)
+}
+
+/// Reconcile through a persisted reverse broker endpoint without consulting a
+/// live controller-side session.
+pub(crate) fn reverse_broker_reconcile_at(runner_id: &str, broker_url: &str) -> Result<Value> {
     let client = broker_client("build broker reconcile client")?;
     broker_http::post_json(
         &client,
-        &broker_url,
+        broker_url,
         "/runner/jobs/reconcile",
         serde_json::json!({ "runner_id": runner_id }),
         "reconcile reverse runner broker jobs",
         broker_auth::broker_submit_token_for_runner(runner_id)?.as_deref(),
     )
+}
+
+/// Read a reverse runner job from its persisted broker endpoint. This remains
+/// available after a controller restart because it does not require a live
+/// controller-side runner session.
+pub(crate) fn reverse_broker_job_snapshot_at(
+    broker_url: &str,
+    runner_id: &str,
+    job_id: &str,
+) -> Result<(Job, Vec<homeboy_core::api_jobs::JobEvent>)> {
+    let client = broker_client("build reverse broker job snapshot client")?;
+    let token = broker_auth::broker_submit_token_for_runner(runner_id)?;
+    let job_data = broker_http::get_json(
+        &client,
+        broker_url,
+        &format!("/runner/jobs/{job_id}"),
+        "fetch reverse runner broker job",
+        token.as_deref(),
+    )?;
+    let events_data = broker_http::get_json(
+        &client,
+        broker_url,
+        &format!("/runner/jobs/{job_id}/events"),
+        "fetch reverse runner broker job events",
+        token.as_deref(),
+    )?;
+    let job: Job = serde_json::from_value(job_data["job"].clone()).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("parse reverse broker job".to_string()),
+        )
+    })?;
+    if job.id.to_string() != job_id {
+        return Err(Error::internal_unexpected(format!(
+            "reverse broker returned job `{}` while polling requested job `{job_id}`",
+            job.id
+        )));
+    }
+    let events = serde_json::from_value(events_data["events"].clone()).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("parse reverse broker job events".to_string()),
+        )
+    })?;
+    Ok((job, events))
 }
 
 /// Submit a redacted, replayable request to a connected reverse broker. Secret
