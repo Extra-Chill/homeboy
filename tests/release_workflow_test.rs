@@ -269,6 +269,78 @@ fn release_preflight_validates_the_private_workspace_build_before_mutating_relea
     );
 }
 
+/// Walk the workspace sources once and count what the Windows guard exists for.
+///
+/// Reading the tree rather than trusting a remembered number is the point: a
+/// job name in a YAML file proves a job runs, not that it guards anything.
+fn windows_source_surface() -> (usize, Vec<String>) {
+    fn walk(
+        dir: &std::path::Path,
+        rust: &mut Vec<std::path::PathBuf>,
+        manifests: &mut Vec<std::path::PathBuf>,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if path.is_dir() {
+                // `target/` is build output and `.git/` is not source.
+                if name == "target" || name == ".git" || name == "node_modules" {
+                    continue;
+                }
+                walk(&path, rust, manifests);
+            } else if name.ends_with(".rs") {
+                rust.push(path);
+            } else if name == "Cargo.toml" {
+                manifests.push(path);
+            }
+        }
+    }
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut rust = Vec::new();
+    let mut manifests = Vec::new();
+    for sub in ["crates", "src"] {
+        walk(&root.join(sub), &mut rust, &mut manifests);
+    }
+    manifests.push(root.join("Cargo.toml"));
+
+    let cfg_sites = rust
+        .iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .map(|body| {
+            body.matches("cfg(windows)").count()
+                + body.matches("cfg(target_os = \"windows\")").count()
+        })
+        .sum();
+
+    let mut windows_crates: Vec<String> = manifests
+        .iter()
+        .filter(|path| {
+            std::fs::read_to_string(path)
+                .map(|body| body.contains("windows-sys"))
+                .unwrap_or(false)
+        })
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    windows_crates.sort();
+
+    (cfg_sites, windows_crates)
+}
+
+/// PR CI keeps a Windows *source* check; the release drops the Windows
+/// *artifact*. Both halves are asserted by effect, not by job name.
+///
+/// #10539: `38492c5db` removed the `gate-windows-build` job and left this test
+/// asserting it, panicking `missing gate-windows-build job` and intermittently
+/// killing releases. Inverting the assertion fixed that instance — but a test
+/// that only says "the removed job is still removed" would keep passing if the
+/// surviving guard were narrowed to nothing, or if the code it guards
+/// disappeared and the job became pure CI spend. So this asserts the guard has
+/// something to guard, and that its scope actually reaches it.
 #[test]
 fn release_omits_unused_windows_artifacts_while_ci_checks_windows_source() {
     let release = release_workflow();
@@ -282,8 +354,39 @@ fn release_omits_unused_windows_artifacts_while_ci_checks_windows_source() {
         !dist_workspace_manifest().contains("x86_64-pc-windows-msvc"),
         "release must not publish an unconsumed Windows artifact"
     );
-    assert!(windows_compile.contains("runs-on: windows-latest"));
-    assert!(windows_compile.contains("run: cargo check --workspace --locked"));
+
+    // The guard must still be a Windows guard.
+    assert!(
+        windows_compile.contains("runs-on: windows-latest"),
+        "a Windows source check that does not run on Windows checks nothing"
+    );
+    // `--workspace` is the load-bearing word. Narrowing to `-p <crate>` would
+    // leave the job green while the cfg-gated code it exists for goes
+    // uncompiled, which is indistinguishable from deleting the job.
+    assert!(
+        windows_compile.contains("run: cargo check --workspace --locked"),
+        "the Windows check must cover the whole workspace with the locked graph"
+    );
+    assert!(
+        !windows_compile.contains("--tests"),
+        "the Windows check is deliberately codegen-free and test-target-free; \
+         some Unix-only test helpers rely on that boundary"
+    );
+
+    // And there must be something for it to guard. If this ever hits zero the
+    // honest move is to delete the job, not to keep paying a windows-latest
+    // runner on every PR for a check with an empty subject.
+    let (cfg_sites, windows_crates) = windows_source_surface();
+    assert!(
+        cfg_sites > 0,
+        "no cfg(windows) sites remain in the workspace: the windows-compile job now guards \
+         nothing and should be removed rather than left running"
+    );
+    assert!(
+        !windows_crates.is_empty(),
+        "no crate declares a windows-sys dependency: the windows-compile job now guards nothing \
+         and should be removed rather than left running. Checked manifests under crates/ and the root."
+    );
 }
 
 #[test]

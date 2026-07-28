@@ -1,0 +1,173 @@
+{
+  "command": "review",
+  "data": {
+    "baseline_comparison": {
+      "delta": 34,
+      "drift_increased": true,
+      "new_items": [
+        {
+          "context_label": "intra-method-duplication",
+          "description": "Duplicated block in `status_with_options` \u2014 13 identical lines at line 1385 and line 1398",
+          "fingerprint": "intra-method-duplication::crates/homeboy-agents/src/agent_task_lifecycle/lifecycle_ops.rs::IntraMethodDuplicate"
+        },
+        {
+          "context_label": "intra-method-duplication",
+          "description": "Duplicated block in `audit_internal` \u2014 7 identical lines at line 286 and line 318",
+          "fingerprint": "intra-method-duplication::crates/homeboy-code-audit/src/engine.rs::IntraMethodDuplicate"
+        }
+      ],
+      "resolved_fingerprints": [
+        "artifact_portability::artifact_portability/local_artifact_path/$.artifact.commands[1].findings[0].metadata.source_sidecar_path::NonPortableArtifactPath",
+        "artifact_portability::artifact_portability/local_artifact_path/$.artifact.commands[1].findings[1].metadata.source_sidecar_path::NonPortableArtifactPath"
+      ]
+    },
+    "command": "audit.compared",
+    "component_id": "homeboy",
+    "conventions": [
+      {
+        "confidence": 1.0,
+        "conforming": [
+          "crates/homeboy-agents/src/agent_task_service/tests.rs",
+          "crates/homeboy-agents/src/agent_task_service/cook_tests.rs"
+        ],
+        "expected_interfaces": [
+          "AgentTaskExecutorAdapter"
+        ],
+        "expected_methods": [
+          "execute"
+        ],
+        "expected_registrations": [
+          "json"
+        ],
+        "glob": "crates/homeboy-agents/src/agent_task_service/*",
+        "name": "Agent Task Service (Tests)",
+        "status": "clean",
+        "total_files": 2
+      }
+    ],
+    "duplicate_groups": [
+      {
+        "canonical_file": "crates/homeboy-cli/src/commands/runs/remote.rs",
+        "function_name": "active_runner_job_run_summary_if_durable",
+        "remove_from": [
+          "crates/homeboy-cli/src/commands/runs/handlers.rs"
+        ]
+      }
+    ],
+    "findings": [
+      {
+        "category": "Commands",
+        "file": "crates/homeboy-cli/src/commands/agent_task_dispatch.rs",
+        "fingerprint": "crates/homeboy-cli/src/commands/agent_task_dispatch.rs:missing_method:Commands:Missing method: run",
+        "message": "Missing method: run",
+        "metadata": {
+          "confidence": "heuristic",
+          "convention": "Commands",
+          "kind": "missing_method",
+          "source_sidecar": "audit-findings",
+          "suggestion": "Add run() to match the convention in Commands"
+        },
+        "rule": "missing_method",
+        "severity": "warning",
+        "source": {
+          "kind": "sidecar",
+          "label": "audit-findings"
+        },
+        "tool": "audit"
+      },
+      {
+        "category": "Src",
+        "file": "crates/contracts/homeboy-audit-contract/src/test_mapping.rs",
+        "fingerprint": "crates/contracts/homeboy-audit-contract/src/test_mapping.rs:missing_method:Src:Missing method: merge",
+        "message": "Missing method: merge",
+        "metadata": {
+          "confidence": "heuristic",
+          "convention": "Src",
+          "kind": "missing_method",
+          "source_sidecar": "audit-findings",
+          "suggestion": "Add merge() to match the convention in Src"
+        },
+        "rule": "missing_method",
+        "severity": "warning",
+        "source": {
+          "kind": "sidecar",
+          "label": "audit-findings"
+        },
+        "tool": "audit"
+      }
+    ],
+    "passed": false,
+    "source_path": "/home/runner/work/homeboy/homeboy",
+    "summary": {
+      "alignment_score": 0.8198198080062866,
+      "conventions_detected": 13,
+      "files_scanned": 1596,
+      "files_skipped": 1,
+      "outliers_found": 20,
+      "warnings": [
+        "1 source file(s) found but could not be fingerprinted (no extension provides fingerprinting for these file types)"
+      ]
+    }
+  },
+  "diagnostics": {
+    "code": "command.failed",
+    "details": {
+      "exit_code": 1
+    },
+    "failure_digest": {
+      "next_actions": [
+        {
+          "command": "homeboy runs evidence 8b9126ba-9900-4a9e-a310-aaf6c2c1f1cf",
+          "kind": "show",
+          "label": "show evidence"
+        },
+        {
+          "command": "homeboy activity show 8b9126ba-9900-4a9e-a310-aaf6c2c1f1cf",
+          "kind": "show",
+          "label": "show activity"
+        }
+      ],
+      "summary": "audit run 8b9126ba-9900-4a9e-a310-aaf6c2c1f1cf failed (exit 1)"
+    },
+    "message": "audit run 8b9126ba-9900-4a9e-a310-aaf6c2c1f1cf failed (exit 1)"
+  },
+  "evidence": [
+    {
+      "id": "8b9126ba-9900-4a9e-a310-aaf6c2c1f1cf-result",
+      "kind": "command-result",
+      "semantic_key": "command_result",
+      "uri": "homeboy://runs/8b9126ba-9900-4a9e-a310-aaf6c2c1f1cf/result"
+    }
+  ],
+  "exit_code": 1,
+  "next_actions": [
+    {
+      "command": "homeboy runs evidence 8b9126ba-9900-4a9e-a310-aaf6c2c1f1cf",
+      "kind": "show",
+      "label": "show evidence"
+    }
+  ],
+  "operation": "audit",
+  "refs": {
+    "runs": [
+      {
+        "id": "8b9126ba-9900-4a9e-a310-aaf6c2c1f1cf",
+        "kind": "audit",
+        "source": "homeboy-audit",
+        "status_command": "homeboy runs show 8b9126ba-9900-4a9e-a310-aaf6c2c1f1cf",
+        "watch_command": "homeboy runs watch 8b9126ba-9900-4a9e-a310-aaf6c2c1f1cf"
+      }
+    ]
+  },
+  "run": {
+    "id": "8b9126ba-9900-4a9e-a310-aaf6c2c1f1cf",
+    "kind": "audit",
+    "source": "homeboy-audit",
+    "status_command": "homeboy runs show 8b9126ba-9900-4a9e-a310-aaf6c2c1f1cf",
+    "watch_command": "homeboy runs watch 8b9126ba-9900-4a9e-a310-aaf6c2c1f1cf"
+  },
+  "schema": "homeboy/command-result/v3",
+  "status": "failed",
+  "success": false,
+  "summary": "audit run 8b9126ba-9900-4a9e-a310-aaf6c2c1f1cf failed (exit 1)"
+}

@@ -229,11 +229,14 @@ jobs:
       # measuring nothing, so the one property this job enforces unconditionally
       # is that the audit had a corpus at all.
       #
-      # Reads the action's structured audit output. HOMEBOY_OUTPUT_DIR is
-      # exported to $GITHUB_ENV by the action's run-homeboy-commands.sh. If that
-      # ever moves, this step fails closed (missing file -> exit 1), which is the
-      # correct direction for a gate: it can produce a false RED, never a false
-      # green.
+      # The assertion lives in .github/assert-audit-corpus.sh, not inline here,
+      # because an inline `run:` block can only ever be checked by a YAML
+      # substring test — and a substring test is exactly what let this step ship
+      # broken twice (wrong result filename, then a wrong jq path bolted on top
+      # of it). The script is executed against recorded fixtures by
+      # tests/audit_debt_workflow_test.rs, including one fixture per historical
+      # defect, so the assertion is verified by running it rather than by
+      # reading it.
       #
       # `files_scanned` is the CONVENTION corpus (index files and single-file
       # directories excluded — see #10558). It is a lower bound on what the
@@ -241,25 +244,31 @@ jobs:
       # assertion wants. `review audit` itself already errors when the wider
       # source-policy corpus is empty, so the two checks bracket the failure.
       - name: Assert the audit actually scanned the tree
-        run: |
-          set -euo pipefail
-          result="${HOMEBOY_OUTPUT_DIR:-}/audit.json"
-          if [ -z "${HOMEBOY_OUTPUT_DIR:-}" ] || [ ! -s "${result}" ]; then
-            echo "::error::Audit produced no structured output at '${result}'. The audit did not run to completion (or homeboy-action changed where it writes results). A gate that cannot read the audit result cannot claim the audit passed — see #10557." >&2
-            exit 1
-          fi
-          files_scanned="$(jq -r '.data.audit.output.summary.files_scanned // 0' "${result}")"
-          echo "audit corpus: ${files_scanned} file(s)"
-          if [ "${files_scanned}" -lt 1 ]; then
-            echo "::error::Audit scanned ${files_scanned} files. An audit with an empty corpus has not passed — it has not run. The usual cause is a missing fingerprinting extension: this gate must go through Extra-Chill/homeboy-action, whose 'Install extension' step installs the extensions declared in homeboy.json. See #10557." >&2
-            jq -r '.data.audit.output.summary' "${result}" >&2 || true
-            exit 1
-          fi
+        run: bash .github/assert-audit-corpus.sh
 
       - name: Report the (non-blocking) audit findings verdict
         if: steps.audit.outcome == 'failure'
         run: |
+          set -euo pipefail
+          result="${HOMEBOY_OUTPUT_DIR:-}/review-audit.json"
           echo "::warning::Full-profile audit reported findings. This verdict is REPORTING-ONLY until #10569 regenerates the baseline; the corpus assertion above is the blocking part. Expand the audit group in this job's log for the finding list."
+          # Put the size of the debt in the job summary. A warning annotation
+          # nobody counts is how a reporting-only verdict quietly becomes
+          # permanent; a number that has to be looked at every merge is not.
+          {
+            echo "### Full-tree audit: reporting-only verdict (#10569)"
+            echo
+            if [ -s "${result}" ]; then
+              jq -r '"- corpus: \(.data.summary.files_scanned) file(s)",
+                     "- total findings: \(.data.findings | length)",
+                     "- new since baseline: \(.data.baseline_comparison.new_items | length)",
+                     "- resolved since baseline: \(.data.baseline_comparison.resolved_fingerprints | length)"' \
+                "${result}" 2>/dev/null \
+                || echo "- could not read \`${result}\`"
+            else
+              echo "- no audit result at \`${result}\` (see the corpus assertion step)"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   # ── Release-blocking suite, at full scope, on the merged result ──
   # `review lint` + `review test` is exactly release.yml's RELEASE_BLOCKING_COMMANDS

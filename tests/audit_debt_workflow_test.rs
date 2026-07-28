@@ -16,6 +16,101 @@ fn report_red_main_script() -> &'static str {
     include_str!("../.github/report-red-main.sh")
 }
 
+/// Compile-time proof that the blocking corpus assertion the workflow invokes
+/// exists. The tests below then EXECUTE it — see
+/// `assert_audit_corpus_rejects_the_historical_audit_json_filename`.
+fn audit_corpus_script() -> &'static str {
+    include_str!("../.github/assert-audit-corpus.sh")
+}
+
+/// A real `homeboy review audit --profile=full --output <path>` payload,
+/// recorded from a full run against this repository. The bulk arrays are
+/// truncated; the envelope is verbatim. Fixtures that are hand-written to match
+/// what a test expects prove nothing — this one is the actual contract the gate
+/// has to parse.
+fn recorded_review_audit_payload() -> &'static str {
+    include_str!("fixtures/audit_corpus/review-audit.json")
+}
+
+/// A real payload from a `review audit` that failed BEFORE producing an audit
+/// (a stale baseline row on `main`, 2026-07-28). There is no `.data` at all.
+fn recorded_failed_review_audit_payload() -> &'static str {
+    include_str!("fixtures/audit_corpus/review-audit-failed-validation.json")
+}
+
+/// The shape of the `review` UMBRELLA command (audit + lint + test stages),
+/// which is where `.data.audit.output.summary` actually lives. `review audit`
+/// on its own never produces this. #10583 pointed the gate's jq path here.
+const UMBRELLA_REVIEW_PAYLOAD: &str = r#"{
+  "schema": "homeboy/command-result/v3",
+  "command": "review",
+  "success": true,
+  "exit_code": 0,
+  "data": {
+    "audit": { "output": { "summary": { "files_scanned": 1596 } } },
+    "lint": { "output": {} },
+    "test": { "output": {} }
+  }
+}
+"#;
+
+struct CorpusAssertion {
+    status: std::process::ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+impl CorpusAssertion {
+    fn output(&self) -> String {
+        format!("{}\n{}", self.stdout, self.stderr)
+    }
+}
+
+/// Run the real gate script the workflow runs, against a directory we control.
+fn run_corpus_assertion(
+    output_dir: Option<&std::path::Path>,
+    min_files: Option<&str>,
+) -> CorpusAssertion {
+    assert!(
+        std::process::Command::new("jq")
+            .arg("--version")
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false),
+        "jq must be installed to exercise the audit corpus gate. Skipping silently would make this \
+         test the very thing it exists to prevent: a check that reports success while measuring nothing."
+    );
+
+    let mut command = std::process::Command::new("bash");
+    command.arg(".github/assert-audit-corpus.sh");
+    command.env_remove("HOMEBOY_OUTPUT_DIR");
+    command.env_remove("AUDIT_MIN_FILES_SCANNED");
+    if let Some(dir) = output_dir {
+        command.env("HOMEBOY_OUTPUT_DIR", dir);
+    }
+    if let Some(min) = min_files {
+        command.env("AUDIT_MIN_FILES_SCANNED", min);
+    }
+
+    let output = command
+        .output()
+        .expect("corpus assertion script should run");
+
+    CorpusAssertion {
+        status: output.status,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+/// Write one file into a fresh output dir and run the assertion against it.
+fn corpus_assertion_with(file_name: &str, payload: &str) -> (tempfile::TempDir, CorpusAssertion) {
+    let dir = tempfile::tempdir().expect("output dir");
+    std::fs::write(dir.path().join(file_name), payload).expect("write payload");
+    let result = run_corpus_assertion(Some(dir.path()), None);
+    (dir, result)
+}
+
 /// Extract a single job block: from `  <name>:` up to the next line at exactly
 /// two spaces of indent (the next job key, or a comment introducing it).
 ///
@@ -264,12 +359,20 @@ fn post_merge_full_audit_gate_blocks_on_an_empty_corpus() {
         .find("name: Assert the audit actually scanned the tree")
         .expect("audit gate must carry a corpus assertion step");
     assert!(
-        gate.contains(".data.audit.output.summary.files_scanned"),
-        "review audit nests the audit result below data.audit.output; the corpus assertion must read the audit's own files_scanned figure"
+        gate.contains("run: bash .github/assert-audit-corpus.sh"),
+        "the corpus assertion must be the executable script, not an inline run: block — inline \
+         shell can only be checked by a substring test, which is how this step shipped broken twice"
+    );
+    // Nothing may re-implement the parse inline: an inline copy would drift away
+    // from the fixture-tested script without any test noticing.
+    assert!(
+        !gate.contains("files_scanned=\"$(jq"),
+        "the audit gate must not parse the audit result inline; assert-audit-corpus.sh owns that \
+         and is exercised against recorded fixtures"
     );
     assert!(
-        !gate.contains(".data.summary.files_scanned"),
-        "data.summary is the review-level summary and has no audit corpus metric"
+        !audit_corpus_script().is_empty(),
+        "the corpus assertion script must exist"
     );
 
     // Every `continue-on-error: true` in this job must precede the blocking
@@ -282,11 +385,207 @@ fn post_merge_full_audit_gate_blocks_on_an_empty_corpus() {
     }
 }
 
-/// The findings verdict is deliberately reporting-only for now (main carries 37
-/// unbaselined findings plus the ~293 that #10558 makes visible, and baselining
-/// them needs the fixed binary that only exists after this merges). That state
-/// is allowed to exist — but only while it is tracked, so it cannot quietly
-/// become the permanent shape of the gate.
+/// The happy path, proven by running the gate over a recorded real payload.
+///
+/// This is the assertion the whole file is about: not "the workflow mentions
+/// files_scanned" but "the shipped script, given the bytes `review audit`
+/// actually writes, exits 0 and reports the real corpus size".
+#[test]
+fn audit_corpus_gate_accepts_a_recorded_review_audit_payload() {
+    let (_dir, result) =
+        corpus_assertion_with("review-audit.json", recorded_review_audit_payload());
+
+    assert!(
+        result.status.success(),
+        "the recorded payload must pass the corpus gate:\n{}",
+        result.output()
+    );
+    assert!(
+        result.stdout.contains("audit corpus: 1596 file(s)"),
+        "the gate must report the corpus size it actually read:\n{}",
+        result.output()
+    );
+}
+
+/// Regression: the gate spent its entire life reading `audit.json`.
+///
+/// homeboy-action derives the result filename from the command
+/// (`command_output_stem "review audit"` -> `review-audit`), so `audit.json`
+/// never existed. The assertion failed on every merge from the day it landed,
+/// and reported it as "the audit did not run to completion" — blaming the audit
+/// for the gate's own bug.
+#[test]
+fn audit_corpus_gate_rejects_the_historical_audit_json_filename() {
+    let (_dir, result) = corpus_assertion_with("audit.json", recorded_review_audit_payload());
+
+    assert!(
+        !result.status.success(),
+        "a payload under the wrong filename must not pass:\n{}",
+        result.output()
+    );
+    assert!(
+        result.stderr.contains("review-audit.json"),
+        "the failure must name the file homeboy-action actually writes:\n{}",
+        result.output()
+    );
+    // The directory listing is what turns "no output" into "output under a
+    // different name", which is the diagnosis nobody got for a whole day.
+    assert!(
+        result.stderr.contains("audit.json"),
+        "the failure must show what the output directory does contain:\n{}",
+        result.output()
+    );
+}
+
+/// Regression: #10583 repointed the jq path at `.data.audit.output.summary`,
+/// which is the `review` UMBRELLA shape. `review audit` alone returns the flat
+/// audit output. With the old `// 0` default this misreported a shape mismatch
+/// as an empty corpus; the gate must distinguish the two.
+#[test]
+fn audit_corpus_gate_rejects_the_umbrella_review_shape() {
+    let (_dir, result) = corpus_assertion_with("review-audit.json", UMBRELLA_REVIEW_PAYLOAD);
+
+    assert!(
+        !result.status.success(),
+        "the umbrella shape carries no `review audit` corpus figure and must not pass:\n{}",
+        result.output()
+    );
+    assert!(
+        result.stderr.contains(".data.summary.files_scanned"),
+        "the failure must name the field `review audit` actually writes:\n{}",
+        result.output()
+    );
+    assert!(
+        !result.stdout.contains("audit corpus: 0 file(s)"),
+        "a shape mismatch must not be reported as an empty corpus — that conflation is what let \
+         the wrong jq path look like a plausible finding:\n{}",
+        result.output()
+    );
+}
+
+/// A `review audit` that died before auditing anything writes a real result
+/// file with no `.data`. The gate must fail AND surface the actual cause rather
+/// than claiming the audit produced no output.
+#[test]
+fn audit_corpus_gate_surfaces_a_failed_audit_instead_of_blaming_missing_output() {
+    let (_dir, result) =
+        corpus_assertion_with("review-audit.json", recorded_failed_review_audit_payload());
+
+    assert!(
+        !result.status.success(),
+        "a failed audit has no corpus and must not pass:\n{}",
+        result.output()
+    );
+    assert!(
+        result.stderr.contains("baselines.audit.known_fingerprints"),
+        "the gate must print the audit's own failure summary so the operator sees the real cause:\n{}",
+        result.output()
+    );
+}
+
+#[test]
+fn audit_corpus_gate_rejects_an_empty_corpus() {
+    let payload =
+        recorded_review_audit_payload().replace("\"files_scanned\": 1596", "\"files_scanned\": 0");
+    assert_ne!(
+        payload,
+        recorded_review_audit_payload(),
+        "the fixture's corpus figure moved; this test was about to assert nothing"
+    );
+
+    let (_dir, result) = corpus_assertion_with("review-audit.json", &payload);
+
+    assert!(
+        !result.status.success(),
+        "an empty corpus is #10557 verbatim and must fail:\n{}",
+        result.output()
+    );
+}
+
+/// `files_scanned >= 1` cannot tell 1596 files from 3. A corpus that collapses
+/// without emptying is the same defect wearing a different number, so the gate
+/// carries a sanity floor.
+#[test]
+fn audit_corpus_gate_rejects_a_collapsed_but_non_empty_corpus() {
+    let payload =
+        recorded_review_audit_payload().replace("\"files_scanned\": 1596", "\"files_scanned\": 3");
+    assert_ne!(
+        payload,
+        recorded_review_audit_payload(),
+        "the fixture's corpus figure moved; this test was about to assert nothing"
+    );
+
+    let (_dir, result) = corpus_assertion_with("review-audit.json", &payload);
+
+    assert!(
+        !result.status.success(),
+        "3 of ~1600 scannable files is a collapsed corpus, not a pass:\n{}",
+        result.output()
+    );
+    assert!(
+        result.stderr.contains("sanity floor"),
+        "the failure must explain the floor and how to move it deliberately:\n{}",
+        result.output()
+    );
+}
+
+/// Fails closed when it cannot find the audit at all. A gate is allowed to
+/// produce a false RED; it is never allowed to produce a false green.
+#[test]
+fn audit_corpus_gate_fails_closed_without_an_output_directory() {
+    let unset = run_corpus_assertion(None, None);
+    assert!(
+        !unset.status.success(),
+        "an unset HOMEBOY_OUTPUT_DIR must fail closed:\n{}",
+        unset.output()
+    );
+
+    let empty = tempfile::tempdir().expect("output dir");
+    let missing = run_corpus_assertion(Some(empty.path()), None);
+    assert!(
+        !missing.status.success(),
+        "an output directory with no audit result must fail closed:\n{}",
+        missing.output()
+    );
+}
+
+/// The floor is configurable, and the gate says which floor it applied — so a
+/// future corpus shrink is a deliberate edit rather than a silent softening.
+#[test]
+fn audit_corpus_gate_reports_the_floor_it_applied() {
+    let dir = tempfile::tempdir().expect("output dir");
+    std::fs::write(
+        dir.path().join("review-audit.json"),
+        recorded_review_audit_payload(),
+    )
+    .expect("write payload");
+
+    let result = run_corpus_assertion(Some(dir.path()), Some("1"));
+    assert!(result.status.success(), "{}", result.output());
+    assert!(
+        result.stdout.contains("floor 1"),
+        "the gate must state the floor it enforced:\n{}",
+        result.output()
+    );
+
+    let raised = run_corpus_assertion(Some(dir.path()), Some("100000"));
+    assert!(
+        !raised.status.success(),
+        "a floor above the corpus must fail:\n{}",
+        raised.output()
+    );
+}
+
+/// The findings verdict is deliberately reporting-only for now. Measured on
+/// `main` at 38b3fdf1b (run 30357149676, the first run where the audit gate
+/// actually scanned): **224 new findings since baseline** — 185
+/// `core_boundary_leak` rows unblinded by #10558's corpus fix plus 39 ordinary
+/// drift rows. Baselining them needs the fixed binary and a triage pass over
+/// the 185, so the flip is tracked in #10569.
+///
+/// That state is allowed to exist — but only while it is tracked AND while its
+/// size is published on every merge. A warning annotation nobody counts is how
+/// a reporting-only verdict quietly becomes permanent.
 #[test]
 fn reporting_only_audit_verdict_carries_a_follow_up_issue() {
     let gate = job("full-audit-gate");
@@ -303,6 +602,16 @@ fn reporting_only_audit_verdict_carries_a_follow_up_issue() {
     assert!(
         gate.contains("Reporting-only until"),
         "the reporting-only state must be stated at the step it applies to"
+    );
+    assert!(
+        gate.contains("GITHUB_STEP_SUMMARY"),
+        "a reporting-only verdict must publish the size of the debt it is tolerating, not just \
+         warn that some exists"
+    );
+    assert!(
+        gate.contains("new_items | length"),
+        "the published figure must be the count of findings NEW since the baseline — the number \
+         that has to reach zero (or be baselined) before #10569 can flip this to blocking"
     );
 }
 
