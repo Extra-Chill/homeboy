@@ -32,6 +32,80 @@ struct DraftAdoptionManifest {
     version: String,
     commit: String,
     expected_assets: Vec<String>,
+    /// Provenance of the binary performing the recovery, as opposed to the
+    /// release target it repairs (issue #10519). Optional so a manifest
+    /// written before this field existed still adopts instead of failing
+    /// closed on a pipeline that is already stranded.
+    #[serde(default)]
+    control: Option<DraftAdoptionControl>,
+}
+
+#[derive(Deserialize)]
+struct DraftAdoptionControl {
+    /// Commit the control binary was built from.
+    commit: String,
+    /// Whether the control binary's history contains the release target
+    /// commit. `None` when CI could not resolve the relationship, which must
+    /// degrade to "unverified", never to "blocked".
+    #[serde(default)]
+    contains_target: Option<bool>,
+}
+
+/// How the control binary performing a recovery relates to the release it is
+/// repairing.
+///
+/// Recovery deliberately runs a binary built from the current default branch
+/// rather than from the stranded tag, so that a publisher fix merged *after*
+/// the tag can be applied to it (#10519). That freedom has an inverse hazard:
+/// a control binary from a tree that never contained the tag would apply a
+/// release contract this tag was never planned under. This classification is
+/// the boundary between the two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecoveryLineage {
+    /// Control binary strictly descends from the release target: it contains
+    /// everything the tag contained, plus any publisher fix merged since.
+    /// This is the bootstrap working as intended.
+    Bootstrapped,
+    /// Control binary *is* the release target commit. Legitimate for a tag
+    /// pushed moments ago, but a publisher fix merged after the tag cannot be
+    /// bootstrapped by this run.
+    Pinned,
+    /// Control binary's history does not contain the release target commit.
+    Divergent,
+    /// CI could not establish the relationship.
+    Unknown,
+}
+
+impl RecoveryLineage {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Bootstrapped => "bootstrapped",
+            Self::Pinned => "pinned",
+            Self::Divergent => "divergent",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Classify control-binary lineage from the two commits and CI's ancestry
+/// answer. Pure so the policy is testable without a repository.
+fn classify_recovery_lineage(
+    control_commit: &str,
+    target_commit: &str,
+    contains_target: Option<bool>,
+) -> RecoveryLineage {
+    if control_commit.is_empty() || target_commit.is_empty() {
+        return RecoveryLineage::Unknown;
+    }
+    // A commit always contains itself, so equality outranks CI's answer.
+    if control_commit.eq_ignore_ascii_case(target_commit) {
+        return RecoveryLineage::Pinned;
+    }
+    match contains_target {
+        Some(true) => RecoveryLineage::Bootstrapped,
+        Some(false) => RecoveryLineage::Divergent,
+        None => RecoveryLineage::Unknown,
+    }
 }
 
 pub(crate) struct PackageRecoveryContext<'a> {
@@ -61,14 +135,23 @@ pub(crate) fn run_artifact_inventory(
 
     let manifest_path = dir.join(PACKAGE_RECOVERY_MANIFEST);
     if manifest_path.is_file() && is_draft_adoption_manifest(&manifest_path) {
-        let intent = inventory_draft_adoption_manifest(&manifest_path, recovery_context)?;
+        let (intent, lineage) =
+            inventory_draft_adoption_manifest(&manifest_path, recovery_context)?;
         let count = intent.expected_assets.len();
         state.draft_adoption = Some(intent);
+        if lineage == RecoveryLineage::Pinned {
+            homeboy_core::log_status!(
+                "release",
+                "! recovery control binary is the release target commit {}; a publisher fix merged after {} cannot be applied by this run",
+                recovery_context.commit,
+                recovery_context.tag
+            );
+        }
         return Ok(step_success(
             "artifacts.inventory",
             "artifacts.inventory",
             Some(
-                serde_json::json!({ "dir": artifact_dir, "artifact_count": 0, "adoption_asset_count": count }),
+                serde_json::json!({ "dir": artifact_dir, "artifact_count": 0, "adoption_asset_count": count, "control_lineage": lineage.as_str() }),
             ),
             Vec::new(),
         ));
@@ -241,7 +324,7 @@ fn is_draft_adoption_manifest(manifest_path: &std::path::Path) -> bool {
 fn inventory_draft_adoption_manifest(
     manifest_path: &std::path::Path,
     context: &PackageRecoveryContext,
-) -> Result<DraftAdoptionIntent> {
+) -> Result<(DraftAdoptionIntent, RecoveryLineage)> {
     let contents = std::fs::read_to_string(manifest_path).map_err(|error| {
         Error::internal_io(
             format!(
@@ -270,6 +353,7 @@ fn inventory_draft_adoption_manifest(
             None,
         ));
     }
+    let target_commit = manifest.commit.clone();
     let identity = PackageRecoveryManifest {
         schema: manifest.schema,
         schema_version: 1,
@@ -280,6 +364,38 @@ fn inventory_draft_adoption_manifest(
         artifacts: Vec::new(),
     };
     validate_recovery_identity(&identity, manifest_path, context)?;
+
+    // Recovery is allowed — required, even — to be NEWER than the release it
+    // repairs; that is the whole point of building the control binary from the
+    // default branch instead of the stranded tag. It must never be OLDER or
+    // sideways: a control binary whose history lacks the tag cannot be shown
+    // to carry the publisher fix recovery exists to apply, and would impose a
+    // release contract this tag was never planned under.
+    let lineage = match manifest.control.as_ref() {
+        Some(control) => {
+            classify_recovery_lineage(&control.commit, &target_commit, control.contains_target)
+        }
+        None => RecoveryLineage::Unknown,
+    };
+    if lineage == RecoveryLineage::Divergent {
+        let control_commit = manifest
+            .control
+            .as_ref()
+            .map(|control| control.commit.as_str())
+            .unwrap_or_default();
+        return Err(Error::validation_invalid_argument(
+            "from-artifacts",
+            format!(
+                "Draft adoption control binary was built from commit '{}', whose history does not contain release target '{}' ({}). Recovery may run code newer than the tag it repairs, but not code from a tree that never contained it. Re-dispatch the release workflow from a ref that contains {}.",
+                control_commit,
+                target_commit,
+                identity.tag,
+                identity.tag
+            ),
+            Some(manifest_path.display().to_string()),
+            None,
+        ));
+    }
     if manifest.expected_assets.is_empty()
         || manifest
             .expected_assets
@@ -303,9 +419,12 @@ fn inventory_draft_adoption_manifest(
             None,
         ));
     }
-    Ok(DraftAdoptionIntent {
-        expected_assets: names,
-    })
+    Ok((
+        DraftAdoptionIntent {
+            expected_assets: names,
+        },
+        lineage,
+    ))
 }
 
 fn valid_asset_name(name: &str) -> bool {
@@ -538,7 +657,8 @@ fn validate_recovery_artifact(
 #[cfg(test)]
 mod tests {
     use super::{
-        establish_publication_authority, run_artifact_inventory, PackageRecoveryContext,
+        classify_recovery_lineage, establish_publication_authority, run_artifact_inventory,
+        PackageRecoveryContext, RecoveryLineage, ReleaseStepResult, Result,
         PACKAGE_RECOVERY_MANIFEST, PACKAGE_RECOVERY_MANIFEST_SCHEMA,
         PACKAGE_RECOVERY_MANIFEST_SCHEMA_VERSION,
     };
@@ -979,5 +1099,129 @@ mod tests {
             sha256: None,
             publication_authority: false,
         }
+    }
+
+    // ── Recovery control-binary lineage (issue #10519) ──
+
+    #[test]
+    fn recovery_lineage_allows_newer_control_binaries_and_rejects_only_divergent_history() {
+        // The bootstrap: control binary descends from the tag, so it can carry
+        // a publisher fix merged after the tag was cut.
+        assert_eq!(
+            classify_recovery_lineage("newsha", "abc123", Some(true)),
+            RecoveryLineage::Bootstrapped
+        );
+        // The trap #10519 names: control binary IS the stranded tag.
+        assert_eq!(
+            classify_recovery_lineage("abc123", "abc123", None),
+            RecoveryLineage::Pinned
+        );
+        // A commit always contains itself; equality outranks a bogus CI answer.
+        assert_eq!(
+            classify_recovery_lineage("ABC123", "abc123", Some(false)),
+            RecoveryLineage::Pinned
+        );
+        // The inverse hazard: control binary from a tree without the tag.
+        assert_eq!(
+            classify_recovery_lineage("othersha", "abc123", Some(false)),
+            RecoveryLineage::Divergent
+        );
+        // Unresolvable ancestry degrades to "unverified", never to "blocked".
+        assert_eq!(
+            classify_recovery_lineage("othersha", "abc123", None),
+            RecoveryLineage::Unknown
+        );
+        assert_eq!(
+            classify_recovery_lineage("", "abc123", Some(false)),
+            RecoveryLineage::Unknown
+        );
+    }
+
+    fn adoption_manifest_with_control(control: Option<serde_json::Value>) -> serde_json::Value {
+        let mut manifest = serde_json::json!({
+            "schema": "homeboy.draft-adoption",
+            "schema_version": 1,
+            "component_id": "plugin",
+            "tag": "v1.2.3",
+            "version": "1.2.3",
+            "commit": "abc123",
+            "expected_assets": ["plugin.zip", "plugin.zip.sha256"],
+        });
+        if let Some(control) = control {
+            manifest
+                .as_object_mut()
+                .expect("object")
+                .insert("control".to_string(), control);
+        }
+        manifest
+    }
+
+    fn adopt(control: Option<serde_json::Value>) -> Result<ReleaseStepResult> {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join(PACKAGE_RECOVERY_MANIFEST),
+            adoption_manifest_with_control(control).to_string(),
+        )
+        .unwrap();
+        run_artifact_inventory(
+            &mut ReleaseState::default(),
+            &temp.path().to_string_lossy(),
+            &recovery_context(),
+        )
+    }
+
+    #[test]
+    fn draft_adoption_accepts_a_control_binary_newer_than_the_release_it_repairs() {
+        let result = adopt(Some(serde_json::json!({
+            "commit": "deadbeefnewer",
+            "contains_target": true,
+        })))
+        .expect("newer control binary must be allowed to recover an older tag");
+        assert_eq!(
+            result.data.as_ref().and_then(|d| d.get("control_lineage")),
+            Some(&serde_json::json!("bootstrapped"))
+        );
+    }
+
+    #[test]
+    fn draft_adoption_rejects_a_control_binary_whose_history_lacks_the_release_target() {
+        let error = adopt(Some(serde_json::json!({
+            "commit": "deadbeefsideways",
+            "contains_target": false,
+        })))
+        .expect_err("divergent control binary must not adopt a draft");
+        let rendered = format!("{error}");
+        assert!(
+            rendered.contains("deadbeefsideways") && rendered.contains("abc123"),
+            "error must name both provenances, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn draft_adoption_records_but_permits_a_control_binary_pinned_to_the_release_target() {
+        // A tag pushed moments ago is legitimately still HEAD. Refusing here
+        // would block ordinary same-commit recoveries, so this is evidence
+        // only — but it must be visible, because in this shape a publisher fix
+        // merged after the tag cannot be bootstrapped.
+        let result = adopt(Some(serde_json::json!({
+            "commit": "abc123",
+            "contains_target": true,
+        })))
+        .expect("same-commit recovery stays legal");
+        assert_eq!(
+            result.data.as_ref().and_then(|d| d.get("control_lineage")),
+            Some(&serde_json::json!("pinned"))
+        );
+    }
+
+    #[test]
+    fn draft_adoption_without_control_provenance_still_adopts_as_unverified() {
+        // Fail-safe: the guard must never be a new way for an already-stranded
+        // release to become unrecoverable.
+        let result = adopt(None).expect("absent control provenance must not block recovery");
+        assert_eq!(
+            result.data.as_ref().and_then(|d| d.get("control_lineage")),
+            Some(&serde_json::json!("unknown"))
+        );
     }
 }
