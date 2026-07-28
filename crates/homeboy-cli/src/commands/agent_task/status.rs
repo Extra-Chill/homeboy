@@ -27,7 +27,7 @@ use super::args::{
     CancelArgs, DiagnoseArgs, EvidenceArgs, LogsArgs, ReplayProviderBoundaryArgs,
     RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
 };
-use super::candidate::{classify_candidates, CandidateState};
+use super::candidate::{canonical_candidate_projection, classify_candidates, CandidateState};
 use crate::commands::utils::response::{
     CommandActionableMetadata, CommandAgentTaskRef, CommandArtifactRef, CommandNextAction,
     CommandNextActionKind, CommandResultRefs, CommandRunRef, ACTIONABLE_METADATA_KEY,
@@ -84,6 +84,8 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     enrich_with_diagnostic_summary(&mut value, &args.run_id)?;
     attach_transport_proxy_recovery_guidance(&mut value, &args.run_id);
     if args.full {
+        let aggregate = completed_run_aggregate(&args.run_id).and_then(Result::ok);
+        attach_full_status_candidate(&mut value, aggregate.as_ref(), &args.run_id);
         bound_full_reader_payload(&mut value);
         attach_runner_probe(&mut value, &runner_probe);
         attach_agent_task_status_actionable(&mut value, &args.run_id);
@@ -94,6 +96,30 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
     attach_runner_probe(&mut summary, &runner_probe);
     attach_agent_task_status_actionable(&mut summary, &args.run_id);
     Ok((summary, 0))
+}
+
+fn attach_full_status_candidate(
+    value: &mut Value,
+    aggregate: Option<&AgentTaskAggregate>,
+    run_id: &str,
+) {
+    if let Some(aggregate) = aggregate {
+        if let Value::Object(fields) = value {
+            fields.insert(
+                "aggregate".to_string(),
+                serde_json::to_value(aggregate).unwrap_or(Value::Null),
+            );
+        }
+    }
+    let canonical = classify_candidates(value);
+    let liveness = liveness_summary(value, run_id, canonical.state());
+    if let Value::Object(fields) = value {
+        fields.insert(
+            "canonical_candidate".to_string(),
+            canonical_candidate_projection(canonical),
+        );
+        fields.insert("liveness".to_string(), liveness);
+    }
 }
 
 /// Project the read-side runner-probe decision into the status payload.
@@ -344,7 +370,7 @@ fn attach_agent_task_status_actionable(value: &mut Value, run_id: &str) {
         ..Default::default()
     };
 
-    if classify_candidates(value).state().is_recoverable() {
+    if classify_candidates(value).state().is_available() {
         let review_command = format!("homeboy agent-task review {run_id}");
         metadata.next_actions.push(
             CommandNextAction::new("review run", review_command)
@@ -783,6 +809,9 @@ const DIAGNOSE_ACTION_BASIS_DIAGNOSIS: &str = "diagnosis";
 /// enough to act on, so the generic recovery set is emitted as an explicit
 /// fallback rather than as the only behavior.
 const DIAGNOSE_ACTION_BASIS_FALLBACK: &str = "generic_fallback";
+/// Basis marker for a recoverable canonical candidate that takes precedence
+/// over a later failed provider attempt.
+const DIAGNOSE_ACTION_BASIS_CANDIDATE: &str = "canonical_candidate";
 
 /// One failed task and how its executor classified the failure. This is the
 /// typed input to the classification→action table: it is read from durable
@@ -831,9 +860,26 @@ fn attach_diagnose_actionable(
     runner_id: Option<&str>,
 ) {
     let run_id = record.run_id.as_str();
+    let candidate_payload = candidate_result_payload(
+        &serde_json::to_value(record).unwrap_or(Value::Null),
+        aggregate,
+    );
+    let candidate_recoverable = classify_candidates(&candidate_payload)
+        .state()
+        .is_available();
     let failures = aggregate.map(diagnosed_failures).unwrap_or_default();
-    let (next_actions, basis) =
-        diagnose_next_actions(run_id, &failures, missing_artifacts, runner_id);
+    let (next_actions, basis) = if candidate_recoverable {
+        (
+            vec![CommandNextAction::new(
+                "review the canonical candidate",
+                format!("homeboy agent-task review {}", quote_arg(run_id)),
+            )
+            .with_kind(CommandNextActionKind::Show)],
+            DIAGNOSE_ACTION_BASIS_CANDIDATE,
+        )
+    } else {
+        diagnose_next_actions(run_id, &failures, missing_artifacts, runner_id)
+    };
     if let Value::Object(map) = value {
         map.insert(
             "next_action_basis".to_string(),
@@ -1919,7 +1965,7 @@ pub(crate) fn execution_states_from_aggregate(
 ) -> Value {
     let review =
         homeboy::agents::agent_tasks::AgentTaskAggregateReport::from(aggregate.outcomes.clone());
-    let canonical = classify_candidates(&json!({ "aggregate": aggregate }));
+    let canonical = classify_candidates(&candidate_result_payload(record, Some(aggregate)));
     let candidate_state = canonical.state();
     let provider = aggregate
         .outcomes
@@ -1951,9 +1997,9 @@ pub(crate) fn execution_states_from_aggregate(
         .map(|task| {
             let reason_code = if task.status == AgentTaskOutcomeStatus::NoOp {
                 "no_changes_produced"
-            } else if candidate_state != CandidateState::PatchAvailable
-                && task.decision
-                    == homeboy::agents::agent_tasks::AgentTaskReconciliationDecision::ApplyCandidate
+            } else if task.decision
+                == homeboy::agents::agent_tasks::AgentTaskReconciliationDecision::ApplyCandidate
+                && candidate_state != CandidateState::PatchAvailable
             {
                 candidate_state.as_str()
             } else {
@@ -2016,6 +2062,12 @@ pub(crate) fn execution_states_from_aggregate(
         "candidate": {
             "state": candidate_state.as_str(),
             "tasks": candidates,
+            "scan": {
+                "attempts_omitted": canonical.attempts_omitted,
+                "outcomes_omitted": canonical.outcomes_omitted,
+                "artifacts_omitted": canonical.artifacts_omitted,
+                "degraded": canonical.is_degraded(),
+            },
         },
         "gate": {
             "state": match promotion_status {
@@ -2217,17 +2269,26 @@ fn collect_nested_diagnostics(
 /// run-record `Value` (already enriched with `diagnostic_summary`); the plan is
 /// loaded best-effort to map task ids back to issue URLs and prompt titles.
 fn compact_status_summary(record: &Value, run_id: &str) -> Value {
-    let plan = agent_task_lifecycle::load_plan(run_id).ok();
     let aggregate = completed_run_aggregate(run_id).and_then(Result::ok);
+    compact_status_summary_with_aggregate(record, run_id, aggregate.as_ref())
+}
+
+fn compact_status_summary_with_aggregate(
+    record: &Value,
+    run_id: &str,
+    aggregate: Option<&AgentTaskAggregate>,
+) -> Value {
+    let plan = agent_task_lifecycle::load_plan(run_id).ok();
     let task_table = task_source_table(record, plan.as_ref());
     let tasks_omitted = record
         .get("tasks")
         .and_then(Value::as_array)
         .map_or(0, |tasks| tasks.len().saturating_sub(COMPACT_TASK_LIMIT));
-    let ref_inventory = ref_inventory(record, aggregate.as_ref());
+    let ref_inventory = ref_inventory(record, aggregate);
     let (refs, refs_omitted) = compact_refs(&ref_inventory);
     let risk_flags = risk_flags(record);
-    let work_summary = work_summary(record, aggregate.as_ref(), &ref_inventory);
+    let work_summary = work_summary(record, aggregate, &ref_inventory);
+    let canonical_candidate = classify_candidates(&candidate_result_payload(record, aggregate));
 
     let mut summary = json!({
         "schema": "homeboy/agent-task-status-summary/v1",
@@ -2235,6 +2296,7 @@ fn compact_status_summary(record: &Value, run_id: &str) -> Value {
         "state": record.get("state").cloned().unwrap_or(Value::Null),
         "timestamps": compact_fields(record, &["created_at", "updated_at", "started_at", "completed_at"]),
         "work_summary": work_summary,
+        "canonical_candidate": canonical_candidate_projection(canonical_candidate),
         "artifact_refs": refs.clone(),
         "artifact_refs_omitted": refs_omitted,
         "totals": record.get("totals").cloned().unwrap_or(Value::Null),
@@ -2246,7 +2308,7 @@ fn compact_status_summary(record: &Value, run_id: &str) -> Value {
         "execution_location": execution_location(record),
         "queue_visibility": queue_visibility(record),
         "execution_budget": plan.as_ref().map(|plan| &plan.options.execution_budget),
-        "liveness": liveness_summary(record, run_id),
+        "liveness": liveness_summary(record, run_id, canonical_candidate.state()),
         "full_command": format!("homeboy agent-task status {run_id} --full"),
     });
 
@@ -2291,9 +2353,31 @@ fn compact_status_summary(record: &Value, run_id: &str) -> Value {
                     "run_id",
                     "task_id",
                     "artifact_id",
+                    "patch_artifact_id",
+                    "patch_artifact",
+                    "patch",
                     "updated_at",
                     "created_at",
                     "command",
+                ],
+            );
+        }
+    }
+    if let Some(cook_finalization) = record
+        .get("metadata")
+        .and_then(|metadata| metadata.get("cook_finalization"))
+    {
+        if !cook_finalization.is_null() {
+            summary["cook_finalization"] = compact_fields(
+                cook_finalization,
+                &[
+                    "schema",
+                    "status",
+                    "pr_number",
+                    "pr_url",
+                    "pull_request_url",
+                    "updated_at",
+                    "created_at",
                 ],
             );
         }
@@ -2429,7 +2513,7 @@ fn bounded_value(value: &Value) -> Value {
     }
 }
 
-fn liveness_summary(record: &Value, run_id: &str) -> Value {
+fn liveness_summary(record: &Value, run_id: &str, candidate_state: CandidateState) -> Value {
     let metadata = record.get("metadata").unwrap_or(&Value::Null);
     let provider_handle_count = record
         .get("provider_handles")
@@ -2452,7 +2536,7 @@ fn liveness_summary(record: &Value, run_id: &str) -> Value {
         .and_then(|queue| queue.get("state"))
         .and_then(Value::as_str)
         == Some("waiting_for_capacity");
-    let candidate_recoverable = classify_candidates(record).state().is_recoverable();
+    let candidate_recoverable = candidate_state.is_recoverable();
 
     // A local cook runs the provider in an in-process thread, so it has neither
     // provider handles nor a runner job id. `reserve_provider_execution` still
@@ -2754,7 +2838,7 @@ fn work_summary(
     let committed_changes = provider_committed_changes(record)
         || aggregate.is_some_and(aggregate_has_committed_changes)
         || latest_promotion.is_some_and(promotion_reports_committed_changes);
-    let canonical = classify_candidates(&json!({ "aggregate": aggregate }));
+    let canonical = classify_candidates(&candidate_result_payload(record, aggregate));
     let classification = work_classification(
         record,
         promotion_status,
@@ -2776,6 +2860,12 @@ fn work_summary(
             "retained_only": canonical.retained_only,
             "unknown": canonical.unknown,
         },
+        "candidate_scan": {
+            "attempts_omitted": canonical.attempts_omitted,
+            "outcomes_omitted": canonical.outcomes_omitted,
+            "artifacts_omitted": canonical.artifacts_omitted,
+            "degraded": canonical.is_degraded(),
+        },
         "provider_execution_status": provider_status,
         "promotion_status": promotion_status,
         "artifact_ref_count": artifact_ref_count,
@@ -2783,6 +2873,17 @@ fn work_summary(
         "committed_changes_detected": committed_changes,
         "artifact_command": record.get("run_id").and_then(Value::as_str).map(|run_id| format!("homeboy agent-task artifacts {run_id}")),
     })
+}
+
+/// Combine the current record with the immutable aggregate before projecting a
+/// candidate result. Promotion, finalization, and adoption facts live on the
+/// record while patch facts live in the aggregate; neither may erase the other.
+fn candidate_result_payload(record: &Value, aggregate: Option<&AgentTaskAggregate>) -> Value {
+    let mut payload = record.clone();
+    if let Some(aggregate) = aggregate {
+        payload["aggregate"] = serde_json::to_value(aggregate).unwrap_or(Value::Null);
+    }
+    payload
 }
 
 fn deduped_ref_count<'a>(refs: impl Iterator<Item = &'a CompactRef>) -> usize {
@@ -2822,8 +2923,11 @@ fn work_classification(
     if committed_changes && promotion_status.is_some_and(is_no_change_promotion_status) {
         return "committed_changes_pending_promotion";
     }
-    if candidate_state == CandidateState::PatchAvailable {
-        return "provider_completed_patch_available";
+    match candidate_state {
+        CandidateState::Finalized => return "pull_request_finalized",
+        CandidateState::Promoted => return "promoted_changes",
+        CandidateState::PatchAvailable => return "provider_completed_patch_available",
+        _ => {}
     }
     if promotion_status.is_some_and(is_no_change_promotion_status) {
         if artifact_ref_count == 0 && evidence_ref_count == 0 {
@@ -3099,7 +3203,7 @@ mod tests {
         assert_eq!(summary["liveness"]["status"], "terminal");
         assert_eq!(
             summary["liveness"]["next_action"],
-            "homeboy agent-task review agent-task-run-1"
+            "homeboy agent-task status <run-id> --full"
         );
         assert!(summary["queue_visibility"]["concurrency_note"]
             .as_str()
@@ -3160,6 +3264,142 @@ mod tests {
             accepted_handoff["liveness"]["provider_boundary"]["runner_job_id"],
             "accepted-daemon-job"
         );
+    }
+
+    #[test]
+    fn compact_status_envelope_preserves_candidate_lifecycle_parity() {
+        let promoted_record = json!({
+            "run_id": "agent-task-promoted",
+            "state": "succeeded",
+            "tasks": [],
+            "metadata": { "latest_promotion": {
+                "status": "applied", "patch_artifact": { "id": "patch" }
+            }}
+        });
+        let promoted = compact_status_summary(&promoted_record, "agent-task-promoted");
+        assert_eq!(promoted["latest_promotion"]["status"], "applied");
+        assert_eq!(
+            classify_candidates(&promoted).state(),
+            CandidateState::Promoted
+        );
+
+        let finalized_record = json!({
+            "run_id": "agent-task-finalized",
+            "state": "succeeded",
+            "tasks": [],
+            "metadata": { "cook_finalization": {
+                "status": "review_ready", "pr_url": "https://example.test/pull/1"
+            }}
+        });
+        let finalized = compact_status_summary(&finalized_record, "agent-task-finalized");
+        assert_eq!(finalized["cook_finalization"]["status"], "review_ready");
+        assert_eq!(
+            classify_candidates(&finalized).state(),
+            CandidateState::Finalized
+        );
+    }
+
+    #[test]
+    fn default_status_projects_durable_patch_candidate_for_rendering_and_actions() {
+        let record = json!({
+            "run_id": "agent-task-durable-patch",
+            "state": "succeeded",
+            "tasks": [],
+        });
+        let aggregate: AgentTaskAggregate = serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-aggregate/v1",
+            "plan_id": "plan-durable-patch",
+            "status": "succeeded",
+            "totals": {
+                "queued": 0, "running": 0, "blocked": 0, "skipped": 0,
+                "succeeded": 1, "failed": 0, "cancelled": 0, "timed_out": 0
+            },
+            "outcomes": [{
+                "schema": "homeboy/agent-task-outcome/v1",
+                "task_id": "cook",
+                "status": "succeeded",
+                "summary": "patch ready",
+                "failure_classification": null,
+                "artifacts": [{
+                    "schema": "homeboy/agent-task-artifact/v1",
+                    "id": "durable-patch",
+                    "kind": "patch",
+                    "size_bytes": 32_318,
+                    "metadata": { "changed_file_count": 7 }
+                }],
+                "evidence_refs": [],
+                "metadata": {},
+                "outputs": {}
+            }]
+        }))
+        .expect("durable aggregate");
+
+        let mut compact = compact_status_summary_with_aggregate(
+            &record,
+            "agent-task-durable-patch",
+            Some(&aggregate),
+        );
+        assert_eq!(
+            compact["canonical_candidate"]["schema"],
+            "homeboy/agent-task-candidate/v1"
+        );
+        assert_eq!(compact["canonical_candidate"]["state"], "patch_available");
+        assert_eq!(compact["canonical_candidate"]["diff_bytes"], 32_318);
+        assert_eq!(compact["canonical_candidate"]["scan"]["degraded"], false);
+        assert!(compact.get("aggregate").is_none());
+
+        attach_agent_task_status_actionable(&mut compact, "agent-task-durable-patch");
+        let rendered = crate::commands::agent_task_summary::render_agent_task_summary(
+            crate::commands::agent_task_summary::AgentTaskSummaryKind::Status,
+            &compact,
+        )
+        .expect("status summary");
+
+        assert!(rendered.contains("Candidate state: patch_available"));
+        assert!(rendered.contains("Patch candidates: 1 non-empty / 0 empty"));
+        assert!(!rendered.contains("Patch candidates: 1 non-empty / 0 empty /"));
+        assert!(rendered.contains("Diff bytes: 32318"));
+        assert!(rendered.contains("Changed files: unknown"));
+        assert!(rendered.contains("Next: homeboy agent-task review agent-task-durable-patch"));
+        assert!(compact[ACTIONABLE_METADATA_KEY]["next_actions"]
+            .as_array()
+            .expect("next actions")
+            .iter()
+            .any(
+                |action| action["command"] == "homeboy agent-task review agent-task-durable-patch"
+            ));
+
+        let mut full = record.clone();
+        attach_full_status_candidate(&mut full, Some(&aggregate), "agent-task-durable-patch");
+        attach_agent_task_status_actionable(&mut full, "agent-task-durable-patch");
+        let full_rendered = crate::commands::agent_task_summary::render_agent_task_summary(
+            crate::commands::agent_task_summary::AgentTaskSummaryKind::Status,
+            &full,
+        )
+        .expect("full status summary");
+
+        assert_eq!(
+            full["aggregate"]["outcomes"][0]["artifacts"][0]["size_bytes"],
+            32_318
+        );
+        assert_eq!(full["canonical_candidate"], compact["canonical_candidate"]);
+        assert_eq!(
+            compact["liveness"]["next_action"],
+            "homeboy agent-task review agent-task-durable-patch"
+        );
+        assert_eq!(full["liveness"], compact["liveness"]);
+        assert!(full_rendered.contains("Status: succeeded"));
+        assert!(full_rendered.contains("Patch candidates: 1 non-empty / 0 empty"));
+        assert!(full_rendered.contains("Changed files: 7"));
+        assert!(!full_rendered.contains("no_patch_produced"));
+        assert!(full_rendered.contains("Next: homeboy agent-task review agent-task-durable-patch"));
+        assert!(full[ACTIONABLE_METADATA_KEY]["next_actions"]
+            .as_array()
+            .expect("full next actions")
+            .iter()
+            .any(
+                |action| action["command"] == "homeboy agent-task review agent-task-durable-patch"
+            ));
     }
 
     #[test]
@@ -3385,6 +3625,38 @@ mod tests {
         assert_eq!(summary["work_summary"]["classification"], "no_changes");
         assert_eq!(summary["work_summary"]["artifact_ref_count"], 0);
         assert_eq!(summary["work_summary"]["evidence_ref_count"], 0);
+    }
+
+    #[test]
+    fn work_summary_distinguishes_available_promoted_and_finalized_candidates() {
+        let available = work_summary(&json!({ "state": "succeeded" }), None, &[]);
+        assert_eq!(available["classification"], "no_changes");
+
+        let promoted = work_summary(
+            &json!({
+                "state": "succeeded",
+                "metadata": { "latest_promotion": {
+                    "status": "applied", "patch_artifact": { "id": "patch" }
+                }}
+            }),
+            None,
+            &[],
+        );
+        assert_eq!(promoted["candidate_state"], "promoted");
+        assert_eq!(promoted["classification"], "promoted_changes");
+
+        let finalized = work_summary(
+            &json!({
+                "state": "succeeded",
+                "metadata": { "cook_finalization": {
+                    "status": "review_ready", "pr_url": "https://example.test/pull/1"
+                }}
+            }),
+            None,
+            &[],
+        );
+        assert_eq!(finalized["candidate_state"], "finalized");
+        assert_eq!(finalized["classification"], "pull_request_finalized");
     }
 
     #[test]

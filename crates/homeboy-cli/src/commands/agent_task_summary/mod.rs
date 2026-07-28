@@ -61,7 +61,12 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
     let aggregate_path = string_value(payload, &["aggregate_path"])
         .or_else(|| string_value(payload, &["record", "aggregate_path"]));
     let metrics = code_production_metrics(payload);
-    let state = effective_run_state(raw_state, tasks_attempted, metrics.non_empty_patches);
+    let state = effective_run_state(
+        raw_state,
+        tasks_attempted,
+        metrics.candidate_state,
+        metrics.candidate_scan_degraded,
+    );
     let artifact_count = aggregate_artifact_count(payload);
     let first_artifact = string_value(
         payload,
@@ -89,7 +94,7 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
     if let Some(artifact) = first_artifact {
         lines.push(format!("First artifact: {artifact}"));
     }
-    if metrics.candidate_state == CandidateState::PatchAvailable {
+    if metrics.candidate_state.is_available() {
         lines.push(format!("Next: homeboy agent-task review {run_id}"));
     } else {
         lines.push(format!("Next: homeboy agent-task logs {run_id}"));
@@ -103,7 +108,12 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     let tasks_planned = array_len(payload, &["tasks"]).unwrap_or(0);
     let tasks_attempted = status_attempted_task_count(payload);
     let metrics = code_production_metrics(payload);
-    let state = effective_run_state(raw_state, tasks_attempted, metrics.non_empty_patches);
+    let state = effective_run_state(
+        raw_state,
+        tasks_attempted,
+        metrics.candidate_state,
+        metrics.candidate_scan_degraded,
+    );
     let artifact_count = array_len(payload, &["artifact_refs"]).unwrap_or(0);
     let aggregate_path = string_value(payload, &["aggregate_path"]);
 
@@ -119,7 +129,7 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         lines.push(format!("Diagnostic: {diagnostic}"));
     }
     lines.push(format!("Artifacts: {artifact_count}"));
-    if metrics.candidate_state == CandidateState::PatchAvailable {
+    if metrics.candidate_state.is_available() {
         if let Some(path) = aggregate_path {
             lines.push(format!("Aggregate: {path}"));
         }
@@ -186,7 +196,7 @@ fn render_review_summary(payload: &Value) -> Option<String> {
         .and_then(|_| usize_value(payload, &["aggregate_review", "summary", "failed"]))
         .unwrap_or(0);
     let metrics = code_production_metrics(payload);
-    let promotable = metrics.non_empty_patches > 0;
+    let promotable = metrics.candidate_state == CandidateState::PatchAvailable;
     let patch = promotable
         .then(|| string_value(payload, &["promotion_candidates", "0", "artifact_id"]))
         .flatten();
@@ -196,7 +206,11 @@ fn render_review_summary(payload: &Value) -> Option<String> {
         .then(|| command_line(payload, &["promotion_candidates", "0", "command"]))
         .flatten();
 
-    let outcome = if promotable {
+    let outcome = if metrics.candidate_state == CandidateState::Finalized {
+        "pull request finalized"
+    } else if metrics.candidate_state == CandidateState::Promoted {
+        "patch promoted"
+    } else if promotable {
         "patch produced, not promoted"
     } else if raw_apply_candidates > 0 {
         "no-op: patch artifacts produced but empty"
@@ -284,6 +298,7 @@ struct CodeProductionMetrics {
     /// zero (#9742).
     changed_files_unknown_patches: usize,
     candidate_state: CandidateState,
+    candidate_scan_degraded: bool,
 }
 
 fn code_production_lines(metrics: &CodeProductionMetrics) -> Vec<String> {
@@ -321,39 +336,59 @@ fn code_production_lines(metrics: &CodeProductionMetrics) -> Vec<String> {
 fn code_production_metrics(payload: &Value) -> CodeProductionMetrics {
     let mut metrics = CodeProductionMetrics::default();
     let canonical = classify_candidates(payload);
-    if canonical.state() != CandidateState::Unknown {
+    if payload.get("aggregate").is_none()
+        && payload
+            .pointer("/canonical_candidate/schema")
+            .and_then(Value::as_str)
+            == Some("homeboy/agent-task-candidate/v1")
+    {
         metrics.non_empty_patches = canonical.available;
         metrics.empty_patches = canonical.empty;
+        metrics.diff_bytes = canonical.diff_bytes;
         metrics.unknown_size_patches = canonical.unknown
             + canonical.missing
             + canonical.unreadable
             + canonical.conflicting
             + canonical.retained_only;
-        metrics.diff_bytes = canonical.diff_bytes;
+        // Compact projections intentionally omit patch contents and changed-file
+        // metadata, so never present their absent detail as a verified zero.
+        metrics.changed_files_unknown_patches = canonical.available;
         metrics.candidate_state = canonical.state();
+        metrics.candidate_scan_degraded = canonical.is_degraded();
         return metrics;
     }
-    for patch in collect_patch_artifacts(payload) {
-        match patch.size_bytes {
-            Some(size) if size > 0 => {
-                metrics.non_empty_patches += 1;
-                metrics.diff_bytes += size;
-                match patch.changed_files {
-                    Some(count) => metrics.changed_files += count,
-                    None => metrics.changed_files_unknown_patches += 1,
+    // Metrics intentionally come from the display/review artifacts so rejected,
+    // unreadable, and changed-file evidence retains its established semantics.
+    // The candidate classifier only annotates that evidence with terminal state.
+    if !canonical.is_degraded() {
+        for patch in collect_patch_artifacts(payload) {
+            match patch.size_bytes {
+                Some(size) if size > 0 => {
+                    metrics.non_empty_patches += 1;
+                    metrics.diff_bytes += size;
+                    match patch.changed_files {
+                        Some(count) => metrics.changed_files += count,
+                        None => metrics.changed_files_unknown_patches += 1,
+                    }
                 }
+                Some(_) => metrics.empty_patches += 1,
+                None => metrics.unknown_size_patches += 1,
             }
-            Some(_) => metrics.empty_patches += 1,
-            None => metrics.unknown_size_patches += 1,
         }
     }
-    metrics.candidate_state = if metrics.non_empty_patches > 0 {
+    let measured_state = if metrics.non_empty_patches > 0 {
         CandidateState::PatchAvailable
     } else if metrics.empty_patches > 0 {
         CandidateState::Empty
     } else {
         CandidateState::Unknown
     };
+    metrics.candidate_state = if canonical.state() == CandidateState::Unknown {
+        measured_state
+    } else {
+        canonical.state()
+    };
+    metrics.candidate_scan_degraded = canonical.is_degraded();
     metrics
 }
 
@@ -402,6 +437,42 @@ fn collect_patch_artifacts(payload: &Value) -> Vec<PatchArtifact> {
                         size_bytes: u64_value(artifact, &["size_bytes"]),
                         changed_files: resolve_changed_files(artifact),
                     })
+            })
+            .collect();
+    }
+
+    if let Some(attempts) = value_at(payload, &["attempts"]).and_then(Value::as_array) {
+        let artifacts: Vec<&Value> = attempts
+            .iter()
+            .flat_map(|attempt| {
+                value_at(attempt, &["aggregate", "outcomes"])
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|outcome| {
+                        value_at(outcome, &["artifacts"])
+                            .and_then(Value::as_array)
+                            .into_iter()
+                            .flatten()
+                    })
+            })
+            .collect();
+        let canonical: Vec<&Value> = artifacts
+            .iter()
+            .copied()
+            .filter(|artifact| is_canonical_mirror(artifact))
+            .collect();
+        let artifacts = if canonical.is_empty() {
+            artifacts
+        } else {
+            canonical
+        };
+        return artifacts
+            .into_iter()
+            .filter(|artifact| is_display_apply_artifact(artifact))
+            .map(|artifact| PatchArtifact {
+                size_bytes: u64_value(artifact, &["size_bytes"]),
+                changed_files: resolve_changed_files(artifact),
             })
             .collect();
     }
@@ -456,6 +527,13 @@ fn is_display_apply_artifact(artifact: &Value) -> bool {
         return false;
     }
     !(artifact_flag(artifact, "rejected") || artifact_flag(artifact, "false_positive"))
+}
+
+fn is_canonical_mirror(artifact: &Value) -> bool {
+    value_at(artifact, &["metadata", "executor_artifact_finalized"]).and_then(Value::as_bool)
+        == Some(true)
+        || string_value(artifact, &["url"])
+            .is_some_and(|url| url.starts_with("homeboy://agent-task/run/"))
 }
 
 fn artifact_flag(artifact: &Value, key: &str) -> bool {
@@ -547,8 +625,18 @@ fn strip_diff_path_prefix(token: &str) -> String {
 /// A run whose lifecycle state is `succeeded` but that produced zero promotion
 /// candidates did not actually patch anything. Surface that honestly as
 /// `no_patch_produced` instead of advertising success (#4610).
-fn effective_run_state(raw_state: &str, tasks_attempted: usize, patch_candidates: usize) -> &str {
-    if raw_state == "succeeded" && tasks_attempted > 0 && patch_candidates == 0 {
+fn effective_run_state(
+    raw_state: &str,
+    tasks_attempted: usize,
+    candidate_state: CandidateState,
+    candidate_scan_degraded: bool,
+) -> &str {
+    if raw_state == "succeeded"
+        && candidate_state == CandidateState::Unknown
+        && candidate_scan_degraded
+    {
+        "unknown"
+    } else if raw_state == "succeeded" && tasks_attempted > 0 && !candidate_state.is_available() {
         "no_patch_produced"
     } else {
         raw_state
@@ -655,6 +743,84 @@ mod tests {
         assert!(summary.contains("Patch candidates: 0 non-empty / 3 empty\n"));
         assert!(summary.contains("Next: homeboy agent-task logs agent-task-abe47e4d\n"));
         assert!(!summary.contains("Next: homeboy agent-task review"));
+    }
+
+    #[test]
+    fn cook_summary_keeps_a_canonical_candidate_after_an_empty_retry() {
+        let payload = json!({
+            "run_id": "agent-task-canonical",
+            "state": "succeeded",
+            "task_count": 2,
+            "attempts": [
+                {
+                    "aggregate": {
+                        "outcomes": [{
+                            "artifacts": [{
+                                "id": "canonical-patch",
+                                "kind": "patch",
+                                "size_bytes": 32318,
+                                "url": "homeboy://agent-task/run/agent-task-canonical/artifacts#task=cook&artifact=canonical-patch",
+                                "metadata": { "executor_artifact_finalized": true }
+                            }]
+                        }]
+                    }
+                },
+                {
+                    "aggregate": {
+                        "outcomes": [{
+                            "artifacts": [{ "id": "empty-retry", "kind": "patch", "size_bytes": 0 }]
+                        }]
+                    }
+                }
+            ]
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
+
+        assert!(summary.contains("Status: succeeded\n"));
+        assert!(summary.contains("Patch candidates: 1 non-empty / 0 empty\n"));
+        assert!(summary.contains("Candidate state: patch_available\n"));
+        assert!(summary.contains("Next: homeboy agent-task review agent-task-canonical\n"));
+        assert!(!summary.contains("no_patch_produced"));
+    }
+
+    #[test]
+    fn finalized_pr_summary_is_not_reported_as_an_unpromoted_empty_patch() {
+        let payload = json!({
+            "run_id": "agent-task-finalized",
+            "state": "succeeded",
+            "task_count": 1,
+            "aggregate": { "outcomes": [{ "artifacts": [{ "id": "empty", "kind": "patch", "size_bytes": 0 }] }] },
+            "finalization": { "status": "review_ready", "pr_url": "https://example.test/pull/1" }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
+
+        assert!(summary.contains("Status: succeeded\n"));
+        assert!(summary.contains("Candidate state: finalized\n"));
+        assert!(summary.contains("Next: homeboy agent-task review agent-task-finalized\n"));
+        assert!(!summary.contains("no_patch_produced"));
+    }
+
+    #[test]
+    fn oversized_empty_artifacts_keep_the_terminal_summary_unknown() {
+        let artifacts = (0..257)
+            .map(
+                |index| json!({ "id": format!("empty-{index}"), "kind": "patch", "size_bytes": 0 }),
+            )
+            .collect::<Vec<_>>();
+        let payload = json!({
+            "run_id": "agent-task-truncated",
+            "state": "succeeded",
+            "task_count": 1,
+            "aggregate": { "outcomes": [{ "artifacts": artifacts }] }
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
+
+        assert!(summary.contains("Status: unknown\n"));
+        assert!(summary.contains("Candidate state: unknown\n"));
+        assert!(!summary.contains("Status: no_patch_produced\n"));
     }
 
     #[test]

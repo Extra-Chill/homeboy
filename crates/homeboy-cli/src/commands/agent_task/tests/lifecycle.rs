@@ -1334,6 +1334,30 @@ fn execution_states_prefer_adopted_normalized_gate_outcome_over_stale_attempt_fa
     assert_eq!(states["promotion"]["state"], "applied");
 }
 
+#[test]
+fn execution_states_keep_promoted_candidate_after_a_failed_provider_attempt() {
+    let states = super::super::status::execution_states_from_aggregate(
+        &aggregate_for_execution_outcome(fixture_execution_outcome(
+            AgentTaskOutcomeStatus::Failed,
+            Some(AgentTaskFailureClassification::Provider),
+            Vec::new(),
+            Value::Null,
+        )),
+        &json!({
+            "metadata": {
+                "latest_promotion": {
+                    "status": "applied",
+                    "patch_artifact": { "id": "canonical-patch" }
+                }
+            }
+        }),
+    );
+
+    assert_eq!(states["provider"][0]["state"], "failed");
+    assert_eq!(states["candidate"]["state"], "promoted");
+    assert_eq!(states["promotion"]["state"], "applied");
+}
+
 fn execution_states(outcome: AgentTaskOutcome, promotion_status: &str) -> Value {
     super::super::status::execution_states_from_aggregate(
         &aggregate_for_execution_outcome(outcome),
