@@ -14,6 +14,7 @@ use super::{
     terminate_pid, wait_for_tcp, RemoteDaemon,
 };
 use crate::connection::remote_daemon::parse_json_from_mixed_stdout;
+use crate::daemon_repair;
 use crate::{RunnerConnectReport, RunnerFailureKind};
 use std::collections::BTreeMap;
 
@@ -242,11 +243,12 @@ pub(super) fn daemon_http_runtime_loaded_paths(
 }
 
 pub(super) fn daemon_http_freshness(
+    runner_id: &str,
     local_url: &str,
     expected_version: &str,
     expected_identity: &str,
 ) -> std::result::Result<DaemonFreshnessReport, String> {
-    daemon_freshness_report(local_url, expected_version, expected_identity)
+    daemon_freshness_report(runner_id, local_url, expected_version, expected_identity)
 }
 
 /// A direct-SSH session is live only when its loopback endpoint still serves
@@ -410,7 +412,31 @@ pub(super) fn daemon_runtime_loaded_paths_from_body(body: &Value) -> BTreeMap<St
         .collect()
 }
 
+/// Restate a daemon-authored freshness report in the controller's frame.
+///
+/// A daemon composes its `repair_plan` and `adoption_command` as
+/// `homeboy daemon *`, which is correct on the machine that runs it. Once the
+/// report has crossed the SSH tunnel those commands are actively wrong: running
+/// them here would stop or adopt the *controller's* daemon. The typed evidence
+/// survives the crossing; the actions do not, so they are rebuilt against an
+/// explicit runner id (#10302).
+fn into_controller_frame(
+    mut report: DaemonFreshnessReport,
+    runner_id: &str,
+) -> DaemonFreshnessReport {
+    report.repair_plan = daemon_repair::controller_frame_plan(runner_id, &report);
+    // An adoption command is one explicit, operator-confirmed action. A
+    // multi-step restart sequence is a plan, not an adoption, so it is exposed
+    // only as steps.
+    report.adoption_command = match report.repair_plan.as_slice() {
+        [step] => Some(step.command.clone()),
+        _ => None,
+    };
+    report
+}
+
 fn daemon_freshness_report(
+    runner_id: &str,
     local_url: &str,
     expected_version: &str,
     expected_identity: &str,
@@ -426,38 +452,41 @@ fn daemon_freshness_report(
             )?
             .is_none()
         {
-            return Ok(report);
+            return Ok(into_controller_frame(report, runner_id));
         }
         if report.fresh {
             let mut report = report;
             report.fresh = false;
             report.stale_reason_code = Some(DaemonStaleReasonCode::VersionMismatch);
             report.restartable = true;
-            return Ok(report);
+            return Ok(into_controller_frame(report, runner_id));
         }
-        return Ok(report);
+        return Ok(into_controller_frame(report, runner_id));
     }
     let mismatch =
         daemon_version_identity_mismatch(&body, &raw_body, expected_version, expected_identity)?;
-    Ok(DaemonFreshnessReport {
-        fresh: mismatch.is_none(),
-        stale_reason_code: mismatch.map(|_| DaemonStaleReasonCode::VersionMismatch),
-        // A legacy version response has no daemon-owned job count, so it cannot
-        // authorize replacement while the typed job endpoint is unavailable.
-        restartable: false,
-        lease_id: daemon_lease_id_from_body(&body).map(ToString::to_string),
-        pid: None,
-        recovery_evidence: None,
-        ownership_evidence: None,
-        adoption_command: None,
-        binary_hash: None,
-        daemon_version: daemon_version_from_body(&body).map(str::to_string),
-        daemon_build_identity: daemon_identity_from_body(&body).map(str::to_string),
-        runtime_paths: None,
-        active_jobs: 0,
-        termination_evidence: None,
-        repair_plan: Vec::new(),
-    })
+    Ok(into_controller_frame(
+        DaemonFreshnessReport {
+            fresh: mismatch.is_none(),
+            stale_reason_code: mismatch.map(|_| DaemonStaleReasonCode::VersionMismatch),
+            // A legacy version response has no daemon-owned job count, so it cannot
+            // authorize replacement while the typed job endpoint is unavailable.
+            restartable: false,
+            lease_id: daemon_lease_id_from_body(&body).map(ToString::to_string),
+            pid: None,
+            recovery_evidence: None,
+            ownership_evidence: None,
+            adoption_command: None,
+            binary_hash: None,
+            daemon_version: daemon_version_from_body(&body).map(str::to_string),
+            daemon_build_identity: daemon_identity_from_body(&body).map(str::to_string),
+            runtime_paths: None,
+            active_jobs: 0,
+            termination_evidence: None,
+            repair_plan: Vec::new(),
+        },
+        runner_id,
+    ))
 }
 
 fn daemon_version_identity_mismatch(

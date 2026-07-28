@@ -17,9 +17,10 @@ use sha2::{Digest, Sha256};
 
 use super::{
     current_binary_sha256, read_termination_evidence, runtime_path_fingerprint,
-    DaemonFreshnessReport, DaemonRepairStep, DaemonRuntimeSnapshot, DaemonStaleReasonCode,
-    DaemonState, DAEMON_LEASE_SCHEMA,
+    DaemonFreshnessReport, DaemonRecoveryEvidence, DaemonRepairStep, DaemonRuntimeSnapshot,
+    DaemonStaleReasonCode, DaemonState, DAEMON_LEASE_SCHEMA,
 };
+use crate::engine::shell;
 use crate::process::pid_is_running;
 use crate::{build_identity, Error, Result};
 
@@ -167,6 +168,16 @@ pub(crate) fn stale_lease(
     }
 }
 
+/// Build the freshness contract for the daemon running on *this* machine.
+///
+/// Every evidence field is filled, not just the ones this producer finds
+/// convenient: a report with half the contract populated forces consumers to
+/// special-case which producer built it.
+///
+/// The `repair_plan` and `adoption_command` are in this daemon's own local
+/// frame (`homeboy daemon …`), which is correct for `homeboy daemon status` and
+/// wrong anywhere the report is read over a transport. A remote reader must
+/// restate them against whatever handle it uses to reach this machine.
 pub(crate) fn freshness_report_from_validation(
     validation: &DaemonLeaseValidation,
     active_jobs: usize,
@@ -178,6 +189,61 @@ pub(crate) fn freshness_report_from_validation(
             validation.stale_reason_code,
             Some(DaemonStaleReasonCode::LeaseCorrupt | DaemonStaleReasonCode::TransportUnreachable)
         );
+    let lease_id = state.map(|state| state.lease_id.clone());
+    let pid = state.map(|state| state.pid);
+    // The lease names an exact PID the local kernel proved is gone, so its
+    // durable jobs can be reconciled against that one lease rather than guessed
+    // at. `DaemonFreshnessReport` has a second producer that observes a daemon
+    // over a transport; both classify this evidence identically so a consumer
+    // can rely on the field regardless of which one filled it in.
+    let proven_dead = validation.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
+        && lease_id.is_some()
+        && pid.is_some();
+    // No lease owns the store, yet durable jobs remain: the only safe action is
+    // explicit lease-less reconciliation, never an implicit replacement.
+    let leaseless_reconciliation_available = validation.stale_reason_code
+        == Some(DaemonStaleReasonCode::LeaseMissing)
+        && active_jobs > 0;
+    let recoverable_fresh_idle = validation.fresh && active_jobs == 0;
+
+    let mut ownership_evidence = if proven_dead {
+        Some(format!(
+            "daemon lease `{}` records PID {}, which is not running",
+            lease_id.as_deref().expect("proven dead lease"),
+            pid.expect("proven dead PID")
+        ))
+    } else if leaseless_reconciliation_available {
+        Some(format!(
+            "daemon state records no lease while {active_jobs} durable job(s) remain; they require explicit reconciliation before replacement"
+        ))
+    } else if recoverable_fresh_idle {
+        Some("daemon lease is fresh with zero active jobs".to_string())
+    } else {
+        Some(format!(
+            "daemon lease evidence is inconclusive; {active_jobs} active job(s) are protected from implicit replacement"
+        ))
+    };
+    if let Some(stale_reason) = &validation.stale_reason {
+        ownership_evidence = Some(format!(
+            "{}; inspected stale reason: {stale_reason}",
+            ownership_evidence.unwrap_or_default()
+        ));
+    }
+
+    let adoption_command = if proven_dead {
+        Some(format!(
+            "homeboy daemon adopt-orphan --lease-id {} --confirm-pid-dead",
+            shell::quote_arg(lease_id.as_deref().expect("proven dead lease"))
+        ))
+    } else if leaseless_reconciliation_available {
+        Some("homeboy daemon reconcile-leaseless-orphans --confirm-no-daemon-owner".to_string())
+    } else {
+        None
+    };
+
+    // A restartable lease has nothing durable to protect, so a plain stop/start
+    // is the whole repair. Otherwise the repair is exactly the explicit
+    // reconciliation the evidence authorizes; anything else would be prose.
     let repair_plan = if restartable {
         vec![
             DaemonRepairStep {
@@ -189,18 +255,35 @@ pub(crate) fn freshness_report_from_validation(
                 command: "homeboy daemon start".to_string(),
             },
         ]
+    } else if proven_dead {
+        vec![DaemonRepairStep {
+            code: "daemon_adopt_orphan".to_string(),
+            command: adoption_command.clone().expect("proven dead adoption"),
+        }]
+    } else if leaseless_reconciliation_available {
+        vec![DaemonRepairStep {
+            code: "daemon_reconcile_leaseless_orphans".to_string(),
+            command: adoption_command.clone().expect("leaseless adoption"),
+        }]
     } else {
         Vec::new()
     };
+
     DaemonFreshnessReport {
         fresh: validation.fresh,
         stale_reason_code: validation.stale_reason_code,
         restartable,
-        lease_id: state.map(|state| state.lease_id.clone()),
-        pid: state.map(|state| state.pid),
-        recovery_evidence: None,
-        ownership_evidence: None,
-        adoption_command: None,
+        lease_id,
+        pid,
+        recovery_evidence: Some(if proven_dead {
+            DaemonRecoveryEvidence::ProvenDead
+        } else if recoverable_fresh_idle {
+            DaemonRecoveryEvidence::Recoverable
+        } else {
+            DaemonRecoveryEvidence::Unavailable
+        }),
+        ownership_evidence,
+        adoption_command,
         binary_hash: state.and_then(|state| state.binary_sha256.clone()),
         daemon_version: state.map(|state| state.build_identity.version.clone()),
         daemon_build_identity: state.map(|state| state.build_identity.display.clone()),
