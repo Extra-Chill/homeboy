@@ -835,8 +835,15 @@ fn cleanup_unlocked(
             }
             continue;
         }
-        if resource.git_worktree.is_some() {
-            registered_worktree_count += 1;
+        // A lease can outlive its worktree — an operator or a partial cleanup
+        // can remove `<lease>/workspace` on its own — so registration liveness
+        // is asked of the worktree path, not of the lease.
+        if let Some(registration) = resource.git_worktree.as_ref() {
+            if Path::new(&registration.path).exists() {
+                registered_worktree_count += 1;
+            } else if resource.finalized_at.is_some() {
+                stranded.push(position);
+            }
         }
         let lifecycle_state = resource.lifecycle_state.clone();
         let interrupted_at = resource.interrupted_at.clone();
