@@ -17,7 +17,7 @@ use crate::command_contract::{
     RUNNER_ARTIFACT_ROOT_DIR_SUFFIX,
 };
 use crate::core::artifact_address::ARTIFACT_ADDRESS_SCHEMA;
-use crate::core::artifact_contract::{ARTIFACT_CONTRACT_SCHEMA, EVIDENCE_CONTRACT_SCHEMA};
+use crate::core::artifact_contract::ARTIFACT_CONTRACT_SCHEMA;
 use crate::core::artifact_dom_boxes::ARTIFACT_DOM_BOXES_SCHEMA;
 use crate::core::artifact_ref::{
     ARTIFACT_REF_SCHEMA, HOMEBOY_REF_SCHEME, RUNNER_ARTIFACT_REF_SCHEME,
@@ -492,7 +492,6 @@ fn represented_artifact_schema_ids() -> Vec<String> {
     vec![
         RUNNER_ARTIFACT_MANIFEST_SCHEMA.to_string(),
         ARTIFACT_CONTRACT_SCHEMA.to_string(),
-        EVIDENCE_CONTRACT_SCHEMA.to_string(),
         ARTIFACT_REF_SCHEMA.to_string(),
         ARTIFACT_ADDRESS_SCHEMA.to_string(),
         ARTIFACT_DOM_BOXES_SCHEMA.to_string(),

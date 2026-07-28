@@ -29,9 +29,8 @@ use super::args::{
 };
 use super::candidate::{classify_candidates, CandidateState};
 use crate::commands::utils::response::{
-    CommandActionableMetadata, CommandAgentTaskRef, CommandArtifactRef, CommandEvidenceRef,
-    CommandNextAction, CommandNextActionKind, CommandResultRefs, CommandRunRef,
-    ACTIONABLE_METADATA_KEY,
+    CommandActionableMetadata, CommandAgentTaskRef, CommandArtifactRef, CommandNextAction,
+    CommandNextActionKind, CommandResultRefs, CommandRunRef, ACTIONABLE_METADATA_KEY,
 };
 
 /// Cap the number of detail refs rendered in the compact summary so a noisy
@@ -1170,7 +1169,7 @@ fn diagnose_artifact_refs(aggregate: &AgentTaskAggregate) -> Vec<CommandArtifact
         .collect()
 }
 
-fn diagnose_evidence_refs(aggregate: &AgentTaskAggregate) -> Vec<CommandEvidenceRef> {
+fn diagnose_evidence_refs(aggregate: &AgentTaskAggregate) -> Vec<CommandArtifactRef> {
     aggregate
         .outcomes
         .iter()
@@ -1181,7 +1180,7 @@ fn diagnose_evidence_refs(aggregate: &AgentTaskAggregate) -> Vec<CommandEvidence
                 .map(move |evidence| (outcome.task_id.as_str(), evidence))
         })
         .take(COMPACT_REF_LIMIT)
-        .map(|(task_id, evidence)| CommandEvidenceRef {
+        .map(|(task_id, evidence)| CommandArtifactRef {
             id: format!("{task_id}:{}", evidence.kind),
             kind: evidence.kind.clone(),
             uri: evidence.uri.clone(),

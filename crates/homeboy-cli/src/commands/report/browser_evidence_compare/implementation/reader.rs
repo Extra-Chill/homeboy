@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 use homeboy_extension::trace::trace_browser_summary_has_signal;
 use homeboy_extension::TraceBrowserEvidenceAdapterConfig;
 
-use super::super::types::ArtifactRef;
+use super::super::types::BrowserEvidenceArtifactLink;
 use super::parse::{
     artifact_ref, assertion_stats, browser_metric_names, collect_artifacts,
     collect_declared_artifact_map_adapters, collect_declared_browser_summary_adapters,
@@ -171,7 +171,7 @@ fn canonical_path(path: &Path) -> PathBuf {
 /// artifact maps) from a parsed JSON value.
 fn collect_artifact_targets(
     value: &Value,
-    artifacts: &mut BTreeSet<ArtifactRef>,
+    artifacts: &mut BTreeSet<BrowserEvidenceArtifactLink>,
     adapters: &[TraceBrowserEvidenceAdapterConfig],
 ) {
     match value {
@@ -206,10 +206,10 @@ fn collect_json_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()>
 fn collect_samples(
     value: &Value,
     inherited: &SampleContext,
-    source: &ArtifactRef,
+    source: &BrowserEvidenceArtifactLink,
     source_dir: Option<&Path>,
     samples: &mut Vec<BrowserEvidenceSample>,
-    artifacts: &mut BTreeSet<ArtifactRef>,
+    artifacts: &mut BTreeSet<BrowserEvidenceArtifactLink>,
     adapters: &[TraceBrowserEvidenceAdapterConfig],
 ) {
     match value {
@@ -230,10 +230,10 @@ fn collect_samples(
 fn collect_object_samples(
     object: &Map<String, Value>,
     inherited: &SampleContext,
-    source: &ArtifactRef,
+    source: &BrowserEvidenceArtifactLink,
     source_dir: Option<&Path>,
     samples: &mut Vec<BrowserEvidenceSample>,
-    artifacts: &mut BTreeSet<ArtifactRef>,
+    artifacts: &mut BTreeSet<BrowserEvidenceArtifactLink>,
     adapters: &[TraceBrowserEvidenceAdapterConfig],
 ) {
     let context = context_for_object(object, inherited);
@@ -362,8 +362,8 @@ fn has_provenance_signal(object: &Map<String, Value>) -> bool {
 
 fn collect_provenance_artifacts(
     value: &Value,
-    source: &ArtifactRef,
-    artifacts: &mut BTreeSet<ArtifactRef>,
+    source: &BrowserEvidenceArtifactLink,
+    artifacts: &mut BTreeSet<BrowserEvidenceArtifactLink>,
     adapters: &[TraceBrowserEvidenceAdapterConfig],
 ) {
     match value {
@@ -387,7 +387,7 @@ fn collect_provenance_artifacts(
 
 fn collect_object_artifacts(
     object: &Map<String, Value>,
-    artifacts: &mut BTreeSet<ArtifactRef>,
+    artifacts: &mut BTreeSet<BrowserEvidenceArtifactLink>,
     adapters: &[TraceBrowserEvidenceAdapterConfig],
 ) {
     collect_artifacts(object, artifacts);
@@ -397,7 +397,7 @@ fn collect_object_artifacts(
 fn sample_from_object(
     object: &Map<String, Value>,
     context: &SampleContext,
-    source: &ArtifactRef,
+    source: &BrowserEvidenceArtifactLink,
     source_dir: Option<&Path>,
     adapters: &[TraceBrowserEvidenceAdapterConfig],
 ) -> BrowserEvidenceSample {

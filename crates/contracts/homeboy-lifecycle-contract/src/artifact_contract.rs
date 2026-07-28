@@ -1,8 +1,13 @@
-//! Product-neutral artifact and evidence contract primitives.
+//! Product-neutral artifact contract primitives.
 //!
 //! These contracts intentionally stay small and generic. Producers may carry
 //! domain-specific fields through `extra`, while core owns the shared schema,
 //! field aliases, and non-empty target normalization.
+//!
+//! Evidence *references* (a labelled pointer at an artifact) live in
+//! `homeboy-artifact-ref-contract` as `EvidenceRef`. There is no second
+//! `EvidenceContract` shape: the one that used to live here had no producer and
+//! no consumer anywhere in the workspace (#10310).
 
 use std::collections::BTreeMap;
 
@@ -77,7 +82,6 @@ impl Default for ArtifactRecord {
 }
 
 pub const ARTIFACT_CONTRACT_SCHEMA: &str = "homeboy/artifact-contract/v1";
-pub const EVIDENCE_CONTRACT_SCHEMA: &str = "homeboy/evidence-contract/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ArtifactContract {
@@ -150,48 +154,6 @@ impl ArtifactContract {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EvidenceContract {
-    #[serde(default = "evidence_contract_schema")]
-    pub schema: String,
-    pub kind: String,
-    pub target: String,
-    pub label: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub semantic_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artifact: Option<ArtifactContract>,
-    #[serde(default, skip_serializing_if = "Value::is_null")]
-    pub metadata: Value,
-    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: BTreeMap<String, Value>,
-}
-
-impl EvidenceContract {
-    pub fn from_value(value: Value) -> Result<Self, String> {
-        contract_from_value(value, Self::normalize)
-    }
-
-    fn normalize(&mut self) -> Result<(), String> {
-        normalize_schema_and_kind(
-            &mut self.schema,
-            &mut self.kind,
-            EVIDENCE_CONTRACT_SCHEMA,
-            "evidence contract",
-        )?;
-        self.target = required_trimmed("target", &self.target)?;
-        self.label = trim_or_default(&self.label, &self.kind);
-        self.role = normalize_optional_string(self.role.take());
-        self.semantic_key = normalize_optional_string(self.semantic_key.take());
-        if let Some(artifact) = &mut self.artifact {
-            artifact.normalize()?;
-        }
-        Ok(())
-    }
-}
-
 fn normalize_schema_and_kind(
     schema: &mut String,
     kind: &mut String,
@@ -216,10 +178,6 @@ where
 
 fn artifact_contract_schema() -> String {
     ARTIFACT_CONTRACT_SCHEMA.to_string()
-}
-
-fn evidence_contract_schema() -> String {
-    EVIDENCE_CONTRACT_SCHEMA.to_string()
 }
 
 fn normalize_optional_string(value: Option<String>) -> Option<String> {
@@ -295,26 +253,6 @@ mod tests {
         .expect_err("target error");
 
         assert!(err.contains("path, url, or public_url"));
-    }
-
-    #[test]
-    fn evidence_contract_normalizes_label_and_nested_artifact() {
-        let evidence = EvidenceContract::from_value(json!({
-            "kind": " proof ",
-            "target": " https://example.test/proof ",
-            "label": " ",
-            "artifact": {
-                "kind": "proof-json",
-                "path": "proof.json"
-            }
-        }))
-        .expect("evidence contract");
-
-        assert_eq!(evidence.schema, EVIDENCE_CONTRACT_SCHEMA);
-        assert_eq!(evidence.kind, "proof");
-        assert_eq!(evidence.label, "proof");
-        assert_eq!(evidence.target, "https://example.test/proof");
-        assert_eq!(evidence.artifact.expect("artifact").artifact_type, "file");
     }
 
     #[test]

@@ -32,7 +32,7 @@ pub struct CommandResultEnvelope<T: Serialize> {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<CommandArtifactRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub evidence: Vec<CommandEvidenceRef>,
+    pub evidence: Vec<CommandArtifactRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<CommandDiagnostics>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,7 +77,7 @@ pub struct CommandActionableMetadata {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<CommandArtifactRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub evidence: Vec<CommandEvidenceRef>,
+    pub evidence: Vec<CommandArtifactRef>,
 }
 
 impl CommandActionableMetadata {
@@ -246,17 +246,18 @@ pub struct CommandAgentTaskRef {
     pub review_command: Option<String>,
 }
 
+/// A pointer at one artifact or piece of evidence carried by a command-result
+/// envelope.
+///
+/// `artifacts` and `evidence` on [`CommandActionableMetadata`] both hold this
+/// shape. They used to hold two structurally identical types
+/// (`CommandArtifactRef` / `CommandEvidenceRef`); the distinction was never in
+/// the type, only in which field the value landed in — which is exactly how
+/// core already models it (`ActivityItem.artifacts` and `ActivityItem.evidence`
+/// are both `Vec<ActivityEvidenceRef>`). Collapsed in #10310; the serialized
+/// shape is unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandArtifactRef {
-    pub id: String,
-    pub kind: String,
-    pub uri: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub semantic_key: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CommandEvidenceRef {
     pub id: String,
     pub kind: String,
     pub uri: String,
@@ -586,7 +587,7 @@ fn envelope_for_data(
 
     if evidence.is_empty() {
         if let Some(run) = &run {
-            evidence.push(CommandEvidenceRef {
+            evidence.push(CommandArtifactRef {
                 id: format!("{}-result", run.id),
                 kind: "command-result".to_string(),
                 uri: format!("homeboy://runs/{}/result", run.id),
@@ -1183,6 +1184,63 @@ pub fn write_json_to_file_for_identity(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// #10310 collapsed `CommandEvidenceRef` onto `CommandArtifactRef`. They
+    /// were the same four fields with the same serde attributes; only the
+    /// envelope field they landed in ever distinguished them. Both lists must
+    /// still serialize with the identical element shape.
+    #[test]
+    fn actionable_artifacts_and_evidence_share_one_serialized_element_shape() {
+        let metadata = CommandActionableMetadata {
+            artifacts: vec![CommandArtifactRef {
+                id: "summary".to_string(),
+                kind: "artifact".to_string(),
+                uri: "homeboy://runs/run-1/artifact/summary".to_string(),
+                semantic_key: Some("run.summary".to_string()),
+            }],
+            evidence: vec![CommandArtifactRef {
+                id: "summary".to_string(),
+                kind: "artifact".to_string(),
+                uri: "homeboy://runs/run-1/artifact/summary".to_string(),
+                semantic_key: Some("run.summary".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(&metadata).expect("serialize actionable metadata");
+        assert_eq!(value["artifacts"][0], value["evidence"][0]);
+        assert_eq!(
+            value["artifacts"][0],
+            json!({
+                "id": "summary",
+                "kind": "artifact",
+                "uri": "homeboy://runs/run-1/artifact/summary",
+                "semantic_key": "run.summary"
+            })
+        );
+    }
+
+    /// `semantic_key` stays omitted rather than serialized as `null`, so
+    /// pre-collapse payloads compare equal.
+    #[test]
+    fn actionable_ref_omits_absent_semantic_key() {
+        let value = serde_json::to_value(CommandArtifactRef {
+            id: "log".to_string(),
+            kind: "log".to_string(),
+            uri: "homeboy://runs/run-1/artifact/log".to_string(),
+            semantic_key: None,
+        })
+        .expect("serialize artifact ref");
+
+        assert_eq!(
+            value,
+            json!({
+                "id": "log",
+                "kind": "log",
+                "uri": "homeboy://runs/run-1/artifact/log"
+            })
+        );
+    }
 
     #[test]
     fn preflight_failures_keep_resolved_nested_command_identity() {

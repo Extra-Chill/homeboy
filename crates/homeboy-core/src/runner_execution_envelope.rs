@@ -5,9 +5,20 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::env_materialization_plan::EnvMaterializationPlan;
-use crate::lab_contract::{LabRunnerWorkload, LabRunnerWorkloadArtifactRef};
+use crate::lab_contract::LabRunnerWorkload;
 use crate::secret_env_plan::SecretEnvPlan;
 use crate::source_snapshot::SourceSnapshot;
+
+/// The one `{id, name, path, url}` artifact reference carried by runner
+/// execution records, projections, and lab workloads.
+///
+/// This module used to define its own `RunnerExecutionArtifactRef` with exactly
+/// these four fields and exactly these serde attributes, while the same file
+/// already imported `LabRunnerWorkloadArtifactRef` for
+/// `RunnerExecutionResultRefs.artifacts`. Two names, one shape, one file.
+/// Collapsed onto the leaf-contract type in #10310; the serialized shape is
+/// unchanged.
+pub use crate::lab_contract::LabRunnerWorkloadArtifactRef;
 
 pub const RUNNER_EXECUTION_ENVELOPE_SCHEMA: &str = "homeboy/runner-execution-envelope/v1";
 pub const RUNNER_EXECUTION_RECORD_SCHEMA: &str = "homeboy/runner-execution-record/v1";
@@ -129,7 +140,7 @@ pub struct RunnerExecutionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestration_provenance: Option<OrchestrationTargetProvenance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifact_refs: Vec<RunnerExecutionArtifactRef>,
+    pub artifact_refs: Vec<LabRunnerWorkloadArtifactRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<RunnerExecutionNextAction>,
 }
@@ -154,7 +165,7 @@ pub struct RunnerExecutionProjection {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub materialized_paths: Vec<PathMaterializationProjection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifact_refs: Vec<RunnerExecutionArtifactRef>,
+    pub artifact_refs: Vec<LabRunnerWorkloadArtifactRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<RunnerExecutionNextAction>,
 }
@@ -245,17 +256,6 @@ impl OrchestrationTargetProvenance {
         self.extensions = extensions;
         self
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerExecutionArtifactRef {
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -358,7 +358,7 @@ impl RunnerExecutionRecord {
 
     pub fn with_artifact_refs(
         mut self,
-        artifact_refs: impl IntoIterator<Item = RunnerExecutionArtifactRef>,
+        artifact_refs: impl IntoIterator<Item = LabRunnerWorkloadArtifactRef>,
     ) -> Self {
         self.artifact_refs = artifact_refs.into_iter().collect();
         self
@@ -702,7 +702,7 @@ mod tests {
         let record = RunnerExecutionRecord::terminal("job-1", "lab-a", "daemon", 0)
             .with_job_id("job-1")
             .with_mirror_run_id(Some("run-1".to_string()))
-            .with_artifact_refs(vec![RunnerExecutionArtifactRef {
+            .with_artifact_refs(vec![LabRunnerWorkloadArtifactRef {
                 id: "artifact-1".to_string(),
                 name: Some("report".to_string()),
                 path: Some("artifacts/report.json".to_string()),
@@ -864,5 +864,65 @@ mod tests {
             projection.materialized_paths[1].role,
             PATH_MATERIALIZATION_ROLE_REQUIRED_PATH
         );
+    }
+
+    /// #10310 collapsed `RunnerExecutionArtifactRef` onto
+    /// `LabRunnerWorkloadArtifactRef`. Both were `{id, name, path, url}` with
+    /// identical serde attributes, so records written by an older binary must
+    /// still deserialize and re-serialize byte-identically.
+    #[test]
+    fn runner_execution_record_artifact_refs_keep_the_pre_collapse_wire_shape() {
+        let payload = json!({
+            "schema": RUNNER_EXECUTION_RECORD_SCHEMA,
+            "execution_id": "job-1",
+            "runner_id": "lab-a",
+            "transport": "daemon",
+            "status": "succeeded",
+            "artifact_refs": [
+                {
+                    "id": "report",
+                    "name": "summary",
+                    "path": "artifacts/summary.json",
+                    "url": "https://example.test/summary.json"
+                },
+                { "id": "bare" }
+            ]
+        });
+
+        let record: RunnerExecutionRecord =
+            serde_json::from_value(payload.clone()).expect("legacy record deserializes");
+        assert_eq!(record.artifact_refs.len(), 2);
+        assert_eq!(record.artifact_refs[0].id, "report");
+        assert_eq!(record.artifact_refs[0].name.as_deref(), Some("summary"));
+        assert_eq!(
+            record.artifact_refs[0].path.as_deref(),
+            Some("artifacts/summary.json")
+        );
+        assert_eq!(record.artifact_refs[1].id, "bare");
+        assert_eq!(record.artifact_refs[1].name, None);
+
+        let reserialized = serde_json::to_value(&record).expect("record serializes");
+        assert_eq!(reserialized["artifact_refs"], payload["artifact_refs"]);
+    }
+
+    /// The lab workload result refs and the runner execution record refs are
+    /// now literally the same type, so a value crosses between them without a
+    /// field-by-field rebuild.
+    #[test]
+    fn workload_result_refs_and_execution_record_refs_share_one_type() {
+        let artifact = LabRunnerWorkloadArtifactRef {
+            id: "report".to_string(),
+            name: None,
+            path: Some("artifacts/summary.json".to_string()),
+            url: None,
+        };
+        let result_refs = RunnerExecutionResultRefs {
+            artifacts: vec![artifact.clone()],
+            ..Default::default()
+        };
+        let record = RunnerExecutionRecord::terminal("job-1", "lab-a", "daemon", 0)
+            .with_artifact_refs(result_refs.artifacts.iter().cloned());
+
+        assert_eq!(record.artifact_refs, vec![artifact]);
     }
 }

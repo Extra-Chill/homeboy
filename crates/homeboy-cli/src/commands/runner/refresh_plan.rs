@@ -6,7 +6,7 @@ use serde::Serialize;
 use homeboy::core::build_identity::BuildIdentity;
 use homeboy::core::engine::shell::quote_arg;
 use homeboy::core::runner_execution_envelope::{
-    RunnerExecutionArtifactDeclaration, RunnerExecutionArtifactRef, RunnerExecutionEnvelope,
+    LabRunnerWorkloadArtifactRef, RunnerExecutionArtifactDeclaration, RunnerExecutionEnvelope,
     RunnerExecutionLifecyclePolicy, RunnerExecutionRecord, RunnerExecutionResultRefs,
     RUNNER_EXECUTION_ENVELOPE_SCHEMA,
 };
@@ -746,11 +746,11 @@ fn artifact_declarations(
 
 fn execution_artifact_refs(
     evidence_paths: &[LabRefreshPlanEvidencePath],
-) -> Vec<RunnerExecutionArtifactRef> {
+) -> Vec<LabRunnerWorkloadArtifactRef> {
     evidence_paths
         .iter()
         .enumerate()
-        .map(|(index, evidence_path)| RunnerExecutionArtifactRef {
+        .map(|(index, evidence_path)| LabRunnerWorkloadArtifactRef {
             id: artifact_name(evidence_path, index),
             name: Some(evidence_path.kind.to_string()),
             path: Some(evidence_path.path.clone()),

@@ -3,7 +3,8 @@ use serde_json::Value;
 
 use crate::api_jobs::JobArtifactMetadata;
 use crate::artifact_ref::{artifact_uri, ArtifactRef, EvidenceRef, ARTIFACT_REF_SCHEMA};
-use crate::runner_execution_envelope::{RunnerExecutionArtifactRef, RunnerExecutionRecord};
+use crate::lab_contract::LabRunnerWorkloadArtifactRef;
+use crate::runner_execution_envelope::RunnerExecutionRecord;
 use homeboy_lab_runner_contract::RunnerArtifactRef;
 
 pub const RUN_OUTCOME_ENVELOPE_SCHEMA: &str = "homeboy/run-outcome-envelope/v1";
@@ -115,7 +116,7 @@ impl RunOutcomeEnvelope {
     pub fn add_runner_execution_artifact_refs(
         &mut self,
         run_id: &str,
-        artifacts: impl IntoIterator<Item = RunnerExecutionArtifactRef>,
+        artifacts: impl IntoIterator<Item = LabRunnerWorkloadArtifactRef>,
     ) {
         for artifact in artifacts {
             self.push_artifact_ref(runner_execution_artifact_ref(run_id, artifact));
@@ -217,7 +218,7 @@ fn runner_artifact_ref(run_id: &str, artifact: RunnerArtifactRef) -> ArtifactRef
 
 fn runner_execution_artifact_ref(
     run_id: &str,
-    artifact: RunnerExecutionArtifactRef,
+    artifact: LabRunnerWorkloadArtifactRef,
 ) -> ArtifactRef {
     project_artifact_ref(
         run_id,
@@ -377,7 +378,7 @@ mod tests {
         let record = RunnerExecutionRecord::terminal("job-1", "lab-a", "daemon", 0)
             .with_job_id("job-1")
             .with_mirror_run_id(Some("run-1".to_string()))
-            .with_artifact_refs(vec![RunnerExecutionArtifactRef {
+            .with_artifact_refs(vec![LabRunnerWorkloadArtifactRef {
                 id: "report".to_string(),
                 name: Some("summary".to_string()),
                 path: Some("artifacts/summary.json".to_string()),
@@ -434,7 +435,7 @@ mod tests {
         );
         let execution = runner_execution_artifact_ref(
             "run-1",
-            RunnerExecutionArtifactRef {
+            LabRunnerWorkloadArtifactRef {
                 id: "execution".to_string(),
                 name: None,
                 path: None,

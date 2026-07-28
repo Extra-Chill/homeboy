@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::super::types::{
-    ArtifactRef, BrowserEvidenceVariant, BrowserEvidenceVariantComparison, VisualCompareResult,
+    BrowserEvidenceArtifactLink, BrowserEvidenceVariant, BrowserEvidenceVariantComparison,
+    VisualCompareResult,
 };
 use super::super::VisualCompareOptions;
 
@@ -51,7 +52,7 @@ pub(in crate::commands::report::browser_evidence_compare) fn attach_visual_compa
     Ok(())
 }
 
-fn screenshot_path(artifacts: &[ArtifactRef]) -> Option<String> {
+fn screenshot_path(artifacts: &[BrowserEvidenceArtifactLink]) -> Option<String> {
     let source_parent = artifacts.iter().find_map(|artifact| {
         (artifact.label == "source")
             .then(|| PathBuf::from(&artifact.target))
@@ -171,7 +172,7 @@ fn visual_compare_result_from_value(
                         .get("path")
                         .and_then(Value::as_str)
                         .or_else(|| value.as_str())?;
-                    Some(ArtifactRef {
+                    Some(BrowserEvidenceArtifactLink {
                         label: label.clone(),
                         target: redact_visual_artifact_target(
                             path,

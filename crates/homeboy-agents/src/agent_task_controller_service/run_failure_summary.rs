@@ -16,6 +16,8 @@
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::agent_task::AgentTaskEvidenceRef;
+
 /// Owner surface that a controller run blocker is attributed to.
 ///
 /// Ordered roughly outside-in so the most specific reachable surface wins when
@@ -43,19 +45,6 @@ impl OwnerSurface {
             OwnerSurface::AgentOutput => "agent_output",
         }
     }
-}
-
-/// A durable, Homeboy-owned reference to evidence behind a controller failure.
-///
-/// `kind` classifies the ref (`runner_job_log`, `run_evidence`,
-/// `artifact_bundle`, ...) so operators can pick the right follow-up without
-/// guessing at URI shapes.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct ControllerRunEvidenceRef {
-    pub kind: String,
-    pub uri: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
 }
 
 /// Compact, operator-facing root-cause summary for a failed controller run.
@@ -89,7 +78,7 @@ pub struct ControllerRunFailureSummary {
     pub failure_phase: Option<String>,
     /// Durable evidence refs (runner job logs, run evidence, artifact bundles).
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub evidence_refs: Vec<ControllerRunEvidenceRef>,
+    pub evidence_refs: Vec<AgentTaskEvidenceRef>,
     /// Provider-owned runtime context for the failed run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_context: Option<Value>,
@@ -266,13 +255,13 @@ fn collect_evidence_refs(
     loop_id: &str,
     failed_action: Option<&Value>,
     status: &Value,
-) -> Vec<ControllerRunEvidenceRef> {
-    let mut refs: Vec<ControllerRunEvidenceRef> = Vec::new();
+) -> Vec<AgentTaskEvidenceRef> {
+    let mut refs: Vec<AgentTaskEvidenceRef> = Vec::new();
 
     // Persisted run evidence: the controller record itself is the durable index.
     push_ref(
         &mut refs,
-        ControllerRunEvidenceRef {
+        AgentTaskEvidenceRef {
             kind: "run_evidence".to_string(),
             uri: format!("homeboy agent-task controller status {loop_id}"),
             label: Some("persisted controller run evidence".to_string()),
@@ -288,7 +277,7 @@ fn collect_evidence_refs(
         for job_id in find_all_strings(action, &["runner_job_id", "job_id"]) {
             push_ref(
                 &mut refs,
-                ControllerRunEvidenceRef {
+                AgentTaskEvidenceRef {
                     kind: "runner_job_log".to_string(),
                     uri: runner_id
                         .as_ref()
@@ -303,7 +292,7 @@ fn collect_evidence_refs(
         for run_id in find_all_strings(action, &["run_id"]) {
             push_ref(
                 &mut refs,
-                ControllerRunEvidenceRef {
+                AgentTaskEvidenceRef {
                     kind: "run_evidence".to_string(),
                     uri: format!("homeboy agent-task status {run_id} --full"),
                     label: Some(format!("agent-task run {run_id} evidence")),
@@ -333,13 +322,13 @@ fn collect_evidence_refs(
 
 /// Extract declared artifact/evidence refs (`uri`/`url`/`path`) from any nested
 /// `artifacts`, `artifact_refs`, or `evidence_refs` arrays.
-fn collect_declared_refs(value: &Value) -> Vec<ControllerRunEvidenceRef> {
+fn collect_declared_refs(value: &Value) -> Vec<AgentTaskEvidenceRef> {
     let mut out = Vec::new();
     collect_declared_refs_into(value, &mut out);
     out
 }
 
-fn collect_declared_refs_into(value: &Value, out: &mut Vec<ControllerRunEvidenceRef>) {
+fn collect_declared_refs_into(value: &Value, out: &mut Vec<AgentTaskEvidenceRef>) {
     match value {
         Value::Object(map) => {
             for key in [
@@ -369,7 +358,7 @@ fn collect_declared_refs_into(value: &Value, out: &mut Vec<ControllerRunEvidence
     }
 }
 
-fn declared_ref_from_item(container_key: &str, item: &Value) -> Option<ControllerRunEvidenceRef> {
+fn declared_ref_from_item(container_key: &str, item: &Value) -> Option<AgentTaskEvidenceRef> {
     let uri = string_field(item, "uri")
         .or_else(|| string_field(item, "url"))
         .or_else(|| string_field(item, "path"))?;
@@ -385,16 +374,16 @@ fn declared_ref_from_item(container_key: &str, item: &Value) -> Option<Controlle
     let label = string_field(item, "label")
         .or_else(|| string_field(item, "name"))
         .or_else(|| string_field(item, "role"));
-    Some(ControllerRunEvidenceRef { kind, uri, label })
+    Some(AgentTaskEvidenceRef { kind, uri, label })
 }
 
-fn collect_source_like_refs(value: &Value) -> Vec<ControllerRunEvidenceRef> {
+fn collect_source_like_refs(value: &Value) -> Vec<AgentTaskEvidenceRef> {
     let mut out = Vec::new();
     collect_source_like_refs_into(value, &mut out);
     out
 }
 
-fn collect_source_like_refs_into(value: &Value, out: &mut Vec<ControllerRunEvidenceRef>) {
+fn collect_source_like_refs_into(value: &Value, out: &mut Vec<AgentTaskEvidenceRef>) {
     match value {
         Value::Object(map) => {
             for (key, nested) in map {
@@ -432,10 +421,10 @@ fn collect_source_like_ref_value(
     kind: &str,
     key: &str,
     value: &Value,
-    out: &mut Vec<ControllerRunEvidenceRef>,
+    out: &mut Vec<AgentTaskEvidenceRef>,
 ) {
     match value {
-        Value::String(text) if !text.trim().is_empty() => out.push(ControllerRunEvidenceRef {
+        Value::String(text) if !text.trim().is_empty() => out.push(AgentTaskEvidenceRef {
             kind: kind.to_string(),
             uri: text.trim().to_string(),
             label: Some(key.to_string()),
@@ -446,7 +435,7 @@ fn collect_source_like_ref_value(
                 .or_else(|| string_field(value, "path"))
                 .or_else(|| string_field(value, "ref"))
             {
-                out.push(ControllerRunEvidenceRef {
+                out.push(AgentTaskEvidenceRef {
                     kind: kind.to_string(),
                     uri,
                     label: string_field(value, "label").or_else(|| Some(key.to_string())),
@@ -669,7 +658,7 @@ fn find_all_strings_into(value: &Value, fields: &[&str], out: &mut Vec<String>) 
     }
 }
 
-fn push_ref(refs: &mut Vec<ControllerRunEvidenceRef>, candidate: ControllerRunEvidenceRef) {
+fn push_ref(refs: &mut Vec<AgentTaskEvidenceRef>, candidate: AgentTaskEvidenceRef) {
     if !refs.iter().any(|existing| existing.uri == candidate.uri) {
         refs.push(candidate);
     }

@@ -151,12 +151,25 @@ pub struct MetricStats {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ArtifactComparison {
-    pub baseline: Vec<ArtifactRef>,
-    pub candidate: Vec<ArtifactRef>,
+    pub baseline: Vec<BrowserEvidenceArtifactLink>,
+    pub candidate: Vec<BrowserEvidenceArtifactLink>,
 }
 
+/// A labelled link scraped out of a browser-evidence blob.
+///
+/// Deliberately *not* the canonical `homeboy_core::artifact_ref::ArtifactRef`:
+/// this carries no artifact identity at all. It is recovered from arbitrary
+/// third-party evidence JSON where the only two things reliably present are a
+/// display label and a target path/URL. It is `Ord` because the reader dedupes
+/// links in a `BTreeSet`, and `Serialize`-only because it is report output that
+/// is never read back.
+///
+/// It was named `ArtifactRef` until #10310, which made it one of three
+/// unrelated types sharing that name across the workspace. Renamed rather than
+/// merged: a display link and an addressable artifact reference are different
+/// things. The serialized `{label, target}` shape is unchanged.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ArtifactRef {
+pub struct BrowserEvidenceArtifactLink {
     pub label: String,
     pub target: String,
 }
@@ -169,7 +182,7 @@ pub struct VisualCompareResult {
     pub total_pixels: Option<u64>,
     pub dimension_mismatch: Option<bool>,
     pub artifacts_directory: String,
-    pub artifacts: Vec<ArtifactRef>,
+    pub artifacts: Vec<BrowserEvidenceArtifactLink>,
 }
 
 fn is_default_u64(value: &u64) -> bool {

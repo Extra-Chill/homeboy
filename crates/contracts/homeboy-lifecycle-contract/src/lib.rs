@@ -14,8 +14,7 @@ pub mod rig_snapshot;
 pub mod timeline;
 
 pub use artifact_contract::{
-    ArtifactContract, ArtifactRecord, ArtifactViewerLink, EvidenceContract,
-    ARTIFACT_CONTRACT_SCHEMA, EVIDENCE_CONTRACT_SCHEMA,
+    ArtifactContract, ArtifactRecord, ArtifactViewerLink, ARTIFACT_CONTRACT_SCHEMA,
 };
 pub use lifecycle::{
     LifecycleContract, LifecyclePhaseContract, LifecyclePhaseKind, LifecyclePhaseResult,

@@ -45,8 +45,8 @@ pub struct RunsRefsOutput {
     pub artifact_count: usize,
     pub aggregate_artifact_count: usize,
     pub runs: Vec<RunRef>,
-    pub artifacts: Vec<ArtifactRef>,
-    pub aggregate_artifacts: Vec<ArtifactRef>,
+    pub artifacts: Vec<RunsRefsArtifactRef>,
+    pub aggregate_artifacts: Vec<RunsRefsArtifactRef>,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -83,8 +83,20 @@ pub struct RunRef {
     pub evidence_commands: RunEvidenceCommands,
 }
 
+/// One row of `homeboy runs refs` output.
+///
+/// Deliberately *not* the canonical `homeboy_core::artifact_ref::ArtifactRef`:
+/// this is a store projection built for an operator, so it carries the
+/// content-integrity columns the canonical wire ref does not (`mime`,
+/// `size_bytes`, `sha256`) plus a ready-to-paste `get_command`, and omits the
+/// wire ref's `schema`/`public_url`/`role`/`semantic_key`. It is
+/// `Serialize`-only because it is CLI output that is never read back.
+///
+/// It was named `ArtifactRef` until #10310, which made it one of three
+/// unrelated types sharing that name across the workspace. Renamed rather than
+/// merged; the serialized shape is unchanged.
 #[derive(Serialize, Debug, Clone, PartialEq)]
-pub struct ArtifactRef {
+pub struct RunsRefsArtifactRef {
     pub run_id: String,
     pub artifact_id: String,
     pub ref_id: String,
@@ -192,8 +204,8 @@ fn run_ref(run: &RunRecord) -> RunRef {
     }
 }
 
-fn artifact_ref(artifact: &ArtifactRecord) -> ArtifactRef {
-    ArtifactRef {
+fn artifact_ref(artifact: &ArtifactRecord) -> RunsRefsArtifactRef {
+    RunsRefsArtifactRef {
         run_id: artifact.run_id.clone(),
         artifact_id: artifact.id.clone(),
         ref_id: format!("homeboy://run/{}/artifact/{}", artifact.run_id, artifact.id),

@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::types::{
-    ArtifactComparison, ArtifactRef, AssertionComparison, AssertionStats, BrowserEvidenceVariant,
-    BrowserEvidenceVariantComparison, MetricComparison, MetricStats,
+    ArtifactComparison, AssertionComparison, AssertionStats, BrowserEvidenceArtifactLink,
+    BrowserEvidenceVariant, BrowserEvidenceVariantComparison, MetricComparison, MetricStats,
 };
 use super::BrowserEvidenceSample;
 
@@ -114,7 +114,7 @@ fn variant_for_sample(sample: &BrowserEvidenceSample) -> BrowserEvidenceVariant 
     }
 }
 
-fn artifact_refs(samples: &[&BrowserEvidenceSample]) -> Vec<ArtifactRef> {
+fn artifact_refs(samples: &[&BrowserEvidenceSample]) -> Vec<BrowserEvidenceArtifactLink> {
     samples
         .iter()
         .flat_map(|sample| {

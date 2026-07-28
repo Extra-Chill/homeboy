@@ -329,7 +329,7 @@ fn actionable_for_activity_item(item: &ActivityItem) -> CommandActionableMetadat
         evidence: item
             .evidence
             .iter()
-            .map(|evidence| super::utils::response::CommandEvidenceRef {
+            .map(|evidence| super::utils::response::CommandArtifactRef {
                 id: evidence.id.clone(),
                 kind: evidence.kind.clone(),
                 uri: evidence.uri.clone(),
