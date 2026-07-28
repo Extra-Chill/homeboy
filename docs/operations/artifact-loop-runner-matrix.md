@@ -156,12 +156,13 @@ worker command and the output directory is enough to understand the result.
 
 ## Public Links
 
-Set `HOMEBOY_PUBLIC_ARTIFACT_BASE_URL` on the runner only when promoted artifact
-files are mirrored to a stable HTTP(S) origin. With that variable configured,
-Homeboy can derive public links for fetchable run artifacts and `runs evidence`
-can expose reviewer-visible URLs after validation.
+Set the controller's `artifact_origin.public_base_url` only when its persisted
+artifacts are served from a stable HTTPS origin. With that controller setting,
+Homeboy can derive canonical reviewer links for fetchable run artifacts. The
+legacy `HOMEBOY_PUBLIC_ARTIFACT_BASE_URL` remains a controller-process
+compatibility input; setting it on a runner has no effect on reviewer links.
 
-If the variable is absent, evidence remains valid but non-public: reviewers use
+If the controller origin is absent, evidence remains valid but non-public: reviewers use
 `homeboy runs artifact get <run-id> <artifact-id> -o <path>` or CI-provided
 artifact downloads.
 

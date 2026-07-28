@@ -51,9 +51,7 @@ Runner config separates printable environment from secret references:
 
 ```json
 {
-  "env": {
-    "HOMEBOY_PUBLIC_ARTIFACT_BASE_URL": "https://artifacts.example.test"
-  },
+  "env": {},
   "secret_env": {
     "GITHUB_TOKEN": { "env": "GITHUB_TOKEN" }
   }
@@ -61,6 +59,17 @@ Runner config separates printable environment from secret references:
 ```
 
 `env` values are diagnostic. `secret_env` values are resolved at execution time and are never printed as secret values.
+
+Configure the controller's reviewer artifact origin in `homeboy.json`; runner
+environment never supplies it:
+
+```json
+{
+  "artifact_origin": {
+    "public_base_url": "https://artifacts.example.test"
+  }
+}
+```
 
 ## 5. Verify Lab-Offload Readiness
 

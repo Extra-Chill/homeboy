@@ -78,24 +78,94 @@ pub fn controller_artifact_metadata(runs: &[RunRecord]) -> Result<Vec<JobArtifac
     artifacts
         .into_iter()
         .map(|artifact| {
+            validate_controller_artifact(&artifact)?;
             let controller_run_id = artifact.run_id.clone();
+            let url = homeboy_core::artifact_links::controller_artifact_url(&artifact)?;
+            let fetch_command = format!(
+                "homeboy runs artifact get {} {} -o <path>",
+                controller_run_id, artifact.id
+            );
             Ok(JobArtifactMetadata {
                 id: artifact.id,
                 name: None,
                 path: Some(artifact.path),
-                url: artifact.public_url.or(artifact.url),
+                url,
                 mime: artifact.mime,
                 size_bytes: artifact
                     .size_bytes
                     .and_then(|size| u64::try_from(size).ok()),
                 sha256: artifact.sha256,
                 content_base64: None,
-                metadata: Some(
-                    json!({ "controller_run_id": controller_run_id, "controller_owned": true }),
-                ),
+                metadata: Some(json!({
+                    "controller_run_id": controller_run_id,
+                    "controller_owned": true,
+                    "fetch_command": fetch_command,
+                })),
             })
         })
         .collect()
+}
+
+fn validate_controller_artifact(artifact: &ArtifactRecord) -> Result<()> {
+    if artifact.artifact_type != "file" {
+        return Err(Error::validation_invalid_argument(
+            "artifact.type",
+            "terminal artifact must be a controller-owned file",
+            Some(artifact.id.clone()),
+            None,
+        ));
+    }
+    let expected_size = artifact.size_bytes.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "artifact.size_bytes",
+            "terminal artifact is missing controller size metadata",
+            Some(artifact.id.clone()),
+            None,
+        )
+    })?;
+    let expected_sha256 = artifact
+        .sha256
+        .as_deref()
+        .filter(|sha| !sha.is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "artifact.sha256",
+                "terminal artifact is missing controller checksum metadata",
+                Some(artifact.id.clone()),
+                None,
+            )
+        })?;
+    if artifact.mime.as_deref().is_none_or(str::is_empty) {
+        return Err(Error::validation_invalid_argument(
+            "artifact.mime",
+            "terminal artifact is missing controller media type metadata",
+            Some(artifact.id.clone()),
+            None,
+        ));
+    }
+    let path = std::path::Path::new(&artifact.path);
+    let size_matches = std::fs::metadata(path)
+        .ok()
+        .filter(|metadata| metadata.is_file())
+        .and_then(|metadata| i64::try_from(metadata.len()).ok())
+        == Some(expected_size);
+    if !size_matches {
+        return Err(Error::validation_invalid_argument(
+            "artifact.size_bytes",
+            "terminal artifact bytes are missing or do not match controller metadata",
+            Some(artifact.id.clone()),
+            None,
+        ));
+    }
+    if homeboy_core::artifact_metadata::sha256_file(path)? != expected_sha256 {
+        return Err(Error::validation_invalid_argument(
+            "artifact.sha256",
+            "terminal artifact bytes do not match controller checksum metadata",
+            Some(artifact.id.clone()),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 pub fn mirror_daemon_evidence(

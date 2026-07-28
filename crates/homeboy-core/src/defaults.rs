@@ -98,6 +98,14 @@ pub struct HomeboyConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_root: Option<String>,
 
+    /// Controller-owned public origin for canonical run artifact routes.
+    ///
+    /// Runner environment is not configuration for this origin. The legacy
+    /// `HOMEBOY_PUBLIC_ARTIFACT_BASE_URL` is read only as a controller-process
+    /// compatibility input when this setting is absent.
+    #[serde(default)]
+    pub artifact_origin: ArtifactOriginConfig,
+
     /// Enable automatic update check on startup (default: true).
     /// Disable with `homeboy config set /update_check false`
     /// or set HOMEBOY_NO_UPDATE_CHECK=1.
@@ -158,10 +166,19 @@ impl Default for HomeboyConfig {
             release_gate: ReleaseGateConfig::default(),
             retention: RetentionConfig::default(),
             artifact_root: None,
+            artifact_origin: ArtifactOriginConfig::default(),
             update_check: true,
             resident_services: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ArtifactOriginConfig {
+    /// Public HTTPS base URL owned by this controller, for example
+    /// `https://artifacts.example.test`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]

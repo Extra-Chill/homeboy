@@ -32,11 +32,17 @@ pub(crate) fn route(path: &str) -> Option<HttpResponse> {
     let result = match segments.as_slice() {
         ["artifacts", artifact_token] => resolve_artifact_download(None, artifact_token),
         ["runs", run_id, "artifacts", "sync"] => artifact_sync_manifest(run_id),
-        ["runs", run_id, "artifacts", artifact_token] => {
-            resolve_artifact_download(Some(run_id), artifact_token)
+        ["runs", run_id, "artifacts", artifact_id] => {
+            resolve_exact_artifact_download(run_id, artifact_id)
         }
-        ["runs", run_id, "artifacts", artifact_token, "content"] => {
-            resolve_artifact_download(Some(run_id), artifact_token)
+        ["runs", run_id, "artifacts", artifact_id, "content"] => {
+            resolve_exact_artifact_download(run_id, artifact_id)
+        }
+        ["runs", run_id, "artifacts", "aliases", artifact_token] => {
+            resolve_alias_artifact_download(run_id, artifact_token)
+        }
+        ["runs", run_id, "artifacts", "store", artifact_token] => {
+            resolve_artifact_store_download(run_id, artifact_token)
         }
         _ => return None,
     };
@@ -127,6 +133,10 @@ fn resolve_artifact_download(
             })?
     };
 
+    resolve_downloaded_artifact(artifact)
+}
+
+fn resolve_downloaded_artifact(artifact: ArtifactRecord) -> Result<ResolvedArtifactResponse> {
     if artifact.artifact_type != "file" {
         if artifact.artifact_type == "remote_file"
             || crate::execution_contract::is_remote_runner_artifact_path(&artifact.path)
@@ -210,6 +220,55 @@ fn resolve_artifact_download(
             filename,
         },
     )))
+}
+
+fn resolve_exact_artifact_download(
+    run_id: &str,
+    artifact_id: &str,
+) -> Result<ResolvedArtifactResponse> {
+    let store = ObservationStore::open_initialized()?;
+    if store.get_run(run_id)?.is_none() {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            format!("run record not found: {run_id}"),
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    crate::artifacts::index_remote_published_artifact_refs_for_run(&store, run_id)?;
+    let artifact_id = decode_uri_component(artifact_id);
+    let artifact = store.get_artifact(&artifact_id)?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "artifact_id",
+            format!("artifact record not found: {artifact_id}"),
+            Some(artifact_id.clone()),
+            None,
+        )
+    })?;
+    if artifact.run_id != run_id {
+        return Err(Error::validation_invalid_argument(
+            "artifact_id",
+            "artifact does not belong to requested run",
+            Some(artifact_id),
+            None,
+        ));
+    }
+    resolve_downloaded_artifact(artifact)
+}
+
+fn resolve_alias_artifact_download(
+    run_id: &str,
+    artifact_token: &str,
+) -> Result<ResolvedArtifactResponse> {
+    resolve_artifact_download(Some(run_id), artifact_token)
+}
+
+fn resolve_artifact_store_download(
+    run_id: &str,
+    artifact_token: &str,
+) -> Result<ResolvedArtifactResponse> {
+    let decoded = decode_uri_component(artifact_token);
+    artifact_store_download(run_id, artifact_token, &decoded)
 }
 
 fn artifact_store_download(

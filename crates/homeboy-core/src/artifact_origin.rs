@@ -678,6 +678,120 @@ mod tests {
     }
 
     #[test]
+    fn serves_nested_visual_compare_reviewer_paths_over_http() {
+        let root = tempfile::tempdir().expect("artifact root");
+        let fixture = [
+            ("source.png", b"source bytes".as_slice()),
+            ("candidate.png", b"candidate bytes".as_slice()),
+            ("diff.png", b"diff bytes".as_slice()),
+        ];
+        let path = root.path().join("visual-compare/37-art-gallery-exhibition");
+        std::fs::create_dir_all(&path).expect("artifact directory");
+        for (name, bytes) in fixture {
+            std::fs::write(path.join(name), bytes).expect("visual artifact");
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("listener address");
+        let root_path = root.path().to_path_buf();
+        let server = std::thread::spawn(move || {
+            for stream in listener.incoming().take(3) {
+                handle_stream(stream.expect("request stream"), &root_path).expect("serve request");
+            }
+        });
+        let client = reqwest::blocking::Client::new();
+        for (name, bytes) in fixture {
+            let response = client
+                .get(format!(
+                    "http://{address}/visual-compare/37-art-gallery-exhibition/{name}"
+                ))
+                .send()
+                .expect("reviewer request");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.bytes().expect("response bytes").as_ref(), bytes);
+        }
+        server.join().expect("origin server");
+    }
+
+    #[test]
+    fn serves_generated_canonical_reviewer_urls_over_http() {
+        crate::test_support::with_isolated_home(|home| {
+            let _env = EnvGuard::set(
+                crate::artifacts::PUBLIC_ARTIFACT_BASE_URL_ENV,
+                "https://artifacts.example.test",
+            );
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("runner-exec").build())
+                .expect("run");
+            let fixture = [
+                ("source", "source.png", b"source bytes".as_slice()),
+                ("candidate", "candidate.png", b"candidate bytes".as_slice()),
+                ("diff", "diff.png", b"diff bytes".as_slice()),
+            ];
+            let source_dir = home.path().join("visual-compare/37-art-gallery-exhibition");
+            std::fs::create_dir_all(&source_dir).expect("artifact directory");
+            let artifacts = fixture
+                .iter()
+                .map(|(id, name, bytes)| {
+                    let source = source_dir.join(name);
+                    std::fs::write(&source, bytes).expect("visual artifact");
+                    store
+                        .record_artifact_with_id(
+                            &run.id,
+                            "visual_compare",
+                            &source,
+                            id,
+                            serde_json::json!({}),
+                        )
+                        .expect("controller artifact")
+                })
+                .collect::<Vec<_>>();
+
+            let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+            let address = listener.local_addr().expect("listener address");
+            let root = home.path().to_path_buf();
+            let server = std::thread::spawn(move || {
+                for stream in listener.incoming().take(3) {
+                    handle_stream(stream.expect("request stream"), &root).expect("serve request");
+                }
+            });
+            let client = reqwest::blocking::Client::new();
+            for ((id, _, bytes), artifact) in fixture.iter().zip(artifacts) {
+                let public_url = crate::artifact_links::controller_artifact_url(&artifact)
+                    .expect("valid reviewer origin")
+                    .expect("configured public reviewer URL");
+                assert_eq!(
+                    public_url,
+                    format!(
+                        "https://artifacts.example.test/runs/{}/artifacts/{id}",
+                        run.id
+                    )
+                );
+                let path = reqwest::Url::parse(&public_url)
+                    .expect("public URL")
+                    .path()
+                    .to_string();
+                let response = client
+                    .get(format!("http://{address}{path}"))
+                    .send()
+                    .expect("unauthenticated reviewer request");
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                assert_eq!(
+                    response.headers()[reqwest::header::CONTENT_TYPE],
+                    "image/png"
+                );
+                assert_eq!(
+                    response.headers()["x-homeboy-artifact-sha256"],
+                    artifact.sha256.as_deref().expect("checksum")
+                );
+                assert_eq!(response.bytes().expect("response bytes").as_ref(), *bytes);
+            }
+            server.join().expect("origin server");
+        });
+    }
+
+    #[test]
     fn inspect_reports_404_for_missing_workflow_bench_bundle_path() {
         let temp = tempfile::tempdir().expect("tempdir");
 
