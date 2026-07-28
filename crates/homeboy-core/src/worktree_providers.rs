@@ -24,6 +24,10 @@ const PROVIDER_CLEANUP_OUTPUT_LIMIT: usize = 64 * 1024;
 const PROVIDER_LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const PROVIDER_LOOKUP_TIMEOUT: Duration = Duration::from_secs(1);
+#[cfg(not(test))]
+const PROVIDER_ENSURE_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const PROVIDER_ENSURE_TIMEOUT: Duration = Duration::from_secs(3);
 const PROVIDER_LOOKUP_OUTPUT_LIMIT: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
@@ -418,7 +422,7 @@ fn run_provider_ensure_command(provider_id: &str, command: &[String]) -> Result<
     let output = crate::engine::command::wait_with_bounded_output_supervised(
         &mut child,
         PROVIDER_LOOKUP_OUTPUT_LIMIT,
-        PROVIDER_LOOKUP_TIMEOUT,
+        PROVIDER_ENSURE_TIMEOUT,
         Duration::from_millis(100),
         || false,
         |_, _| Ok(()),
@@ -438,7 +442,7 @@ fn run_provider_ensure_command(provider_id: &str, command: &[String]) -> Result<
             "to_worktree",
             format!(
                 "worktree provider `{provider_id}` ensure command timed out after {} ms",
-                PROVIDER_LOOKUP_TIMEOUT.as_millis()
+                PROVIDER_ENSURE_TIMEOUT.as_millis()
             ),
             Some(provider_id.to_string()),
             Some(vec![
@@ -1770,7 +1774,7 @@ mod tests {
         fs::write(
             &script,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -f '{}' ]; then\n    printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-9908\",\"path\":\"{}\",\"branch\":\"fix/9908\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n  else\n    exit 1\n  fi\nelse\n  git init -b fix/9908 '{}' >/dev/null\n  printf '%s|%s|%s|%s|%s|%s' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" > '{}'\nfi\n",
+                "#!/bin/sh\nif [ \"$1\" = resolve ]; then\n  if [ -f '{}' ]; then\n    printf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"homeboy@fix-9908\",\"path\":\"{}\",\"branch\":\"fix/9908\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n  else\n    exit 1\n  fi\nelse\n  sleep 2\n  git init -b fix/9908 '{}' >/dev/null\n  printf '%s|%s|%s|%s|%s|%s' \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" \"$7\" > '{}'\nfi\n",
                 state.display(),
                 workspace.display(),
                 workspace.display(),
