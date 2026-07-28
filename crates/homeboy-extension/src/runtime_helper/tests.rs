@@ -78,8 +78,8 @@ fn declared_helper_is_content_addressed_and_reports_provenance() {
             id: RUNTIME_SETTINGS_HELPER_ID.to_string(),
             revision: None,
         };
-        let provision = provision_declared_helpers(&[requirement])
-            .expect("core materializes declared helper");
+        let provision =
+            provision_declared_helpers(&[requirement]).expect("core materializes declared helper");
 
         assert_eq!(provision.len(), 1);
         assert_eq!(provision[0].env_var, RUNTIME_SETTINGS_HELPER_ENV);
@@ -436,8 +436,14 @@ fn emit_test_failure_shim_derives_canonical_fingerprint_and_supports_infra_fallb
     assert_eq!(record["line"], 42);
     assert_eq!(record["failure_type"], "AssertionError");
 
-    let identity = ["Foo::testBar", "src/Foo.php", "42", "AssertionError", "Failed asserting that false is true."]
-        .join("\0");
+    let identity = [
+        "Foo::testBar",
+        "src/Foo.php",
+        "42",
+        "AssertionError",
+        "Failed asserting that false is true.",
+    ]
+    .join("\0");
     assert_eq!(
         record["fingerprint"].as_str().expect("fingerprint string"),
         shasum_hex("256", &identity)
@@ -462,7 +468,9 @@ fn emit_test_failure_shim_derives_canonical_fingerprint_and_supports_infra_fallb
         serde_json::from_slice(&infra.stdout).expect("infra record is valid json");
     assert_eq!(infra_record["failure_type"], "infrastructure");
     assert_eq!(
-        infra_record["fingerprint"].as_str().expect("fingerprint string"),
+        infra_record["fingerprint"]
+            .as_str()
+            .expect("fingerprint string"),
         shasum_hex("256", "rust:cargo-test:failed")
     );
 }
@@ -495,8 +503,15 @@ fn emit_test_failure_bound_excerpt_matches_canonical_bound() {
         String::from_utf8_lossy(&output.stderr)
     );
     let excerpt = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(excerpt.chars().count(), 4000, "excerpt should cap at 4000 chars");
-    assert!(excerpt.ends_with("..."), "capped excerpt should end with ellipsis");
+    assert_eq!(
+        excerpt.chars().count(),
+        4000,
+        "excerpt should cap at 4000 chars"
+    );
+    assert!(
+        excerpt.ends_with("..."),
+        "capped excerpt should end with ellipsis"
+    );
 }
 
 #[test]
@@ -1049,10 +1064,7 @@ homeboyBenchProgress({ scenario: 'studio-agent-site-build', phase: 'setup' });
 
 #[test]
 fn bench_runtime_helpers_document_shared_contract() {
-    for content in [
-        assets::BENCH_HELPER_JS,
-        assets::BENCH_HELPER_SH,
-    ] {
+    for content in [assets::BENCH_HELPER_JS, assets::BENCH_HELPER_SH] {
         assert!(
             content.contains("R-7 percentile"),
             "helper should document percentile method"
