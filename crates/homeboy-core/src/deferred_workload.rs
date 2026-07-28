@@ -286,7 +286,7 @@ pub fn defer_claim(id: &str, owner: &str) -> Result<()> {
 }
 
 pub fn records() -> Result<Vec<DeferredWorkload>> {
-    update(|records| Ok(records.clone()))
+    read_store(&store_path()?)
 }
 
 pub fn worker_lock() -> Result<File> {
@@ -577,6 +577,20 @@ mod tests {
             assert!(claim(&input(), "other-lab", "second-owner")
                 .expect("idempotent claim")
                 .is_none());
+        });
+    }
+
+    #[test]
+    fn reading_an_absent_store_does_not_create_runtime_state() {
+        crate::test_support::with_isolated_home(|_| {
+            let path = store_path().expect("store path");
+
+            assert!(records().expect("read absent store").is_empty());
+            assert!(!path.exists(), "read created deferred workload store");
+            assert!(
+                !path.with_extension("lock").exists(),
+                "read created deferred workload lock"
+            );
         });
     }
 
