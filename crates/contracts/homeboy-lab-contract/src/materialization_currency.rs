@@ -412,7 +412,10 @@ mod tests {
             .with_provenance(Some("def5678".to_string()), false);
 
         // Differing revision and dirty flag, identical bytes: the bytes decide.
-        assert_eq!(compare_identities("workspace", &local, &remote), Currency::Current);
+        assert_eq!(
+            compare_identities("workspace", &local, &remote),
+            Currency::Current
+        );
     }
 
     #[test]
