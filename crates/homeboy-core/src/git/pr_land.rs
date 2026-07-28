@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 
@@ -8,7 +9,7 @@ use super::gh_client::GhClient;
 use super::gh_client::{delete_branch_ref_api_args, pr_merge_api_args};
 use super::github::classify_check;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PrLandOptions {
     pub repo: String,
     pub prs: Vec<String>,
@@ -17,6 +18,36 @@ pub struct PrLandOptions {
     pub dry_run: bool,
     pub refresh_helper: Option<PrLandRefreshHelper>,
     pub max_base_retries: usize,
+    pub check_wait_timeout: Duration,
+    pub check_poll_interval: Duration,
+    pub check_waivers: Vec<PrCheckWaiver>,
+}
+
+pub const DEFAULT_CHECK_WAIT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const DEFAULT_CHECK_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+impl Default for PrLandOptions {
+    fn default() -> Self {
+        Self {
+            repo: String::new(),
+            prs: Vec::new(),
+            merge_method: "squash".to_string(),
+            delete_branch: false,
+            dry_run: false,
+            refresh_helper: None,
+            max_base_retries: 1,
+            check_wait_timeout: DEFAULT_CHECK_WAIT_TIMEOUT,
+            check_poll_interval: DEFAULT_CHECK_POLL_INTERVAL,
+            check_waivers: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrCheckWaiver {
+    pub head_sha: String,
+    pub name: String,
+    pub approved_by: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -71,6 +102,32 @@ pub struct PrLandItem {
     pub head_sha: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_wait: Option<PrCheckWaitReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PrCheckWaitReport {
+    pub head_sha: String,
+    pub terminal: bool,
+    pub timed_out: bool,
+    pub checks: Vec<PrCheckResult>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blocking_checks: Vec<PrCheckResult>,
+    pub resume_command: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PrCheckResult {
+    pub name: String,
+    pub status: Option<String>,
+    pub conclusion: Option<String>,
+    pub required: Option<bool>,
+    pub classification: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiver_approved_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -128,6 +185,7 @@ struct PrView {
     state: String,
     draft: bool,
     checks: Option<String>,
+    status_check_rollup: Vec<Value>,
     merge_state: Option<String>,
     head_sha: Option<String>,
     head: Option<String>,
@@ -181,6 +239,7 @@ impl PrLandClient for GhPrLandClient {
             state: parsed.state,
             draft: parsed.is_draft,
             checks: summarize_checks(&parsed.status_check_rollup),
+            status_check_rollup: parsed.status_check_rollup,
             merge_state: non_empty(parsed.merge_state_status),
             head_sha: non_empty(parsed.head_ref_oid),
             head: non_empty(parsed.head_ref_name),
@@ -248,51 +307,78 @@ fn land_prs_with_client(
     };
 
     for number in numbers {
-        let mut pr = client.view_pr(&options.repo, number)?;
-        match readiness(&pr, options.refresh_helper.is_some()) {
-            PrReadiness::AlreadyMerged => {
-                summary.already_merged += 1;
-                items.push(item_from_pr(
-                    &pr,
-                    PrLandStatus::AlreadyMerged,
-                    "already merged",
-                ));
-            }
-            PrReadiness::Refreshable(reason) => {
-                if let Some(helper) = &options.refresh_helper {
-                    if options.dry_run {
-                        summary.blocked += 1;
-                        items.push(item_from_pr(
-                            &pr,
-                            PrLandStatus::Blocked,
-                            &format!("would refresh: {reason}"),
-                        ));
-                        break;
-                    }
-                    if !options.dry_run {
-                        client.refresh_pr(&options.repo, &pr, helper)?;
-                    }
-                    summary.refreshed += 1;
-                    pr = client.view_pr(&options.repo, number)?;
-                    if !matches!(readiness(&pr, false), PrReadiness::Ready) {
-                        summary.blocked += 1;
-                        items.push(item_from_pr(&pr, PrLandStatus::Refreshed, &reason));
-                        break;
-                    }
-                } else {
-                    summary.blocked += 1;
-                    items.push(item_from_pr(&pr, PrLandStatus::Blocked, &reason));
-                    break;
-                }
-                merge_ready_pr(&options, client, &mut summary, &mut items, pr)?;
-            }
-            PrReadiness::Blocked(reason) => {
+        let pr = client.view_pr(&options.repo, number)?;
+        match wait_for_checks(&options, client, pr)? {
+            CheckWaitOutcome::Blocked { pr, reason, report } => {
                 summary.blocked += 1;
-                items.push(item_from_pr(&pr, PrLandStatus::Blocked, &reason));
+                items.push(item_from_pr_with_check_wait(
+                    &pr,
+                    PrLandStatus::Blocked,
+                    &reason,
+                    report,
+                ));
                 break;
             }
-            PrReadiness::Ready => {
-                merge_ready_pr(&options, client, &mut summary, &mut items, pr)?;
+            CheckWaitOutcome::Ready { pr, .. } => {
+                match readiness(&pr, options.refresh_helper.is_some()) {
+                    PrReadiness::AlreadyMerged => {
+                        summary.already_merged += 1;
+                        items.push(item_from_pr(
+                            &pr,
+                            PrLandStatus::AlreadyMerged,
+                            "already merged",
+                        ));
+                    }
+                    PrReadiness::Refreshable(reason) => {
+                        if let Some(helper) = &options.refresh_helper {
+                            if options.dry_run {
+                                summary.blocked += 1;
+                                items.push(item_from_pr(
+                                    &pr,
+                                    PrLandStatus::Blocked,
+                                    &format!("would refresh: {reason}"),
+                                ));
+                                break;
+                            }
+                            if !options.dry_run {
+                                client.refresh_pr(&options.repo, &pr, helper)?;
+                            }
+                            summary.refreshed += 1;
+                            let refreshed = client.view_pr(&options.repo, number)?;
+                            let pr = match wait_for_checks(&options, client, refreshed)? {
+                                CheckWaitOutcome::Ready { pr, .. } => pr,
+                                CheckWaitOutcome::Blocked { pr, reason, report } => {
+                                    summary.blocked += 1;
+                                    items.push(item_from_pr_with_check_wait(
+                                        &pr,
+                                        PrLandStatus::Refreshed,
+                                        &reason,
+                                        report,
+                                    ));
+                                    break;
+                                }
+                            };
+                            if !matches!(readiness(&pr, false), PrReadiness::Ready) {
+                                summary.blocked += 1;
+                                items.push(item_from_pr(&pr, PrLandStatus::Refreshed, &reason));
+                                break;
+                            }
+                        } else {
+                            summary.blocked += 1;
+                            items.push(item_from_pr(&pr, PrLandStatus::Blocked, &reason));
+                            break;
+                        }
+                        merge_ready_pr(&options, client, &mut summary, &mut items, pr)?;
+                    }
+                    PrReadiness::Blocked(reason) => {
+                        summary.blocked += 1;
+                        items.push(item_from_pr(&pr, PrLandStatus::Blocked, &reason));
+                        break;
+                    }
+                    PrReadiness::Ready => {
+                        merge_ready_pr(&options, client, &mut summary, &mut items, pr)?;
+                    }
+                }
             }
         }
     }
@@ -350,6 +436,19 @@ fn merge_ready_pr(
                 attempts += 1;
                 summary.merge_retries += 1;
                 pr = client.view_pr(&options.repo, pr.common.number)?;
+                pr = match wait_for_checks(options, client, pr)? {
+                    CheckWaitOutcome::Ready { pr, .. } => pr,
+                    CheckWaitOutcome::Blocked { pr, reason, report } => {
+                        summary.blocked += 1;
+                        items.push(item_from_pr_with_check_wait(
+                            &pr,
+                            PrLandStatus::Blocked,
+                            &reason,
+                            report,
+                        ));
+                        return Ok(());
+                    }
+                };
                 match readiness(&pr, false) {
                     PrReadiness::Ready => continue,
                     PrReadiness::AlreadyMerged => {
@@ -421,6 +520,174 @@ fn item_from_pr_with_warnings(
         merge_state: pr.merge_state.clone(),
         head_sha: pr.head_sha.clone(),
         warnings,
+        check_wait: None,
+    }
+}
+
+fn item_from_pr_with_check_wait(
+    pr: &PrView,
+    status: PrLandStatus,
+    reason: &str,
+    check_wait: PrCheckWaitReport,
+) -> PrLandItem {
+    let mut item = item_from_pr(pr, status, reason);
+    item.check_wait = Some(check_wait);
+    item
+}
+
+enum CheckWaitOutcome {
+    Ready {
+        pr: PrView,
+        report: PrCheckWaitReport,
+    },
+    Blocked {
+        pr: PrView,
+        reason: String,
+        report: PrCheckWaitReport,
+    },
+}
+
+fn wait_for_checks(
+    options: &PrLandOptions,
+    client: &mut impl PrLandClient,
+    mut pr: PrView,
+) -> Result<CheckWaitOutcome> {
+    let Some(expected_head) = pr.head_sha.clone() else {
+        let report = check_wait_report(options, &pr, "", false, false);
+        return Ok(CheckWaitOutcome::Blocked {
+            pr,
+            reason: "PR head SHA is unavailable; cannot bind checks to an exact revision"
+                .to_string(),
+            report,
+        });
+    };
+    let started = Instant::now();
+    loop {
+        if pr.head_sha.as_deref() != Some(expected_head.as_str()) {
+            let report = check_wait_report(options, &pr, &expected_head, false, false);
+            return Ok(CheckWaitOutcome::Blocked {
+                pr,
+                reason: format!(
+                    "PR head changed from {expected_head}; re-run finalization for the new head"
+                ),
+                report,
+            });
+        }
+        let report = check_wait_report(options, &pr, &expected_head, false, false);
+        let waiting = report.checks.iter().any(|check| {
+            matches!(
+                check.classification.as_str(),
+                "queued" | "running" | "pending"
+            )
+        });
+        if !waiting {
+            let mut terminal = report;
+            terminal.terminal = true;
+            if terminal.blocking_checks.is_empty() {
+                return Ok(CheckWaitOutcome::Ready {
+                    pr,
+                    report: terminal,
+                });
+            }
+            return Ok(CheckWaitOutcome::Blocked {
+                pr,
+                reason: "one or more checks failed for the exact PR head".to_string(),
+                report: terminal,
+            });
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= options.check_wait_timeout {
+            let mut timed_out = report;
+            timed_out.timed_out = true;
+            return Ok(CheckWaitOutcome::Blocked {
+                pr,
+                reason: format!(
+                    "checks did not become terminal within {} seconds",
+                    options.check_wait_timeout.as_secs()
+                ),
+                report: timed_out,
+            });
+        }
+        std::thread::sleep(
+            options
+                .check_poll_interval
+                .min(options.check_wait_timeout - elapsed),
+        );
+        pr = client.view_pr(&options.repo, pr.common.number)?;
+    }
+}
+
+fn check_wait_report(
+    options: &PrLandOptions,
+    pr: &PrView,
+    head_sha: &str,
+    terminal: bool,
+    timed_out: bool,
+) -> PrCheckWaitReport {
+    let checks = pr
+        .status_check_rollup
+        .iter()
+        .map(|check| check_result(check, head_sha, &options.check_waivers))
+        .collect::<Vec<_>>();
+    let blocking_checks = checks
+        .iter()
+        .filter(|check| {
+            matches!(
+                check.classification.as_str(),
+                "failed" | "rerunnable" | "unknown"
+            ) && check.waiver_approved_by.is_none()
+        })
+        .cloned()
+        .collect();
+    PrCheckWaitReport {
+        head_sha: head_sha.to_string(),
+        terminal,
+        timed_out,
+        checks,
+        blocking_checks,
+        resume_command: format!("homeboy git pr land {} {}", options.repo, pr.common.number),
+    }
+}
+
+fn check_result(check: &Value, head_sha: &str, waivers: &[PrCheckWaiver]) -> PrCheckResult {
+    let name = string_field(check, "name").unwrap_or_else(|| "unnamed check".to_string());
+    let required = check.get("isRequired").and_then(Value::as_bool);
+    let classification = check_classification(classify_check(check)).to_string();
+    let waiver_approved_by = (required == Some(false))
+        .then(|| {
+            waivers.iter().find(|waiver| {
+                waiver.head_sha == head_sha
+                    && waiver.name == name
+                    && !waiver.approved_by.trim().is_empty()
+            })
+        })
+        .flatten()
+        .map(|waiver| waiver.approved_by.clone());
+    PrCheckResult {
+        name,
+        status: string_field(check, "status"),
+        conclusion: string_field(check, "conclusion"),
+        required,
+        classification,
+        url: string_field(check, "detailsUrl").or_else(|| string_field(check, "targetUrl")),
+        waiver_approved_by,
+    }
+}
+
+fn string_field(check: &Value, field: &str) -> Option<String> {
+    check.get(field).and_then(Value::as_str).map(str::to_string)
+}
+
+fn check_classification(class: super::github::CheckClass) -> &'static str {
+    match class {
+        super::github::CheckClass::Passed => "passed",
+        super::github::CheckClass::Skipped => "skipped",
+        super::github::CheckClass::Failed => "failed",
+        super::github::CheckClass::Rerunnable => "rerunnable",
+        super::github::CheckClass::Unknown => "unknown",
+        super::github::CheckClass::Queued => "queued",
+        super::github::CheckClass::Running => "running",
+        super::github::CheckClass::Pending => "pending",
     }
 }
 
@@ -673,6 +940,16 @@ mod tests {
             state: "OPEN".to_string(),
             draft: false,
             checks: checks.map(str::to_string),
+            status_check_rollup: match checks {
+                Some("SUCCESS") => vec![
+                    serde_json::json!({"name":"CI", "status":"COMPLETED", "conclusion":"SUCCESS"}),
+                ],
+                Some("PENDING") => vec![serde_json::json!({"name":"CI", "status":"IN_PROGRESS"})],
+                Some("FAILURE") => vec![
+                    serde_json::json!({"name":"CI", "status":"COMPLETED", "conclusion":"FAILURE"}),
+                ],
+                _ => Vec::new(),
+            },
             merge_state: merge_state.map(str::to_string),
             head_sha: Some(format!("sha{number}")),
             head: Some(format!("branch-{number}")),
@@ -687,8 +964,27 @@ mod tests {
             prs: prs.into_iter().map(str::to_string).collect(),
             merge_method: "squash".to_string(),
             max_base_retries: 1,
+            check_wait_timeout: Duration::ZERO,
+            check_poll_interval: Duration::ZERO,
             ..Default::default()
         }
+    }
+
+    fn pr_with_rollup(number: u64, rollup: Vec<Value>) -> PrView {
+        let mut view = pr(number, Some("SUCCESS"), Some("CLEAN"));
+        view.checks = summarize_checks(&rollup);
+        view.status_check_rollup = rollup;
+        view
+    }
+
+    fn check(name: &str, status: &str, conclusion: &str, required: bool) -> Value {
+        serde_json::json!({
+            "name": name,
+            "status": status,
+            "conclusion": conclusion,
+            "isRequired": required,
+            "detailsUrl": format!("https://ci.example.test/{name}"),
+        })
     }
 
     #[test]
@@ -827,5 +1123,127 @@ mod tests {
         assert_eq!(client.refreshed, vec![1]);
         assert_eq!(client.merged, vec![1]);
         assert_eq!(output.summary.refreshed, 1);
+    }
+
+    #[test]
+    fn waits_for_the_exact_head_and_reports_every_terminal_failure() {
+        let mut client = FakeClient::default();
+        client.push_view(pr_with_rollup(
+            1,
+            vec![
+                check("docs", "COMPLETED", "FAILURE", false),
+                check("audit", "IN_PROGRESS", "", true),
+                check("test", "QUEUED", "", true),
+            ],
+        ));
+        client.push_view(pr_with_rollup(
+            1,
+            vec![
+                check("docs", "COMPLETED", "FAILURE", false),
+                check("audit", "COMPLETED", "SUCCESS", true),
+                check("test", "COMPLETED", "FAILURE", true),
+            ],
+        ));
+        let mut opts = options(vec!["1"]);
+        opts.check_wait_timeout = Duration::from_secs(1);
+
+        let output = land_prs_with_client(opts, &mut client).unwrap();
+
+        assert!(client.merged.is_empty());
+        let report = output.items[0].check_wait.as_ref().unwrap();
+        assert!(report.terminal);
+        assert!(!report.timed_out);
+        assert_eq!(report.head_sha, "sha1");
+        assert_eq!(report.blocking_checks.len(), 2);
+        assert_eq!(
+            report.blocking_checks[0].url.as_deref(),
+            Some("https://ci.example.test/docs")
+        );
+        assert_eq!(
+            report.resume_command,
+            "homeboy git pr land Extra-Chill/homeboy 1"
+        );
+    }
+
+    #[test]
+    fn pending_check_timeout_is_resumable_without_merging() {
+        let mut client = FakeClient::default();
+        client.push_view(pr_with_rollup(
+            1,
+            vec![check("test", "IN_PROGRESS", "", true)],
+        ));
+
+        let output = land_prs_with_client(options(vec!["1"]), &mut client).unwrap();
+
+        assert!(client.merged.is_empty());
+        let report = output.items[0].check_wait.as_ref().unwrap();
+        assert!(report.timed_out);
+        assert!(!report.terminal);
+        assert_eq!(
+            report.resume_command,
+            "homeboy git pr land Extra-Chill/homeboy 1"
+        );
+    }
+
+    #[test]
+    fn head_change_while_waiting_cannot_reuse_the_previous_check_result() {
+        let mut client = FakeClient::default();
+        client.push_view(pr_with_rollup(
+            1,
+            vec![check("test", "IN_PROGRESS", "", true)],
+        ));
+        let mut changed_head = pr_with_rollup(1, vec![check("test", "IN_PROGRESS", "", true)]);
+        changed_head.head_sha = Some("sha2".to_string());
+        client.push_view(changed_head);
+        let mut opts = options(vec!["1"]);
+        opts.check_wait_timeout = Duration::from_secs(1);
+
+        let output = land_prs_with_client(opts, &mut client).unwrap();
+
+        assert!(client.merged.is_empty());
+        let report = output.items[0].check_wait.as_ref().unwrap();
+        assert_eq!(report.head_sha, "sha1");
+        assert!(output.items[0].reason.contains("head changed from sha1"));
+    }
+
+    #[test]
+    fn waiver_is_bound_to_the_named_non_required_check_and_exact_head() {
+        let failed = || pr_with_rollup(1, vec![check("docs", "COMPLETED", "FAILURE", false)]);
+        let mut wrong_head = FakeClient::default();
+        wrong_head.push_view(failed());
+        let mut opts = options(vec!["1"]);
+        opts.check_waivers = vec![PrCheckWaiver {
+            head_sha: "another-sha".to_string(),
+            name: "docs".to_string(),
+            approved_by: "operator".to_string(),
+        }];
+        assert!(client_must_block(opts, &mut wrong_head));
+
+        let mut wrong_name = FakeClient::default();
+        wrong_name.push_view(failed());
+        let mut opts = options(vec!["1"]);
+        opts.check_waivers = vec![PrCheckWaiver {
+            head_sha: "sha1".to_string(),
+            name: "other".to_string(),
+            approved_by: "operator".to_string(),
+        }];
+        assert!(client_must_block(opts, &mut wrong_name));
+
+        let mut approved = FakeClient::default();
+        approved.push_view(failed());
+        let mut opts = options(vec!["1"]);
+        opts.check_waivers = vec![PrCheckWaiver {
+            head_sha: "sha1".to_string(),
+            name: "docs".to_string(),
+            approved_by: "operator".to_string(),
+        }];
+        let output = land_prs_with_client(opts, &mut approved).unwrap();
+        assert_eq!(approved.merged, vec![1]);
+        assert_eq!(output.items[0].status, PrLandStatus::Landed);
+    }
+
+    fn client_must_block(options: PrLandOptions, client: &mut FakeClient) -> bool {
+        let output = land_prs_with_client(options, client).unwrap();
+        client.merged.is_empty() && output.summary.blocked == 1
     }
 }

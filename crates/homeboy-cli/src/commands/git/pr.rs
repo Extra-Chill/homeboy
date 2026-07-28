@@ -4,6 +4,7 @@ use homeboy::core::git::{
     PrPolicyMergeOptions, PrPolicyOpenOptions, PrPolicyTargetRefs, PrRefreshOptions,
     PrRefreshStrategy,
 };
+use std::time::Duration;
 
 use super::args::{ComponentPathArgs, PrArgs, PrCommand, PrPolicyArgs, PrPolicyCommand};
 use super::helpers::{parse_pr_state, read_lines_file, resolve_body};
@@ -226,7 +227,13 @@ pub(super) fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
             refresh_helper,
             refresh_helper_args,
             max_base_retries,
+            max_check_wait_seconds,
+            check_waivers,
         } => {
+            let check_waivers = check_waivers
+                .iter()
+                .map(|raw| parse_check_waiver(raw))
+                .collect::<homeboy::core::Result<Vec<_>>>()?;
             let output = git::land_prs(PrLandOptions {
                 repo,
                 prs,
@@ -238,11 +245,41 @@ pub(super) fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
                     args: refresh_helper_args,
                 }),
                 max_base_retries,
+                check_wait_timeout: Duration::from_secs(max_check_wait_seconds),
+                check_poll_interval: Duration::from_secs(5),
+                check_waivers,
             })?;
             let exit = if output.summary.blocked > 0 { 1 } else { 0 };
             Ok((GitCommandOutput::Land(output), exit))
         }
     }
+}
+
+fn parse_check_waiver(raw: &str) -> homeboy::core::Result<git::PrCheckWaiver> {
+    let mut parts = raw.splitn(3, '|');
+    let (Some(head_sha), Some(name), Some(approved_by)) =
+        (parts.next(), parts.next(), parts.next())
+    else {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "check-waiver",
+            "expected HEAD_SHA|CHECK_NAME|APPROVER",
+            Some(raw.to_string()),
+            None,
+        ));
+    };
+    if head_sha.trim().is_empty() || name.trim().is_empty() || approved_by.trim().is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "check-waiver",
+            "head SHA, check name, and approver must all be non-empty",
+            Some(raw.to_string()),
+            None,
+        ));
+    }
+    Ok(git::PrCheckWaiver {
+        head_sha: head_sha.to_string(),
+        name: name.to_string(),
+        approved_by: approved_by.to_string(),
+    })
 }
 
 fn parse_pr_refresh_strategy(value: &str) -> homeboy::core::Result<PrRefreshStrategy> {
