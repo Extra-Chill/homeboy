@@ -385,14 +385,18 @@ fn help_cell(arg: &Arg) -> String {
         .map(|help| cell(&help))
         .unwrap_or_else(|| NO_HELP_CELL.to_string());
 
-    let values = arg
-        .get_possible_values()
-        .into_iter()
-        .filter(|value| !value.is_hide_set())
-        .map(|value| format!("`{}`", value.get_name()))
-        .collect::<Vec<_>>();
-    if !values.is_empty() {
-        text.push_str(&format!(" Values: {}.", values.join(", ")));
+    // Only value-taking arguments have a meaningful enum. A `SetTrue` flag
+    // reports `true`/`false` from its bool value parser, which is noise.
+    if value_placeholder(arg).is_some() {
+        let values = arg
+            .get_possible_values()
+            .into_iter()
+            .filter(|value| !value.is_hide_set())
+            .map(|value| format!("`{}`", value.get_name()))
+            .collect::<Vec<_>>();
+        if !values.is_empty() {
+            text.push_str(&format!(" Values: {}.", values.join(", ")));
+        }
     }
 
     text
