@@ -1858,16 +1858,10 @@ fn enqueue_exec_job(
         cwd: Some(plan.cwd.clone()),
         lifecycle: lifecycle.clone(),
     };
-    // Direct-daemon offload deliberately projects its transport lifecycle as
-    // `runner.exec`; the typed workload is the canonical agent-task identity.
-    let is_agent_task = request
-        .lab_runner_workload
-        .as_ref()
-        .and_then(|workload| workload.agent_task.as_ref())
-        .is_some();
-    let capacity = is_agent_task
-        .then_some(plan.concurrency_limit.unwrap_or(usize::MAX).max(1))
-        .unwrap_or(usize::MAX);
+    // Every runner process shares the runner's connection and declared process
+    // capacity. Diagnostic commands are ordinary runner executions too, so
+    // admitting them outside this queue can wedge the shared transport.
+    let capacity = plan.concurrency_limit.unwrap_or(usize::MAX).max(1);
     let stall_watchdog_store = job_store.clone();
     let runner = job_store
         .run_capacity_queued_local_child_background_with_source_snapshot_metadata_path_materialization_and_local_runner(
@@ -3008,6 +3002,99 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_read_only_execs_queue_at_runner_capacity_without_blocking_inspection() {
+        with_isolated_home(|_| {
+            register_enqueue_test_driver();
+            let store = JobStore::default();
+            let jobs = (0..6)
+                .map(|index| {
+                    let response = enqueue_exec_job(
+                        Some(json!({
+                            "runner_id": "lab",
+                            "cwd": "/tmp",
+                            "command": ["__homeboy_test_hold__", index.to_string()],
+                        })),
+                        &store,
+                    )
+                    .expect("daemon accepts read-only exec");
+                    uuid::Uuid::parse_str(
+                        response["job"]["id"]
+                            .as_str()
+                            .expect("durable job identity"),
+                    )
+                    .expect("job UUID")
+                })
+                .collect::<Vec<_>>();
+
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < deadline
+                && jobs
+                    .iter()
+                    .filter(|job_id| {
+                        store
+                            .events(**job_id)
+                            .expect("job events")
+                            .iter()
+                            .any(|event| {
+                                event
+                                    .data
+                                    .as_ref()
+                                    .is_some_and(|data| data["phase"] == "child_reserved")
+                            })
+                    })
+                    .count()
+                    == 0
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
+            let reserved = jobs
+                .iter()
+                .filter(|job_id| {
+                    store
+                        .events(**job_id)
+                        .expect("job events")
+                        .iter()
+                        .any(|event| {
+                            event
+                                .data
+                                .as_ref()
+                                .is_some_and(|data| data["phase"] == "child_reserved")
+                        })
+                })
+                .count();
+            assert_eq!(reserved, 1, "only one runner child may hold capacity");
+            assert_eq!(
+                daemon_freshness_report(&store)
+                    .expect("inspection remains available")
+                    .active_jobs,
+                6,
+                "queued work remains observable while capacity is contended"
+            );
+
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline
+                && jobs.iter().any(|job_id| {
+                    !store
+                        .get(*job_id)
+                        .expect("job remains inspectable")
+                        .status
+                        .is_terminal()
+                })
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(jobs.iter().all(|job_id| {
+                store
+                    .get(*job_id)
+                    .expect("terminal job")
+                    .status
+                    .is_terminal()
+            }));
+        });
+    }
+
+    #[test]
     fn admission_reservation_rejects_a_changed_daemon_lease_before_job_creation() {
         let error = validate_admission_lease("lease-a", "lease-b")
             .expect_err("a reservation must not cross daemon leases");
@@ -3057,12 +3144,20 @@ mod tests {
 
         fn execute(
             &self,
-            _prepared: &PreparedDaemonExec,
+            prepared: &PreparedDaemonExec,
             _is_cancelled: runner_exec_driver::ExecCancellationProbe,
             _progress_sink: Option<runner_exec_driver::ExecProgressSink>,
             _require_child_identity_acknowledgement: bool,
             child_started: Option<runner_exec_driver::ExecChildStarted>,
         ) -> Result<DaemonExecOutput> {
+            if prepared
+                .command
+                .first()
+                .is_some_and(|command| command == "__homeboy_test_hold__")
+            {
+                // Keep the reservation observable while concurrent requests arrive.
+                std::thread::sleep(Duration::from_millis(250));
+            }
             #[cfg(unix)]
             {
                 let mut command = Command::new("sh");
