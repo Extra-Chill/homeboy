@@ -179,11 +179,11 @@ fn the_plan_job_still_fails_closed_when_cargo_dist_plans_no_artifacts() {
 fn recovery_records_control_binary_and_release_target_provenance_separately() {
     // Issue #10519: recovery used to execute the stranded tag's own binary, so
     // a publisher fix merged after the tag could never repair it. The control
-    // binary now comes from `gate-build` at `github.sha` while the release
+    // binary now comes from `gate-build` at the proven candidate while the release
     // target stays pinned to the tag; the run has to state both.
     let workflow = release_workflow();
     assert!(
-        workflow.contains("CONTROL_SHA: ${{ github.sha }}"),
+        workflow.contains("CONTROL_SHA: ${{ env.RELEASE_CANDIDATE_SHA }}"),
         "the finalizer must record which commit built the control binary"
     );
     assert!(workflow.contains("| control binary | "));
