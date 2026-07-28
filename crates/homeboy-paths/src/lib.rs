@@ -447,3 +447,88 @@ pub fn authorize_remote_artifact_path(
         Err(RemotePathAuthorizationError::OutsideAllowedRoots)
     }
 }
+
+/// Fails closed when a crate on disk is not enumerated as a workspace member.
+///
+/// The root manifest globs members as `crates/homeboy-*` and
+/// `crates/contracts/homeboy-*` rather than a bare `crates/*`, because a bare
+/// glob also matches the `crates/contracts` grouping directory (not itself a
+/// crate) and cargo then fails to load its manifest. The historical workaround
+/// was `exclude = ["crates/contracts"]`, but cargo's `exclude` matches by path
+/// PREFIX and outranks the members globs -- it silently dropped all 18
+/// `crates/contracts/*` crates out of the workspace. Nothing warned: they still
+/// compiled as path dependencies, so `cargo build` was green while
+/// `--workspace` selection (test, clippy, `check --tests`) never saw them and
+/// their unit tests never ran (#10550).
+///
+/// The prefix globs remove the need for `exclude`, but they trade one silent
+/// failure for another: a crate added under `crates/` without the `homeboy-`
+/// prefix would be just as invisible. This test closes that hole by comparing
+/// the manifests on disk against the members cargo actually resolved.
+#[cfg(test)]
+mod workspace_membership {
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+
+    fn workspace_root() -> PathBuf {
+        // crates/homeboy-paths -> crates -> <root>
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("homeboy-paths should live at <root>/crates/homeboy-paths")
+            .to_path_buf()
+    }
+
+    /// Every directory under `dir` that contains a `Cargo.toml`.
+    fn crate_dirs(dir: &Path) -> BTreeSet<String> {
+        let mut found = BTreeSet::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return found;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.join("Cargo.toml").is_file() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    found.insert(name.to_string());
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn workspace_membership_is_complete() {
+        let root = workspace_root();
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("root manifest");
+
+        // Guard the mechanism itself: `exclude` outranks the members globs, so
+        // reintroducing it silently re-orphans crates.
+        assert!(
+            !manifest.contains("\nexclude = [\"crates/contracts\"]"),
+            "root manifest must not exclude `crates/contracts`: cargo's exclude \
+             matches by path prefix and would drop every crates/contracts/* \
+             member from the workspace (#10550)"
+        );
+
+        for (dir, glob) in [
+            (root.join("crates"), "crates/homeboy-*"),
+            (
+                root.join("crates").join("contracts"),
+                "crates/contracts/homeboy-*",
+            ),
+        ] {
+            for name in crate_dirs(&dir) {
+                assert!(
+                    name.starts_with("homeboy-"),
+                    "crate `{}` in {} is not matched by the `{}` members glob, so it \
+                     is invisible to every `--workspace` gate (test, clippy, \
+                     `check --tests`). Rename it with the `homeboy-` prefix or widen \
+                     the glob in the root Cargo.toml.",
+                    name,
+                    dir.display(),
+                    glob
+                );
+            }
+        }
+    }
+}
