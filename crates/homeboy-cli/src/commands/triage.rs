@@ -87,7 +87,18 @@ pub struct TriageArgs {
     timeout: String,
 
     /// Delay between GitHub polls.
-    #[arg(long, global = true, value_name = "DURATION", default_value = "60s")]
+    ///
+    /// Spelled `--interval` to match `activity watch` and `runs watch`, whose
+    /// operators otherwise have to remember a third vocabulary for the same
+    /// concept (#10315). `--poll-interval` is retained as a visible alias
+    /// because it is a published spelling; nothing that worked stops working.
+    #[arg(
+        long = "interval",
+        visible_alias = "poll-interval",
+        global = true,
+        value_name = "DURATION",
+        default_value = "60s"
+    )]
     poll_interval: String,
 }
 
@@ -347,6 +358,47 @@ mod tests {
         assert_eq!(cli.args.timeout, "5m");
         assert_eq!(cli.args.poll_interval, "30s");
         assert!(cli.args.command.is_none());
+    }
+
+    /// `--interval` is the canonical spelling shared with `activity watch` and
+    /// `runs watch`; `--poll-interval` is the published spelling this command
+    /// shipped with. Both must resolve to the same field, and the default must
+    /// not move.
+    #[test]
+    fn watch_interval_accepts_both_spellings() {
+        for spelling in ["--interval", "--poll-interval"] {
+            let cli = TestCli::try_parse_from([
+                "triage",
+                "--watch",
+                "Extra-Chill/homeboy#2238",
+                spelling,
+                "45s",
+            ])
+            .unwrap_or_else(|error| panic!("{spelling} should parse: {error}"));
+            assert_eq!(cli.args.poll_interval, "45s", "{spelling}");
+        }
+
+        let default = TestCli::try_parse_from(["triage", "--watch", "Extra-Chill/homeboy#2238"])
+            .expect("bare watch parses");
+        assert_eq!(default.args.poll_interval, "60s");
+    }
+
+    /// The two spellings are one argument, not two: supplying both is a
+    /// duplicate value for the same id, and the last one wins rather than
+    /// silently producing two independent intervals.
+    #[test]
+    fn watch_interval_spellings_are_one_argument() {
+        let cli = TestCli::try_parse_from([
+            "triage",
+            "--watch",
+            "Extra-Chill/homeboy#2238",
+            "--poll-interval",
+            "30s",
+            "--interval",
+            "45s",
+        ])
+        .expect("both spellings parse");
+        assert_eq!(cli.args.poll_interval, "45s");
     }
 
     #[test]

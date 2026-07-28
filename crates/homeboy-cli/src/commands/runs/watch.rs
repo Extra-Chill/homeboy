@@ -14,7 +14,7 @@
 //! - `--timeout` bounds the total wait; on expiry the watch returns the
 //!   last-seen state with a distinct timeout exit code.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use clap::Args;
 use serde::Serialize;
@@ -27,10 +27,9 @@ use super::common::{parse_duration, RunSummary};
 use super::types::{actionable_for_run_summary, RunsOutput};
 use super::{reconcile, CmdResult};
 use crate::commands::utils::response::CommandActionableMetadata;
-
-/// Exit code returned when the run did not settle before `--timeout`. Matches
-/// the GNU `timeout(1)` convention so wrappers can recognize the case.
-pub(super) const TIMEOUT_EXIT_CODE: i32 = 124;
+use crate::commands::utils::watch::{
+    watch_loop, WatchConclusion, WatchConfig, WatchPoller, WatchResult, TIMEOUT_EXIT_CODE,
+};
 
 #[derive(Args, Clone)]
 pub struct RunsWatchArgs {
@@ -75,21 +74,22 @@ pub struct RunsWatchOutput {
     pub notify: Option<NotifyOutcome>,
 }
 
-/// Abstraction over "fetch the current state of this run" so the watch loop is
-/// testable without a real store, clock, or sleeps.
-pub(super) trait RunPoller {
-    fn poll(&self, run_id: &str) -> homeboy::core::Result<RunRecord>;
-}
-
 /// Production poller: refresh the requested mirrored runner evidence, reconcile
 /// its owner, then read the freshest local record. Fleet reconciliation remains
 /// an explicit `runs reconcile` operation rather than a side effect of a focused
 /// watch.
+///
+/// The reconciling read is what makes this poller distinct from
+/// `activity watch`'s: `runs watch` deliberately transitions an owner-dead run
+/// to `stale` so the watch can surface it instead of blocking, while activity
+/// reads are deliberately non-reconciling.
 struct StorePoller<'a> {
     store: &'a ObservationStore,
 }
 
-impl RunPoller for StorePoller<'_> {
+impl WatchPoller for StorePoller<'_> {
+    type Item = RunRecord;
+
     fn poll(&self, run_id: &str) -> homeboy::core::Result<RunRecord> {
         let run = runs_service::require_run(self.store, run_id)?;
         runs_service::refresh_selected_mirrored_daemon_evidence_best_effort(self.store, &run);
@@ -97,24 +97,10 @@ impl RunPoller for StorePoller<'_> {
         reconcile::reconcile_owned_stale_running_run(self.store, &run)?;
         runs_service::require_run(self.store, run_id)
     }
-}
 
-struct WatchConfig {
-    interval: Duration,
-    timeout: Option<Duration>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(super) enum WatchConclusion {
-    Terminal,
-    TimedOut,
-}
-
-pub(super) struct WatchResult {
-    run: RunRecord,
-    conclusion: WatchConclusion,
-    poll_count: u64,
-    waited: Duration,
+    fn is_terminal(&self, run: &RunRecord) -> bool {
+        is_terminal_status(&run.status)
+    }
 }
 
 pub fn watch_run(args: RunsWatchArgs) -> CmdResult<RunsOutput> {
@@ -129,7 +115,7 @@ pub fn watch_run(args: RunsWatchArgs) -> CmdResult<RunsOutput> {
 
     let started = Instant::now();
     let run_id = args.run_id.clone();
-    let result = run_watch_loop(
+    let result = watch_loop(
         &poller,
         &args.run_id,
         &config,
@@ -141,51 +127,6 @@ pub fn watch_run(args: RunsWatchArgs) -> CmdResult<RunsOutput> {
     let notify = maybe_notify(&args, &result);
     let (output, exit_code) = build_output(&args.run_id, result, notify);
     Ok((RunsOutput::Watch(output), exit_code))
-}
-
-/// The core poll loop, generic over the run source, the sleep function, and the
-/// clock so tests can drive it deterministically.
-fn run_watch_loop<P, S, C>(
-    poller: &P,
-    run_id: &str,
-    config: &WatchConfig,
-    mut sleep: S,
-    elapsed: C,
-    mut progress: impl FnMut(&RunRecord, u64),
-) -> homeboy::core::Result<WatchResult>
-where
-    P: RunPoller,
-    S: FnMut(Duration),
-    C: Fn() -> Duration,
-{
-    let mut poll_count: u64 = 0;
-    loop {
-        let run = poller.poll(run_id)?;
-        poll_count += 1;
-        progress(&run, poll_count);
-
-        if is_terminal_status(&run.status) {
-            return Ok(WatchResult {
-                run,
-                conclusion: WatchConclusion::Terminal,
-                poll_count,
-                waited: elapsed(),
-            });
-        }
-
-        if let Some(timeout) = config.timeout {
-            if elapsed() >= timeout {
-                return Ok(WatchResult {
-                    run,
-                    conclusion: WatchConclusion::TimedOut,
-                    poll_count,
-                    waited: elapsed(),
-                });
-            }
-        }
-
-        sleep(config.interval);
-    }
 }
 
 /// A run is terminal when it is not `running`. An unrecognized status is treated
@@ -209,18 +150,18 @@ fn exit_code_for_status(status: &str) -> i32 {
 
 fn build_output(
     run_id: &str,
-    result: WatchResult,
+    result: WatchResult<RunRecord>,
     notify: Option<NotifyOutcome>,
 ) -> (RunsWatchOutput, i32) {
-    let timed_out = result.conclusion == WatchConclusion::TimedOut;
-    let status = result.run.status.clone();
+    let timed_out = result.timed_out();
+    let status = result.item.status.clone();
     let exit_code = if timed_out {
         TIMEOUT_EXIT_CODE
     } else {
         exit_code_for_status(&status)
     };
 
-    let run = super::run_summary(result.run);
+    let run = super::run_summary(result.item);
     let actionable = actionable_for_run_summary(&run);
 
     (
@@ -240,16 +181,16 @@ fn build_output(
     )
 }
 
-fn maybe_notify(args: &RunsWatchArgs, result: &WatchResult) -> Option<NotifyOutcome> {
+fn maybe_notify(args: &RunsWatchArgs, result: &WatchResult<RunRecord>) -> Option<NotifyOutcome> {
     if !args.notify || result.conclusion != WatchConclusion::Terminal {
         return None;
     }
     let route = homeboy::core::notification_route::NotificationRoute::from_metadata(
-        &result.run.metadata_json,
+        &result.item.metadata_json,
     );
     let event =
-        NotifyEvent::run_completed_with_route(&args.run_id, &result.run.status, route.as_ref())
-            .with_payload(notify::run_completed_payload(&result.run));
+        NotifyEvent::run_completed_with_route(&args.run_id, &result.item.status, route.as_ref())
+            .with_payload(notify::run_completed_payload(&result.item));
     Some(notify::dispatch(&event))
 }
 
@@ -267,6 +208,7 @@ fn emit_progress(run_id: &str, run: &RunRecord, poll_count: u64) {
 mod tests {
     use std::cell::Cell;
     use std::collections::VecDeque;
+    use std::time::Duration;
 
     use super::*;
 
@@ -282,7 +224,9 @@ mod tests {
         }
     }
 
-    impl RunPoller for ScriptedPoller {
+    impl WatchPoller for ScriptedPoller {
+        type Item = RunRecord;
+
         fn poll(&self, run_id: &str) -> homeboy::core::Result<RunRecord> {
             let mut states = self.states.borrow_mut();
             // Hold the last scripted state once the queue is down to one entry,
@@ -293,6 +237,10 @@ mod tests {
                 *states.front().expect("at least one scripted status")
             };
             Ok(run_record(run_id, status))
+        }
+
+        fn is_terminal(&self, run: &RunRecord) -> bool {
+            is_terminal_status(&run.status)
         }
     }
 
@@ -322,10 +270,13 @@ mod tests {
 
     /// Drive the loop with a virtual clock: each simulated sleep advances time,
     /// so timeouts are exercised without real waiting.
-    fn run_loop(poller: &ScriptedPoller, cfg: &WatchConfig) -> homeboy::core::Result<WatchResult> {
+    fn run_loop(
+        poller: &ScriptedPoller,
+        cfg: &WatchConfig,
+    ) -> homeboy::core::Result<WatchResult<RunRecord>> {
         let clock = Cell::new(Duration::ZERO);
         let advance = |by: Duration| clock.set(clock.get() + by);
-        run_watch_loop(
+        watch_loop(
             poller,
             "run-1",
             cfg,
