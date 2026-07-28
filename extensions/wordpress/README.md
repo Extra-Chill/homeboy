@@ -279,9 +279,9 @@ homeboy build <component>
     │
     ├─ Detect plugin/theme from headers (Plugin Name | Theme Name)
     ├─ Extract version
-    ├─ Stage into .homeboy-build/  (avoids @wordpress/scripts build/ collision)
-    ├─ Install production deps   (composer --no-dev, npm ci if applicable)
     ├─ Build frontend assets     (@wordpress/scripts when present)
+    ├─ Install production deps   (composer --no-dev)
+    ├─ Stage into .homeboy-build/  (avoids @wordpress/scripts build/ collision)
     ├─ Copy files                (rsync, respects .buildignore)
     ├─ Validate build structure  (php -l, PSR-4)
     ├─ ZIP → build/<component-id>.zip

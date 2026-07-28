@@ -15,8 +15,8 @@
 # Features:
 # - Auto-detects plugin/theme from file headers
 # - Extracts version for validation and logging
-# - Installs production dependencies (composer --no-dev)
 # - Builds Gutenberg blocks (@wordpress/scripts support)
+# - Installs production dependencies (composer --no-dev)
 # - Copies files using rsync with .buildignore exclusions
 # - Validates build structure before packaging
 # - Restores dev dependencies after build
@@ -1132,13 +1132,13 @@ build_project() {
     fi
 
     clean_previous_builds
-    install_production_deps
     build_frontend_assets
     if should_build_nested_packages; then
         build_nested_packages
     else
         print_status "Skipping nested package builds (build_nested_packages disabled)"
     fi
+    install_production_deps
     copy_project_files
 
     if ! validate_php_syntax; then

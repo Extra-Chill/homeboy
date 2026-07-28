@@ -172,6 +172,7 @@
     "test:wp-codebox-bench-crawl-helper": "bash scripts/bench/wp-codebox-bench-crawl-helper-smoke.sh",
     "test:wp-codebox-prepared-dependency-cache": "bash tests/prepared-bench-dependency-cache-smoke.sh",
     "test:dependency-plugin-preflight": "bash tests/dependency-plugin-preflight-smoke.sh",
+    "test:build-before-production-prune": "bash scripts/build/build-before-production-prune-smoke.sh",
     "test:wp-codebox-bench-bootstrap-steps": "node tests/wp-codebox-bench-bootstrap-steps-smoke.js",
     "test:wp-codebox-bench-prepare-steps": "node tests/wp-codebox-bench-prepare-steps-smoke.js",
     "test:build-package-artifacts": "bash scripts/build/build-package-artifacts-smoke.sh",
