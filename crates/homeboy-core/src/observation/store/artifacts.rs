@@ -10,6 +10,7 @@ use uuid::Uuid;
 use super::*;
 
 const PUBLICATION_LEASE_MS: i64 = 5 * 60 * 1000;
+const PUBLICATION_ARTIFACT_FILENAME_LIMIT: usize = 240;
 
 /// A file staged by a caller for atomic publication with its run record.
 /// The store computes controller-owned integrity metadata from `source_path`.
@@ -1484,7 +1485,15 @@ fn publication_artifact_path(
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| Error::internal_unexpected("persisted artifact path has no filename"))?;
-    Ok(canonical.with_file_name(format!("{publication_id}-{file_name}")))
+    let published_name = format!("{publication_id}-{file_name}");
+    if published_name.len() <= PUBLICATION_ARTIFACT_FILENAME_LIMIT {
+        return Ok(canonical.with_file_name(published_name));
+    }
+
+    Ok(canonical.with_file_name(format!(
+        "{publication_id}-sha256-{:x}",
+        Sha256::digest(file_name.as_bytes())
+    )))
 }
 
 /// Hash a directory tree independent of traversal order. Paths and entry types
@@ -1732,6 +1741,48 @@ mod tests {
             assert!(published
                 .iter()
                 .all(|artifact| Path::new(&artifact.path).is_file()));
+        });
+    }
+
+    #[test]
+    fn atomic_publication_bounds_oversized_final_filename() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("test").cwd_path(home.path()).build())
+                .expect("run");
+            let source = home.path().join(format!(
+                "private-sha256-{}-agent-task-plan.json",
+                "a".repeat(64)
+            ));
+            fs::write(&source, b"private plan").expect("write private plan");
+            let artifact_id = format!("agent-task-{}", "b".repeat(140));
+
+            let published = store
+                .publish_run_artifacts_atomically(
+                    &run,
+                    &[ArtifactPublication {
+                        id: artifact_id,
+                        kind: "executor-input".to_string(),
+                        source_path: source,
+                        mime: None,
+                        metadata_json: serde_json::json!({}),
+                        expected_size_bytes: None,
+                        expected_sha256: None,
+                    }],
+                )
+                .expect("publish oversized private artifact");
+
+            let path = Path::new(&published[0].path);
+            assert!(path.is_file());
+            assert_eq!(fs::read(path).expect("published bytes"), b"private plan");
+            assert!(
+                path.file_name()
+                    .expect("published filename")
+                    .as_encoded_bytes()
+                    .len()
+                    <= PUBLICATION_ARTIFACT_FILENAME_LIMIT
+            );
         });
     }
 
