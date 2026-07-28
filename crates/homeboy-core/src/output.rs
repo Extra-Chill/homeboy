@@ -1,8 +1,9 @@
 //! Public output types for Homeboy command responses.
 //!
-//! This extension contains all types that are part of the public API
-//! for command output. These are used by CLI commands and consumers
-//! of the homeboy library.
+//! All types here are part of the public API for command output. They are used
+//! by CLI commands and by consumers of the homeboy library, which reach them as
+//! `homeboy::core::output::*` or through the flattened re-export at the crate
+//! root.
 
 use serde::{Deserialize, Serialize};
 

@@ -351,7 +351,7 @@ fn default_runner_missing_capabilities_fails_without_local_fallback_opt_in() {
             .to_string(),
         vec!["Install Playwright and browser binaries on the runner.".to_string()],
         false,
-        homeboy_cli_contract::Placement::Auto,
+        homeboy_lab_runner_contract::Placement::Auto,
         &overhead,
     );
 
@@ -394,7 +394,7 @@ fn default_runner_missing_capabilities_can_fallback_with_explicit_opt_in() {
             .to_string(),
         Vec::new(),
         true,
-        homeboy_cli_contract::Placement::Auto,
+        homeboy_lab_runner_contract::Placement::Auto,
         &overhead,
     )
     .expect("explicit fallback opt-in should allow local run");
@@ -432,7 +432,7 @@ fn plan_records_skipped_auto_offload() {
     let outcome = execute_lab_offload(LabOffloadRequest {
         command: Some(portable_lab_command("test")),
         normalized_args: &["homeboy".to_string(), "test".to_string()],
-        placement: homeboy_cli_contract::Placement::Local,
+        placement: homeboy_lab_runner_contract::Placement::Local,
         ..LabOffloadRequest::for_test(&["homeboy".to_string(), "test".to_string()])
     })
     .expect("outcome");
@@ -450,7 +450,7 @@ fn plan_records_skipped_auto_offload() {
 fn lab_placement_refuses_local_execution_without_lab_contract() {
     let outcome = execute_lab_offload(LabOffloadRequest {
         normalized_args: &["homeboy".to_string(), "status".to_string()],
-        placement: homeboy_cli_contract::Placement::Lab,
+        placement: homeboy_lab_runner_contract::Placement::Lab,
         ..LabOffloadRequest::for_test(&["homeboy".to_string(), "status".to_string()])
     });
 
@@ -472,7 +472,7 @@ fn lab_placement_refuses_local_only_rig_install_with_actionable_boundary() {
             "install".to_string(),
             "./rig-package".to_string(),
         ],
-        placement: homeboy_cli_contract::Placement::Lab,
+        placement: homeboy_lab_runner_contract::Placement::Lab,
         ..LabOffloadRequest::for_test(&[
             "homeboy".to_string(),
             "rig".to_string(),
@@ -536,7 +536,7 @@ fn build_lab_placement_error_gives_managed_runner_replacement() {
             "build".to_string(),
             "homeboy".to_string(),
         ],
-        placement: homeboy_cli_contract::Placement::Lab,
+        placement: homeboy_lab_runner_contract::Placement::Lab,
         ..LabOffloadRequest::for_test(&[
             "homeboy".to_string(),
             "build".to_string(),

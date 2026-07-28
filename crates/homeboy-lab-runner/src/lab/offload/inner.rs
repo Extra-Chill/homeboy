@@ -723,7 +723,7 @@ pub(crate) fn exec_lab_context(
                 }
                 return match selection.source {
                     LabRunnerSelectionSource::Default => {
-                        if request.placement == homeboy_cli_contract::Placement::Lab {
+                        if request.placement == homeboy_lab_runner_contract::Placement::Lab {
                             Err(local_execution_denied_error(&reason, Some(runner_id)))
                         } else if !request.allow_local_fallback {
                             Err(selected_runner_fallback_error(
@@ -1496,7 +1496,7 @@ pub(crate) fn run_lab_offload_inner(
                     .skip_reason(reason.clone())
                     .build(),
                 );
-                if request.placement == homeboy_cli_contract::Placement::Lab {
+                if request.placement == homeboy_lab_runner_contract::Placement::Lab {
                     return Err(local_execution_denied_error(&reason, Some(runner_id)));
                 }
                 overhead.set_fallback_reason(&reason);

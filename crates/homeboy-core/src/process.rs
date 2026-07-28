@@ -1,4 +1,10 @@
-use homeboy_error::{Error, Result};
+//! Process spawning, signaling, and lifecycle helpers.
+//!
+//! Owns the platform assumptions (POSIX signal numbers, Linux process scopes,
+//! `ps`/`/proc` descendant walks) so lifecycle callers elsewhere in core never
+//! reach for `libc` directly.
+
+use crate::error::{Error, Result};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,8 +19,8 @@ const PROCESS_SCOPE_ENV: &str = "HOMEBOY_PROCESS_SCOPE";
 /// Graceful-termination signal number for [`signal_pid`].
 ///
 /// Named here rather than used as `libc::SIGTERM` at call sites so every
-/// lifecycle caller routes its platform assumption through this crate.
-pub const SIGNAL_TERMINATE: libc::c_int = libc::SIGTERM;
+/// lifecycle caller routes its platform assumption through this module.
+pub(crate) const SIGNAL_TERMINATE: libc::c_int = libc::SIGTERM;
 
 /// Forced-kill signal number for [`signal_pid`].
 ///
@@ -24,12 +30,12 @@ pub const SIGNAL_TERMINATE: libc::c_int = libc::SIGTERM;
 /// keeps cross-target builds compiling while [`signal_pid`] remains the single
 /// place that rejects signaling on platforms without POSIX signals.
 #[cfg(unix)]
-pub const SIGNAL_KILL: libc::c_int = libc::SIGKILL;
+pub(crate) const SIGNAL_KILL: libc::c_int = libc::SIGKILL;
 
 /// Placeholder forced-kill number on platforms without POSIX signals. It is
 /// never delivered: [`signal_pid`] fails closed before the value is used.
 #[cfg(not(unix))]
-pub const SIGNAL_KILL: libc::c_int = 9;
+pub(crate) const SIGNAL_KILL: libc::c_int = 9;
 
 /// Owns a process group and, on Linux, an inherited scope marker that survives
 /// descendants changing sessions or outliving their direct parent.
@@ -289,7 +295,7 @@ pub fn pid_has_environment_value(pid: u32, key: &str, value: &str) -> Result<boo
 /// Prove that a process owns a persisted startup token before it is signaled.
 /// Linux reads the authoritative environment; other Unix platforms inspect the
 /// explicit `--startup-token` daemon argument with `ps`.
-pub fn pid_has_ownership_token(pid: u32, key: &str, value: &str) -> Result<bool> {
+pub(crate) fn pid_has_ownership_token(pid: u32, key: &str, value: &str) -> Result<bool> {
     #[cfg(target_os = "linux")]
     {
         return pid_has_environment_value(pid, key, value);
@@ -366,7 +372,7 @@ fn environment_contains_assignment(environment: &[u8], expected: &[u8]) -> bool 
 /// Send SIGTERM to a recorded PID and prove it exited within `timeout`.
 /// Platform-specific signaling stays in this process abstraction so lifecycle
 /// callers do not need to issue ad hoc shell commands.
-pub fn terminate_pid_with_sigterm_and_wait(pid: u32, timeout: Duration) -> Result<()> {
+pub(crate) fn terminate_pid_with_sigterm_and_wait(pid: u32, timeout: Duration) -> Result<()> {
     if pid == 0 || pid > i32::MAX as u32 {
         return Err(Error::validation_invalid_argument(
             "pid",
@@ -389,7 +395,7 @@ pub fn terminate_pid_with_sigterm_and_wait(pid: u32, timeout: Duration) -> Resul
 
 /// Deliver one Unix signal to an exact PID. Ownership validation belongs to the
 /// caller because persisted protocol tokens are product-level evidence.
-pub fn signal_pid(pid: u32, signal: libc::c_int) -> Result<()> {
+pub(crate) fn signal_pid(pid: u32, signal: libc::c_int) -> Result<()> {
     if pid == 0 || pid > i32::MAX as u32 {
         return Err(Error::validation_invalid_argument(
             "pid",
@@ -426,7 +432,7 @@ pub fn signal_pid(pid: u32, signal: libc::c_int) -> Result<()> {
 
 /// Poll until a process has exited. This reaps direct children on Unix so a
 /// macOS zombie does not look like a surviving process.
-pub fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
+pub(crate) fn wait_for_pid_exit(pid: u32, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while process_is_running_after_sigterm(pid) {
         if Instant::now() >= deadline {

@@ -4,7 +4,7 @@ use crate::lab_selection::allows_detached_reverse_capacity_queue;
 fn select(
     command: &LabOffloadCommand,
     explicit_runner: Option<&str>,
-    placement: homeboy_cli_contract::Placement,
+    placement: homeboy_lab_runner_contract::Placement,
     deny_local_bench: bool,
     release_gate_local_allowed: bool,
     default_runner: Option<String>,
@@ -24,7 +24,7 @@ fn explicit_runner_selects_lab_with_auto_placement() {
     let selection = select(
         &portable_lab_command("test"),
         Some("lab-explicit"),
-        homeboy_cli_contract::Placement::Auto,
+        homeboy_lab_runner_contract::Placement::Auto,
         false,
         false,
         Some("lab-default".to_string()),
@@ -41,7 +41,7 @@ fn auto_uses_the_ready_default_runner_for_supported_commands() {
     let selection = select(
         &portable_lab_command("test"),
         None,
-        homeboy_cli_contract::Placement::Auto,
+        homeboy_lab_runner_contract::Placement::Auto,
         false,
         false,
         Some("lab-default".to_string()),
@@ -58,7 +58,7 @@ fn local_placement_skips_default_runner_selection() {
     assert!(select(
         &portable_lab_command("test"),
         None,
-        homeboy_cli_contract::Placement::Local,
+        homeboy_lab_runner_contract::Placement::Local,
         false,
         false,
         Some("lab-default".to_string()),
@@ -72,7 +72,7 @@ fn lab_placement_requires_a_portable_command_and_runner() {
     let error = select(
         &portable_lab_command("test"),
         None,
-        homeboy_cli_contract::Placement::Lab,
+        homeboy_lab_runner_contract::Placement::Lab,
         false,
         false,
         None,
@@ -88,7 +88,7 @@ fn lab_or_local_prefers_a_default_runner_without_requiring_one() {
     let selection = select(
         &portable_lab_command("test"),
         None,
-        homeboy_cli_contract::Placement::LabOrLocal,
+        homeboy_lab_runner_contract::Placement::LabOrLocal,
         false,
         false,
         Some("lab-default".to_string()),
@@ -100,7 +100,7 @@ fn lab_or_local_prefers_a_default_runner_without_requiring_one() {
     assert!(select(
         &portable_lab_command("test"),
         None,
-        homeboy_cli_contract::Placement::LabOrLocal,
+        homeboy_lab_runner_contract::Placement::LabOrLocal,
         false,
         false,
         None,
@@ -114,7 +114,7 @@ fn local_placement_obeys_bench_and_release_gates() {
     let bench_error = select(
         &portable_lab_command("bench"),
         None,
-        homeboy_cli_contract::Placement::Local,
+        homeboy_lab_runner_contract::Placement::Local,
         true,
         false,
         None,
@@ -125,7 +125,7 @@ fn local_placement_obeys_bench_and_release_gates() {
     let release_error = select(
         &release_gate_lab_command("lint"),
         None,
-        homeboy_cli_contract::Placement::Local,
+        homeboy_lab_runner_contract::Placement::Local,
         false,
         false,
         Some("lab-default".to_string()),
@@ -139,7 +139,7 @@ fn release_gate_can_explicitly_allow_local_placement() {
     assert!(select(
         &release_gate_lab_command("test"),
         None,
-        homeboy_cli_contract::Placement::Local,
+        homeboy_lab_runner_contract::Placement::Local,
         false,
         true,
         Some("lab-default".to_string()),
@@ -154,7 +154,7 @@ fn busy_default_runner_allows_normal_auto_work_to_stay_local() {
     assert!(select(
         &command,
         None,
-        homeboy_cli_contract::Placement::Auto,
+        homeboy_lab_runner_contract::Placement::Auto,
         false,
         false,
         None,
@@ -278,7 +278,7 @@ fn explicit_lab_never_allows_missing_or_busy_default_runner_to_run_local() {
     let error = select(
         &portable_lab_command("test"),
         None,
-        homeboy_cli_contract::Placement::Lab,
+        homeboy_lab_runner_contract::Placement::Lab,
         false,
         false,
         None,

@@ -4,7 +4,7 @@ pub struct LabOffloadRequest<'a> {
     pub command: Option<LabOffloadCommand>,
     pub normalized_args: &'a [String],
     pub explicit_runner: Option<&'a str>,
-    pub placement: homeboy_cli_contract::Placement,
+    pub placement: homeboy_lab_runner_contract::Placement,
     pub allow_local_fallback: bool,
     pub allow_dirty_lab_workspace: bool,
     /// Skip post-materialization dependency hydration for Lab workspace exec
@@ -56,7 +56,7 @@ impl<'a> LabOffloadRequest<'a> {
             command: None,
             normalized_args,
             explicit_runner: None,
-            placement: homeboy_cli_contract::Placement::Auto,
+            placement: homeboy_lab_runner_contract::Placement::Auto,
             allow_local_fallback: false,
             allow_dirty_lab_workspace: false,
             skip_deps_hydration: false,
@@ -114,7 +114,7 @@ mod tests {
         assert!(command.is_none());
         assert_eq!(normalized_args, args);
         assert!(explicit_runner.is_none());
-        assert_eq!(placement, homeboy_cli_contract::Placement::Auto);
+        assert_eq!(placement, homeboy_lab_runner_contract::Placement::Auto);
         assert!(!allow_local_fallback);
         assert!(!allow_dirty_lab_workspace);
         assert!(!skip_deps_hydration);

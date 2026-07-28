@@ -21,7 +21,6 @@ homeboy-upgrade = { version = "0.1.0", path = "../homeboy-upgrade" }
 homeboy-rig = { version = "0.1.0", path = "../homeboy-rig" }
 homeboy-agents = { version = "0.1.0", path = "../homeboy-agents" }
 homeboy-fuzz = { version = "0.1.0", path = "../homeboy-fuzz" }
-homeboy-cli-contract = { version = "0.1.0", path = "../contracts/homeboy-cli-contract" }
 homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
 homeboy-lab-runner-contract = { version = "0.1.0", path = "../contracts/homeboy-lab-runner-contract" }
 base64 = "0.22"

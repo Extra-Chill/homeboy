@@ -87,7 +87,7 @@ pub struct AgentRuntimeMaterializationContract {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preparation: Vec<AgentRuntimePreparationAction>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub source_roots: Vec<homeboy_agents_contract::AgentTaskProviderRunnerSource>,
+    pub source_roots: Vec<homeboy_lab_runner_contract::AgentTaskProviderRunnerSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<AgentRuntimeMaterializationDependency>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -320,7 +320,7 @@ pub struct AgentRuntimeMaterializationPlan {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub generation_identity: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub source_roots: Vec<homeboy_agents_contract::AgentTaskProviderRunnerSource>,
+    pub source_roots: Vec<homeboy_lab_runner_contract::AgentTaskProviderRunnerSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<AgentRuntimeMaterializationDependency>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

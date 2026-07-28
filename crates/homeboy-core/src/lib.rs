@@ -133,9 +133,7 @@ pub use homeboy_lab_contract::notification_payload;
 pub use homeboy_lab_contract::notification_route;
 pub mod notify;
 pub mod observation;
-// output moved to the internal `homeboy-output` crate. Re-exported so existing
-// `crate::output::*` call sites keep working unchanged.
-pub use homeboy_output as output;
+pub mod output;
 pub(crate) mod ownership;
 pub use homeboy_lab_contract::path_materialization;
 pub mod performance_hotspots;
@@ -146,9 +144,7 @@ pub mod performance_hotspots;
 // re-export keeps the existing crate::phase_timing path working.
 pub use homeboy_engine_primitives::phase_timing;
 pub use homeboy_gate_contract::plan;
-// process moved to the internal `homeboy-process` crate. Re-exported so existing
-// `crate::process::*` call sites keep working unchanged.
-pub use homeboy_process as process;
+pub mod process;
 // product_identity moved to the internal `homeboy-product-identity` crate.
 // Re-exported so `crate::product_identity::*` call sites keep working.
 pub use homeboy_product_identity as product_identity;

@@ -241,7 +241,8 @@ payload structs and compare them with checked-in JSON produced from the same cod
 
 ## Progressive Disclosure Budgets
 
-Agent-facing readers use one finite output contract from `homeboy-output`:
+Agent-facing readers use one finite output contract from `homeboy-core`'s
+`output` module:
 
 - `compact_summary` returns fixed summary fields only.
 - `bounded_collection` defaults to 20 items and 64 KiB of serialized items.

@@ -738,7 +738,7 @@ fn daemon_repair_action(runner_id: &str, status: &RunnerStatusReport) -> Option<
 pub(super) fn resolve_lab_runner_selection(
     command: &LabOffloadCommand,
     explicit_runner: Option<&str>,
-    placement: homeboy_cli_contract::Placement,
+    placement: homeboy_lab_runner_contract::Placement,
 ) -> Result<Option<LabRunnerSelection>> {
     let config = homeboy_core::defaults::load_config();
     let deny_local_bench = config.bench.local_execution.is_denied();
@@ -767,7 +767,7 @@ pub(super) fn resolve_lab_runner_selection(
 pub(super) fn resolve_lab_runner_selection_from_placement(
     command: &LabOffloadCommand,
     explicit_runner: Option<&str>,
-    placement: homeboy_cli_contract::Placement,
+    placement: homeboy_lab_runner_contract::Placement,
     deny_local_bench: bool,
     release_gate_local_hot_allowed: bool,
     default_runner: Option<String>,
@@ -790,7 +790,7 @@ pub(super) fn resolve_lab_runner_selection_from_placement(
         }));
     }
 
-    if placement == homeboy_cli_contract::Placement::Lab && !command.is_portable() {
+    if placement == homeboy_lab_runner_contract::Placement::Lab && !command.is_portable() {
         // Surface the command's own local-only reason rather than a generic
         // "portable commands are ..." hint. For a controller-owned coordinator
         // like cook, `--placement lab` is a contradiction the operator should
@@ -821,7 +821,9 @@ pub(super) fn resolve_lab_runner_selection_from_placement(
     // closed with a clear diagnostic unless the operator explicitly opts back
     // into local execution via config/env, in which case the override is recorded
     // by the offload metadata.
-    if command.routing_policy.release_gate && placement == homeboy_cli_contract::Placement::Local {
+    if command.routing_policy.release_gate
+        && placement == homeboy_lab_runner_contract::Placement::Local
+    {
         if let Some(runner_id) = default_runner.as_ref() {
             if !release_gate_local_hot_allowed {
                 return Err(release_gate_local_hot_denied_error(
@@ -835,12 +837,12 @@ pub(super) fn resolve_lab_runner_selection_from_placement(
         }
     }
 
-    if placement == homeboy_cli_contract::Placement::Local || !command.is_portable() {
+    if placement == homeboy_lab_runner_contract::Placement::Local || !command.is_portable() {
         fail_if_local_bench_denied(command, deny_local_bench)?;
         return Ok(None);
     }
 
-    if placement == homeboy_cli_contract::Placement::Lab && default_runner.is_none() {
+    if placement == homeboy_lab_runner_contract::Placement::Lab && default_runner.is_none() {
         return Err(Error::validation_invalid_argument(
             "placement",
             format!(
@@ -1138,7 +1140,7 @@ mod placement_rejection_tests {
         let error = resolve_lab_runner_selection_from_placement(
             &command,
             None,
-            homeboy_cli_contract::Placement::Lab,
+            homeboy_lab_runner_contract::Placement::Lab,
             false,
             false,
             None,
@@ -1188,7 +1190,7 @@ mod placement_rejection_tests {
         let error = resolve_lab_runner_selection_from_placement(
             &command,
             Some("homeboy-lab"),
-            homeboy_cli_contract::Placement::Auto,
+            homeboy_lab_runner_contract::Placement::Auto,
             false,
             false,
             None,
@@ -1214,7 +1216,7 @@ mod placement_rejection_tests {
         let error = resolve_lab_runner_selection_from_placement(
             &command,
             None,
-            homeboy_cli_contract::Placement::Lab,
+            homeboy_lab_runner_contract::Placement::Lab,
             false,
             false,
             None,

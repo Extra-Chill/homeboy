@@ -114,7 +114,7 @@ pub struct LabStagingRecipe {
     pub tunnel_mode: crate::RunnerTunnelMode,
     pub command: LabStagingCommand,
     pub normalized_args: Vec<String>,
-    pub placement: homeboy_cli_contract::Placement,
+    pub placement: homeboy_lab_runner_contract::Placement,
     pub allow_local_fallback: bool,
     pub allow_dirty_lab_workspace: bool,
     pub skip_deps_hydration: bool,
@@ -3848,7 +3848,7 @@ mod tests {
         LabOffloadRequest {
             command,
             normalized_args: args,
-            placement: homeboy_cli_contract::Placement::Lab,
+            placement: homeboy_lab_runner_contract::Placement::Lab,
             detach_after_handoff: true,
             source_path: Some(std::path::Path::new("/work/source")),
             require_controller_git_bundle: true,
