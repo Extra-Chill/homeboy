@@ -1960,8 +1960,10 @@ mod tests {
         );
     }
 
-    /// A gate command whose first token is a shell builtin or a compound
-    /// expression declares no toolchain at all. Nothing is probed for it.
+    /// A gate command whose first token is a shell builtin or part of a
+    /// compound expression declares no toolchain at all. `c3462d472` made
+    /// preflight opt-in precisely because a gate command is a shell program,
+    /// so its first token is not necessarily an executable to probe.
     #[test]
     fn shell_gate_commands_contribute_no_inferred_toolchain() {
         let options = VerifyGateOptions {
