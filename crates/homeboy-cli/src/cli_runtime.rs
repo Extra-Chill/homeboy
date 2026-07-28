@@ -729,6 +729,11 @@ fn delegate_cook_continue_to_pinned_runtime(
 ) -> homeboy::core::Result<Option<i32>> {
     let run_id =
         crate::agents::agent_tasks::service::resolve_cook_continuation_run_id(cook_or_attempt_id)?;
+    if let Some(pinned) =
+        crate::agents::agent_tasks::lifecycle::runner_pinned_runtime_for_mutation(&run_id)?
+    {
+        return delegate_cook_continue_to_runner_pinned_runtime(&pinned, normalized_args).map(Some);
+    }
     let Some(pinned) = crate::agents::agent_tasks::lifecycle::pinned_runtime_for_mutation(&run_id)?
     else {
         return Ok(None);
@@ -746,6 +751,27 @@ fn delegate_cook_continue_to_pinned_runtime(
             )
         })?;
     Ok(Some(status.code().unwrap_or(1)))
+}
+
+fn delegate_cook_continue_to_runner_pinned_runtime(
+    pinned: &crate::agents::agent_tasks::lifecycle::RunnerPinnedRuntime,
+    normalized_args: &[String],
+) -> homeboy::core::Result<i32> {
+    let mut command = vec![pinned.executable.display().to_string()];
+    command.extend_from_slice(&normalized_args[1..]);
+    let (output, exit_code) = homeboy::runner::exec(
+        &pinned.runner_id,
+        homeboy::runner::RunnerExecOptions {
+            command,
+            raw_exec: true,
+            ..Default::default()
+        },
+    )?;
+    if !output.stderr.is_empty() {
+        eprint!("{}", output.stderr);
+    }
+    print!("{}", output.stdout);
+    Ok(exit_code)
 }
 
 /// Fanout coordination is controller-owned and may span children from distinct

@@ -451,6 +451,56 @@ fn accepted_lab_runner_execution_preserves_controller_runtime_pin_across_host_id
 }
 
 #[test]
+fn persisted_runner_v2_pin_is_resolved_through_its_lab_authority_before_local_validation() {
+    with_isolated_home(|_| {
+        let run_id = "cook-10497-attempt-1";
+        let command = vec![
+            "homeboy".to_string(),
+            "agent-task".to_string(),
+            "run-plan".to_string(),
+        ];
+        submit_plan(&test_plan(), Some(run_id)).expect("persist controller-local continuation");
+        record_detached_lab_run(DetachedLabRunRecord {
+            run_id,
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-10497",
+            // This Lab workspace has been reaped; continuation must use durable
+            // recipe and promotion evidence rather than a remote checkout.
+            remote_workspace: "/home/chubes/reaped-lab-workspace",
+            remote_command: &command,
+        })
+        .expect("persist Lab transport authority");
+        rewrite_record_for_test(run_id, |record| {
+            record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
+                "schema": "homeboy/controller-runtime-pin/v2",
+                "originating": {
+                    "build_identity": "homeboy 0.300.0+linux",
+                    "pinned_executable": "/home/chubes/.local/share/homeboy/controller-runtimes/linux/homeboy",
+                    "sha256": "linux-runner-sha256"
+                }
+            });
+            record.metadata["retained_successful_patch_candidate"] = json!({"sha256": "candidate-10497"});
+        })
+        .expect("persist historical v2 runner pin");
+
+        assert!(
+            pinned_runtime_for_mutation(run_id).is_err(),
+            "the historical Linux path is not valid on the controller"
+        );
+        let pinned = runner_pinned_runtime_for_mutation(run_id)
+            .expect("resolve runner-owned v2 runtime")
+            .expect("runner transport takes precedence over local validation");
+        assert_eq!(pinned.runner_id, "homeboy-lab");
+        assert_eq!(
+            pinned.executable,
+            std::path::PathBuf::from(
+                "/home/chubes/.local/share/homeboy/controller-runtimes/linux/homeboy"
+            )
+        );
+    });
+}
+
+#[test]
 fn planned_lab_runner_execution_preserves_controller_runtime_pin_before_acceptance() {
     with_isolated_home(|_| {
         let run_id = "cross-host-controller-pin-planned";
