@@ -428,7 +428,8 @@ pub fn retry(
             // before recipe/index binding, so recovery can prove ownership without
             // adopting an unrelated same-plan run.
             if !retry_exists {
-                retry_run_id = reserve_cook_retry_lifecycle(&source, &cook_retry, &retry_run_id)?;
+                retry_run_id =
+                    reserve_cook_retry_lifecycle(&source, &cook_retry, &retry_run_id, force)?;
             }
             // Recipe and index are one Cook-owned binding boundary. Serialize
             // concurrent claim observers so neither can overwrite the other's
@@ -462,6 +463,7 @@ fn reserve_cook_retry_lifecycle(
     source: &agent_task_lifecycle::AgentTaskRunRecord,
     retry: &CookRetryAttempt,
     retry_run_id: &str,
+    force: bool,
 ) -> Result<String> {
     let operation_key = format!("retry:{}:{}", retry.cook_id, retry.attempt);
     match agent_task_lifecycle::claim_cook_operation(
@@ -473,7 +475,7 @@ fn reserve_cook_retry_lifecycle(
             // The Cook operation claim coordinates recipe/index binding; the
             // lifecycle retry lock also makes the first durable successor
             // idempotent across concurrent controllers and processes.
-            agent_task_lifecycle::retry_with_force(&source.run_id, Some(retry_run_id), false)?;
+            agent_task_lifecycle::retry_with_force(&source.run_id, Some(retry_run_id), force)?;
             let result = json!({ "run_id": retry_run_id });
             if let Err(error) = agent_task_lifecycle::complete_cook_operation(
                 &source.run_id,

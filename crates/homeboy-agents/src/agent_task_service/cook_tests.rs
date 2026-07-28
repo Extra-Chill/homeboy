@@ -2007,6 +2007,37 @@ fn retryable_pre_provider_retry_stays_attached_to_its_cook() {
 }
 
 #[test]
+fn retryable_pre_provider_retry_propagates_force_after_terminal_successor() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = retryable_pre_provider_cook("cook-forced-terminal-retry", 3);
+        let first_retry =
+            crate::agent_task_service::retry(&options.initial_run_id, None, false, false)
+                .expect("reserve second attempt");
+        agent_task_lifecycle::record_pre_execution_failure(
+            &first_retry.record.run_id,
+            &options.initial_plan,
+            "lab_handoff",
+            &Error::internal_io(
+                "File name too long",
+                Some("finalize staged artifact".to_string()),
+            )
+            .with_retryable(true),
+        )
+        .expect("terminalize second attempt");
+
+        let forced =
+            crate::agent_task_service::retry(&first_retry.record.run_id, None, false, true)
+                .expect("force reserves third attempt");
+
+        assert_eq!(forced.record.metadata["cook_attempt"], 3);
+        assert_eq!(
+            forced.record.metadata["retry_of"],
+            first_retry.record.run_id
+        );
+    });
+}
+
+#[test]
 fn retryable_pre_provider_retry_without_a_recipe_uses_legacy_lifecycle_retry() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let options = batch_cook_options(
