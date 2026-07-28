@@ -254,6 +254,7 @@ jobs:
         id: proof
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           CANDIDATE_SHA: ${{ github.sha }}
           DRY_RUN: ${{ inputs.dry-run || 'false' }}
         run: |
