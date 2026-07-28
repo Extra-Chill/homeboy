@@ -86,7 +86,9 @@ Proof, run 30380078587 job 90345508296 (conclusion **success**, both phases comp
 | 25966 | baseline: `test result: FAILED. 0 passed; 1 failed; …` |
 | 26154 | `##[notice]Differential gate accepted review test: current=1 base=1` |
 
-`baseline_red` *does* also occur (`apply-differential-gate.py:192`), 12 times in this window, always with the message `baseline command … exited 124 before comparable counts were available` — i.e. it fires because the baseline **timed out**, not because the baseline had known failures. So in this window the two statuses have disjoint causes:
+**Frequency across the 81 runs:** `pass` (`::notice::Differential gate accepted …`) **53**, `baseline_red` **9**, `inconclusive` **1**, `rejected` **0**. And every one of the 53 was `current=1 base=1` — not a single one was a genuine `current < base` improvement. The branch that exists to reward a PR for reducing failures fired 53 times in 23 hours and rewarded a reduction exactly zero times.
+
+`baseline_red` (`apply-differential-gate.py:192`) fired 9 times, always with the message `baseline command … exited 124 before comparable counts were available` — i.e. it fires because the baseline **timed out**, not because the baseline had known failures. So in this window the two statuses have disjoint causes:
 
 - `pass` (from `current == base`) hides *real, counted, reproducible* failures. **This is the leak.**
 - `baseline_red` fires only for killed baselines and is the honest, visible signal.
@@ -102,7 +104,7 @@ This is where the framing needed the most repair.
 | window | test binaries | tests | outcome |
 |---|---|---|---|
 | 07-27T18:43Z → 07-28T10:35Z | 17–25 | 77–125 | always completed |
-| 07-28T12:23Z → 17:15Z | 27–29 | 280–503 | killed at 1500 s in 43 of 46 phases |
+| 07-28T12:23Z → 17:15Z | 27–29 (large-scope phases) | 280–503 | **every** large-scope phase killed at 1500 s — 43 of the window's 77 phases; the other 34 were still small-scope and completed |
 
 `homeboy-agents` was in **none** of the small-scope runs. So all 17 `agent_task_*` names in the inventory were observed **only inside killed phases** — 0 completed observations each. The scope widened after #10449 ("changed-scope test gate is blind to Cargo workspace member crates") and the widened suite immediately blew the budget.
 
