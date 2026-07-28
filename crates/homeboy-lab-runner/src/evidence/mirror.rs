@@ -1217,6 +1217,19 @@ where
                 ),
             ));
         }
+        if artifact.mime.as_deref().is_none_or(str::is_empty) {
+            return Err(artifact_projection_error(
+                runner,
+                job,
+                &run.id,
+                Error::validation_invalid_argument(
+                    "artifact.mime",
+                    "terminal artifact is missing controller media type metadata",
+                    Some(artifact.id.clone()),
+                    None,
+                ),
+            ));
+        }
         let mut file = tempfile::NamedTempFile::new().map_err(|error| {
             artifact_projection_error(
                 runner,
@@ -1437,6 +1450,7 @@ fn permanent_artifact_provenance_error(error: &Error) -> bool {
             Some("artifact.provenance")
                 | Some("artifact.size_bytes")
                 | Some("artifact.sha256")
+                | Some("artifact.mime")
                 | Some("artifact.content_base64")
         )
 }

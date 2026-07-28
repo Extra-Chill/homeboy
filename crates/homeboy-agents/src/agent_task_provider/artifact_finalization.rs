@@ -216,6 +216,7 @@ fn staged_file(
     validate_token("artifact.id", &artifact.id)?;
     validate_token("artifact.kind", &artifact.kind)?;
     let declared = Path::new(declared);
+    let mime = homeboy_core::artifact_metadata::content_type_from_path(declared);
     let candidate = if declared.is_absolute() {
         declared.to_path_buf()
     } else {
@@ -359,12 +360,7 @@ fn staged_file(
             ))
         }
     }
-    Ok((
-        destination.clone(),
-        size,
-        sha256,
-        homeboy_core::artifact_metadata::content_type_from_path(&destination),
-    ))
+    Ok((destination.clone(), size, sha256, mime))
 }
 
 #[cfg(windows)]
@@ -728,6 +724,7 @@ mod tests {
                 b"verified patch bytes"
             );
             assert_eq!(artifact.size_bytes, Some(20));
+            assert_eq!(artifact.mime.as_deref(), Some("text/x-patch"));
             assert_eq!(
                 artifact.sha256,
                 Some(
