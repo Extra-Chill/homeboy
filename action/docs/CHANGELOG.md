@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.9.1] - 2026-07-28
+
+### Fixed
+- stop the differential gate laundering an equal-failure run into a green check
+
 ## [2.9.0] - 2026-07-28
 
 ### Added
