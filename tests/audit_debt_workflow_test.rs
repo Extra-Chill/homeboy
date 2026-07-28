@@ -264,8 +264,12 @@ fn post_merge_full_audit_gate_blocks_on_an_empty_corpus() {
         .find("name: Assert the audit actually scanned the tree")
         .expect("audit gate must carry a corpus assertion step");
     assert!(
-        gate.contains("files_scanned"),
-        "the corpus assertion must read the audit's own files_scanned figure"
+        gate.contains(".data.audit.output.summary.files_scanned"),
+        "review audit nests the audit result below data.audit.output; the corpus assertion must read the audit's own files_scanned figure"
+    );
+    assert!(
+        !gate.contains(".data.summary.files_scanned"),
+        "data.summary is the review-level summary and has no audit corpus metric"
     );
 
     // Every `continue-on-error: true` in this job must precede the blocking

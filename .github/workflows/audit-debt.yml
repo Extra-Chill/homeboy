@@ -248,11 +248,11 @@ jobs:
             echo "::error::Audit produced no structured output at '${result}'. The audit did not run to completion (or homeboy-action changed where it writes results). A gate that cannot read the audit result cannot claim the audit passed — see #10557." >&2
             exit 1
           fi
-          files_scanned="$(jq -r '.data.summary.files_scanned // 0' "${result}")"
+          files_scanned="$(jq -r '.data.audit.output.summary.files_scanned // 0' "${result}")"
           echo "audit corpus: ${files_scanned} file(s)"
           if [ "${files_scanned}" -lt 1 ]; then
             echo "::error::Audit scanned ${files_scanned} files. An audit with an empty corpus has not passed — it has not run. The usual cause is a missing fingerprinting extension: this gate must go through Extra-Chill/homeboy-action, whose 'Install extension' step installs the extensions declared in homeboy.json. See #10557." >&2
-            jq -r '.data.summary' "${result}" >&2 || true
+            jq -r '.data.audit.output.summary' "${result}" >&2 || true
             exit 1
           fi
 
