@@ -108,8 +108,7 @@ fn cli_reference_docs_are_current() {
 /// One generated page per visible top-level command, plus the index.
 #[test]
 fn generated_reference_covers_every_visible_top_level_command() {
-    let mut root = Cli::command();
-    root.build();
+    let root = Cli::command();
 
     let expected = documented_subcommands(&root)
         .into_iter()
@@ -136,8 +135,7 @@ fn generated_reference_covers_every_visible_top_level_command() {
 /// shows up as a reviewed docs diff.
 #[test]
 fn commands_without_help_text_are_confined_to_agent_task() {
-    let mut root = Cli::command();
-    root.build();
+    let root = Cli::command();
 
     let mut undocumented = Vec::new();
     for command in documented_subcommands(&root) {

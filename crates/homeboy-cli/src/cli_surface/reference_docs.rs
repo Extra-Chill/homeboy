@@ -26,6 +26,21 @@
 //! HOMEBOY_WRITE_CLI_REFERENCE=1 cargo test -p homeboy-cli --lib cli_surface::reference_docs
 //! ```
 //!
+//! # Why it does not call `Command::build`
+//!
+//! Everything here reads the tree exactly as `clap_derive` produced it.
+//! `clap_derive` already emits an explicit `ArgAction` and `value_name` for
+//! every field, so building buys nothing this module needs — and it costs two
+//! things it does not want. It propagates every `global = true` argument into
+//! all ~500 nodes, which this module strips again anyway; and it runs clap's
+//! `debug_assert` suite over the whole tree, which turns any pre-existing
+//! definition defect anywhere in the CLI into a *docs* test failure. That is not
+//! hypothetical: `runner refresh-plan` declares a local `--output` that collides
+//! with the propagated global `--output`, and building trips
+//! `Long option names must be unique for each argument`. Once that is fixed, a
+//! deliberate `build()`-based assertion canary would be a good separate guard;
+//! it should not be smuggled in as a side effect of generating docs.
+//!
 //! # Why it does not overwrite `docs/commands/`
 //!
 //! `docs/commands/*.md` is hand-written narrative: concepts, recipes, contracts,
@@ -56,10 +71,7 @@ const NO_HELP_CELL: &str = "_no help text_";
 
 /// Renders the full generated tree as `file name -> markdown body`.
 pub(super) fn generated_reference_docs() -> BTreeMap<String, String> {
-    let mut root = Cli::command();
-    // Populates clap-managed state (value names, `help` args, propagated
-    // globals) so introspection sees the same shapes `--help` would.
-    root.build();
+    let root = Cli::command();
 
     let mut files = BTreeMap::new();
     let mut summaries = Vec::new();
