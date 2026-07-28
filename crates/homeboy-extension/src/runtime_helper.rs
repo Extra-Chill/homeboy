@@ -348,7 +348,12 @@ pub fn helper_path(name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+// `#[path]`, not `include!("runtime_helper/tests.rs")`. Both produce the same
+// module -- `runtime_helper::tests`, with the same `super` -- but `include!` is
+// a macro, and rustfmt resolves the module tree by parsing without expanding
+// macros. Under `include!` this file's 1,073 lines were the one place in the
+// workspace that `cargo fmt --all` compiled but never formatted; five diff
+// blocks of drift had accumulated in it. rustfmt does follow `#[path]`.
 #[cfg(test)]
-mod tests {
-    include!("runtime_helper/tests.rs");
-}
+#[path = "runtime_helper/tests.rs"]
+mod tests;

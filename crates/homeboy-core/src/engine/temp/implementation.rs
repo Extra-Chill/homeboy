@@ -481,7 +481,6 @@ mod owner_support {
 }
 use owner_support::*;
 
-#[path = "implementation/storage.rs"]
 mod storage;
 use storage::*;
 

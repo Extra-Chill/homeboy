@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
-#[path = "defaults/builtins.rs"]
 mod builtins;
 mod io;
 mod policy;
