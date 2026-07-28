@@ -252,6 +252,48 @@ pub(super) fn execute_artifact_deploy(
         .with_build_exit_code(prepared.build_exit_code);
         return with_prepared_artifact_source(result, prepared);
     };
+    if let (Some(expected_manifest), Some(expected_sha256)) =
+        (&prepared.package_manifest, &prepared.payload_sha256)
+    {
+        let exclusions = homeboy_core::component::resolve_component_scope(
+            component,
+            homeboy_core::component::ScopeCommand::Deploy,
+        )
+        .exclude;
+        let manifest_matches =
+            super::super::content_manifest::package_manifest(artifact_path, &exclusions)
+                .is_ok_and(|manifest| manifest == *expected_manifest);
+        let sha_matches = crate::deploy::sha256_file(artifact_path)
+            .is_ok_and(|sha256| sha256 == *expected_sha256);
+        if !manifest_matches || !sha_matches {
+            let result = ComponentDeployResult::failed(
+                component,
+                base_path,
+                prepared.local_version.clone(),
+                prepared.remote_version.clone(),
+                "prepared package changed after preflight; refusing transfer".to_string(),
+            )
+            .with_remote_path(install_dir.to_string())
+            .with_build_exit_code(prepared.build_exit_code);
+            return with_prepared_artifact_source(result, prepared);
+        }
+    }
+    if let Some(artifact) = prepared.canonical_release_artifact.as_ref() {
+        if let Err(error) =
+            super::super::content_manifest::verify_archive_hash(artifact_path, artifact)
+        {
+            let result = ComponentDeployResult::failed(
+                component,
+                base_path,
+                prepared.local_version.clone(),
+                prepared.remote_version.clone(),
+                error,
+            )
+            .with_remote_path(install_dir.to_string())
+            .with_build_exit_code(prepared.build_exit_code);
+            return with_prepared_artifact_source(result, prepared);
+        }
+    }
     let artifact_input_metadata = match artifact_inputs::resolve_metadata(component) {
         Ok(inputs) => inputs,
         Err(err) => {

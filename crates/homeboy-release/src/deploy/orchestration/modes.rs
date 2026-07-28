@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use homeboy_core::component::Component;
+use homeboy_core::component::{resolve_component_scope, Component, ScopeCommand};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git::release_download::ReleaseArtifactLease;
 use homeboy_core::project::Project;
@@ -29,6 +29,7 @@ pub(super) fn run_check_mode(
     config: &DeployConfig,
     client: &SshClient,
     canonical_packages: &HashMap<String, ReleaseArtifactLease>,
+    unavailable_canonical_packages: &HashMap<String, String>,
 ) -> DeployOrchestrationResult {
     let mut git_probe_cache = GitProbeCache::default();
     let mut results: Vec<ComponentDeployResult> = components
@@ -37,20 +38,65 @@ pub(super) fn run_check_mode(
             let mut status =
                 calculate_component_status_with_git_cache(c, remote_versions, &mut git_probe_cache);
             let release_state = calculate_release_state(c);
-            let manifest = if let Some(package) = canonical_packages.get(&c.id) {
-                super::super::content_manifest::compare_archive(
-                    &package.path,
-                    &super::super::path_roots::resolve_effective_remote_path(project, c, base_path)
-                        .unwrap_or_default(),
+            let prepared = config
+                .prepared_artifact
+                .as_ref()
+                .filter(|artifact| artifact.component_id == c.id);
+            let target = super::super::path_roots::resolve_effective_remote_path(project, c, base_path)
+                .unwrap_or_default();
+            let manifest = if let Some(artifact) = prepared {
+                super::super::content_manifest::compare_prepared_archive(
+                    std::path::Path::new(artifact.effective_path()),
+                    &target,
                     client,
+                    &resolve_component_scope(c, ScopeCommand::Deploy).exclude,
+                    artifact,
+                )
+            } else if let Some(package) = canonical_packages.get(&c.id) {
+                match super::super::content_manifest::verify_archive_hash(&package.path, package) {
+                    Ok(()) => super::super::content_manifest::compare_archive(
+                        &package.path,
+                        &target,
+                        client,
+                        &resolve_component_scope(c, ScopeCommand::Deploy).exclude,
+                        Some(package),
+                    ),
+                    Err(error) => {
+                        super::super::content_manifest::canonical_package_unavailable_for_artifact(
+                            error, package,
+                        )
+                    }
+                }
+            } else if let Some(diagnostic) = unavailable_canonical_packages.get(&c.id) {
+                super::super::content_manifest::canonical_package_unavailable(
+                    diagnostic.clone(),
+                    c.build_artifact.as_deref(),
                 )
             } else {
-                super::super::content_manifest::compare(
-                    std::path::Path::new(&c.local_path),
-                    &super::super::path_roots::resolve_effective_remote_path(project, c, base_path)
-                        .unwrap_or_default(),
-                    client,
-                )
+                let version = local_versions.get(&c.id).map(String::as_str).unwrap_or_default();
+                match super::super::receipt::load(
+                    project,
+                    &c.id,
+                    &target,
+                    version,
+                    &resolve_component_scope(c, ScopeCommand::Deploy).exclude,
+                ) {
+                    Ok(Some(receipt)) => super::super::content_manifest::compare_saved_package_manifest(
+                        &receipt.manifest,
+                        &target,
+                        client,
+                        &receipt.exclusions,
+                        receipt.provenance(),
+                    ),
+                    Ok(None) => super::super::content_manifest::local_build_package_unavailable(
+                        "canonical package is unavailable in check mode and no deployed-package receipt matches this target and version".to_string(),
+                        c.build_artifact.as_deref(),
+                    ),
+                    Err(error) => super::super::content_manifest::local_build_package_unavailable(
+                        format!("deployed-package receipt unavailable: {error}"),
+                        c.build_artifact.as_deref(),
+                    ),
+                }
             };
             if manifest.status == "missing" {
                 status = ComponentStatus::Missing;
@@ -638,6 +684,7 @@ mod tests {
             &config,
             &local_client(),
             &HashMap::new(),
+            &HashMap::new(),
         );
         assert_eq!(checked.results[0].status, "checked");
         assert_eq!(checked.results[0].local_version.as_deref(), Some("1.2.3"));
@@ -717,15 +764,28 @@ mod tests {
             &config,
             &local_client(),
             &packages,
+            &HashMap::new(),
         );
         assert_eq!(
             clean.results[0].component_status,
             Some(ComponentStatus::UpToDate)
         );
+        let manifest = clean.results[0]
+            .content_manifest
+            .as_ref()
+            .expect("package manifest");
+        assert_eq!(manifest.scope, "canonical-package-installed-tree");
+        assert_eq!(
+            manifest
+                .provenance
+                .as_ref()
+                .and_then(|provenance| provenance.artifact_tag.as_deref()),
+            Some("v1.0.0")
+        );
 
         std::fs::write(remote.join("plugin.php"), "modified").expect("drift");
         let drift = run_check_mode(
-            &[component],
+            std::slice::from_ref(&component),
             &versions,
             &versions,
             &[],
@@ -734,10 +794,331 @@ mod tests {
             &config,
             &local_client(),
             &packages,
+            &HashMap::new(),
         );
         assert_eq!(
             drift.results[0].component_status,
             Some(ComponentStatus::RemoteModified)
+        );
+
+        std::fs::write(&packages["plugin"].path, "mutated after lease").expect("mutate package");
+        let mutated = run_check_mode(
+            std::slice::from_ref(&component),
+            &versions,
+            &versions,
+            &[],
+            &Project::default(),
+            ".",
+            &config,
+            &local_client(),
+            &packages,
+            &HashMap::new(),
+        );
+        let manifest = mutated.results[0]
+            .content_manifest
+            .as_ref()
+            .expect("unavailable canonical package evidence");
+        assert_eq!(manifest.status, "unavailable");
+        assert_eq!(manifest.scope, "canonical-package-unavailable");
+        assert_eq!(
+            manifest
+                .provenance
+                .as_ref()
+                .and_then(|provenance| provenance.artifact_sha256.as_deref()),
+            None
+        );
+    }
+
+    #[test]
+    fn prepared_artifact_is_selected_ahead_of_a_release_asset_during_check() {
+        let temp = tempfile::tempdir().expect("temp");
+        let remote = temp.path().join("plugin");
+        std::fs::create_dir_all(&remote).expect("remote");
+        std::fs::write(remote.join("plugin.php"), "prepared").expect("remote payload");
+        let prepared_path = temp.path().join("prepared.zip");
+        let release_path = temp.path().join("release.zip");
+        for (path, contents) in [
+            (&prepared_path, b"prepared".as_slice()),
+            (&release_path, b"release".as_slice()),
+        ] {
+            let file = std::fs::File::create(path).expect("package");
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file("plugin.php", zip::write::FileOptions::default())
+                .expect("entry");
+            use std::io::Write as _;
+            zip.write_all(contents).expect("contents");
+            zip.finish().expect("finish");
+        }
+        let release =
+            ReleaseArtifactLease::test_new(homeboy_core::git::release_download::ReleaseArtifact {
+                path: release_path.clone(),
+                tag: "v1.0.0".to_string(),
+                commit: None,
+                url: "https://example.test/release.zip".to_string(),
+                name: "release.zip".to_string(),
+                size: std::fs::metadata(&release_path).expect("metadata").len(),
+                sha256: crate::deploy::sha256_file(&release_path).expect("sha"),
+            })
+            .expect("lease");
+        let component = Component {
+            id: "plugin".to_string(),
+            remote_path: remote.display().to_string(),
+            ..Component::default()
+        };
+        let versions = HashMap::from([("plugin".to_string(), "1.0.0".to_string())]);
+        let mut config = DeployConfig::check_all_no_pull_head();
+        config.prepared_artifact = Some(PreparedDeployArtifact {
+            component_id: "plugin".to_string(),
+            path: prepared_path.display().to_string(),
+            durable_path: prepared_path.display().to_string(),
+            size_bytes: std::fs::metadata(&prepared_path).expect("metadata").len(),
+            sha256: crate::deploy::sha256_file(&prepared_path).expect("sha"),
+            version: "1.0.0".to_string(),
+            tag: "v1.0.0".to_string(),
+            source_commit: "prepared-commit".to_string(),
+        });
+        let result = run_check_mode(
+            &[component],
+            &versions,
+            &versions,
+            &[],
+            &Project::default(),
+            ".",
+            &config,
+            &local_client(),
+            &HashMap::from([("plugin".to_string(), release)]),
+            &HashMap::new(),
+        );
+        let manifest = result.results[0]
+            .content_manifest
+            .as_ref()
+            .expect("manifest");
+        assert_eq!(manifest.status, "match");
+        assert_eq!(
+            manifest.provenance.as_ref().expect("provenance").source,
+            "prepared-artifact"
+        );
+    }
+
+    #[test]
+    fn check_reports_mixed_version_and_content_drift_against_the_package() {
+        let temp = tempfile::tempdir().expect("temp");
+        let remote = temp.path().join("plugin");
+        std::fs::create_dir_all(&remote).expect("remote");
+        std::fs::write(remote.join("plugin.php"), "Version: 2.0.0\nmodified")
+            .expect("remote plugin");
+        let package = temp.path().join("plugin.zip");
+        let file = std::fs::File::create(&package).expect("package");
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file("plugin/plugin.php", zip::write::FileOptions::default())
+            .expect("entry");
+        use std::io::Write as _;
+        zip.write_all(b"Version: 1.0.0\nrelease").expect("contents");
+        zip.finish().expect("finish");
+        let bytes = std::fs::read(&package).expect("package bytes");
+        let lease =
+            ReleaseArtifactLease::test_new(homeboy_core::git::release_download::ReleaseArtifact {
+                path: package.clone(),
+                tag: "v1.0.0".to_string(),
+                commit: Some("release-commit".to_string()),
+                url: "https://example.test/plugin.zip".to_string(),
+                name: "plugin.zip".to_string(),
+                size: bytes.len() as u64,
+                sha256: crate::deploy::sha256_file(&package).expect("sha"),
+            })
+            .expect("lease");
+        let component = Component {
+            id: "plugin".to_string(),
+            local_path: temp.path().display().to_string(),
+            remote_path: remote.display().to_string(),
+            ..Component::default()
+        };
+        let local_versions = HashMap::from([("plugin".to_string(), "1.0.0".to_string())]);
+        let remote_versions = HashMap::from([("plugin".to_string(), "2.0.0".to_string())]);
+        let result = run_check_mode(
+            &[component],
+            &local_versions,
+            &remote_versions,
+            &[],
+            &Project::default(),
+            ".",
+            &DeployConfig::check_all_no_pull_head(),
+            &local_client(),
+            &HashMap::from([("plugin".to_string(), lease)]),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            result.results[0].component_status,
+            Some(ComponentStatus::MixedDrift)
+        );
+        assert_eq!(
+            result.results[0]
+                .content_manifest
+                .as_ref()
+                .expect("manifest")
+                .status,
+            "different"
+        );
+    }
+
+    #[test]
+    fn check_reports_unavailable_canonical_package_without_reading_the_source_tree() {
+        let component = Component {
+            id: "plugin".to_string(),
+            local_path: "/source/tree/must-not-be-read".to_string(),
+            build_artifact: Some("dist/plugin.zip".to_string()),
+            ..Component::default()
+        };
+        let versions = HashMap::from([("plugin".to_string(), "1.0.0".to_string())]);
+        let result = run_check_mode(
+            &[component],
+            &versions,
+            &versions,
+            &[],
+            &Project::default(),
+            ".",
+            &DeployConfig::check_all_no_pull_head(),
+            &local_client(),
+            &HashMap::new(),
+            &HashMap::from([(
+                "plugin".to_string(),
+                "release asset download failed".to_string(),
+            )]),
+        );
+        let manifest = result.results[0]
+            .content_manifest
+            .as_ref()
+            .expect("canonical unavailable evidence");
+        assert_eq!(manifest.status, "unavailable");
+        assert_eq!(manifest.scope, "canonical-package-unavailable");
+        assert_eq!(
+            manifest
+                .provenance
+                .as_ref()
+                .and_then(|provenance| provenance.artifact_name.as_deref()),
+            Some("dist/plugin.zip")
+        );
+    }
+
+    #[test]
+    fn tagged_and_skip_build_checks_require_a_canonical_package_or_receipt() {
+        let temp = tempfile::tempdir().expect("temp");
+        let source = temp.path().join("monorepo");
+        let remote = temp.path().join("installed");
+        std::fs::create_dir_all(source.join("packages/plugin")).expect("source");
+        std::fs::create_dir_all(&remote).expect("remote");
+        std::fs::write(source.join("README.md"), "source only").expect("source file");
+        std::fs::write(source.join("packages/plugin/plugin.php"), "installed")
+            .expect("source file");
+        std::fs::write(remote.join("plugin.php"), "installed").expect("remote file");
+        let component = Component {
+            id: "plugin".to_string(),
+            local_path: source.display().to_string(),
+            remote_path: remote.display().to_string(),
+            build_artifact: Some("packages/plugin/plugin.zip".to_string()),
+            ..Component::default()
+        };
+        let versions = HashMap::from([("plugin".to_string(), "1.0.0".to_string())]);
+        for mut config in [
+            DeployConfig {
+                tagged: true,
+                ..DeployConfig::check_all_no_pull_head()
+            },
+            DeployConfig {
+                skip_build: true,
+                ..DeployConfig::check_all_no_pull_head()
+            },
+        ] {
+            config.check = true;
+            let result = run_check_mode(
+                std::slice::from_ref(&component),
+                &versions,
+                &versions,
+                &[],
+                &Project::default(),
+                ".",
+                &config,
+                &local_client(),
+                &HashMap::new(),
+                &HashMap::new(),
+            );
+            let manifest = result.results[0]
+                .content_manifest
+                .as_ref()
+                .expect("canonical package evidence");
+            assert_eq!(manifest.status, "unavailable");
+            assert_eq!(manifest.scope, "canonical-package-unavailable");
+            assert_eq!(
+                manifest
+                    .provenance
+                    .as_ref()
+                    .map(|provenance| provenance.source.as_str()),
+                Some("local-build")
+            );
+        }
+    }
+
+    #[test]
+    fn check_reports_unavailable_when_local_build_artifact_has_no_package_coverage() {
+        let component = Component {
+            id: "plugin".to_string(),
+            local_path: "/source/tree/must-not-be-read".to_string(),
+            build_artifact: Some("dist/plugin.zip".to_string()),
+            ..Component::default()
+        };
+        let versions = HashMap::from([("plugin".to_string(), "1.0.0".to_string())]);
+        let result = run_check_mode(
+            &[component],
+            &versions,
+            &versions,
+            &[],
+            &Project::default(),
+            ".",
+            &DeployConfig::check_all_no_pull_head(),
+            &local_client(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            result.results[0]
+                .content_manifest
+                .as_ref()
+                .expect("manifest")
+                .status,
+            "unavailable"
+        );
+    }
+
+    #[test]
+    fn check_does_not_use_package_coverage_without_an_immutable_payload() {
+        let component = Component {
+            id: "plugin".to_string(),
+            local_path: "/source/tree/must-not-be-read".to_string(),
+            build_artifact: Some("dist/plugin.zip".to_string()),
+            ..Component::default()
+        };
+        let versions = HashMap::from([("plugin".to_string(), "1.0.0".to_string())]);
+        let result = run_check_mode(
+            &[component],
+            &versions,
+            &versions,
+            &[],
+            &Project::default(),
+            ".",
+            &DeployConfig::check_all_no_pull_head(),
+            &local_client(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        let manifest = result.results[0]
+            .content_manifest
+            .as_ref()
+            .expect("manifest");
+        assert_eq!(manifest.status, "unavailable");
+        let diagnostic = manifest.diagnostic.as_deref().expect("diagnostic");
+        assert!(
+            diagnostic.contains("no deployed-package receipt"),
+            "{diagnostic}"
         );
     }
 

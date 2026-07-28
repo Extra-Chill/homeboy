@@ -13,6 +13,7 @@ mod planning;
 mod policy;
 pub(crate) mod preparation;
 pub(crate) mod provenance;
+mod receipt;
 mod safety_and_artifact;
 mod smoke;
 mod transfer;

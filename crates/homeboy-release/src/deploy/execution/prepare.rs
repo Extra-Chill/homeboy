@@ -27,6 +27,9 @@ pub(crate) struct PreparedComponentDeploy {
     pub build_exit_code: Option<i32>,
     pub artifact_path: Option<PathBuf>,
     pub artifact_source: Option<DeployArtifactSource>,
+    pub canonical_release_artifact: Option<ReleaseArtifactLease>,
+    pub package_manifest: Option<super::super::content_manifest::Manifest>,
+    pub payload_sha256: Option<String>,
     pub build_provenance: BuildProvenance,
     pub cleanup_local_artifact: bool,
 }
@@ -71,6 +74,9 @@ pub(crate) fn prepare_component_deploy(
 
     // Try downloading release artifact from GitHub instead of building locally.
     // This is the preferred path when the component has remote_url set.
+    // An explicit prepared artifact is the selected payload, even if a release
+    // asset was resolved earlier for this component.
+    let canonical_release_artifact = selected_release_artifact(config, release_artifact.clone());
     let release_artifact: Option<PathBuf> = if let Some(prepared_artifact) =
         config.prepared_artifact.as_ref()
     {
@@ -241,6 +247,43 @@ pub(crate) fn prepare_component_deploy(
     };
     let build_provenance =
         capture_build_provenance(component, build_source, build_ran, artifact_path.as_deref());
+    let exclusions = homeboy_core::component::resolve_component_scope(
+        component,
+        homeboy_core::component::ScopeCommand::Deploy,
+    )
+    .exclude;
+    let (package_manifest, payload_sha256) = match artifact_path.as_deref().filter(|path| {
+        path.extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+    }) {
+        Some(path) => match (
+            super::super::content_manifest::package_manifest(path, &exclusions),
+            crate::deploy::sha256_file(path),
+        ) {
+            (Ok(manifest), Ok(sha256)) => (Some(manifest), Some(sha256)),
+            (Err(error), _) => {
+                return Err(failed_component_deploy_result(
+                    component,
+                    base_path,
+                    local_version,
+                    remote_version,
+                    build_exit_code,
+                    format!("unable to capture deployed package receipt: {error}"),
+                ));
+            }
+            (_, Err(error)) => {
+                return Err(failed_component_deploy_result(
+                    component,
+                    base_path,
+                    local_version,
+                    remote_version,
+                    build_exit_code,
+                    format!("unable to capture deployed package receipt: {error}"),
+                ));
+            }
+        },
+        None => (None, None),
+    };
 
     Ok(PreparedComponentDeploy {
         component: component.clone(),
@@ -251,6 +294,9 @@ pub(crate) fn prepare_component_deploy(
         build_exit_code,
         artifact_path,
         artifact_source,
+        canonical_release_artifact,
+        package_manifest,
+        payload_sha256,
         build_provenance,
         cleanup_local_artifact,
     })
@@ -303,4 +349,51 @@ pub(super) fn failed_component_deploy_result(
 ) -> ComponentDeployResult {
     ComponentDeployResult::failed(component, base_path, local_version, remote_version, error)
         .with_build_exit_code(build_exit_code)
+}
+
+fn selected_release_artifact(
+    config: &DeployConfig,
+    release_artifact: Option<ReleaseArtifactLease>,
+) -> Option<ReleaseArtifactLease> {
+    config
+        .prepared_artifact
+        .is_none()
+        .then_some(release_artifact)
+        .flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::deploy::PreparedDeployArtifact;
+
+    #[test]
+    fn prepared_artifact_does_not_inherit_an_unrelated_release_lease() {
+        let mut config = DeployConfig::check_all_no_pull_head();
+        config.prepared_artifact = Some(PreparedDeployArtifact {
+            component_id: "fixture".to_string(),
+            path: "prepared.zip".to_string(),
+            durable_path: "prepared.zip".to_string(),
+            size_bytes: 1,
+            sha256: "prepared".to_string(),
+            version: "1.0.0".to_string(),
+            tag: "v1.0.0".to_string(),
+            source_commit: "commit".to_string(),
+        });
+        let path = tempfile::NamedTempFile::new().expect("release asset");
+        std::fs::write(path.path(), "release").expect("release bytes");
+        let lease =
+            ReleaseArtifactLease::test_new(homeboy_core::git::release_download::ReleaseArtifact {
+                path: path.path().to_path_buf(),
+                tag: "v1.0.0".to_string(),
+                commit: None,
+                url: "https://example.test/release.zip".to_string(),
+                name: "release.zip".to_string(),
+                size: 7,
+                sha256: crate::deploy::sha256_file(path.path()).expect("sha"),
+            })
+            .expect("lease");
+
+        assert!(selected_release_artifact(&config, Some(lease)).is_none());
+    }
 }

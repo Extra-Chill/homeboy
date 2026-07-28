@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::release::version;
-use homeboy_core::component::Component;
+use homeboy_core::component::{resolve_component_scope, Component, ScopeCommand};
 use homeboy_core::context::RemoteProjectContext;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::project::Project;
@@ -142,7 +142,7 @@ pub(super) fn deploy_components(
         validate_effective_remote_paths(&components, &project, base_path)?;
     }
 
-    let resolved_release_artifacts =
+    let (resolved_release_artifacts, unavailable_canonical_packages) =
         resolve_release_artifacts_for_deploy(&components, config, release_artifacts)?;
 
     // Resolve first, then materialize immutable detached worktrees for real deploys.
@@ -225,6 +225,7 @@ pub(super) fn deploy_components(
             config,
             &ctx.client,
             &resolved_release_artifacts,
+            &unavailable_canonical_packages,
         ));
     }
     if config.dry_run {
@@ -396,15 +397,33 @@ pub(super) fn deploy_components(
     // Re-probe immediately before the first destructive write. A same-version
     // mismatch is remote-only content drift, not an ordinary local update.
     for prepared in prepared_deployments.iter() {
-        let Some(local_path) = prepared
-            .artifact_path
-            .as_deref()
-            .filter(|path| path.is_dir())
-        else {
-            continue;
+        let exclusions = resolve_component_scope(&prepared.component, ScopeCommand::Deploy).exclude;
+        let manifest = match (
+            prepared.artifact_path.as_deref(),
+            prepared.canonical_release_artifact.as_ref(),
+        ) {
+            (Some(archive), Some(artifact)) => {
+                super::content_manifest::verify_archive_hash(archive, artifact).map_err(
+                    |error| {
+                        Error::validation_invalid_argument("release_artifact", error, None, None)
+                    },
+                )?;
+                super::content_manifest::compare_archive(
+                    archive,
+                    &prepared.install_dir,
+                    &ctx.client,
+                    &exclusions,
+                    Some(artifact),
+                )
+            }
+            (Some(local_path), None) if local_path.is_dir() => super::content_manifest::compare(
+                local_path,
+                &prepared.install_dir,
+                &ctx.client,
+                &exclusions,
+            ),
+            _ => continue,
         };
-        let manifest =
-            super::content_manifest::compare(local_path, &prepared.install_dir, &ctx.client);
         if prepared.local_version == prepared.remote_version
             && !config.force
             && manifest.status != "match"
@@ -432,6 +451,22 @@ pub(super) fn deploy_components(
 
     for prepared in prepared_deployments.iter() {
         let component = &prepared.component;
+        if prepared.package_manifest.is_some() {
+            let version = prepared.local_version.as_deref().unwrap_or_default();
+            if let Err(error) =
+                super::receipt::invalidate(&project, &component.id, &prepared.install_dir, version)
+            {
+                failed += 1;
+                results.push(ComponentDeployResult::failed(
+                    component,
+                    base_path,
+                    prepared.local_version.clone(),
+                    prepared.remote_version.clone(),
+                    format!("unable to invalidate prior deployed-package receipt: {error}"),
+                ));
+                continue;
+            }
+        }
 
         let mut result = execute_preflighted_component_deploy(prepared, ctx, base_path, &project);
 
@@ -499,7 +534,32 @@ pub(super) fn deploy_components(
         } else if let Some(prepared_artifact) = config.prepared_artifact.as_ref() {
             build_provenance.built_from_commit = Some(prepared_artifact.source_commit.clone());
         }
-        result = result.with_build_provenance(build_provenance);
+        result = result.with_build_provenance(build_provenance.clone());
+
+        if result.status == "deployed" {
+            if let (Some(manifest), Some(payload_sha256)) = (
+                prepared.package_manifest.clone(),
+                prepared.payload_sha256.clone(),
+            ) {
+                let exclusions = resolve_component_scope(component, ScopeCommand::Deploy).exclude;
+                let version = prepared.local_version.as_deref().unwrap_or_default();
+                if let Err(error) = super::receipt::write(
+                    &project,
+                    &component.id,
+                    &prepared.install_dir,
+                    version,
+                    manifest,
+                    payload_sha256,
+                    build_provenance,
+                    exclusions,
+                ) {
+                    result.status = "failed".to_string();
+                    result.error = Some(format!(
+                        "deployment completed but authoritative deployed-package receipt could not be persisted: {error}"
+                    ));
+                }
+            }
+        }
 
         if result.status == "deployed" {
             succeeded += 1;
@@ -564,39 +624,49 @@ fn resolve_release_artifacts_for_deploy(
     components: &[Component],
     config: &DeployConfig,
     release_artifacts: &mut ReleaseArtifactStore,
-) -> Result<HashMap<String, ReleaseArtifactLease>> {
+) -> Result<(
+    HashMap<String, ReleaseArtifactLease>,
+    HashMap<String, String>,
+)> {
     let mut resolved_release_artifacts: HashMap<String, ReleaseArtifactLease> = HashMap::new();
+    let mut unavailable_canonical_packages = HashMap::new();
     if config.dry_run {
-        return Ok(resolved_release_artifacts);
+        return Ok((resolved_release_artifacts, unavailable_canonical_packages));
     }
 
     for component in components {
+        if config
+            .prepared_artifact
+            .as_ref()
+            .is_some_and(|artifact| artifact.component_id == component.id)
+        {
+            continue;
+        }
         if let ReleaseArtifactPlan::Reuse { tag, .. } =
             release_artifact_plan(component, config, false, false)
         {
-            let artifact = match resolve_planned_release_artifact(
-                component,
-                &tag,
-                release_artifacts,
-            ) {
-                Ok(artifact) => artifact,
-                Err(error) if config.check => {
-                    homeboy_core::log_status!(
-                        "deploy",
-                        "Canonical release package unavailable for '{}' ({error}); using legacy source-tree check",
-                        component.id
-                    );
-                    continue;
-                }
-                Err(error) => {
-                    return Err(Error::validation_invalid_argument(
-                        "releaseArtifact",
-                        error,
-                        None,
-                        None,
-                    ))
-                }
-            };
+            let artifact =
+                match resolve_planned_release_artifact(component, &tag, release_artifacts) {
+                    Ok(artifact) => artifact,
+                    Err(error) if config.check => {
+                        homeboy_core::log_status!(
+                            "deploy",
+                            "Canonical release package unavailable for '{}' ({error})",
+                            component.id
+                        );
+                        unavailable_canonical_packages
+                            .insert(component.id.clone(), error.to_string());
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(Error::validation_invalid_argument(
+                            "releaseArtifact",
+                            error,
+                            None,
+                            None,
+                        ))
+                    }
+                };
             homeboy_core::log_status!(
                 "deploy",
                 "Verified release asset: tag={} name={} size={} sha256={} source={}",
@@ -610,7 +680,7 @@ fn resolve_release_artifacts_for_deploy(
         }
     }
 
-    Ok(resolved_release_artifacts)
+    Ok((resolved_release_artifacts, unavailable_canonical_packages))
 }
 
 fn validate_preflighted_component_identities(
@@ -1059,9 +1129,8 @@ mod tests {
         assert_eq!(err.details["field"].as_str(), Some("build_command"));
     }
 
-    // A check resolves the canonical package when available, but an unavailable
-    // release asset must retain legacy source-tree checking rather than abort a
-    // project-wide read-only probe. Dry-run still resolves nothing. (#10253)
+    // A check records unavailable canonical-package evidence without reverting
+    // to unrelated source-tree bytes. Dry-run still resolves nothing. (#10253)
     #[test]
     fn check_tolerates_missing_canonical_package_and_dry_run_skips_resolution() {
         with_isolated_home(|_| {
@@ -1078,21 +1147,22 @@ mod tests {
             check_config.check = true;
             check_config.expected_version = Some("9.9.9".to_string());
             let mut store = ReleaseArtifactStore::default();
-            let resolved = resolve_release_artifacts_for_deploy(
+            let (resolved, unavailable) = resolve_release_artifacts_for_deploy(
                 &[component.clone()],
                 &check_config,
                 &mut store,
             )
-            .expect("check mode must retain legacy behavior when canonical package is missing");
+            .expect("check mode must preserve canonical package evidence when missing");
             assert!(
                 resolved.is_empty(),
                 "missing canonical package must not produce a partial authority"
             );
+            assert!(unavailable["cli-binary"].contains("release"));
 
             let mut dry_run_config = base_deploy_config();
             dry_run_config.dry_run = true;
             dry_run_config.expected_version = Some("9.9.9".to_string());
-            let resolved = resolve_release_artifacts_for_deploy(
+            let (resolved, unavailable) = resolve_release_artifacts_for_deploy(
                 &[component.clone()],
                 &dry_run_config,
                 &mut store,
@@ -1102,6 +1172,7 @@ mod tests {
                 resolved.is_empty(),
                 "dry-run must resolve no release assets"
             );
+            assert!(unavailable.is_empty());
 
             // A real deploy still resolves — and surfaces the failure loudly.
             let mut deploy_config = base_deploy_config();
@@ -1982,7 +2053,14 @@ mod tests {
         let missing_path = dir.path().join("missing");
         std::fs::create_dir_all(ready_path.join("dist")).expect("ready dist");
         std::fs::create_dir_all(&missing_path).expect("missing component dir");
-        std::fs::write(ready_path.join("dist/ready.zip"), b"artifact").expect("ready artifact");
+        let file =
+            std::fs::File::create(ready_path.join("dist/ready.zip")).expect("ready artifact");
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file("ready.php", zip::write::FileOptions::default())
+            .expect("zip entry");
+        use std::io::Write as _;
+        zip.write_all(b"ready").expect("zip contents");
+        zip.finish().expect("finish zip");
 
         let components = vec![
             artifact_component("ready", &ready_path.to_string_lossy(), "dist/ready.zip"),

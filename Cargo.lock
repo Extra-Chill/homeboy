@@ -1179,6 +1179,7 @@ dependencies = [
  "homeboy-core",
  "homeboy-engine-primitives",
  "homeboy-extension",
+ "homeboy-paths",
  "homeboy-product-identity",
  "homeboy-release-contract",
  "libc",
