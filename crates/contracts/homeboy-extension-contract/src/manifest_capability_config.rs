@@ -36,16 +36,20 @@ pub struct ComponentEnvConfig {
     pub detect_script: String,
 }
 
-/// What a extension provides: file extensions it handles and capabilities it supports.
+/// What an extension provides: file extensions it handles and how it is discovered.
+///
+/// Unknown keys are ignored rather than rejected. This struct previously used
+/// `deny_unknown_fields`, which made retiring any key a hard break: an older
+/// published manifest carrying a since-removed key would fail to deserialize
+/// entirely, taking `file_extensions` and `discovery_markers` down with it.
+/// Extensions ship on their own release cadence, so tolerance here matches the
+/// forward-compatibility policy the parent `ExtensionManifest` already sets
+/// with its `#[serde(flatten)] extra`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ProvidesConfig {
     /// File extensions this extension can process.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_extensions: Vec<String>,
-    /// Capabilities this extension supports (e.g., ["fingerprint", "refactor"]).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub capabilities: Vec<String>,
     /// Component-root marker rules used to suggest this extension for an
     /// unattached component. Core evaluates these generically; extension
     /// manifests own the ecosystem-specific file/glob knowledge.
@@ -80,12 +84,6 @@ pub struct ScriptsConfig {
     /// Receives `{file_path, content}` on stdin and outputs `{artifacts:[...]}` on stdout.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topology: Option<String>,
-    /// Script that validates written code compiles/parses correctly.
-    /// Receives `{root, changed_files}` JSON on stdin, exits 0 on success, non-zero with
-    /// compiler output on stderr on failure.
-    ///
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub validate: Option<String>,
     /// Script that formats source code after automated writes.
     /// Runs from the project root. Exit 0 on success, non-zero on failure.
     /// Formatting failure is non-fatal — it logs a warning but never rolls back.
@@ -103,13 +101,6 @@ pub struct ScriptsConfig {
     /// Outputs `{fixes:[...]}` JSON using Homeboy's generic fix envelope.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compiler_warning_fixes: Option<String>,
-    /// Script that extracts function contracts from source files.
-    /// Receives `{file, content}` JSON on stdin, outputs `{file, contracts: [...]}` JSON on stdout.
-    /// Each contract describes a function's signature, control flow branches, effects, and calls.
-    ///
-    /// Used by the test generator, doc generator, and refactor safety checker.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub contract: Option<String>,
 }
 
 /// Extension-declared release preflight.

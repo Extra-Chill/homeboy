@@ -165,7 +165,7 @@ pub struct ExtensionManifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requires: Option<RequirementsConfig>,
 
-    // Multi-extension composition: role ownership used to disambiguate a
+    // Multi-extension composition: `includes` primacy is used to disambiguate a
     // capability provided by more than one linked extension.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub composition: Option<CompositionConfig>,
@@ -179,33 +179,20 @@ pub struct ExtensionManifest {
     pub extension_path: Option<String>,
 }
 
-/// Multi-extension composition metadata. Declares how a component's linked
-/// extensions relate so Homeboy can resolve a capability that more than one of
-/// them provides without requiring manual `capability_extensions` selection.
+/// Multi-extension composition metadata.
+///
+/// `includes` is the sole ownership signal: when several linked extensions
+/// provide the same capability, an extension that composes all the others is
+/// resolved as the primary owner. See
+/// `homeboy_core::extension_execution::disambiguate_capability_owner`.
+///
+/// Unknown keys are ignored rather than rejected, so manifests still carrying
+/// the retired `roles`/`optional`/`conflicts` metadata continue to load.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CompositionConfig {
-    /// Extensions this one composes with (informational).
+    /// Extensions this one composes with. Used to resolve capability ownership.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub includes: Vec<String>,
-    /// Optional companion assets (informational).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub optional: Vec<String>,
-    /// Role name -> owning extension(s). A role with a single owner designates
-    /// the extension that owns that role's capabilities across the composition.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub roles: BTreeMap<String, RoleOwners>,
-    /// Extensions that must not be linked together (informational).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub conflicts: Vec<String>,
-}
-
-/// Owner(s) of a composition role. Manifests use both a single owner
-/// (`"javascript": "nodejs"`) and a list (`"project": ["a", "b"]`).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(untagged)]
-pub enum RoleOwners {
-    One(String),
-    Many(Vec<String>),
 }
 
 impl ExtensionManifest {
@@ -574,7 +561,22 @@ mod composition_tests {
     use super::*;
 
     #[test]
-    fn deserializes_mixed_single_and_list_role_owners() {
+    fn deserializes_includes() {
+        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "wordpress",
+            "version": "1.0.0",
+            "composition": { "includes": ["nodejs"] }
+        }))
+        .expect("manifest with composition deserializes");
+
+        let composition = manifest.composition.expect("composition present");
+        assert_eq!(composition.includes, vec!["nodejs".to_string()]);
+    }
+
+    /// Manifests published before `roles`/`optional`/`conflicts` were retired
+    /// must still load — the keys are simply ignored rather than rejected.
+    #[test]
+    fn retired_composition_keys_are_tolerated() {
         let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
             "name": "wordpress",
             "version": "1.0.0",
@@ -588,25 +590,10 @@ mod composition_tests {
                 "conflicts": []
             }
         }))
-        .expect("manifest with composition deserializes");
+        .expect("manifest with retired composition keys still deserializes");
 
         let composition = manifest.composition.expect("composition present");
         assert_eq!(composition.includes, vec!["nodejs".to_string()]);
-        // A bare string owner deserializes into the single-owner shape.
-        assert_eq!(
-            composition.roles.get("javascript"),
-            Some(&RoleOwners::One("nodejs".to_string()))
-        );
-        // A list owner deserializes into the multi-owner shape.
-        assert_eq!(
-            composition.roles.get("project"),
-            Some(&RoleOwners::Many(vec![
-                "wordpress-plugin".to_string(),
-                "wordpress-theme".to_string(),
-            ]))
-        );
-        // Absent role.
-        assert_eq!(composition.roles.get("missing"), None);
     }
 
     #[test]
