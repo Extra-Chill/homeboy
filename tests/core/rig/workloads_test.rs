@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
-use crate::spec::RigSpec;
+use crate::spec::{LifecycleWorkloadKind, LifecycleWorkloadRef, RigSpec};
 use crate::{
     check_groups_for_extension_workloads, env_provider_extensions_for_extension_workloads,
     extension_ids_for_workloads, extension_workload_inputs, required_component_id_for_workload,
     required_extension_ids_for_workload, runner_capabilities_for_extension,
-    trace_dependencies_for_extension, workload_path_expansions_for_extension,
-    workloads_for_extension, RigWorkloadKind,
+    trace_dependencies_for_extension, workload_lifecycle_contract,
+    workload_path_expansions_for_extension, workloads_for_extension, RigWorkloadKind,
 };
 
 #[test]
@@ -560,4 +560,170 @@ fn test_trace_workload_dependencies_expand_paths_and_capabilities_dedupe() {
             "sample-runtime.recipe-run".to_string()
         ]
     );
+}
+
+// ------------------------------------------------------------------
+// `WorkloadSpec.lifecycle` resolution (#10317)
+//
+// Before this reader existed the field was parsed, defaulted in four test
+// constructors, serialized — and never read by anything. These tests pin the
+// resolution contract, which is fail-closed in every direction.
+// ------------------------------------------------------------------
+
+fn workload_ref(
+    kind: LifecycleWorkloadKind,
+    extension: &str,
+    path: Option<&str>,
+) -> LifecycleWorkloadRef {
+    LifecycleWorkloadRef {
+        kind,
+        extension: extension.to_string(),
+        path: path.map(str::to_string),
+    }
+}
+
+fn lifecycle_rig() -> RigSpec {
+    serde_json::from_str(
+        r#"{
+            "id": "workload-lifecycle",
+            "fuzz_workloads": {
+                "generic": [
+                    { "path": "fuzz/plain.workload.json" },
+                    {
+                        "path": "fuzz/sandboxed.workload.json",
+                        "lifecycle": {
+                            "phases": [
+                                { "id": "make", "phase": "prepare", "extension_hook": "sandbox-runtime.create" },
+                                { "id": "reap", "phase": "teardown", "extension_hook": "sandbox-runtime.destroy" }
+                            ]
+                        }
+                    }
+                ]
+            },
+            "bench_workloads": {
+                "runner": [
+                    {
+                        "path": "bench/a.mjs",
+                        "lifecycle": { "phases": [{ "id": "a", "phase": "prepare", "command": "true" }] }
+                    },
+                    {
+                        "path": "bench/b.mjs",
+                        "lifecycle": { "phases": [{ "id": "b", "phase": "prepare", "command": "true" }] }
+                    }
+                ]
+            }
+        }"#,
+    )
+    .expect("parse rig spec")
+}
+
+#[test]
+fn workload_lifecycle_contract_resolves_the_only_declaring_workload() {
+    let rig_spec = lifecycle_rig();
+
+    let contract = workload_lifecycle_contract(
+        &rig_spec,
+        &workload_ref(LifecycleWorkloadKind::Fuzz, "generic", None),
+    )
+    .expect("resolves the single workload carrying a contract");
+
+    assert_eq!(contract.schema, "homeboy/lifecycle-contract/v1");
+    assert_eq!(contract.phases.len(), 2);
+    assert_eq!(
+        contract.phases[0].extension_hook.as_deref(),
+        Some("sandbox-runtime.create")
+    );
+}
+
+#[test]
+fn workload_lifecycle_contract_selects_by_declared_path() {
+    let rig_spec = lifecycle_rig();
+
+    let contract = workload_lifecycle_contract(
+        &rig_spec,
+        &workload_ref(LifecycleWorkloadKind::Bench, "runner", Some("bench/b.mjs")),
+    )
+    .expect("resolves by path");
+
+    assert_eq!(contract.phases[0].id, "b");
+}
+
+#[test]
+fn workload_lifecycle_contract_refuses_to_guess_between_candidates() {
+    let rig_spec = lifecycle_rig();
+
+    let error = workload_lifecycle_contract(
+        &rig_spec,
+        &workload_ref(LifecycleWorkloadKind::Bench, "runner", None),
+    )
+    .expect_err("two candidates is ambiguous");
+
+    let message = error.to_string();
+    assert!(message.contains("workload.path"), "{message}");
+    assert!(message.contains("bench/a.mjs"), "{message}");
+    assert!(message.contains("bench/b.mjs"), "{message}");
+}
+
+#[test]
+fn workload_lifecycle_contract_rejects_a_workload_without_a_contract() {
+    let rig_spec = lifecycle_rig();
+
+    let error = workload_lifecycle_contract(
+        &rig_spec,
+        &workload_ref(
+            LifecycleWorkloadKind::Fuzz,
+            "generic",
+            Some("fuzz/plain.workload.json"),
+        ),
+    )
+    .expect_err("an explicitly selected workload with no contract is an error, not a no-op");
+
+    assert!(
+        error.to_string().contains("declares no lifecycle contract"),
+        "{error}"
+    );
+}
+
+#[test]
+fn workload_lifecycle_contract_rejects_unknown_extension_and_path() {
+    let rig_spec = lifecycle_rig();
+
+    let unknown_extension = workload_lifecycle_contract(
+        &rig_spec,
+        &workload_ref(LifecycleWorkloadKind::Fuzz, "nope", None),
+    )
+    .expect_err("unknown extension");
+    assert!(
+        unknown_extension
+            .to_string()
+            .contains("declared extensions"),
+        "{unknown_extension}"
+    );
+
+    let unknown_path = workload_lifecycle_contract(
+        &rig_spec,
+        &workload_ref(
+            LifecycleWorkloadKind::Fuzz,
+            "generic",
+            Some("fuzz/nope.json"),
+        ),
+    )
+    .expect_err("unknown path");
+    assert!(
+        unknown_path.to_string().contains("declared paths"),
+        "{unknown_path}"
+    );
+}
+
+#[test]
+fn workload_lifecycle_contract_reports_an_empty_map_without_panicking() {
+    let rig_spec: RigSpec = serde_json::from_str(r#"{ "id": "empty" }"#).expect("parse rig spec");
+
+    let error = workload_lifecycle_contract(
+        &rig_spec,
+        &workload_ref(LifecycleWorkloadKind::Trace, "runner", None),
+    )
+    .expect_err("no trace_workloads at all");
+
+    assert!(error.to_string().contains("trace_workloads"), "{error}");
 }

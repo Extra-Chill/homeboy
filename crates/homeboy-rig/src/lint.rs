@@ -522,6 +522,7 @@ fn portability_failures(root: &Path, files: &[PathBuf]) -> Result<Vec<String>> {
         };
         failures.extend(shared_path_failures(root, file, &value));
         failures.extend(resource_retention_failures(root, file, &value));
+        failures.extend(lifecycle_step_source_failures(root, file, &value));
     }
 
     Ok(failures)
@@ -580,6 +581,87 @@ fn shared_path_failures(root: &Path, file: &Path, rig: &serde_json::Value) -> Ve
                 "{rel}: shared_paths[{index}] link and target must differ unless allow_self_target is true"
             ));
         }
+    }
+    failures
+}
+
+/// A `kind: "lifecycle"` step takes its contract from exactly one source:
+/// an inline `lifecycle` payload, or a `workload` reference.
+///
+/// Both fields are optional in the schema so either shape parses, which means
+/// serde no longer rejects a step that declares neither. The executor still
+/// fails closed at run time, but a rig author should not have to run `rig up`
+/// to find out — that is what this lint is for.
+fn lifecycle_step_source_failures(
+    root: &Path,
+    file: &Path,
+    rig: &serde_json::Value,
+) -> Vec<String> {
+    let rel = display_relative(root, file);
+    let Some(pipelines) = rig.get("pipeline").and_then(|value| value.as_object()) else {
+        return Vec::new();
+    };
+
+    let mut failures = Vec::new();
+    for (name, steps) in pipelines {
+        let Some(steps) = steps.as_array() else {
+            continue;
+        };
+        for (index, step) in steps.iter().enumerate() {
+            let Some(step) = step.as_object() else {
+                continue;
+            };
+            if step.get("kind").and_then(|value| value.as_str()) != Some("lifecycle") {
+                continue;
+            }
+            let inline = step.contains_key("lifecycle");
+            let reference = step.contains_key("workload");
+            let location = format!("{rel}: pipeline.{name}[{index}] lifecycle step");
+            match (inline, reference) {
+                (true, true) => failures.push(format!(
+                    "{location} declares both `lifecycle` and `workload`; use exactly one contract source"
+                )),
+                (false, false) => failures.push(format!(
+                    "{location} declares neither `lifecycle` nor `workload`; use exactly one contract source"
+                )),
+                _ => {}
+            }
+
+            if let Some(workload) = step.get("workload") {
+                failures.extend(lifecycle_workload_ref_failures(&location, workload));
+            }
+        }
+    }
+    failures
+}
+
+/// Shape checks for a `workload` reference. Resolution against the declared
+/// workload maps stays at run time — lint only rejects a reference that could
+/// never resolve for anyone.
+fn lifecycle_workload_ref_failures(location: &str, workload: &serde_json::Value) -> Vec<String> {
+    let Some(workload) = workload.as_object() else {
+        return vec![format!("{location} `workload` must be an object")];
+    };
+
+    let mut failures = Vec::new();
+    match workload.get("kind").and_then(|value| value.as_str()) {
+        Some("bench" | "fuzz" | "trace") => {}
+        Some(other) => failures.push(format!(
+            "{location} `workload.kind` must be one of bench, fuzz, trace (found '{other}')"
+        )),
+        None => failures.push(format!(
+            "{location} `workload.kind` is required and must be one of bench, fuzz, trace"
+        )),
+    }
+    let extension = workload
+        .get("extension")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim();
+    if extension.is_empty() {
+        failures.push(format!(
+            "{location} `workload.extension` is required and must be a non-empty extension id"
+        ));
     }
     failures
 }
@@ -1438,5 +1520,135 @@ mod tests {
         let error = reference_step.error.as_ref().expect("error");
         assert!(error.contains("fuzz_profile profile missing references write"));
         assert!(error.contains("bench_profile profile missing references slow"));
+    }
+
+    #[test]
+    fn package_lint_reports_lifecycle_step_without_a_contract_source() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("lifecycle");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "lifecycle",
+                "pipeline": {
+                    "up": [{ "kind": "lifecycle", "op": "prepare" }]
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = portability_step(&outcome);
+
+        assert_eq!(step.status, "fail");
+        let error = step.error.as_ref().expect("error");
+        assert!(
+            error.contains("declares neither `lifecycle` nor `workload`"),
+            "{error}"
+        );
+        assert!(error.contains("pipeline.up[0]"), "{error}");
+    }
+
+    #[test]
+    fn package_lint_reports_lifecycle_step_with_two_contract_sources() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("lifecycle");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "lifecycle",
+                "pipeline": {
+                    "up": [{
+                        "kind": "lifecycle",
+                        "lifecycle": { "phases": [] },
+                        "workload": { "kind": "fuzz", "extension": "generic" }
+                    }]
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = portability_step(&outcome);
+
+        assert_eq!(step.status, "fail");
+        let error = step.error.as_ref().expect("error");
+        assert!(
+            error.contains("declares both `lifecycle` and `workload`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn package_lint_reports_malformed_lifecycle_workload_reference() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("lifecycle");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "lifecycle",
+                "pipeline": {
+                    "up": [{
+                        "kind": "lifecycle",
+                        "workload": { "kind": "sandbox", "extension": "  " }
+                    }]
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = portability_step(&outcome);
+
+        assert_eq!(step.status, "fail");
+        let error = step.error.as_ref().expect("error");
+        assert!(error.contains("`workload.kind` must be one of"), "{error}");
+        assert!(
+            error.contains("`workload.extension` is required"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn package_lint_accepts_both_lifecycle_contract_sources_used_alone() {
+        let temp = tempfile::TempDir::new().expect("temp package");
+        let rig_dir = temp.path().join("rigs").join("lifecycle");
+        fs::create_dir_all(&rig_dir).expect("rig dir");
+        fs::write(
+            rig_dir.join("rig.json"),
+            r#"{
+                "id": "lifecycle",
+                "fuzz_workloads": {
+                    "generic": [{
+                        "path": "fuzz/a.workload.json",
+                        "lifecycle": {
+                            "phases": [{ "id": "make", "phase": "prepare", "command": "true" }]
+                        }
+                    }]
+                },
+                "pipeline": {
+                    "up": [{
+                        "kind": "lifecycle",
+                        "workload": { "kind": "fuzz", "extension": "generic" }
+                    }],
+                    "down": [{
+                        "kind": "lifecycle",
+                        "op": "teardown",
+                        "lifecycle": {
+                            "phases": [{ "id": "reap", "phase": "teardown", "command": "true" }]
+                        }
+                    }]
+                }
+            }"#,
+        )
+        .expect("write rig");
+
+        let outcome = run_package_lint_at(temp.path()).expect("lint package");
+        let step = portability_step(&outcome);
+
+        assert_eq!(step.status, "pass", "{:?}", step.error);
     }
 }

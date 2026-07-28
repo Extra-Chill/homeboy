@@ -28,6 +28,10 @@ use homeboy_core::error::Result;
 pub use outcome::{PipelineOutcome, PipelineStepOutcome};
 
 pub(super) use command_step::run_command_step;
+/// Ownership key a `lifecycle` step's captured handles are recorded under.
+/// Exported so `repair` classifies live handles with the same key the executor
+/// writes, instead of a second copy that can drift.
+pub(super) use lifecycle_step::step_key as lifecycle_step_key;
 
 pub fn run_pipeline(rig: &RigSpec, name: &str, fail_fast: bool) -> Result<PipelineOutcome> {
     run_pipeline_with_settings(rig, name, fail_fast, &[])
@@ -339,13 +343,15 @@ fn run_step(
             step_id,
             component,
             lifecycle,
+            workload,
             op,
             ..
         } => lifecycle_step::run_lifecycle_step(
             rig,
             step_id.as_deref(),
             component.as_deref(),
-            lifecycle,
+            lifecycle.as_ref(),
+            workload.as_ref(),
             *op,
             settings,
         ),

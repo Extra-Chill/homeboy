@@ -829,6 +829,7 @@ fn test_spec_lifecycle_step_round_trips_the_shipped_contract() {
             depends_on,
             component,
             lifecycle,
+            workload,
             op,
             label,
         } => {
@@ -837,6 +838,9 @@ fn test_spec_lifecycle_step_round_trips_the_shipped_contract() {
             assert_eq!(component.as_deref(), Some("app"));
             assert_eq!(*op, LifecyclePhaseKind::Snapshot);
             assert_eq!(label.as_deref(), Some("capture sandbox handle"));
+            // An inline contract leaves the workload reference absent.
+            assert!(workload.is_none());
+            let lifecycle = lifecycle.as_ref().expect("inline contract");
             assert_eq!(lifecycle.schema, "homeboy/lifecycle-contract/v1");
             assert_eq!(lifecycle.phases.len(), 3);
             assert_eq!(lifecycle.phases[1].phase, LifecyclePhaseKind::Snapshot);
@@ -859,10 +863,82 @@ fn test_spec_lifecycle_step_round_trips_the_shipped_contract() {
     match &re_parsed.pipeline.get("up").unwrap()[0] {
         PipelineStep::Lifecycle { lifecycle, op, .. } => {
             assert_eq!(*op, LifecyclePhaseKind::Snapshot);
-            assert_eq!(lifecycle.phases.len(), 3);
+            assert_eq!(lifecycle.as_ref().expect("inline contract").phases.len(), 3);
         }
         other => panic!("expected Lifecycle, got {:?}", other),
     }
+}
+
+/// A `lifecycle` step can name a contract a workload already declares instead
+/// of restating it. `lifecycle` and `workload` are mutually exclusive contract
+/// sources; the executor rejects zero or two of them, and `rig lint` catches
+/// it before `rig up`.
+#[test]
+fn test_spec_lifecycle_step_round_trips_a_workload_reference() {
+    use crate::spec::{LifecyclePhaseKind, LifecycleWorkloadKind};
+    let json = r#"{
+        "id": "sandbox-rig",
+        "fuzz_workloads": {
+            "generic": [
+                {
+                    "path": "fuzz/sandboxed.workload.json",
+                    "lifecycle": {
+                        "phases": [
+                            { "id": "make", "phase": "prepare", "extension_hook": "runtime.prepare" },
+                            { "id": "reap", "phase": "teardown", "extension_hook": "runtime.teardown" }
+                        ]
+                    }
+                }
+            ]
+        },
+        "pipeline": {
+            "down": [
+                {
+                    "kind": "lifecycle",
+                    "op": "teardown",
+                    "workload": {
+                        "kind": "fuzz",
+                        "extension": "generic",
+                        "path": "fuzz/sandboxed.workload.json"
+                    }
+                }
+            ]
+        }
+    }"#;
+
+    let spec: RigSpec = serde_json::from_str(json).expect("parse");
+
+    // The workload still carries the contract it declared.
+    let declared = spec.fuzz_workloads["generic"][0]
+        .lifecycle()
+        .expect("workload contract");
+    assert_eq!(declared.phases.len(), 2);
+
+    match &spec.pipeline.get("down").unwrap()[0] {
+        PipelineStep::Lifecycle {
+            lifecycle,
+            workload,
+            op,
+            ..
+        } => {
+            assert!(lifecycle.is_none(), "reference form carries no inline body");
+            assert_eq!(*op, LifecyclePhaseKind::Teardown);
+            let workload = workload.as_ref().expect("workload reference");
+            assert_eq!(workload.kind, LifecycleWorkloadKind::Fuzz);
+            assert_eq!(workload.extension, "generic");
+            assert_eq!(
+                workload.path.as_deref(),
+                Some("fuzz/sandboxed.workload.json")
+            );
+        }
+        other => panic!("expected Lifecycle, got {:?}", other),
+    }
+
+    // Round-trips without growing an empty inline contract.
+    let re_serialized = serde_json::to_value(&spec).expect("serialize");
+    let step = &re_serialized["pipeline"]["down"][0];
+    assert_eq!(step["workload"]["kind"], "fuzz");
+    assert!(step.get("lifecycle").is_none());
 }
 
 #[test]
@@ -893,6 +969,7 @@ fn test_spec_lifecycle_step_defaults_op_and_component() {
             assert_eq!(*op, LifecyclePhaseKind::Prepare);
             assert!(component.is_none());
             // Contract schema/version default without being declared.
+            let lifecycle = lifecycle.as_ref().expect("inline contract");
             assert_eq!(lifecycle.schema, "homeboy/lifecycle-contract/v1");
             assert_eq!(lifecycle.version, 1);
         }

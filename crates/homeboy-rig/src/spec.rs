@@ -32,7 +32,8 @@ pub use dependencies::{
     NormalizedDependencyMaterializationStep,
 };
 pub use pipeline::{
-    GitOp, HostMutationOp, PatchOp, PipelineStep, ServiceOp, SharedPathOp, StackOp, SymlinkOp,
+    GitOp, HostMutationOp, LifecycleWorkloadKind, LifecycleWorkloadRef, PatchOp, PipelineStep,
+    ServiceOp, SharedPathOp, StackOp, SymlinkOp,
 };
 pub use toolchain::{PathDiscoverySort, PathDiscoverySpec, ToolchainSpec};
 pub use trace::{

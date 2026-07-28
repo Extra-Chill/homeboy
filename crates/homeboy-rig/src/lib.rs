@@ -98,14 +98,14 @@ pub use spec::{
     DependencyMaterializationStepSpec, DiscoverSpec, ExecutableRequirementSpec,
     FilesystemAssertionKind, FilesystemAssertionSpec, LifecycleContract, LifecyclePhaseContract,
     LifecyclePhaseKind, LifecyclePhaseResult, LifecyclePhaseStatus, LifecycleResultMetadata,
-    LifecycleSnapshotRef, NewerThanSpec, NormalizedDependencyMaterializationStep, PatchOp,
-    PipelineStep, RigRequirementsSpec, RigResourceRetentionSpec, RigResourcesSpec, RigSpec,
-    RunnerToolRequirementSpec, ServiceKind, ServiceSpec, SharedPathOp, SharedPathSpec, StackOp,
-    SymlinkSpec, TimeSource, TraceConfig, TraceDependencySpec, TraceExperimentArtifactSpec,
-    TraceExperimentCommandSpec, TraceExperimentSpec, TraceGuardrailSpec,
-    TraceNativePublicPreviewSpec, TracePhaseTemplateSpec, TracePreviewAssetFanoutSpec,
-    TraceProfileSpec, TracePublicPreviewMode, TracePublicPreviewSpec, TraceVariantSpec,
-    WorkloadSpec, RIG_RESOURCE_CLASSES, RIG_RESOURCE_CLASS_EXCLUSIVE,
+    LifecycleSnapshotRef, LifecycleWorkloadKind, LifecycleWorkloadRef, NewerThanSpec,
+    NormalizedDependencyMaterializationStep, PatchOp, PipelineStep, RigRequirementsSpec,
+    RigResourceRetentionSpec, RigResourcesSpec, RigSpec, RunnerToolRequirementSpec, ServiceKind,
+    ServiceSpec, SharedPathOp, SharedPathSpec, StackOp, SymlinkSpec, TimeSource, TraceConfig,
+    TraceDependencySpec, TraceExperimentArtifactSpec, TraceExperimentCommandSpec,
+    TraceExperimentSpec, TraceGuardrailSpec, TraceNativePublicPreviewSpec, TracePhaseTemplateSpec,
+    TracePreviewAssetFanoutSpec, TraceProfileSpec, TracePublicPreviewMode, TracePublicPreviewSpec,
+    TraceVariantSpec, WorkloadSpec, RIG_RESOURCE_CLASSES, RIG_RESOURCE_CLASS_EXCLUSIVE,
     RIG_RESOURCE_CLASS_LIFECYCLE_SNAPSHOTS, RIG_RESOURCE_CLASS_PATHS, RIG_RESOURCE_CLASS_PORTS,
     RIG_RESOURCE_CLASS_PROCESS_PATTERNS,
 };
@@ -124,8 +124,8 @@ pub use workloads::{
     extension_workload_inputs, invocation_requirements_for_extension_workloads,
     required_component_id_for_workload, required_extension_ids_for_workload,
     runner_capabilities_for_extension, trace_dependencies_for_extension,
-    workload_path_expansions_for_extension, workloads_for_extension, RigExtensionWorkloadInputs,
-    RigWorkloadKind, RigWorkloadPathExpansion,
+    workload_lifecycle_contract, workload_path_expansions_for_extension, workloads_for_extension,
+    RigExtensionWorkloadInputs, RigWorkloadKind, RigWorkloadPathExpansion,
 };
 
 use discovery::discover_rigs_for_install;

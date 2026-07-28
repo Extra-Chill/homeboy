@@ -395,8 +395,22 @@ pub enum PipelineStep {
         /// shape for a runtime-owned throwaway environment.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         component: Option<String>,
-        /// Lifecycle contract payload (`homeboy/lifecycle-contract/v1`).
-        lifecycle: LifecycleContract,
+        /// Inline lifecycle contract payload (`homeboy/lifecycle-contract/v1`).
+        ///
+        /// Mutually exclusive with `workload`: a step declares its contract
+        /// inline *or* references one a workload already declares. Declaring
+        /// both, or neither, is a hard error raised before any phase runs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lifecycle: Option<LifecycleContract>,
+        /// Reference to a contract declared by a rig-owned workload entry in
+        /// `bench_workloads` / `trace_workloads` / `fuzz_workloads`.
+        ///
+        /// This is what makes a workload-declared lifecycle load-bearing.
+        /// Without it the contract has to be duplicated once per op — an
+        /// `up` step and a `down` step drifting apart is exactly the trap a
+        /// single declaration site avoids.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workload: Option<LifecycleWorkloadRef>,
         /// Phase to execute. Every contract phase of this kind runs, in
         /// declared order. Defaults to `prepare`.
         #[serde(default = "default_lifecycle_op")]
@@ -438,6 +452,48 @@ fn default_host_mutation_op() -> HostMutationOp {
 
 fn default_lifecycle_op() -> LifecyclePhaseKind {
     LifecyclePhaseKind::Prepare
+}
+
+/// Which rig-owned workload map a [`LifecycleWorkloadRef`] selects from.
+///
+/// Deliberately a separate enum from `workloads::RigWorkloadKind`: the spec
+/// layer owns the on-disk vocabulary and must not inherit serde behaviour from
+/// a runtime type that has no serde contract today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleWorkloadKind {
+    Bench,
+    Fuzz,
+    Trace,
+}
+
+impl LifecycleWorkloadKind {
+    /// Spec-facing name, used verbatim in resolution error messages.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LifecycleWorkloadKind::Bench => "bench",
+            LifecycleWorkloadKind::Fuzz => "fuzz",
+            LifecycleWorkloadKind::Trace => "trace",
+        }
+    }
+}
+
+/// Pointer to the `lifecycle` contract a rig-owned workload entry declares.
+///
+/// Resolution is fail-closed in every direction: an unknown extension, a
+/// `path` that matches no declared workload, an ambiguous selection, or a
+/// workload that declares no `lifecycle` all fail before a phase executes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleWorkloadRef {
+    /// Workload map to search: `bench`, `fuzz`, or `trace`.
+    pub kind: LifecycleWorkloadKind,
+    /// Extension ID key within that map.
+    pub extension: String,
+    /// Declared workload `path`, matched verbatim against the spec (before
+    /// variable expansion). Required only when the extension declares more
+    /// than one workload carrying a lifecycle contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// Git operation supported by a rig `git` step.

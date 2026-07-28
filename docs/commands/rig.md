@@ -197,6 +197,7 @@ symlink this rig did not create, and never signals a process it did not start.
 | `resources.ports` | Reported `skipped`. Port ownership is declarative; repair does not bind, probe, or reclaim ports. |
 | `resources.process_patterns` | Reported `skipped`. Repair does not signal matched processes. |
 | `resources.exclusive` | Reported `skipped`. Exclusive tokens are lease-scoped; repair does not adjust rig leases. |
+| `lifecycle_snapshots` | Reported. A live handle a declared `lifecycle` step still owns is `skipped`; a handle no declared step owns any more is `blocked`. Repair never deletes a handle record — the handle is opaque, so dropping it would strand a live environment rather than reap it. Reaping is the declared `teardown` step's job (`homeboy rig down`), or `homeboy runs resources --cleanup-plan`. |
 
 Each entry in the report carries a status and a `detail` explaining what
 happened:
