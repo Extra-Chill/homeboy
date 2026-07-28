@@ -146,10 +146,35 @@ if [[ -z "${COMPONENT_SLUG}" ]]; then
   exit 1
 fi
 
-ARTIFACT_PATH="build/${COMPONENT_SLUG}.zip"
+RECOVERY_ARTIFACTS="$(echo "${PAYLOAD}" | jq -c '
+  [
+    .release.artifacts // []
+    | .[]?
+    | select(
+        type == "object"
+        and (.type == "wordpress-zip" or .artifact_type == "wordpress-zip")
+      )
+  ]
+')"
+
+RECOVERY_ARTIFACT_COUNT="$(echo "${RECOVERY_ARTIFACTS}" | jq 'length')"
+if [[ "${RECOVERY_ARTIFACT_COUNT}" -gt 1 ]]; then
+  echo "Error: release payload contains multiple WordPress ZIP recovery artifacts" >&2
+  exit 1
+fi
+
+if [[ "${RECOVERY_ARTIFACT_COUNT}" -eq 1 ]]; then
+  if ! echo "${RECOVERY_ARTIFACTS}" | jq -e '.[0].path | type == "string" and length > 0' >/dev/null; then
+    echo "Error: WordPress ZIP recovery artifact path must be a non-empty string" >&2
+    exit 1
+  fi
+  ARTIFACT_PATH="$(echo "${RECOVERY_ARTIFACTS}" | jq -r '.[0].path')"
+else
+  ARTIFACT_PATH="build/${COMPONENT_SLUG}.zip"
+fi
 
 if [[ ! -f "${ARTIFACT_PATH}" ]]; then
-  echo "Error: expected release artifact at ${ARTIFACT_PATH}, run release.package first" >&2
+  echo "Error: expected release artifact at ${ARTIFACT_PATH}" >&2
   exit 1
 fi
 
