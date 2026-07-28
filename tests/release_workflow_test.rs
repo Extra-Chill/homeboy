@@ -214,6 +214,42 @@ fn release_concurrency_scopes_recovery_runs_to_the_requested_tag() {
 }
 
 #[test]
+fn release_reuses_or_awaits_an_exact_main_guard_qualification() {
+    let workflow = release_workflow();
+    let qualification = job_section(workflow, "release-qualification");
+
+    assert!(qualification.contains("CANDIDATE_SHA: ${{ github.sha }}"));
+    assert!(qualification.contains("gh run list --workflow audit-debt.yml"));
+    assert!(qualification.contains("--commit \"$CANDIDATE_SHA\""));
+    assert!(qualification.contains(
+        "gh workflow run audit-debt.yml --ref main -f qualification_sha=\"$CANDIDATE_SHA\""
+    ));
+    assert!(qualification.contains("proof-status=${conclusion}"));
+    assert!(qualification.contains("Selected SHA:"));
+    assert!(qualification.contains("Exact gate proof run:"));
+    assert!(qualification.contains("Proof source: ${action}"));
+    assert!(qualification.contains("Dry run: release mutation remains disabled"));
+}
+
+#[test]
+fn terminal_green_qualification_skips_duplicate_release_gates() {
+    let workflow = release_workflow();
+
+    for job in ["gate-build", "gate-audit", "gate-lint", "gate-test"] {
+        let section = job_section(workflow, job);
+        assert!(
+            section.contains("needs.release-qualification.outputs.proof-status != 'success'"),
+            "{job} must reuse exact terminal green Main Guard evidence"
+        );
+    }
+
+    let policy = job_section(workflow, "release-quality-policy");
+    assert!(policy
+        .contains("QUALIFICATION_RESULT: ${{ needs.release-qualification.outputs.proof-status }}"));
+    assert!(policy.contains("Exact Main Guard qualification finished with result"));
+}
+
+#[test]
 fn release_test_gate_does_not_repeat_separate_lint_gate() {
     let gate_test = job_section(release_workflow(), "gate-test");
 

@@ -287,13 +287,37 @@ fn post_merge_gates_never_mutate_the_repository() {
 #[test]
 fn superseded_post_merge_runs_are_cancelled() {
     let workflow = main_guard_workflow();
-    // Opposite of release.yml's `cancel-in-progress: false`: this gate reports
-    // on the current tip and strands nothing, so a superseded run is worthless.
-    assert!(workflow.contains("cancel-in-progress: true"));
+    // Push monitoring reports on the current tip and strands nothing, so a
+    // superseded run is worthless. An explicit qualification is different: it
+    // proves an immutable release candidate and must not be cancelled by a
+    // later merge.
+    assert!(workflow.contains("cancel-in-progress: ${{ inputs.qualification_sha == '' }}"));
     // Push and sweep are separate groups so a merge train cannot cancel the
     // weekly audit sweep.
     assert!(workflow.contains("group: main-guard-"));
     assert!(workflow.contains("github.event_name == 'push' && 'post-merge' || 'sweep'"));
+    assert!(workflow.contains("format('qualification-{0}', inputs.qualification_sha)"));
+}
+
+#[test]
+fn immutable_qualification_checks_out_and_gates_the_requested_sha() {
+    let workflow = main_guard_workflow();
+
+    assert!(workflow.contains("qualification_sha:"));
+    assert!(workflow.contains("Release Qualification {0}"));
+    assert!(workflow.contains("ref: ${{ inputs.qualification_sha || github.sha }}"));
+    for name in [
+        "gate-build",
+        "full-audit-gate",
+        "full-lint-gate",
+        "full-test-gate",
+    ] {
+        let gate = job(name);
+        assert!(
+            gate.contains("inputs.qualification_sha != ''"),
+            "{name} must run for an immutable qualification"
+        );
+    }
 }
 
 /// The audit gate must be able to SEE the tree it claims to gate.

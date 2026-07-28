@@ -231,13 +231,108 @@ jobs:
             echo "::notice::Release dry-run predicts v${RELEASE_VERSION} (${BUMP_TYPE})"
           fi
 
-  # ── Step 2: Build once ──
+  # ── Step 2: Exact-SHA release qualification ──
+  #
+  # A release owns an immutable candidate (github.sha), unlike Main Guard's
+  # push monitoring, which is intentionally latest-wins. Reuse terminal green
+  # Main Guard evidence for this SHA when it exists; otherwise dispatch a
+  # non-cancellable qualification and await that exact proof.
+  release-qualification:
+    name: Release qualification
+    needs: check
+    if: needs.check.outputs.should-release == 'true' && needs.check.outputs.recovery-release != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      candidate-sha: ${{ steps.proof.outputs.candidate-sha }}
+      proof-sha: ${{ steps.proof.outputs.proof-sha }}
+      proof-run: ${{ steps.proof.outputs.proof-run }}
+      proof-status: ${{ steps.proof.outputs.proof-status }}
+      next-action: ${{ steps.proof.outputs.next-action }}
+    steps:
+      - name: Reuse or await exact Main Guard proof
+        id: proof
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CANDIDATE_SHA: ${{ github.sha }}
+          DRY_RUN: ${{ inputs.dry-run || 'false' }}
+        run: |
+          set -euo pipefail
+
+          title="Release Qualification ${CANDIDATE_SHA}"
+          run_json="$(gh run list --workflow audit-debt.yml --limit 100 --json databaseId,displayTitle,status,conclusion,url | jq -c --arg title "$title" 'map(select(.displayTitle == $title)) | first // empty')"
+          action="reused exact terminal proof"
+
+          # A push-triggered Main Guard has the candidate as its workflow SHA,
+          # so it is equally valid evidence and avoids an unnecessary dispatch.
+          if [ -z "$run_json" ]; then
+            run_json="$(gh run list --workflow audit-debt.yml --commit "$CANDIDATE_SHA" --status completed --limit 100 --json databaseId,status,conclusion,url | jq -c 'map(select(.conclusion == "success")) | first // empty')"
+          fi
+
+          if [ -z "$run_json" ]; then
+            gh workflow run audit-debt.yml --ref main -f qualification_sha="$CANDIDATE_SHA"
+            action="started immutable qualification"
+            for _ in $(seq 1 30); do
+              run_json="$(gh run list --workflow audit-debt.yml --limit 100 --json databaseId,displayTitle,status,conclusion,url | jq -c --arg title "$title" 'map(select(.displayTitle == $title)) | first // empty')"
+              [ -n "$run_json" ] && break
+              sleep 2
+            done
+          fi
+
+          if [ -z "$run_json" ]; then
+            echo "::error::Main Guard qualification did not appear for ${CANDIDATE_SHA}"
+            exit 1
+          fi
+
+          run_id="$(jq -r '.databaseId' <<<"$run_json")"
+          while :; do
+            run_json="$(gh run view "$run_id" --json status,conclusion,url)"
+            status="$(jq -r '.status' <<<"$run_json")"
+            [ "$status" = "completed" ] && break
+            sleep 30
+          done
+
+          conclusion="$(jq -r '.conclusion // "cancelled"' <<<"$run_json")"
+          url="$(jq -r '.url' <<<"$run_json")"
+          if [ "$conclusion" = "success" ]; then
+            next_action="release immutable candidate"
+          else
+            next_action="repair or rerun the exact qualification"
+          fi
+
+          {
+            echo "candidate-sha=${CANDIDATE_SHA}"
+            echo "proof-sha=${CANDIDATE_SHA}"
+            echo "proof-run=${url}"
+            echo "proof-status=${conclusion}"
+            echo "next-action=${next_action}"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Release qualification"
+            echo
+            echo "- Selected SHA: \`${CANDIDATE_SHA}\`"
+            echo "- Exact gate proof SHA: \`${CANDIDATE_SHA}\`"
+            echo "- Exact gate proof run: ${url}"
+            echo "- Proof status: \`${conclusion}\`"
+            echo "- Next action: ${next_action}"
+            echo "- Proof source: ${action}"
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "- Dry run: release mutation remains disabled"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          [ "$conclusion" = "success" ]
+
+  # ── Step 3: Build once ──
   # Compile homeboy from source once and share the binary with all
   # quality gate jobs. Eliminates 3× redundant cargo builds.
   gate-build:
     name: Build
-    needs: check
-    if: needs.check.outputs.should-release == 'true'
+    needs:
+      - check
+      - release-qualification
+    if: needs.check.outputs.should-release == 'true' && needs.check.outputs.recovery-release != 'true' && needs.release-qualification.outputs.proof-status != 'success'
     # This binary is executed by the ubuntu-22.04 publication jobs. Build on
     # the oldest consumer runtime so recovery finalizers cannot require a newer GLIBC.
     runs-on: ubuntu-22.04
@@ -280,8 +375,9 @@ jobs:
     name: Audit
     needs:
       - check
+      - release-qualification
       - gate-build
-    if: needs.check.outputs.should-release == 'true' && needs.check.outputs.recovery-release != 'true'
+    if: needs.check.outputs.should-release == 'true' && needs.check.outputs.recovery-release != 'true' && needs.release-qualification.outputs.proof-status != 'success'
     runs-on: ubuntu-latest
     outputs:
       audit-result: ${{ steps.audit.outcome }}
@@ -329,8 +425,9 @@ jobs:
     name: Lint
     needs:
       - check
+      - release-qualification
       - gate-build
-    if: needs.check.outputs.should-release == 'true' && needs.check.outputs.recovery-release != 'true'
+    if: needs.check.outputs.should-release == 'true' && needs.check.outputs.recovery-release != 'true' && needs.release-qualification.outputs.proof-status != 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -373,8 +470,9 @@ jobs:
     name: Test
     needs:
       - check
+      - release-qualification
       - gate-build
-    if: needs.check.outputs.should-release == 'true' && needs.check.outputs.recovery-release != 'true'
+    if: needs.check.outputs.should-release == 'true' && needs.check.outputs.recovery-release != 'true' && needs.release-qualification.outputs.proof-status != 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -430,11 +528,12 @@ jobs:
     name: Release Quality Policy
     needs:
       - check
+      - release-qualification
       - gate-build
       - gate-audit
       - gate-lint
       - gate-test
-    if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.check.outputs.recovery-release != 'true' && needs.gate-build.result == 'success' }}
+    if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.check.outputs.recovery-release != 'true' && needs.release-qualification.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout workflow event commit
@@ -445,10 +544,15 @@ jobs:
       - name: Enforce release-blocking commands
         env:
           BLOCKING_COMMANDS: ${{ env.RELEASE_BLOCKING_COMMANDS }}
+          QUALIFICATION_RESULT: ${{ needs.release-qualification.outputs.proof-status }}
           AUDIT_RESULT: ${{ needs.gate-audit.outputs.audit-result || needs.gate-audit.result }}
           LINT_RESULT: ${{ needs.gate-lint.result }}
           TEST_RESULT: ${{ needs.gate-test.result }}
         run: |
+          if [ "$QUALIFICATION_RESULT" != "success" ]; then
+            echo "::error::Exact Main Guard qualification finished with result: $QUALIFICATION_RESULT"
+            exit 1
+          fi
           bash .github/release-quality-policy.sh
 
   # ── Step 4: Version bump + changelog + tag ──
@@ -456,9 +560,10 @@ jobs:
     name: Prepare Release
     needs:
       - check
+      - release-qualification
       - gate-build
       - release-quality-policy
-    if: ${{ always() && needs.check.outputs.should-release == 'true' && needs.gate-build.result == 'success' && (needs.check.outputs.recovery-release == 'true' || inputs.release_tag != '' || needs.release-quality-policy.result == 'success') }}
+    if: ${{ always() && needs.check.outputs.should-release == 'true' && (needs.release-qualification.outputs.proof-status == 'success' || needs.check.outputs.recovery-release == 'true' || inputs.release_tag != '') && (needs.check.outputs.recovery-release == 'true' || inputs.release_tag != '' || needs.release-quality-policy.result == 'success') }}
     runs-on: ubuntu-latest
     outputs:
       release-version: ${{ steps.outputs.outputs['release-version'] }}
