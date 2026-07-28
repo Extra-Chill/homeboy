@@ -4,7 +4,7 @@
 use crate::{TestDriftConfig, TestPassthroughFilter};
 use homeboy_engine_primitives::output_parse::ParseSpec;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RequirementsConfig {
@@ -276,6 +276,132 @@ pub struct TestConfig {
     /// invocation-provided evidence file before Homeboy accepts a neutral result.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_tests_applicable: Option<TestNoTestsApplicablePolicy>,
+
+    /// Environment the test command may carry to a portable runner. Exact keys
+    /// and prefixes are opt-in so unrelated controller environment never leaks.
+    #[serde(default, skip_serializing_if = "PortableEnvConfig::is_empty")]
+    pub portable_env: PortableEnvConfig,
+
+    /// Maps the environment name consumed by the test runner to the selected
+    /// runner's existing `secret_env` identity. These are references only;
+    /// secret values are resolved by the runner at execution time.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub secret_env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PortableEnvConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefixes: Vec<String>,
+}
+
+impl PortableEnvConfig {
+    pub const MAX_ENTRIES: usize = 64;
+    pub const MAX_NAME_LEN: usize = 128;
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty() && self.prefixes.is_empty()
+    }
+
+    pub fn validate(&self) -> homeboy_error::Result<()> {
+        if self.keys.len() + self.prefixes.len() > Self::MAX_ENTRIES {
+            return Err(homeboy_error::Error::validation_invalid_argument(
+                "test.portable_env",
+                format!(
+                    "must declare at most {} keys and prefixes",
+                    Self::MAX_ENTRIES
+                ),
+                None,
+                None,
+            ));
+        }
+        for (kind, names) in [("keys", &self.keys), ("prefixes", &self.prefixes)] {
+            for name in names {
+                let valid = !name.is_empty()
+                    && name.len() <= Self::MAX_NAME_LEN
+                    && name
+                        .chars()
+                        .all(|ch| ch == '_' || ch.is_ascii_uppercase() || ch.is_ascii_digit())
+                    && name
+                        .chars()
+                        .next()
+                        .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase());
+                if !valid {
+                    return Err(homeboy_error::Error::validation_invalid_argument(
+                        format!("test.portable_env.{kind}"),
+                        "must contain non-empty ASCII uppercase environment identifiers up to 128 characters",
+                        Some(name.clone()),
+                        None,
+                    ));
+                }
+                if looks_like_secret_env_name(name) {
+                    return Err(homeboy_error::Error::validation_invalid_argument(
+                        format!("test.portable_env.{kind}"),
+                        "must not declare secret-looking names; declare runner-resolved references in test.secret_env instead",
+                        Some(name.clone()),
+                        None,
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn validate_test_secret_env_references(
+    references: &BTreeMap<String, String>,
+) -> homeboy_error::Result<()> {
+    for (name, reference) in references {
+        for value in [name, reference] {
+            let valid = !value.is_empty()
+                && value.len() <= PortableEnvConfig::MAX_NAME_LEN
+                && value
+                    .chars()
+                    .all(|ch| ch == '_' || ch.is_ascii_uppercase() || ch.is_ascii_digit())
+                && value
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase());
+            if !valid {
+                return Err(homeboy_error::Error::validation_invalid_argument(
+                    "test.secret_env",
+                    "must map ASCII uppercase environment identities to runner secret_env identities",
+                    Some(format!("{name}={reference}")),
+                    None,
+                ));
+            }
+        }
+        if name != reference {
+            return Err(homeboy_error::Error::validation_invalid_argument(
+                "test.secret_env",
+                "must map each test environment name to the same existing runner secret_env identity",
+                Some(format!("{name}={reference}")),
+                Some(vec![
+                    "Configure the runner's secret_env reference under the environment name consumed by the test runner."
+                        .to_string(),
+                ]),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn looks_like_secret_env_name(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    [
+        "PASSWORD",
+        "PASSWD",
+        "SECRET",
+        "TOKEN",
+        "API_KEY",
+        "PRIVATE_KEY",
+        "CREDENTIAL",
+    ]
+    .iter()
+    .any(|marker| name.contains(marker))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -310,6 +436,57 @@ pub struct TestChangedFileExclusiveEnv {
     /// File extensions matched without leading dots.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_test_secret_env_references, PortableEnvConfig};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn portable_env_accepts_exact_keys_and_prefixes() {
+        PortableEnvConfig {
+            keys: vec!["DB_SERVICE_HOST".to_string()],
+            prefixes: vec!["DB_SERVICE_".to_string()],
+        }
+        .validate()
+        .expect("portable environment contract");
+    }
+
+    #[test]
+    fn portable_env_rejects_non_identifier_and_unbounded_declarations() {
+        assert!(PortableEnvConfig {
+            keys: vec!["db-service".to_string()],
+            prefixes: Vec::new(),
+        }
+        .validate()
+        .is_err());
+        assert!(PortableEnvConfig {
+            keys: (0..=PortableEnvConfig::MAX_ENTRIES)
+                .map(|index| format!("DB_SERVICE_{index}"))
+                .collect(),
+            prefixes: Vec::new(),
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn portable_env_rejects_secret_looking_public_names_with_secret_reference_guidance() {
+        let error = PortableEnvConfig {
+            keys: vec!["DB_SERVICE_PASSWORD".to_string()],
+            prefixes: Vec::new(),
+        }
+        .validate()
+        .expect_err("password must not be captured as public environment");
+        assert!(error.message.contains("test.secret_env"));
+
+        validate_test_secret_env_references(&BTreeMap::from([(
+            "DB_SERVICE_PASSWORD".to_string(),
+            "DB_SERVICE_PASSWORD".to_string(),
+        )]))
+        .expect("runner secret reference");
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

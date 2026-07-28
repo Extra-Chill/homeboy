@@ -43,8 +43,8 @@ pub use homeboy_extension_contract::manifest_toolchain_config::{
     BenchConfig, BuildConfig, CliAutoFlag, CliAutoFlagCondition, CliConfig, CliHelpConfig,
     DatabaseCliConfig, DatabaseConfig, DeployOverride, DeployOwnerHint, DeployVerification,
     DepsConfig, DiscoveryConfig, EnvProviderConfig, FileContainsCondition, LintChangedFileRoute,
-    LintConfig, RemotePathInferenceRule, RemotePathRootRule, RequirementsConfig, SinceTagConfig,
-    SourceSnapshotConfig, TestChangedFileExclusiveEnv, TestChangedFileRouting,
+    LintConfig, PortableEnvConfig, RemotePathInferenceRule, RemotePathRootRule, RequirementsConfig,
+    SinceTagConfig, SourceSnapshotConfig, TestChangedFileExclusiveEnv, TestChangedFileRouting,
     TestChangedFileRoutingStrategy, TestConfig, TestNoTestsApplicablePolicy, VersionPatternConfig,
 };
 pub use homeboy_extension_contract::DeployArchiveInstallPolicy;

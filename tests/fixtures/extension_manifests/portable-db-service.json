@@ -1,0 +1,15 @@
+{
+  "name": "Portable DB service fixture",
+  "version": "0.0.0",
+  "provides": { "file_extensions": ["fixture"] },
+  "scripts": { "fingerprint": "scripts/fingerprint.sh" },
+  "test": {
+    "extension_script": "scripts/test-runner.sh",
+    "portable_env": {
+      "keys": ["DB_SERVICE_HOST", "DB_SERVICE_PORT"]
+    },
+    "secret_env": {
+      "DB_SERVICE_PASSWORD": "DB_SERVICE_PASSWORD"
+    }
+  }
+}

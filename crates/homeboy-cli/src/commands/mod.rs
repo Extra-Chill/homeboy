@@ -240,6 +240,7 @@ mod contract_lab_routing_tests;
 pub mod contract_output_routing;
 pub mod daemon;
 pub mod db;
+pub mod deferred_workload;
 pub mod deploy;
 pub mod docs;
 pub mod extension;

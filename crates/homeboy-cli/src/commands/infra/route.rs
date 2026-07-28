@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::agents::agent_task_service::DerivedCookBaselineCapability;
+use crate::commands::utils::resource_policy;
 use crate::core::io::output_file::write_output_file;
 
 pub fn route_after_parse(
@@ -99,6 +100,7 @@ pub fn route_after_parse(
     }
 
     let lab_command = lab_offload_command(&cli.command)?;
+    let normalized_args = inline_test_settings_profiles(cli, normalized_args)?;
 
     // Keep the readiness verdict, not just the selected id: when no runner is
     // eligible the reasons and remediation commands are the only thing that can
@@ -108,7 +110,7 @@ pub fn route_after_parse(
     } else {
         None
     };
-    let inferred_runner_id = if lab_command.is_some() {
+    let mut inferred_runner_id = if lab_command.is_some() {
         cli.runner.clone().or_else(|| {
             lab_readiness
                 .as_ref()
@@ -117,6 +119,57 @@ pub fn route_after_parse(
     } else {
         None
     };
+    let deferred_requirements = review_test_deferred_requirements(cli);
+    let deferred_runner_incompatible = inferred_runner_id
+        .as_deref()
+        .zip(deferred_requirements.as_ref())
+        .is_some_and(|(runner_id, requirements)| {
+            matches!(
+                runners::runner_capability_inventory(runner_id),
+                Ok(inventory)
+                    if !requirements
+                        .is_satisfied_by(&inventory.runtime_ids, &inventory.capabilities)
+            )
+        });
+    if deferred_runner_incompatible {
+        inferred_runner_id = None;
+    }
+    if deferred_runner_incompatible
+        && std::env::var_os("HOMEBOY_DEFERRED_WORKLOAD_REPLAY").is_some()
+    {
+        return Ok(Some(75));
+    }
+
+    if inferred_runner_id.is_none()
+        && review_test_can_defer(cli)
+        && deferred_resource_admission_refused()
+        && std::env::var_os("HOMEBOY_DEFERRED_WORKLOAD_REPLAY").is_none()
+    {
+        let deferred = homeboy::core::deferred_workload::defer(deferred_workload_input(
+            cli,
+            &portable_deferred_args(&normalized_args),
+            deferred_requirements.expect("review tests always resolve deferred requirements"),
+        )?)?;
+        crate::commands::deferred_workload::ensure_worker()?;
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "schema": "homeboy/deferred-workload-result/v1",
+                "status": "deferred",
+                "deferred_workload_id": deferred.id,
+                "command": deferred.command_label,
+                "diagnostics": {
+                    "worker_command": "homeboy deferred-workload worker",
+                    "status_command": "homeboy deferred-workload status",
+                    "ci_alternative": deferred.ci_alternative,
+                    "resolved_portability": deferred.portability,
+                    "reason": deferred.reason,
+                },
+            }))
+            .unwrap_or_else(|_| "{}".to_string())
+        );
+        return Ok(Some(0));
+    }
 
     // A split-placement coordinator honors `--placement lab`; it must never fall
     // through to the generic local-only portability rejection, which contradicts
@@ -132,7 +185,7 @@ pub fn route_after_parse(
 
     if let Some(exit_code) = run_split_placement_cook(
         cli,
-        normalized_args,
+        &normalized_args,
         output_file,
         inferred_runner_id.as_deref(),
     )? {
@@ -146,12 +199,12 @@ pub fn route_after_parse(
     }
 
     let run_handoff = if lab_command.is_some() && inferred_runner_id.is_some() {
-        materialize_agent_task_run_handoff(cli, normalized_args)?
+        materialize_agent_task_run_handoff(cli, &normalized_args)?
     } else {
         None
     };
     let retry_handoff = if lab_command.is_some() && inferred_runner_id.is_some() {
-        materialize_agent_task_retry_handoff(cli, normalized_args)?
+        materialize_agent_task_retry_handoff(cli, &normalized_args)?
     } else {
         None
     };
@@ -167,12 +220,30 @@ pub fn route_after_parse(
                 .as_ref()
                 .map(|handoff| handoff.args.as_slice())
         })
-        .unwrap_or(normalized_args);
+        .unwrap_or(&normalized_args);
+    let normalized_args = normalized_args.to_vec();
+    let deferred_claim = inferred_runner_id
+        .as_deref()
+        .filter(|_| review_test_can_defer(cli))
+        .map(|runner_id| {
+            homeboy::core::deferred_workload::claim(
+                &deferred_workload_input(
+                    cli,
+                    &portable_deferred_args(&normalized_args),
+                    review_test_deferred_requirements(cli)
+                        .expect("review tests always resolve deferred requirements"),
+                )?,
+                runner_id,
+                &format!("{}:{}", std::process::id(), uuid::Uuid::new_v4()),
+            )
+        })
+        .transpose()?
+        .flatten();
     // A controller-owned `run` becomes a portable `run-plan`. Route according
     // to that materialized command so Lab stages its workspace and rewrites the
     // structured plan instead of taking the original runner-resident path.
     let lab_command = if run_handoff.is_some() {
-        lab_offload_command_for_materialized_args(normalized_args)?
+        lab_offload_command_for_materialized_args(&normalized_args)?
     } else {
         lab_command
     };
@@ -181,7 +252,8 @@ pub fn route_after_parse(
     } else {
         None
     };
-    let normalized_args = inject_agent_task_cook_attempt_plan(normalized_args, cook_plan.as_ref())?;
+    let normalized_args =
+        inject_agent_task_cook_attempt_plan(&normalized_args, cook_plan.as_ref())?;
     let generic_detached_handoff = if lab_command.is_some()
         && inferred_runner_id.is_some()
         && cli.detach_after_handoff
@@ -300,6 +372,9 @@ pub fn route_after_parse(
 
     match outcome {
         LabRouteOutcome::RunLocal => {
+            if let Some(record) = deferred_claim.as_ref() {
+                homeboy::core::deferred_workload::terminalize(&record.id, false)?;
+            }
             if destructive_fuzz_requires_lab(&cli.command) {
                 return Err(destructive_fuzz_local_execution_error());
             }
@@ -311,6 +386,9 @@ pub fn route_after_parse(
             Ok(None)
         }
         LabRouteOutcome::InFlight(output) | LabRouteOutcome::Offloaded(output) => {
+            if let Some(record) = deferred_claim.as_ref() {
+                homeboy::core::deferred_workload::terminalize(&record.id, output.exit_code == 0)?;
+            }
             if !output.stderr.is_empty() {
                 eprint!("{}", output.stderr);
             }
@@ -1068,6 +1146,203 @@ fn materialize_agent_task_cook_plan(
     crate::commands::agent_task::run::compile_cook_plan(cook, provision).map(Some)
 }
 
+fn inline_test_settings_profiles(cli: &Cli, args: &[String]) -> homeboy::core::Result<Vec<String>> {
+    let settings = match &cli.command {
+        Commands::Review(review) => match review.command.as_ref() {
+            Some(crate::commands::review::ReviewCommand::Test(test)) => &test.setting_args,
+            _ => return Ok(args.to_vec()),
+        },
+        _ => return Ok(args.to_vec()),
+    };
+    if settings.settings_json_file.is_empty() {
+        return Ok(args.to_vec());
+    }
+
+    let profile_values = settings.settings_profile_json_overrides()?;
+    if let Some(key) = profile_values
+        .iter()
+        .find_map(|(key, value)| credential_shaped_setting_key(key, value))
+    {
+        return Err(Error::validation_invalid_argument(
+            "settings-json-file",
+            format!(
+                "settings profile contains credential-shaped setting `{key}` and cannot be inlined into a portable or deferred command; use --runner-secret-env NAME for a runner-owned secret reference"
+            ),
+            Some(key.clone()),
+            Some(vec![
+                "Move the credential to the runner-owned secret store and pass its explicit identity with `--runner-secret-env NAME`. Keep only non-secret connection settings in the profile.".to_string(),
+            ]),
+        ));
+    }
+    let mut rewritten = Vec::with_capacity(args.len() + profile_values.len() * 2);
+    let mut iter = args.iter().peekable();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            rewritten.push(arg.clone());
+            rewritten.extend(iter.cloned());
+            break;
+        }
+        if arg == "--settings-json-file" || arg == "--settings-profile" {
+            let _ = iter.next();
+            continue;
+        }
+        if arg.starts_with("--settings-json-file=") || arg.starts_with("--settings-profile=") {
+            continue;
+        }
+        rewritten.push(arg.clone());
+    }
+
+    let insertion = rewritten
+        .iter()
+        .rposition(|arg| arg == "test")
+        .map(|index| index + 1)
+        .ok_or_else(|| {
+            Error::internal_unexpected(
+                "test settings profile normalization lost the test subcommand",
+            )
+        })?;
+    let mut portable_profile_args = Vec::with_capacity(profile_values.len() * 2);
+    for (key, value) in profile_values {
+        let value = serde_json::to_string(&value).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize test settings profile".to_string()),
+            )
+        })?;
+        portable_profile_args.push("--setting-json".to_string());
+        portable_profile_args.push(format!("{key}={value}"));
+    }
+    rewritten.splice(insertion..insertion, portable_profile_args);
+    Ok(rewritten)
+}
+
+fn credential_shaped_setting_key(key: &str, value: &serde_json::Value) -> Option<String> {
+    if credential_shaped_key(key) {
+        return Some(key.to_string());
+    }
+    match value {
+        serde_json::Value::Object(values) => values.iter().find_map(|(nested, value)| {
+            credential_shaped_setting_key(&format!("{key}.{nested}"), value)
+        }),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .find_map(|value| credential_shaped_setting_key(key, value)),
+        _ => None,
+    }
+}
+
+fn credential_shaped_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    [
+        "password",
+        "secret",
+        "token",
+        "credential",
+        "api_key",
+        "apikey",
+        "private_key",
+    ]
+    .iter()
+    .any(|needle| key.contains(needle))
+}
+
+fn review_test_can_defer(cli: &Cli) -> bool {
+    matches!(
+        cli.placement,
+        homeboy::cli_surface::Placement::Auto | homeboy::cli_surface::Placement::LabOrLocal
+    ) && cli.runner.is_none()
+        && matches!(
+            &cli.command,
+            Commands::Review(review)
+                if matches!(review.command, Some(crate::commands::review::ReviewCommand::Test(_)))
+                    && review.lab_contract().is_some_and(|contract| contract.is_portable())
+        )
+}
+
+fn deferred_workload_input(
+    cli: &Cli,
+    args: &[String],
+    test_requirements: homeboy::core::deferred_workload::DeferredWorkloadRequirements,
+) -> homeboy::core::Result<homeboy::core::deferred_workload::DeferredWorkloadInput> {
+    Ok(homeboy::core::deferred_workload::DeferredWorkloadInput {
+        command_label: "review test".to_string(),
+        args: args.to_vec(),
+        placement: match cli.placement {
+            homeboy::cli_surface::Placement::Auto => "auto",
+            homeboy::cli_surface::Placement::LabOrLocal => "lab-or-local",
+            homeboy::cli_surface::Placement::Lab => "lab",
+            homeboy::cli_surface::Placement::Local => "local",
+        }
+        .to_string(),
+        resource_requirement: "eligible_lab_runner".to_string(),
+        portability: "portable_lab_route".to_string(),
+        reason: "no eligible Lab runner is currently ready".to_string(),
+        ci_alternative: "Run the same command in CI or configure a ready Homeboy runner."
+            .to_string(),
+        resolved_contract: serde_json::json!({
+            "label": "review test",
+            "portability": "portable_lab_route",
+            "required_runtimes": test_requirements.required_runtimes,
+            "required_capabilities": test_requirements.required_capabilities,
+        }),
+        resolved_resources: resource_policy::captured_context()
+            .and_then(|context| serde_json::to_value(context).ok())
+            .unwrap_or_else(|| serde_json::json!({ "severity": "unknown" })),
+        test_requirements,
+        job_overrides: lab_job_overrides(cli)?,
+    })
+}
+
+fn review_test_deferred_requirements(
+    cli: &Cli,
+) -> Option<homeboy::core::deferred_workload::DeferredWorkloadRequirements> {
+    let Commands::Review(review) = &cli.command else {
+        return None;
+    };
+    let crate::commands::review::ReviewCommand::Test(test) = review.command.as_ref()? else {
+        return None;
+    };
+    let contract = test.lab_contract();
+    contract.is_portable().then(
+        || homeboy::core::deferred_workload::DeferredWorkloadRequirements {
+            required_runtimes: ["homeboy".to_string()].into(),
+            required_capabilities: contract
+                .extra_required_capabilities
+                .iter()
+                .map(|capability| (*capability).to_string())
+                .collect(),
+        },
+    )
+}
+
+fn deferred_resource_admission_refused() -> bool {
+    resource_policy::captured_context().is_some_and(|context| {
+        context.warned && matches!(context.severity.as_str(), "warm" | "hot")
+    })
+}
+
+/// Preserve a command which can be replayed with an explicit runner. Placement
+/// is controller selection state, not portable workload intent.
+fn portable_deferred_args(args: &[String]) -> Vec<String> {
+    let mut result = Vec::with_capacity(args.len());
+    let mut skip_next = false;
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg == "--placement" || arg == "--runner" {
+            skip_next = true;
+            continue;
+        }
+        if arg.starts_with("--placement=") || arg.starts_with("--runner=") {
+            continue;
+        }
+        result.push(arg.clone());
+    }
+    result
+}
+
 struct GenericDetachedLabHandoff {
     run_id: String,
     plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
@@ -1561,20 +1836,67 @@ fn insert_lab_env_override(
     policy: &RedactionPolicy,
     name: String,
     value: String,
-) {
+) -> homeboy::core::Result<()> {
     if policy.is_sensitive_key(&name) || policy.redact_string(&value) != value {
-        overrides.secret_env_names.push(name.clone());
+        return Err(Error::validation_invalid_argument(
+            "runner-env",
+            format!(
+                "inline environment value for `{name}` is sensitive; use `--runner-secret-env {name}`"
+            ),
+            Some(name),
+            Some(vec![
+                "Configure the runner-owned secret reference and use `--runner-secret-env NAME` instead."
+                    .to_string(),
+            ]),
+        ));
     }
     overrides.env.insert(name, value);
+    Ok(())
+}
+
+fn validate_explicit_runner_env(
+    policy: &RedactionPolicy,
+    name: &str,
+    value: &str,
+) -> homeboy::core::Result<()> {
+    if policy.is_sensitive_key(name) || policy.redact_string(value) != value {
+        return Err(Error::validation_invalid_argument(
+            "runner-env",
+            format!(
+                "--runner-env {name}=… carries a sensitive value and cannot be persisted or dispatched inline; use `--runner-secret-env {name}`"
+            ),
+            Some(name.to_string()),
+            Some(vec![format!(
+                "Configure the runner-owned secret reference and use `--runner-secret-env {name}` instead."
+            )]),
+        ));
+    }
+    Ok(())
 }
 
 fn lab_job_overrides(cli: &Cli) -> homeboy::core::Result<runners::LabJobOverrides> {
     let mut overrides = runners::LabJobOverrides::default();
     let policy = RedactionPolicy::default();
+    let portable_env = portable_test_env(cli)?;
+
+    for (name, value) in portable_env.public_env {
+        insert_lab_env_override(&mut overrides, &policy, name, value)?;
+    }
+    // References name the runner-owned secret_env entries. They never read the
+    // controller environment and are the only secret data retained by deferral.
+    overrides
+        .secret_env_names
+        .extend(portable_env.secret_env.into_keys());
 
     for raw in &cli.runner_env {
         let (name, value) = parse_lab_env_pair("runner-env", raw)?;
-        insert_lab_env_override(&mut overrides, &policy, name, value);
+        validate_explicit_runner_env(&policy, &name, &value)?;
+        insert_lab_env_override(&mut overrides, &policy, name, value)?;
+    }
+
+    for name in &cli.runner_secret_env {
+        let name = validate_lab_env_name("runner-secret-env", name)?;
+        overrides.secret_env_names.push(name);
     }
 
     if let Some(raw_json) = cli.lab_env_json.as_deref() {
@@ -1608,7 +1930,7 @@ fn lab_job_overrides(cli: &Cli) -> homeboy::core::Result<runners::LabJobOverride
                     ));
                 }
             };
-            insert_lab_env_override(&mut overrides, &policy, name, value);
+            insert_lab_env_override(&mut overrides, &policy, name, value)?;
         }
     }
 
@@ -1620,6 +1942,30 @@ fn lab_job_overrides(cli: &Cli) -> homeboy::core::Result<runners::LabJobOverride
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     Ok(overrides)
+}
+
+/// The test manifest, not the ambient controller, owns portable environment.
+/// This runs before direct Lab dispatch and deferred-plan persistence.
+fn portable_test_env(cli: &Cli) -> homeboy::core::Result<homeboy_extension::test::PortableTestEnv> {
+    let Commands::Review(review) = &cli.command else {
+        return Ok(homeboy_extension::test::PortableTestEnv {
+            public_env: Vec::new(),
+            secret_env: Default::default(),
+        });
+    };
+    let Some(crate::commands::review::ReviewCommand::Test(args)) = review.command.as_ref() else {
+        return Ok(homeboy_extension::test::PortableTestEnv {
+            public_env: Vec::new(),
+            secret_env: Default::default(),
+        });
+    };
+    let context = crate::commands::source_command::resolve_source_context(
+        &args.comp,
+        &args.setting_args,
+        &args.extension_override,
+        Some(homeboy_extension::ExtensionCapability::Test),
+    )?;
+    homeboy_extension::test::portable_env(&context.component)
 }
 
 fn parse_lab_env_pair(source: &str, raw: &str) -> homeboy::core::Result<(String, String)> {

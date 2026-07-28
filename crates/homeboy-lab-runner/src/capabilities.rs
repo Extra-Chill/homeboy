@@ -56,6 +56,7 @@ pub fn prepare_lab_runner_capability(
     PreparedLabRunnerCapability {
         command: contract.command,
         required_tools,
+        required_capabilities: contract.required_capabilities,
     }
 }
 
@@ -205,6 +206,36 @@ pub(crate) struct RunnerCapabilitySnapshot {
     commands: BTreeSet<String>,
     tool_capabilities: BTreeSet<String>,
     components: BTreeSet<String>,
+}
+
+/// Live capabilities observed by the execution preflight probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerCapabilityInventory {
+    pub runtime_ids: BTreeSet<String>,
+    pub capabilities: BTreeSet<String>,
+}
+
+pub fn runner_capability_inventory(runner_id: &str) -> Result<RunnerCapabilityInventory> {
+    let runner = super::load(runner_id)?;
+    let snapshot = RunnerCapabilitySnapshot::from_runner_probe(
+        &runner,
+        &RunnerCapabilityPreflight::default(),
+    )?;
+    let mut capabilities = snapshot
+        .tools
+        .iter()
+        .map(|tool| tool.id().to_string())
+        .chain(snapshot.components.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    capabilities.extend(snapshot.tool_capabilities);
+    let runtime_ids = capabilities
+        .contains("homeboy")
+        .then(|| BTreeSet::from(["homeboy".to_string()]))
+        .unwrap_or_default();
+    Ok(RunnerCapabilityInventory {
+        runtime_ids,
+        capabilities,
+    })
 }
 
 impl RunnerCapabilitySnapshot {
@@ -674,10 +705,11 @@ mod tests {
                 RunnerRequiredTool::new("dependency-manager"),
                 RunnerRequiredTool::new("container-runtime"),
             ],
-            required_capabilities: Vec::new(),
+            required_capabilities: vec!["browser-runner".to_string()],
         });
 
         assert_eq!(plan.command, "lint");
+        assert_eq!(plan.required_capabilities, ["browser-runner"]);
         assert_eq!(
             plan.required_tools,
             vec![
@@ -768,6 +800,7 @@ mod tests {
                 RunnerRequiredTool::new("runtime"),
                 RunnerRequiredTool::new("workspace-manager"),
             ],
+            required_capabilities: Vec::new(),
         };
         let capabilities = RunnerCapabilitySnapshot {
             tools: [
@@ -801,6 +834,7 @@ mod tests {
                 RunnerRequiredTool::git(),
                 RunnerRequiredTool::new("workspace-manager"),
             ],
+            required_capabilities: Vec::new(),
         };
         let capabilities = RunnerCapabilitySnapshot {
             tools: [RunnerRequiredTool::git()].into_iter().collect(),
@@ -879,6 +913,7 @@ mod tests {
                 RunnerRequiredTool::git(),
                 RunnerRequiredTool::new("browser-runner"),
             ],
+            required_capabilities: Vec::new(),
         };
         let capabilities = RunnerCapabilitySnapshot {
             tools: [RunnerRequiredTool::git()].into_iter().collect(),
