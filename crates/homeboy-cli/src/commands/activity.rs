@@ -9,6 +9,7 @@ use homeboy::core::activity::{
 use homeboy::core::notification_payload::{
     NotifyAction, NotifyAttachment, NotifyEventKind, NotifyPayload, NotifySubject,
 };
+use homeboy::core::notification_route::{self, NotificationRoute};
 use homeboy::core::notify::{self, NotifyEvent, NotifyOutcome};
 use homeboy::core::{Error, Result};
 
@@ -16,9 +17,8 @@ use super::utils::response::{
     CommandActionableMetadata, CommandAgentTaskRef, CommandJobRef, CommandNextAction,
     CommandNextActionKind, CommandResultRefs, CommandRunRef,
 };
+use super::utils::watch::{watch_loop, WatchConfig, WatchPoller, WatchResult, TIMEOUT_EXIT_CODE};
 use super::CmdResult;
-
-const TIMEOUT_EXIT_CODE: i32 = 124;
 
 #[derive(Args, Clone)]
 pub struct ActivityArgs {
@@ -206,50 +206,61 @@ fn show(id: &str) -> CmdResult<ActivityOutput> {
     ))
 }
 
+/// Production poller: resolve one activity item across every activity source.
+///
+/// Deliberately **non**-reconciling, which is the load-bearing behavioural
+/// difference from `runs watch`'s `StorePoller`. An activity read must not
+/// mutate an observation record — `activity_reads_do_not_reconcile_stale_running_records`
+/// pins that — so the two commands share the poll loop (`utils::watch`) but not
+/// the poller. This is why #10315's prescribed fix ("construct an
+/// `ActivityPoller: RunPoller`") could not be taken literally: `RunPoller`
+/// yielded a `RunRecord`, and an activity item is a projection over four stores
+/// that frequently has no `RunRecord` behind it at all.
+struct ActivityPoller;
+
+impl WatchPoller for ActivityPoller {
+    type Item = ActivityItem;
+
+    fn poll(&self, id: &str) -> Result<ActivityItem> {
+        activity::resolve_activity(id)
+    }
+
+    fn is_terminal(&self, item: &ActivityItem) -> bool {
+        !activity::is_active(item.state)
+    }
+}
+
 fn watch(args: ActivityWatchArgs) -> CmdResult<ActivityOutput> {
     let interval = parse_duration(&args.interval)?;
     let timeout = args.timeout.as_deref().map(parse_duration).transpose()?;
-    let started = Instant::now();
-    let mut poll_count = 0;
+    let config = WatchConfig { interval, timeout };
 
-    loop {
-        let item = activity::resolve_activity(&args.id)?;
-        poll_count += 1;
-        eprintln!(
-            "activity {}: {:?} (poll {})",
-            args.id, item.state, poll_count
-        );
-        if !activity::is_active(item.state) {
-            return Ok(watch_output(
-                args,
-                item,
-                false,
-                started.elapsed(),
-                poll_count,
-            ));
-        }
-        if let Some(timeout) = timeout {
-            if started.elapsed() >= timeout {
-                return Ok(watch_output(
-                    args,
-                    item,
-                    true,
-                    started.elapsed(),
-                    poll_count,
-                ));
-            }
-        }
-        std::thread::sleep(interval);
-    }
+    let started = Instant::now();
+    let id = args.id.clone();
+    let result = watch_loop(
+        &ActivityPoller,
+        &args.id,
+        &config,
+        std::thread::sleep,
+        || started.elapsed(),
+        |item, poll_count| emit_progress(&id, item, poll_count),
+    )?;
+
+    Ok(watch_output(args, result))
+}
+
+fn emit_progress(id: &str, item: &ActivityItem, poll_count: u64) {
+    eprintln!("activity {}: {:?} (poll {})", id, item.state, poll_count);
 }
 
 fn watch_output(
     args: ActivityWatchArgs,
-    item: ActivityItem,
-    timed_out: bool,
-    waited: Duration,
-    poll_count: u64,
+    result: WatchResult<ActivityItem>,
 ) -> (ActivityOutput, i32) {
+    let timed_out = result.timed_out();
+    let waited = result.waited;
+    let poll_count = result.poll_count;
+    let item = result.item;
     let notify = maybe_notify(&args, &item, timed_out);
     let exit_code = if timed_out {
         TIMEOUT_EXIT_CODE
@@ -269,7 +280,7 @@ fn watch_output(
             schema: activity::ACTIVITY_REPORT_SCHEMA,
             command: "activity.watch",
             id: args.id,
-            state: item.state.clone(),
+            state: item.state,
             terminal: !timed_out,
             timed_out,
             waited_secs: waited.as_secs(),
@@ -413,6 +424,35 @@ fn maybe_notify(
     if !args.notify {
         return None;
     }
+    // The invocation's route, bound once by `cli_runtime` from
+    // `--notification-transport`/`--notification-route` or the matching
+    // environment. This used to be dropped: the event was built with
+    // `transport: None, route: None`, so `activity watch --notify
+    // --notification-route ...` silently delivered to the configured default
+    // transport with no route at all (#10315, found by #10538).
+    //
+    // Unlike `runs watch`, there is no run-scoped fallback available here:
+    // `ActivityItem` is a cross-store projection with no metadata channel, so
+    // it cannot carry the route `ObservationStore::start_run` stamped onto the
+    // record. Honouring the caller's explicit route is the available — and the
+    // requested — answer.
+    let route = notification_route::current();
+    Some(notify::dispatch(&activity_notify_event(
+        item,
+        timed_out,
+        route.as_ref(),
+    )))
+}
+
+/// Build the completion notification for a watched activity item.
+///
+/// Split out from [`maybe_notify`] so the routing decision is unit-testable
+/// without an installed transport to dispatch through.
+fn activity_notify_event(
+    item: &ActivityItem,
+    timed_out: bool,
+    route: Option<&NotificationRoute>,
+) -> NotifyEvent {
     let status = if timed_out {
         "timed_out".to_string()
     } else {
@@ -461,19 +501,18 @@ fn maybe_notify(
                 ),
         );
 
-    Some(notify::dispatch(
-        &NotifyEvent {
-            title: format!("homeboy activity {status}"),
-            body: format!("{} {}", item.kind, item.id),
-            status,
-            run_id: item.id.clone(),
-            kind,
-            transport: None,
-            route: None,
-            payload: None,
-        }
-        .with_payload(payload),
-    ))
+    NotifyEvent {
+        title: format!("homeboy activity {status}"),
+        body: format!("{} {}", item.kind, item.id),
+        status,
+        run_id: item.id.clone(),
+        kind,
+        transport: None,
+        route: None,
+        payload: None,
+    }
+    .with_route(route)
+    .with_payload(payload)
 }
 
 /// Project an activity evidence ref into a deliverable attachment.
@@ -550,9 +589,55 @@ mod tests {
     use super::*;
     use crate::cli_surface::Cli;
     use clap::Parser;
+    use homeboy::core::activity::{ActivityCrossRefs, ActivityNextAction, ActivityRunnerRefs};
     use homeboy::core::observation::{NewRunRecord, ObservationStore, RunStatus};
     use homeboy::test_support::with_isolated_home;
     use serde_json::json;
+
+    fn activity_item(state: ActivityState) -> ActivityItem {
+        ActivityItem {
+            id: "run-1".to_string(),
+            kind: "observation_run".to_string(),
+            source_store: "observation".to_string(),
+            state,
+            created_at: "2026-05-02T16:46:46Z".to_string(),
+            updated_at: None,
+            finished_at: None,
+            command: Some("homeboy bench".to_string()),
+            cwd: None,
+            runner: ActivityRunnerRefs::default(),
+            refs: ActivityCrossRefs::default(),
+            artifacts: Vec::new(),
+            evidence: Vec::new(),
+            source_projections: Vec::new(),
+            state_conflicts: Vec::new(),
+            next_actions: vec![ActivityNextAction {
+                label: "show".to_string(),
+                command: "homeboy activity show run-1".to_string(),
+            }],
+        }
+    }
+
+    fn watch_args() -> ActivityWatchArgs {
+        ActivityWatchArgs {
+            id: "run-1".to_string(),
+            timeout: None,
+            interval: "2s".to_string(),
+            notify: false,
+        }
+    }
+
+    fn watch_result(
+        state: ActivityState,
+        conclusion: crate::commands::utils::watch::WatchConclusion,
+    ) -> WatchResult<ActivityItem> {
+        WatchResult {
+            item: activity_item(state),
+            conclusion,
+            poll_count: 3,
+            waited: Duration::from_secs(6),
+        }
+    }
 
     #[test]
     fn empty_state_summary_is_explicit() {
@@ -624,5 +709,162 @@ mod tests {
             assert_eq!(after, before);
             assert_eq!(after.status, RunStatus::Running.as_str());
         });
+    }
+
+    /// `activity watch` and `runs watch` are separate commands over separate
+    /// domain models, but they must agree on the timeout exit code. It used to
+    /// be declared once per command; both now read the shared constant, and
+    /// this pins the value against the GNU `timeout(1)` convention.
+    #[test]
+    fn timeout_exit_code_matches_the_shared_watch_contract() {
+        use crate::commands::utils::watch::WatchConclusion;
+
+        assert_eq!(TIMEOUT_EXIT_CODE, 124);
+        let (_, exit_code) = watch_output(
+            watch_args(),
+            watch_result(ActivityState::Running, WatchConclusion::TimedOut),
+        );
+        assert_eq!(exit_code, TIMEOUT_EXIT_CODE);
+    }
+
+    #[test]
+    fn watch_output_preserves_its_schema_and_accounting() {
+        use crate::commands::utils::watch::WatchConclusion;
+
+        let (output, exit_code) = watch_output(
+            watch_args(),
+            watch_result(ActivityState::Succeeded, WatchConclusion::Terminal),
+        );
+        assert_eq!(exit_code, 0);
+        let ActivityOutput::Watch(output) = output else {
+            panic!("watch returns a watch output");
+        };
+        // The wire shape is unchanged by the shared-loop extraction.
+        assert_eq!(output.command, "activity.watch");
+        assert_eq!(output.schema, activity::ACTIVITY_REPORT_SCHEMA);
+        assert_eq!(output.id, "run-1");
+        assert_eq!(output.state, ActivityState::Succeeded);
+        assert!(output.terminal);
+        assert!(!output.timed_out);
+        assert_eq!(output.poll_count, 3);
+        assert_eq!(output.waited_secs, 6);
+        assert_eq!(output.next_actions, vec!["homeboy activity show run-1"]);
+    }
+
+    #[test]
+    fn a_failed_watch_exits_nonzero_and_a_timeout_is_not_terminal() {
+        use crate::commands::utils::watch::WatchConclusion;
+
+        let (_, failed) = watch_output(
+            watch_args(),
+            watch_result(ActivityState::Failed, WatchConclusion::Terminal),
+        );
+        assert_eq!(failed, 1);
+
+        let (output, _) = watch_output(
+            watch_args(),
+            watch_result(ActivityState::Running, WatchConclusion::TimedOut),
+        );
+        let ActivityOutput::Watch(output) = output else {
+            panic!("watch returns a watch output");
+        };
+        assert!(!output.terminal);
+        assert!(output.timed_out);
+    }
+
+    /// The activity poller must classify exactly the states
+    /// `activity::is_active` calls active, so the shared loop stops on the same
+    /// snapshots the hand-rolled loop stopped on.
+    #[test]
+    fn activity_poller_terminality_matches_the_active_predicate() {
+        for state in [
+            ActivityState::Unknown,
+            ActivityState::Queued,
+            ActivityState::Running,
+            ActivityState::Succeeded,
+            ActivityState::PartialFailure,
+            ActivityState::Failed,
+            ActivityState::Cancelled,
+            ActivityState::TimedOut,
+            ActivityState::Stale,
+        ] {
+            let item = activity_item(state);
+            assert_eq!(
+                ActivityPoller.is_terminal(&item),
+                !activity::is_active(state),
+                "{state:?} terminality"
+            );
+        }
+    }
+
+    /// Regression for the defect #10538 surfaced: the event was built with
+    /// `transport: None, route: None` and never consulted the bound route, so
+    /// `--notification-route` was silently dropped by this command alone.
+    #[test]
+    fn notify_event_carries_the_invocation_route() {
+        let route =
+            homeboy::core::notification_route::NotificationRoute::new("test.transport", "route-42")
+                .expect("route");
+        let event = activity_notify_event(
+            &activity_item(ActivityState::Succeeded),
+            false,
+            Some(&route),
+        );
+        assert_eq!(event.transport.as_deref(), Some("test.transport"));
+        assert_eq!(event.route.as_deref(), Some("route-42"));
+    }
+
+    #[test]
+    fn notify_event_stays_route_less_without_a_bound_route() {
+        let event = activity_notify_event(&activity_item(ActivityState::Succeeded), false, None);
+        assert!(event.transport.is_none());
+        assert!(event.route.is_none());
+    }
+
+    /// End-to-end wiring: `maybe_notify` must read the thread-local route
+    /// `cli_runtime` binds for the whole invocation from
+    /// `--notification-transport`/`--notification-route`.
+    ///
+    /// No extension declares `test.transport` in an isolated home, so delivery
+    /// fails — but it fails *naming the routed transport*, which is only
+    /// possible if the bound route reached the event. Before this fix the
+    /// event was transport-less and would have resolved to the configured
+    /// operations default instead.
+    #[test]
+    fn watch_notification_delivers_to_the_bound_cli_route() {
+        with_isolated_home(|_| {
+            let route = NotificationRoute::new("test.transport", "route-42").expect("route");
+            let outcome = notification_route::with_current(Some(route), || {
+                maybe_notify(
+                    &ActivityWatchArgs {
+                        notify: true,
+                        ..watch_args()
+                    },
+                    &activity_item(ActivityState::Succeeded),
+                    false,
+                )
+            })
+            .expect("--notify requests a notification");
+
+            assert!(!outcome.delivered);
+            assert!(outcome.error.unwrap_or_default().contains("test.transport"));
+        });
+    }
+
+    #[test]
+    fn watch_without_notify_dispatches_nothing() {
+        assert!(maybe_notify(
+            &watch_args(),
+            &activity_item(ActivityState::Succeeded),
+            false
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn timed_out_notification_is_needs_attention() {
+        let event = activity_notify_event(&activity_item(ActivityState::Running), true, None);
+        assert_eq!(event.kind, NotifyEventKind::NeedsAttention);
+        assert_eq!(event.status, "timed_out");
     }
 }

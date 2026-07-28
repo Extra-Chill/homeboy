@@ -47,8 +47,10 @@ component-first, target-first, environment, and workspace commands.
 ```sh
 homeboy triage --watch Extra-Chill/homeboy#2238 --until merged
 homeboy triage --watch Extra-Chill/homeboy#2238 --until green-mergeable --auto-merge
-homeboy triage --watch https://github.com/Extra-Chill/homeboy#2238 --until closed --timeout 10m --poll-interval 30s
+homeboy triage --watch https://github.com/Extra-Chill/homeboy#2238 --until closed --timeout 10m --interval 30s
 ```
+
+`--interval` is the same spelling `homeboy activity watch` and `homeboy runs watch` use for the delay between polls. `--poll-interval` remains a visible alias, so existing automation keeps working.
 
 Supported `--until` states:
 
