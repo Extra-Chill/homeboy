@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.29.5] - 2026-07-28
+
+### Changed
+- drop retired manifest keys and dead validate scripts
+
 ## [1.29.4] - 2026-07-26
 
 ### Fixed
