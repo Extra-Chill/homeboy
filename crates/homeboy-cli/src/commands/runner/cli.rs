@@ -285,6 +285,10 @@ pub(super) enum RunnerCommand {
     Disconnect {
         /// Runner ID
         id: String,
+
+        /// Remove only this controller's matching local tunnel/session state without contacting the remote runner
+        #[arg(long)]
+        local_recovery: bool,
     },
     /// Build or select the Homeboy binary used for runner/Lab jobs
     RefreshHomeboy {

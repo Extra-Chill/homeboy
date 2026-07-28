@@ -22,6 +22,66 @@ pub(crate) fn disconnect_with_force(
     disconnect_with_session(runner_id, None, force)
 }
 
+/// Recover the controller-owned side of a wedged tunnel without observing or
+/// mutating the remote daemon. Remote jobs intentionally remain ambiguous.
+pub(crate) fn disconnect_local_recovery(runner_id: &str) -> Result<RunnerDisconnectReport> {
+    let session = read_session(runner_id)?;
+    let session_path = session_path(runner_id)?.display().to_string();
+    if let Some(session) = session.as_ref() {
+        if session.mode == RunnerTunnelMode::DirectSsh {
+            if let Some(pid) = session.tunnel_pid {
+                terminate_pid(pid);
+            }
+        }
+        let removed = remove_session_if_matches(runner_id, session)?;
+        if removed {
+            let _ = remove_ownership_if_matches(runner_id, session)?;
+        }
+        return Ok(RunnerDisconnectReport {
+            runner_id: runner_id.to_string(),
+            disconnected: removed,
+            partial: true,
+            remote_error: Some(
+                "remote daemon was not contacted; its jobs and lifecycle remain ambiguous"
+                    .to_string(),
+            ),
+            local_recovery_command: None,
+            session: (!removed).then(|| session.clone()),
+            session_path,
+        });
+    }
+    Ok(RunnerDisconnectReport {
+        runner_id: runner_id.to_string(),
+        disconnected: false,
+        partial: true,
+        remote_error: Some(
+            "no controller-local session was present; remote daemon was not contacted".to_string(),
+        ),
+        local_recovery_command: None,
+        session: None,
+        session_path,
+    })
+}
+
+fn partial_disconnect_report(
+    runner_id: &str,
+    session: Option<RunnerSession>,
+    remote_error: impl Into<String>,
+) -> Result<RunnerDisconnectReport> {
+    Ok(RunnerDisconnectReport {
+        runner_id: runner_id.to_string(),
+        disconnected: false,
+        partial: true,
+        remote_error: Some(remote_error.into()),
+        local_recovery_command: Some(format!(
+            "homeboy runner disconnect {} --local-recovery",
+            shell::quote_arg(runner_id)
+        )),
+        session,
+        session_path: session_path(runner_id)?.display().to_string(),
+    })
+}
+
 /// Stop the daemon through the current live session after confirming it still
 /// owns the remote daemon observed by a caller's promotion transaction.
 pub(crate) fn disconnect_with_session(
@@ -66,8 +126,14 @@ pub(crate) fn disconnect_with_session(
         // SSH and clean up stale local tunnel processes only after its stop.
         let retained_generations =
             super::super::generation_store::live_sessions(runner_id, Some(session))?;
+        let authoritative_status = match probe_authoritative_daemon_status(runner_id) {
+            Ok(status) => status,
+            Err(error) => {
+                return partial_disconnect_report(runner_id, session.clone().into(), error.message)
+            }
+        };
         if remote_daemon::authoritative_stale_generations_are_dead(
-            &probe_authoritative_daemon_status(runner_id)?,
+            &authoritative_status,
             &eligible_stale_generation_leases(&retained_generations).unwrap_or_default(),
         ) {
             let leases =
@@ -78,13 +144,23 @@ pub(crate) fn disconnect_with_session(
             return Ok(RunnerDisconnectReport {
                 runner_id: runner_id.to_string(),
                 disconnected: true,
+                partial: false,
+                remote_error: None,
+                local_recovery_command: None,
                 session: None,
                 session_path: session_path(runner_id)?.display().to_string(),
             });
         }
-        if let Some(authoritative_session) =
-            reconcile_authoritative_idle_stale_generations(runner_id, &retained_generations)?
-        {
+        let authoritative_session = match reconcile_authoritative_idle_stale_generations(
+            runner_id,
+            &retained_generations,
+        ) {
+            Ok(session) => session,
+            Err(error) => {
+                return partial_disconnect_report(runner_id, session.clone().into(), error.message)
+            }
+        };
+        if let Some(authoritative_session) = authoritative_session {
             *session = authoritative_session.clone();
         }
         let mut reconciled_tunnel_pids = retained_generations
@@ -115,12 +191,18 @@ pub(crate) fn disconnect_with_session(
             }
         }
         if !unresolved.is_empty() {
-            return Err(Error::validation_invalid_argument(
-                "disconnect",
-                format!("runner `{runner_id}` has unresolved daemon generations; sessions and ledger were retained"),
-                Some(runner_id.to_string()),
-                Some(unresolved.into_iter().map(|entry| entry.to_string()).collect()),
-            ));
+            return partial_disconnect_report(
+                runner_id,
+                session.clone().into(),
+                format!(
+                    "remote daemon stop was not proven; sessions and ledger were retained: {}",
+                    unresolved
+                        .into_iter()
+                        .map(|entry| entry.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
         }
         for pid in reconciled_tunnel_pids {
             terminate_pid(pid);
@@ -136,12 +218,17 @@ pub(crate) fn disconnect_with_session(
         // new generation merely to clean that already-dead inventory.
         let retained_generations = super::super::generation_store::live_sessions(runner_id, None)?;
         let leases = eligible_stale_generation_leases(&retained_generations).unwrap_or_default();
-        if !leases.is_empty()
-            && remote_daemon::authoritative_stale_generations_are_dead(
-                &probe_authoritative_daemon_status(runner_id)?,
-                &leases,
-            )
-        {
+        let authoritative_status = if leases.is_empty() {
+            None
+        } else {
+            match probe_authoritative_daemon_status(runner_id) {
+                Ok(status) => Some(status),
+                Err(error) => return partial_disconnect_report(runner_id, None, error.message),
+            }
+        };
+        if authoritative_status.as_ref().is_some_and(|status| {
+            remote_daemon::authoritative_stale_generations_are_dead(status, &leases)
+        }) {
             super::super::generation_store::tombstone_dead_direct_generations(runner_id, &leases)?;
             remove_ownership(runner_id)?;
         }
@@ -150,6 +237,9 @@ pub(crate) fn disconnect_with_session(
     Ok(RunnerDisconnectReport {
         runner_id: runner_id.to_string(),
         disconnected: session.is_some(),
+        partial: false,
+        remote_error: None,
+        local_recovery_command: None,
         session,
         session_path: session_path(runner_id)?.display().to_string(),
     })
@@ -878,6 +968,29 @@ mod tests {
             remote_daemon::RemoteDaemonConnectAction::Start,
             "refresh must start a replacement rather than reattach the stale lease"
         );
+    }
+
+    #[test]
+    fn local_recovery_removes_only_the_controller_session_without_remote_access() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut session = direct_ssh_session("lease-wedged");
+            session.tunnel_pid = None;
+            write_session(&session).expect("record controller session");
+            write_ownership(&session).expect("record ownership");
+
+            let report = disconnect_local_recovery("homeboy-lab").expect("local recovery");
+
+            assert!(report.disconnected);
+            assert!(report.partial);
+            assert!(report
+                .remote_error
+                .expect("ambiguity is explicit")
+                .contains("not contacted"));
+            assert!(read_session("homeboy-lab").expect("read session").is_none());
+            assert!(read_ownership("homeboy-lab")
+                .expect("read ownership")
+                .is_none());
+        });
     }
 
     #[test]

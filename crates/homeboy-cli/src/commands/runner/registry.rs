@@ -412,13 +412,17 @@ pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOu
     ))
 }
 
-pub(super) fn disconnect(id: &str) -> CmdResult<RunnerOutput> {
+pub(super) fn disconnect(id: &str, local_recovery: bool) -> CmdResult<RunnerOutput> {
     Ok((
         RunnerOutput {
             command: "runner.disconnect".to_string(),
             id: Some(id.to_string()),
             extra: RunnerExtra {
-                connection: Some(RunnerConnectionOutput::Disconnect(runner::disconnect(id)?)),
+                connection: Some(RunnerConnectionOutput::Disconnect(if local_recovery {
+                    runner::disconnect_local_recovery(id)?
+                } else {
+                    runner::disconnect(id)?
+                })),
                 ..Default::default()
             },
             ..Default::default()

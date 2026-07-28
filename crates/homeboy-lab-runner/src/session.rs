@@ -1141,6 +1141,13 @@ fn same_homeboy_version(left: &str, right: &str) -> bool {
 pub struct RunnerDisconnectReport {
     pub runner_id: String,
     pub disconnected: bool,
+    /// The remote daemon could not be authoritatively stopped. Its jobs and
+    /// lifecycle remain ambiguous, while the controller session is retained.
+    pub partial: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_recovery_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<RunnerSession>,
     pub session_path: String,
