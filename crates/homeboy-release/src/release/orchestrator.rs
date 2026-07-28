@@ -130,8 +130,8 @@ fn restore_checkout_after_failed_run(
     if let Some(checkout_guard) = checkout_guard {
         let evidence = checkout_guard.restore_after_failure()?;
         let restored = evidence.restored;
-        let recovery_action = (!restored)
-            .then(|| format!("homeboy release {} --apply", run.component_id));
+        let recovery_action =
+            (!restored).then(|| format!("homeboy release {} --apply", run.component_id));
         let tag_state = if run.result.steps.iter().any(|step| {
             step.step_type == "git.tag" && matches!(step.status, ReleaseStepStatus::Success)
         }) {

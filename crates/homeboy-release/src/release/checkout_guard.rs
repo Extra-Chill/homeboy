@@ -61,7 +61,10 @@ impl ReleaseCheckoutGuard {
         self.restore_after_failure_with_hook(|| {})
     }
 
-    fn restore_after_failure_with_hook(&self, after_capture: impl FnOnce()) -> Result<CheckoutRestoreEvidence> {
+    fn restore_after_failure_with_hook(
+        &self,
+        after_capture: impl FnOnce(),
+    ) -> Result<CheckoutRestoreEvidence> {
         let temporary_head = git_stdout(&self.path, &["rev-parse", "HEAD"])?;
         after_capture();
         let mut errors = Vec::new();
@@ -76,9 +79,7 @@ impl ReleaseCheckoutGuard {
         );
 
         let checkout_result = match &self.original_ref {
-            OriginalRef::Branch(branch) => {
-                run_git_checked(&self.path, &["checkout", "-q", branch])
-            }
+            OriginalRef::Branch(branch) => run_git_checked(&self.path, &["checkout", "-q", branch]),
             OriginalRef::Detached => {
                 run_git_checked(&self.path, &["checkout", "-q", &self.original_head])
             }
@@ -293,7 +294,10 @@ mod tests {
         assert_eq!(rollback.original_head, original_head);
         assert_ne!(rollback.temporary_head, rollback.original_head);
         assert!(rollback.restored);
-        assert_eq!(rollback.final_head.as_deref(), Some(rollback.original_head.as_str()));
+        assert_eq!(
+            rollback.final_head.as_deref(),
+            Some(rollback.original_head.as_str())
+        );
         assert_eq!(rollback.error, None);
         assert_eq!(git_stdout_for_test(dir, &["status", "--porcelain=v1"]), "");
         assert!(!dir.join("generated.txt").exists());
@@ -381,8 +385,15 @@ mod tests {
         assert!(!rollback.restored);
         assert_eq!(rollback.original_head, original_head);
         assert_eq!(rollback.temporary_head, release_commit);
-        assert_eq!(rollback.final_head.as_deref(), Some(concurrent_head.as_str()));
-        assert!(rollback.error.as_deref().unwrap().contains("moved concurrently"));
+        assert_eq!(
+            rollback.final_head.as_deref(),
+            Some(concurrent_head.as_str())
+        );
+        assert!(rollback
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("moved concurrently"));
         assert_ne!(concurrent_head, original_head);
         assert_ne!(concurrent_head, release_commit);
     }
