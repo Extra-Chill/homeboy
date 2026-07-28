@@ -131,10 +131,12 @@ pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
             crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(dispatch_recipe)
         };
         let execute = |options| {
-            let cook = agent_task_service::run_cook(
-                options,
-                ExtensionProviderAgentTaskExecutor::discover(),
-            )?;
+            let executor = ExtensionProviderAgentTaskExecutor::discover();
+            let cook = if historical_terminal {
+                agent_task_service::run_terminal_cook_continuation(options, executor)?
+            } else {
+                agent_task_service::run_cook(options, executor)?
+            };
             let exit_code = cook.exit_code;
             result = Some(cook.value);
             Ok(exit_code)
