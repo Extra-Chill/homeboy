@@ -19,8 +19,38 @@ use homeboy_refactor_contract::AppliedRefactor;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::run::{RawTestOutput, TestRunWorkflowResult};
+use super::run::{test_timeout, RawTestOutput, TestRunWorkflowResult};
 use super::workflow::{AutoFixDriftOutput, AutoFixDriftWorkflowResult, DriftWorkflowResult};
+
+/// Exit status Homeboy assigns when it terminates a child that exhausted its
+/// execution budget (`timed_out_exit_code` in `homeboy-core`).
+///
+/// A timeout is neither a test failure nor a broken harness: the suite is
+/// *incomplete*. Classifying it as either discards the distinction between
+/// "your change broke tests" and "the clock ran out", which is the only thing
+/// a reviewer needs in order to know whether to act. It must therefore be
+/// matched before any count-based branch, because a killed child usually never
+/// writes its results sidecar and so arrives with absent or partial counts.
+const TIMEOUT_EXIT_CODE: i32 = 124;
+
+/// Render a timeout as a timeout, naming the budget that was exhausted and
+/// whatever partial progress survived.
+///
+/// The budget is read back through the same `test_timeout()` accessor the run
+/// path used to arm the child, so the number reported is always the number
+/// actually enforced rather than a duplicated constant that can drift.
+fn test_timeout_summary(counts: Option<&TestCounts>) -> String {
+    let budget_seconds = test_timeout().as_secs();
+    match counts {
+        Some(counts) if counts.passed + counts.failed > 0 => format!(
+            "test phase timed out after {}s: {} passed, {} failed before termination, suite incomplete",
+            budget_seconds, counts.passed, counts.failed
+        ),
+        _ => format!(
+            "test phase timed out after {budget_seconds}s before reporting test counts, suite incomplete"
+        ),
+    }
+}
 
 /// Build output from a main test workflow result.
 pub fn from_main_workflow(result: TestRunWorkflowResult) -> (TestCommandOutput, i32) {
@@ -185,6 +215,8 @@ fn test_phase_report(
             } else {
                 "test phase passed".to_string()
             }
+        } else if exit_code == TIMEOUT_EXIT_CODE {
+            test_timeout_summary(counts)
         } else if counts.map(|counts| counts.total == 0).unwrap_or(false) {
             "test runner reported zero executed tests".to_string()
         } else if has_findings {
@@ -215,6 +247,20 @@ fn test_phase_failure(
     counts: Option<&TestCounts>,
     has_findings: bool,
 ) -> PhaseFailure {
+    // Checked before `has_findings`: a suite killed mid-run can still have
+    // parsed a few structured failures, but partial findings from an aborted
+    // run are not a verdict. Classifying that as `Findings` would report "N
+    // test failure(s) detected" for a run that never finished. The findings
+    // themselves stay in the output envelope, so nothing is discarded here —
+    // only the phase label is corrected.
+    if exit_code == TIMEOUT_EXIT_CODE {
+        return PhaseFailure {
+            phase: VerificationPhase::Test,
+            summary: test_timeout_summary(counts),
+            category: PhaseFailureCategory::Infrastructure,
+        };
+    }
+
     let category = if has_findings {
         PhaseFailureCategory::Findings
     } else if exit_code != 0 && counts.map(|counts| counts.total == 0).unwrap_or(false) {
@@ -341,6 +387,105 @@ mod tests {
         assert_eq!(json["findings"][0]["file"], "tests/fails.rs");
         assert_eq!(json["findings"][0]["line"], 42);
         assert_eq!(json["failure"]["category"], "findings");
+    }
+
+    /// Recorded from job 90334340546 of run 30376771886: `homeboy review test`
+    /// exhausted its 1500s budget, the child was killed before writing its
+    /// results sidecar, and the phase was reported as
+    /// "test harness infrastructure failure (exit 124)" with zero counts.
+    fn timed_out_workflow_result(counts: Option<TestCounts>) -> TestRunWorkflowResult {
+        let mut result = workflow_result(None);
+        result.exit_code = 124;
+        result.test_counts = counts;
+        result
+    }
+
+    #[test]
+    fn a_timed_out_test_phase_is_not_reported_as_a_test_failure() {
+        let (output, exit_code) = from_main_workflow(timed_out_workflow_result(None));
+        let json = serde_json::to_value(output).expect("serialize test command output");
+
+        assert_eq!(exit_code, 124);
+
+        // The effect that matters: a reviewer must be able to tell a timeout
+        // apart from "your change broke tests" and from a broken harness.
+        let failure_summary = json["failure"]["summary"].as_str().expect("summary");
+        let phase_summary = json["phase"]["summary"].as_str().expect("phase summary");
+        for summary in [failure_summary, phase_summary] {
+            assert!(
+                summary.contains("timed out"),
+                "timeout must be named as a timeout, got: {summary}"
+            );
+            assert!(
+                summary.contains("suite incomplete"),
+                "timeout must state the suite did not finish, got: {summary}"
+            );
+            assert!(
+                !summary.contains("infrastructure failure"),
+                "a timeout is not a harness infrastructure failure, got: {summary}"
+            );
+            assert!(
+                !summary.contains("failure(s) detected"),
+                "a timeout is not a set of test failures, got: {summary}"
+            );
+        }
+
+        // `findings` remains the only category meaning "tests reported
+        // problems"; a timeout must never borrow it.
+        assert_ne!(json["failure"]["category"], "findings");
+    }
+
+    #[test]
+    fn a_timed_out_test_phase_reports_the_budget_and_partial_progress() {
+        let (output, _) = from_main_workflow(timed_out_workflow_result(Some(TestCounts::new(
+            412, 410, 2, 0,
+        ))));
+        let json = serde_json::to_value(output).expect("serialize test command output");
+        let summary = json["failure"]["summary"].as_str().expect("summary");
+
+        // The budget reported is the budget enforced, read back through the
+        // same accessor the run path arms the child with.
+        let budget = super::test_timeout().as_secs();
+        assert!(
+            summary.contains(&format!("after {budget}s")),
+            "timeout must name the budget it exhausted, got: {summary}"
+        );
+        assert!(
+            summary.contains("410 passed"),
+            "work completed before termination must survive, got: {summary}"
+        );
+        assert!(
+            summary.contains("suite incomplete"),
+            "partial counts must not read as a final verdict, got: {summary}"
+        );
+    }
+
+    #[test]
+    fn partial_findings_from_an_aborted_run_do_not_become_a_test_failure_verdict() {
+        // A suite killed mid-run can still have parsed a few failures. That is
+        // not a verdict, and the phase must not be labelled as one -- but the
+        // findings themselves must still reach the reader.
+        let mut result = timed_out_workflow_result(Some(TestCounts::new(9, 8, 1, 0)));
+        result.findings = Some(vec![HomeboyFinding::builder("test", "assertion failed")
+            .rule("AssertionFailed")
+            .severity("error")
+            .build()]);
+
+        let (output, _) = from_main_workflow(result);
+        let json = serde_json::to_value(output).expect("serialize test command output");
+
+        assert_ne!(
+            json["failure"]["category"], "findings",
+            "an incomplete run cannot deliver a findings verdict"
+        );
+        assert!(json["failure"]["summary"]
+            .as_str()
+            .expect("summary")
+            .contains("timed out"));
+        assert_eq!(
+            json["findings"][0]["message"], "assertion failed",
+            "evidence must be preserved even though the label changes"
+        );
     }
 
     #[test]
