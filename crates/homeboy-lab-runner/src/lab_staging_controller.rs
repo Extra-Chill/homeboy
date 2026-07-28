@@ -3561,35 +3561,28 @@ impl LabStagingExecutionAdapter for StageExecutionAdapter {
     }
 }
 
-fn adapter_slot() -> &'static Mutex<Option<Arc<dyn LabStagingExecutionAdapter>>> {
-    static ADAPTER: OnceLock<Mutex<Option<Arc<dyn LabStagingExecutionAdapter>>>> = OnceLock::new();
-    ADAPTER.get_or_init(|| Mutex::new(None))
-}
-
-/// Install an execution adapter after its owner has registered the driver.
-pub(crate) fn install_production_execution_adapter(adapter: Arc<dyn LabStagingExecutionAdapter>) {
-    *adapter_slot().lock().expect("Lab staging adapter lock") = Some(adapter);
+homeboy_engine_primitives::provider_registry_arc! {
+    provider: dyn LabStagingExecutionAdapter,
+    /// Install an execution adapter after its owner has registered the driver.
+    register: pub(crate) fn install_production_execution_adapter,
+    /// The installed production execution adapter, if any. There is no no-op
+    /// adapter: an absent adapter means routing is not ready, which every
+    /// caller below reports in its own shape.
+    optional: fn installed_production_adapter,
 }
 
 pub(crate) fn require_production_adapter() -> Result<Arc<dyn LabStagingExecutionAdapter>> {
-    adapter_slot()
-        .lock()
-        .expect("Lab staging adapter lock")
-        .clone()
-        .ok_or_else(|| {
-            Error::internal_unexpected(
-                "Lab staging controller is registered but its production execution adapter is unavailable",
-            )
-        })
+    installed_production_adapter().ok_or_else(|| {
+        Error::internal_unexpected(
+            "Lab staging controller is registered but its production execution adapter is unavailable",
+        )
+    })
 }
 
 /// Registration makes the durable driver available to its owner. Traffic stays
 /// disabled until every subsequent stage has a production implementation.
 pub(crate) fn routing_ready() -> bool {
-    adapter_slot()
-        .lock()
-        .expect("Lab staging adapter lock")
-        .is_some()
+    installed_production_adapter().is_some()
 }
 
 /// Enable the production staging implementation after generic driver
@@ -3827,6 +3820,15 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Drop whatever adapter a previous test installed. The registry is a
+    /// process global, so tests that assert the "no adapter installed" branch
+    /// have to clear it explicitly.
+    fn clear_installed_adapter() {
+        *provider_slot()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
 
     fn recipe_command() -> LabOffloadCommand {
         LabOffloadCommand {
@@ -5300,7 +5302,7 @@ mod tests {
                 .expect("recreated cancellation token")
                 .is_cancelled());
             assert_eq!(cancelled.load(Ordering::SeqCst), 1);
-            *adapter_slot().lock().expect("adapter lock") = None;
+            clear_installed_adapter();
             cancellations()
                 .lock()
                 .expect("lock")
@@ -5353,7 +5355,7 @@ mod tests {
     #[test]
     fn production_adapter_readiness_fails_closed_when_uninstalled() {
         let _serial = global_state_lock().lock().expect("lock");
-        *adapter_slot().lock().expect("lock") = None;
+        clear_installed_adapter();
         assert!(require_production_adapter().is_err());
     }
 
@@ -5671,7 +5673,7 @@ mod tests {
     #[test]
     fn registration_keeps_lab_routing_disabled_without_submission_hook() {
         let _serial = global_state_lock().lock().expect("lock");
-        *adapter_slot().lock().expect("adapter lock") = None;
+        clear_installed_adapter();
         register();
         assert!(!routing_ready());
     }
@@ -5679,11 +5681,11 @@ mod tests {
     #[test]
     fn production_enablement_installs_the_staging_adapter() {
         let _serial = global_state_lock().lock().expect("lock");
-        *adapter_slot().lock().expect("adapter lock") = None;
+        clear_installed_adapter();
         register();
         enable_production_routing();
         assert!(routing_ready());
-        *adapter_slot().lock().expect("adapter lock") = None;
+        clear_installed_adapter();
     }
 
     #[test]

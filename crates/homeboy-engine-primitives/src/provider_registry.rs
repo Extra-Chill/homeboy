@@ -54,6 +54,8 @@
 //! `provider_registry_arc!` — `Arc` provider whose accessor clones the `Arc`
 //! out, so the registry lock is released before a (potentially long-running)
 //! call. Used where holding the lock across the call would serialize real work.
+//! Its `optional:` form is the `Arc` counterpart of `with_optional:`: no no-op,
+//! accessor yields `Option<Arc<dyn Trait>>`.
 
 /// Declare a process-global boxed provider registry.
 ///
@@ -134,6 +136,13 @@ macro_rules! provider_registry {
 /// `Arc` out before returning, releasing the registry lock so it is not held
 /// across the provider call.
 ///
+/// Two forms, mirroring [`provider_registry!`]:
+///
+/// - `noop: <expr>` + `active:` — the accessor always yields an `Arc`, falling
+///   back to a freshly-allocated no-op.
+/// - `optional:` (no `noop:`) — the accessor yields `Option<Arc<dyn Trait>>` so
+///   each caller supplies its own "provider absent" behavior.
+///
 /// A poisoned lock always recovers via `into_inner()`.
 #[macro_export]
 macro_rules! provider_registry_arc {
@@ -145,14 +154,7 @@ macro_rules! provider_registry_arc {
         $(#[$active_meta:meta])*
         active: $active_vis:vis fn $active:ident $(,)?
     ) => {
-        fn provider_slot() -> &'static ::std::sync::Mutex<
-            ::std::option::Option<::std::sync::Arc<dyn $provider>>,
-        > {
-            static PROVIDER: ::std::sync::Mutex<
-                ::std::option::Option<::std::sync::Arc<dyn $provider>>,
-            > = ::std::sync::Mutex::new(::std::option::Option::None);
-            &PROVIDER
-        }
+        $crate::__provider_registry_arc_slot!($provider);
 
         $(#[$register_meta])*
         $register_vis fn $register(provider: ::std::sync::Arc<dyn $provider>) {
@@ -171,6 +173,50 @@ macro_rules! provider_registry_arc {
                 ::std::option::Option::Some(provider) => ::std::sync::Arc::clone(provider),
                 ::std::option::Option::None => ::std::sync::Arc::new($noop),
             }
+        }
+    };
+
+    (
+        provider: dyn $provider:path,
+        $(#[$register_meta:meta])*
+        register: $register_vis:vis fn $register:ident,
+        $(#[$active_meta:meta])*
+        optional: $active_vis:vis fn $active:ident $(,)?
+    ) => {
+        $crate::__provider_registry_arc_slot!($provider);
+
+        $(#[$register_meta])*
+        $register_vis fn $register(provider: ::std::sync::Arc<dyn $provider>) {
+            let mut slot = provider_slot()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *slot = ::std::option::Option::Some(provider);
+        }
+
+        $(#[$active_meta])*
+        $active_vis fn $active(
+        ) -> ::std::option::Option<::std::sync::Arc<dyn $provider>> {
+            let slot = provider_slot()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            slot.as_ref().map(::std::sync::Arc::clone)
+        }
+    };
+}
+
+/// Internal: the `Arc` slot accessor shared by both `provider_registry_arc!`
+/// forms. The `static` lives inside the function body so it cannot collide with
+/// any module-level item at the expansion site.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __provider_registry_arc_slot {
+    ($provider:path) => {
+        fn provider_slot(
+        ) -> &'static ::std::sync::Mutex<::std::option::Option<::std::sync::Arc<dyn $provider>>> {
+            static PROVIDER: ::std::sync::Mutex<
+                ::std::option::Option<::std::sync::Arc<dyn $provider>>,
+            > = ::std::sync::Mutex::new(::std::option::Option::None);
+            &PROVIDER
         }
     };
 }
@@ -240,5 +286,52 @@ mod tests {
         .join();
         assert!(provider_slot().is_poisoned());
         assert_eq!(with_greeter(|g| g.greet()), "real");
+    }
+
+    // A second registry in the same module would collide on the generated
+    // `provider_slot`, so the `Arc` forms get their own modules.
+    mod arc_optional {
+        use super::Greeter;
+        use std::sync::Arc;
+
+        struct RealGreeter;
+
+        impl Greeter for RealGreeter {
+            fn greet(&self) -> String {
+                "real".to_string()
+            }
+        }
+
+        crate::provider_registry_arc! {
+            provider: dyn Greeter,
+            /// Register the greeter used by this test module.
+            register: pub(crate) fn register_greeter,
+            /// The registered greeter, if any.
+            optional: fn active_greeter,
+        }
+
+        // One test: the registry is a process global, so splitting these would
+        // make them order-dependent on each other.
+        #[test]
+        fn yields_none_registers_and_survives_a_poisoned_lock() {
+            assert!(active_greeter().is_none());
+
+            register_greeter(Arc::new(RealGreeter));
+            assert_eq!(
+                active_greeter().map(|g| g.greet()),
+                Some("real".to_string())
+            );
+
+            let _ = std::thread::spawn(|| {
+                let _guard = provider_slot().lock().unwrap();
+                panic!("poison the registry lock");
+            })
+            .join();
+            assert!(provider_slot().is_poisoned());
+            assert_eq!(
+                active_greeter().map(|g| g.greet()),
+                Some("real".to_string())
+            );
+        }
     }
 }
