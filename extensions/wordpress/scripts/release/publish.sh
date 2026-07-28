@@ -153,6 +153,11 @@ RECOVERY_ARTIFACTS="$(echo "${PAYLOAD}" | jq -c '
     | select(
         type == "object"
         and (.type == "wordpress-zip" or .artifact_type == "wordpress-zip")
+        or (
+          type == "object"
+          and ((.type // .artifact_type // "") == "")
+          and ((.path // "") | type == "string" and endswith(".zip"))
+        )
       )
   ]
 ')"
