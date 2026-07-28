@@ -45,7 +45,7 @@ fn unrigged_bench_forwards_cli_warmup() {
         let mut args = run_args(Some("studio"), Vec::new(), Vec::new());
         args.run.warmup = Some(4);
 
-        let (output, exit_code) = run(args, &GlobalArgs {}).expect("bench should run");
+        let (output, exit_code) = run(args).expect("bench should run");
 
         assert_eq!(exit_code, 0);
         assert_eq!(first_warmup_metric(output), 4.0);
@@ -59,11 +59,8 @@ fn unrigged_bench_omits_warmup_env_by_default() {
         let component_dir = tempfile::TempDir::new().expect("component dir");
         write_registered_component(home, "studio", component_dir.path());
 
-        let (output, exit_code) = run(
-            run_args(Some("studio"), Vec::new(), Vec::new()),
-            &GlobalArgs {},
-        )
-        .expect("bench should run");
+        let (output, exit_code) =
+            run(run_args(Some("studio"), Vec::new(), Vec::new())).expect("bench should run");
 
         assert_eq!(exit_code, 0);
         assert_eq!(first_warmup_metric(output), -1.0);
@@ -78,11 +75,8 @@ fn single_rig_bench_forwards_rig_warmup() {
         write_rig(home, "rig-a", "studio", component_dir.path());
         set_rig_warmup(home, "rig-a", 6);
 
-        let (output, exit_code) = run(
-            run_args(None, vec!["rig-a".to_string()], Vec::new()),
-            &GlobalArgs {},
-        )
-        .expect("rig bench should run");
+        let (output, exit_code) = run(run_args(None, vec!["rig-a".to_string()], Vec::new()))
+            .expect("rig bench should run");
 
         assert_eq!(exit_code, 0);
         assert_eq!(first_warmup_metric(output), 6.0);
@@ -100,7 +94,7 @@ fn cli_warmup_overrides_rig_warmup() {
         let mut args = run_args(None, vec!["rig-a".to_string()], Vec::new());
         args.run.warmup = Some(2);
 
-        let (output, exit_code) = run(args, &GlobalArgs {}).expect("rig bench should run");
+        let (output, exit_code) = run(args).expect("rig bench should run");
 
         assert_eq!(exit_code, 0);
         assert_eq!(first_warmup_metric(output), 2.0);
@@ -118,14 +112,11 @@ fn cross_rig_bench_uses_each_rig_warmup() {
         set_rig_warmup(home, "rig-a", 2);
         set_rig_warmup(home, "rig-b", 5);
 
-        let (output, exit_code) = run(
-            run_args(
-                None,
-                vec!["rig-a".to_string(), "rig-b".to_string()],
-                Vec::new(),
-            ),
-            &GlobalArgs {},
-        )
+        let (output, exit_code) = run(run_args(
+            None,
+            vec!["rig-a".to_string(), "rig-b".to_string()],
+            Vec::new(),
+        ))
         .expect("cross-rig bench should run");
 
         assert_eq!(exit_code, 0);
@@ -176,7 +167,7 @@ fn cross_rig_cli_warmup_overrides_all_rigs() {
         );
         args.run.warmup = Some(9);
 
-        let (output, exit_code) = run(args, &GlobalArgs {}).expect("cross-rig bench should run");
+        let (output, exit_code) = run(args).expect("cross-rig bench should run");
 
         assert_eq!(exit_code, 0);
         match output {

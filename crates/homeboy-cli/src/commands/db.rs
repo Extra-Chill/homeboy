@@ -149,7 +149,7 @@ impl Serialize for DbResultVariant {
     }
 }
 
-pub fn run(args: DbArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<DbOutput> {
+pub fn run(args: DbArgs) -> CmdResult<DbOutput> {
     match args.command {
         DbCommand::Status => status(),
         DbCommand::Tables { project_id, args } => tables(&project_id, &args),

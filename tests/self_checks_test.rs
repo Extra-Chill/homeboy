@@ -3,7 +3,6 @@ use homeboy::commands::test::{run as run_test, TestArgs};
 use homeboy::commands::utils::args::{
     BaselineArgs, ExtensionOverrideArgs, LintSniffArgs, PositionalComponentArgs, SettingArgs,
 };
-use homeboy::commands::GlobalArgs;
 use std::fs;
 use std::path::Path;
 
@@ -92,8 +91,7 @@ fn lint_runs_declared_self_check_without_extensions() {
     write_component(dir.path(), r#"{ "lint": ["sh scripts/lint.sh"] }"#);
     write_script(dir.path(), "lint.sh", "printf 'lint self-check ran\\n'\n");
 
-    let (output, exit_code) =
-        run_lint(lint_args(dir.path()), &GlobalArgs {}).expect("lint self-check should run");
+    let (output, exit_code) = run_lint(lint_args(dir.path())).expect("lint self-check should run");
 
     assert_eq!(exit_code, 0);
     assert!(output.passed);
@@ -106,8 +104,7 @@ fn test_runs_declared_self_check_without_extensions() {
     write_component(dir.path(), r#"{ "test": ["sh scripts/test.sh"] }"#);
     write_script(dir.path(), "test.sh", "printf 'test self-check ran\\n'\n");
 
-    let (output, exit_code) =
-        run_test(test_args(dir.path()), &GlobalArgs {}).expect("test self-check should run");
+    let (output, exit_code) = run_test(test_args(dir.path())).expect("test self-check should run");
 
     assert_eq!(exit_code, 0);
     assert!(output.passed);
@@ -124,7 +121,7 @@ fn non_zero_self_check_fails_command_and_surfaces_output() {
         "printf 'visible failure stdout\\n'\nprintf 'visible failure stderr\\n' >&2\nexit 7\n",
     );
 
-    let (output, exit_code) = run_test(test_args(dir.path()), &GlobalArgs {})
+    let (output, exit_code) = run_test(test_args(dir.path()))
         .expect("test self-check failure should return structured output");
 
     assert_eq!(exit_code, 7);
@@ -147,7 +144,7 @@ fn json_self_check_failure_reports_bounded_large_output_metadata() {
         "perl -e 'print \"stdout-line-\" . (\"x\" x 80) . \"\\n\" for 1..800'\nperl -e 'print STDERR \"stderr-line-\" . (\"x\" x 80) . \"\\n\" for 1..800'\nexit 7\n",
     );
 
-    let (output, exit_code) = run_test(json_test_args(dir.path()), &GlobalArgs {})
+    let (output, exit_code) = run_test(json_test_args(dir.path()))
         .expect("test self-check failure should return structured output");
 
     assert_eq!(exit_code, 7);
@@ -171,7 +168,7 @@ fn missing_extension_and_self_check_keeps_existing_error() {
     let dir = tempfile::tempdir().expect("temp dir");
     write_component(dir.path(), r#"{}"#);
 
-    let err = match run_lint(lint_args(dir.path()), &GlobalArgs {}) {
+    let err = match run_lint(lint_args(dir.path())) {
         Ok(_) => panic!("lint without extension or self-check should fail"),
         Err(err) => err,
     };

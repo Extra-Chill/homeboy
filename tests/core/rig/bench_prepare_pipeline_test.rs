@@ -113,10 +113,11 @@ fn bench_prepare_runs_before_check_and_workload() {
             Some(format!("printf 'prepare\\n' >> '{}'", log_path.display())),
         );
 
-        let (_output, exit_code) = run(
-            run_args(None, vec!["bench-prep-rig".to_string()], Vec::new()),
-            &GlobalArgs {},
-        )
+        let (_output, exit_code) = run(run_args(
+            None,
+            vec!["bench-prep-rig".to_string()],
+            Vec::new(),
+        ))
         .expect("bench should run");
 
         assert_eq!(exit_code, 0);
@@ -133,11 +134,8 @@ fn rig_without_bench_prepare_preserves_existing_check_then_workload_flow() {
         write_logging_bench_extension(home, &log_path);
         write_pipeline_rig(home, "plain-rig", component.path(), &log_path, None);
 
-        let (_output, exit_code) = run(
-            run_args(None, vec!["plain-rig".to_string()], Vec::new()),
-            &GlobalArgs {},
-        )
-        .expect("bench should run");
+        let (_output, exit_code) = run(run_args(None, vec!["plain-rig".to_string()], Vec::new()))
+            .expect("bench should run");
 
         assert_eq!(exit_code, 0);
         assert_eq!(log_lines(&log_path), vec!["check", "workload"]);
@@ -162,10 +160,11 @@ fn failing_bench_prepare_aborts_before_check_and_workload() {
             )),
         );
 
-        let error = match run(
-            run_args(None, vec!["failing-prep-rig".to_string()], Vec::new()),
-            &GlobalArgs {},
-        ) {
+        let error = match run(run_args(
+            None,
+            vec!["failing-prep-rig".to_string()],
+            Vec::new(),
+        )) {
             Ok(_) => panic!("bench should fail before workload"),
             Err(error) => error,
         };
@@ -213,14 +212,11 @@ fn failing_bench_prepare_requirement_reports_context() {
         )
         .expect("write rig");
 
-        let error = match run(
-            run_args(
-                None,
-                vec!["failing-requirement-rig".to_string()],
-                Vec::new(),
-            ),
-            &GlobalArgs {},
-        ) {
+        let error = match run(run_args(
+            None,
+            vec!["failing-requirement-rig".to_string()],
+            Vec::new(),
+        )) {
             Ok(_) => panic!("bench should fail before workload"),
             Err(error) => error.to_string(),
         };
@@ -279,14 +275,11 @@ fn bench_prepare_materializes_check_requirement_prepare_commands_before_check() 
         )
         .expect("write rig");
 
-        let (_output, exit_code) = run(
-            run_args(
-                None,
-                vec!["check-requirement-prepare-rig".to_string()],
-                Vec::new(),
-            ),
-            &GlobalArgs {},
-        )
+        let (_output, exit_code) = run(run_args(
+            None,
+            vec!["check-requirement-prepare-rig".to_string()],
+            Vec::new(),
+        ))
         .expect("bench should run");
 
         assert_eq!(exit_code, 0);
@@ -315,7 +308,7 @@ fn bench_list_rig_discovers_scenarios_without_preflight_or_bench_prepare() {
             None,
             vec!["list-rig".to_string()],
         )));
-        let (output, exit_code) = run(args, &GlobalArgs {}).expect("bench list should run");
+        let (output, exit_code) = run(args).expect("bench list should run");
 
         assert_eq!(exit_code, 0);
         match output {

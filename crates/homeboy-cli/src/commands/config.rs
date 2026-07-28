@@ -60,7 +60,7 @@ pub struct ConfigOutput {
     deleted: Option<bool>,
 }
 
-pub fn run(args: ConfigArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<ConfigOutput> {
+pub fn run(args: ConfigArgs) -> CmdResult<ConfigOutput> {
     match args.command {
         ConfigCommand::Show { builtin } => show(builtin),
         ConfigCommand::Set {

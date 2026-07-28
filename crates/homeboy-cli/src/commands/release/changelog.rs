@@ -51,10 +51,7 @@ pub fn is_show_markdown(args: &ChangelogArgs) -> bool {
     matches!(args.command, Some(ChangelogCommand::Show { .. })) || args.command.is_none()
 }
 
-pub fn run(
-    args: ChangelogArgs,
-    _global: &crate::commands::GlobalArgs,
-) -> CmdResult<ChangelogOutput> {
+pub fn run(args: ChangelogArgs) -> CmdResult<ChangelogOutput> {
     match &args.command {
         None => {
             let (out, code) = show_homeboy_json()?;

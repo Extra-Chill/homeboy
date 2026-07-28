@@ -41,7 +41,7 @@ pub enum UndoOutput {
     Delete { id: String, deleted: bool },
 }
 
-pub fn run(args: UndoArgs, _global: &super::GlobalArgs) -> CmdResult<UndoOutput> {
+pub fn run(args: UndoArgs) -> CmdResult<UndoOutput> {
     match args.command {
         Some(UndoCommand::List) => {
             let snapshots = undo::list_snapshots()?;

@@ -48,18 +48,12 @@ pub struct VersionShowOutput {
     targets: Vec<VersionTargetInfo>,
 }
 
-pub fn run(
-    args: VersionArgs,
-    _global: &crate::commands::GlobalArgs,
-) -> crate::commands::CmdResult<VersionOutput> {
+pub fn run(args: VersionArgs) -> crate::commands::CmdResult<VersionOutput> {
     let VersionCommand::Show { component_id, path } = args.command;
     show(VersionShowArgs { component_id, path })
 }
 
-pub fn run_command(
-    command: VersionCommand,
-    _global: &crate::commands::GlobalArgs,
-) -> CmdResult<VersionOutput> {
+pub fn run_command(command: VersionCommand) -> CmdResult<VersionOutput> {
     let VersionCommand::Show { component_id, path } = command;
     show(VersionShowArgs { component_id, path })
 }

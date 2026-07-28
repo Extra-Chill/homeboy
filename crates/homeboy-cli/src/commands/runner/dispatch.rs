@@ -17,10 +17,7 @@ use super::{
     workspace,
 };
 
-pub fn run(
-    args: RunnerArgs,
-    _global: &crate::commands::GlobalArgs,
-) -> CmdResult<RunnerCommandOutput> {
+pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
     match args.command {
         RunnerCommand::Add {
             json,
@@ -323,7 +320,7 @@ pub fn run(
     }
 }
 
-pub fn run_command_output(args: RunnerArgs, _global: &super::super::GlobalArgs) -> CommandRun {
+pub fn run_command_output(args: RunnerArgs) -> CommandRun {
     crate::commands::utils::tty::status("homeboy is working...");
 
     match args.command {

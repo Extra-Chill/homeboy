@@ -1,6 +1,5 @@
 use super::{resolve_multi_args, run, DeployArgs};
 use crate::cli_surface::{Cli, Commands};
-use crate::commands::GlobalArgs;
 use clap::Parser;
 use std::collections::BTreeMap;
 
@@ -12,7 +11,6 @@ fn deploy_head_requires_apply_for_real_deploy() {
             args.component_ids = vec!["component-a".to_string()];
             args.head = true;
         }),
-        &GlobalArgs {},
     );
 
     let err = match result {
@@ -32,7 +30,6 @@ fn deploy_force_requires_apply_for_real_deploy() {
             args.component_ids = vec!["component-a".to_string()];
             args.force = true;
         }),
-        &GlobalArgs {},
     );
 
     let err = match result {
@@ -53,7 +50,6 @@ fn deploy_head_dry_run_does_not_require_apply() {
             args.head = true;
             args.dry_run = true;
         }),
-        &GlobalArgs {},
     );
 
     let err = match result {
@@ -71,7 +67,6 @@ fn deploy_ref_requires_apply_for_real_deploy() {
             args.component_ids = vec!["component-a".to_string()];
             args.requested_ref = Some("accepted-commit".to_string());
         }),
-        &GlobalArgs {},
     );
 
     let err = match result {
@@ -149,7 +144,7 @@ fn release_set_rejects_multi_target_modes() {
         let Commands::Deploy(args) = cli.command else {
             panic!("expected deploy command");
         };
-        let error = match run(args, &GlobalArgs {}) {
+        let error = match run(args) {
             Ok(_) => panic!("release-set multi-target deploy must be rejected"),
             Err(error) => error,
         };
@@ -169,7 +164,7 @@ fn release_set_requires_apply_before_preflight() {
         args.release_set = Some(manifest.path().display().to_string());
     });
 
-    let error = match run(args, &GlobalArgs {}) {
+    let error = match run(args) {
         Ok(_) => panic!("release set must require --apply"),
         Err(error) => error,
     };
@@ -183,7 +178,6 @@ fn release_set_check_is_rejected_before_ref_resolution_or_materialization() {
             args.release_set = Some("not-read.json".to_string());
             args.check = true;
         }),
-        &GlobalArgs {},
     );
     let error = match result {
         Ok(_) => panic!("release-set check must be rejected before it reads or mutates a source checkout"),

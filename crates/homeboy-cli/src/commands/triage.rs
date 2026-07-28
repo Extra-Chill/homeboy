@@ -144,7 +144,7 @@ enum TriageCommand {
     },
 }
 
-pub fn run(args: TriageArgs, _global: &super::GlobalArgs) -> CmdResult<TriageCommandOutput> {
+pub fn run(args: TriageArgs) -> CmdResult<TriageCommandOutput> {
     if !args.watch.is_empty() {
         let options = TriageWatchOptions {
             refs: args.watch,

@@ -16,7 +16,7 @@ use super::utils::response::{
     CommandActionableMetadata, CommandAgentTaskRef, CommandJobRef, CommandNextAction,
     CommandNextActionKind, CommandResultRefs, CommandRunRef,
 };
-use super::{CmdResult, GlobalArgs};
+use super::CmdResult;
 
 const TIMEOUT_EXIT_CODE: i32 = 124;
 
@@ -101,7 +101,7 @@ pub struct ActivityWatchOutput {
     pub notify: Option<NotifyOutcome>,
 }
 
-pub fn run(args: ActivityArgs, _global: &GlobalArgs) -> CmdResult<ActivityOutput> {
+pub fn run(args: ActivityArgs) -> CmdResult<ActivityOutput> {
     match args
         .command
         .unwrap_or(ActivityCommand::List(ActivityListArgs {

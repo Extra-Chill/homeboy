@@ -8,7 +8,7 @@ use crate::cli_surface::Commands;
 use crate::command_contract::CommandOutputFileMode;
 
 use crate::commands::utils::response::{self as output, CommandIdentity};
-use crate::commands::{review, trace, GlobalArgs};
+use crate::commands::{review, trace};
 
 #[derive(Debug)]
 pub(crate) struct CookOutputLease {
@@ -456,7 +456,6 @@ impl<'a> OutputService<'a> {
 pub fn run_command(
     command: Commands,
     spec: &'static crate::command_contract::CommandSpec,
-    global: &GlobalArgs,
     requested_output_file: Option<&str>,
     identity: &CommandIdentity,
 ) -> i32 {
@@ -464,12 +463,11 @@ pub fn run_command(
     let plan = command.response_plan(spec, output_file.is_some());
     let output_service = OutputService::new(output_file);
 
-    let run = match crate::commands::raw_output::prepare_command_run(command, global, plan.stdout) {
+    let run = match crate::commands::raw_output::prepare_command_run(command, plan.stdout) {
         crate::commands::raw_output::CommandRunPreparation::Handled(exit_code) => return exit_code,
         crate::commands::raw_output::CommandRunPreparation::Json(command) => {
             return output_service.emit_run(
-                run_json(*command, spec, global, plan.output_file, output_file)
-                    .with_identity(identity),
+                run_json(*command, spec, plan.output_file, output_file).with_identity(identity),
                 plan.output_file,
             );
         }
@@ -534,14 +532,13 @@ pub fn command_runtime_output_file<'a>(
 pub fn run_json(
     command: Commands,
     spec: &crate::command_contract::CommandSpec,
-    global: &GlobalArgs,
     mode: CommandOutputFileMode,
     output_file: Option<&str>,
 ) -> CommandRun {
     match (mode, command) {
         (CommandOutputFileMode::TraceJsonSummaryArtifact, Commands::Trace(args)) => {
             let (stdout_result, exit_code, output_file_result) =
-                trace::run_json_with_output_artifact(args, global);
+                trace::run_json_with_output_artifact(args);
 
             CommandRun {
                 command: "trace".to_string(),
@@ -555,7 +552,7 @@ pub fn run_json(
             }
         }
         (_, command) => {
-            crate::commands::json_output::run_command_output(command, spec, global, output_file)
+            crate::commands::json_output::run_command_output(command, spec, output_file)
         }
     }
 }

@@ -143,7 +143,7 @@ struct RefsTarget {
     path: Option<String>,
 }
 
-pub fn run(args: RefsArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<RefsOutput> {
+pub fn run(args: RefsArgs) -> CmdResult<RefsOutput> {
     let targets = resolve_targets(&args)?;
     let scope = RenameScope::from_str(&args.scope)?;
     let rename_context = RenameContext::from_str(&args.context)?;
@@ -543,7 +543,7 @@ mod tests {
             exclude: Vec::new(),
             context: "all".to_string(),
         };
-        let (output, exit_code) = run(args, &crate::commands::GlobalArgs {}).expect("refs run");
+        let (output, exit_code) = run(args).expect("refs run");
 
         assert_eq!(exit_code, 0);
         let RefsOutput::Single(report) = output else {

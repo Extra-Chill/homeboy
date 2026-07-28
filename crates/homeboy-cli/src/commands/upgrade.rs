@@ -3,7 +3,7 @@ use homeboy_upgrade::upgrade;
 use serde_json::Value;
 use std::path::PathBuf;
 
-use crate::commands::{CmdResult, GlobalArgs};
+use crate::commands::CmdResult;
 
 #[derive(Args)]
 pub struct UpgradeArgs {
@@ -49,7 +49,7 @@ pub struct UpgradeArgs {
     pub source_path: Option<PathBuf>,
 }
 
-pub fn run(args: UpgradeArgs, _global: &GlobalArgs) -> CmdResult<Value> {
+pub fn run(args: UpgradeArgs) -> CmdResult<Value> {
     if args.check {
         let result = upgrade::check_for_updates()?;
         let json = serde_json::to_value(result)

@@ -109,7 +109,7 @@ pub struct ControllerRuntimePruneOutput {
     removed: Vec<String>,
 }
 
-pub fn run(args: RuntimeArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<RuntimeOutput> {
+pub fn run(args: RuntimeArgs) -> CmdResult<RuntimeOutput> {
     match args.command {
         RuntimeCommand::Helper { command } => match command {
             RuntimeHelperCommand::Path { helper, .. } => helper_path(&helper),

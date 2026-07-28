@@ -71,7 +71,7 @@ fn cross_rig_default_runs_rigs_sequentially() {
         );
         args.run.shared_state = Some(shared_state.path().to_path_buf());
 
-        let (_output, exit_code) = run(args, &GlobalArgs {}).expect("cross-rig bench should run");
+        let (_output, exit_code) = run(args).expect("cross-rig bench should run");
 
         assert_eq!(exit_code, 0);
         assert_eq!(
@@ -99,7 +99,7 @@ fn cross_rig_concurrency_runs_rigs_in_parallel() {
         args.run.shared_state = Some(shared_state.path().to_path_buf());
         args.run.rig_concurrency = 2;
 
-        let (output, exit_code) = run(args, &GlobalArgs {}).expect("cross-rig bench should run");
+        let (output, exit_code) = run(args).expect("cross-rig bench should run");
 
         assert_eq!(exit_code, 0);
         let BenchOutput::Comparison(result) = output else {

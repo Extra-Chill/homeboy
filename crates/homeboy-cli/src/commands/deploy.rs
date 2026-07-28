@@ -165,7 +165,6 @@ pub enum DeployCommandOutput {
 
 pub fn run(
     mut args: DeployArgs,
-    _global: &crate::commands::GlobalArgs,
 ) -> CmdResult<DeployCommandOutput> {
     if args.release_set.is_some() && (args.projects.is_some() || args.fleet.is_some() || args.shared)
     {

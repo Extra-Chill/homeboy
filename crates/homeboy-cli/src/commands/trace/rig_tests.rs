@@ -98,10 +98,11 @@ fn rig_trace_run_fails_fast_on_active_default_namespace_resource_lease() {
             .expect("acquire active trace lease")
             .expect("resourceful trace rig leases");
 
-        let error = match run(
-            trace_args_for_rig("studio-alt", "studio", "studio-app-create-site"),
-            &GlobalArgs {},
-        ) {
+        let error = match run(trace_args_for_rig(
+            "studio-alt",
+            "studio",
+            "studio-app-create-site",
+        )) {
             Ok(_) => panic!("trace should fail before running with conflicting rig resources"),
             Err(error) => error,
         };

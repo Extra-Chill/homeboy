@@ -21,7 +21,7 @@ use super::utils::args::{
     PositionalComponentArgs, SettingArgs,
 };
 use super::utils::response::actionable_metadata_value_for_run_ref;
-use super::{CmdResult, GlobalArgs};
+use super::CmdResult;
 use crate::command_contract::{LabCommandContract, TEST_LAB_LABEL};
 use crate::core::observation::ObservedWorkflowRunner;
 use homeboy::core::validation_progress::validation_progress_metadata;
@@ -133,7 +133,7 @@ fn filter_homeboy_flags(args: &[String]) -> Vec<String> {
     filter_passthrough_args(PassthroughCommand::Test, args)
 }
 
-pub fn run(args: TestArgs, _global: &GlobalArgs) -> CmdResult<TestCommandOutput> {
+pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
     let source_ctx = resolve_source_context(
         &args.comp,
         &args.setting_args,

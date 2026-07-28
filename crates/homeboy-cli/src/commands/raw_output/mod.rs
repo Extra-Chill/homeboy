@@ -3,9 +3,7 @@ use crate::command_contract::{CommandRawOutputMode, CommandStdoutMode};
 
 use super::output_runtime::{CommandPresentation, CommandRun};
 use super::utils::{response as output, tty};
-use super::{
-    file, release, report, review, runner, runs, runtime, self_cmd, ssh, trace, GlobalArgs,
-};
+use super::{file, release, report, review, runner, runs, runtime, self_cmd, ssh, trace};
 
 pub enum RawExecution {
     Handled(i32),
@@ -18,11 +16,7 @@ pub enum CommandRunPreparation {
     Raw(CommandRun),
 }
 
-pub fn prepare_command_run(
-    command: Commands,
-    global: &GlobalArgs,
-    mode: CommandStdoutMode,
-) -> CommandRunPreparation {
+pub fn prepare_command_run(command: Commands, mode: CommandStdoutMode) -> CommandRunPreparation {
     match mode {
         CommandStdoutMode::JsonEnvelope => CommandRunPreparation::Json(Box::new(command)),
         CommandStdoutMode::Raw(CommandRawOutputMode::InteractivePassthrough) => {
@@ -32,26 +26,22 @@ pub fn prepare_command_run(
             }
         }
         CommandStdoutMode::Raw(raw_mode) => {
-            let raw_run = run(command, global, raw_mode)
+            let raw_run = run(command, raw_mode)
                 .expect("markdown and plain-text modes should return raw output");
             CommandRunPreparation::Raw(raw_run)
         }
     }
 }
 
-pub fn run(
-    command: Commands,
-    global: &GlobalArgs,
-    mode: CommandRawOutputMode,
-) -> Option<CommandRun> {
+pub fn run(command: Commands, mode: CommandRawOutputMode) -> Option<CommandRun> {
     match mode {
         CommandRawOutputMode::InteractivePassthrough => None,
-        CommandRawOutputMode::Markdown => Some(run_markdown(command, global)),
-        CommandRawOutputMode::PlainText => Some(run_plain_text(command, global)),
+        CommandRawOutputMode::Markdown => Some(run_markdown(command)),
+        CommandRawOutputMode::PlainText => Some(run_plain_text(command)),
     }
 }
 
-fn run_markdown(command: Commands, global: &GlobalArgs) -> CommandRun {
+fn run_markdown(command: Commands) -> CommandRun {
     match command {
         Commands::SelfCmd(args) => raw_stdout_only(self_cmd::run_docs_markdown(args)),
         Commands::Release(args) => match args.markdown_changelog_args() {
@@ -60,17 +50,17 @@ fn run_markdown(command: Commands, global: &GlobalArgs) -> CommandRun {
             }
             None => raw_stdout_only(unsupported_output("markdown")),
         },
-        Commands::Review(args) => review::raw_output::run_markdown_with_json(args, global),
-        Commands::Trace(args) => trace::run_markdown_with_json_artifact(args, global),
-        Commands::Runs(args) => raw_stdout_only(runs::run_markdown(args, global)),
+        Commands::Review(args) => review::raw_output::run_markdown_with_json(args),
+        Commands::Trace(args) => trace::run_markdown_with_json_artifact(args),
+        Commands::Runs(args) => raw_stdout_only(runs::run_markdown(args)),
         Commands::Report(args) => raw_stdout_only(report::run_markdown(args)),
         _ => raw_stdout_only(unsupported_output("markdown")),
     }
 }
 
-fn run_plain_text(command: Commands, global: &GlobalArgs) -> CommandRun {
+fn run_plain_text(command: Commands) -> CommandRun {
     match command {
-        Commands::File(args) => raw_stdout_only(match file::run(args, global) {
+        Commands::File(args) => raw_stdout_only(match file::run(args) {
             Ok((file::FileCommandOutput::Raw(content), exit_code)) => Ok((content, exit_code)),
             Ok(_) => Err(homeboy::core::Error::internal_unexpected(
                 "Unexpected output type for raw mode",
@@ -78,7 +68,7 @@ fn run_plain_text(command: Commands, global: &GlobalArgs) -> CommandRun {
             Err(err) => Err(err),
         }),
         Commands::Runner(args) if runner::is_compact_exec_stdout(&args) => {
-            runner_compact_exec(args, global)
+            runner_compact_exec(args)
         }
         Commands::Ssh(args) => ssh_raw(args),
         Commands::Runtime(args) => raw_stdout_only(runtime::run_plain_text(args)),
@@ -102,11 +92,8 @@ fn ssh_raw(args: ssh::SshArgs) -> CommandRun {
     }
 }
 
-fn runner_compact_exec(
-    args: crate::commands::runner::RunnerArgs,
-    global: &GlobalArgs,
-) -> CommandRun {
-    runner::run_plain_text_raw(args, global)
+fn runner_compact_exec(args: crate::commands::runner::RunnerArgs) -> CommandRun {
+    runner::run_plain_text_raw(args)
 }
 
 pub fn raw_stdout_only(result: homeboy::core::Result<(String, i32)>) -> CommandRun {
@@ -154,7 +141,6 @@ mod tests {
                     crate::commands::manifest::ManifestArgs {},
                 ),
             }),
-            &GlobalArgs {},
             CommandRawOutputMode::InteractivePassthrough,
         );
 

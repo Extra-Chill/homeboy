@@ -305,7 +305,7 @@ struct RefactorTargetArgs {
     path: Option<String>,
 }
 
-pub fn run(args: RefactorArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<RefactorOutput> {
+pub fn run(args: RefactorArgs) -> CmdResult<RefactorOutput> {
     match args.command {
         None => run_refactor_sources(
             args.comp.as_ref(),

@@ -165,7 +165,7 @@ pub struct FleetExtra {
 
 pub type FleetOutput = EntityCrudOutput<Fleet, FleetExtra>;
 
-pub fn run(args: FleetArgs, _global: &super::GlobalArgs) -> CmdResult<FleetOutput> {
+pub fn run(args: FleetArgs) -> CmdResult<FleetOutput> {
     match args.command {
         FleetCommand::Create {
             id,
@@ -203,8 +203,8 @@ pub(crate) fn adapter(
         .with_lab_contract(lab_contract)
 }
 
-fn run_json(args: FleetArgs, global: &super::GlobalArgs) -> adapter::JsonHandlerResult {
-    crate::commands::utils::response::map_cmd_result_to_json(run(args, global))
+fn run_json(args: FleetArgs) -> adapter::JsonHandlerResult {
+    crate::commands::utils::response::map_cmd_result_to_json(run(args))
 }
 
 fn lab_contract(args: &FleetArgs) -> Option<LabCommandContract> {

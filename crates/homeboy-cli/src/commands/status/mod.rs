@@ -34,7 +34,7 @@ pub use types::{
 };
 use types::{StatusProgress, StatusTimer, READY_TO_DEPLOY_NOTE, UNRELEASED_MERGES_NOTE};
 
-pub fn run(args: StatusArgs, _global: &super::GlobalArgs) -> CmdResult<StatusResult> {
+pub fn run(args: StatusArgs) -> CmdResult<StatusResult> {
     // Refreshing remote refs changes Git metadata, so serialize it with other
     // runtime mutations. Default status is intentionally snapshot-only.
     let _refresh_lease = args
@@ -539,7 +539,6 @@ mod tests {
     use super::git_cache::{component_cache_key, default_origin_branch, upstream_drift_cache_key};
     use super::*;
     use crate::cli_surface::{Cli, Commands};
-    use crate::commands::GlobalArgs;
     use clap::Parser;
     use std::env;
     use std::fs;
@@ -879,7 +878,7 @@ mod tests {
         let (_dir, repo) = make_git_repo("external-repo");
         let args = status_args(None, repo.to_string_lossy().to_string(), false);
 
-        let (result, code) = run(args, &GlobalArgs {}).expect("status --path succeeds");
+        let (result, code) = run(args).expect("status --path succeeds");
 
         assert_eq!(code, 0);
         match result {
@@ -899,7 +898,7 @@ mod tests {
         env::set_current_dir(dir.path()).expect("set unregistered cwd");
 
         let started = Instant::now();
-        let result = run(default_status_args(), &GlobalArgs {});
+        let result = run(default_status_args());
         let elapsed = started.elapsed();
 
         env::set_current_dir(original_cwd).expect("restore cwd");
@@ -1039,7 +1038,7 @@ mod tests {
             true,
         );
 
-        let (result, code) = run(args, &GlobalArgs {}).expect("status <id> --path --full succeeds");
+        let (result, code) = run(args).expect("status <id> --path --full succeeds");
 
         assert_eq!(code, 0);
         match result {

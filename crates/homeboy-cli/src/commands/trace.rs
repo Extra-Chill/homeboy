@@ -18,7 +18,7 @@ use homeboy_extension::trace::{
 use homeboy_extension::ExtensionCapability;
 
 use super::utils::args::{BaselineArgs, PositionalComponentArgs, SettingArgs};
-use super::{CmdResult, GlobalArgs};
+use super::CmdResult;
 use crate::command_contract::{
     CommandPortabilityContract, LabCommandContract, LabWorkspaceModePolicy,
     LAB_TRACE_EXTRA_CAPABILITIES, LAB_TRACE_SECRET_ENV_SOURCES, TRACE_LAB_LABEL,
@@ -286,15 +286,12 @@ pub fn is_markdown_mode(args: &TraceArgs) -> bool {
     args.report.as_deref() == Some("markdown")
 }
 
-pub fn run_markdown(args: TraceArgs, global: &GlobalArgs) -> CmdResult<String> {
-    let (output, exit_code) = run(args, global)?;
+pub fn run_markdown(args: TraceArgs) -> CmdResult<String> {
+    let (output, exit_code) = run(args)?;
     Ok((render_markdown_output(&output), exit_code))
 }
 
-pub fn run_markdown_with_json_artifact(
-    args: TraceArgs,
-    _global: &GlobalArgs,
-) -> super::output_runtime::CommandRun {
+pub fn run_markdown_with_json_artifact(args: TraceArgs) -> super::output_runtime::CommandRun {
     let output_to_json = |output: &TraceCommandOutput| {
         serde_json::to_value(output).map_err(|err| {
             homeboy::core::Error::internal_json(
@@ -369,14 +366,13 @@ fn render_markdown_output(output: &TraceCommandOutput) -> String {
     }
 }
 
-pub fn run(args: TraceArgs, _global: &GlobalArgs) -> CmdResult<TraceCommandOutput> {
+pub fn run(args: TraceArgs) -> CmdResult<TraceCommandOutput> {
     let ((stdout_output, _artifact_output), exit_code) = run_outputs(args)?;
     Ok((stdout_output, exit_code))
 }
 
 pub fn run_json_with_output_artifact(
     args: TraceArgs,
-    _global: &GlobalArgs,
 ) -> (
     homeboy::core::Result<serde_json::Value>,
     i32,

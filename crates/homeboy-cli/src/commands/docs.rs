@@ -89,7 +89,7 @@ pub fn run_markdown(args: DocsArgs) -> CmdResult<String> {
 }
 
 /// JSON output mode (map subcommand)
-pub fn run(args: DocsArgs, _global: &super::GlobalArgs) -> CmdResult<DocsOutput> {
+pub fn run(args: DocsArgs) -> CmdResult<DocsOutput> {
     match args.command {
         Some(DocsCommand::Map {
             component_id,

@@ -9,14 +9,11 @@ fn cross_rig_run_passes_selector_to_each_rig() {
         write_rig(home, "rig-a", "studio", component_a.path());
         write_rig(home, "rig-b", "studio", component_b.path());
 
-        let (output, exit_code) = run(
-            run_args(
-                None,
-                vec!["rig-a".to_string(), "rig-b".to_string()],
-                vec!["rig-slow".to_string()],
-            ),
-            &GlobalArgs {},
-        )
+        let (output, exit_code) = run(run_args(
+            None,
+            vec!["rig-a".to_string(), "rig-b".to_string()],
+            vec!["rig-slow".to_string()],
+        ))
         .expect("cross-rig selected bench should run");
 
         assert_eq!(exit_code, 0);
@@ -50,8 +47,7 @@ fn cross_rig_json_summary_omits_full_results_payload() {
         );
         args.run.json_summary = true;
 
-        let (output, exit_code) =
-            run(args, &GlobalArgs {}).expect("cross-rig selected bench summary should run");
+        let (output, exit_code) = run(args).expect("cross-rig selected bench summary should run");
 
         assert_eq!(exit_code, 0);
         match output {
@@ -88,8 +84,8 @@ fn cross_rig_reverse_order_flips_reference_and_execution_order() {
         );
         args.run.rig_order = BenchRigOrder::Reverse;
 
-        let (output, exit_code) = run(args, &GlobalArgs {})
-            .expect("cross-rig selected bench should run in reverse order");
+        let (output, exit_code) =
+            run(args).expect("cross-rig selected bench should run in reverse order");
 
         assert_eq!(exit_code, 0);
         match output {
@@ -119,7 +115,7 @@ fn cross_rig_runs_preserve_run_level_summaries_after_selection() {
         args.run.runs = 3;
 
         let (output, exit_code) =
-            run(args, &GlobalArgs {}).expect("cross-rig selected bench should run multiple runs");
+            run(args).expect("cross-rig selected bench should run multiple runs");
 
         assert_eq!(exit_code, 0);
         match output {
@@ -162,14 +158,11 @@ fn cross_rig_profile_requires_every_rig_to_define_profile() {
             r#"{ "smoke": ["rig-slow"] }"#,
         );
 
-        let err = match run(
-            run_args_with_profile(
-                None,
-                vec!["rig-a".to_string(), "rig-b".to_string()],
-                "substrate",
-            ),
-            &GlobalArgs {},
-        ) {
+        let err = match run(run_args_with_profile(
+            None,
+            vec!["rig-a".to_string(), "rig-b".to_string()],
+            "substrate",
+        )) {
             Ok(_) => panic!("missing cross-rig profile should fail"),
             Err(err) => err,
         };
@@ -202,14 +195,11 @@ fn cross_rig_profile_selects_profile_for_each_rig() {
             r#"{ "substrate": ["rig-slow"] }"#,
         );
 
-        let (output, exit_code) = run(
-            run_args_with_profile(
-                None,
-                vec!["rig-a".to_string(), "rig-b".to_string()],
-                "substrate",
-            ),
-            &GlobalArgs {},
-        )
+        let (output, exit_code) = run(run_args_with_profile(
+            None,
+            vec!["rig-a".to_string(), "rig-b".to_string()],
+            "substrate",
+        ))
         .expect("cross-rig profile bench should run");
 
         assert_eq!(exit_code, 0);
@@ -317,14 +307,11 @@ fn cross_rig_profile_uses_enclosing_local_rig_package() {
         .expect("write local rig b profile");
         std::env::set_current_dir(local_package.path()).expect("enter local package");
 
-        let result = run(
-            run_args_with_profile(
-                None,
-                vec!["rig-a".to_string(), "rig-b".to_string()],
-                "substrate",
-            ),
-            &GlobalArgs {},
-        );
+        let result = run(run_args_with_profile(
+            None,
+            vec!["rig-a".to_string(), "rig-b".to_string()],
+            "substrate",
+        ));
         std::env::set_current_dir(&original_dir).expect("restore current dir");
         let (output, exit_code) = result.expect("cross-rig local package profile should run");
 

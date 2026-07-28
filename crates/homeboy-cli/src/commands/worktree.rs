@@ -170,7 +170,7 @@ pub struct WorktreeCleanupCommandOutput {
     pub deprecated_flag: Option<&'static str>,
 }
 
-pub fn run(args: WorktreeArgs, _global: &super::GlobalArgs) -> CmdResult<WorktreeOutput> {
+pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
     let output = match args.command {
         WorktreeCommand::Create {
             component_id,

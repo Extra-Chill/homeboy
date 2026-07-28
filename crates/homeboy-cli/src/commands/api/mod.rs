@@ -93,10 +93,10 @@ pub enum ApiCommandOutput {
     Http(homeboy::core::http_request::HttpRequestOutput),
 }
 
-pub fn run(args: ApiArgs, global: &crate::commands::GlobalArgs) -> CmdResult<ApiCommandOutput> {
+pub fn run(args: ApiArgs) -> CmdResult<ApiCommandOutput> {
     match args.command {
-        ApiCommand::Auth(args) => map_nested(auth::run(args, global), ApiCommandOutput::Auth),
-        ApiCommand::Http(args) => map_nested(http::run(args, global), ApiCommandOutput::Http),
+        ApiCommand::Auth(args) => map_nested(auth::run(args), ApiCommandOutput::Auth),
+        ApiCommand::Http(args) => map_nested(http::run(args), ApiCommandOutput::Http),
         command => run_project(ApiArgs { command })
             .map(|(output, code)| (ApiCommandOutput::Project(output), code)),
     }

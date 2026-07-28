@@ -33,10 +33,7 @@ pub fn is_compact_exec_stdout(args: &RunnerArgs) -> bool {
     args.compact_exec_stdout()
 }
 
-pub fn run_plain_text_raw(
-    args: RunnerArgs,
-    _global: &super::GlobalArgs,
-) -> super::output_runtime::CommandRun {
+pub fn run_plain_text_raw(args: RunnerArgs) -> super::output_runtime::CommandRun {
     match args.command {
         cli::RunnerCommand::Exec {
             id,

@@ -20,7 +20,7 @@ use super::utils::args::{
     PositionalComponentArgs, SettingArgs,
 };
 use super::utils::response::actionable_metadata_value_for_run_ref;
-use super::{CmdResult, GlobalArgs};
+use super::CmdResult;
 use crate::command_contract::{
     CommandJsonFamily, CommandOutputDescriptor, CommandOutputFileMode, CommandPortabilityContract,
     LabCommandContract, BENCH_LAB_LABEL,
@@ -441,7 +441,7 @@ impl RigRunBenchOptions {
 }
 
 pub(crate) fn run_rig_profile(options: RigRunBenchOptions) -> CmdResult<BenchOutput> {
-    run(options.into_bench_args(), &GlobalArgs {})
+    run(options.into_bench_args())
 }
 
 fn attach_bench_actionable(output: &mut BenchOutput) {
@@ -563,7 +563,7 @@ pub enum BenchOutput {
     List(BenchListWorkflowResult),
 }
 
-pub fn run(mut args: BenchArgs, _global: &GlobalArgs) -> CmdResult<BenchOutput> {
+pub fn run(mut args: BenchArgs) -> CmdResult<BenchOutput> {
     if let Some(command) = &args.command {
         return match command {
             BenchCommand::Matrix(matrix_args) => {

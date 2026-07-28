@@ -41,7 +41,7 @@ mod tests;
 mod types;
 mod watch;
 
-use super::{CmdResult, GlobalArgs};
+use super::CmdResult;
 
 // Public command-layer API consumed by routing, raw/json output, rig, and bench.
 pub use dispatch::{global_runner_error, run, run_markdown};

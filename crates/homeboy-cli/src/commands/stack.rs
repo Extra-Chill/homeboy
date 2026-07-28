@@ -210,7 +210,7 @@ pub type StackPushOutput = CommandReport<PushOutput>;
 pub type StackDiffOutput = CommandReport<DiffOutput>;
 pub type StackInspectOutput = CommandReport<InspectOutput>;
 
-pub fn run(args: StackArgs, _global: &super::GlobalArgs) -> CmdResult<StackCommandOutput> {
+pub fn run(args: StackArgs) -> CmdResult<StackCommandOutput> {
     match args.command {
         StackCommand::List => list(),
         StackCommand::Show { stack_id } => show(&stack_id),

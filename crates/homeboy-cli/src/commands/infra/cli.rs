@@ -16,7 +16,7 @@ pub struct CliOutput {
     pub result: CliToolResult,
 }
 
-pub fn run(args: CliArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<CliOutput> {
+pub fn run(args: CliArgs) -> CmdResult<CliOutput> {
     let result = cli_tool::run(&args.tool, &args.identifier, &args.args)?;
     let exit_code = result.exit_code;
 

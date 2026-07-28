@@ -1,6 +1,5 @@
 use super::args::{EditArgs, FileModifications, LineOperations, PatternOperations};
 use super::{run, FileArgs, FileCommand, FileCommandOutput};
-use crate::commands::GlobalArgs;
 use crate::test_support::with_isolated_home;
 use std::path::Path;
 
@@ -40,7 +39,6 @@ fn file_read_json_includes_size_metadata() {
                     raw: false,
                 },
             },
-            &GlobalArgs {},
         )
     });
 
@@ -80,7 +78,6 @@ fn file_delete_without_apply_returns_plan_and_preserves_file() {
                     apply: false,
                 },
             },
-            &GlobalArgs {},
         )
     });
 
@@ -116,7 +113,6 @@ fn file_mkdir_without_apply_returns_plan_and_preserves_filesystem() {
                     apply: false,
                 },
             },
-            &GlobalArgs {},
         )
     });
 
@@ -155,7 +151,6 @@ fn file_rename_without_apply_returns_plan_and_preserves_filesystem() {
                     apply: false,
                 },
             },
-            &GlobalArgs {},
         )
     });
 
@@ -201,7 +196,6 @@ fn file_edit_dry_run_returns_preview_and_preserves_file() {
                     file_mods: FileModifications::default(),
                 }),
             },
-            &GlobalArgs {},
         )
     });
 
@@ -249,7 +243,6 @@ fn file_edit_without_dry_run_writes_file() {
                     file_mods: FileModifications::default(),
                 }),
             },
-            &GlobalArgs {},
         )
     });
 
@@ -293,7 +286,6 @@ fn file_edit_force_allows_first_replacement_when_pattern_has_multiple_matches() 
                     file_mods: FileModifications::default(),
                 }),
             },
-            &GlobalArgs {},
         )
     });
 
