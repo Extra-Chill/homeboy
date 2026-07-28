@@ -279,6 +279,11 @@ pub fn route_after_parse(
                     retry_handoff
                         .as_ref()
                         .map(|handoff| handoff.primary_workspace.as_path())
+                })
+                .or_else(|| {
+                    generic_detached_handoff
+                        .as_ref()
+                        .map(|handoff| handoff.source_path.as_path())
                 }),
             verified_cook_baseline: None,
             require_controller_git_bundle: false,
@@ -1066,6 +1071,7 @@ fn materialize_agent_task_cook_plan(
 struct GenericDetachedLabHandoff {
     run_id: String,
     plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+    source_path: PathBuf,
 }
 
 /// Give detached portable commands a controller-owned identity before Lab
@@ -1079,8 +1085,24 @@ fn materialize_generic_detached_lab_handoff(
         format!("lab-offload-{run_id}"),
         Vec::new(),
     );
-    agent_task_lifecycle::submit_plan(&plan, Some(&run_id))?;
-    Ok(GenericDetachedLabHandoff { run_id, plan })
+    if agent_task_lifecycle::run_record_exists(&run_id)? {
+        if agent_task_lifecycle::load_plan(&run_id)? != plan {
+            return Err(Error::validation_invalid_argument(
+                "run_id",
+                "detached Lab run id already belongs to a different immutable handoff",
+                Some(run_id),
+                None,
+            ));
+        }
+    } else {
+        agent_task_lifecycle::submit_plan(&plan, Some(&run_id))?;
+    }
+    let source_path = source_path_for_generic_detached_lab_handoff(args)?;
+    Ok(GenericDetachedLabHandoff {
+        run_id,
+        plan,
+        source_path,
+    })
 }
 
 fn explicit_run_id(args: &[String]) -> Option<String> {
@@ -1092,6 +1114,38 @@ fn explicit_run_id(args: &[String]) -> Option<String> {
                     .then(|| args.get(index + 1).cloned())
                     .flatten()
             })
+    })
+}
+
+fn source_path_for_generic_detached_lab_handoff(args: &[String]) -> homeboy::core::Result<PathBuf> {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            break;
+        }
+        if arg == "--path" || arg == "--cwd" {
+            let path = args.next().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "path",
+                    "Lab handoff source flag requires a value",
+                    None,
+                    None,
+                )
+            })?;
+            return Ok(PathBuf::from(shellexpand::tilde(path).to_string()));
+        }
+        if let Some(path) = arg
+            .strip_prefix("--path=")
+            .or_else(|| arg.strip_prefix("--cwd="))
+        {
+            return Ok(PathBuf::from(shellexpand::tilde(path).to_string()));
+        }
+    }
+    std::env::current_dir().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("read cwd for Lab handoff".to_string()),
+        )
     })
 }
 

@@ -164,7 +164,7 @@ impl LabStagingRecipe {
         let command = request.command.as_ref().ok_or_else(|| {
             Error::validation_invalid_argument(
                 "command",
-                "Lab staging requires a resolved agent-task Lab command",
+                "Lab staging requires a resolved portable Lab command",
                 None,
                 None,
             )
@@ -220,19 +220,16 @@ impl LabStagingRecipe {
     }
 
     fn validate(&self) -> Result<()> {
-        // Canonical argv may contain the executable and global options before
-        // the resolved subcommand token.
-        let normalized_agent_task = self.normalized_args.iter().any(|arg| arg == "agent-task");
         if self.schema != LAB_STAGING_RECIPE_SCHEMA
             || self.run_id.trim().is_empty()
             || self.runner_id.trim().is_empty()
             || !self.command.portable
-            || !self.command.hot_label.starts_with("agent-task")
-            || !normalized_agent_task
+            || self.normalized_args.is_empty()
+            || self.source_path.is_none()
         {
             return Err(Error::validation_invalid_argument(
                 "lab_staging_recipe",
-                "Lab staging requires its v1 schema, bound run and runner identities, and an agent-task command shape",
+                "Lab staging requires its v1 schema, bound run and runner identities, portable argv, and a controller source path",
                 None,
                 None,
             ));
@@ -3908,6 +3905,42 @@ mod tests {
             LabStagingCheckpoint::initial(&envelope).phase,
             LabStagingPhase::AcceptedMaterializeWorkspace
         );
+    }
+
+    #[test]
+    fn generic_bench_recipe_keeps_controller_source_private() {
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "--run-id".to_string(),
+            "ssi-fixture-37-20260727-runtime-fixed".to_string(),
+            "--path".to_string(),
+            "/controller/private/static-site-importer".to_string(),
+        ];
+        let mut command = recipe_command();
+        command.command = LabCommandContract::portable("bench", None, false, &[]);
+        let recipe = LabStagingRecipe::from_request(
+            "ssi-fixture-37-20260727-runtime-fixed",
+            "lab-1",
+            &recipe_request(Some(command), &args, HashMap::new()),
+        )
+        .expect("generic bench recipe is accepted");
+
+        assert_eq!(
+            recipe.source_path.as_deref(),
+            Some(std::path::Path::new("/work/source"))
+        );
+        let envelope = LabStagingDispatchEnvelope::new(
+            recipe.run_id.clone(),
+            recipe.runner_id.clone(),
+            LabStagingInputRef::AgentTaskAttempt {
+                run_id: recipe.run_id.clone(),
+                recipe: recipe_ref(),
+            },
+        );
+        let public = envelope.public_projection();
+        assert!(!public.to_string().contains("/controller/private"));
+        assert!(!public.to_string().contains("/work/source"));
     }
 
     #[test]
