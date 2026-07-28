@@ -315,8 +315,8 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# publish.sh: uses an external recovery ZIP supplied by Homeboy and returns
-# its absolute path in the receipt.
+# publish.sh: uses an untyped external recovery ZIP from Homeboy's directory
+# inventory and returns its absolute path in the receipt.
 # ---------------------------------------------------------------------------
 RECOVERY_DIR="$(mktemp -d -t homeboy-wp-release-recovery.XXXXXX)"
 trap 'rm -rf "${WORK_DIR}" "${STUB_BIN_DIR}" "${HAPPY_DIR}" "${BRANCH_DIR}" "${RECOVERY_DIR}"' EXIT
@@ -332,7 +332,7 @@ publish_out="$(
   cd "${RECOVERY_DIR}" && \
   PATH="${STUB_BIN_DIR}:${PATH}" \
   GITHUB_REPOSITORY="example/recovered-plugin" \
-  HOMEBOY_SETTINGS_JSON='{"release":{"tag":"v1.0.0","component_id":"recovered-plugin","artifacts":[{"path":"'"${RECOVERY_ZIP}"'","artifact_type":"wordpress-zip"}]}}' \
+  HOMEBOY_SETTINGS_JSON='{"release":{"tag":"v1.0.0","component_id":"recovered-plugin","artifacts":[{"path":"'"${RECOVERY_ZIP}"'","phase":"recovery","producer":"from-artifacts","publication_authority":true}]}}' \
   "${PUBLISH_SH}" 2>&1
 )"
 publish_status=$?
@@ -345,7 +345,7 @@ elif ! echo "${publish_out}" | tail -1 | jq -e --arg path "${RECOVERY_ZIP}" '.su
   echo "FAIL: publish.sh receipt did not return recovery ZIP path; got: ${publish_out}" >&2
   failures=$((failures + 1))
 else
-  echo "OK: publish.sh uses the supplied recovery ZIP"
+  echo "OK: publish.sh uses the untyped recovery ZIP"
 fi
 
 # publish.sh: multiple WordPress ZIP recovery artifacts must not silently
