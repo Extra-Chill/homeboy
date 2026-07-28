@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.27] - 2026-07-28
+
+### Fixed
+- let the differential gate tell a timeout from a test failure
+
 ## [2.8.26] - 2026-07-28
 
 ### Fixed
