@@ -541,6 +541,7 @@ _This command declares no clap help text, so no description can be generated for
 | --- | --- | --- |
 | `--new-run-id` | `<ID>` | _no help text_ |
 | `--run` | flag | _no help text_ |
+| `--force` | flag | Permit a new retry after every prior retry in this lineage is terminal |
 
 ## `homeboy agent-task fanout`
 
