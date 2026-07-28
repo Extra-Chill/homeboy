@@ -998,6 +998,7 @@ fn is_direct_changed_test_path(file: &str) -> bool {
         || path_lower.starts_with("test/")
         || path_lower.starts_with("__tests__/")
         || path_lower.contains("/tests/")
+        || path_lower.contains("/test/")
         || path_lower.contains("/__tests__/")
     {
         return true;
@@ -1085,11 +1086,19 @@ mod tests {
         );
         assert_eq!(
             changed_test_file_for_path("src/core/extension/test/mod.rs"),
-            None
+            Some("src/core/extension/test/mod.rs".to_string())
         );
         assert_eq!(
             changed_test_file_for_path("src/core/audit_test.rs"),
             Some("src/core/audit_test.rs".to_string())
+        );
+        assert_eq!(
+            changed_test_file_for_path("crates/homeboy-extension/src/test/report.rs"),
+            Some("crates/homeboy-extension/src/test/report.rs".to_string())
+        );
+        assert_eq!(
+            changed_test_file_for_path("crates/homeboy-extension/src/test/run.rs"),
+            Some("crates/homeboy-extension/src/test/run.rs".to_string())
         );
     }
 
