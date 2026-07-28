@@ -267,7 +267,7 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
 
     let mut cook_command = context.command(TestBinary::HomeboyFixture);
     cook_command
-        .env("PATH", path)
+        .env("PATH", &path)
         .env("HOMEBOY_CONTROLLER_ID", "fixture-controller")
         .args([
             "--runner",
@@ -329,6 +329,7 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
             let run_id = accepted["latest_run_id"].as_str().unwrap_or("unknown");
             let status = context
                 .command(TestBinary::HomeboyFixture)
+                .env("PATH", &path)
                 .args(["agent-task", "status", run_id])
                 .output()
                 .expect("inspect stalled controller parent");
@@ -460,6 +461,10 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
     let terminal = loop {
         let status = context
             .command(TestBinary::HomeboyFixture)
+            // A recorded-only reverse session makes `runner status` reach for
+            // its SSH recovery probe. Keep that on the fixture shim rather than
+            // letting a real `ssh` escape the hermetic context.
+            .env("PATH", &path)
             .args(["agent-task", "status", run_id])
             .output()
             .expect("read terminal parent status");
