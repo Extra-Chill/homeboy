@@ -206,6 +206,9 @@ impl CliRuntime {
             && !normalized
                 .windows(2)
                 .any(|args| args == ["agent-task", "promotion-provider"])
+            && !normalized
+                .windows(3)
+                .any(|args| args == ["agent-task", "tool", "dispatch"])
         {
             let _ = crate::runner::reconcile_terminal_runner_exec_runs();
         }
@@ -503,11 +506,14 @@ impl CliRuntime {
             }
         }
 
-        // This internal provider's request is carried on process stdin. Execute
-        // it before generic routing or startup work can consume that stream.
+        // These internal adapters carry their requests on process stdin. Execute
+        // them before generic routing or startup work can consume that stream.
         if let Some(exit_code) =
             run_promotion_provider_dispatch(&cli.command, output_file.as_deref(), &command_identity)
         {
+            return std::process::ExitCode::from(exit_code_to_u8(exit_code));
+        }
+        if let Some(exit_code) = run_raw_agent_tool_dispatch(&cli.command) {
             return std::process::ExitCode::from(exit_code_to_u8(exit_code));
         }
 
@@ -552,10 +558,6 @@ impl CliRuntime {
         crate::core::set_artifact_root_override(
             cli.artifact_root.clone().or(artifact_root_override),
         );
-
-        if let Some(exit_code) = run_raw_agent_tool_dispatch(&cli.command) {
-            return std::process::ExitCode::from(exit_code_to_u8(exit_code));
-        }
 
         run_startup_update_checks(&cli.command);
 
