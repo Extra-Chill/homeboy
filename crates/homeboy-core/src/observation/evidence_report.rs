@@ -21,12 +21,15 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{run_owner_pid, running_status_note, ArtifactRecord, RunRecord};
+use super::{run_owner_pid, running_status_note, ArtifactRecord, RunRecord, RunStatus};
 use crate::artifact_address::{ArtifactAddress, ArtifactAddressKind};
 use crate::artifact_preview::{html_preview_entrypoints, ArtifactPreviewEntrypoint};
 use crate::artifact_ref::{artifact_ref_from_record, ArtifactRef, EvidenceRef};
 use crate::artifacts::{generic_matrix_summary_from_artifacts, GenericMatrixSummary};
-use crate::evidence_manifest::{EvidenceManifest, TrackerRef, EVIDENCE_MANIFEST_SCHEMA};
+use crate::evidence_manifest::{
+    BlockingCondition, BlockingSeverity, EvidenceConfidence, EvidenceManifest,
+    EvidenceManifestSource, EvidenceManifestState, RunRef, TrackerRef, EVIDENCE_MANIFEST_SCHEMA,
+};
 use crate::observation::disk_budget::DiskBudget;
 
 /// Default retention window (days) surfaced in evidence retention guidance.
@@ -57,6 +60,10 @@ pub struct RunEvidenceReport<S: Serialize> {
     pub agent_task_lifecycle_event: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matrix_summary: Option<GenericMatrixSummary>,
+    /// The run's interpretation contract: what the evidence means and what is
+    /// blocking. Resolved from a producer-authored manifest when one is
+    /// attached, otherwise derived from this run record. Always present — check
+    /// `evidence_manifest.source` to tell an assertion from a derivation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence_manifest: Option<EvidenceManifest>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -110,9 +117,21 @@ pub fn build_run_evidence_report<S: Serialize>(
     let homeboy_provenance = evidence_homeboy_provenance(&run);
     let agent_task_lifecycle_event = evidence_agent_task_lifecycle_event(&run.metadata_json);
     let matrix_summary = evidence_matrix_summary(&run, &artifacts);
-    let (evidence_manifest, evidence_manifest_errors) = evidence_manifest(&run, &artifacts);
-    let tracker_refs = evidence_tracker_refs(&run.metadata_json, evidence_manifest.as_ref());
+    let (authored_manifest, evidence_manifest_errors) = evidence_manifest(&run, &artifacts);
+    // Tracker refs stay derived from the *authored* manifest only. A derived
+    // manifest copies this list, so folding it back in would double every ref.
+    let tracker_refs = evidence_tracker_refs(&run.metadata_json, authored_manifest.as_ref());
     let stale_reason = running_status_note(&run);
+    let evidence_manifest = Some(authored_manifest.unwrap_or_else(|| {
+        derive_evidence_manifest(EvidenceManifestDerivation {
+            run: &run,
+            artifacts: artifacts.as_slice(),
+            failure: &failure,
+            evidence_links: evidence_links.as_slice(),
+            tracker_refs: tracker_refs.as_slice(),
+            stale_reason: stale_reason.as_deref(),
+        })
+    }));
     let heartbeat = EvidenceHeartbeat {
         status: run.status.clone(),
         stale: stale_reason.is_some(),
@@ -782,11 +801,17 @@ pub fn evidence_matrix_summary(
     generic_matrix_summary_from_artifacts(&run.id, artifacts)
 }
 
-/// Resolve an embedded evidence manifest from run metadata or artifacts.
+/// Resolve a **producer-authored** evidence manifest from run metadata or
+/// artifacts.
 ///
 /// Returns the parsed manifest (if any) plus any non-fatal parse errors
 /// encountered while resolving candidates, preserving the original error
-/// message format.
+/// message format. `None` means no producer attached one — not that the run has
+/// no interpretation; see [`derive_evidence_manifest`].
+///
+/// The resolved manifest's `source` is stamped from the path it was found on,
+/// overwriting whatever the producer serialized. Provenance is the reader's to
+/// state, not the producer's to claim.
 pub fn evidence_manifest(
     run: &RunRecord,
     artifacts: &[ArtifactRecord],
@@ -794,7 +819,10 @@ pub fn evidence_manifest(
     let mut errors = Vec::new();
     if let Some(value) = run.metadata_json.get("evidence_manifest") {
         match EvidenceManifest::parse_value(value.clone()) {
-            Ok(manifest) => return (Some(manifest), errors),
+            Ok(mut manifest) => {
+                manifest.source = Some(EvidenceManifestSource::RunMetadata);
+                return (Some(manifest), errors);
+            }
             Err(err) => errors.push(format!("metadata.evidence_manifest: {err}")),
         }
     }
@@ -814,12 +842,261 @@ pub fn evidence_manifest(
             }
         };
         match EvidenceManifest::parse_value(value) {
-            Ok(manifest) => return (Some(manifest), errors),
+            Ok(mut manifest) => {
+                manifest.source = Some(EvidenceManifestSource::Artifact);
+                return (Some(manifest), errors);
+            }
             Err(err) => errors.push(format!("artifact.{}: {err}", artifact.id)),
         }
     }
 
     (None, errors)
+}
+
+/// Inputs [`derive_evidence_manifest`] reads. Grouped rather than passed
+/// positionally so adding a signal later is not a signature break for callers.
+pub struct EvidenceManifestDerivation<'a> {
+    pub run: &'a RunRecord,
+    pub artifacts: &'a [ArtifactRecord],
+    pub failure: &'a EvidenceFailureSummary,
+    /// Reviewer-visible evidence targets. Emptiness is the signal that a run
+    /// recorded artifacts nobody outside this machine can look at.
+    pub evidence_links: &'a [EvidenceLink],
+    pub tracker_refs: &'a [TrackerRef],
+    /// Set when the run holds a `running` record whose owner is gone.
+    pub stale_reason: Option<&'a str>,
+}
+
+/// Upper bound on derived blockers.
+///
+/// A manifest is meant to be lifted out of the report and carried around; a run
+/// with a thousand gate failures must not turn it into an unbounded payload.
+/// Truncation is announced in `interpretation.notes` rather than silent, and the
+/// full lists stay available on the report's `failure` block.
+const DERIVED_BLOCKING_CONDITION_LIMIT: usize = 20;
+
+/// Compose an interpretation contract from a run record when no producer
+/// attached one.
+///
+/// This is a mechanical reading, not a judgement, and it says so: the result
+/// carries `source: derived`, and a consumer that must not act on Homeboy's own
+/// reading of its own run can gate on
+/// [`EvidenceManifestSource::is_authored`](crate::evidence_manifest::EvidenceManifestSource::is_authored).
+///
+/// The mapping is conservative in both directions. An unrecognized status label
+/// becomes `unknown` rather than being guessed at, and a run recorded as passing
+/// that nonetheless carries a critical blocker is reported as `blocked`: a
+/// manifest that claims a pass while listing what stopped it is worse than no
+/// manifest, because a consumer reads `status.state` and stops there.
+pub fn derive_evidence_manifest(inputs: EvidenceManifestDerivation<'_>) -> EvidenceManifest {
+    let EvidenceManifestDerivation {
+        run,
+        artifacts,
+        failure,
+        evidence_links,
+        tracker_refs,
+        stale_reason,
+    } = inputs;
+
+    let status = RunStatus::from_label(&run.status);
+    let mut state = match status {
+        Some(RunStatus::Running) => EvidenceManifestState::Pending,
+        Some(RunStatus::Pass) => EvidenceManifestState::Passed,
+        Some(RunStatus::Fail) | Some(RunStatus::Error) => EvidenceManifestState::Failed,
+        Some(RunStatus::Stale) => EvidenceManifestState::Blocked,
+        Some(RunStatus::Skipped) | None => EvidenceManifestState::Unknown,
+    };
+    let terminal = matches!(
+        status,
+        Some(RunStatus::Pass) | Some(RunStatus::Fail) | Some(RunStatus::Error)
+    );
+
+    let mut notes = Vec::new();
+    let mut blocking_conditions = derived_blocking_conditions(
+        run,
+        failure,
+        status,
+        stale_reason,
+        terminal,
+        evidence_links.is_empty(),
+    );
+    if blocking_conditions.len() > DERIVED_BLOCKING_CONDITION_LIMIT {
+        notes.push(format!(
+            "{} more blocking conditions were omitted; read the run's failure block for the full list.",
+            blocking_conditions.len() - DERIVED_BLOCKING_CONDITION_LIMIT
+        ));
+        blocking_conditions.truncate(DERIVED_BLOCKING_CONDITION_LIMIT);
+    }
+
+    if state == EvidenceManifestState::Passed
+        && blocking_conditions
+            .iter()
+            .any(|condition| condition.severity == Some(BlockingSeverity::Critical))
+    {
+        state = EvidenceManifestState::Blocked;
+        notes.push(
+            "The run record reports a pass while also recording a critical blocker; the blocker wins."
+                .to_string(),
+        );
+    }
+
+    let confidence = if !terminal || artifacts.is_empty() {
+        EvidenceConfidence::Low
+    } else if evidence_links.is_empty() {
+        EvidenceConfidence::Medium
+    } else {
+        EvidenceConfidence::High
+    };
+
+    notes.push(
+        "Derived by Homeboy from the run record; no producer attached an evidence manifest."
+            .to_string(),
+    );
+    if let Some(reason) = stale_reason {
+        notes.push(reason.to_string());
+    }
+    if terminal && artifacts.is_empty() {
+        notes.push("The run recorded no artifacts, so it produced nothing reviewable.".to_string());
+    } else if terminal && evidence_links.is_empty() {
+        notes.push(
+            "Every recorded artifact is operator-local; fetch it with `homeboy runs artifact get` before citing it as evidence."
+                .to_string(),
+        );
+    }
+    notes.extend(failure.hints.iter().cloned());
+
+    let mut manifest = EvidenceManifest::new(
+        state,
+        derived_summary(run, failure, artifacts.len(), evidence_links.len()),
+    );
+    manifest.id = Some(run.id.clone());
+    manifest.title = run
+        .command
+        .clone()
+        .or_else(|| Some(format!("{} run {}", run.kind, run.id)));
+    manifest.source = Some(EvidenceManifestSource::Derived);
+    manifest.status.label = stale_reason.map(str::to_string);
+    manifest.status.updated_at = Some(
+        run.finished_at
+            .clone()
+            .unwrap_or_else(|| run.started_at.clone()),
+    );
+    manifest.interpretation.confidence = Some(confidence);
+    manifest.interpretation.notes = notes;
+    manifest.tracker_refs = tracker_refs.to_vec();
+    manifest.run_refs = vec![RunRef {
+        id: run.id.clone(),
+        kind: Some(run.kind.clone()),
+        component_id: run.component_id.clone(),
+        rig_id: run.rig_id.clone(),
+        url: None,
+    }];
+    manifest.artifact_refs = artifacts.iter().map(artifact_ref_from_record).collect();
+    manifest.blocking_conditions = blocking_conditions;
+    manifest
+}
+
+fn derived_summary(
+    run: &RunRecord,
+    failure: &EvidenceFailureSummary,
+    artifact_count: usize,
+    evidence_link_count: usize,
+) -> String {
+    let mut summary = format!(
+        "{} run {} recorded status `{}` with {artifact_count} artifact(s) and {evidence_link_count} reviewer-visible evidence link(s).",
+        run.kind, run.id, run.status
+    );
+    if let Some(error) = failure.error.as_deref() {
+        summary.push_str(&format!(" Recorded error: {error}"));
+    }
+    summary
+}
+
+fn derived_blocking_conditions(
+    run: &RunRecord,
+    failure: &EvidenceFailureSummary,
+    status: Option<RunStatus>,
+    stale_reason: Option<&str>,
+    terminal: bool,
+    no_reviewable_evidence: bool,
+) -> Vec<BlockingCondition> {
+    let refs = vec![run.id.clone()];
+    let mut conditions = Vec::new();
+
+    for gate in &failure.gate_failures {
+        conditions.push(BlockingCondition {
+            kind: "gate_failure".to_string(),
+            summary: gate.clone(),
+            severity: Some(BlockingSeverity::Critical),
+            refs: refs.clone(),
+        });
+    }
+    if let Some(error) = failure.error.as_deref() {
+        conditions.push(BlockingCondition {
+            kind: "run_error".to_string(),
+            summary: error.to_string(),
+            severity: Some(BlockingSeverity::Critical),
+            refs: refs.clone(),
+        });
+    }
+    if let Some(runner_failure) = failure.runner_failure.as_ref() {
+        let detail = runner_failure
+            .message
+            .clone()
+            .or_else(|| runner_failure.failure_code.clone())
+            .unwrap_or_else(|| runner_failure.stderr_tail.clone());
+        conditions.push(BlockingCondition {
+            kind: "runner_failure".to_string(),
+            summary: format!(
+                "Runner job {} failed: {detail}",
+                runner_failure.runner_job_id
+            ),
+            severity: Some(BlockingSeverity::Critical),
+            refs: refs.clone(),
+        });
+    }
+    match status {
+        Some(RunStatus::Stale) => conditions.push(BlockingCondition {
+            kind: "stale_run".to_string(),
+            summary: stale_reason
+                .map(str::to_string)
+                .unwrap_or_else(|| "The run record is stale.".to_string()),
+            severity: Some(BlockingSeverity::Critical),
+            refs: refs.clone(),
+        }),
+        Some(RunStatus::Running) => conditions.push(BlockingCondition {
+            kind: "run_in_progress".to_string(),
+            summary: "The run has not reached a terminal state.".to_string(),
+            severity: Some(BlockingSeverity::Info),
+            refs: refs.clone(),
+        }),
+        Some(RunStatus::Skipped) => conditions.push(BlockingCondition {
+            kind: "run_skipped".to_string(),
+            summary: "The run was skipped, so it proved nothing.".to_string(),
+            severity: Some(BlockingSeverity::Warning),
+            refs: refs.clone(),
+        }),
+        None => conditions.push(BlockingCondition {
+            kind: "unknown_run_status".to_string(),
+            summary: format!(
+                "Status `{}` is not a status Homeboy owns, so terminality cannot be assumed.",
+                run.status
+            ),
+            severity: Some(BlockingSeverity::Warning),
+            refs: refs.clone(),
+        }),
+        Some(RunStatus::Pass) | Some(RunStatus::Fail) | Some(RunStatus::Error) => {}
+    }
+    if terminal && no_reviewable_evidence {
+        conditions.push(BlockingCondition {
+            kind: "no_reviewable_evidence".to_string(),
+            summary: "The run recorded no reviewer-visible evidence target.".to_string(),
+            severity: Some(BlockingSeverity::Warning),
+            refs,
+        });
+    }
+
+    conditions
 }
 
 fn is_evidence_manifest_artifact(artifact: &ArtifactRecord) -> bool {
@@ -910,8 +1187,251 @@ mod tests {
         // A passing run is not a failure.
         assert!(!report.failure.failed);
         assert_eq!(report.failure.status, "pass");
-        // No manifest in metadata or artifacts means a clean (None, empty) result.
-        assert!(report.evidence_manifest.is_none());
+        // No producer attached a manifest, so the report carries a derived one.
+        let manifest = report.evidence_manifest.expect("derived manifest");
+        assert_eq!(manifest.source, Some(EvidenceManifestSource::Derived));
+        assert_eq!(manifest.status.state, EvidenceManifestState::Passed);
         assert!(report.evidence_manifest_errors.is_empty());
+    }
+
+    fn local_file_artifact() -> ArtifactRecord {
+        ArtifactRecord {
+            id: "summary".to_string(),
+            run_id: "run-1".to_string(),
+            kind: "summary".to_string(),
+            artifact_type: "file".to_string(),
+            path: "/tmp/does-not-need-to-exist/summary.json".to_string(),
+            created_at: "2026-06-12T00:00:30Z".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn derived_manifest(run: &RunRecord, artifacts: &[ArtifactRecord]) -> EvidenceManifest {
+        let failure = evidence_failure_summary(run);
+        let links = evidence_links(artifacts);
+        let stale_reason = running_status_note(run);
+        derive_evidence_manifest(EvidenceManifestDerivation {
+            run,
+            artifacts,
+            failure: &failure,
+            evidence_links: links.as_slice(),
+            tracker_refs: &[],
+            stale_reason: stale_reason.as_deref(),
+        })
+    }
+
+    /// A derived manifest must be self-describing: it always validates against
+    /// its own contract, so it can be lifted out of the report and handed to any
+    /// consumer of `homeboy/evidence-manifest/v1`.
+    #[test]
+    fn derived_manifest_satisfies_the_contract_for_every_status_label() {
+        for status in ["running", "pass", "fail", "error", "skipped", "stale", "?"] {
+            let mut run = sample_run();
+            run.status = status.to_string();
+            let manifest = derived_manifest(&run, &[url_artifact()]);
+
+            manifest
+                .validate()
+                .unwrap_or_else(|err| panic!("{status}: {err}"));
+            assert_eq!(manifest.source, Some(EvidenceManifestSource::Derived));
+            assert_eq!(manifest.id.as_deref(), Some("run-1"));
+            assert_eq!(manifest.run_refs[0].id, "run-1");
+        }
+    }
+
+    #[test]
+    fn derived_manifest_maps_each_owned_status_to_a_state() {
+        let cases = [
+            ("running", EvidenceManifestState::Pending),
+            ("pass", EvidenceManifestState::Passed),
+            ("fail", EvidenceManifestState::Failed),
+            ("error", EvidenceManifestState::Failed),
+            ("stale", EvidenceManifestState::Blocked),
+            ("skipped", EvidenceManifestState::Unknown),
+        ];
+
+        for (status, expected) in cases {
+            let mut run = sample_run();
+            run.status = status.to_string();
+            assert_eq!(
+                derived_manifest(&run, &[url_artifact()]).status.state,
+                expected,
+                "{status}"
+            );
+        }
+    }
+
+    /// Fail closed: a label Homeboy does not own is `unknown`, never guessed
+    /// into a pass, and it says why.
+    #[test]
+    fn derived_manifest_refuses_to_interpret_a_status_it_does_not_own() {
+        let mut run = sample_run();
+        run.status = "mostly_fine".to_string();
+        let manifest = derived_manifest(&run, &[url_artifact()]);
+
+        assert_eq!(manifest.status.state, EvidenceManifestState::Unknown);
+        assert_eq!(
+            manifest.interpretation.confidence,
+            Some(EvidenceConfidence::Low)
+        );
+        assert!(manifest
+            .blocking_conditions
+            .iter()
+            .any(|condition| condition.kind == "unknown_run_status"));
+    }
+
+    /// A pass that also recorded a gate failure is contradictory metadata. The
+    /// manifest is what a consumer acts on, so the blocker wins.
+    #[test]
+    fn derived_manifest_downgrades_a_pass_that_carries_a_critical_blocker() {
+        let mut run = sample_run();
+        run.metadata_json = serde_json::json!({ "gate_failures": ["p95_ms exceeded"] });
+        let manifest = derived_manifest(&run, &[url_artifact()]);
+
+        assert_eq!(run.status, "pass");
+        assert_eq!(manifest.status.state, EvidenceManifestState::Blocked);
+        assert!(manifest.has_blocking_condition(BlockingSeverity::Critical));
+        assert!(manifest
+            .interpretation
+            .notes
+            .iter()
+            .any(|note| note.contains("the blocker wins")));
+    }
+
+    #[test]
+    fn derived_manifest_grades_confidence_by_reviewability() {
+        let run = sample_run();
+
+        let none = derived_manifest(&run, &[]);
+        assert_eq!(
+            none.interpretation.confidence,
+            Some(EvidenceConfidence::Low)
+        );
+        assert!(none
+            .blocking_conditions
+            .iter()
+            .any(|condition| condition.kind == "no_reviewable_evidence"));
+
+        let local = derived_manifest(&run, &[local_file_artifact()]);
+        assert_eq!(
+            local.interpretation.confidence,
+            Some(EvidenceConfidence::Medium)
+        );
+        assert_eq!(local.artifact_refs.len(), 1);
+
+        let reviewable = derived_manifest(&run, &[url_artifact()]);
+        assert_eq!(
+            reviewable.interpretation.confidence,
+            Some(EvidenceConfidence::High)
+        );
+        assert!(!reviewable
+            .blocking_conditions
+            .iter()
+            .any(|condition| condition.kind == "no_reviewable_evidence"));
+    }
+
+    #[test]
+    fn derived_manifest_bounds_its_blocking_conditions() {
+        let mut run = sample_run();
+        run.status = "fail".to_string();
+        let gates: Vec<String> = (0..50).map(|index| format!("gate {index}")).collect();
+        run.metadata_json = serde_json::json!({ "gate_failures": gates });
+
+        let manifest = derived_manifest(&run, &[url_artifact()]);
+
+        assert_eq!(
+            manifest.blocking_conditions.len(),
+            DERIVED_BLOCKING_CONDITION_LIMIT
+        );
+        assert!(manifest
+            .interpretation
+            .notes
+            .iter()
+            .any(|note| note.contains("omitted")));
+    }
+
+    /// An authored manifest is never overwritten, and the reader stamps where it
+    /// came from instead of trusting what the producer serialized.
+    #[test]
+    fn an_authored_manifest_wins_and_is_stamped_with_its_real_provenance() {
+        let mut run = sample_run();
+        run.metadata_json = serde_json::json!({
+            "evidence_manifest": {
+                "schema": "homeboy/evidence-manifest/v1",
+                "source": "artifact",
+                "status": { "state": "blocked" },
+                "interpretation": { "summary": "Reviewer confirmation is required." }
+            }
+        });
+
+        let report = build_run_evidence_report(RunEvidenceReportInputs {
+            command: "runs.evidence",
+            run: run.clone(),
+            run_summary: serde_json::json!({ "id": run.id }),
+            artifacts: vec![url_artifact()],
+            artifact_root: PathBuf::from("/tmp/artifacts"),
+            disk_budget: sample_disk_budget(),
+        });
+
+        let manifest = report.evidence_manifest.expect("authored manifest");
+        assert_eq!(manifest.status.state, EvidenceManifestState::Blocked);
+        assert_eq!(
+            manifest.interpretation.summary,
+            "Reviewer confirmation is required."
+        );
+        // Claimed `artifact`, resolved from run metadata. The reader decides.
+        assert_eq!(manifest.source, Some(EvidenceManifestSource::RunMetadata));
+    }
+
+    /// A derived manifest copies the report's tracker refs, so the report must
+    /// not fold them back in — that would double every ref.
+    #[test]
+    fn a_derived_manifest_does_not_double_the_reports_tracker_refs() {
+        let mut run = sample_run();
+        run.metadata_json = serde_json::json!({
+            "tracker_refs": [{ "kind": "issue", "id": "HB-42" }]
+        });
+
+        let report = build_run_evidence_report(RunEvidenceReportInputs {
+            command: "runs.evidence",
+            run: run.clone(),
+            run_summary: serde_json::json!({ "id": run.id }),
+            artifacts: vec![url_artifact()],
+            artifact_root: PathBuf::from("/tmp/artifacts"),
+            disk_budget: sample_disk_budget(),
+        });
+
+        assert_eq!(report.tracker_refs.len(), 1);
+        let manifest = report.evidence_manifest.expect("derived manifest");
+        assert_eq!(manifest.tracker_refs.len(), 1);
+        assert_eq!(manifest.tracker_refs[0].id, "HB-42");
+    }
+
+    /// A malformed authored manifest must not be silently replaced by a derived
+    /// one that hides the producer's bug: the error is still reported.
+    #[test]
+    fn a_malformed_authored_manifest_still_reports_its_error() {
+        let mut run = sample_run();
+        run.metadata_json = serde_json::json!({
+            "evidence_manifest": {
+                "schema": "homeboy/evidence-manifest/v1",
+                "status": { "state": "passed" },
+                "interpretation": { "summary": "" }
+            }
+        });
+
+        let report = build_run_evidence_report(RunEvidenceReportInputs {
+            command: "runs.evidence",
+            run: run.clone(),
+            run_summary: serde_json::json!({ "id": run.id }),
+            artifacts: vec![url_artifact()],
+            artifact_root: PathBuf::from("/tmp/artifacts"),
+            disk_budget: sample_disk_budget(),
+        });
+
+        assert_eq!(report.evidence_manifest_errors.len(), 1);
+        assert!(report.evidence_manifest_errors[0].contains("metadata.evidence_manifest"));
+        let manifest = report.evidence_manifest.expect("derived manifest");
+        assert_eq!(manifest.source, Some(EvidenceManifestSource::Derived));
     }
 }
