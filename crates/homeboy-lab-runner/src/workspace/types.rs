@@ -347,6 +347,8 @@ pub struct RunnerWorkspacePruneOutput {
     pub skipped_live_count: usize,
     /// Candidates withheld because Homeboy could not prove their liveness state.
     pub skipped_unknown_count: usize,
+    /// Capacity withheld by liveness evidence, grouped by its exact reason.
+    pub withheld_by_liveness_reason: Vec<RunnerWorkspacePruneWithheldReason>,
     pub inspect_command: String,
     pub stop_command: String,
     pub reconcile_command: String,
@@ -400,6 +402,13 @@ pub struct RunnerWorkspaceLivenessEvidence {
 pub struct RunnerWorkspacePruneSkippedEntry {
     pub remote_path: String,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RunnerWorkspacePruneWithheldReason {
+    pub reason: String,
+    pub workspace_count: usize,
+    pub bytes: u64,
 }
 
 #[derive(Debug, Clone, Default)]

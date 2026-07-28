@@ -40,19 +40,25 @@ pub fn accepted_lab_runner_job_identity(
     run_id: &str,
 ) -> Result<Option<homeboy_core::lab_contract::RunnerJobIdentity>> {
     let record = store::read_record(&sanitize_run_id(run_id))?;
+    Ok(accepted_lab_runner_job_identity_from_record(&record))
+}
+
+pub(crate) fn accepted_lab_runner_job_identity_from_record(
+    record: &AgentTaskRunRecord,
+) -> Option<homeboy_core::lab_contract::RunnerJobIdentity> {
     let Some(handoff) = record.lab_handoff.as_ref().filter(|handoff| {
         handoff.validation_error().is_none()
             && handoff.state == AgentTaskLabHandoffState::Accepted
             && handoff.authority == AgentTaskLabHandoffAuthority::RunnerDaemon
     }) else {
-        return Ok(None);
+        return None;
     };
     let identity = homeboy_core::lab_contract::RunnerJobIdentity::new(
         &record.run_id,
         &handoff.runner_id,
         handoff.runner_job_id.clone().unwrap_or_default(),
     );
-    Ok(identity.is_complete().then_some(identity))
+    identity.is_complete().then_some(identity)
 }
 
 /// Metadata `kind` marker for a generic runner-execution run. It distinguishes

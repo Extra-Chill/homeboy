@@ -198,7 +198,14 @@ fn write_record_with_aggregate(
         git_sha: None,
         rig_id: None,
         metadata_json,
-    })
+    })?;
+    let committed = store.get_run(&record.run_id)?.ok_or_else(|| {
+        Error::internal_unexpected(format!(
+            "committed agent-task run record is unavailable: {}",
+            record.run_id
+        ))
+    })?;
+    super::workspace_authority::persist_terminal_from_record(&record_from_run(&committed)?)
 }
 
 pub(super) fn read_record(run_id: &str) -> Result<AgentTaskRunRecord> {

@@ -1340,6 +1340,15 @@ fn runner_terminal_reconciliation_is_idempotent_and_preserves_execution_owner() 
             &[],
         );
         store::write_record(&record).expect("terminal record");
+        let receipt = resolve_workspace_terminal_authority(
+            "agent-task-terminal-proxy",
+            "homeboy-lab",
+            "/runner/workspace/repo",
+            Some("job-456"),
+        )
+        .expect("resolve terminal workspace authority")
+        .expect("terminal workspace authority persisted");
+        assert_eq!(receipt.runner_job_id, "job-456");
 
         let retry = record_detached_lab_run(DetachedLabRunRecord {
             run_id: "agent-task-terminal-proxy",

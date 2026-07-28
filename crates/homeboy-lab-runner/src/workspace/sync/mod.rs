@@ -39,10 +39,10 @@ use super::types::{
     canonical_workspace_path, ByteFileCounts, LocalGitState, RunnerWorkspaceCurrentSummary,
     RunnerWorkspaceLivenessEvidence, RunnerWorkspaceMaterializationPlan, RunnerWorkspaceMetadata,
     RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
-    RunnerWorkspacePruneSkippedEntry, RunnerWorkspaceSnapshotEntry, RunnerWorkspaceSnapshotFilters,
-    RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
-    RunnerWorkspaceTerminalEvidence, RunnerWorkspaceUpdateOptions, RunnerWorkspaceUpdateOutput,
-    DEFAULT_EXCLUDES,
+    RunnerWorkspacePruneSkippedEntry, RunnerWorkspacePruneWithheldReason,
+    RunnerWorkspaceSnapshotEntry, RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSyncMode,
+    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, RunnerWorkspaceTerminalEvidence,
+    RunnerWorkspaceUpdateOptions, RunnerWorkspaceUpdateOutput, DEFAULT_EXCLUDES,
 };
 use super::util::{
     deterministic_remote_path, git_output, parent_remote_path, ssh_client_for_runner,
@@ -1173,6 +1173,7 @@ pub fn prune_workspaces(
     let mut skipped = Vec::new();
     let mut skipped_live_count = 0;
     let mut skipped_unknown_count = 0;
+    let mut withheld_workspaces = std::collections::BTreeMap::<String, (String, u64)>::new();
     let mut stop_commands = Vec::new();
     let mut candidate_entries = Vec::new();
     let mut total_candidate_count = 0;
@@ -1212,6 +1213,13 @@ pub fn prune_workspaces(
                         )
                     }),
             );
+            let reason = withheld
+                .liveness
+                .observations
+                .first()
+                .cloned()
+                .unwrap_or_else(|| withheld.liveness.state.clone());
+            withheld_workspaces.insert(withheld.remote_path.clone(), (reason, withheld.bytes));
             skipped.push(RunnerWorkspacePruneSkippedEntry {
                 remote_path: withheld.remote_path,
                 reason: format!(
@@ -1239,30 +1247,57 @@ pub fn prune_workspaces(
             // The scan is only a snapshot. Recheck ownership at the destructive boundary.
             match revalidate_candidate_liveness(&runner, &candidate) {
                 Ok(liveness) if revalidated_candidate_is_deletable(&liveness) => {
+                    begin_workspace_terminal_authority_release(&runner, &candidate)?;
                     match remove_prune_candidate(&runner, &lab_workspaces_root, &candidate) {
-                        Ok(None) => removed.push(candidate),
-                        Ok(Some(liveness)) => skipped.push(RunnerWorkspacePruneSkippedEntry {
-                            remote_path: candidate.remote_path,
-                            reason: format!(
-                                "workspace liveness changed to {}; {}",
-                                liveness.state,
-                                liveness.observations.join(", ")
-                            ),
-                        }),
+                        Ok(None) => {
+                            remove_workspace_terminal_authority_receipt(&runner, &candidate)?;
+                            withheld_workspaces.remove(&candidate.remote_path);
+                            removed.push(candidate)
+                        }
+                        Ok(Some(liveness)) => {
+                            abort_workspace_terminal_authority_release(&runner, &candidate)?;
+                            record_withheld_liveness(
+                                &mut withheld_workspaces,
+                                &mut skipped_live_count,
+                                &mut skipped_unknown_count,
+                                &candidate,
+                                &liveness,
+                            );
+                            skipped.push(RunnerWorkspacePruneSkippedEntry {
+                                remote_path: candidate.remote_path,
+                                reason: format!(
+                                    "workspace liveness changed to {}; {}",
+                                    liveness.state,
+                                    liveness.observations.join(", ")
+                                ),
+                            })
+                        }
+                        // Transport errors cannot prove that a remote delete did
+                        // not complete. Keep the pending marker so a late terminal
+                        // projection cannot recreate authority for a removed path.
                         Err(err) => skipped.push(RunnerWorkspacePruneSkippedEntry {
                             remote_path: candidate.remote_path,
                             reason: err.to_string(),
                         }),
                     }
                 }
-                Ok(liveness) => skipped.push(RunnerWorkspacePruneSkippedEntry {
-                    remote_path: candidate.remote_path,
-                    reason: format!(
-                        "workspace liveness changed to {}; {}",
-                        liveness.state,
-                        liveness.observations.join(", ")
-                    ),
-                }),
+                Ok(liveness) => {
+                    record_withheld_liveness(
+                        &mut withheld_workspaces,
+                        &mut skipped_live_count,
+                        &mut skipped_unknown_count,
+                        &candidate,
+                        &liveness,
+                    );
+                    skipped.push(RunnerWorkspacePruneSkippedEntry {
+                        remote_path: candidate.remote_path,
+                        reason: format!(
+                            "workspace liveness changed to {}; {}",
+                            liveness.state,
+                            liveness.observations.join(", ")
+                        ),
+                    })
+                }
                 Err(err) => skipped.push(RunnerWorkspacePruneSkippedEntry {
                     remote_path: candidate.remote_path,
                     reason: err.to_string(),
@@ -1317,6 +1352,26 @@ pub fn prune_workspaces(
             skipped,
             skipped_live_count,
             skipped_unknown_count,
+            withheld_by_liveness_reason: withheld_workspaces
+                .into_values()
+                .fold(
+                    std::collections::BTreeMap::<String, (usize, u64)>::new(),
+                    |mut grouped, (reason, bytes)| {
+                        let entry = grouped.entry(reason).or_default();
+                        entry.0 += 1;
+                        entry.1 += bytes;
+                        grouped
+                    },
+                )
+                .into_iter()
+                .map(
+                    |(reason, (workspace_count, bytes))| RunnerWorkspacePruneWithheldReason {
+                        reason,
+                        workspace_count,
+                        bytes,
+                    },
+                )
+                .collect(),
             inspect_command: format!("homeboy runner status {runner_arg}"),
             stop_command: stop_commands.into_iter().next().unwrap_or_else(|| {
                 format!("homeboy runner doctor {runner_arg} --scope lab-offload --repair")
@@ -1336,6 +1391,26 @@ pub fn prune_workspaces(
         },
         0,
     ))
+}
+
+fn record_withheld_liveness(
+    withheld: &mut std::collections::BTreeMap<String, (String, u64)>,
+    live_count: &mut usize,
+    unknown_count: &mut usize,
+    candidate: &RunnerWorkspacePruneEntry,
+    liveness: &RunnerWorkspaceLivenessEvidence,
+) {
+    if liveness.state == "live" {
+        *live_count += 1;
+    } else {
+        *unknown_count += 1;
+    }
+    let reason = liveness
+        .observations
+        .first()
+        .cloned()
+        .unwrap_or_else(|| liveness.state.clone());
+    withheld.insert(candidate.remote_path.clone(), (reason, candidate.bytes));
 }
 
 fn prune_candidates_for_runner(
@@ -1400,7 +1475,22 @@ pub fn reap_run_workspace(
     })?;
     validate_absolute_path("workspace_root", workspace_root)?;
     let lab_workspaces_root = format!("{}/_lab_workspaces", workspace_root.trim_end_matches('/'));
-    remove_workspace(&runner, &lab_workspaces_root, remote_path)?;
+    validate_workspace_removal_path(Path::new(&lab_workspaces_root), Path::new(remote_path))?;
+    // Capture the immutable receipt key before removal; the receipt is released
+    // only after the workspace deletion has durably completed.
+    let run_id = workspace_metadata_run_id(&runner, remote_path)?;
+    if let Some(run_id) = run_id.as_deref() {
+        homeboy_agents::agent_task_lifecycle::begin_workspace_terminal_authority_release(
+            run_id,
+            &runner.id,
+            remote_path,
+        )?;
+    }
+    if let Err(error) = remove_workspace(&runner, &lab_workspaces_root, remote_path) {
+        // The remote side may have completed deletion before transport failed.
+        // Retain pending authority so either outcome remains safe and resumable.
+        return Err(error);
+    }
     // The sibling Homeboy artifact directory (`<checkout>-homeboy-artifacts`)
     // also lives under `_lab_workspaces`, so it passes the same containment
     // guard. It only exists when the run requested `--output`, so a
@@ -1409,7 +1499,45 @@ pub fn reap_run_workspace(
     if let Some(artifact_dir) = artifact_dir {
         let _ = remove_workspace(&runner, &lab_workspaces_root, artifact_dir);
     }
+    if let Some(run_id) = run_id {
+        homeboy_agents::agent_task_lifecycle::remove_workspace_terminal_authority(
+            &run_id,
+            &runner.id,
+            remote_path,
+        )?;
+    }
     Ok(())
+}
+
+fn workspace_metadata_run_id(
+    runner: &super::super::Runner,
+    remote_path: &str,
+) -> Result<Option<String>> {
+    let metadata_path = format!(
+        "{}/{}",
+        remote_path.trim_end_matches('/'),
+        WORKSPACE_METADATA_FILE
+    );
+    let content = match runner.kind {
+        RunnerKind::Local => fs::read_to_string(&metadata_path)
+            .map_err(|error| Error::internal_io(error.to_string(), Some(metadata_path.clone())))?,
+        RunnerKind::Ssh => {
+            let (_, client) = ssh_client_for_runner(runner)?;
+            let output = client.execute_with_timeout(
+                &format!("cat {}", shell::quote_arg(&metadata_path)),
+                WORKSPACE_METADATA_TIMEOUT,
+            );
+            if !output.success {
+                return Err(workspace_metadata_ssh_error(&output));
+            }
+            output.stdout
+        }
+    };
+    Ok(serde_json::from_str::<serde_json::Value>(&content)
+        .map_err(|error| Error::internal_json(error.to_string(), Some(metadata_path.clone())))?
+        .get("run_id")
+        .and_then(|value| value.as_str())
+        .map(str::to_string))
 }
 
 fn workspace_metadata(
@@ -2597,7 +2725,7 @@ fn classify_local_candidate(
     let Some(source_path) = metadata.get("local_path").and_then(|value| value.as_str()) else {
         return Ok(None);
     };
-    let reason = prune_candidate_reason(&metadata, path, source_path)?;
+    let reason = prune_candidate_reason(runner, &metadata, path, source_path)?;
     let Some(reason) = reason else {
         return Ok(None);
     };
@@ -2631,6 +2759,7 @@ fn classify_local_candidate(
 }
 
 fn prune_candidate_reason(
+    runner: &super::super::Runner,
     metadata: &serde_json::Value,
     path: &Path,
     source_path: &str,
@@ -2663,7 +2792,9 @@ fn prune_candidate_reason(
     if !Path::new(source_path).exists() {
         return Ok(Some("source_path_missing".to_string()));
     }
-    if has_terminal_delete_on_success_lifecycle(metadata) {
+    if has_terminal_delete_on_success_lifecycle_with(metadata, |run_id| {
+        workspace_run_authority(runner, metadata, path, run_id)
+    }) {
         return Ok(Some(TERMINAL_RESOURCE_LIFECYCLE_REASON.to_string()));
     }
     if is_stale_materialized_workspace_lifecycle(metadata, path) {
@@ -2706,16 +2837,6 @@ fn is_stale_materialized_workspace_lifecycle(metadata: &serde_json::Value, path:
             == Some("delete_on_success")
         && resource.get("status").and_then(|value| value.as_str()) == Some("active")
         && resource.get("path").and_then(|value| value.as_str()) == path.to_str()
-}
-
-fn has_terminal_delete_on_success_lifecycle(metadata: &serde_json::Value) -> bool {
-    has_terminal_delete_on_success_lifecycle_with(metadata, |run_id| {
-        match homeboy_agents::agent_task_lifecycle::exact_record(run_id) {
-            Ok(record) if record.state.is_terminal() => RunAuthority::Terminal,
-            Ok(_) => RunAuthority::Active,
-            Err(_) => RunAuthority::Unavailable,
-        }
-    })
 }
 
 pub(crate) fn has_terminal_delete_on_success_lifecycle_with(
@@ -2765,11 +2886,7 @@ fn workspace_liveness(
         .and_then(|value| value.as_str())
         .filter(|id| !id.trim().is_empty());
     match active_resource_lifecycle_liveness(metadata, |run_id| {
-        match homeboy_agents::agent_task_lifecycle::exact_record(run_id) {
-            Ok(record) if record.state.is_terminal() => RunAuthority::Terminal,
-            Ok(_) => RunAuthority::Active,
-            Err(_) => RunAuthority::Unavailable,
-        }
+        workspace_run_authority(runner, metadata, path, run_id)
     }) {
         ActiveResourceLifecycleLiveness::Terminal(_)
         | ActiveResourceLifecycleLiveness::NotActive => {}
@@ -2792,6 +2909,84 @@ fn workspace_liveness(
         RunnerKind::Local => local_process_liveness(path),
         RunnerKind::Ssh => ssh_process_liveness(runner, &path.display().to_string()),
     }
+}
+
+/// A compacted lifecycle record is not enough to make an active lease stale.
+/// Only the immutable receipt written with the exact accepted runner binding can
+/// supersede it after ordinary controller retention.
+fn workspace_run_authority(
+    runner: &super::super::Runner,
+    metadata: &serde_json::Value,
+    path: &Path,
+    run_id: &str,
+) -> RunAuthority {
+    let job_id = metadata.get("job_id").and_then(|value| value.as_str());
+    match homeboy_agents::agent_task_lifecycle::resolve_workspace_terminal_authority(
+        run_id,
+        &runner.id,
+        &path.display().to_string(),
+        job_id,
+    ) {
+        Ok(Some(_)) => RunAuthority::Terminal,
+        Err(_)
+            if homeboy_agents::agent_task_lifecycle::workspace_terminal_authority_release_is_pending(
+                run_id,
+                &runner.id,
+                &path.display().to_string(),
+            )
+            .unwrap_or(false) =>
+        {
+            RunAuthority::Terminal
+        }
+        Err(_) => RunAuthority::Unavailable,
+        Ok(None) => match homeboy_agents::agent_task_lifecycle::exact_record(run_id) {
+            Ok(record) if record.state.is_terminal() => RunAuthority::Terminal,
+            Ok(_) => RunAuthority::Active,
+            Err(_) => RunAuthority::Unavailable,
+        },
+    }
+}
+
+fn remove_workspace_terminal_authority_receipt(
+    runner: &super::super::Runner,
+    candidate: &RunnerWorkspacePruneEntry,
+) -> Result<()> {
+    let Some(run_id) = candidate.run_id.as_deref() else {
+        return Ok(());
+    };
+    homeboy_agents::agent_task_lifecycle::remove_workspace_terminal_authority(
+        run_id,
+        &runner.id,
+        &candidate.remote_path,
+    )
+}
+
+fn begin_workspace_terminal_authority_release(
+    runner: &super::super::Runner,
+    candidate: &RunnerWorkspacePruneEntry,
+) -> Result<()> {
+    let Some(run_id) = candidate.run_id.as_deref() else {
+        return Ok(());
+    };
+    homeboy_agents::agent_task_lifecycle::begin_workspace_terminal_authority_release(
+        run_id,
+        &runner.id,
+        &candidate.remote_path,
+    )
+}
+
+fn abort_workspace_terminal_authority_release(
+    runner: &super::super::Runner,
+    candidate: &RunnerWorkspacePruneEntry,
+) -> Result<()> {
+    let Some(run_id) = candidate.run_id.as_deref() else {
+        return Ok(());
+    };
+    homeboy_agents::agent_task_lifecycle::abort_workspace_terminal_authority_release(
+        run_id,
+        &runner.id,
+        &candidate.remote_path,
+    )
 }
 
 pub(crate) fn workspace_liveness_with_size_observation(
@@ -3160,6 +3355,7 @@ fn prune_candidates_ssh(
             continue;
         };
         let reason = prune_candidate_reason_from_decoded_metadata(
+            runner,
             &metadata,
             age_seconds,
             Path::new(&parts[2]),
@@ -3225,6 +3421,7 @@ fn prune_candidates_ssh(
 }
 
 fn prune_candidate_reason_from_decoded_metadata(
+    runner: &super::super::Runner,
     metadata: &serde_json::Value,
     age_seconds: u64,
     path: &Path,
@@ -3251,7 +3448,9 @@ fn prune_candidate_reason_from_decoded_metadata(
     if !Path::new(source_path).exists() {
         return Some("source_path_missing".to_string());
     }
-    if has_terminal_delete_on_success_lifecycle(metadata) {
+    if has_terminal_delete_on_success_lifecycle_with(metadata, |run_id| {
+        workspace_run_authority(runner, metadata, path, run_id)
+    }) {
         return Some(TERMINAL_RESOURCE_LIFECYCLE_REASON.to_string());
     }
     is_stale_materialized_workspace_lifecycle(metadata, path)
@@ -3374,14 +3573,10 @@ fn remove_ssh_prune_candidate(
         );
         return parse_ssh_prune_delete_output(output);
     } else {
-        let terminal_owner_run_id = candidate.run_id.as_deref().filter(|run_id| {
-            homeboy_agents::agent_task_lifecycle::exact_record(run_id)
-                .is_ok_and(|record| record.state.is_terminal())
-        });
         ssh_prune_delete_command_with_terminal_authority(
             root,
             &candidate.remote_path,
-            terminal_owner_run_id,
+            candidate.run_id.as_deref(),
             candidate.job_id.as_deref(),
         )
     };
@@ -3478,14 +3673,7 @@ pub(crate) fn ssh_prune_delete_materialized_workspace_command(
 fn remove_workspace(runner: &super::super::Runner, root: &str, remote_path: &str) -> Result<()> {
     let root_path = Path::new(root);
     let path = Path::new(remote_path);
-    if !path.starts_with(root_path) || path == root_path || remote_path.trim().is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "remote_path",
-            "refusing to remove runner workspace outside _lab_workspaces root",
-            Some(remote_path.to_string()),
-            None,
-        ));
-    }
+    validate_workspace_removal_path(root_path, path)?;
     match runner.kind {
         RunnerKind::Local => remove_local_workspace_with_lifecycle(root_path, path),
         RunnerKind::Ssh => {
@@ -3507,6 +3695,18 @@ fn remove_workspace(runner: &super::super::Runner, root: &str, remote_path: &str
             }
         }
     }
+}
+
+fn validate_workspace_removal_path(root_path: &Path, path: &Path) -> Result<()> {
+    if !path.starts_with(root_path) || path == root_path || path.as_os_str().is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "remote_path",
+            "refusing to remove runner workspace outside _lab_workspaces root",
+            Some(path.display().to_string()),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 fn remove_local_workspace_with_lifecycle(root: &Path, path: &Path) -> Result<()> {
