@@ -612,13 +612,20 @@ fn release_summary_from_run(run: &ReleaseRun) -> Vec<String> {
     summary.push(github_release_summary_line(run));
     if let Some(rollback) = &run.result.rollback {
         summary.push(format!(
-            "Rollback evidence: original HEAD {}; temporary HEAD {}; final HEAD {}",
-            rollback.original_head, rollback.temporary_head, rollback.final_head
+            "Rollback evidence ({}): original HEAD {}; release commit {}; final HEAD {}; tag state {}",
+            rollback.status,
+            rollback.original_head,
+            rollback.release_commit,
+            rollback.final_head.as_deref().unwrap_or("unavailable"),
+            rollback.tag_state,
         ));
-        summary.push(
+        if let Some(error) = &rollback.error {
+            summary.push(format!("Rollback verification failed: {error}"));
+        }
+        summary.push(rollback.recovery_action.clone().unwrap_or_else(|| {
             "Inspect remote branch and tag state before retrying: git ls-remote --heads --tags origin"
-                .to_string(),
-        );
+                .to_string()
+        }));
     }
     summary
 }
@@ -648,9 +655,17 @@ fn git_commit_summary_line(run: &ReleaseRun) -> String {
     if step_data_bool(step, "skipped") {
         "No release commit created".to_string()
     } else if let Some(rollback) = &run.result.rollback {
+        if rollback.status != "restored" {
+            return format!(
+                "Release commit recovery interrupted: {} (actual HEAD {})",
+                rollback.release_commit,
+                rollback.final_head.as_deref().unwrap_or("unavailable")
+            );
+        }
         format!(
             "Release commit rolled back: {} (checkout restored to {})",
-            rollback.temporary_head, rollback.final_head
+            rollback.release_commit,
+            rollback.final_head.as_deref().unwrap_or("unavailable")
         )
     } else {
         "Release commit created".to_string()
@@ -1248,9 +1263,14 @@ mod tests {
                 summary: None,
                 phase_timings: None,
                 rollback: Some(ReleaseRollbackEvidence {
+                    status: "restored".to_string(),
                     original_head: "original".to_string(),
                     temporary_head: "release-commit".to_string(),
-                    final_head: "original".to_string(),
+                    release_commit: "release-commit".to_string(),
+                    final_head: Some("original".to_string()),
+                    tag_state: "not_created".to_string(),
+                    error: None,
+                    recovery_action: None,
                 }),
             },
         };
@@ -1262,12 +1282,54 @@ mod tests {
                 .to_string()
         ));
         assert!(summary.iter().any(|line| line.contains(
-            "original HEAD original; temporary HEAD release-commit; final HEAD original"
+            "original HEAD original; release commit release-commit; final HEAD original; tag state not_created"
         )));
         assert!(summary
             .iter()
             .any(|line| line.contains("git ls-remote --heads --tags origin")));
         assert!(!summary.contains(&"Release commit created".to_string()));
+    }
+
+    #[test]
+    fn release_summary_never_claims_interrupted_rollback_succeeded() {
+        let run = ReleaseRun {
+            component_id: "demo".to_string(),
+            enabled: true,
+            result: ReleaseRunResult {
+                steps: vec![ReleaseStepResult {
+                    id: "git.commit".to_string(),
+                    step_type: "git.commit".to_string(),
+                    status: ReleaseStepStatus::Success,
+                    ..Default::default()
+                }],
+                status: ReleaseStepStatus::Failed,
+                warnings: vec!["Release rollback was interrupted".to_string()],
+                summary: None,
+                phase_timings: None,
+                rollback: Some(ReleaseRollbackEvidence {
+                    status: "interrupted".to_string(),
+                    original_head: "original".to_string(),
+                    temporary_head: "release-commit".to_string(),
+                    release_commit: "release-commit".to_string(),
+                    final_head: Some("concurrent-head".to_string()),
+                    tag_state: "not_created".to_string(),
+                    error: Some("checkout HEAD moved concurrently".to_string()),
+                    recovery_action: Some("homeboy release demo --apply".to_string()),
+                }),
+            },
+        };
+
+        let summary = release_summary_from_run(&run);
+
+        assert!(summary.contains(
+            &"Release commit recovery interrupted: release-commit (actual HEAD concurrent-head)"
+                .to_string()
+        ));
+        assert!(summary
+            .iter()
+            .any(|line| line.contains("Rollback evidence (interrupted)")));
+        assert!(summary.contains(&"homeboy release demo --apply".to_string()));
+        assert!(!summary.iter().any(|line| line.contains("rolled back")));
     }
 
     #[test]
