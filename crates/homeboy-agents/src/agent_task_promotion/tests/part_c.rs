@@ -186,6 +186,8 @@ fn configured_command_provider_is_resolved_lazily_with_provenance() {
             enabled: true,
             kind: WorktreeProviderKind::Command,
             apply_enabled: true,
+            lookup_timeout_ms: 10_000,
+            lookup_output_limit_bytes: 64 * 1024,
             commands: WorktreeProviderCommands {
                 resolve: Some(vec![
                     provider_path.display().to_string(),
@@ -285,6 +287,8 @@ fn configured_provider_accepts_only_the_unpushed_immutable_candidate_destination
             enabled: true,
             kind: WorktreeProviderKind::Command,
             apply_enabled: true,
+            lookup_timeout_ms: 10_000,
+            lookup_output_limit_bytes: 64 * 1024,
             commands: WorktreeProviderCommands {
                 resolve: Some(vec![
                     provider.path().display().to_string(),

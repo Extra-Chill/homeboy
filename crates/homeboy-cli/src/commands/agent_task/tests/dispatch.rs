@@ -245,6 +245,8 @@ fn invalid_cook_inputs_do_not_mutate_a_configured_provider_destination() {
                 enabled: true,
                 kind: homeboy::core::defaults::WorktreeProviderKind::Command,
                 apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy::core::defaults::WorktreeProviderCommands {
                     resolve: Some(vec![
                         provider.display().to_string(),
@@ -351,6 +353,8 @@ fn cook_resolves_existing_provider_destination_without_creation_metadata() {
                 enabled: true,
                 kind: homeboy::core::defaults::WorktreeProviderKind::Command,
                 apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy::core::defaults::WorktreeProviderCommands {
                     resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
                     ..Default::default()
@@ -419,6 +423,8 @@ fn cook_does_not_collapse_provider_lookup_failures_into_missing_destination_meta
                 enabled: true,
                 kind: homeboy::core::defaults::WorktreeProviderKind::Command,
                 apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy::core::defaults::WorktreeProviderCommands {
                     resolve: Some(vec![provider.display().to_string(), "resolve".to_string()]),
                     ensure: Some(vec![provider.display().to_string(), "ensure".to_string()]),

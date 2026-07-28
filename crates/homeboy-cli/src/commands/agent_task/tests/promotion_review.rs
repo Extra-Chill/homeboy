@@ -472,6 +472,8 @@ fn cook_promotes_mirrored_remote_attempt_into_controller_target() {
                 enabled: true,
                 kind: homeboy::core::defaults::WorktreeProviderKind::Command,
                 apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
                 commands: homeboy::core::defaults::WorktreeProviderCommands {
                     resolve: Some(vec![
                         provider.display().to_string(),
