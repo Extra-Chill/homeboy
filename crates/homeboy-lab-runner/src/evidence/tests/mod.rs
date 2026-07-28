@@ -1789,6 +1789,51 @@ fn terminal_artifacts_missing_integrity_are_permanent_provenance_errors() {
 }
 
 #[test]
+fn terminal_artifact_missing_mime_is_a_permanent_provenance_error() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let mut job = terminal_runner_job();
+        let bytes = b"typed terminal artifact";
+        job.artifacts = vec![JobArtifactMetadata {
+            id: "missing-mime".to_string(),
+            name: Some("artifact.unknown".to_string()),
+            path: Some("/runner/artifact.unknown".to_string()),
+            url: None,
+            mime: None,
+            size_bytes: Some(bytes.len() as u64),
+            sha256: Some(format!("{:x}", Sha256::digest(bytes))),
+            content_base64: None,
+            metadata: None,
+        }];
+        let run = mirror_job_run(
+            &store,
+            &ssh_runner(),
+            "/runner",
+            &[],
+            &job,
+            &[],
+            &json!({}),
+            None,
+            None,
+        )
+        .expect("synthetic run");
+
+        let error = mirror_terminal_job_artifacts_with(&store, &ssh_runner(), &job, &run, |_| {
+            Ok(bytes.to_vec())
+        })
+        .expect_err("missing media type is rejected");
+
+        assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
+        assert_eq!(
+            error.details["source_error"]["details"]["field"],
+            "artifact.mime"
+        );
+        assert!(!error.retryable.unwrap_or(true));
+        assert!(store.list_artifacts(&run.id).expect("artifacts").is_empty());
+    });
+}
+
+#[test]
 fn terminal_artifact_download_failure_rolls_back_every_artifact_and_retry_is_idempotent() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let store = ObservationStore::open_initialized().expect("store");
@@ -1802,7 +1847,7 @@ fn terminal_artifact_download_failure_rolls_back_every_artifact_and_retry_is_ide
                 name: None,
                 path: None,
                 url: None,
-                mime: None,
+                mime: Some("application/octet-stream".to_string()),
                 size_bytes: Some(bytes.len() as u64),
                 sha256: Some(format!("{:x}", Sha256::digest(bytes))),
                 content_base64: None,

@@ -19,6 +19,8 @@ pub fn content_type_from_path(path: &Path) -> Option<String> {
         "css" => "text/css",
         "js" | "mjs" => "text/javascript",
         "txt" | "log" => "text/plain",
+        "patch" => "text/x-patch",
+        "diff" => "text/x-diff",
         "csv" => "text/csv",
         "xml" => "application/xml",
         "zip" => "application/zip",
@@ -33,4 +35,26 @@ pub fn content_type_from_path(path: &Path) -> Option<String> {
         _ => return None,
     };
     Some(mime.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn executor_artifact_extensions_have_stable_content_types() {
+        for (path, expected) in [
+            ("change.patch", "text/x-patch"),
+            ("change.diff", "text/x-diff"),
+            ("transcript.txt", "text/plain"),
+            ("result.json", "application/json"),
+            ("runtime.log", "text/plain"),
+        ] {
+            assert_eq!(
+                content_type_from_path(Path::new(path)).as_deref(),
+                Some(expected)
+            );
+        }
+        assert_eq!(content_type_from_path(Path::new("artifact.unknown")), None);
+    }
 }
