@@ -201,8 +201,32 @@ pub struct AgentTaskCookIndex {
     pub schema: String,
     pub cook_id: String,
     pub latest_run_id: String,
+    /// The latest completed attempt with controller-validated canonical patch
+    /// bytes. Unlike `latest_run_id`, empty retries never replace this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_substantive_candidate: Option<AgentTaskCookLatestSubstantiveCandidate>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attempts: Vec<AgentTaskCookIndexAttempt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskCookLatestSubstantiveCandidate {
+    pub schema: String,
+    pub run_id: String,
+    pub attempt: u32,
+    pub task_id: String,
+    pub artifact_id: String,
+    pub artifact_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_size_bytes: Option<u64>,
+    pub integrity: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promotion_provenance: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_provenance: Option<Value>,
+    pub recorded_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -669,6 +669,10 @@ pub struct AgentTaskCookReport {
     pub attempts: Vec<AgentTaskCookAttemptReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finalization: Option<Value>,
+    /// Candidate authority is separate from `latest_run_id`, which remains the
+    /// chronological invocation/index compatibility field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_candidate: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
     /// Preserves the lifecycle-owned failure boundary when cook stops before
@@ -691,6 +695,14 @@ pub struct AgentTaskCookReport {
 pub struct AgentTaskCookFailureContext {
     pub cook_id: String,
     pub latest_run_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_artifact_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub promotion_provenance: Option<Value>,
     pub durable_recipe_ref: String,
     pub lifecycle_state: String,
     pub phase: String,
@@ -1883,18 +1895,13 @@ where
         .find(|attempt| attempt.run_id == options.initial_run_id)
         .map(|attempt| attempt.attempt)
         .unwrap_or(1);
-    let resumed_run_id = (!verification_pending_continuation)
-        .then(|| agent_task_lifecycle::cook_index(&options.cook_id).ok())
-        .flatten()
-        .map(|index| index.latest_run_id)
-        .filter(|run_id| run_id != &options.initial_run_id)
-        .filter(|run_id| {
-            recipe
-                .attempts
-                .iter()
-                .find(|attempt| attempt.run_id == *run_id)
-                .is_some_and(|attempt| attempt.attempt >= requested_attempt)
-        });
+    let resumed_run_id = resumable_cook_run_id(
+        &recipe,
+        &options.cook_id,
+        &options.initial_run_id,
+        requested_attempt,
+        verification_pending_continuation,
+    );
     let mut run_id = resumed_run_id
         .clone()
         .unwrap_or_else(|| options.initial_run_id.clone());
@@ -2696,6 +2703,27 @@ where
         1,
         Some(&run_id),
     ))
+}
+
+fn resumable_cook_run_id(
+    recipe: &super::AgentTaskCookRecipe,
+    cook_id: &str,
+    initial_run_id: &str,
+    requested_attempt: u32,
+    verification_pending_continuation: bool,
+) -> Option<String> {
+    (!verification_pending_continuation)
+        .then(|| agent_task_lifecycle::select_cook_candidate(cook_id).ok())
+        .flatten()
+        .map(|selection| selection.run_id)
+        .filter(|run_id| run_id != initial_run_id)
+        .filter(|run_id| {
+            recipe
+                .attempts
+                .iter()
+                .find(|attempt| attempt.run_id == *run_id)
+                .is_some_and(|attempt| attempt.attempt >= requested_attempt)
+        })
 }
 
 /// A multi-candidate Cook has one controller-owned destination. Reject ambiguous

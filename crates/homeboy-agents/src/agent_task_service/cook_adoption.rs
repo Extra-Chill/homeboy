@@ -1115,6 +1115,19 @@ fn materialize_adoption_attempt(
 fn resolve_cook_adoption_attempt(
     recipe: &super::AgentTaskCookRecipe,
 ) -> Result<&super::AgentTaskCookRecipeAttempt> {
+    if let Ok(selection) = agent_task_lifecycle::select_cook_candidate(&recipe.cook_id) {
+        if selection.reason
+            != "no_substantive_candidate_evidence_preserve_latest_attempt_compatibility"
+        {
+            if let Some(attempt) = recipe
+                .attempts
+                .iter()
+                .find(|attempt| attempt.run_id == selection.run_id)
+            {
+                return Ok(attempt);
+            }
+        }
+    }
     let first = recipe
         .attempts
         .first()

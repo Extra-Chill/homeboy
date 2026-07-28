@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde_json::{json, Value};
 
 use super::{
-    sanitize_run_id, AgentTaskCookIndex, AgentTaskCookIndexAttempt, AgentTaskRunRecord,
-    AgentTaskRunState,
+    sanitize_run_id, AgentTaskCookIndex, AgentTaskCookIndexAttempt,
+    AgentTaskCookLatestSubstantiveCandidate, AgentTaskRunRecord, AgentTaskRunState,
 };
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use homeboy_core::engine::local_files::{
@@ -219,6 +219,7 @@ pub(super) fn write_cook_index_attempt(
     attempt: u32,
     run_id: &str,
     recorded_at: String,
+    candidate: Option<AgentTaskCookLatestSubstantiveCandidate>,
 ) -> Result<AgentTaskCookIndex> {
     let cook_id = sanitize_run_id(cook_id);
     let run_id = sanitize_run_id(run_id);
@@ -230,6 +231,7 @@ pub(super) fn write_cook_index_attempt(
             schema: super::records::schemas::COOK_INDEX.to_string(),
             cook_id: cook_id.clone(),
             latest_run_id: run_id.clone(),
+            latest_substantive_candidate: None,
             attempts: Vec::new(),
         }
     };
@@ -259,12 +261,46 @@ pub(super) fn write_cook_index_attempt(
         .expect("Cook index has the recorded attempt")
         .run_id
         .clone();
+    if let Some(candidate) = candidate {
+        let replace = index
+            .latest_substantive_candidate
+            .as_ref()
+            .is_none_or(|current| {
+                candidate.attempt > current.attempt
+                    || (candidate.attempt == current.attempt && candidate.run_id >= current.run_id)
+            });
+        if replace {
+            index.latest_substantive_candidate = Some(candidate);
+        }
+    }
     write_json(&path, &index)?;
     Ok(index)
 }
 
+#[cfg(test)]
+pub(super) fn write_cook_index_for_test(index: &AgentTaskCookIndex) -> Result<()> {
+    write_json(&cook_index_path(&sanitize_run_id(&index.cook_id))?, index)
+}
+
 pub(super) fn read_cook_index(cook_id: &str) -> Result<AgentTaskCookIndex> {
     read_json(&cook_index_path(cook_id)?)
+}
+
+pub(super) fn update_cook_index(
+    cook_id: &str,
+    mutate: impl FnOnce(&mut AgentTaskCookIndex) -> bool,
+) -> Result<Option<AgentTaskCookIndex>> {
+    let path = cook_index_path(&sanitize_run_id(cook_id))?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut index = read_json(&path)?;
+    if mutate(&mut index) {
+        // `write_json` is atomic; this makes the pointer update one durable
+        // index transaction without nesting the configuration lock it owns.
+        write_json(&path, &index)?;
+    }
+    Ok(Some(index))
 }
 
 pub(super) fn record_exists(run_id: &str) -> Result<bool> {

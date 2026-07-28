@@ -1105,6 +1105,7 @@ pub fn reconcile_terminal_artifact_projection(run_id: &str) -> Result<bool> {
     let _plan = store::read_controller_plan(&record.run_id)?;
     let aggregate = store::read_aggregate(&record.run_id)?;
     record_terminal_artifact_projection(&mut record, &aggregate)?;
+    update_cook_candidate_after_completion(&record, &aggregate, None)?;
     Ok(true)
 }
 
@@ -1720,8 +1721,26 @@ pub fn read_aggregate(run_id: &str) -> Result<AgentTaskAggregate> {
     store::read_aggregate(&run_id)
 }
 
+/// Read an immutable attempt directly; unlike `read_aggregate`, this never
+/// treats a Cook ID as an alias for its latest attempt.
+pub fn read_attempt_aggregate(run_id: &str) -> Result<AgentTaskAggregate> {
+    store::read_aggregate(&sanitize_run_id(run_id))
+}
+
 pub fn aggregate_source(run_id: &str) -> Result<(String, PathBuf)> {
-    let record = status(run_id)?;
+    let selected_run_id = match cook_index(run_id).and_then(|_| select_cook_candidate(run_id)) {
+        Ok(selection) if selection.incomplete => {
+            return Err(Error::validation_invalid_argument(
+                "cook_id",
+                "candidate selection is incomplete after its bounded recovery window",
+                Some(run_id.to_string()),
+                None,
+            ));
+        }
+        Ok(selection) if !selection.run_id.is_empty() => selection.run_id,
+        _ => run_id.to_string(),
+    };
+    let record = status(&selected_run_id)?;
     record.aggregate_path.as_ref().ok_or_else(|| {
         Error::validation_invalid_argument(
             "run_id",
@@ -1755,7 +1774,15 @@ pub fn record_cook_attempt(
     metadata.insert("cook_id".to_string(), json!(sanitize_run_id(cook_id)));
     metadata.insert("cook_attempt".to_string(), json!(attempt));
     store::write_record(&record)?;
-    store::write_cook_index_attempt(cook_id, attempt, run_id, recorded_at)
+    // Completion can precede Cook registration during handoff recovery. Re-read
+    // its persisted aggregate after the Cook identity is durable, then commit the
+    // attempt and substantive pointer in the same index write.
+    let candidate = store::read_aggregate(&record.run_id)
+        .ok()
+        .and_then(|aggregate| {
+            substantive_candidate_from_aggregate(&record.run_id, attempt, &aggregate, None)
+        });
+    store::write_cook_index_attempt(cook_id, attempt, run_id, recorded_at, candidate)
 }
 
 /// Record the controller-owned boundary that a resumed Cook must advance.
@@ -1790,6 +1817,283 @@ pub fn record_cook_recovery_checkpoint(
 
 pub fn cook_index(cook_id: &str) -> Result<AgentTaskCookIndex> {
     store::read_cook_index(&sanitize_run_id(cook_id))
+}
+
+#[cfg(test)]
+pub(crate) fn replace_cook_index_for_test(index: &AgentTaskCookIndex) -> Result<()> {
+    store::write_cook_index_for_test(index)
+}
+
+/// The bounded controller-owned answer to which Cook attempt still owns a
+/// candidate. The mutable latest-attempt alias is chronological history, not
+/// candidate authority: a later metadata-only attempt must not erase a patch.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AgentTaskCookCandidateSelection {
+    pub schema: String,
+    pub cook_id: String,
+    pub run_id: String,
+    pub attempt: u32,
+    pub latest_attempt_run_id: String,
+    pub reason: String,
+    #[serde(default)]
+    pub incomplete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_artifact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_newer_attempts: Vec<AgentTaskCookCandidateSkippedAttempt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_newer_run_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AgentTaskCookCandidateSkippedAttempt {
+    pub run_id: String,
+    pub reason: String,
+}
+
+const COOK_CANDIDATE_SELECTION_WINDOW: usize = 64;
+
+/// Select the latest attempt with controller-readable actionable patch bytes.
+/// Ties use run ID so duplicate attempt numbers remain deterministic. When no
+/// attempt has candidate bytes, retain the legacy latest attempt for old runs.
+pub fn select_cook_candidate(cook_id: &str) -> Result<AgentTaskCookCandidateSelection> {
+    let index = cook_index(cook_id)?;
+    if let Some(candidate) = index.latest_substantive_candidate.as_ref() {
+        if substantive_candidate(&candidate.run_id).as_ref()
+            == Some(&(candidate.task_id.clone(), candidate.artifact_id.clone()))
+        {
+            return Ok(AgentTaskCookCandidateSelection {
+                schema: "homeboy/agent-task-cook-candidate-selection/v1".to_string(),
+                cook_id: index.cook_id,
+                run_id: candidate.run_id.clone(),
+                attempt: candidate.attempt,
+                latest_attempt_run_id: index.latest_run_id,
+                reason: "latest_substantive_candidate_pointer".to_string(),
+                incomplete: false,
+                selected_task_id: Some(candidate.task_id.clone()),
+                selected_artifact_id: Some(candidate.artifact_id.clone()),
+                skipped_newer_attempts: Vec::new(),
+                skipped_newer_run_ids: Vec::new(),
+            });
+        }
+    }
+    // Legacy indexes predate the durable pointer. Their recovery path reads at
+    // most this fixed tail window and reports incomplete rather than widening.
+    let attempts = index
+        .attempts
+        .iter()
+        .rev()
+        .take(COOK_CANDIDATE_SELECTION_WINDOW)
+        .collect::<Vec<_>>();
+    let latest_attempt_run_id = index.latest_run_id.clone();
+    let mut skipped_newer_run_ids = Vec::new();
+    let mut skipped_newer_attempts = Vec::new();
+    for attempt in attempts.iter().take(COOK_CANDIDATE_SELECTION_WINDOW) {
+        if let Some((task_id, artifact_id)) = substantive_candidate(&attempt.run_id) {
+            return Ok(AgentTaskCookCandidateSelection {
+                schema: "homeboy/agent-task-cook-candidate-selection/v1".to_string(),
+                cook_id: index.cook_id,
+                run_id: attempt.run_id.clone(),
+                attempt: attempt.attempt,
+                latest_attempt_run_id,
+                reason: if skipped_newer_run_ids.is_empty() {
+                    "latest_attempt_has_substantive_candidate".to_string()
+                } else {
+                    "latest_substantive_candidate_after_non_substantive_attempts".to_string()
+                },
+                incomplete: false,
+                selected_task_id: Some(task_id),
+                selected_artifact_id: Some(artifact_id),
+                skipped_newer_attempts,
+                skipped_newer_run_ids,
+            });
+        }
+        skipped_newer_run_ids.push(attempt.run_id.clone());
+        skipped_newer_attempts.push(AgentTaskCookCandidateSkippedAttempt {
+            run_id: attempt.run_id.clone(),
+            reason: "no_verified_canonical_promotable_patch".to_string(),
+        });
+    }
+    if index.attempts.len() > COOK_CANDIDATE_SELECTION_WINDOW {
+        return Ok(AgentTaskCookCandidateSelection {
+            schema: "homeboy/agent-task-cook-candidate-selection/v1".to_string(),
+            cook_id: index.cook_id,
+            run_id: String::new(),
+            attempt: 0,
+            latest_attempt_run_id,
+            reason: "selection_window_exhausted_without_promotable_candidate".to_string(),
+            incomplete: true,
+            selected_task_id: None,
+            selected_artifact_id: None,
+            skipped_newer_attempts,
+            skipped_newer_run_ids,
+        });
+    }
+    let latest = attempts.first().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "cook_id",
+            "durable Cook index has no attempts",
+            Some(cook_id.to_string()),
+            None,
+        )
+    })?;
+    Ok(AgentTaskCookCandidateSelection {
+        schema: "homeboy/agent-task-cook-candidate-selection/v1".to_string(),
+        cook_id: index.cook_id,
+        run_id: latest.run_id.clone(),
+        attempt: latest.attempt,
+        latest_attempt_run_id,
+        reason: "no_substantive_candidate_evidence_preserve_latest_attempt_compatibility"
+            .to_string(),
+        incomplete: false,
+        selected_task_id: None,
+        selected_artifact_id: None,
+        skipped_newer_attempts,
+        skipped_newer_run_ids,
+    })
+}
+
+pub(crate) fn update_cook_candidate_after_completion(
+    record: &AgentTaskRunRecord,
+    aggregate: &AgentTaskAggregate,
+    promotion: Option<Value>,
+) -> Result<()> {
+    let Some(cook_id) = record.metadata.get("cook_id").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let Some(attempt) = record.metadata.get("cook_attempt").and_then(Value::as_u64) else {
+        return Ok(());
+    };
+    let Some(candidate) =
+        substantive_candidate_from_aggregate(&record.run_id, attempt as u32, aggregate, promotion)
+    else {
+        return Ok(());
+    };
+    store::update_cook_index(cook_id, |index| {
+        replace_latest_substantive_candidate(index, candidate)
+    })?;
+    Ok(())
+}
+
+fn replace_latest_substantive_candidate(
+    index: &mut AgentTaskCookIndex,
+    candidate: AgentTaskCookLatestSubstantiveCandidate,
+) -> bool {
+    let replace = index
+        .latest_substantive_candidate
+        .as_ref()
+        .is_none_or(|current| {
+            candidate.attempt > current.attempt
+                || (candidate.attempt == current.attempt && candidate.run_id >= current.run_id)
+        });
+    if replace {
+        index.latest_substantive_candidate = Some(candidate);
+    }
+    replace
+}
+
+fn substantive_candidate_from_aggregate(
+    run_id: &str,
+    attempt: u32,
+    aggregate: &AgentTaskAggregate,
+    promotion: Option<Value>,
+) -> Option<AgentTaskCookLatestSubstantiveCandidate> {
+    let (task_id, artifact_id) = substantive_candidate_in_aggregate(run_id, aggregate)?;
+    let outcome = aggregate
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.task_id == task_id)?;
+    let artifact = outcome
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.id == artifact_id)?;
+    let promotion_provenance = promotion
+        .as_ref()
+        .and_then(|value| value.get("provenance").cloned());
+    let destination_provenance = promotion.as_ref().map(|value| {
+        json!({
+            "to_worktree": value.get("to_worktree"),
+            "target": value.get("target"),
+        })
+    });
+    Some(AgentTaskCookLatestSubstantiveCandidate {
+        schema: "homeboy/agent-task-cook-latest-substantive-candidate/v1".to_string(),
+        run_id: run_id.to_string(),
+        attempt,
+        task_id,
+        artifact_id,
+        artifact_kind: artifact.kind.clone(),
+        artifact_sha256: artifact.sha256.clone(),
+        artifact_size_bytes: artifact.size_bytes,
+        integrity: json!({
+            "sha256": artifact.sha256,
+            "size_bytes": artifact.size_bytes,
+            "controller_projection": "verified",
+            "canonical_patch": true,
+        }),
+        promotion_provenance,
+        destination_provenance,
+        recorded_at: now_timestamp(),
+    })
+}
+
+fn substantive_candidate(run_id: &str) -> Option<(String, String)> {
+    // Candidate recovery is a bounded scan. Avoid the aggregate reader's
+    // reconciliation path when this controller record never projected one.
+    let record = exact_record(run_id).ok()?;
+    let aggregate_path = record.aggregate_path?;
+    if !std::path::Path::new(&aggregate_path).exists() {
+        return None;
+    }
+    let Ok(aggregate) = store::read_aggregate(run_id) else {
+        return None;
+    };
+    substantive_candidate_in_aggregate(run_id, &aggregate)
+}
+
+fn substantive_candidate_in_aggregate(
+    run_id: &str,
+    aggregate: &AgentTaskAggregate,
+) -> Option<(String, String)> {
+    let outcome = aggregate.selected_outcome().or_else(|| {
+        (aggregate.outcomes.len() == 1)
+            .then(|| aggregate.outcomes.first())
+            .flatten()
+    });
+    let Some(outcome) = outcome else {
+        return None;
+    };
+    // Metadata alone (and typed artifact envelopes) cannot authorize recovery.
+    // Selection requires controller-readable bytes that pass the same integrity
+    // and canonical patch normalization used by promotion.
+    outcome.artifacts.iter().find_map(|artifact| {
+        if !crate::agent_task_timeout_artifacts::is_actionable_patch_artifact(artifact) {
+            return None;
+        }
+        let Some(path) = crate::agent_task_lifecycle::verified_controller_artifact_projection_path(
+            run_id,
+            &outcome.task_id,
+            artifact,
+        )
+        .ok()
+        .flatten() else {
+            return None;
+        };
+        std::fs::canonicalize(path)
+            .ok()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|bytes| {
+                (crate::agent_task_promotion::validate_artifact_content(artifact, &bytes).is_ok()
+                    && crate::agent_task_promotion::normalize_promotion_patch(
+                        &bytes,
+                        "candidate-selection",
+                    )
+                    .is_ok_and(|patch| !patch.content.trim().is_empty()))
+                .then(|| (outcome.task_id.clone(), artifact.id.clone()))
+            })
+    })
 }
 
 /// Read one durable attempt without resolving a cook ID through its latest
@@ -1832,13 +2136,17 @@ pub fn record_promotion(run_id: &str, promotion: Value) -> Result<AgentTaskRunRe
             .as_array_mut()
             .expect("promotions array")
             .push(promotion.clone());
-        metadata.insert("latest_promotion".to_string(), promotion);
+        metadata.insert("latest_promotion".to_string(), promotion.clone());
         true
     })?;
-    match record {
-        Some(record) => Ok(record),
-        None => store::read_record(&run_id),
+    let record = match record {
+        Some(record) => record,
+        None => store::read_record(&run_id)?,
+    };
+    if let Ok(aggregate) = store::read_aggregate(&run_id) {
+        update_cook_candidate_after_completion(&record, &aggregate, Some(promotion))?;
     }
+    Ok(record)
 }
 
 /// Persist the controller publication result separately from promotion so a

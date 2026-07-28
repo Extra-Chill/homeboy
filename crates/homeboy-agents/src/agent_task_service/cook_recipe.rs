@@ -959,9 +959,17 @@ pub fn resolve_cook_continuation_run_id(cook_or_attempt_id: &str) -> Result<Stri
     {
         return Ok(cook_or_attempt_id.to_string());
     }
-    Ok(agent_task_lifecycle::cook_index(&recipe.cook_id)
-        .ok()
-        .map(|index| index.latest_run_id)
+    let selection = agent_task_lifecycle::select_cook_candidate(&recipe.cook_id)?;
+    if selection.incomplete {
+        return Err(Error::validation_invalid_argument(
+            "cook_id",
+            "candidate selection is incomplete after its bounded recovery window",
+            Some(recipe.cook_id.clone()),
+            None,
+        ));
+    }
+    Ok(Some(selection.run_id)
+        .filter(|run_id| !run_id.is_empty())
         .filter(|run_id| {
             recipe
                 .attempts
