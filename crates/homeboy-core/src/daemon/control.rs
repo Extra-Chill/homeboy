@@ -199,22 +199,20 @@ pub struct ArtifactFetchOutcome {
 
 /// Recover active jobs from an absent daemon-state record only when an operator
 /// supplies the exact lease and dead PID recorded before control-plane loss.
+///
+/// PID death and control-plane loss are not operator assertions: both are
+/// established here. `validate_state_loss_preconditions` requires an absent
+/// state record, a `LeaseMissing` freshness code, an unreachable daemon, and a
+/// non-running recorded PID, and then `probe_recorded_daemon_endpoint` must
+/// fail to connect to the recorded endpoint. The former `--confirm-pid-dead`
+/// and `--confirm-control-plane-lost` gates ran *before* all of that and so
+/// could only reject correct operators.
 pub fn recover_missing_lease_state(
     lease_id: &str,
     recorded_pid: u32,
     recorded_endpoint: &str,
-    confirm_pid_dead: bool,
-    confirm_control_plane_lost: bool,
     addr: &str,
 ) -> Result<super::DaemonStateLossRecoveryResult> {
-    if !confirm_pid_dead || !confirm_control_plane_lost {
-        return Err(Error::validation_invalid_argument(
-            "recover_missing_lease_state",
-            "state-loss recovery requires --confirm-pid-dead and --confirm-control-plane-lost",
-            Some(lease_id.to_string()),
-            None,
-        ));
-    }
     parse_bind_addr(addr)?;
     let recorded_endpoint = parse_recorded_daemon_endpoint(recorded_endpoint)?;
     let _lock = acquire_daemon_operation_lock()?;
@@ -955,20 +953,17 @@ pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
 
 /// Replace one explicitly identified, provably dead daemon lease. The operation
 /// lock covers validation, durable-job reconciliation, and replacement startup.
+///
+/// The exact `lease_id` is the operator's destructive-action target; PID death
+/// is proven here rather than asserted. `adopt_orphaned_lease_with_operations`
+/// requires a `PidDead` freshness code, re-proves the recorded PID dead *under
+/// the owner lock* (so a reused PID cannot slip through), and refuses when any
+/// active child process survives.
 pub fn adopt_orphaned_lease(
     lease_id: &str,
-    confirm_pid_dead: bool,
     confirmed_no_pid_job_ids: &[uuid::Uuid],
     addr: &str,
 ) -> Result<DaemonOrphanAdoptionResult> {
-    if !confirm_pid_dead {
-        return Err(Error::validation_invalid_argument(
-            "confirm_pid_dead",
-            "orphan adoption requires explicit confirmation that the recorded daemon PID is dead",
-            None,
-            Some(vec!["Inspect `homeboy daemon status` and retry with --confirm-pid-dead only for the reported dead lease.".to_string()]),
-        ));
-    }
     parse_bind_addr(addr)?;
     let _lock = acquire_daemon_operation_lock()?;
     adopt_orphaned_lease_with_operations(
@@ -996,21 +991,26 @@ pub fn adopt_orphaned_lease(
 /// daemon lost jobs before it could persist a child identity. This never widens
 /// automatic adoption: the operator must name every active job and attest that
 /// workload processes were inspected and are absent.
+///
+/// `confirm_workload_processes_absent` is deliberately retained. This command
+/// exists precisely because the daemon died before persisting child identity,
+/// so the store holds no PID for the named jobs and nothing in this process can
+/// observe whether their workloads are still running. The store-side check only
+/// proves the *absence of recorded* child evidence — the very condition that
+/// makes the operator's inspection the sole source of truth — and it persists
+/// the attestation as durable provenance on every affected job.
+///
+/// PID death, by contrast, is proven here:
+/// `reconcile_dead_lease_orphans_with_operations` requires a `PidDead` freshness
+/// code, a non-running recorded PID, persisted unexpected-termination evidence
+/// bound to this exact lease and PID, and a second liveness proof taken under
+/// the owner lock. `--confirm-pid-dead` added nothing to that.
 pub fn reconcile_dead_lease_orphans(
     lease_id: &str,
     job_ids: &[uuid::Uuid],
-    confirm_pid_dead: bool,
     confirm_workload_processes_absent: bool,
     addr: &str,
 ) -> Result<DaemonExactOrphanRecoveryResult> {
-    if !confirm_pid_dead {
-        return Err(Error::validation_invalid_argument(
-            "confirm_pid_dead",
-            "exact dead-lease recovery requires --confirm-pid-dead",
-            None,
-            None,
-        ));
-    }
     if !confirm_workload_processes_absent {
         return Err(Error::validation_invalid_argument("confirm_workload_processes_absent", "exact dead-lease recovery requires --confirm-workload-processes-absent after inspecting workload processes", None, None));
     }
@@ -1296,18 +1296,13 @@ where
 /// typed `/jobs` view no longer accounts for their durable active jobs.
 /// Process and configured-listener probes are fail-closed because replacement
 /// is safe only after ownership has been ruled out.
-pub fn reconcile_leaseless_orphans(
-    confirm_no_daemon_owner: bool,
-    addr: &str,
-) -> Result<DaemonLeaselessRecoveryResult> {
-    if !confirm_no_daemon_owner {
-        return Err(Error::validation_invalid_argument(
-            "reconcile_leaseless_orphans",
-            "lease-less recovery requires --confirm-no-daemon-owner",
-            None,
-            None,
-        ));
-    }
+///
+/// Absence of a daemon owner is proven, not asserted: the daemon owner lock is
+/// refused while any daemon is live or starting, and `prove_no_daemon_owner`
+/// then fails closed on any related daemon process candidate or any reachable
+/// listener at `addr`. The former `--confirm-no-daemon-owner` gate ran ahead of
+/// both probes.
+pub fn reconcile_leaseless_orphans(addr: &str) -> Result<DaemonLeaselessRecoveryResult> {
     parse_bind_addr(addr)?;
     let _lock = acquire_daemon_operation_lock()?;
     let status = read_status()?;

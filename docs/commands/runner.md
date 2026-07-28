@@ -346,14 +346,26 @@ plan is emitted; `--sync-mode` accepts `snapshot`, `snapshot-git`, or `git`.
 
 ```sh
 homeboy runner connect <runner-id>
-homeboy runner connect <runner-id> --adopt-orphan-lease <lease-id> --confirm-pid-dead
-homeboy runner connect <runner-id> --adopt-orphan-lease <lease-id> --confirm-pid-dead --confirm-untracked-child-dead <job-id>
-homeboy runner connect <runner-id> --reconcile-leaseless-orphans --confirm-no-daemon-owner
-homeboy daemon reconcile-leaseless-orphans --reconcile-leaseless-orphans --confirm-no-daemon-owner
-homeboy runner connect <runner-id> --recover-missing-lease-state <lease-id> --recorded-pid <pid> --recorded-endpoint <loopback-host:port> --confirm-pid-dead --confirm-control-plane-lost
-homeboy daemon recover-missing-lease-state --lease-id <lease-id> --recorded-pid <pid> --recorded-endpoint <loopback-host:port> --confirm-pid-dead --confirm-control-plane-lost
+homeboy runner connect <runner-id> --adopt-orphan-lease <lease-id>
+homeboy runner connect <runner-id> --adopt-orphan-lease <lease-id> --confirm-untracked-child-dead <job-id>
+homeboy runner connect <runner-id> --reconcile-leaseless-orphans
+homeboy daemon reconcile-leaseless-orphans
+homeboy runner connect <runner-id> --recover-missing-lease-state <lease-id> --recorded-pid <pid> --recorded-endpoint <loopback-host:port>
+homeboy daemon recover-missing-lease-state --lease-id <lease-id> --recorded-pid <pid> --recorded-endpoint <loopback-host:port>
 homeboy runner connect <controller-id> --reverse --reverse-runner <runner-id> --broker-url <url>
 ```
+
+`--confirm-pid-dead`, `--confirm-no-daemon-owner`, and
+`--confirm-control-plane-lost` are deprecated no-ops on both surfaces; the runner
+proves each fact itself before mutating anything. See the deprecation table in
+[daemon.md](daemon.md). They remain accepted for one release, so released
+runbooks and composed repair commands keep working, but supplying one *without*
+its recovery mode is refused — a confirmation selects no recovery on its own.
+`--recorded-pid` and `--recorded-endpoint` are **not** confirmations: once a
+runner's state record is gone it cannot recompute them, so they stay required.
+`--confirm-untracked-child-dead <job-id>` also stays required where it applies —
+it names an exact job with no recorded child PID, which is evidence homeboy does
+not have.
 
 Starts a loopback-only Homeboy daemon on the runner and opens an SSH tunnel to
 it. This is the preferred Lab execution path because later `runner exec` calls
@@ -364,7 +376,8 @@ the runner ID, tunnel endpoint, daemon endpoint, and persisted session metadata.
 When a controller session was lost while a remote daemon lease is dead and its
 durable jobs remain, inspect the remote `homeboy daemon status` first. Recovery
 requires the explicit exact-lease form shown above. It verifies the recorded PID
-is dead. If a listed active job has neither a terminal result nor a recorded
+is dead itself — that is not an operator assertion. If a listed active job has
+neither a terminal result nor a recorded
 child PID, inspect its process identity independently and supply one repeated
 `--confirm-untracked-child-dead <job-id>` value for every such exact job. The
 confirmation is rejected for terminal, PID-backed, foreign-lease, or unknown

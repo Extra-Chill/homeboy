@@ -225,7 +225,7 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         adopt_orphan_lease: Option<String>,
 
-        /// Confirm the recorded PID for --adopt-orphan-lease is dead
+        /// Deprecated no-op retained for one release; the runner proves the recorded PID dead itself
         #[arg(long)]
         confirm_pid_dead: bool,
 
@@ -245,7 +245,7 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         reconcile_leaseless_orphans: bool,
 
-        /// Confirm the remote store has no daemon owner before lease-less reconciliation
+        /// Deprecated no-op retained for one release; the runner fails closed on owner-lock, process, and listener probes
         #[arg(long)]
         confirm_no_daemon_owner: bool,
 
@@ -261,7 +261,7 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         recorded_endpoint: Option<String>,
 
-        /// Confirm the remote daemon state record and endpoint are unavailable
+        /// Deprecated no-op retained for one release; the runner probes its own state record and endpoint
         #[arg(long)]
         confirm_control_plane_lost: bool,
     },
