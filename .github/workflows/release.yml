@@ -634,11 +634,20 @@ jobs:
           echo "dist ran successfully"
           cat plan-dist-manifest.json
           echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
-          EXPECTED_ASSETS="$(jq -c '[.releases[].artifacts[]? | split("/") | last] | unique' plan-dist-manifest.json)"
-          if [ "$(jq 'length' <<< "${EXPECTED_ASSETS}")" -eq 0 ]; then
+          PLANNED_ARTIFACTS="$(jq -c '[.releases[].artifacts[]? | split("/") | last] | unique' plan-dist-manifest.json)"
+          if [ "$(jq 'length' <<< "${PLANNED_ARTIFACTS}")" -eq 0 ]; then
             echo "::error::cargo-dist planned no release assets"
             exit 1
           fi
+          # cargo-dist uploads its own `dist-manifest.json` to every GitHub
+          # Release but never lists it in `.releases[].artifacts[]` (issue
+          # #10547). Draft adoption validates the remote inventory *exactly*,
+          # so a planned-artifacts-only expectation is permanently one asset
+          # short and no stranded draft can ever be adopted. `expected-assets`
+          # must therefore describe cargo-dist's complete published inventory,
+          # not just its planned payloads.
+          EXPECTED_ASSETS="$(jq -c '. + ["dist-manifest.json"] | unique' <<< "${PLANNED_ARTIFACTS}")"
+          echo "planned-artifacts=${PLANNED_ARTIFACTS}" >> "$GITHUB_OUTPUT"
           echo "expected-assets=${EXPECTED_ASSETS}" >> "$GITHUB_OUTPUT"
 
       - name: Upload dist-manifest.json
@@ -914,9 +923,41 @@ jobs:
           name: homeboy-binary
           path: .homeboy-bin
 
+      # Recovery has two independent provenances that must never be conflated
+      # (issue #10519): the *control binary* that performs publication, and the
+      # *release target* whose tree and bytes are immutable. Record both
+      # explicitly so a run's evidence proves which code repaired which tag.
       - name: Verify current Homeboy finalizer
         if: needs.prepare.outputs.recovery-release == 'true'
-        run: chmod +x .homeboy-bin/homeboy
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
+          CONTROL_SHA: ${{ github.sha }}
+          ADOPTION_SOURCE: ${{ needs.prepare.outputs.recovery-release == 'true' && 'draft-adoption' || 'artifacts' }}
+        run: |
+          set -euo pipefail
+          chmod +x .homeboy-bin/homeboy
+          # Never let provenance reporting become a new way for recovery to
+          # fail closed; the finalizer step below is the real execution gate.
+          CONTROL_IDENTITY="$(.homeboy-bin/homeboy --version 2>/dev/null || echo 'unreadable')"
+          TARGET_SHA="$(git rev-parse "${RELEASE_TAG}^{}")"
+          {
+            echo "### Release recovery provenance"
+            echo ""
+            echo "| role | value |"
+            echo "| --- | --- |"
+            echo "| control binary | \`${CONTROL_IDENTITY}\` |"
+            echo "| control commit | \`${CONTROL_SHA}\` |"
+            echo "| release target tag | \`${RELEASE_TAG}\` |"
+            echo "| release target commit | \`${TARGET_SHA}\` |"
+            echo "| artifact provenance | \`${ADOPTION_SOURCE}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice::Recovery control binary ${CONTROL_IDENTITY} built from ${CONTROL_SHA} is repairing ${RELEASE_TAG} at ${TARGET_SHA} using ${ADOPTION_SOURCE} provenance"
+          if [ "${CONTROL_SHA}" = "${TARGET_SHA}" ]; then
+            # Not fatal: a tag pushed moments ago is legitimately still HEAD.
+            # It does mean a publisher fix merged after the tag cannot be
+            # bootstrapped by this run — the exact trap #10519 describes.
+            echo "::warning::Recovery control binary was built from the release target commit ${TARGET_SHA}; a publisher fix merged after ${RELEASE_TAG} cannot be bootstrapped by this run (#10519). Re-dispatch from an updated default branch if recovery keeps failing in the publisher."
+          fi
 
       - name: Finish Homeboy release pipeline at tag
         uses: Extra-Chill/homeboy-action@v2

@@ -1,0 +1,22 @@
+{
+  "releases": [
+    {
+      "app_name": "homeboy",
+      "app_version": "0.321.0",
+      "artifacts": [
+        "source.tar.gz",
+        "source.tar.gz.sha256",
+        "homeboy.rb",
+        "sha256.sum",
+        "homeboy-aarch64-apple-darwin.tar.xz",
+        "homeboy-aarch64-apple-darwin.tar.xz.sha256",
+        "homeboy-aarch64-unknown-linux-gnu.tar.xz",
+        "homeboy-aarch64-unknown-linux-gnu.tar.xz.sha256",
+        "homeboy-x86_64-apple-darwin.tar.xz",
+        "homeboy-x86_64-apple-darwin.tar.xz.sha256",
+        "homeboy-x86_64-unknown-linux-gnu.tar.xz",
+        "homeboy-x86_64-unknown-linux-gnu.tar.xz.sha256"
+      ]
+    }
+  ]
+}
