@@ -51,6 +51,16 @@ such as `evidence-manifest` — can be checked before they are attached:
 homeboy contract validate homeboy/evidence-manifest/v1 --file manifest.json
 ```
 
+Fuzz evidence crosses the same boundary. A rig or runner can check its
+completeness verdict, and a consumer can check a reviewer proof, before either
+is attached or published:
+
+```sh
+homeboy contract show fuzz-evidence-contract
+homeboy contract validate homeboy/fuzz-evidence-contract/v1 --file evidence.json
+homeboy contract validate homeboy/fuzz-proof/v1 --file proof.json
+```
+
 ## Export
 
 ```sh

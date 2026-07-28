@@ -52,6 +52,10 @@ fn render(proof: &Value) -> String {
         }
     }
 
+    if let Some(fuzz) = proof.get("fuzz") {
+        lines.extend(fuzz_lines(fuzz));
+    }
+
     match proof.get("signals").and_then(Value::as_object) {
         Some(signals) if !signals.is_empty() => {
             lines.push(format!("Signals ({}):", signals.len()));
@@ -67,6 +71,93 @@ fn render(proof: &Value) -> String {
     let mut output = lines.join("\n");
     output.push('\n');
     output
+}
+
+/// Bounded reviewer lines for a fuzz run: what was fuzzed, at what revision,
+/// with what inputs, against what pass criteria. The full projection —
+/// including the Markdown rendering — stays behind `--json`.
+fn fuzz_lines(fuzz: &Value) -> Vec<String> {
+    let mut lines = vec!["Fuzz proof:".to_string()];
+    let workload = string_value(fuzz, &["verdict", "workload"]).unwrap_or("unknown");
+    let evidence = string_value(fuzz, &["verdict", "evidence"]).unwrap_or("unknown");
+    lines.push(format!("  Workload: {workload}   Evidence: {evidence}"));
+    if let Some(domain) = string_value(fuzz, &["verdict", "failure_domain"]) {
+        lines.push(format!("  Failure domain: {domain}"));
+    }
+    if let Some(revision) = string_value(fuzz, &["component", "revision"]) {
+        lines.push(format!("  Component revision: {revision}"));
+    }
+    if let Some(revision) = string_value(fuzz, &["rig", "revision"]) {
+        lines.push(format!("  Rig revision: {revision}"));
+    }
+    if let Some(cases) = value_at(fuzz, &["cases"]) {
+        lines.push(format!(
+            "  Cases: {}/{} passed, {} failed, {} skipped",
+            count_at(cases, "passed"),
+            count_at(cases, "total"),
+            count_at(cases, "failed"),
+            count_at(cases, "skipped")
+        ));
+    }
+    if let Some(findings) = value_at(fuzz, &["findings"]) {
+        lines.push(format!(
+            "  Findings: {} total, {} open",
+            count_at(findings, "total"),
+            count_at(findings, "open")
+        ));
+    }
+    if let Some(gates) = value_at(fuzz, &["gates"]) {
+        lines.push(format!(
+            "  Gates: {}/{} passed",
+            count_at(gates, "passed"),
+            count_at(gates, "total")
+        ));
+    }
+    if let Some(coverage) = value_at(fuzz, &["coverage"]) {
+        lines.push(format!(
+            "  Coverage: targets {}/{}, operations {}/{}",
+            count_at(coverage, "proven_targets"),
+            count_at(coverage, "declared_targets"),
+            count_at(coverage, "proven_operations"),
+            count_at(coverage, "declared_operations")
+        ));
+    }
+    if let Some(seed) = string_value(fuzz, &["execution", "seed"]) {
+        lines.push(format!("  Seed: {seed}"));
+    }
+    let violations = value_at(fuzz, &["evidence", "violations"])
+        .and_then(Value::as_array)
+        .filter(|violations| !violations.is_empty());
+    if let Some(violations) = violations {
+        lines.push(format!(
+            "  Evidence-contract violations ({}) — producer defects, not product findings:",
+            violations.len()
+        ));
+        for violation in violations.iter().take(4) {
+            let code = string_value(violation, &["code"]).unwrap_or("unknown");
+            let message = string_value(violation, &["message"]).unwrap_or("");
+            match string_value(violation, &["declared_ref"]) {
+                Some(declared_ref) => {
+                    lines.push(format!("    [{code}] {message} (ref: {declared_ref})"))
+                }
+                None => lines.push(format!("    [{code}] {message}")),
+            }
+        }
+    }
+    let gaps = value_at(fuzz, &["gaps"])
+        .and_then(Value::as_array)
+        .filter(|gaps| !gaps.is_empty());
+    if let Some(gaps) = gaps {
+        lines.push(format!("  Not recorded ({}):", gaps.len()));
+        for gap in gaps.iter().filter_map(Value::as_str).take(4) {
+            lines.push(format!("    {gap}"));
+        }
+    }
+    lines
+}
+
+fn count_at(value: &Value, key: &str) -> u64 {
+    value.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
 
 fn scalar_display(value: &Value) -> String {
@@ -123,6 +214,91 @@ mod tests {
         assert!(summary.contains("Full output: homeboy runs proof bench-run-42 --json\n"));
         // Compact: no raw JSON braces.
         assert!(!summary.contains("{\n"));
+    }
+
+    #[test]
+    fn proof_summary_surfaces_the_fuzz_projection() {
+        let payload = json!({
+            "variant": "proof",
+            "payload": {
+                "run_id": "studio-pr-4356-homeboy-v6",
+                "kind": "fuzz",
+                "status": "pass",
+                "passed": true,
+                "signals": { "success": true },
+                "fuzz": {
+                    "verdict": { "overall": true, "workload": "passed", "evidence": "complete" },
+                    "component": { "role": "component", "revision": "0bb440ed" },
+                    "rig": { "role": "rig", "revision": "7ccbe545" },
+                    "cases": { "total": 19, "passed": 19, "failed": 0, "skipped": 0 },
+                    "findings": { "total": 0, "open": 0 },
+                    "gates": { "total": 4, "passed": 4, "failed": 0 },
+                    "coverage": {
+                        "declared_targets": 4, "proven_targets": 4,
+                        "declared_operations": 6, "proven_operations": 6,
+                        "complete": true
+                    },
+                    "execution": { "seed": "4356" },
+                    "evidence": { "complete": true }
+                }
+            }
+        });
+
+        let summary = render_runs_proof_summary(&payload).expect("summary");
+
+        assert!(summary.contains("Fuzz proof:\n"));
+        assert!(summary.contains("  Workload: passed   Evidence: complete\n"));
+        assert!(summary.contains("  Component revision: 0bb440ed\n"));
+        assert!(summary.contains("  Rig revision: 7ccbe545\n"));
+        assert!(summary.contains("  Cases: 19/19 passed, 0 failed, 0 skipped\n"));
+        assert!(summary.contains("  Gates: 4/4 passed\n"));
+        assert!(summary.contains("  Coverage: targets 4/4, operations 6/6\n"));
+        assert!(summary.contains("  Seed: 4356\n"));
+        // A complete contract adds no violation noise.
+        assert!(!summary.contains("Evidence-contract violations"));
+    }
+
+    #[test]
+    fn proof_summary_separates_evidence_violations_from_product_findings() {
+        let payload = json!({
+            "variant": "proof",
+            "payload": {
+                "run_id": "studio-pr-4356-homeboy-v1",
+                "kind": "fuzz",
+                "status": "fail",
+                "passed": false,
+                "signals": {},
+                "fuzz": {
+                    "verdict": {
+                        "overall": false,
+                        "workload": "passed",
+                        "evidence": "incomplete",
+                        "failure_domain": "evidence_contract_failure"
+                    },
+                    "component": { "role": "component" },
+                    "gates": { "total": 4, "passed": 4, "failed": 0 },
+                    "execution": {},
+                    "evidence": {
+                        "complete": false,
+                        "violations": [{
+                            "code": "artifact_ref_missing",
+                            "message": "declared artifact is absent from the fuzz artifact root",
+                            "declared_ref": "results.json"
+                        }]
+                    },
+                    "gaps": ["no seed was recorded"]
+                }
+            }
+        });
+
+        let summary = render_runs_proof_summary(&payload).expect("summary");
+
+        assert!(summary.contains("  Workload: passed   Evidence: incomplete\n"));
+        assert!(summary.contains("  Failure domain: evidence_contract_failure\n"));
+        assert!(summary.contains("producer defects, not product findings"));
+        assert!(summary.contains("[artifact_ref_missing]"));
+        assert!(summary.contains("(ref: results.json)"));
+        assert!(summary.contains("  Not recorded (1):\n"));
     }
 
     #[test]

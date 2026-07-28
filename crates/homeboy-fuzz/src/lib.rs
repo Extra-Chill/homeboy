@@ -10,11 +10,13 @@ mod coverage;
 mod coverage_reconciliation_persistence;
 mod defaults;
 mod envelope;
+mod evidence_contract;
 mod hotspots;
 mod normalize;
 mod observations;
 mod parse;
 mod payloads;
+mod proof;
 mod result_envelope_persistence;
 mod run_dir_writers;
 mod run_evidence_persistence;
@@ -54,6 +56,11 @@ pub use envelope::{
     FuzzSamplingCorpusRef, FuzzSamplingReplayDeterminism, FuzzSamplingRequest, FuzzSamplingStratum,
     FuzzTargetInventory, IsolationProof,
 };
+pub use evidence_contract::{
+    classify_fuzz_failure, FuzzEvidenceContract, FuzzEvidenceVerdict, FuzzEvidenceViolation,
+    FuzzEvidenceViolationCode, FuzzFailureClassification, FuzzFailureDomain, FuzzFailureSignals,
+    FuzzWorkloadVerdict, FUZZ_ARTIFACT_ROOT_PRODUCER_CONTRACT, FUZZ_RESULTS_FILE_PRODUCER_CONTRACT,
+};
 pub use hotspots::{
     parse_fuzz_hotspot_set_value, rank_fuzz_observation_set_hotspots, FuzzHotspot,
     FuzzHotspotDimension, FuzzHotspotMetric, FuzzHotspotSet,
@@ -71,6 +78,12 @@ pub use payloads::{
     externalize_fuzz_campaign_payloads, FuzzPayload, FuzzPayloadBudget, FuzzPayloadExternalization,
     FUZZ_PAYLOAD_ARTIFACT_KIND, INLINE_FUZZ_PAYLOAD_LIMIT_BYTES,
 };
+pub use proof::{
+    derive_fuzz_proof, fuzz_campaign_case_totals, fuzz_campaign_finding_totals, FuzzProof,
+    FuzzProofCaseTotals, FuzzProofCoverage, FuzzProofExecution, FuzzProofFailedGate,
+    FuzzProofFindingTotals, FuzzProofGateTotals, FuzzProofRevision, FuzzProofSource,
+    FuzzProofVerdict,
+};
 pub use result_envelope_persistence::{
     fuzz_result_envelope_evidence_ref, fuzz_result_envelope_json, persist_fuzz_result_envelope,
     persist_fuzz_run_result_envelope, report_fuzz_result_envelope,
@@ -82,15 +95,15 @@ pub use schemas::{
     standardized_fuzz_skip_reason_codes, FUZZ_ACTION_MODEL_SCHEMA, FUZZ_ARTIFACT_SCHEMA,
     FUZZ_CAMPAIGN_SCHEMA, FUZZ_CASE_LOG_SCHEMA, FUZZ_CASE_SCHEMA, FUZZ_CONTRACT_VERSION,
     FUZZ_CORE_CONTRACT_SCHEMA, FUZZ_COVERAGE_RECONCILIATION_SCHEMA, FUZZ_COVERAGE_SCHEMA,
-    FUZZ_COVERAGE_SUMMARY_SCHEMA, FUZZ_EXECUTION_REQUEST_SCHEMA, FUZZ_EXPLORATION_POLICY_SCHEMA,
-    FUZZ_FINDING_SCHEMA, FUZZ_GATE_SCHEMA, FUZZ_HOTSPOT_SET_SCHEMA, FUZZ_OBSERVATION_SET_SCHEMA,
-    FUZZ_PROVENANCE_SCHEMA, FUZZ_REPLAY_SCHEMA, FUZZ_REQUIRED_ARTIFACT_SCHEMA,
-    FUZZ_RESULT_ENVELOPE_SCHEMA, FUZZ_SAMPLING_REQUEST_SCHEMA, FUZZ_SEED_SCHEMA,
-    FUZZ_SEQUENCE_PLAN_SCHEMA, FUZZ_SEQUENCE_RESULT_SCHEMA, FUZZ_SKIP_REASON_AUTH_REQUIRED,
-    FUZZ_SKIP_REASON_CONFIG_REQUIRED, FUZZ_SKIP_REASON_DESTRUCTIVE, FUZZ_SKIP_REASON_LEGACY,
-    FUZZ_SKIP_REASON_UNAVAILABLE, FUZZ_SKIP_REASON_UNSAFE, FUZZ_SKIP_REASON_UNSUPPORTED,
-    FUZZ_SURFACE_SCHEMA, FUZZ_TARGET_INVENTORY_SCHEMA, FUZZ_TARGET_SCHEMA, FUZZ_THRESHOLD_SCHEMA,
-    FUZZ_WORKLOAD_SCHEMA, ISOLATION_PROOF_SCHEMA,
+    FUZZ_COVERAGE_SUMMARY_SCHEMA, FUZZ_EVIDENCE_CONTRACT_SCHEMA, FUZZ_EXECUTION_REQUEST_SCHEMA,
+    FUZZ_EXPLORATION_POLICY_SCHEMA, FUZZ_FINDING_SCHEMA, FUZZ_GATE_SCHEMA, FUZZ_HOTSPOT_SET_SCHEMA,
+    FUZZ_OBSERVATION_SET_SCHEMA, FUZZ_PROOF_SCHEMA, FUZZ_PROVENANCE_SCHEMA, FUZZ_REPLAY_SCHEMA,
+    FUZZ_REQUIRED_ARTIFACT_SCHEMA, FUZZ_RESULT_ENVELOPE_SCHEMA, FUZZ_SAMPLING_REQUEST_SCHEMA,
+    FUZZ_SEED_SCHEMA, FUZZ_SEQUENCE_PLAN_SCHEMA, FUZZ_SEQUENCE_RESULT_SCHEMA,
+    FUZZ_SKIP_REASON_AUTH_REQUIRED, FUZZ_SKIP_REASON_CONFIG_REQUIRED, FUZZ_SKIP_REASON_DESTRUCTIVE,
+    FUZZ_SKIP_REASON_LEGACY, FUZZ_SKIP_REASON_UNAVAILABLE, FUZZ_SKIP_REASON_UNSAFE,
+    FUZZ_SKIP_REASON_UNSUPPORTED, FUZZ_SURFACE_SCHEMA, FUZZ_TARGET_INVENTORY_SCHEMA,
+    FUZZ_TARGET_SCHEMA, FUZZ_THRESHOLD_SCHEMA, FUZZ_WORKLOAD_SCHEMA, ISOLATION_PROOF_SCHEMA,
 };
 pub use types::{
     FuzzAction, FuzzActionModel, FuzzCampaign, FuzzCase, FuzzCaseLogArtifactRef, FuzzCaseLogEntry,

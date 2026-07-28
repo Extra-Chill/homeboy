@@ -5,8 +5,11 @@ use homeboy::core::observation::{runs_service, ArtifactRecord, ObservationStore,
 use homeboy::fuzz::inspect_fuzz_result_envelope_artifact;
 
 use super::types::{FuzzInspectArgs, FuzzInspectCandidate, FuzzInspectOutput};
-use super::types_extra::{FuzzDiagnosticSourceIdentity, FuzzFailureDiagnostic};
+use super::types_extra::{FuzzDiagnosticSourceIdentity, FuzzFailureDiagnostic, FuzzGateEvaluation};
 use homeboy::fuzz::fuzz_result_envelope_evidence_ref;
+use homeboy::fuzz::{
+    classify_fuzz_failure, FuzzEvidenceContract, FuzzFailureDomain, FuzzFailureSignals,
+};
 
 /// Artifact kinds that hold the raw fuzz runner input/result pair, ordered by
 /// inspection preference. `fuzz_results` is the verbatim file a runner wrote to
@@ -157,6 +160,11 @@ pub(super) fn run_inspect(args: FuzzInspectArgs) -> homeboy::core::Result<FuzzIn
     // The selected artifact can belong to a downstream Lab fuzz run rather than
     // the runner-exec run used for lookup. Its record is the diagnostic source.
     let diagnostic_run = runs_service::require_run(&store, &selected.run_id)?;
+    // Read-time reconstruction: prefer the classified contract the producer
+    // persisted, and fall back to the pre-taxonomy `missing_artifact_refs` /
+    // `results_error` members for runs recorded before it existed.
+    let evidence_contract = FuzzEvidenceContract::from_run_metadata(&diagnostic_run.metadata_json);
+    let recorded_gates = recorded_gate_evaluations(&diagnostic_run.metadata_json);
 
     Ok(FuzzInspectOutput {
         command: "fuzz.inspect".to_string(),
@@ -186,6 +194,8 @@ pub(super) fn run_inspect(args: FuzzInspectArgs) -> homeboy::core::Result<FuzzIn
                         .map(|reference| reference.canonical_uri().to_string()),
                 )
                 .collect(),
+            &evidence_contract,
+            &recorded_gates,
         )),
         envelope_summary,
         candidates: candidate_index,
@@ -202,34 +212,95 @@ pub(super) fn run_inspect(args: FuzzInspectArgs) -> homeboy::core::Result<FuzzIn
     })
 }
 
+/// Build the compact fuzz failure diagnosis.
+///
+/// The `evidence` argument is what keeps a producer defect from being reported
+/// as a discovery about the code under test. Before it existed, the only
+/// inputs were the campaign and the runner's stdout/stderr, so a campaign
+/// whose 19 cases all passed but whose declared `results.json` was absent got
+/// diagnosed as `workload_execution_failure` against an unrelated passing case
+/// id, with successful runner stdout at the head of the root-cause chain.
 pub(super) fn fuzz_failure_diagnostic(
     run: &RunRecord,
     source_run_id: Option<&str>,
     result: &serde_json::Value,
     output: &[&str],
     mut evidence_refs: Vec<String>,
+    evidence: &FuzzEvidenceContract,
+    gates: &[FuzzGateEvaluation],
 ) -> FuzzFailureDiagnostic {
     let campaign = result.get("campaign").unwrap_or(result);
-    let failed_case = campaign
+    let cases = campaign
         .get("cases")
         .and_then(serde_json::Value::as_array)
-        .and_then(|cases| {
-            cases
+        .map(|cases| cases.as_slice())
+        .unwrap_or_default();
+    let failed_cases = cases
+        .iter()
+        .filter(|case| {
+            matches!(
+                case.get("status").and_then(serde_json::Value::as_str),
+                Some("failed" | "error")
+            )
+        })
+        .collect::<Vec<_>>();
+    let failed_case_ids = failed_cases
+        .iter()
+        .filter_map(|case| {
+            case.get("id")
+                .or_else(|| case.get("case_id"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    let failed_gate_ids = gates
+        .iter()
+        .filter(|gate| gate.status != "passed")
+        .map(|gate| gate.gate_id.clone())
+        .collect::<Vec<_>>();
+    let open_findings = campaign
+        .get("findings")
+        .and_then(serde_json::Value::as_array)
+        .map(|findings| {
+            findings
                 .iter()
-                .find(|case| {
-                    matches!(
-                        case.get("status").and_then(serde_json::Value::as_str),
-                        Some("failed" | "error")
-                    )
+                .filter(|finding| {
+                    finding.get("status").and_then(serde_json::Value::as_str) == Some("open")
                 })
-                .or_else(|| cases.first())
-        });
-    let case_id = failed_case
-        .and_then(|case| case.get("id").or_else(|| case.get("case_id")))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
-        .or_else(|| find_string(result, &["case_id"]));
+                .count() as u64
+        })
+        .unwrap_or(0);
+    let classification_result = classify_fuzz_failure(&FuzzFailureSignals {
+        evidence,
+        failed_case_ids: &failed_case_ids,
+        open_findings,
+        failed_gate_ids: &failed_gate_ids,
+        campaign_present: !campaign.is_null()
+            && campaign
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some(),
+    });
+    let is_evidence_failure =
+        classification_result.domain == FuzzFailureDomain::EvidenceContractFailure;
+
+    // A campaign-level evidence failure has no owning case. Naming a passing
+    // one is how #10513 pointed at `sqlite-artifact-mask-1` for a run in which
+    // every case passed.
+    let case_id = if is_evidence_failure {
+        None
+    } else {
+        failed_cases
+            .first()
+            .copied()
+            .or_else(|| cases.first())
+            .and_then(|case| case.get("id").or_else(|| case.get("case_id")))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .or_else(|| find_string(result, &["case_id"]))
+    };
     let phase = find_string(result, &["phase", "phase_id"]);
+
     let mut causes = diagnostic_strings(result);
     causes.extend(
         output
@@ -240,24 +311,46 @@ pub(super) fn fuzz_failure_diagnostic(
     causes.sort();
     causes.dedup();
     let joined = causes.join("\n");
-    let classification = if joined.contains("ELOOP") {
-        "pre_execution_assembly_failure"
+    let classification = if is_evidence_failure {
+        FuzzFailureDomain::EvidenceContractFailure
+            .as_str()
+            .to_string()
+    } else if joined.contains("ELOOP") {
+        "pre_execution_assembly_failure".to_string()
     } else if joined.contains("PHP")
         && (joined.contains("Missing ") || joined.contains("exit code"))
     {
-        "php_bootstrap_fatal"
+        "php_bootstrap_fatal".to_string()
     } else if causes.is_empty() {
-        "failed_campaign"
+        "failed_campaign".to_string()
     } else {
-        "workload_execution_failure"
-    }
-    .to_string();
+        "workload_execution_failure".to_string()
+    };
     causes.truncate(4);
+    // Evidence-contract root causes lead: they name the declared reference,
+    // the base it was resolved against, and the producer that owed it. Runner
+    // output stays available behind them instead of masquerading as the cause.
+    let mut root_cause_chain = evidence.root_cause_lines();
+    root_cause_chain.truncate(4);
+    root_cause_chain.extend(causes);
+    root_cause_chain.truncate(8);
+
     let executions = if classification == "pre_execution_assembly_failure" {
         0
     } else {
-        find_u64(result, &["executions", "execution_count", "executionCount"])
-            .unwrap_or_else(|| u64::from(case_id.is_some()))
+        find_u64(result, &["executions", "execution_count", "executionCount"]).unwrap_or_else(
+            || {
+                // For a campaign-level evidence failure there is no owning
+                // case, but the campaign still says how much ran. Reporting
+                // `1` there (the old `case_id.is_some()` fallback) understated
+                // a 19-case campaign.
+                if is_evidence_failure {
+                    cases.len() as u64
+                } else {
+                    u64::from(case_id.is_some())
+                }
+            },
+        )
     };
     if let Some(source_run_id) = source_run_id {
         evidence_refs.push(format!("homeboy://run/{source_run_id}"));
@@ -275,7 +368,11 @@ pub(super) fn fuzz_failure_diagnostic(
         case_id,
         phase,
         classification,
-        root_cause_chain: causes,
+        failure_domain: classification_result.domain.as_str().to_string(),
+        workload_verdict: classification_result.workload_verdict.as_str().to_string(),
+        evidence_verdict: classification_result.evidence_verdict.as_str().to_string(),
+        evidence_violations: evidence.violations.clone(),
+        root_cause_chain,
         executions,
         source_identity: FuzzDiagnosticSourceIdentity {
             component: run
@@ -289,6 +386,50 @@ pub(super) fn fuzz_failure_diagnostic(
         evidence_refs,
         inspect_command: format!("homeboy fuzz inspect {}", run.id),
     }
+}
+
+/// Recover the gate evaluations the producing run persisted.
+///
+/// `fuzz inspect` reads a run back off storage, so it cannot re-evaluate
+/// gates; a gate failure has to come from the record. An entry without a
+/// resolvable `gate_id` is dropped rather than counted as an anonymous
+/// failure.
+fn recorded_gate_evaluations(metadata: &serde_json::Value) -> Vec<FuzzGateEvaluation> {
+    metadata
+        .get("gates")
+        .and_then(serde_json::Value::as_array)
+        .map(|gates| {
+            gates
+                .iter()
+                .filter_map(|gate| {
+                    Some(FuzzGateEvaluation {
+                        gate_id: gate
+                            .get("gate_id")
+                            .and_then(serde_json::Value::as_str)?
+                            .to_string(),
+                        status: gate
+                            .get("status")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("unknown")
+                            .to_string(),
+                        metric: gate
+                            .get("metric")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        observed: gate
+                            .get("observed")
+                            .and_then(serde_json::Value::as_f64)
+                            .unwrap_or(0.0),
+                        expected: gate
+                            .get("expected")
+                            .and_then(serde_json::Value::as_f64)
+                            .unwrap_or(0.0),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn campaign_status(value: &serde_json::Value) -> Option<String> {
@@ -687,6 +828,183 @@ mod tests {
                 .join(" ")
                 .contains("actions.php"));
             assert!(serde_json::to_vec(&diagnostic).unwrap().len() < 10_000);
+        });
+    }
+
+    /// #10513: a strict campaign whose cases all passed, whose gates all
+    /// passed, and one of whose declared artifacts was never written.
+    #[test]
+    fn inspect_blames_the_evidence_contract_not_a_passing_case() {
+        with_isolated_home(|home| {
+            let _artifact_root =
+                ArtifactRootOverrideGuard::new(home.path().join("agent-readable-artifacts"));
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run(
+                    "fuzz",
+                    serde_json::json!({
+                        "exit_code": 1,
+                        "success": false,
+                        "campaign_id": "sqlite-artifact-mask",
+                        "missing_artifact_refs": ["results.json"],
+                        "results_error": "fuzz campaign references artifact path(s) missing from HOMEBOY_FUZZ_ARTIFACTS_DIR: results.json",
+                        "gates": [
+                            { "gate_id": "no-open-findings", "status": "passed", "metric": "open_findings", "observed": 0.0, "expected": 0.0 },
+                            { "gate_id": "has-case-evidence", "status": "passed", "metric": "case_evidence", "observed": 1.0, "expected": 1.0 },
+                            { "gate_id": "target-coverage-complete", "status": "passed", "metric": "target_coverage", "observed": 1.0, "expected": 1.0 },
+                            { "gate_id": "operation-coverage-complete", "status": "passed", "metric": "operation_coverage", "observed": 1.0, "expected": 1.0 }
+                        ]
+                    }),
+                ))
+                .expect("run");
+            store
+                .finish_run(&run.id, RunStatus::Fail, None)
+                .expect("finish");
+            let result = serde_json::json!({
+                "campaign": {
+                    "id": "sqlite-artifact-mask",
+                    "status": "passed",
+                    "cases": [
+                        { "id": "sqlite-artifact-mask-1", "status": "passed",
+                          "observed": { "stdout": "imported 512 rows without error" } },
+                        { "id": "sqlite-artifact-mask-2", "status": "passed" }
+                    ],
+                    "findings": []
+                }
+            });
+            let path = home.path().join("passing-results.json");
+            std::fs::write(&path, serde_json::to_vec(&result).unwrap()).expect("write");
+            store
+                .record_artifact(&run.id, "fuzz_results", &path)
+                .expect("record");
+
+            let output = run_inspect(FuzzInspectArgs {
+                run_id: run.id.clone(),
+                raw: false,
+                full: false,
+            })
+            .expect("inspect");
+
+            let diagnostic = output.diagnostic.expect("diagnostic");
+            assert_eq!(diagnostic.classification, "evidence_contract_failure");
+            assert_eq!(diagnostic.failure_domain, "evidence_contract_failure");
+            // The workload verdict survives: every case passed.
+            assert_eq!(diagnostic.workload_verdict, "passed");
+            assert_eq!(diagnostic.evidence_verdict, "incomplete");
+            // No unrelated case id is assigned to a campaign-level failure.
+            assert!(diagnostic.case_id.is_none());
+            // Root cause leads with the missing artifact, its resolution base,
+            // and the owning producer contract — not with successful stdout.
+            let leading = diagnostic
+                .root_cause_chain
+                .first()
+                .expect("a root cause")
+                .clone();
+            assert!(leading.contains("artifact_ref_missing"), "{leading}");
+            assert!(leading.contains("results.json"), "{leading}");
+            assert!(
+                !leading.contains("imported 512 rows"),
+                "successful runner stdout must not lead: {leading}"
+            );
+            assert_eq!(diagnostic.evidence_violations.len(), 1);
+            assert_eq!(
+                diagnostic.evidence_violations[0].declared_ref.as_deref(),
+                Some("results.json")
+            );
+        });
+    }
+
+    #[test]
+    fn inspect_still_reports_a_workload_failure_when_a_case_actually_failed() {
+        with_isolated_home(|home| {
+            let _artifact_root =
+                ArtifactRootOverrideGuard::new(home.path().join("agent-readable-artifacts"));
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run(
+                    "fuzz",
+                    serde_json::json!({ "exit_code": 1, "campaign_id": "mixed" }),
+                ))
+                .expect("run");
+            store
+                .finish_run(&run.id, RunStatus::Fail, None)
+                .expect("finish");
+            let result = serde_json::json!({
+                "campaign": {
+                    "id": "mixed",
+                    "status": "failed",
+                    "cases": [
+                        { "id": "case-1", "status": "passed" },
+                        { "id": "case-2", "status": "failed",
+                          "observed": { "stderr": "assertion failed" } }
+                    ]
+                }
+            });
+            let path = home.path().join("mixed-results.json");
+            std::fs::write(&path, serde_json::to_vec(&result).unwrap()).expect("write");
+            store
+                .record_artifact(&run.id, "fuzz_results", &path)
+                .expect("record");
+
+            let output = run_inspect(FuzzInspectArgs {
+                run_id: run.id,
+                raw: false,
+                full: false,
+            })
+            .expect("inspect");
+
+            let diagnostic = output.diagnostic.expect("diagnostic");
+            assert_eq!(diagnostic.classification, "workload_execution_failure");
+            assert_eq!(diagnostic.failure_domain, "workload_failure");
+            assert_eq!(diagnostic.workload_verdict, "failed");
+            assert_eq!(diagnostic.evidence_verdict, "complete");
+            // The failing case is named, not the first case in the list.
+            assert_eq!(diagnostic.case_id.as_deref(), Some("case-2"));
+        });
+    }
+
+    #[test]
+    fn inspect_reports_a_gate_failure_separately_from_a_workload_failure() {
+        with_isolated_home(|home| {
+            let _artifact_root =
+                ArtifactRootOverrideGuard::new(home.path().join("agent-readable-artifacts"));
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run(
+                    "fuzz",
+                    serde_json::json!({
+                        "exit_code": 1,
+                        "campaign_id": "gated",
+                        "gates": [
+                            { "gate_id": "p95-budget", "status": "failed", "metric": "p95_ms", "observed": 900.0, "expected": 500.0 }
+                        ]
+                    }),
+                ))
+                .expect("run");
+            store
+                .finish_run(&run.id, RunStatus::Fail, None)
+                .expect("finish");
+            let path = home.path().join("gated-results.json");
+            std::fs::write(
+                &path,
+                br#"{"campaign":{"id":"gated","status":"passed","cases":[{"id":"c1","status":"passed"}]}}"#,
+            )
+            .expect("write");
+            store
+                .record_artifact(&run.id, "fuzz_results", &path)
+                .expect("record");
+
+            let output = run_inspect(FuzzInspectArgs {
+                run_id: run.id,
+                raw: false,
+                full: false,
+            })
+            .expect("inspect");
+
+            let diagnostic = output.diagnostic.expect("diagnostic");
+            assert_eq!(diagnostic.failure_domain, "gate_failure");
+            assert_eq!(diagnostic.workload_verdict, "passed");
+            assert_eq!(diagnostic.evidence_verdict, "complete");
         });
     }
 

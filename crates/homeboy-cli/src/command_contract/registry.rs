@@ -131,6 +131,22 @@ pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
         rust_type: "homeboy::fuzz::FuzzWorkload",
     },
     ContractRegistryEntry {
+        schema_id: crate::fuzz::FUZZ_EVIDENCE_CONTRACT_SCHEMA,
+        name: "fuzz-evidence-contract",
+        title: "Fuzz evidence contract",
+        owner: "homeboy-fuzz",
+        summary: "Campaign-level evidence completeness and the classified violations that broke it, kept separate from any verdict about the workload under test.",
+        rust_type: "homeboy::fuzz::FuzzEvidenceContract",
+    },
+    ContractRegistryEntry {
+        schema_id: crate::fuzz::FUZZ_PROOF_SCHEMA,
+        name: "fuzz-proof",
+        title: "Fuzz reviewer proof",
+        owner: "homeboy-fuzz",
+        summary: "Bounded reviewer projection of a fuzz run: exact component and rig identity, case and finding totals, gate outcomes, coverage, execution inputs, and evidence verdict.",
+        rust_type: "homeboy::fuzz::FuzzProof",
+    },
+    ContractRegistryEntry {
         schema_id: crate::core::resource_cleanup_intent::RESOURCE_CLEANUP_INTENT_SCHEMA,
         name: "resource-cleanup-intent",
         title: "Resource cleanup intent",

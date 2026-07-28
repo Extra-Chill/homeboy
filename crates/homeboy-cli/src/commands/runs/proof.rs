@@ -20,6 +20,7 @@ use serde_json::Value;
 
 use homeboy::core::observation::evidence_report::evidence_failure_summary;
 use homeboy::core::observation::{runs_service, ObservationStore, RunRecord};
+use homeboy::fuzz::{derive_fuzz_proof, FuzzProof};
 
 use super::{reconcile, CmdResult, RunsOutput};
 
@@ -48,6 +49,12 @@ pub struct RunsProofOutput {
     pub gate_failures: Vec<String>,
     /// Flattened scalar proof/scorecard signal fields, deterministic by key.
     pub signals: BTreeMap<String, Value>,
+    /// Reviewer-ready fuzz projection: exact component and rig identity, case
+    /// and finding totals, gate outcomes, coverage, execution inputs, the
+    /// evidence-contract verdict, and a Markdown rendering. Derived at read
+    /// time from the persisted run; absent for non-fuzz runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fuzz: Option<FuzzProof>,
 }
 
 pub fn proof(run_id: &str) -> CmdResult<RunsOutput> {
@@ -85,6 +92,9 @@ pub fn build_proof(run: &RunRecord) -> RunsProofOutput {
         error: failure.error,
         gate_failures: failure.gate_failures,
         signals,
+        // Derived, never persisted: a read-only projection must not mutate
+        // stored state, and freezing this derivation would stop it improving.
+        fuzz: derive_fuzz_proof(run),
     }
 }
 
@@ -255,5 +265,59 @@ mod tests {
         let run = run_with("pass", json!({ "scenario_metrics": [] }));
         let proof = build_proof(&run);
         assert_eq!(proof.passed, Some(true));
+    }
+
+    #[test]
+    fn build_proof_leaves_non_fuzz_runs_without_a_fuzz_projection() {
+        let run = run_with("pass", json!({ "success": true }));
+        assert!(build_proof(&run).fuzz.is_none());
+    }
+
+    /// #10514: the reviewer-facing read command returned only
+    /// `{"kind":"fuzz","passed":true,"signals":{"success":true},"status":"pass"}`
+    /// for a run that already knew its exact revisions, cases, and gates.
+    #[test]
+    fn build_proof_projects_the_reviewer_facing_fuzz_proof() {
+        let mut run = run_with(
+            "pass",
+            json!({
+                "success": true,
+                "campaign_id": "import-db-dropin",
+                "seed": "4356",
+                "rig_package": {
+                    "rig_id": "studio",
+                    "installed_source_revision": "7ccbe54558d145d022ef2b88f3ba9f7e2063df5e",
+                    "linked": true
+                },
+                "case_totals": { "total": 19, "passed": 19 },
+                "finding_totals": { "total": 0, "open": 0 },
+                "tracker_refs": [{ "kind": "github-pr", "id": "Automattic/studio#4356" }],
+                "gates": [
+                    { "gate_id": "no-open-findings", "status": "passed" },
+                    { "gate_id": "has-case-evidence", "status": "passed" }
+                ]
+            }),
+        );
+        run.kind = "fuzz".to_string();
+        run.component_id = Some("studio".to_string());
+        run.git_sha = Some("0bb440eddd8ebe53c15fe826a30c5ec13b2f58b0".to_string());
+
+        let proof = build_proof(&run);
+
+        let fuzz = proof.fuzz.expect("fuzz proof");
+        assert_eq!(
+            fuzz.component.revision.as_deref(),
+            Some("0bb440eddd8ebe53c15fe826a30c5ec13b2f58b0")
+        );
+        assert_eq!(
+            fuzz.rig.as_ref().and_then(|rig| rig.revision.as_deref()),
+            Some("7ccbe54558d145d022ef2b88f3ba9f7e2063df5e")
+        );
+        assert_eq!(fuzz.cases.as_ref().expect("cases").passed, 19);
+        assert_eq!(fuzz.gates.passed, 2);
+        assert_eq!(fuzz.tracker_refs.len(), 1);
+        assert!(fuzz.markdown.contains("19/19 passed"));
+        // The generic signal map still works; the fuzz block is additive.
+        assert_eq!(proof.signals.get("success"), Some(&json!(true)));
     }
 }

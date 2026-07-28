@@ -28,6 +28,12 @@ pub const FUZZ_RESULT_ENVELOPE_SCHEMA: &str = "homeboy/fuzz-result-envelope/v1";
 pub const FUZZ_REQUIRED_ARTIFACT_SCHEMA: &str = "homeboy/fuzz-required-artifact/v1";
 pub const FUZZ_GATE_SCHEMA: &str = "homeboy/fuzz-gate/v1";
 pub const FUZZ_HOTSPOT_SET_SCHEMA: &str = "homeboy/fuzz-hotspot-set/v1";
+/// Campaign-level evidence completeness and the violations that broke it.
+/// Separate from any workload verdict on purpose.
+pub const FUZZ_EVIDENCE_CONTRACT_SCHEMA: &str = "homeboy/fuzz-evidence-contract/v1";
+/// Bounded reviewer projection of a fuzz run: exact revisions, cases,
+/// findings, gates, and coverage.
+pub const FUZZ_PROOF_SCHEMA: &str = "homeboy/fuzz-proof/v1";
 pub const FUZZ_OBSERVATION_SET_SCHEMA: &str = "homeboy/fuzz-observation-set/v1";
 pub const ISOLATION_PROOF_SCHEMA: &str = "homeboy/isolation-proof/v1";
 pub const FUZZ_SKIP_REASON_UNSAFE: &str = "unsafe";

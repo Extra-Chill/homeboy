@@ -51,7 +51,10 @@ use crate::core::secret_env_plan::{
     SECRET_ENV_MATERIALIZED_HANDOFF_SCHEMA, SECRET_ENV_PLAN_SCHEMA,
 };
 use crate::core::{Error, ErrorCode, Result};
-use crate::fuzz::{FuzzWorkload, FUZZ_WORKLOAD_SCHEMA};
+use crate::fuzz::{
+    FuzzEvidenceContract, FuzzProof, FuzzWorkload, FUZZ_EVIDENCE_CONTRACT_SCHEMA,
+    FUZZ_PROOF_SCHEMA, FUZZ_WORKLOAD_SCHEMA,
+};
 
 mod examples;
 use examples::*;
@@ -1290,6 +1293,8 @@ static CONTRACT_SCHEMAS: &[ContractSchema] = &[
     contract_schema!(PATH_MATERIALIZATION_PLAN_SCHEMA, PathMaterializationPlan),
     contract_schema!(RUN_OUTCOME_ENVELOPE_SCHEMA, RunOutcomeEnvelope),
     contract_schema!(EVIDENCE_MANIFEST_SCHEMA, EvidenceManifest),
+    contract_schema!(FUZZ_EVIDENCE_CONTRACT_SCHEMA, FuzzEvidenceContract),
+    contract_schema!(FUZZ_PROOF_SCHEMA, FuzzProof),
 ];
 
 trait ContractValidation: DeserializeOwned {
@@ -1333,6 +1338,8 @@ impl_contract_validation! {
     ResourceLifecycleIndex => RESOURCE_LIFECYCLE_INDEX_SCHEMA, |value| value.validate();
     HostMutationLifecycle => HOST_MUTATION_LIFECYCLE_SCHEMA, |value| value.validate();
     EvidenceManifest => EVIDENCE_MANIFEST_SCHEMA, |value| validate_evidence_manifest(&value);
+    FuzzEvidenceContract => FUZZ_EVIDENCE_CONTRACT_SCHEMA, |value| validate_fuzz_evidence_contract(&value);
+    FuzzProof => FUZZ_PROOF_SCHEMA, |value| validate_fuzz_proof(&value);
     Value => FUZZ_WORKLOAD_SCHEMA, |value| {
         FuzzWorkload::from_value(value).map_err(|message| {
             homeboy::core::Error::new(
@@ -1365,6 +1372,66 @@ fn validate_evidence_manifest(manifest: &EvidenceManifest) -> homeboy::core::Res
             }),
         )
     })
+}
+
+/// Check a candidate fuzz evidence contract before a producer attaches it.
+///
+/// The one invariant that matters is that `complete` cannot disagree with the
+/// violation list: a payload claiming completeness while carrying violations
+/// is exactly the collapse this contract exists to prevent.
+fn validate_fuzz_evidence_contract(contract: &FuzzEvidenceContract) -> homeboy::core::Result<()> {
+    validate_schema_field(FUZZ_EVIDENCE_CONTRACT_SCHEMA, &contract.schema)?;
+    let error = if contract.complete && !contract.violations.is_empty() {
+        Some("complete is true but violations were declared")
+    } else if !contract.complete && contract.violations.is_empty() {
+        Some("complete is false but no violation was declared")
+    } else if contract
+        .violations
+        .iter()
+        .any(|violation| violation.message.trim().is_empty())
+    {
+        Some("every violation must carry a non-empty message")
+    } else {
+        None
+    };
+    match error {
+        None => Ok(()),
+        Some(error) => Err(homeboy::core::Error::new(
+            homeboy::core::ErrorCode::ValidationInvalidArgument,
+            "Contract validation failed",
+            serde_json::json!({
+                "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
+                "valid": false,
+                "error": error,
+            }),
+        )),
+    }
+}
+
+/// Check a candidate fuzz reviewer proof.
+fn validate_fuzz_proof(proof: &FuzzProof) -> homeboy::core::Result<()> {
+    validate_schema_field(FUZZ_PROOF_SCHEMA, &proof.schema)?;
+    let error = if proof.run_id.trim().is_empty() {
+        Some("run_id is required")
+    } else if proof.component.role != "component" {
+        Some("component.role must be `component`")
+    } else if proof.rig.as_ref().is_some_and(|rig| rig.role != "rig") {
+        Some("rig.role must be `rig`")
+    } else {
+        None
+    };
+    match error {
+        None => validate_fuzz_evidence_contract(&proof.evidence),
+        Some(error) => Err(homeboy::core::Error::new(
+            homeboy::core::ErrorCode::ValidationInvalidArgument,
+            "Contract validation failed",
+            serde_json::json!({
+                "schema": FUZZ_PROOF_SCHEMA,
+                "valid": false,
+                "error": error,
+            }),
+        )),
+    }
 }
 
 fn deserialize_contract<T: DeserializeOwned>(
@@ -1576,6 +1643,134 @@ mod tests {
                 .as_str()
                 .expect("error detail")
                 .contains("interpretation.summary"),
+            "{:?}",
+            err.details
+        );
+    }
+
+    /// Fuzz evidence crosses the homeboy/homeboy-extensions boundary, so a rig
+    /// must be able to discover the schema and check a candidate before
+    /// attaching it. An inbound contract with no registry entry is unusable.
+    #[test]
+    fn fuzz_evidence_contract_is_discoverable_and_validatable() {
+        let contract = registered_contract("fuzz-evidence-contract")
+            .expect("fuzz evidence contract registry entry");
+        assert_eq!(contract.schema_id, FUZZ_EVIDENCE_CONTRACT_SCHEMA);
+        assert_eq!(
+            registered_contract(FUZZ_EVIDENCE_CONTRACT_SCHEMA),
+            Some(contract)
+        );
+
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "evidence.json",
+            json!({
+                "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
+                "complete": false,
+                "violations": [{
+                    "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
+                    "code": "artifact_ref_missing",
+                    "message": "declared artifact is absent from the fuzz artifact root",
+                    "declared_ref": "results.json",
+                    "resolution_base": "/run/fuzz-artifacts",
+                    "producer_contract": "HOMEBOY_FUZZ_ARTIFACTS_DIR"
+                }]
+            }),
+        );
+
+        let output = validate_file(FUZZ_EVIDENCE_CONTRACT_SCHEMA, file).expect("valid contract");
+        assert!(output.valid);
+    }
+
+    #[test]
+    fn fuzz_evidence_contract_validation_rejects_completeness_that_disagrees_with_violations() {
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "evidence.json",
+            json!({
+                "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
+                "complete": true,
+                "violations": [{
+                    "code": "artifact_ref_missing",
+                    "message": "absent"
+                }]
+            }),
+        );
+
+        let err = validate_file(FUZZ_EVIDENCE_CONTRACT_SCHEMA, file).expect_err("invalid");
+        assert_eq!(err.details["valid"], json!(false));
+        assert!(
+            err.details["error"]
+                .as_str()
+                .expect("error detail")
+                .contains("complete is true but violations were declared"),
+            "{:?}",
+            err.details
+        );
+    }
+
+    #[test]
+    fn fuzz_proof_is_discoverable_and_validatable() {
+        let contract = registered_contract("fuzz-proof").expect("fuzz proof registry entry");
+        assert_eq!(contract.schema_id, FUZZ_PROOF_SCHEMA);
+
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "proof.json",
+            json!({
+                "schema": FUZZ_PROOF_SCHEMA,
+                "source": "run_metadata",
+                "run_id": "studio-pr-4356-homeboy-v6",
+                "status": "pass",
+                "verdict": {
+                    "overall": true,
+                    "workload": "passed",
+                    "evidence": "complete"
+                },
+                "component": { "role": "component", "id": "studio" },
+                "execution": {},
+                "gates": { "total": 4, "passed": 4, "failed": 0 },
+                "evidence": {
+                    "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA,
+                    "complete": true
+                },
+                "markdown": "## Fuzz proof\n"
+            }),
+        );
+
+        let output = validate_file(FUZZ_PROOF_SCHEMA, file).expect("valid proof");
+        assert!(output.valid);
+    }
+
+    #[test]
+    fn fuzz_proof_validation_rejects_a_mislabelled_revision_role() {
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "proof.json",
+            json!({
+                "schema": FUZZ_PROOF_SCHEMA,
+                "source": "run_metadata",
+                "run_id": "run-1",
+                "status": "pass",
+                "verdict": { "overall": true, "workload": "passed", "evidence": "complete" },
+                "component": { "role": "rig" },
+                "execution": {},
+                "gates": { "total": 0, "passed": 0, "failed": 0 },
+                "evidence": { "schema": FUZZ_EVIDENCE_CONTRACT_SCHEMA, "complete": true },
+                "markdown": ""
+            }),
+        );
+
+        let err = validate_file(FUZZ_PROOF_SCHEMA, file).expect_err("invalid proof");
+        assert!(
+            err.details["error"]
+                .as_str()
+                .expect("error detail")
+                .contains("component.role"),
             "{:?}",
             err.details
         );
