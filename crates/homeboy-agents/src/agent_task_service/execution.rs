@@ -697,7 +697,7 @@ fn is_exact_retry_reservation(
 }
 
 pub(super) fn cook_retry_plans_match(expected: &AgentTaskPlan, observed: &AgentTaskPlan) -> bool {
-    if expected == observed {
+    if serialized_plans_match(expected, observed) {
         return true;
     }
     if expected.tasks.len() != observed.tasks.len() {
@@ -729,7 +729,17 @@ pub(super) fn cook_retry_plans_match(expected: &AgentTaskPlan, observed: &AgentT
         );
         metadata.remove("cook_workspace_identity_predecessor");
     }
-    normalized == *expected
+    serialized_plans_match(expected, &normalized)
+}
+
+fn serialized_plans_match(expected: &AgentTaskPlan, observed: &AgentTaskPlan) -> bool {
+    match (
+        serde_json::to_value(expected),
+        serde_json::to_value(observed),
+    ) {
+        (Ok(expected), Ok(observed)) => expected == observed,
+        _ => false,
+    }
 }
 
 struct CookRetryAttempt {

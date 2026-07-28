@@ -2069,6 +2069,10 @@ fn retryable_pre_provider_retry_accepts_runner_rebound_workspace_identity() {
             "git_representation": "directory",
         });
         runner_plan.tasks[0].metadata["cook_workspace_identity_predecessor"] = controller_identity;
+        runner_plan = serde_json::from_value(
+            serde_json::to_value(runner_plan).expect("serialize runner-bound plan"),
+        )
+        .expect("rebuild runner-bound plan projections");
         agent_task_lifecycle::record_pre_execution_failure(
             &second.record.run_id,
             &runner_plan,
