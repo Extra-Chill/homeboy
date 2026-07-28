@@ -718,3 +718,161 @@ fn release_prepare_and_publish_preflight_runner_disk() {
     assert!(workflow
         .contains("refusing publish before the runner exhausts disk while writing diagnostics"));
 }
+
+/// Isolate a single `steps:` entry so a gate can be asserted on the step it
+/// actually guards rather than merely somewhere in the job.
+fn release_step_block<'a>(job: &'a str, marker_line: &str) -> &'a str {
+    let marker = format!("      - {marker_line}\n");
+    let start = job
+        .find(&marker)
+        .unwrap_or_else(|| panic!("missing step '{marker_line}'"));
+    let rest = &job[start + marker.len()..];
+    let end = rest
+        .find("\n      - ")
+        .map_or(rest.len(), |index| index + 1);
+    &rest[..end]
+}
+
+/// Acceptance criteria 3 and 4 of #10519: recovery must not rebuild every
+/// platform before it can adopt a draft that already holds every authoritative
+/// asset. Both stranded drafts on this repo are in exactly that state
+/// (`v0.321.1` with 13 assets, `v0.320.0` with 15 including Windows), yet each
+/// recovery attempt spent ~40 minutes rebuilding them before failing in the
+/// publisher.
+#[test]
+fn release_recovery_skips_the_artifact_rebuild_when_the_draft_is_already_complete() {
+    let workflow = release_workflow();
+    let plan = job_section(workflow, "plan");
+
+    assert!(
+        plan.contains("draft-complete: ${{ steps.draft-probe.outputs.draft-complete }}"),
+        "plan must publish the fast-path decision to downstream jobs"
+    );
+
+    let probe = release_step_block(
+        plan,
+        "name: Probe existing draft for a complete asset inventory",
+    );
+    assert!(
+        probe.contains("if: needs.prepare.outputs.recovery-release == 'true'"),
+        "the fast path is a recovery-only concern; fresh releases have no draft to adopt"
+    );
+    assert!(
+        probe.contains("draft-complete=${COMPLETE}"),
+        "the probe must emit its decision"
+    );
+    assert!(
+        probe.contains("COMPLETE=false"),
+        "the probe must default to rebuilding"
+    );
+
+    // The fail-safe ordering property. Whether `dist host --steps=create`
+    // disturbs an existing draft's assets is undocumented; observing the
+    // inventory *after* create means a create that emptied the draft is seen as
+    // incomplete and the normal rebuild runs. A pre-create probe could skip the
+    // very rebuild that restores those assets.
+    let create = plan
+        .find("dist host --steps=create")
+        .expect("plan must create the GitHub Release with cargo-dist");
+    let probe_at = plan
+        .find("- name: Probe existing draft for a complete asset inventory")
+        .expect("plan must probe the draft");
+    assert!(
+        create < probe_at,
+        "the completeness probe must observe the post-create inventory so an asset-clearing create falls back to the rebuild"
+    );
+
+    // GitHub's default shell is `bash -e`; `set -uo pipefail` alone leaves
+    // errexit on, so a transient `gh`/`jq` failure in an optimisation probe
+    // would fail the whole release.
+    assert!(
+        probe.contains("set +e"),
+        "the probe must not be able to fail a release it only exists to speed up"
+    );
+
+    for job in ["build-local-artifacts", "build-global-artifacts"] {
+        assert!(
+            job_section(workflow, job).contains("needs.plan.outputs.draft-complete != 'true'"),
+            "{job} must be skipped when the draft already holds every expected asset"
+        );
+    }
+
+    let host = job_section(workflow, "host");
+    assert!(
+        host.contains("needs.plan.outputs.draft-complete == 'true' || (needs.build-global-artifacts.result == 'success'"),
+        "host must still run when the artifact matrix was deliberately skipped, or the draft could never be published"
+    );
+
+    // Every cargo-dist upload-phase step is gated...
+    for step in [
+        "name: Install cached dist",
+        "name: Fetch artifacts",
+        "id: host",
+        "name: Upload dist-manifest.json",
+        "name: Download GitHub Artifacts",
+        "name: Cleanup",
+    ] {
+        assert!(
+            release_step_block(host, step)
+                .contains("needs.plan.outputs.draft-complete != 'true'"),
+            "host step '{step}' rebuilds or re-uploads artifacts and must be skipped on the fast path"
+        );
+    }
+
+    // ...and the adoption phase is not, or the fast path would publish nothing.
+    let adoption = &host[host
+        .find("- name: Create remote draft adoption manifest")
+        .expect("host must build the draft adoption manifest")..];
+    assert!(
+        !adoption.contains("draft-complete != 'true'"),
+        "verified draft adoption must run on the fast path — it is the whole point of taking it"
+    );
+    assert!(
+        adoption.contains("release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && 'draft-adoption' || 'artifacts' }}"),
+        "the fast path must still hand the finalizer the remote-adoption manifest"
+    );
+}
+
+/// The fast path is an optimisation, never a relaxation. Skipping the rebuild
+/// must not skip a single verification: `validate_draft_adoption` still checks
+/// name, size, upload state and SHA-256 digest against the published checksum
+/// sidecars, and `verify-published` still re-reads the release afterwards.
+#[test]
+fn release_fast_path_keeps_every_publication_verification() {
+    let workflow = release_workflow();
+    let verify = job_section(workflow, "verify-published");
+
+    assert!(
+        !verify.contains("draft-complete"),
+        "post-publication verification must be unconditional, including on the fast path"
+    );
+    assert!(
+        verify.contains("EXPECTED_ASSETS: ${{ needs.plan.outputs.expected-assets }}"),
+        "verification must re-check the same expected inventory the fast path matched on"
+    );
+    assert!(
+        verify.contains("HOST_RESULT: ${{ needs.host.result }}"),
+        "verification must still require the publishing job to have succeeded"
+    );
+
+    // The control binary that performs adoption is still the one built from the
+    // dispatching commit, not from the stranded tag (#10519's headline defect,
+    // fixed in #10560 — keep it fixed).
+    let host = job_section(workflow, "host");
+    assert!(
+        host.contains("binary-path: ${{ needs.prepare.outputs.recovery-release == 'true' && '.homeboy-bin/homeboy' || '' }}"),
+        "recovery must execute the freshly built control binary, never the stranded tag's"
+    );
+    assert!(
+        job_section(workflow, "gate-build").contains("ref: ${{ github.sha }}"),
+        "the control binary must be built from the dispatching commit"
+    );
+    assert!(
+        host.contains("ref: ${{ needs.prepare.outputs['release-tag'] }}"),
+        "the release target tree must stay pinned to the tag being recovered"
+    );
+    assert!(
+        host.contains("| artifact bytes |"),
+        "recovery evidence must record whether the published bytes were rebuilt or pre-existing"
+    );
+}

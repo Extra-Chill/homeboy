@@ -601,6 +601,7 @@ jobs:
       val: ${{ steps.plan.outputs.manifest }}
       tag-flag: ${{ format('--tag={0}', needs.prepare.outputs['release-tag']) }}
       expected-assets: ${{ steps.plan.outputs.expected-assets }}
+      draft-complete: ${{ steps.draft-probe.outputs.draft-complete }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -650,6 +651,75 @@ jobs:
           echo "planned-artifacts=${PLANNED_ARTIFACTS}" >> "$GITHUB_OUTPUT"
           echo "expected-assets=${EXPECTED_ASSETS}" >> "$GITHUB_OUTPUT"
 
+      # ── Recovery fast path: is the draft already complete? (issue #10519) ──
+      # Recovery rebuilds every platform (~40 minutes) before it can adopt a
+      # draft that frequently already holds every authoritative asset — the
+      # stranded v0.321.1 draft has carried all 13 since 2026-07-27. Probe the
+      # remote inventory so the publish chain can skip straight to adoption.
+      #
+      # This probe deliberately runs AFTER `dist host --steps=create`. Whether
+      # `--steps=create` disturbs an existing draft's assets is undocumented,
+      # and gating the build matrix on a pre-create observation could skip the
+      # very rebuild that restores assets create had just cleared. Observing the
+      # post-create state makes the fast path fail-safe by construction: if
+      # create emptied the draft, the probe sees an incomplete inventory and the
+      # full rebuild runs exactly as it does today.
+      #
+      # This is an optimisation gate only, and is deliberately weaker than the
+      # authority it defers to: `validate_draft_adoption` still re-verifies
+      # every asset's name, size, upload state and SHA-256 digest against the
+      # published checksum sidecars in the `host` finalizer, and `verify-published`
+      # independently re-checks the inventory afterwards. Neither is skipped.
+      - name: Probe existing draft for a complete asset inventory
+        id: draft-probe
+        if: needs.prepare.outputs.recovery-release == 'true'
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
+          EXPECTED_ASSETS: ${{ steps.plan.outputs.expected-assets }}
+        run: |
+          # A probe that cannot read the inventory must degrade to "rebuild
+          # everything", never to "fail the release". GitHub's default shell is
+          # `bash -e`, so errexit has to be turned off explicitly here — `set
+          # -uo pipefail` alone would leave it on and let a transient jq or gh
+          # failure block the release outright.
+          set +e
+          set -uo pipefail
+          COMPLETE=false
+          REASON=''
+
+          if ! gh release view "${RELEASE_TAG}" --json isDraft,assets > draft.json 2> draft.err; then
+            REASON="the inventory for ${RELEASE_TAG} could not be read"
+            sed 's/^/gh: /' draft.err >&2 || true
+          elif [ "$(jq -r '.isDraft' draft.json)" != "true" ]; then
+            REASON="${RELEASE_TAG} is not an unpublished draft"
+          else
+            WANTED="$(jq -Sc 'unique' <<< "${EXPECTED_ASSETS}")"
+            USABLE="$(jq -Sc '[.assets[] | select(.state == "uploaded" and .size > 0) | .name] | unique' draft.json)"
+            TOTAL="$(jq -r '.assets | length' draft.json)"
+            WANTED_COUNT="$(jq -r 'length' <<< "${WANTED}")"
+            # Exact inventory: every expected asset usable, and nothing else
+            # present. `TOTAL` catches duplicates and strays that `unique`
+            # would otherwise collapse away.
+            if [ "${USABLE}" = "${WANTED}" ] && [ "${TOTAL}" = "${WANTED_COUNT}" ]; then
+              COMPLETE=true
+            else
+              REASON="the inventory differs (expected ${WANTED_COUNT}: ${WANTED}; usable: ${USABLE}; total on release: ${TOTAL})"
+            fi
+          fi
+
+          echo "draft-complete=${COMPLETE}" >> "$GITHUB_OUTPUT"
+          if [ "${COMPLETE}" = "true" ]; then
+            echo "::notice::${RELEASE_TAG} already holds every expected asset; skipping the cross-platform rebuild and re-upload, and going straight to draft adoption (#10519)"
+            {
+              echo "### Release recovery fast path"
+              echo ""
+              echo "\`${RELEASE_TAG}\` already holds every expected asset, so the cross-platform rebuild and re-upload are skipped."
+              echo "The \`host\` finalizer still re-verifies name, size, upload state and SHA-256 digest before publishing."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::notice::Rebuilding every release artifact for ${RELEASE_TAG}: ${REASON}"
+          fi
+
       - name: Upload dist-manifest.json
         uses: actions/upload-artifact@v4
         with:
@@ -661,7 +731,7 @@ jobs:
     needs:
       - prepare
       - plan
-    if: ${{ always() && needs.prepare.result == 'success' && needs.prepare.outputs.prepared == 'true' && needs.prepare.outputs['release-tag'] != '' && needs.plan.result == 'success' && fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null }}
+    if: ${{ always() && needs.prepare.result == 'success' && needs.prepare.outputs.prepared == 'true' && needs.prepare.outputs['release-tag'] != '' && needs.plan.result == 'success' && needs.plan.outputs.draft-complete != 'true' && fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix }}
@@ -739,7 +809,7 @@ jobs:
       - prepare
       - plan
       - build-local-artifacts
-    if: ${{ always() && needs.prepare.result == 'success' && needs.prepare.outputs.prepared == 'true' && needs.prepare.outputs['release-tag'] != '' && needs.plan.result == 'success' && (fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include == null || needs.build-local-artifacts.result == 'success') }}
+    if: ${{ always() && needs.prepare.result == 'success' && needs.prepare.outputs.prepared == 'true' && needs.prepare.outputs['release-tag'] != '' && needs.plan.result == 'success' && needs.plan.outputs.draft-complete != 'true' && (fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include == null || needs.build-local-artifacts.result == 'success') }}
     runs-on: ubuntu-22.04
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -829,7 +899,10 @@ jobs:
       - plan
       - build-local-artifacts
       - build-global-artifacts
-    if: ${{ always() && needs.prepare.result == 'success' && needs.prepare.outputs.prepared == 'true' && needs.prepare.outputs['release-tag'] != '' && needs.plan.result == 'success' && needs.build-global-artifacts.result == 'success' && (fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include == null || needs.build-local-artifacts.result == 'success') }}
+    # The draft-complete fast path (#10519) skips the artifact matrix entirely,
+    # so `host` must not require builds that were deliberately never run. It
+    # still runs: the adoption finalizer below is what publishes the draft.
+    if: ${{ always() && needs.prepare.result == 'success' && needs.prepare.outputs.prepared == 'true' && needs.prepare.outputs['release-tag'] != '' && needs.plan.result == 'success' && (needs.plan.outputs.draft-complete == 'true' || (needs.build-global-artifacts.result == 'success' && (fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include == null || needs.build-local-artifacts.result == 'success'))) }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -844,15 +917,22 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
+      # Everything from here to the adoption manifest exists to rebuild and
+      # re-upload artifacts. When the draft already holds every expected asset
+      # (#10519) there is nothing to upload, so the whole cargo-dist upload
+      # phase is skipped and this job goes straight to verified adoption.
       - name: Install cached dist
+        if: needs.plan.outputs.draft-complete != 'true'
         uses: actions/download-artifact@v4
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/
 
-      - run: chmod +x ~/.cargo/bin/dist
+      - if: needs.plan.outputs.draft-complete != 'true'
+        run: chmod +x ~/.cargo/bin/dist
 
       - name: Fetch artifacts
+        if: needs.plan.outputs.draft-complete != 'true'
         uses: actions/download-artifact@v4
         with:
           pattern: artifacts-*
@@ -860,6 +940,7 @@ jobs:
           merge-multiple: true
 
       - id: host
+        if: needs.plan.outputs.draft-complete != 'true'
         shell: bash
         run: |
           if ! grep -Fqx '[package.metadata.dist]' Cargo.toml; then
@@ -876,16 +957,18 @@ jobs:
           echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"
 
       - name: Restore recovery cargo-dist overlay
-        if: needs.prepare.outputs.recovery-release == 'true'
+        if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete != 'true'
         run: git restore --source=HEAD -- Cargo.toml
 
       - name: Upload dist-manifest.json
+        if: needs.plan.outputs.draft-complete != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: artifacts-dist-manifest
           path: dist-manifest.json
 
       - name: Download GitHub Artifacts
+        if: needs.plan.outputs.draft-complete != 'true'
         uses: actions/download-artifact@v4
         with:
           pattern: artifacts-*
@@ -893,6 +976,7 @@ jobs:
           merge-multiple: true
 
       - name: Cleanup
+        if: needs.plan.outputs.draft-complete != 'true'
         run: |
           rm -f artifacts/*-dist-manifest.json
 
@@ -933,6 +1017,7 @@ jobs:
           RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
           CONTROL_SHA: ${{ github.sha }}
           ADOPTION_SOURCE: ${{ needs.prepare.outputs.recovery-release == 'true' && 'draft-adoption' || 'artifacts' }}
+          ARTIFACT_ORIGIN: ${{ needs.plan.outputs.draft-complete == 'true' && 'pre-existing draft assets (rebuild skipped)' || 'rebuilt and re-uploaded by this run' }}
         run: |
           set -euo pipefail
           chmod +x .homeboy-bin/homeboy
@@ -950,6 +1035,7 @@ jobs:
             echo "| release target tag | \`${RELEASE_TAG}\` |"
             echo "| release target commit | \`${TARGET_SHA}\` |"
             echo "| artifact provenance | \`${ADOPTION_SOURCE}\` |"
+            echo "| artifact bytes | \`${ARTIFACT_ORIGIN}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::notice::Recovery control binary ${CONTROL_IDENTITY} built from ${CONTROL_SHA} is repairing ${RELEASE_TAG} at ${TARGET_SHA} using ${ADOPTION_SOURCE} provenance"
           if [ "${CONTROL_SHA}" = "${TARGET_SHA}" ]; then

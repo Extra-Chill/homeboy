@@ -1087,9 +1087,42 @@ pub(crate) fn validate_draft_adoption(
         .map(|asset| asset.name.clone())
         .collect::<std::collections::BTreeSet<_>>();
     if expected != actual || actual.len() != metadata.assets.len() {
-        return Err(
-            "draft adoption asset inventory does not exactly match the manifest".to_string(),
-        );
+        // Name the difference. Recovery is a ~40 minute rebuild cycle, so an
+        // inventory mismatch reported only as "does not match" costs a full
+        // release cycle per diagnostic guess — that is exactly how #10547
+        // (cargo-dist's unlisted `dist-manifest.json`) stayed hidden across
+        // repeated recovery attempts of v0.321.1.
+        let missing = expected.difference(&actual).cloned().collect::<Vec<_>>();
+        let unexpected = actual.difference(&expected).cloned().collect::<Vec<_>>();
+        let mut seen = std::collections::BTreeSet::new();
+        let duplicated = metadata
+            .assets
+            .iter()
+            .filter(|asset| !seen.insert(asset.name.as_str()))
+            .map(|asset| asset.name.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut detail = Vec::new();
+        if !missing.is_empty() {
+            detail.push(format!("expected but absent: {}", missing.join(", ")));
+        }
+        if !unexpected.is_empty() {
+            detail.push(format!("present but unexpected: {}", unexpected.join(", ")));
+        }
+        if !duplicated.is_empty() {
+            detail.push(format!(
+                "duplicated on the release: {}",
+                duplicated.into_iter().collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if detail.is_empty() {
+            detail.push("inventory differs in multiplicity only".to_string());
+        }
+        return Err(format!(
+            "draft adoption asset inventory does not exactly match the manifest ({} expected, {} on the release): {}",
+            expected.len(),
+            metadata.assets.len(),
+            detail.join("; ")
+        ));
     }
     for asset in &metadata.assets {
         if asset.state != "uploaded" || asset.size == 0 || canonical_remote_digest(asset)?.is_none()
@@ -1113,7 +1146,9 @@ pub(crate) fn validate_draft_adoption(
     let mut references = BTreeMap::new();
     for (sidecar, contents) in sidecars {
         if !expected.contains(sidecar) {
-            return Err("checksum sidecar is not an expected asset".to_string());
+            return Err(format!(
+                "checksum sidecar '{sidecar}' is not an expected asset"
+            ));
         }
         let mut sidecar_references = 0;
         for line in contents.lines().filter(|line| !line.trim().is_empty()) {
@@ -1659,6 +1694,79 @@ mod tests {
             format!("{}  unknown.zip\n", "c".repeat(64)),
         );
         assert!(validate_draft_adoption("v1.2.3", &expected, &metadata, &sidecars).is_err());
+    }
+
+    /// Regression for #10519/#10547: an inventory mismatch must name the
+    /// differing assets. Recovery is a full rebuild cycle, so a bare "does not
+    /// match" forces operators to spend one ~40 minute release run per guess.
+    #[test]
+    fn draft_adoption_inventory_mismatch_names_the_differing_assets() {
+        let digest = "a".repeat(64);
+        let metadata = GitHubReleaseMetadata {
+            tag_name: "v1.2.3".to_string(),
+            is_draft: true,
+            assets: vec![
+                remote_asset("app.zip", 1, Some(format!("sha256:{digest}"))),
+                remote_asset(
+                    "app.zip.sha256",
+                    70,
+                    Some(format!("sha256:{}", "b".repeat(64))),
+                ),
+                // cargo-dist publishes this but never lists it in the plan
+                // manifest's `.releases[].artifacts[]` (#10547).
+                remote_asset(
+                    "dist-manifest.json",
+                    12,
+                    Some(format!("sha256:{}", "c".repeat(64))),
+                ),
+            ],
+        };
+        let expected = vec!["app.zip".to_string(), "app.zip.sha256".to_string()];
+        let mut sidecars = BTreeMap::new();
+        sidecars.insert("app.zip.sha256".to_string(), format!("{digest}  app.zip\n"));
+
+        let error = validate_draft_adoption("v1.2.3", &expected, &metadata, &sidecars)
+            .expect_err("unexpected remote asset must fail adoption");
+        assert!(
+            error.contains("dist-manifest.json"),
+            "mismatch must name the unexpected asset, got: {error}"
+        );
+        assert!(
+            error.contains("present but unexpected"),
+            "mismatch must say which side the asset is on, got: {error}"
+        );
+        assert!(
+            error.contains("2 expected") && error.contains("3 on the release"),
+            "mismatch must report both counts, got: {error}"
+        );
+
+        // The inverse direction: an asset the manifest expects but the draft
+        // never received.
+        let mut short = metadata.clone();
+        short.assets.retain(|asset| asset.name != "app.zip.sha256");
+        let error = validate_draft_adoption("v1.2.3", &expected, &short, &sidecars)
+            .expect_err("missing remote asset must fail adoption");
+        assert!(
+            error.contains("expected but absent") && error.contains("app.zip.sha256"),
+            "mismatch must name the absent asset, got: {error}"
+        );
+
+        // Duplicate names collapse in a set comparison, so multiplicity needs
+        // its own report or the error would be empty of detail.
+        let mut duplicate = GitHubReleaseMetadata {
+            tag_name: "v1.2.3".to_string(),
+            is_draft: true,
+            assets: metadata.assets[..2].to_vec(),
+        };
+        duplicate
+            .assets
+            .push(remote_asset("app.zip", 1, Some(format!("sha256:{digest}"))));
+        let error = validate_draft_adoption("v1.2.3", &expected, &duplicate, &sidecars)
+            .expect_err("duplicated remote asset must fail adoption");
+        assert!(
+            error.contains("duplicated on the release") && error.contains("app.zip"),
+            "mismatch must report duplicates, got: {error}"
+        );
     }
 
     #[test]
