@@ -413,6 +413,8 @@ pub use homeboy_release_contract::{ReleaseState, ReleaseStateBuckets, ReleaseSta
 pub struct ContentManifestComparison {
     pub algorithm: String,
     pub scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ContentManifestProvenance>,
     pub local_digest: Option<String>,
     pub remote_digest: Option<String>,
     pub status: String,
@@ -420,6 +422,20 @@ pub struct ContentManifestComparison {
     pub differences: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<String>,
+}
+
+/// The immutable payload identity used as the local side of a content comparison.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContentManifestProvenance {
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_commit: Option<String>,
 }
 
 /// Result for a single component deployment.
