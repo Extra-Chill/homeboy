@@ -6,11 +6,7 @@
   "description": "Immutable Cloudflare Worker deployment, rollback, and durability gates",
   "author": "Extra Chill",
   "provides": {
-    "file_extensions": ["json", "toml", "jsonc", "mjs"],
-    "capabilities": ["cloudflare-worker-deploy", "cloudflare-worker-rollback", "cloudflare-worker-durability-gates"]
-  },
-  "scripts": {
-    "validate": "tests/cloudflare-worker-deploy.test.mjs"
+    "file_extensions": ["json", "toml", "jsonc", "mjs"]
   },
   "cli": {
     "tool": "cloudflare-worker-deploy",

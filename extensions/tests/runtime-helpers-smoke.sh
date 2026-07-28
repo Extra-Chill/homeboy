@@ -345,12 +345,9 @@ for runner in \
     nodejs/scripts/format.sh \
     nodejs/scripts/fuzz/fuzz-runner.sh \
     nodejs/scripts/trace/trace-runner.sh \
-    nodejs/scripts/validate.sh \
     rust/scripts/bench/bench-runner.sh \
     rust/scripts/format.sh \
-    rust/scripts/validate.sh \
     swift/scripts/lint-runner.sh \
-    swift/scripts/validate.sh \
     wordpress/scripts/bench/bench-runner-wp-codebox.sh \
     wordpress/scripts/build/build.sh \
     wordpress/scripts/lint/eslint-runner.sh \

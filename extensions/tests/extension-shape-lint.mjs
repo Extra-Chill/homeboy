@@ -24,12 +24,6 @@ const standardDiscoveryMarkers = {
 };
 
 const rootManifest = readJson(path.join(rootDir, 'homeboy-extension-root.json')) || {};
-const dependencyAdapterIndex = readJson(path.join(rootDir, 'dependency-adapters', 'index.json')) || {};
-const dependencyAdapterIds = new Set(
-  (Array.isArray(dependencyAdapterIndex.manifests) ? dependencyAdapterIndex.manifests : [])
-    .map((manifest) => manifest.id)
-    .filter((id) => typeof id === 'string'),
-);
 
 const allowedTopLevelDirs = new Set([
   '.git',
@@ -145,12 +139,10 @@ function validateComposition(extensionId, composition) {
     return;
   }
 
-  for (const field of ['includes', 'optional', 'conflicts']) {
-    if (!isStringArray(composition[field])) {
-      fail(`${extensionId}: composition.${field} must be an array of non-empty strings`);
-    } else if (hasDuplicates(composition[field])) {
-      fail(`${extensionId}: composition.${field} must not contain duplicates`);
-    }
+  if (!isStringArray(composition.includes)) {
+    fail(`${extensionId}: composition.includes must be an array of non-empty strings`);
+  } else if (hasDuplicates(composition.includes)) {
+    fail(`${extensionId}: composition.includes must not contain duplicates`);
   }
 
   const includes = Array.isArray(composition.includes) ? composition.includes : [];
@@ -160,37 +152,9 @@ function validateComposition(extensionId, composition) {
     }
   }
 
-  for (const optionalAdapter of Array.isArray(composition.optional) ? composition.optional : []) {
-    const adapterId = optionalAdapter.match(/^dependency-adapters\/([^/]+)$/)?.[1];
-    if (!adapterId || !dependencyAdapterIds.has(adapterId)) {
-      fail(`${extensionId}: composition.optional references unknown dependency adapter ${optionalAdapter}`);
-    }
-  }
-
-  for (const conflictingExtension of Array.isArray(composition.conflicts) ? composition.conflicts : []) {
-    if (conflictingExtension === extensionId || !extensionIds.has(conflictingExtension)) {
-      fail(`${extensionId}: composition.conflicts references invalid extension ${conflictingExtension}`);
-    } else if (includes.includes(conflictingExtension)) {
-      fail(`${extensionId}: composition.conflicts must not include an extension from composition.includes`);
-    }
-  }
-
-  const roles = composition.roles;
-  if (!roles || typeof roles !== 'object' || Array.isArray(roles) || Object.keys(roles).length === 0) {
-    fail(`${extensionId}: composition.roles must be a non-empty object`);
-    return;
-  }
-
-  for (const [role, owner] of Object.entries(roles)) {
-    if (!role) {
-      fail(`${extensionId}: composition.roles must not contain an empty role`);
-    }
-    if (Array.isArray(owner)) {
-      if (owner.length === 0 || !isStringArray(owner) || hasDuplicates(owner)) {
-        fail(`${extensionId}: composition.roles.${role} must be a unique list of non-empty profile names`);
-      }
-    } else if (typeof owner !== 'string' || owner.length === 0 || ![extensionId, ...includes].includes(owner)) {
-      fail(`${extensionId}: composition.roles.${role} must reference this extension or an included extension`);
+  for (const retired of ['optional', 'conflicts', 'roles']) {
+    if (composition[retired] !== undefined) {
+      fail(`${extensionId}: composition.${retired} is retired and read by nothing — remove it`);
     }
   }
 }
@@ -234,6 +198,16 @@ function validateExtension(extensionId) {
 
   if (Object.hasOwn(standardDiscoveryMarkers, extensionId)) {
     validateComposition(extensionId, manifest.composition);
+  }
+
+  if (manifest.provides?.capabilities !== undefined) {
+    fail(`${extensionId}: provides.capabilities is retired and read by nothing — remove it`);
+  }
+
+  for (const retired of ['validate', 'contract']) {
+    if (manifest.scripts?.[retired] !== undefined) {
+      fail(`${extensionId}: scripts.${retired} is retired and read by nothing — remove it`);
+    }
   }
 
   for (const [scriptName, scriptPath] of Object.entries(manifest.scripts || {})) {

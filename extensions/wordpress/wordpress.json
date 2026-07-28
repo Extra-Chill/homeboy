@@ -9,24 +9,13 @@
   },
   "provides": {
     "file_extensions": ["php", "css", "ts", "tsx", "js", "jsx", "json"],
-    "capabilities": ["fingerprint", "refactor", "crossref", "validate", "fuzz"],
     "discovery_markers": [
       { "all": ["*.php"] },
       { "all": ["style.css", "functions.php"] }
     ]
   },
   "composition": {
-    "includes": ["nodejs"],
-    "optional": [
-      "dependency-adapters/composer-package-manager",
-      "dependency-adapters/nodejs-package-managers",
-      "dependency-adapters/wordpress-dependency-helpers"
-    ],
-    "roles": {
-      "project": ["wordpress-plugin", "wordpress-theme"],
-      "javascript": "nodejs"
-    },
-    "conflicts": []
+    "includes": ["nodejs"]
   },
   "source_snapshot": {
     "sync_excludes": ["vendor/", "vendor/**"]
@@ -250,7 +239,6 @@
     "fingerprint": "scripts/fingerprint.sh",
     "refactor": "scripts/refactor.py",
     "crossref": "scripts/test/crossref.php",
-    "validate": "scripts/validation/validate-syntax.sh",
     "format": "scripts/format.sh"
   },
   "deps": {

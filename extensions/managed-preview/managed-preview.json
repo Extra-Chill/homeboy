@@ -6,11 +6,7 @@
   "description": "Provider command helpers for Homeboy managed service public previews",
   "author": "Extra Chill",
   "provides": {
-    "file_extensions": ["json", "mjs", "sh"],
-    "capabilities": ["preview-backend", "public-preview-preflight"]
-  },
-  "scripts": {
-    "validate": "tests/public-preview-backend-smoke.mjs"
+    "file_extensions": ["json", "mjs", "sh"]
   },
   "browser_trace_helpers": [
     {

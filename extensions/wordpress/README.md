@@ -24,7 +24,6 @@ extension scripts for these verbs:
 | `fingerprint` | File-shape fingerprinting for change detection | `scripts/fingerprint.sh` |
 | `refactor` | Auto-fix pass (PHPCBF + custom fixers) | `scripts/refactor.py` |
 | `crossref` | Cross-reference analysis across sources/tests | `scripts/test/crossref.php` |
-| `validate` | PHP syntax / PSR-4 / dependency validation | `scripts/validation/validate-syntax.sh` |
 | `format` | Post-write formatting | `scripts/format.sh` |
 
 It also declares a WordPress platform integration in `wordpress.json`:
