@@ -1,4 +1,3 @@
-use homeboy_engine_primitives::content_hash;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -6,6 +5,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
+use homeboy_core::content_diff::{self, TreeEntry, TreeEntryKind, TreeScanOptions};
 use homeboy_core::engine::shell;
 use homeboy_core::server::SshClient;
 
@@ -16,16 +16,28 @@ const SCOPE: &str = "deployed-tree-excluding-homeboy-runtime";
 const MAX_DIFFERENCES: usize = 20;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Entry {
-    kind: char,
-    mode: String,
-    value: String,
+/// How deploy scans a tree, stated once so the local walk cannot drift from the
+/// remote probe or from the archive reader.
+///
+/// `excludes` is deliberately empty. Deploy asks "does the installed tree still
+/// hold the bytes the package contract says it should", and every path in that
+/// contract is in scope by definition. Folding in a source checkout's ignore
+/// rules — the way recovery legitimately does, because recovery is comparing a
+/// checkout — would make drift inside shipped-but-gitignored directories
+/// (vendored dependencies, built assets) invisible, trading a false positive in
+/// a drift detector for a false negative. See #10290.
+fn deployed_tree_scan_options() -> TreeScanOptions {
+    TreeScanOptions {
+        excludes: Vec::new(),
+        record_symlinks: true,
+        record_executable_mode: true,
+        prune_runtime_artifacts: true,
+    }
 }
 
 #[derive(Default)]
 struct Manifest {
-    entries: BTreeMap<String, Entry>,
+    entries: BTreeMap<String, TreeEntry>,
 }
 
 impl Manifest {
@@ -34,7 +46,7 @@ impl Manifest {
         for (path, entry) in &self.entries {
             hash.update(path.as_bytes());
             hash.update([0]);
-            hash.update([entry.kind as u8]);
+            hash.update([entry.kind.tag() as u8]);
             hash.update([0]);
             hash.update(entry.mode.as_bytes());
             hash.update([0]);
@@ -125,9 +137,9 @@ fn local_manifest(root: &Path) -> Result<Manifest, String> {
     if !root.exists() {
         return Err(format!("{} does not exist", root.display()));
     }
-    let mut manifest = Manifest::default();
-    visit(root, root, &mut manifest)?;
-    Ok(manifest)
+    let entries = content_diff::scan_tree(root, &deployed_tree_scan_options())
+        .map_err(|error| error.to_string())?;
+    Ok(Manifest { entries })
 }
 
 fn archive_manifest(path: &Path) -> Result<Manifest, String> {
@@ -159,14 +171,16 @@ fn archive_manifest(path: &Path) -> Result<Manifest, String> {
             })
             .unwrap_or(name)
             .to_string();
+        let mode = content_diff::executable_mode_tag(entry.unix_mode().unwrap_or(0));
         let mut hash = Sha256::new();
         std::io::copy(&mut entry, &mut hash).map_err(|error| error.to_string())?;
         manifest.entries.insert(
             relative,
-            Entry {
-                kind: 'f',
-                mode: executable_mode(entry.unix_mode().unwrap_or(0)),
+            TreeEntry {
+                kind: TreeEntryKind::File,
+                mode,
                 value: format!("{:x}", hash.finalize()),
+                bytes: 0,
             },
         );
     }
@@ -181,58 +195,6 @@ fn archive_root(names: &[String]) -> Option<String> {
                 .is_some_and(|suffix| suffix.starts_with('/'))
         }))
     .then(|| first.to_string())
-}
-
-fn visit(root: &Path, path: &Path, manifest: &mut Manifest) -> Result<(), String> {
-    for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let child = entry.path();
-        let relative = child
-            .strip_prefix(root)
-            .map_err(|e| e.to_string())?
-            .to_string_lossy()
-            .replace('\\', "/");
-        if ignored(&relative) {
-            continue;
-        }
-        let metadata = fs::symlink_metadata(&child).map_err(|e| e.to_string())?;
-        #[cfg(unix)]
-        let mode = executable_mode(std::os::unix::fs::PermissionsExt::mode(
-            &metadata.permissions(),
-        ));
-        #[cfg(not(unix))]
-        let mode = "0".to_string();
-        if metadata.file_type().is_symlink() {
-            let target = fs::read_link(&child)
-                .map_err(|e| e.to_string())?
-                .to_string_lossy()
-                .to_string();
-            manifest.entries.insert(
-                relative,
-                Entry {
-                    kind: 'l',
-                    mode: "0".to_string(),
-                    value: target,
-                },
-            );
-        } else if metadata.is_dir() {
-            visit(root, &child, manifest)?;
-        } else if metadata.is_file() {
-            manifest.entries.insert(
-                relative,
-                Entry {
-                    kind: 'f',
-                    mode,
-                    value: sha256(&child)?,
-                },
-            );
-        }
-    }
-    Ok(())
-}
-
-fn sha256(path: &Path) -> Result<String, String> {
-    content_hash::sha256_file(path).map_err(|error| error.to_string())
 }
 
 fn remote_manifest(root: &str, client: &SshClient) -> Result<Option<Manifest>, String> {
@@ -267,43 +229,43 @@ fn parse_remote_manifest(output: &str) -> Result<Manifest, String> {
             continue;
         }
         let kind = match kind {
-            "f" => 'f',
-            "l" => 'l',
+            "f" => TreeEntryKind::File,
+            "l" => TreeEntryKind::Symlink,
             _ => return Err("unsupported remote manifest entry".to_string()),
         };
         let mode = u32::from_str_radix(mode, 8)
             .map_err(|_| "malformed remote manifest mode".to_string())?;
-        let mode = if kind == 'l' {
+        let mode = if kind == TreeEntryKind::Symlink {
             "0".to_string()
         } else {
-            executable_mode(mode)
+            content_diff::executable_mode_tag(mode)
         };
-        if kind == 'f' && (value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        if kind == TreeEntryKind::File
+            && (value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()))
         {
             return Err("malformed remote SHA-256 evidence".to_string());
         }
         manifest.entries.insert(
             path.to_string(),
-            Entry {
+            TreeEntry {
                 kind,
                 mode,
                 value: value.to_string(),
+                // A remote probe reports content identity, never a stat size.
+                bytes: 0,
             },
         );
     }
     Ok(manifest)
 }
 
-fn executable_mode(mode: u32) -> String {
-    // Deploy normalizes ownership and group-write/setgid bits. Executability is
-    // the mode semantic that survives those target-specific adjustments.
-    format!("{:o}", mode & 0o111)
-}
-
+/// Paths excluded from every deploy manifest, whatever produced it.
+///
+/// This is the whole exclusion policy: version-control metadata and this
+/// product's own transport scratch files. It is intentionally narrower than
+/// recovery's exclusion set — see [`deployed_tree_scan_options`].
 fn ignored(path: &str) -> bool {
-    path == ".git"
-        || path.starts_with(".git/")
-        || path.split('/').any(|part| part.starts_with(".homeboy-"))
+    content_diff::excluded(path, &[]) || content_diff::runtime_artifact(path)
 }
 
 fn differences(local: &Manifest, remote: &Manifest) -> Vec<String> {
@@ -312,10 +274,18 @@ fn differences(local: &Manifest, remote: &Manifest) -> Vec<String> {
     paths.extend(remote.entries.keys().map(|p| (p.as_str(), ())));
     paths
         .into_keys()
-        .filter(|path| local.entries.get(*path) != remote.entries.get(*path))
+        .filter(|path| !entries_match(local.entries.get(*path), remote.entries.get(*path)))
         .take(MAX_DIFFERENCES)
         .map(str::to_string)
         .collect()
+}
+
+fn entries_match(local: Option<&TreeEntry>, remote: Option<&TreeEntry>) -> bool {
+    match (local, remote) {
+        (Some(local), Some(remote)) => local.matches(remote),
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -364,6 +334,53 @@ mod tests {
     fn remote_manifest_requires_well_formed_hash_evidence() {
         assert!(parse_remote_manifest("f\tpath\t644\n").is_err());
         assert!(parse_remote_manifest("f\tpath\t644\tnot-a-hash\n").is_err());
+    }
+
+    /// #10290: deploy and recovery now share one walker, and this pins the two
+    /// deliberate divergences so a future "just unify them" change has to argue
+    /// with a test instead of silently flipping a drift detector's answer.
+    ///
+    /// Deploy records symlinks and executability, recovery does not. Deploy
+    /// applies no caller excludes, so drift inside a shipped directory that the
+    /// source checkout happens to gitignore is still reported.
+    #[test]
+    fn deploy_scan_options_state_the_divergence_from_recovery() {
+        let options = deployed_tree_scan_options();
+        assert!(options.excludes.is_empty());
+        assert!(options.record_symlinks);
+        assert!(options.record_executable_mode);
+        assert!(options.prune_runtime_artifacts);
+
+        let temp = tempfile::tempdir().expect("temp");
+        let local = temp.path().join("local");
+        let remote = temp.path().join("plugin");
+        fs::create_dir_all(local.join("vendor")).expect("local vendor");
+        fs::create_dir_all(remote.join("vendor")).expect("remote vendor");
+        fs::write(local.join("vendor/library.php"), "shipped").expect("local vendor file");
+        fs::write(remote.join("vendor/library.php"), "tampered").expect("remote vendor file");
+        // A checkout-derived ignore rule would hide this; a deploy manifest
+        // must not, because the tampered bytes are live on the target.
+        assert_eq!(
+            differences(
+                &local_manifest(&local).expect("local manifest"),
+                &local_manifest(&remote).expect("remote manifest"),
+            ),
+            vec!["vendor/library.php"]
+        );
+    }
+
+    /// Version-control metadata and this product's transport scratch files are
+    /// the entire deploy exclusion policy, and it holds at any depth.
+    #[test]
+    fn deploy_exclusion_policy_is_vcs_metadata_and_transport_scratch_only() {
+        let scratch = homeboy_core::product_identity::PRODUCT_IDENTITY.artifact_prefix;
+        assert!(ignored(".git"));
+        assert!(ignored(".git/config"));
+        assert!(ignored(&format!("{scratch}upload.tmp")));
+        assert!(ignored(&format!("assets/{scratch}upload.tmp")));
+        assert!(!ignored(".gitignore"));
+        assert!(!ignored("vendor/library.php"));
+        assert!(!ignored("node_modules/pkg/index.js"));
     }
     #[test]
     #[cfg(unix)]

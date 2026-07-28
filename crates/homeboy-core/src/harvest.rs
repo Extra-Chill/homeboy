@@ -297,7 +297,10 @@ fn materialize_remote(
                     Some("materialize harvest snapshot".to_string()),
                 )
             })?;
-        if content_diff::excluded(relative, excludes) {
+        // Runtime scratch files are created by deploy's own transport, so they
+        // are never remote content worth recovering. Skipping them here as well
+        // as in the comparison avoids downloading bytes only to discard them.
+        if content_diff::excluded(relative, excludes) || content_diff::runtime_artifact(relative) {
             continue;
         }
         let local = crate::resolve_contained_local_path(destination, relative, "remote path")?;
