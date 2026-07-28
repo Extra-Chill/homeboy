@@ -62,9 +62,10 @@ for CMD in "${CMD_ARRAY[@]}"; do
   echo "::group::${GROUP_PREFIX} ${CMD}"
   CMD_EXIT=0
   set +e
-  bash "${GITHUB_ACTION_PATH}/scripts/core/run-with-liveness-timeout.sh" \
-    --log-file "${HOMEBOY_OUTPUT_DIR}/${OUTPUT_STEM}.log" \
-    "homeboy ${CMD}" bash -c "${FULL_CMD}"
+  bash "${GITHUB_ACTION_PATH}/scripts/core/phase-progress.sh" run command_execution -- \
+    bash "${GITHUB_ACTION_PATH}/scripts/core/run-with-liveness-timeout.sh" \
+      --log-file "${HOMEBOY_OUTPUT_DIR}/${OUTPUT_STEM}.log" \
+      "homeboy ${CMD}" bash -c "${FULL_CMD}"
   CMD_EXIT=$?
   cat "${HOMEBOY_OUTPUT_DIR}/${OUTPUT_STEM}.log"
   set -e

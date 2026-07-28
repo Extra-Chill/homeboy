@@ -96,6 +96,14 @@ inputs:
     description: 'Maximum wall-clock time to terminate and verify a Homeboy command process group after command completion or timeout. Emits retained-log diagnostics and fails when cleanup cannot finish.'
     required: false
     default: '15'
+  phase-heartbeat-seconds:
+    description: 'Maximum interval between live phase-progress heartbeats.'
+    required: false
+    default: '60'
+  phase-budget-seconds:
+    description: 'Elapsed phase budget before Homeboy Action emits an owning-subsystem diagnostic.'
+    required: false
+    default: '300'
   import-observations:
     description: 'Download and import earlier homeboy-observations artifacts from the same workflow run before command execution. Import is best-effort and non-fatal.'
     required: false
@@ -250,6 +258,9 @@ outputs:
   pr-policy-report:
     description: 'Markdown summary from the PR policy gate'
     value: ${{ steps.pr-policy.outputs.report }}
+  phase-progress:
+    description: 'Path to the phase timing artifact for this action invocation.'
+    value: ${{ steps.phase-summary.outputs.phase-progress }}
 
 runs:
   using: 'composite'
@@ -262,7 +273,7 @@ runs:
       env:
         COMPONENT_NAME: ${{ inputs.component }}
         EXTENSION_INPUT: ${{ inputs.extension }}
-      run: bash ${{ github.action_path }}/scripts/setup/read-portable-config.sh
+      run: bash ${{ github.action_path }}/scripts/core/phase-progress.sh run preparation -- bash ${{ github.action_path }}/scripts/setup/read-portable-config.sh
 
     # ── Phase 2: Resolve execution context ──
 
@@ -273,19 +284,23 @@ runs:
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
         PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         SCOPE_INPUT: ${{ inputs.scope }}
-      run: bash ${{ github.action_path }}/scripts/scope/resolve.sh
+      run: bash ${{ github.action_path }}/scripts/core/phase-progress.sh run changed_scope_resolution -- bash ${{ github.action_path }}/scripts/scope/resolve.sh
 
     - name: Resolve commands
       id: resolve-commands
       shell: bash
       env:
         COMMANDS_INPUT: ${{ inputs.commands }}
-      run: bash ${{ github.action_path }}/scripts/core/resolve-commands.sh
+      run: bash ${{ github.action_path }}/scripts/core/phase-progress.sh run changed_scope_resolution -- bash ${{ github.action_path }}/scripts/core/resolve-commands.sh
 
     # ── Phase 3: Install Homeboy ──
     # Homeboy installs before PHP/Node so we can use `homeboy component env`
     # to detect runtime requirements from the source files (e.g., WordPress
     # "Requires PHP" header).
+
+    - name: Start dependency/build setup timing
+      shell: bash
+      run: bash ${{ github.action_path }}/scripts/core/phase-progress.sh start dependency_build_setup
 
     - name: Install pre-built binary
       id: install-prebuilt
@@ -421,6 +436,11 @@ runs:
       shell: bash
       run: bash ${{ github.action_path }}/scripts/setup/auto-setup-environment.sh
 
+    - name: Finish dependency/build setup timing
+      if: always()
+      shell: bash
+      run: bash ${{ github.action_path }}/scripts/core/phase-progress.sh end dependency_build_setup
+
     # ── Phase 4b: SSH setup (for fleet/deploy) ──
 
     - name: Setup SSH
@@ -486,7 +506,14 @@ runs:
         HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}
         HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS: ${{ inputs.cleanup-timeout-seconds }}
         HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF: true
+        HOMEBOY_ACTION_PHASE_HEARTBEAT_SECONDS: ${{ inputs.phase-heartbeat-seconds }}
+        HOMEBOY_ACTION_PHASE_BUDGET_SECONDS: ${{ inputs.phase-budget-seconds }}
       run: bash ${{ github.action_path }}/scripts/core/run-homeboy-commands.sh
+
+    - name: Start artifact publication timing
+      if: always()
+      shell: bash
+      run: bash ${{ github.action_path }}/scripts/core/phase-progress.sh start artifact_publication
 
     - name: Resolve artifact names
       id: artifact-names
@@ -542,6 +569,11 @@ runs:
         path: homeboy-observations/**
         if-no-files-found: ignore
 
+    - name: Finish artifact publication timing
+      if: always()
+      shell: bash
+      run: bash ${{ github.action_path }}/scripts/core/phase-progress.sh end artifact_publication
+
     - name: Run baseline Homeboy commands
       id: run-baseline-commands
       continue-on-error: true
@@ -561,6 +593,8 @@ runs:
         HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}
         HOMEBOY_ACTION_CLEANUP_TIMEOUT_SECONDS: ${{ inputs.cleanup-timeout-seconds }}
         HOMEBOY_ACTION_REQUIRE_CONTAINMENT_PROOF: true
+        HOMEBOY_ACTION_PHASE_HEARTBEAT_SECONDS: ${{ inputs.phase-heartbeat-seconds }}
+        HOMEBOY_ACTION_PHASE_BUDGET_SECONDS: ${{ inputs.phase-budget-seconds }}
       run: bash ${{ github.action_path }}/scripts/core/run-baseline-commands.sh
 
     # ── Phase 6: Results and reporting ──
@@ -573,7 +607,7 @@ runs:
         FIRST_RESULTS: ${{ steps.run-commands.outputs.results }}
         COMMANDS: ${{ steps.resolve-commands.outputs.resolved-commands }}
         HOMEBOY_DIFFERENTIAL_GATING: ${{ inputs.differential-gating }}
-      run: bash ${{ github.action_path }}/scripts/core/select-final-results.sh
+      run: bash ${{ github.action_path }}/scripts/core/phase-progress.sh run finding_reconciliation -- bash ${{ github.action_path }}/scripts/core/select-final-results.sh
 
     - name: Generate failure digest
       if: |
@@ -710,3 +744,20 @@ runs:
         COMPONENT_NAME: ${{ inputs.component }}
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
       run: bash ${{ github.action_path }}/scripts/issues/auto-file-categorized-issues.sh
+
+    - name: Publish phase timing summary
+      id: phase-summary
+      if: always()
+      shell: bash
+      run: |
+        bash ${{ github.action_path }}/scripts/core/phase-progress.sh start cleanup
+        bash ${{ github.action_path }}/scripts/core/phase-progress.sh end cleanup
+        bash ${{ github.action_path }}/scripts/core/phase-progress.sh summary
+
+    - name: Upload Homeboy phase timings
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: homeboy-phase-progress-${{ github.job }}-${{ runner.os }}
+        path: ${{ steps.phase-summary.outputs.phase-progress }}
+        if-no-files-found: warn
