@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use homeboy_core::materialization_currency::{self, Currency};
 use homeboy_core::source_snapshot::SourceSnapshot;
 use homeboy_core::{Error, Result};
 use homeboy_rig;
@@ -197,10 +198,12 @@ pub(super) fn sync_lab_offload_rigs(
                     rig_path: Some(metadata.rig_path),
                     discovery_path: metadata.discovery_path,
                     source_revision: metadata.source_revision.clone(),
-                    current_source_revision: source_snapshot
-                        .git_sha
-                        .clone()
-                        .or_else(|| metadata.source_revision.clone()),
+                    // Only what the snapshot actually reports. Falling back to
+                    // the install-time revision here would make the freshness
+                    // comparison below compare that revision with itself and
+                    // report `verified` for a source whose current revision
+                    // could not be read at all.
+                    current_source_revision: source_snapshot.git_sha.clone(),
                     source_ref: source_snapshot
                         .git_branch
                         .clone()
@@ -298,42 +301,68 @@ pub(super) fn sync_lab_offload_rigs(
     Ok(synced_rigs)
 }
 
+/// Decide whether an installed rig package source still matches the source it
+/// was installed from.
+///
+/// The verdict comes from the shared currency contract rather than a private
+/// three-way match, because the rig subsystem answers this same question in
+/// `homeboy_rig::package_evidence_from_metadata` and the two used to disagree
+/// on the case that matters: with no revision readable, that one reports
+/// `unknown` while this one reported `verified`.
+///
+/// The `verified` answer came from copying the installed revision into the
+/// current-revision slot when the current one was missing, and then comparing
+/// the value with itself. Absence of evidence is now `unknown`, matching the
+/// rig subsystem and the contract's fail-closed rule. The wire tags
+/// (`verified` / `stale` / `unknown`) are unchanged so consumers of this
+/// evidence keep reading the same vocabulary.
 fn with_lab_package_freshness(
     rig_id: &str,
     mut package_source: LabOffloadRigPackageSource,
 ) -> LabOffloadRigPackageSource {
-    if package_source.current_source_revision.is_none() {
-        package_source.current_source_revision = package_source.source_revision.clone();
-    }
-
-    match (
+    let subject = format!("rig `{rig_id}` installed package source");
+    let currency = materialization_currency::compare_source_revisions(
+        &subject,
         package_source.source_revision.as_deref(),
         package_source.current_source_revision.as_deref(),
-    ) {
-        (Some(installed), Some(current)) if installed == current => {
+    );
+
+    let refresh_command = format!(
+        "homeboy rig install {} --id {} --reinstall",
+        package_source.install_source, rig_id
+    );
+
+    match currency {
+        Currency::Current => {
             package_source.freshness_verified = true;
             package_source.freshness_status = "verified".to_string();
+            package_source.freshness_message = None;
+            package_source.refresh_command = None;
         }
-        (Some(installed), Some(current)) => {
+        Currency::Stale { .. } => {
+            package_source.freshness_verified = false;
             package_source.freshness_status = "stale".to_string();
             package_source.freshness_message = Some(format!(
-                "installed source revision {installed} differs from current source revision {current}"
+                "installed source revision {} differs from current source revision {}",
+                package_source
+                    .source_revision
+                    .as_deref()
+                    .unwrap_or("<missing>"),
+                package_source
+                    .current_source_revision
+                    .as_deref()
+                    .unwrap_or("<missing>")
             ));
-            package_source.refresh_command = Some(format!(
-                "homeboy rig install {} --id {} --reinstall",
-                package_source.install_source, rig_id
-            ));
+            package_source.refresh_command = Some(refresh_command);
         }
-        _ => {
+        Currency::Unknown { .. } => {
+            package_source.freshness_verified = false;
             package_source.freshness_status = "unknown".to_string();
             package_source.freshness_message = Some(
                 "runner rig source freshness could not be verified because a git revision was unavailable"
                     .to_string(),
             );
-            package_source.refresh_command = Some(format!(
-                "homeboy rig install {} --id {} --reinstall",
-                package_source.install_source, rig_id
-            ));
+            package_source.refresh_command = Some(refresh_command);
         }
     }
     package_source
@@ -1901,8 +1930,17 @@ mod tests {
         );
     }
 
+    /// An unreadable current revision is unproven, not verified.
+    ///
+    /// This assertion is inverted from what it used to be. The previous
+    /// behaviour copied the install-time revision into the current-revision
+    /// slot and compared it with itself, so a source whose revision could not
+    /// be read at all was reported as `verified` with no refresh hint — a
+    /// missing probe rendered as a clean bill of health. The rig subsystem's
+    /// own check (`homeboy_rig::package_evidence_from_metadata`) already
+    /// reported `unknown` for the same input; this makes the two agree.
     #[test]
-    fn lab_package_source_freshness_uses_controller_metadata_when_snapshot_has_no_git() {
+    fn lab_package_source_freshness_is_unknown_when_no_current_revision_is_readable() {
         let package = with_lab_package_freshness(
             "ssi-matrix-run-latest",
             LabOffloadRigPackageSource {
@@ -1925,12 +1963,57 @@ mod tests {
             },
         );
 
-        assert!(package.freshness_verified);
-        assert_eq!(package.freshness_status, "verified");
+        assert!(!package.freshness_verified);
+        assert_eq!(package.freshness_status, "unknown");
         assert_eq!(package.source_ref.as_deref(), Some("main"));
         assert!(package.source_dirty);
+        assert!(package
+            .freshness_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("could not be verified"));
+        assert_eq!(
+            package.refresh_command.as_deref(),
+            Some("homeboy rig install /runner/_lab_workspaces/homeboy-rigs --id ssi-matrix-run-latest --reinstall")
+        );
+        // The unreadable slot stays unreadable: nothing fabricates a current
+        // revision from the installed one to satisfy the comparison.
+        assert!(package.current_source_revision.is_none());
+    }
+
+    /// A matching pair is still the only route to `verified`.
+    #[test]
+    fn lab_package_source_freshness_verifies_a_matching_revision_pair() {
+        let package = with_lab_package_freshness(
+            "ssi-matrix-run-latest",
+            LabOffloadRigPackageSource {
+                source: "/controller/homeboy-rigs".to_string(),
+                source_root: "/controller/homeboy-rigs".to_string(),
+                package_path: "/controller/homeboy-rigs".to_string(),
+                install_source: "/runner/_lab_workspaces/homeboy-rigs".to_string(),
+                rig_path: Some("/controller/homeboy-rigs/rigs/ssi/rig.json".to_string()),
+                discovery_path: Some("/controller/homeboy-rigs".to_string()),
+                source_revision: Some("abc1234".to_string()),
+                current_source_revision: Some("abc1234".to_string()),
+                source_ref: Some("main".to_string()),
+                source_dirty: true,
+                freshness_verified: false,
+                freshness_status: String::new(),
+                freshness_message: None,
+                refresh_command: None,
+                linked: true,
+                materialized: false,
+            },
+        );
+
+        assert!(package.freshness_verified);
+        assert_eq!(package.freshness_status, "verified");
         assert!(package.freshness_message.is_none());
         assert!(package.refresh_command.is_none());
+        // A dirty source still verifies here: revision evidence cannot see
+        // uncommitted edits, which is exactly why the currency contract records
+        // that a revision match does not prove content equality.
+        assert!(package.source_dirty);
     }
 
     #[test]
