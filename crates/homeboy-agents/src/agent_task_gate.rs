@@ -1934,6 +1934,11 @@ mod tests {
         assert_eq!(report.environment.inherited[0].value, "kept");
     }
 
+    /// Toolchain preflight is declared, never inferred. A gate command is a
+    /// shell program: its first token can be a builtin, a provider-owned alias,
+    /// or part of a compound expression, so probing it as an executable would
+    /// change what the gate means. `c3462d472` made preflight opt-in for that
+    /// reason and this test tracked the removed inference until #10658.
     #[test]
     fn gate_toolchain_requirements_are_explicit() {
         let options = VerifyGateOptions {
@@ -1953,6 +1958,24 @@ mod tests {
                 probe_arguments: vec!["metadata".to_string()],
             }]
         );
+    }
+
+    /// A gate command whose first token is a shell builtin or part of a
+    /// compound expression declares no toolchain at all. `c3462d472` made
+    /// preflight opt-in precisely because a gate command is a shell program,
+    /// so its first token is not necessarily an executable to probe.
+    #[test]
+    fn shell_gate_commands_contribute_no_inferred_toolchain() {
+        let options = VerifyGateOptions {
+            verify: vec![
+                "test -f Cargo.toml && cargo test --lib".to_string(),
+                "[ -d target ]".to_string(),
+            ],
+            private_verify: vec!["npm test".to_string()],
+            ..VerifyGateOptions::default()
+        };
+
+        assert!(options.required_toolchains().is_empty());
     }
 
     #[cfg(unix)]
