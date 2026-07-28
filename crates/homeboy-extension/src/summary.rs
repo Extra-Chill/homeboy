@@ -1,6 +1,8 @@
 use serde::Serialize;
 
-use super::execution::{extension_ready_status, is_extension_compatible};
+use super::execution::{
+    extension_ready_status_with, is_extension_compatible, ExtensionReadinessMode,
+};
 use super::manifest::ActionType;
 use super::{evaluate_core_compatibility, CoreCompatibilityReport};
 use homeboy_core::extension_store::{
@@ -57,12 +59,25 @@ pub struct ActionSummary {
 /// Aggregates ready status, compatibility, linked status, CLI info, actions,
 /// and runtime details into a single summary per extension.
 pub fn list_summaries(project: Option<&homeboy_core::project::Project>) -> Vec<ExtensionSummary> {
+    list_summaries_with(project, ExtensionReadinessMode::Probe)
+}
+
+/// [`list_summaries`], with control over whether readiness is actually probed.
+///
+/// Every field except `ready`/`ready_reason`/`ready_detail` is read from the
+/// installed manifest and costs nothing. Readiness is the only part that spawns
+/// an operator-authored shell command, so it is the only part a caller should
+/// ever have to opt out of (#10517).
+pub fn list_summaries_with(
+    project: Option<&homeboy_core::project::Project>,
+    readiness: ExtensionReadinessMode,
+) -> Vec<ExtensionSummary> {
     let extensions = load_all_extensions().unwrap_or_default();
 
     let mut summaries: Vec<ExtensionSummary> = extensions
         .iter()
         .map(|ext| {
-            let ready_status = extension_ready_status(ext);
+            let ready_status = extension_ready_status_with(ext, readiness);
             let compatible = is_extension_compatible(ext, project);
             let linked = is_extension_linked(&ext.id);
 

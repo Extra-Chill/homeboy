@@ -69,9 +69,9 @@ pub use env_provider::{
 pub(crate) use execution::build_settings_json_from_manifest;
 pub use execution::execute_action;
 pub use execution::{
-    extension_ready_status, is_extension_compatible, run_action, run_extension, run_setup,
-    ExtensionExecutionMode, ExtensionReadyStatus, ExtensionRunResult, ExtensionSetupResult,
-    ExtensionStepFilter,
+    extension_ready_status, extension_ready_status_with, is_extension_compatible, run_action,
+    run_extension, run_setup, ExtensionExecutionMode, ExtensionReadinessMode, ExtensionReadyStatus,
+    ExtensionRunResult, ExtensionSetupResult, ExtensionStepFilter,
 };
 pub use fingerprint::{
     run_fingerprint_script, AggregateConstructionSeam, AggregateDefinitionFact, AggregateFieldFact,
@@ -140,7 +140,7 @@ pub use runtime_helper::{
     BASH_PREFLIGHT_ENV, COMMAND_CAPTURE_ENV, RUNNER_PRELUDE_ENV, RUNNER_STEPS_ENV,
     RUNTIME_SETTINGS_HELPER_ENV, RUNTIME_SETTINGS_HELPER_ID,
 };
-pub use summary::{list_summaries, ActionSummary, ExtensionSummary};
+pub use summary::{list_summaries, list_summaries_with, ActionSummary, ExtensionSummary};
 pub use validation::{
     extension_provides_build, validate_extension_requirements, validate_required_extensions,
 };

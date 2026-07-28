@@ -10,8 +10,8 @@ use homeboy::core::project::{self, Project};
 use homeboy::core::server::{self, SshClient};
 use homeboy::runner::runners::{self, RunnerKind};
 use homeboy_extension::{
-    self, extension_ready_status, is_extension_linked, load_extension, run_setup, ExtensionSummary,
-    UpdateEntry,
+    self, extension_ready_status_with, is_extension_linked, load_extension, run_setup,
+    ExtensionReadinessMode, ExtensionSummary, UpdateEntry,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -33,6 +33,10 @@ enum ExtensionCommand {
         /// Project ID to filter compatible extensions
         #[arg(short, long)]
         project: Option<String>,
+        /// Report installed metadata only. Skips each extension's ready_check,
+        /// so `ready_reason` is `ready_check_skipped` instead of a live answer
+        #[arg(long)]
+        skip_ready_check: bool,
     },
     /// Compare installed extension revisions with their current checkout HEADs
     DiffInstalled {
@@ -46,6 +50,10 @@ enum ExtensionCommand {
     Show {
         /// Extension ID
         extension_id: String,
+        /// Report installed metadata only. Skips the extension's ready_check,
+        /// so `ready_reason` is `ready_check_skipped` instead of a live answer
+        #[arg(long)]
+        skip_ready_check: bool,
     },
     /// Execute a extension
     Run {
@@ -194,12 +202,18 @@ enum ExtensionCommand {
 
 pub fn run(args: ExtensionArgs) -> CmdResult<ExtensionOutput> {
     match args.command {
-        ExtensionCommand::List { project } => list(project),
+        ExtensionCommand::List {
+            project,
+            skip_ready_check,
+        } => list(project, readiness_mode(skip_ready_check)),
         ExtensionCommand::DiffInstalled {
             extension_id,
             runner,
         } => diff_installed(extension_id.as_deref(), runner.as_deref()),
-        ExtensionCommand::Show { extension_id } => show_extension(&extension_id),
+        ExtensionCommand::Show {
+            extension_id,
+            skip_ready_check,
+        } => show_extension(&extension_id, readiness_mode(skip_ready_check)),
         ExtensionCommand::Run {
             extension_id,
             project,
@@ -581,9 +595,19 @@ pub struct InstalledExtensionDiff {
     pub next_command: String,
 }
 
-fn list(project: Option<String>) -> CmdResult<ExtensionOutput> {
+/// Inventory commands answer "what is installed"; readiness is a separate,
+/// expensive question that `--skip-ready-check` opts out of (#10517).
+fn readiness_mode(skip_ready_check: bool) -> ExtensionReadinessMode {
+    if skip_ready_check {
+        ExtensionReadinessMode::Skip
+    } else {
+        ExtensionReadinessMode::Probe
+    }
+}
+
+fn list(project: Option<String>, readiness: ExtensionReadinessMode) -> CmdResult<ExtensionOutput> {
     let project_config: Option<Project> = project.as_ref().and_then(|id| project::load(id).ok());
-    let summaries = extension::list_summaries(project_config.as_ref());
+    let summaries = extension::list_summaries_with(project_config.as_ref(), readiness);
 
     Ok((
         ExtensionOutput::List {
@@ -854,9 +878,12 @@ fn installed_extension_diff_next_command(summary: &ExtensionSummary, status: &st
     }
 }
 
-fn show_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
+fn show_extension(
+    extension_id: &str,
+    readiness: ExtensionReadinessMode,
+) -> CmdResult<ExtensionOutput> {
     let extension = load_extension(extension_id)?;
-    let ready_status = extension_ready_status(&extension);
+    let ready_status = extension_ready_status_with(&extension, readiness);
     let linked = is_extension_linked(&extension.id);
 
     let has_setup = extension
@@ -1376,6 +1403,88 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
+    /// Installs an extension whose `ready_check` leaves a sentinel behind, so a
+    /// test can prove whether the probe ran rather than trusting the reported
+    /// reason string.
+    #[cfg(unix)]
+    fn write_extension_with_observable_ready_check(home: &Path, id: &str, sentinel: &Path) {
+        let extension_dir = home.join(".config/homeboy/extensions").join(id);
+        fs::create_dir_all(&extension_dir).expect("extension dir");
+        fs::write(
+            extension_dir.join(format!("{id}.json")),
+            serde_json::to_string(&serde_json::json!({
+                "name": "Readiness fixture",
+                "version": "1.0.0",
+                "executable": {
+                    "runtime": {
+                        "ready_check": format!("touch {}", sentinel.display())
+                    }
+                }
+            }))
+            .expect("manifest json"),
+        )
+        .expect("extension manifest");
+    }
+
+    /// #10517: inventory must not be gated on an operator-authored shell
+    /// command. The sentinel is the evidence — a reason string alone could be
+    /// produced by a probe that ran anyway.
+    #[cfg(unix)]
+    #[test]
+    fn extension_list_with_skip_ready_check_never_spawns_the_ready_check() {
+        with_isolated_home(|home| {
+            let sentinel = home.path().join("ready-check-ran");
+            write_extension_with_observable_ready_check(home.path(), "readiness", &sentinel);
+
+            let (output, exit_code) =
+                list(None, ExtensionReadinessMode::Skip).expect("extension list");
+
+            assert_eq!(exit_code, 0);
+            assert!(
+                !sentinel.exists(),
+                "metadata-only inventory must not execute the ready_check"
+            );
+            let ExtensionOutput::List { extensions, .. } = output else {
+                panic!("expected extension list output");
+            };
+            let entry = extensions
+                .iter()
+                .find(|summary| summary.id == "readiness")
+                .expect("fixture extension");
+            assert_eq!(entry.ready_reason.as_deref(), Some("ready_check_skipped"));
+            // Metadata is the whole point of the fast path; it must still be here.
+            assert_eq!(entry.version, "1.0.0");
+            assert_eq!(entry.has_ready_check, Some(true));
+        });
+    }
+
+    /// The default is deliberately unchanged: dropping readiness from the
+    /// default answer would be a silent, user-visible contract change.
+    #[cfg(unix)]
+    #[test]
+    fn extension_list_still_probes_readiness_by_default() {
+        with_isolated_home(|home| {
+            let sentinel = home.path().join("ready-check-ran");
+            write_extension_with_observable_ready_check(home.path(), "readiness", &sentinel);
+
+            let (output, _) = list(None, ExtensionReadinessMode::Probe).expect("extension list");
+
+            assert!(
+                sentinel.exists(),
+                "the default inventory answer still reports live readiness"
+            );
+            let ExtensionOutput::List { extensions, .. } = output else {
+                panic!("expected extension list output");
+            };
+            let entry = extensions
+                .iter()
+                .find(|summary| summary.id == "readiness")
+                .expect("fixture extension");
+            assert!(entry.ready);
+            assert_eq!(entry.ready_reason, None);
+        });
+    }
+
     #[test]
     fn extension_runtime_diagnostics_reports_generic_materialization_guidance() {
         with_isolated_home(|home| {
@@ -1466,7 +1575,8 @@ mod tests {
             )
             .expect("extension manifest");
 
-            let (output, exit_code) = show_extension(extension_id).expect("show extension");
+            let (output, exit_code) = show_extension(extension_id, ExtensionReadinessMode::Probe)
+                .expect("show extension");
             assert_eq!(exit_code, 0);
             let ExtensionOutput::Show { extension } = output else {
                 panic!("expected extension show output");
@@ -1521,7 +1631,8 @@ mod tests {
             )
             .expect("extension manifest");
 
-            let (output, exit_code) = show_extension(extension_id).expect("show extension");
+            let (output, exit_code) = show_extension(extension_id, ExtensionReadinessMode::Probe)
+                .expect("show extension");
             assert_eq!(exit_code, 0);
             let ExtensionOutput::Show { extension } = output else {
                 panic!("expected extension show output");
@@ -1565,7 +1676,8 @@ mod tests {
             )
             .expect("sidecar revision");
 
-            let (output, exit_code) = show_extension(extension_id).expect("show extension");
+            let (output, exit_code) = show_extension(extension_id, ExtensionReadinessMode::Probe)
+                .expect("show extension");
 
             assert_eq!(exit_code, 0);
             let ExtensionOutput::Show { extension } = output else {

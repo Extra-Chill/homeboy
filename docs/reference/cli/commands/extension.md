@@ -49,6 +49,7 @@ Show available extensions with compatibility status
 | Option | Value | Description |
 | --- | --- | --- |
 | `-p`, `--project` | `<PROJECT>` | Project ID to filter compatible extensions |
+| `--skip-ready-check` | flag | Report installed metadata only. Skips each extension's ready_check, so `ready_reason` is `ready_check_skipped` instead of a live answer |
 
 ## `homeboy extension diff-installed`
 
@@ -69,7 +70,7 @@ Compare installed extension revisions with their current checkout HEADs
 ## `homeboy extension show`
 
 ```sh
-homeboy extension show <EXTENSION_ID>
+homeboy extension show [OPTIONS] <EXTENSION_ID>
 ```
 
 Show detailed information about a extension
@@ -77,6 +78,10 @@ Show detailed information about a extension
 | Argument | Required | Description |
 | --- | --- | --- |
 | `<EXTENSION_ID>` | yes | Extension ID |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--skip-ready-check` | flag | Report installed metadata only. Skips the extension's ready_check, so `ready_reason` is `ready_check_skipped` instead of a live answer |
 
 ## `homeboy extension run`
 
