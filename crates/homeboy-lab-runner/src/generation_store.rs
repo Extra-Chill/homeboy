@@ -3,8 +3,10 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::paths;
+use homeboy_core::server::SshClient;
 
 use crate::rolling_generation::RollingResultOwnerRetirement;
 use crate::{RollingGenerations, RunnerDaemonGenerationStatus, RunnerSession};
@@ -759,6 +761,15 @@ struct HttpGenerationEndpointOperations {
     client: reqwest::blocking::Client,
 }
 
+struct SshGenerationEndpointOperations<'a> {
+    client: &'a SshClient,
+}
+
+struct FallbackGenerationEndpointOperations<'a, Primary, Fallback> {
+    primary: &'a Primary,
+    fallback: &'a Fallback,
+}
+
 impl GenerationEndpointOperations for HttpGenerationEndpointOperations {
     fn reconcile_terminal_jobs(&self, session: &RunnerSession) -> bool {
         let Some(local_url) = session.local_url.as_deref() else {
@@ -810,6 +821,123 @@ impl GenerationEndpointOperations for HttpGenerationEndpointOperations {
     }
 }
 
+impl SshGenerationEndpointOperations<'_> {
+    fn endpoint_url(session: &RunnerSession, path: &str) -> Option<String> {
+        if session.mode != crate::RunnerTunnelMode::DirectSsh {
+            return None;
+        }
+        let address = session.remote_daemon_address.as_deref()?;
+        let address = address.parse::<std::net::SocketAddr>().ok()?;
+        if !address.ip().is_loopback() {
+            return None;
+        }
+        Some(format!("http://{address}{path}"))
+    }
+
+    fn request(
+        &self,
+        method: &str,
+        session: &RunnerSession,
+        path: &str,
+        body: Option<&str>,
+    ) -> Option<String> {
+        let url = Self::endpoint_url(session, path)?;
+        let mut command = format!(
+            "curl --fail --silent --show-error --max-time 5 --request {} {}",
+            shell::quote_arg(method),
+            shell::quote_arg(&url),
+        );
+        if let Some(body) = body {
+            command.push_str(&format!(
+                " --header 'Content-Type: application/json' --data {}",
+                shell::quote_arg(body),
+            ));
+        }
+        let output = self
+            .client
+            .execute_with_timeout(&command, Duration::from_secs(10));
+        output.success.then_some(output.stdout)
+    }
+
+    fn authenticated_health(&self, session: &RunnerSession) -> Option<serde_json::Value> {
+        let output = self.request("GET", session, "/health", None)?;
+        let health = serde_json::from_str::<serde_json::Value>(&output).ok()?;
+        Self::health_matches_session(session, &health).then_some(health)
+    }
+
+    fn health_matches_session(session: &RunnerSession, health: &serde_json::Value) -> bool {
+        let Some(expected_lease) = session.remote_daemon_lease_id.as_deref() else {
+            return false;
+        };
+        let Some(expected_pid) = session.remote_daemon_pid.map(u64::from) else {
+            return false;
+        };
+        health
+            .pointer("/lease/lease_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(expected_lease)
+            && health.get("pid").and_then(serde_json::Value::as_u64) == Some(expected_pid)
+    }
+}
+
+impl GenerationEndpointOperations for SshGenerationEndpointOperations<'_> {
+    fn reconcile_terminal_jobs(&self, session: &RunnerSession) -> bool {
+        self.authenticated_health(session).is_some()
+            && self
+                .request("POST", session, "/jobs/reconcile-terminal", None)
+                .is_some()
+    }
+
+    fn active_jobs(&self, session: &RunnerSession) -> Option<usize> {
+        self.authenticated_health(session)?
+            .pointer("/freshness/active_jobs")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok())
+    }
+
+    fn stop(&self, session: &RunnerSession) -> bool {
+        let Some(lease_id) = session.remote_daemon_lease_id.as_deref() else {
+            return false;
+        };
+        if self.authenticated_health(session).is_none() {
+            return false;
+        }
+        let body = serde_json::json!({ "lease_id": lease_id, "force": false }).to_string();
+        self.request("POST", session, "/lifecycle/stop", Some(&body))
+            .is_some()
+    }
+
+    fn terminate_tunnel(&self, pid: u32) {
+        crate::connection::terminate_generation_tunnel(pid);
+    }
+}
+
+impl<Primary, Fallback> GenerationEndpointOperations
+    for FallbackGenerationEndpointOperations<'_, Primary, Fallback>
+where
+    Primary: GenerationEndpointOperations,
+    Fallback: GenerationEndpointOperations,
+{
+    fn reconcile_terminal_jobs(&self, session: &RunnerSession) -> bool {
+        self.primary.reconcile_terminal_jobs(session)
+            || self.fallback.reconcile_terminal_jobs(session)
+    }
+
+    fn active_jobs(&self, session: &RunnerSession) -> Option<usize> {
+        self.primary
+            .active_jobs(session)
+            .or_else(|| self.fallback.active_jobs(session))
+    }
+
+    fn stop(&self, session: &RunnerSession) -> bool {
+        self.primary.stop(session) || self.fallback.stop(session)
+    }
+
+    fn terminate_tunnel(&self, pid: u32) {
+        self.primary.terminate_tunnel(pid);
+    }
+}
+
 /// Reconciliation is intentionally fail-closed: an unreachable draining
 /// endpoint remains recorded and routable. Each reachable draining daemon first
 /// settles terminal durable handoffs, then its own health response becomes the
@@ -826,6 +954,34 @@ pub(crate) fn reconcile(runner_id: &str, legacy: Option<&RunnerSession>) -> Resu
         runner_id,
         legacy,
         &HttpGenerationEndpointOperations { client },
+    )
+}
+
+/// Reconcile generations through their controller-local tunnels, falling back
+/// to the same recorded loopback daemon endpoints over the trusted SSH runner.
+/// This restores observability after an old generation's local tunnel exits
+/// without weakening the daemon's terminal-job, zero-active-job, or stop gates.
+pub(crate) fn reconcile_with_ssh(
+    runner_id: &str,
+    legacy: Option<&RunnerSession>,
+    ssh_client: &SshClient,
+) -> Result<()> {
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|error| {
+            Error::internal_unexpected(format!("build generation reconcile client: {error}"))
+        })?;
+    let local = HttpGenerationEndpointOperations { client };
+    let remote = SshGenerationEndpointOperations { client: ssh_client };
+    reconcile_with(
+        runner_id,
+        legacy,
+        &FallbackGenerationEndpointOperations {
+            primary: &local,
+            fallback: &remote,
+        },
     )
 }
 
@@ -1290,6 +1446,7 @@ mod tests {
     struct FakeEndpointOperations {
         active_jobs: RefCell<std::collections::BTreeMap<String, usize>>,
         terminal_reconcile_failures: RefCell<std::collections::BTreeSet<String>>,
+        stop_failures: RefCell<std::collections::BTreeSet<String>>,
         terminal_reconciled_leases: RefCell<Vec<String>>,
         stopped_leases: RefCell<Vec<String>>,
         terminated_pids: RefCell<Vec<u32>>,
@@ -1315,15 +1472,94 @@ mod tests {
         }
 
         fn stop(&self, session: &RunnerSession) -> bool {
-            self.stopped_leases
-                .borrow_mut()
-                .push(session.remote_daemon_lease_id.clone().expect("lease"));
-            true
+            let lease_id = session.remote_daemon_lease_id.clone().expect("lease");
+            self.stopped_leases.borrow_mut().push(lease_id.clone());
+            !self.stop_failures.borrow().contains(&lease_id)
         }
 
         fn terminate_tunnel(&self, pid: u32) {
             self.terminated_pids.borrow_mut().push(pid);
         }
+    }
+
+    #[test]
+    fn endpoint_fallback_retires_only_the_authoritatively_idle_draining_generation() {
+        test_support::with_isolated_home(|_| {
+            let a = session("lease-a", "daemon-a", Some(101));
+            let b = session("lease-b", "daemon-b", Some(202));
+            record_job("runner-a", &a, "job-a").expect("record A job");
+            activate(
+                "runner-a",
+                &a,
+                "lease-b".to_string(),
+                b.clone(),
+                &["job-a".to_string()],
+            )
+            .expect("activate B");
+
+            let local = FakeEndpointOperations::default();
+            local
+                .terminal_reconcile_failures
+                .borrow_mut()
+                .insert("lease-a".to_string());
+            local
+                .stop_failures
+                .borrow_mut()
+                .insert("lease-a".to_string());
+            local
+                .active_jobs
+                .borrow_mut()
+                .insert("lease-b".to_string(), 0);
+            let remote = FakeEndpointOperations::default();
+            remote
+                .active_jobs
+                .borrow_mut()
+                .insert("lease-a".to_string(), 0);
+
+            reconcile_with(
+                "runner-a",
+                Some(&b),
+                &FallbackGenerationEndpointOperations {
+                    primary: &local,
+                    fallback: &remote,
+                },
+            )
+            .expect("reconcile through fallback");
+
+            let registry = persisted_registry("runner-a");
+            assert_eq!(registry["admission_owner"], "lease-b");
+            assert!(registry["generations"].get("lease-a").is_none());
+            assert!(registry["generations"].get("lease-b").is_some());
+            assert!(registry["job_owners"].get("job-a").is_none());
+            assert_eq!(
+                remote.stopped_leases.borrow().as_slice(),
+                ["lease-a"],
+                "the fallback stops only the drained endpoint"
+            );
+            assert_eq!(local.terminated_pids.borrow().as_slice(), [101]);
+            assert!(remote.terminated_pids.borrow().is_empty());
+        });
+    }
+
+    #[test]
+    fn ssh_fallback_authenticates_the_exact_generation_lease_and_pid() {
+        let expected = session("lease-a", "127.0.0.1", Some(101));
+        assert!(SshGenerationEndpointOperations::health_matches_session(
+            &expected,
+            &json!({
+                "pid": 42,
+                "lease": { "lease_id": "lease-a" },
+                "freshness": { "active_jobs": 0 },
+            }),
+        ));
+        assert!(!SshGenerationEndpointOperations::health_matches_session(
+            &expected,
+            &json!({ "pid": 42, "lease": { "lease_id": "lease-reused" } }),
+        ));
+        assert!(!SshGenerationEndpointOperations::health_matches_session(
+            &expected,
+            &json!({ "pid": 43, "lease": { "lease_id": "lease-a" } }),
+        ));
     }
 
     fn persisted_registry(runner_id: &str) -> serde_json::Value {
@@ -2079,7 +2315,11 @@ mod tests {
             };
             assert_eq!(
                 serde_json::to_value(report).expect("serialize status")["generations"],
-                json!(projected)
+                json!({
+                    "admission_owner": "build-b",
+                    "draining": 1,
+                    "total": 2,
+                })
             );
 
             let operations = FakeEndpointOperations::default();
