@@ -198,13 +198,26 @@ pub fn resolve_worktree_provider_path_from_config(
         if !provider.enabled {
             continue;
         }
-        let Some(command) = provider.commands.list.as_ref() else {
-            continue;
+        let worktree = if let Some(command) = provider.commands.resolve_path.as_ref() {
+            let worktrees = run_provider_resolve_path_command(
+                &provider_id,
+                provider,
+                command,
+                requested.as_path(),
+            )?;
+            targeted_path_result(&provider_id, worktrees, requested.as_path())?
+        } else {
+            let Some(command) = provider.commands.list.as_ref() else {
+                continue;
+            };
+            run_provider_list_command(&provider_id, provider, command)?
+                .into_iter()
+                .find(|worktree| {
+                    std::fs::canonicalize(&worktree.path).ok().as_deref()
+                        == Some(requested.as_path())
+                })
         };
-        let worktrees = run_provider_list_command(&provider_id, provider, command)?;
-        let Some(worktree) = worktrees.into_iter().find(|worktree| {
-            std::fs::canonicalize(&worktree.path).ok().as_deref() == Some(requested.as_path())
-        }) else {
+        let Some(worktree) = worktree else {
             continue;
         };
         validate_provider_handle(&provider_id, &worktree, None, None)?;
@@ -585,6 +598,51 @@ fn run_provider_resolve_command(
         "resolve",
         &provider.commands.resolve_not_found_exit_codes,
     )
+}
+
+fn run_provider_resolve_path_command(
+    provider_id: &str,
+    provider: &WorktreeProviderConfig,
+    command: &[String],
+    path: &std::path::Path,
+) -> Result<Vec<WorktreeProviderHandle>> {
+    let path = path.display().to_string();
+    let command = command
+        .iter()
+        .map(|argument| argument.replace("{path}", &path))
+        .collect::<Vec<_>>();
+    run_provider_lookup_command(
+        provider_id,
+        provider,
+        &command,
+        "resolve_path",
+        &provider.commands.resolve_not_found_exit_codes,
+    )
+}
+
+fn targeted_path_result(
+    provider_id: &str,
+    worktrees: Vec<WorktreeProviderHandle>,
+    requested: &std::path::Path,
+) -> Result<Option<WorktreeProviderHandle>> {
+    if worktrees.is_empty() {
+        return Ok(None);
+    }
+    if let Some(worktree) = worktrees
+        .into_iter()
+        .find(|worktree| std::fs::canonicalize(&worktree.path).ok().as_deref() == Some(requested))
+    {
+        return Ok(Some(worktree));
+    }
+    Err(Error::validation_invalid_argument(
+        "to_worktree",
+        format!(
+            "worktree provider `{provider_id}` resolve_path command did not return the requested canonical path {}",
+            requested.display()
+        ),
+        Some(provider_id.to_string()),
+        None,
+    ))
 }
 
 fn run_provider_list_command(
@@ -2287,7 +2345,7 @@ mod tests {
     }
 
     #[test]
-    fn path_resolution_accepts_an_explicit_provider_worktree_identity() {
+    fn path_resolution_falls_back_to_list_when_resolve_path_is_absent() {
         let workspace = tempfile::tempdir().expect("workspace");
         git_init(workspace.path(), "fix/10251");
         let script = fake_list_provider_script(json!({ "worktrees": [{
@@ -2321,6 +2379,113 @@ mod tests {
             resolution.worktree.path,
             workspace.path().display().to_string()
         );
+    }
+
+    #[test]
+    fn path_resolution_prefers_resolve_path_and_expands_the_canonical_path() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "cook-target");
+        let requested = std::fs::canonicalize(workspace.path()).expect("canonical workspace");
+        let script = fake_provider_script_body(&format!(
+            "if [ \"$1\" != \"{}\" ]; then exit 44; fi\nprintf '%s\\n' '{{\"worktrees\":[{{\"handle\":\"fixture@cook-target\",\"path\":\"{}\",\"branch\":\"cook-target\",\"safety\":{{\"dirty\":false,\"unpushed\":false,\"primary\":false}}}}]}}'\n",
+            requested.display(),
+            requested.display(),
+        ));
+        let provider = WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: false,
+            lookup_timeout_ms: 10_000,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands {
+                resolve_path: Some(vec![script, "{path}".to_string()]),
+                ..Default::default()
+            },
+            list_result_mapping: Some(worktrees_mapping()),
+        };
+
+        let resolution = resolve_worktree_provider_path_from_config(
+            workspace.path(),
+            &config_with_provider(provider),
+        )
+        .expect("path lookup succeeds")
+        .expect("provider owns requested path");
+        assert_eq!(resolution.worktree.path, requested.display().to_string());
+    }
+
+    #[test]
+    fn path_resolution_resolve_path_not_found_does_not_fall_back_to_list() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let marker = workspace.path().join("list-invoked");
+        let list =
+            fake_list_provider_script_with_marker(serde_json::json!({ "worktrees": [] }), &marker);
+        let provider = WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: false,
+            lookup_timeout_ms: 10_000,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands {
+                resolve_path: Some(vec![
+                    fake_provider_script_body("exit 42\n"),
+                    "{path}".to_string(),
+                ]),
+                resolve_not_found_exit_codes: vec![42],
+                list: Some(vec![list]),
+                ..Default::default()
+            },
+            list_result_mapping: Some(worktrees_mapping()),
+        };
+
+        assert!(resolve_worktree_provider_path_from_config(
+            workspace.path(),
+            &config_with_provider(provider)
+        )
+        .expect("not found is not an error")
+        .is_none());
+        assert!(!marker.exists(), "list fallback must not run");
+    }
+
+    #[test]
+    fn path_resolution_resolve_path_rejects_malformed_or_mismatched_results() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        git_init(workspace.path(), "cook-target");
+        let other = tempfile::tempdir().expect("other workspace");
+        git_init(other.path(), "cook-target");
+        let mismatched = fake_list_provider_script(serde_json::json!({
+            "worktrees": [{
+                "handle": "fixture@other",
+                "path": other.path(),
+                "branch": "cook-target",
+                "safety": { "dirty": false, "unpushed": false, "primary": false }
+            }]
+        }));
+        for (script, expected) in [
+            (
+                fake_provider_script_body("printf '{'\n"),
+                "returned invalid JSON",
+            ),
+            (mismatched, "did not return the requested canonical path"),
+        ] {
+            let provider = WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: false,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: WorktreeProviderCommands {
+                    resolve_path: Some(vec![script, "{path}".to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(worktrees_mapping()),
+            };
+            let error = resolve_worktree_provider_path_from_config(
+                workspace.path(),
+                &config_with_provider(provider),
+            )
+            .expect_err("invalid targeted path result must fail closed");
+            assert!(error.message.contains(expected), "{}", error.message);
+        }
     }
 
     #[test]

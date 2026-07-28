@@ -420,8 +420,13 @@ pub struct WorktreeProviderCommands {
     /// requested handle. The result uses `list_result_mapping` and may contain one item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolve: Option<Vec<String>>,
-    /// Provider-native resolve exit statuses that mean the requested handle is
-    /// absent. All other non-zero statuses remain lookup failures.
+    /// Targeted canonical-path lookup. Each `{path}` argument is replaced with
+    /// the requested canonical path. The result uses `list_result_mapping` and
+    /// may contain one item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolve_path: Option<Vec<String>>,
+    /// Provider-native targeted lookup exit statuses that mean the requested
+    /// handle or path is absent. All other non-zero statuses remain failures.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolve_not_found_exit_codes: Vec<i32>,
     /// Discovery command and compatibility fallback for providers without
