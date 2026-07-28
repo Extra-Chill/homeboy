@@ -1,7 +1,11 @@
-//! Stable facade for artifact contracts, links, manifests, and publication helpers.
+//! Convenience re-exports for the artifact APIs that callers reach for most.
 //!
-//! New command/core code should import artifact APIs from this module instead of
-//! reaching into individual artifact implementation modules.
+//! This is a shortcut, not a boundary. The implementation modules
+//! (`artifact_manifest`, `artifact_links`, `artifact_postprocess`, ...) stay
+//! public, and importing from them directly is equally supported — roughly half
+//! of the current call sites already do. Only symbols with a real consumer
+//! through this path are re-exported here, so the list stays honest instead of
+//! mirroring every artifact type in core.
 
 pub use super::artifact_dom_boxes::{
     capture as capture_dom_boxes, DomBoxCaptureSpec, DomBoxReport,
