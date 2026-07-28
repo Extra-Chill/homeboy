@@ -112,13 +112,71 @@ fn aggregate_repo_artifact_next_action_excludes_unignored_work() {
     assert!(repository.join("target/debug/notes.txt").exists());
 }
 
+#[test]
+#[cfg(unix)]
+fn aggregate_runner_binary_cache_next_action_applies_owned_candidate() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let invocation_dir = fixture.path().join("operator-cwd");
+    let slot = invocation_dir.join("_homeboy_binaries/homeboy-old");
+    let binary = slot.join("target/release/homeboy");
+    let tools = fixture.path().join("tools");
+    std::fs::create_dir_all(&invocation_dir).expect("operator directory");
+    std::fs::create_dir_all(binary.parent().expect("binary parent")).expect("slot directory");
+    std::fs::create_dir_all(&tools).expect("tools directory");
+    std::fs::write(&binary, "binary").expect("cached binary");
+    write_executable(&tools.join("lsof"), "#!/bin/sh\nexit 1\n");
+    let touch = Command::new("touch")
+        .args(["-t", "202001010000", slot.to_str().expect("slot path")])
+        .output()
+        .expect("age cache slot");
+    assert!(
+        touch.status.success(),
+        "{}",
+        String::from_utf8_lossy(&touch.stderr)
+    );
+    let path = format!(
+        "{}:{}",
+        tools.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let inventory = run_cleanup_with_path(
+        fixture.path(),
+        &invocation_dir,
+        &["--include", "runner-binary-caches"],
+        &path,
+    );
+    assert_eq!(inventory["success"], true, "{inventory:#}");
+    assert_eq!(inventory["data"]["candidate_count"], 1);
+    assert!(slot.exists());
+    let next_command = inventory["next_actions"][0]["command"]
+        .as_str()
+        .expect("runner cache next action");
+    assert_eq!(next_command, "homeboy runner cache-prune local --apply");
+
+    let args: Vec<_> = next_command.split_whitespace().skip(1).collect();
+    let applied = run_homeboy(fixture.path(), &invocation_dir, &args, &path);
+    assert_eq!(applied["success"], true, "{applied:#}");
+    assert!(!slot.exists());
+}
+
 fn run_cleanup(home: &Path, cwd: &Path, args: &[&str]) -> Value {
+    run_cleanup_with_path(home, cwd, args, &std::env::var("PATH").unwrap_or_default())
+}
+
+fn run_cleanup_with_path(home: &Path, cwd: &Path, args: &[&str], path: &str) -> Value {
+    let mut command = vec!["cleanup"];
+    command.extend_from_slice(args);
+    run_homeboy(home, cwd, &command, path)
+}
+
+fn run_homeboy(home: &Path, cwd: &Path, args: &[&str], path: &str) -> Value {
     let output = Command::new(homeboy_bin())
-        .arg("cleanup")
         .args(args)
         .current_dir(cwd)
         .env("HOME", home)
         .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+        .env("PATH", path)
         .output()
         .expect("run cleanup");
     serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
@@ -128,6 +186,15 @@ fn run_cleanup(home: &Path, cwd: &Path, args: &[&str]) -> Value {
             String::from_utf8_lossy(&output.stderr)
         )
     })
+}
+
+#[cfg(unix)]
+fn write_executable(path: &Path, contents: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::write(path, contents).expect("write executable");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .expect("set executable permissions");
 }
 
 fn run_git(path: &Path, args: &[&str]) {

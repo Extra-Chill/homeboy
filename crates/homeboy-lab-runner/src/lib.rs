@@ -87,6 +87,7 @@ pub mod readonly_probe;
 mod resource_metrics;
 mod rig_materialization;
 mod rolling_generation;
+mod runner_cache;
 mod runtime_materialization_status;
 pub mod runtime_materializer;
 mod runtime_overlay_freshness;
@@ -96,6 +97,10 @@ mod source_materialization;
 mod tool_registry;
 mod transport;
 mod validation_dependencies;
+pub use runner_cache::{
+    prune_homeboy_binary_cache, RunnerBinaryCachePruneEntry, RunnerBinaryCachePruneOptions,
+    RunnerBinaryCachePruneOutput,
+};
 pub use validation_dependencies::RunnerValidationDependencySyncOutput;
 pub mod runners;
 mod worker;
