@@ -3,7 +3,9 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use crate::daemon_repair;
 use crate::resolve_lab_runner_hint;
+use homeboy_core::daemon::DaemonRepairStep;
 use homeboy_core::error::{ActionSafety, ExecutableAction};
 use homeboy_core::lab_contract::LabCommandPortability;
 use homeboy_core::{Error, ErrorCode, Result};
@@ -667,50 +669,44 @@ fn connected_runner_not_ready_reason(
     }
 }
 
-fn daemon_repair_command(runner_id: &str, status: &RunnerStatusReport) -> String {
-    if let Some(report) = status.daemon_freshness.as_ref() {
-        let commands: Vec<_> = report
-            .repair_plan
-            .iter()
-            .map(|step| step.command.clone())
-            .collect();
-        if !commands.is_empty() {
-            return commands.join(" && ");
-        }
-    }
-    let restart = status
-        .stale_daemon
-        .as_ref()
-        .map(|warning| warning.recovery_commands.join(" && "))
-        .unwrap_or_default();
-    if restart.is_empty() {
-        format!("homeboy runner disconnect {runner_id} && homeboy runner connect {runner_id}")
-    } else {
-        restart
-    }
-}
-
-fn daemon_repair_action(runner_id: &str, status: &RunnerStatusReport) -> Option<ExecutableAction> {
-    let recovery_plan: Vec<&str> = status
+/// The typed repair a caller should surface or execute for this runner's daemon.
+///
+/// Steps, not `&&`-joined text: a consumer that wants to run one step, name its
+/// code, or attach lease/PID/endpoint values to it can do so, and prose is a
+/// rendering of the same list rather than a parallel format. The generic
+/// reconnect is the last resort, reached only when neither the freshness report
+/// nor the stale-daemon warning knows anything specific about this daemon.
+fn daemon_repair_steps(runner_id: &str, status: &RunnerStatusReport) -> Vec<DaemonRepairStep> {
+    if let Some(report) = status
         .daemon_freshness
         .as_ref()
         .filter(|report| !report.repair_plan.is_empty())
-        .map(|report| {
-            report
-                .repair_plan
-                .iter()
-                .map(|step| step.command.as_str())
-                .collect()
-        })
-        .or_else(|| {
-            status.stale_daemon.as_ref().map(|warning| {
-                warning
-                    .recovery_commands
-                    .iter()
-                    .map(String::as_str)
-                    .collect()
+    {
+        return report.repair_plan.clone();
+    }
+    let stale_commands = status
+        .stale_daemon
+        .as_ref()
+        .map(|warning| warning.recovery_commands.as_slice())
+        .unwrap_or_default();
+    if !stale_commands.is_empty() {
+        return stale_commands
+            .iter()
+            .map(|command| {
+                daemon_repair::step(daemon_repair::STALE_DAEMON_RECOVERY, command.clone())
             })
-        })?;
+            .collect();
+    }
+    daemon_repair::reconnect_plan(runner_id)
+}
+
+fn daemon_repair_command(runner_id: &str, status: &RunnerStatusReport) -> String {
+    daemon_repair::render(&daemon_repair_steps(runner_id, status))
+}
+
+fn daemon_repair_action(runner_id: &str, status: &RunnerStatusReport) -> Option<ExecutableAction> {
+    let steps = daemon_repair_steps(runner_id, status);
+    let recovery_plan: Vec<&str> = steps.iter().map(|step| step.command.as_str()).collect();
     let recovery_ref = homeboy_product_identity::build_identity()
         .git_commit
         .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()));
@@ -966,6 +962,137 @@ pub(super) fn status_tunnel_mode(status: &RunnerStatusReport) -> RunnerTunnelMod
         .session
         .as_ref()
         .map_or(RunnerTunnelMode::DirectSsh, |session| session.mode.clone())
+}
+
+#[cfg(test)]
+mod daemon_repair_step_tests {
+    use super::*;
+    use crate::session::RunnerStaleDaemonWarning;
+    use crate::RunnerActiveJobState;
+    use homeboy_core::daemon::DaemonFreshnessReport;
+
+    fn status_report(
+        runner_id: &str,
+        daemon_freshness: Option<DaemonFreshnessReport>,
+        stale_daemon: Option<RunnerStaleDaemonWarning>,
+    ) -> RunnerStatusReport {
+        RunnerStatusReport {
+            runner_id: runner_id.to_string(),
+            connected: true,
+            state: crate::RunnerSessionState::Connected,
+            session: None,
+            stale_daemon,
+            daemon_freshness,
+            active_jobs: Vec::new(),
+            active_runner_jobs: Vec::new(),
+            stale_runner_jobs: Vec::new(),
+            active_job_count: 0,
+            stale_runner_job_count: 0,
+            active_job_state: RunnerActiveJobState::NotQueried,
+            active_job_source: None,
+            active_job_error: None,
+            active_job_recovery_evidence: None,
+            session_path: "/tmp/lab.json".to_string(),
+        }
+    }
+
+    fn freshness_with_plan(repair_plan: Vec<DaemonRepairStep>) -> DaemonFreshnessReport {
+        DaemonFreshnessReport {
+            fresh: false,
+            stale_reason_code: Some(homeboy_core::daemon::DaemonStaleReasonCode::PidDead),
+            restartable: false,
+            lease_id: Some("lease-dead".to_string()),
+            pid: Some(4545),
+            recovery_evidence: None,
+            ownership_evidence: None,
+            adoption_command: None,
+            binary_hash: None,
+            daemon_version: None,
+            daemon_build_identity: None,
+            runtime_paths: None,
+            active_jobs: 1,
+            termination_evidence: None,
+            repair_plan,
+        }
+    }
+
+    #[test]
+    fn repair_steps_preserve_the_reports_structured_plan() {
+        // #10302: the plan the freshness report already carries is returned as
+        // typed steps, so a consumer can name a step's code or attach lease/PID
+        // values to it instead of re-parsing `&&`-joined shell text.
+        let report = status_report(
+            "homeboy-lab",
+            Some(freshness_with_plan(vec![daemon_repair::step(
+                daemon_repair::RUNNER_ADOPT_ORPHAN_LEASE,
+                daemon_repair::adopt_orphan_lease_command("homeboy-lab", "lease-dead"),
+            )])),
+            None,
+        );
+
+        let steps = daemon_repair_steps("homeboy-lab", &report);
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].code, daemon_repair::RUNNER_ADOPT_ORPHAN_LEASE);
+        assert_eq!(
+            steps[0].command,
+            "homeboy runner connect homeboy-lab --adopt-orphan-lease lease-dead --confirm-pid-dead"
+        );
+        assert_eq!(
+            daemon_repair_command("homeboy-lab", &report),
+            steps[0].command
+        );
+    }
+
+    #[test]
+    fn stale_daemon_recovery_commands_become_typed_steps() {
+        let warning = RunnerStaleDaemonWarning::new(
+            "homeboy-lab",
+            "homeboy 0.218.0".to_string(),
+            "homeboy 0.219.0".to_string(),
+            Some("homeboy 0.218.0+old".to_string()),
+            Some("homeboy 0.219.0+new".to_string()),
+        );
+        let expected = warning.recovery_commands.clone();
+        let report = status_report("homeboy-lab", None, Some(warning));
+
+        let steps = daemon_repair_steps("homeboy-lab", &report);
+
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| step.command.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(steps
+            .iter()
+            .all(|step| step.code == daemon_repair::STALE_DAEMON_RECOVERY));
+    }
+
+    #[test]
+    fn generic_reconnect_fires_only_when_nothing_specific_is_known() {
+        let report = status_report("homeboy-lab", Some(freshness_with_plan(Vec::new())), None);
+
+        let steps = daemon_repair_steps("homeboy-lab", &report);
+
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| (step.code.as_str(), step.command.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("runner_disconnect", "homeboy runner disconnect homeboy-lab"),
+                ("runner_connect", "homeboy runner connect homeboy-lab"),
+            ]
+        );
+        // The rendered prose is the same text the old joined-string fallback
+        // produced, so operator-facing messages are unchanged.
+        assert_eq!(
+            daemon_repair_command("homeboy-lab", &report),
+            "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab"
+        );
+    }
 }
 
 #[cfg(test)]

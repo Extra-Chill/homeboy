@@ -1482,6 +1482,7 @@ fn reconcile_terminal_phantom_activity(
         return (active_jobs, stale_jobs, direct_daemon_active_jobs, None);
     };
     let Some(refreshed_count) = daemon_http_freshness(
+        runner_id,
         local_url,
         &session.expect("local URL requires session").homeboy_version,
         session
@@ -1582,6 +1583,7 @@ fn runner_daemon_freshness(
         return Ok(None);
     };
     Ok(daemon_http_freshness(
+        &runner.id,
         local_url,
         &session.homeboy_version,
         session.homeboy_build_identity.as_deref().unwrap_or(""),
@@ -1599,12 +1601,12 @@ fn remote_daemon_recovery_freshness(
     }
     let homeboy = match remote_runner_homeboy_path(runner, "runner status") {
         Ok(homeboy) => homeboy,
-        Err(error) => return Some(unavailable_recovery_freshness(error.message)),
+        Err(error) => return Some(unavailable_recovery_freshness(runner_id, error.message)),
     };
     let (_, _, client) = match resolve_ssh_runner(runner) {
         Ok(Some(connection)) => connection,
         Ok(None) => return None,
-        Err(error) => return Some(unavailable_recovery_freshness(error.message)),
+        Err(error) => return Some(unavailable_recovery_freshness(runner_id, error.message)),
     };
     match bounded_remote_daemon_status(&client, homeboy, runner_id) {
         Ok(mut status) => {
@@ -1613,7 +1615,7 @@ fn remote_daemon_recovery_freshness(
                 runner_id, &status,
             ))
         }
-        Err(error) => Some(unavailable_recovery_freshness(error)),
+        Err(error) => Some(unavailable_recovery_freshness(runner_id, error)),
     }
 }
 

@@ -38,6 +38,7 @@ mod continuation_provider;
 mod daemon_exec_driver;
 mod daemon_health;
 mod daemon_http_get;
+mod daemon_repair;
 mod evidence;
 mod execution;
 mod execution_bundle;

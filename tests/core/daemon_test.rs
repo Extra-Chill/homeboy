@@ -1726,6 +1726,64 @@ fn status_retains_dead_missing_schema_lease_identity_for_explicit_recovery() {
 }
 
 #[test]
+fn local_freshness_report_carries_the_same_evidence_fields_as_the_remote_producer() {
+    // #10302: `recovery_evidence` / `ownership_evidence` / `adoption_command`
+    // used to be hardcoded `None` on the local path and populated only across
+    // SSH, so no consumer could rely on either half of the one contract.
+    let _home = HomeGuard::new();
+    let state = daemon_state_for_test(u32::MAX, "127.0.0.1:49152");
+    write_daemon_state_for_test(&state);
+
+    let status = read_status().expect("status");
+
+    assert_eq!(
+        status.freshness.stale_reason_code,
+        Some(DaemonStaleReasonCode::PidDead)
+    );
+    assert_eq!(
+        status.freshness.recovery_evidence,
+        Some(crate::daemon::DaemonRecoveryEvidence::ProvenDead)
+    );
+    let ownership = status
+        .freshness
+        .ownership_evidence
+        .as_deref()
+        .expect("ownership evidence");
+    assert!(
+        ownership.contains("test-lease") && ownership.contains(&u32::MAX.to_string()),
+        "ownership evidence must name the exact lease and PID it proved dead: {ownership}"
+    );
+    assert_eq!(
+        status.freshness.adoption_command.as_deref(),
+        Some("homeboy daemon adopt-orphan --lease-id test-lease --confirm-pid-dead")
+    );
+}
+
+#[test]
+fn local_freshness_report_plans_explicit_reconciliation_for_a_restartable_lease() {
+    let _home = HomeGuard::new();
+    let state = daemon_state_for_test(u32::MAX, "127.0.0.1:49152");
+    write_daemon_state_for_test(&state);
+
+    let status = read_status().expect("status");
+
+    // Zero durable jobs are at risk, so the whole repair is a stop/start.
+    assert!(status.freshness.restartable);
+    assert_eq!(
+        status
+            .freshness
+            .repair_plan
+            .iter()
+            .map(|step| (step.code.as_str(), step.command.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("daemon_stop", "homeboy daemon stop"),
+            ("daemon_start", "homeboy daemon start"),
+        ]
+    );
+}
+
+#[test]
 fn status_keeps_corrupt_lease_fail_closed_without_identity() {
     let _home = HomeGuard::new();
     let path = state_path().expect("state path");

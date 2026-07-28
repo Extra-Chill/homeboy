@@ -509,9 +509,85 @@ fn remote_missing_or_corrupt_lease_with_active_jobs_exposes_bounded_reconciliati
     }
 }
 
+fn plan_of(report: &homeboy_core::daemon::DaemonFreshnessReport) -> Vec<(&str, &str)> {
+    report
+        .repair_plan
+        .iter()
+        .map(|step| (step.code.as_str(), step.command.as_str()))
+        .collect()
+}
+
+#[test]
+fn remote_recovery_repair_plan_carries_the_lease_specific_action() {
+    // #10302: the local daemon path composed a tailored repair plan while every
+    // remote constructor hardcoded an empty one, so the runner an operator
+    // cannot look at was the one that fell through to generic reconnect prose.
+    let proven_dead = remote_daemon_status_for_test_with_reason(
+        false,
+        false,
+        1,
+        "lease-dead",
+        4545,
+        Some(DaemonStaleReasonCode::PidDead),
+    );
+    let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &proven_dead);
+    assert_eq!(
+        plan_of(&recovery),
+        vec![(
+            "runner_adopt_orphan_lease",
+            "homeboy runner connect homeboy-lab --adopt-orphan-lease lease-dead --confirm-pid-dead"
+        )]
+    );
+    // The plan and the adoption command are one action in two shapes; they must
+    // never disagree.
+    assert_eq!(
+        recovery.adoption_command.as_deref(),
+        Some(recovery.repair_plan[0].command.as_str())
+    );
+
+    let mut leaseless = remote_daemon_status_for_test_with_reason(
+        false,
+        false,
+        1,
+        "legacy-lease",
+        4545,
+        Some(DaemonStaleReasonCode::LeaseMissing),
+    );
+    leaseless.daemon = None;
+    let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &leaseless);
+    assert_eq!(
+        plan_of(&recovery),
+        vec![(
+            "runner_reconcile_leaseless_orphans",
+            "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans --confirm-no-daemon-owner"
+        )]
+    );
+
+    let mut fresh_idle = remote_daemon_status_for_test(true, true, 0, "lease-live", 4545);
+    fresh_idle.work_evidence = crate::connection::remote_daemon::RemoteDaemonWorkEvidence::idle();
+    let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &fresh_idle);
+    assert_eq!(
+        plan_of(&recovery),
+        vec![("runner_connect", "homeboy runner connect homeboy-lab")]
+    );
+}
+
+#[test]
+fn remote_recovery_without_evidence_emits_no_repair_plan() {
+    // Nothing was proven about ownership or liveness, so no lease-specific step
+    // can be named. An empty plan is the honest answer and is what lets the
+    // generic reconnect fallback fire downstream.
+    let status = remote_daemon_status_for_test(false, false, 1, "lease-unknown", 4545);
+
+    let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &status);
+
+    assert!(recovery.repair_plan.is_empty());
+    assert!(recovery.adoption_command.is_none());
+}
+
 #[test]
 fn unavailable_remote_recovery_is_fail_closed() {
-    let recovery = unavailable_recovery_freshness("remote command timed out");
+    let recovery = unavailable_recovery_freshness("homeboy-lab", "remote command timed out");
 
     assert_eq!(
         recovery.stale_reason_code,
@@ -524,6 +600,20 @@ fn unavailable_remote_recovery_is_fail_closed() {
     assert!(recovery.lease_id.is_none());
     assert!(recovery.pid.is_none());
     assert!(recovery.adoption_command.is_none());
+    // No lease-specific action is knowable, but the controller-side session
+    // rebuild is, and it must arrive as typed steps rather than as prose
+    // assembled by a downstream fallback (#10302).
+    assert_eq!(
+        recovery
+            .repair_plan
+            .iter()
+            .map(|step| (step.code.as_str(), step.command.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("runner_disconnect", "homeboy runner disconnect homeboy-lab"),
+            ("runner_connect", "homeboy runner connect homeboy-lab"),
+        ]
+    );
 }
 
 #[test]

@@ -1,4 +1,5 @@
 use super::*;
+use crate::daemon_repair;
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonRecoveryEvidence};
 use std::time::Duration;
 
@@ -473,25 +474,34 @@ pub(super) fn remote_daemon_recovery_freshness_from_status(
             ownership_evidence.unwrap_or_default()
         ));
     }
-    let adoption_command = if proven_dead {
-        Some(format!(
-            "homeboy runner connect {} --adopt-orphan-lease {} --confirm-pid-dead",
-            shell::quote_arg(runner_id),
-            shell::quote_arg(lease_id.as_deref().expect("proven dead lease"))
+    // The repair plan and the adoption command are the same action in two
+    // shapes, so they are built from one command and one code. A remote runner
+    // is exactly the daemon an operator cannot look at, so leaving this empty
+    // and falling back to generic reconnect prose discards the evidence the SSH
+    // probe just paid for (#10302).
+    let repair_step = if proven_dead {
+        Some(daemon_repair::step(
+            daemon_repair::RUNNER_ADOPT_ORPHAN_LEASE,
+            daemon_repair::adopt_orphan_lease_command(
+                runner_id,
+                lease_id.as_deref().expect("proven dead lease"),
+            ),
         ))
     } else if leaseless_reconciliation_available {
-        Some(format!(
-            "homeboy runner connect {} --reconcile-leaseless-orphans --confirm-no-daemon-owner",
-            shell::quote_arg(runner_id),
+        Some(daemon_repair::step(
+            daemon_repair::RUNNER_RECONCILE_LEASELESS_ORPHANS,
+            daemon_repair::reconcile_leaseless_orphans_command(runner_id),
         ))
     } else if recoverable_fresh_idle {
-        Some(format!(
-            "homeboy runner connect {}",
-            shell::quote_arg(runner_id),
+        Some(daemon_repair::step(
+            daemon_repair::RUNNER_CONNECT,
+            daemon_repair::connect_command(runner_id),
         ))
     } else {
         None
     };
+    let adoption_command = repair_step.as_ref().map(|step| step.command.clone());
+    let repair_plan: Vec<_> = repair_step.into_iter().collect();
     DaemonFreshnessReport {
         fresh: status.fresh,
         stale_reason_code: status.stale_reason_code,
@@ -513,11 +523,14 @@ pub(super) fn remote_daemon_recovery_freshness_from_status(
         runtime_paths: None,
         active_jobs: status.active_jobs,
         termination_evidence: status.termination_evidence.clone(),
-        repair_plan: Vec::new(),
+        repair_plan,
     }
 }
 
-pub(super) fn unavailable_recovery_freshness(error: impl Into<String>) -> DaemonFreshnessReport {
+pub(super) fn unavailable_recovery_freshness(
+    runner_id: &str,
+    error: impl Into<String>,
+) -> DaemonFreshnessReport {
     DaemonFreshnessReport {
         fresh: false,
         stale_reason_code: Some(DaemonStaleReasonCode::TransportUnreachable),
@@ -529,6 +542,10 @@ pub(super) fn unavailable_recovery_freshness(error: impl Into<String>) -> Daemon
             "remote daemon recovery evidence unavailable: {}",
             error.into()
         )),
+        // No lease, PID, or job count survived the transport failure, so no
+        // lease-specific action can be named. Rebuilding the controller session
+        // is the only honest step, and it is emitted as typed steps rather than
+        // left to a downstream prose fallback.
         adoption_command: None,
         binary_hash: None,
         daemon_version: None,
@@ -536,7 +553,7 @@ pub(super) fn unavailable_recovery_freshness(error: impl Into<String>) -> Daemon
         runtime_paths: None,
         active_jobs: 0,
         termination_evidence: None,
-        repair_plan: Vec::new(),
+        repair_plan: daemon_repair::reconnect_plan(runner_id),
     }
 }
 
@@ -576,7 +593,10 @@ pub(super) fn ensure_remote_daemon(
                 .to_string(),
         );
     }
-    let inspected_freshness = remote_daemon_recovery_freshness_from_status("<runner-id>", &status);
+    // The real runner id, not a `<runner-id>` placeholder: this report now
+    // carries an executable repair plan, and a plan naming a command that does
+    // not exist is worse than no plan at all (#10302).
+    let inspected_freshness = remote_daemon_recovery_freshness_from_status(runner_id, &status);
     match remote_daemon_connect_action_for_runner(
         previous_session,
         &status,
