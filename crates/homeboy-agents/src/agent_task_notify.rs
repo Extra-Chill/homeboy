@@ -265,6 +265,7 @@ mod tests {
             status: status.to_string(),
             attempts: Vec::new(),
             finalization,
+            selected_candidate: None,
             stop_reason: None,
             terminal_phase: None,
             terminal_failure_classification: None,
@@ -277,6 +278,10 @@ mod tests {
         AgentTaskCookFailureContext {
             cook_id: "cook-abc".to_string(),
             latest_run_id: "run-1".to_string(),
+            selected_run_id: None,
+            selected_task_id: None,
+            selected_artifact_id: None,
+            promotion_provenance: None,
             durable_recipe_ref: "recipe".to_string(),
             lifecycle_state: "failed".to_string(),
             phase: "controller".to_string(),
