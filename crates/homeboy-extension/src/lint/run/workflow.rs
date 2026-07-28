@@ -140,11 +140,14 @@ pub fn run_main_lint_workflow(
     for evidence in evidence {
         let had_findings = !evidence.findings.is_empty();
         let declared_producers_empty = evidence.declared_producers.is_empty();
-        let scoped_run = evidence.changed_files.as_ref().map(|changed_files| ScopedLintRun {
-            glob: String::new(),
-            step: evidence.step.clone(),
-            changed_files: changed_files.clone(),
-        });
+        let scoped_run = evidence
+            .changed_files
+            .as_ref()
+            .map(|changed_files| ScopedLintRun {
+                glob: String::new(),
+                step: evidence.step.clone(),
+                changed_files: changed_files.clone(),
+            });
         let route_findings = filter_findings_to_scoped_files(
             evidence.findings,
             scoped_run.as_ref().map(std::slice::from_ref),

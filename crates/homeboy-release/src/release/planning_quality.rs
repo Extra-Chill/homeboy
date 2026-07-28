@@ -100,14 +100,15 @@ pub(super) fn validate_lint_quality(
         ));
     }
 
-    let lint_context = match homeboy_core::extension_execution::resolve_execution_context_if_available(
-        component,
-        ExtensionCapability::Lint,
-    ) {
-        Ok(Some(context)) => context,
-        Ok(None) => return LintQualityOutcome::Passed { ran: false },
-        Err(error) => return runner_error(error),
-    };
+    let lint_context =
+        match homeboy_core::extension_execution::resolve_execution_context_if_available(
+            component,
+            ExtensionCapability::Lint,
+        ) {
+            Ok(Some(context)) => context,
+            Ok(None) => return LintQualityOutcome::Passed { ran: false },
+            Err(error) => return runner_error(error),
+        };
 
     homeboy_core::log_status!("release", "Running lint ({})...", lint_context.extension_id);
 
@@ -115,15 +116,14 @@ pub(super) fn validate_lint_quality(
         Ok(dir) => dir,
         Err(e) => return LintQualityOutcome::Failed(e),
     };
-    let changed_since = match ReleaseScope::resolve(component, component_id)
-        .and_then(|scope| scope.latest_tag())
-    {
-        Ok(tag) => tag,
-        Err(e) => {
-            release_run_dir.finish(false);
-            return runner_error(e);
-        }
-    };
+    let changed_since =
+        match ReleaseScope::resolve(component, component_id).and_then(|scope| scope.latest_tag()) {
+            Ok(tag) => tag,
+            Err(e) => {
+                release_run_dir.finish(false);
+                return runner_error(e);
+            }
+        };
     let workflow = extension::lint::run_main_lint_workflow(
         component,
         Path::new(&component.local_path),
@@ -416,9 +416,7 @@ mod tests {
         code_quality_failure_message, is_runner_infrastructure_failure, validate_lint_quality,
         validate_test_quality, LintQualityOutcome,
     };
-    use homeboy_core::component::{
-        Component, ComponentScriptsConfig, ScopedExtensionConfig,
-    };
+    use homeboy_core::component::{Component, ComponentScriptsConfig, ScopedExtensionConfig};
     use homeboy_extension::RunnerOutput;
     use std::collections::HashMap;
     use std::fs;
@@ -495,8 +493,7 @@ mod tests {
         if prior_tag {
             run_git(source, &["tag", "v1.0.0"]);
         }
-        fs::write(source.join("changed.php"), "<?php echo 'changed';\n")
-            .expect("changed source");
+        fs::write(source.join("changed.php"), "<?php echo 'changed';\n").expect("changed source");
         run_git(source, &["add", "changed.php"]);
         run_git(source, &["commit", "-q", "-m", "fix: changed file"]);
 
@@ -532,9 +529,7 @@ mod tests {
 
     fn enable_split_lint_routes(home: &Path) {
         fs::write(
-            home.join(
-                ".config/homeboy/extensions/release-lint-fixture/release-lint-fixture.json",
-            ),
+            home.join(".config/homeboy/extensions/release-lint-fixture/release-lint-fixture.json"),
             r#"{
                 "name":"Release lint fixture",
                 "version":"1.0.0",
@@ -585,8 +580,10 @@ mod tests {
 
     #[test]
     fn test_validate_lint_quality() {
-        assert!(!validate_lint_quality(&component_without_quality_runners(), "fixture")
-            .expect_passed_with_value(false));
+        assert!(
+            !validate_lint_quality(&component_without_quality_runners(), "fixture")
+                .expect_passed_with_value(false)
+        );
     }
 
     #[test]
@@ -929,7 +926,10 @@ exit 1
         homeboy_core::test_support::with_isolated_home(|home| {
             let source = tempfile::tempdir().expect("source dir");
             run_git(source.path(), &["init", "-q"]);
-            run_git(source.path(), &["config", "user.email", "homeboy@example.com"]);
+            run_git(
+                source.path(),
+                &["config", "user.email", "homeboy@example.com"],
+            );
             run_git(source.path(), &["config", "user.name", "Homeboy Test"]);
             let component_path = source.path().join("packages/fixture");
             fs::create_dir_all(&component_path).expect("component dir");
@@ -942,8 +942,9 @@ exit 1
             run_git(source.path(), &["add", "packages/fixture/changed.php"]);
             run_git(source.path(), &["commit", "-q", "-m", "fix: package"]);
 
-            let extension_dir =
-                home.path().join(".config/homeboy/extensions/release-lint-fixture");
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions/release-lint-fixture");
             fs::create_dir_all(&extension_dir).expect("extension dir");
             fs::write(
                 extension_dir.join("release-lint-fixture.json"),
@@ -1024,13 +1025,10 @@ exit 0
                 &[known],
             )
             .expect("save accepted baseline");
-            let producer_error =
-                validate_lint_quality(&producer_error, "fixture").expect_failed();
-            assert!(
-                producer_error
-                    .to_string()
-                    .contains("Lint failed (exit code 1,")
-            );
+            let producer_error = validate_lint_quality(&producer_error, "fixture").expect_failed();
+            assert!(producer_error
+                .to_string()
+                .contains("Lint failed (exit code 1,"));
             assert_eq!(
                 producer_error.details["lint_workflow"]["producer_error_count"].as_u64(),
                 Some(1)

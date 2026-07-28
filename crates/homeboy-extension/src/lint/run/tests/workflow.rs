@@ -106,10 +106,8 @@ fn routed_lint_component(home: &Path, source: &Path, script: &str) -> Component 
 fn routed_lint_args() -> super::super::types::LintRunWorkflowArgs {
     let mut args = lint_args();
     args.changed_since = Some("v1.0.0".to_string());
-    args.precomputed_changed_files = Some(vec![
-        "legacy.php".to_string(),
-        "assets/app.js".to_string(),
-    ]);
+    args.precomputed_changed_files =
+        Some(vec!["legacy.php".to_string(), "assets/app.js".to_string()]);
     args.json_summary = true;
     args
 }
@@ -143,23 +141,16 @@ exit 1
         );
         let run_dir = RunDir::create().expect("run dir");
 
-        let workflow = run_main_lint_workflow(
-            &component,
-            source.path(),
-            routed_lint_args(),
-            &run_dir,
-        )
-        .expect("workflow result");
+        let workflow =
+            run_main_lint_workflow(&component, source.path(), routed_lint_args(), &run_dir)
+                .expect("workflow result");
 
         assert_eq!(workflow.status, "failed");
         assert_eq!(workflow.exit_code, 1);
         let findings = workflow.findings.as_ref().expect("findings");
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].message, "later route finding");
-        assert_eq!(
-            workflow.producer_summaries[1].step.as_deref(),
-            Some("js")
-        );
+        assert_eq!(workflow.producer_summaries[1].step.as_deref(), Some("js"));
         assert!(producer_sidecar_paths(&workflow)
             .iter()
             .all(|path| path.is_file()));
@@ -184,13 +175,9 @@ exit 0
         );
         let run_dir = RunDir::create().expect("run dir");
 
-        let workflow = run_main_lint_workflow(
-            &component,
-            source.path(),
-            routed_lint_args(),
-            &run_dir,
-        )
-        .expect("workflow result");
+        let workflow =
+            run_main_lint_workflow(&component, source.path(), routed_lint_args(), &run_dir)
+                .expect("workflow result");
 
         assert_eq!(workflow.status, "failed");
         assert_eq!(workflow.findings.as_ref().map(Vec::len), Some(1));
@@ -214,18 +201,17 @@ exit 0
         );
         let run_dir = RunDir::create().expect("run dir");
 
-        let workflow = run_main_lint_workflow(
-            &component,
-            source.path(),
-            routed_lint_args(),
-            &run_dir,
-        )
-        .expect("workflow result");
+        let workflow =
+            run_main_lint_workflow(&component, source.path(), routed_lint_args(), &run_dir)
+                .expect("workflow result");
 
         assert_eq!(workflow.status, "passed");
         let paths = producer_sidecar_paths(&workflow);
         assert_eq!(paths.len(), 2);
-        assert!(paths[0].is_file(), "primary run evidence remains caller-owned");
+        assert!(
+            paths[0].is_file(),
+            "primary run evidence remains caller-owned"
+        );
         assert!(!paths[1].exists(), "successful child route must be cleaned");
     });
 }
@@ -258,8 +244,7 @@ fn nested_component_scope_uses_existing_component_relative_file_paths() {
         run_git(&["tag", "fixture-v1.0.0"]);
         std::fs::write(component_path.join("changed.php"), "<?php echo 1;\n")
             .expect("changed source");
-        std::fs::write(repo.path().join("outside.php"), "<?php echo 2;\n")
-            .expect("outside source");
+        std::fs::write(repo.path().join("outside.php"), "<?php echo 2;\n").expect("outside source");
         run_git(&["add", "packages/fixture/changed.php", "outside.php"]);
         run_git(&["commit", "-q", "-m", "change nested and outside files"]);
 
@@ -300,12 +285,9 @@ exit 1
 fn accepted_baseline_does_not_hide_later_route_producer_error() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let source = tempfile::tempdir().expect("source dir");
-        let mut known = homeboy_core::finding::HomeboyFinding::builder(
-            "eslint",
-            "known finding",
-        )
-        .fingerprint("known")
-        .build();
+        let mut known = homeboy_core::finding::HomeboyFinding::builder("eslint", "known finding")
+            .fingerprint("known")
+            .build();
         known.location.file = Some("assets/app.js".to_string());
         crate::lint::baseline::save_baseline(source.path(), "fixture", &[known])
             .expect("save baseline");
@@ -324,13 +306,9 @@ exit 0
         );
         let run_dir = RunDir::create().expect("run dir");
 
-        let workflow = run_main_lint_workflow(
-            &component,
-            source.path(),
-            routed_lint_args(),
-            &run_dir,
-        )
-        .expect("workflow result");
+        let workflow =
+            run_main_lint_workflow(&component, source.path(), routed_lint_args(), &run_dir)
+                .expect("workflow result");
 
         assert_eq!(workflow.status, "failed");
         assert_eq!(workflow.exit_code, 1);
@@ -338,8 +316,7 @@ exit 0
         assert!(workflow
             .producer_summaries
             .iter()
-            .any(|producer| producer.step.as_deref() == Some("js")
-                && producer.status == "error"));
+            .any(|producer| producer.step.as_deref() == Some("js") && producer.status == "error"));
         assert_eq!(
             workflow
                 .baseline_comparison

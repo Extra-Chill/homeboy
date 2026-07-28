@@ -558,10 +558,7 @@ fn remove_ignored_untracked_composer_lock(component_path: &Path) -> Result<()> {
 fn run_lint_preflight(step: &PlanStep, context: &ReleaseExecutionContext) -> ReleaseStepResult {
     use super::planning_quality::LintQualityOutcome;
 
-    match super::planning_quality::validate_lint_quality(
-        context.component,
-        context.component_id,
-    ) {
+    match super::planning_quality::validate_lint_quality(context.component, context.component_id) {
         LintQualityOutcome::Passed { ran } => successful_quality_result(step, ran),
         LintQualityOutcome::Failed(err) => failed_result(&step.id, &step.kind, err),
     }
