@@ -28,7 +28,7 @@ const AGENT_TASK_COOK_MISSING_VERIFY_GATE_REASON: &str =
 pub(crate) const AGENT_TASK_COOK_COORDINATOR_CONTROLLER_REASON: &str =
     "agent-task cook is a controller-owned coordinator: it resolves the managed target, ingests provider artifacts, promotes candidates, runs deterministic gates, and finalizes. Only its provider attempt is portable, and that attempt is dispatched to the selected Lab runner: `--placement lab` selects the runner for the attempt (never offloading the coordinator), and `--runner <runner-id>` pins a specific one.";
 pub(crate) const AGENT_TASK_PROMOTION_RUN_CONTROLLER_REASON: &str =
-    "agent-task promote with a durable run id is controller-owned: it resolves authoritative lifecycle state and finalized artifact projections on the controller.";
+    "agent-task promote with a durable run id or readable controller-local aggregate is controller-owned: it resolves authoritative lifecycle state and finalized artifact projections on the controller.";
 const AGENT_TASK_FANOUT_COOK_BATCH_DRY_RUN_CONTROLLER_REASON: &str =
     "agent-task fanout cook-batch --dry-run is controller-local planning; it does not execute cooks and should not offload or materialize the controller cwd";
 pub(crate) const AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON: &str =
@@ -339,7 +339,7 @@ fn agent_task_fanout_local_only_contract(
 /// aggregate and finalized artifact projections are not portable path inputs.
 /// Other promotion source forms retain their existing runner-local behavior.
 fn agent_task_promotion_source_is_controller_owned(source: &str) -> bool {
-    agent_task_lifecycle::status(source).is_ok()
+    agent_task_lifecycle::status(source).is_ok() || std::path::Path::new(source).is_file()
 }
 
 pub(crate) fn agent_task_controller_materializes_worktree(
