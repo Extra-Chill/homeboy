@@ -77,6 +77,11 @@ fn terminal_runner_job() -> Job {
 #[test]
 fn controller_terminal_metadata_uses_exact_visual_artifact_shape_and_validates_bytes() {
     homeboy_core::test_support::with_isolated_home(|home| {
+        let prior_public_base = std::env::var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL").ok();
+        std::env::set_var(
+            "HOMEBOY_PUBLIC_ARTIFACT_BASE_URL",
+            "https://artifacts.example.test",
+        );
         let store = ObservationStore::open_initialized().expect("store");
         let run = store
             .start_run(NewRunRecord::builder("runner-exec").build())
@@ -114,15 +119,29 @@ fn controller_terminal_metadata_uses_exact_visual_artifact_shape_and_validates_b
                 .sha256
                 .as_deref()
                 .is_some_and(|sha| !sha.is_empty()));
+            assert_eq!(
+                artifact.url.as_deref(),
+                Some(
+                    format!(
+                        "https://artifacts.example.test/runs/{}/artifacts/{}",
+                        run.id, artifact.id
+                    )
+                    .as_str()
+                )
+            );
         }
 
         let source = store
             .get_artifact("source")
             .expect("source lookup")
             .expect("source");
-        fs::write(&source.path, b"corrupted").expect("corrupt controller bytes");
+        fs::write(&source.path, b"corrupt data").expect("corrupt controller bytes");
         let error = controller_artifact_metadata(&[run]).expect_err("checksum mismatch");
-        assert_eq!(error.details["field"], "artifact.size_bytes");
+        assert_eq!(error.details["field"], "artifact.sha256");
+        match prior_public_base {
+            Some(value) => std::env::set_var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL", value),
+            None => std::env::remove_var("HOMEBOY_PUBLIC_ARTIFACT_BASE_URL"),
+        }
     });
 }
 

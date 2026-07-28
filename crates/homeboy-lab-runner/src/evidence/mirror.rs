@@ -80,12 +80,12 @@ pub fn controller_artifact_metadata(runs: &[RunRecord]) -> Result<Vec<JobArtifac
         .map(|artifact| {
             validate_controller_artifact(&artifact)?;
             let controller_run_id = artifact.run_id.clone();
-            let url = homeboy_core::artifact_links::controller_artifact_url(&artifact);
+            let url = homeboy_core::artifact_links::controller_artifact_url(&artifact)?;
             Ok(JobArtifactMetadata {
                 id: artifact.id,
                 name: None,
                 path: Some(artifact.path),
-                url,
+                url: Some(url),
                 mime: artifact.mime,
                 size_bytes: artifact
                     .size_bytes

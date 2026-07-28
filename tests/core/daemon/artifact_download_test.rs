@@ -55,14 +55,45 @@ fn route_serves_run_scoped_artifact_store_tokens() {
         .expect("artifact token")
         .to_string();
 
-    let response =
-        route(&format!("/runs/{}/artifacts/{}", run.id, token)).expect("artifact-store route");
+    let response = route(&format!("/runs/{}/artifacts/store/{}", run.id, token))
+        .expect("artifact-store route");
 
     assert_eq!(response.status_code, 200);
     let artifact = response.artifact.expect("artifact download");
     assert_eq!(artifact.filename, "summary.json");
     assert_eq!(artifact.size_bytes, 11);
     assert_eq!(response.body["artifact"]["run_id"], run.id);
+}
+
+#[test]
+fn canonical_run_scoped_route_does_not_resolve_friendly_aliases() {
+    let _home = HomeGuard::new();
+    let home_path = std::path::PathBuf::from(std::env::var("HOME").expect("home"));
+    let store = ObservationStore::open_initialized().expect("store");
+    let run = store
+        .start_run(NewRunRecord::builder("bench").build())
+        .expect("run");
+    let path = home_path.join("source.png");
+    fs::write(&path, b"source bytes").expect("source artifact");
+    let artifact = store
+        .record_artifact_with_id(
+            &run.id,
+            "visual_source",
+            &path,
+            "source-id",
+            serde_json::json!({}),
+        )
+        .expect("artifact");
+
+    let canonical =
+        route(&format!("/runs/{}/artifacts/{}", run.id, artifact.id)).expect("canonical route");
+    assert_eq!(canonical.status_code, 200);
+    let alias = route(&format!("/runs/{}/artifacts/visual_source", run.id))
+        .expect("canonical route response");
+    assert_eq!(alias.status_code, 404);
+    let friendly =
+        route(&format!("/runs/{}/artifacts/aliases/visual_source", run.id)).expect("alias route");
+    assert_eq!(friendly.status_code, 200);
 }
 
 #[test]

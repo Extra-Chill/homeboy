@@ -2,6 +2,7 @@ use serde_json::Value;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::error::{Error, Result};
 use crate::execution_contract::encode_uri_component;
 use crate::observation::{ArtifactRecord, ArtifactViewerLink};
 
@@ -84,21 +85,74 @@ pub fn public_artifact_url(artifact: &ArtifactRecord) -> Option<String> {
 /// Return the controller's stable artifact route rather than a filesystem
 /// layout URL. Terminal handoffs use this route because it remains valid when
 /// the runner's artifact layout is unavailable after completion.
-pub fn controller_artifact_url(artifact: &ArtifactRecord) -> Option<String> {
+pub fn controller_artifact_url(artifact: &ArtifactRecord) -> Result<String> {
     if artifact.artifact_type != "file" {
-        return None;
+        return Err(Error::validation_invalid_argument(
+            "artifact.type",
+            "reviewer artifact URLs require a controller-owned file",
+            Some(artifact.id.clone()),
+            None,
+        ));
     }
-    let base = std::env::var(PUBLIC_ARTIFACT_BASE_URL_ENV).ok()?;
-    let base = base.trim().trim_end_matches('/');
-    if base.is_empty() {
-        return None;
-    }
-    Some(format!(
+    let base = reviewer_public_artifact_base_url()?;
+    Ok(format!(
         "{}/runs/{}/artifacts/{}",
         base,
         encode_uri_component(&artifact.run_id),
         encode_uri_component(&artifact.id)
     ))
+}
+
+/// Resolve the public artifact origin once at the configuration boundary.
+/// Terminal handoffs only advertise HTTPS URLs on reviewer-reachable hosts.
+pub fn reviewer_public_artifact_base_url() -> Result<String> {
+    let value = std::env::var(PUBLIC_ARTIFACT_BASE_URL_ENV).map_err(|_| {
+        Error::validation_invalid_argument(
+            PUBLIC_ARTIFACT_BASE_URL_ENV,
+            "a public HTTPS artifact origin is required before returning reviewer references",
+            None,
+            None,
+        )
+    })?;
+    let value = value.trim().trim_end_matches('/');
+    let url = reqwest::Url::parse(value).map_err(|error| {
+        Error::validation_invalid_argument(
+            PUBLIC_ARTIFACT_BASE_URL_ENV,
+            "public artifact origin must be a valid HTTPS URL",
+            Some(error.to_string()),
+            None,
+        )
+    })?;
+    let host = url.host_str().unwrap_or_default();
+    if url.scheme() != "https" || host.is_empty() || non_public_host(host) {
+        return Err(Error::validation_invalid_argument(
+            PUBLIC_ARTIFACT_BASE_URL_ENV,
+            "public artifact origin must use HTTPS with a reviewer-reachable host",
+            Some(value.to_string()),
+            None,
+        ));
+    }
+    Ok(value.to_string())
+}
+
+fn non_public_host(host: &str) -> bool {
+    let host = host.trim_matches(['[', ']']);
+    let lower = host.to_ascii_lowercase();
+    if lower == "localhost" || lower.ends_with(".localhost") || lower.ends_with(".local") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => {
+            ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
+        }
+        Ok(std::net::IpAddr::V6(ip)) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || (ip.segments()[0] & 0xfe00) == 0xfc00
+                || (ip.segments()[0] & 0xffc0) == 0xfe80
+        }
+        Err(_) => false,
+    }
 }
 
 pub fn public_artifact_path_url(root: &Path, base: &str, path: &Path) -> Option<String> {
@@ -261,7 +315,9 @@ fn artifact_is_fetchable(artifact: &ArtifactRecord) -> bool {
         || artifact.artifact_type == "remote_file"
 }
 
-fn probe_public_artifact_url(public_url: &str) -> Result<reqwest::StatusCode, reqwest::Error> {
+fn probe_public_artifact_url(
+    public_url: &str,
+) -> std::result::Result<reqwest::StatusCode, reqwest::Error> {
     crate::http_probe::blocking_client(PUBLIC_ARTIFACT_URL_PROBE_TIMEOUT)?
         .get(public_url)
         .header(reqwest::header::RANGE, "bytes=0-0")
@@ -273,6 +329,9 @@ fn probe_public_artifact_url(public_url: &str) -> Result<reqwest::StatusCode, re
 mod tests {
     use super::*;
     use crate::observation::ArtifactRecord;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn derives_viewer_link_from_public_artifact_url_metadata() {
@@ -367,6 +426,33 @@ mod tests {
     }
 
     #[test]
+    fn controller_url_requires_a_public_https_origin_and_encodes_ids() {
+        let _env = EnvGuard::set(
+            PUBLIC_ARTIFACT_BASE_URL_ENV,
+            "https://artifacts.example.test/reviewer/",
+        );
+        let artifact = ArtifactRecord {
+            id: "source /?%".to_string(),
+            run_id: "run /?%".to_string(),
+            artifact_type: "file".to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            controller_artifact_url(&artifact).expect("reviewer URL"),
+            "https://artifacts.example.test/reviewer/runs/run%20%2F%3F%25/artifacts/source%20%2F%3F%25"
+        );
+    }
+
+    #[test]
+    fn reviewer_public_artifact_base_rejects_local_or_non_https_origins() {
+        for value in ["http://artifacts.example.test", "https://127.0.0.1:7351"] {
+            let _env = EnvGuard::set(PUBLIC_ARTIFACT_BASE_URL_ENV, value);
+            assert!(reviewer_public_artifact_base_url().is_err(), "{value}");
+        }
+    }
+
+    #[test]
     fn directory_artifact_public_url_requires_artifact_root_path() {
         let _env = EnvGuard::set(
             PUBLIC_ARTIFACT_BASE_URL_ENV,
@@ -419,13 +505,19 @@ mod tests {
     struct EnvGuard {
         key: &'static str,
         prior: Option<String>,
+        _lock: MutexGuard<'static, ()>,
     }
 
     impl EnvGuard {
         fn set(key: &'static str, value: &str) -> Self {
+            let lock = ENV_LOCK.lock().expect("environment lock");
             let prior = std::env::var(key).ok();
             std::env::set_var(key, value);
-            Self { key, prior }
+            Self {
+                key,
+                prior,
+                _lock: lock,
+            }
         }
     }
 
