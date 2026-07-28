@@ -10,7 +10,7 @@ use homeboy_core::error::{Error, Result};
 use crate::daemon_http_get::parse_daemon_response_json;
 
 use super::super::broker_http;
-use super::super::evidence::mirror_daemon_job_progress;
+use super::super::evidence::{mirror_daemon_job_progress, mirror_reverse_broker_job_progress};
 use super::super::{load, status, Runner, RunnerTunnelMode};
 
 #[allow(unused_imports)]
@@ -393,8 +393,15 @@ pub(super) fn persist_lab_offload_handoff_run(
     command: &[String],
     job: &Job,
     run_id: Option<&str>,
+    reverse_broker_url: Option<&str>,
 ) -> Option<String> {
-    match mirror_daemon_job_progress(runner, cwd, command, job, &[], run_id) {
+    let mirrored = match reverse_broker_url {
+        Some(broker_url) => {
+            mirror_reverse_broker_job_progress(runner, broker_url, cwd, command, job, run_id)
+        }
+        None => mirror_daemon_job_progress(runner, cwd, command, job, &[], run_id),
+    };
+    match mirrored {
         Ok(run) => Some(run.id),
         Err(err) => {
             eprintln!(

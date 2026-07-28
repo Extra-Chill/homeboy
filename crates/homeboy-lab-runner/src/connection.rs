@@ -1828,14 +1828,14 @@ pub(crate) fn reverse_broker_job_snapshot_at(
     let job_data = broker_http::get_json(
         &client,
         broker_url,
-        &format!("/runner/jobs/{job_id}"),
+        &format!("/jobs/{job_id}"),
         "fetch reverse runner broker job",
         token.as_deref(),
     )?;
     let events_data = broker_http::get_json(
         &client,
         broker_url,
-        &format!("/runner/jobs/{job_id}/events"),
+        &format!("/jobs/{job_id}/events"),
         "fetch reverse runner broker job events",
         token.as_deref(),
     )?;

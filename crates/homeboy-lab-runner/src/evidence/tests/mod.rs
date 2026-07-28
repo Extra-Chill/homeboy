@@ -1566,8 +1566,8 @@ fn reverse_broker_refresh_uses_persisted_transport_after_store_reopen() {
                 broker.join().expect("broker requests")
             },
             vec![
-                format!("/runner/jobs/{}", job.id),
-                format!("/runner/jobs/{}/events", job.id),
+                format!("/jobs/{}", job.id),
+                format!("/jobs/{}/events", job.id),
                 "/runner/jobs/reconcile".to_string(),
             ]
         );

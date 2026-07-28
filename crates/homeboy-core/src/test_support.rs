@@ -1115,6 +1115,18 @@ fn handle_reverse_broker_request(
             .expect("claim broker job");
         return ok(json!({ "claim": claim }));
     }
+    if request.method == "POST" && request.path == "/runner/jobs/reconcile" {
+        let reconciled = store
+            .reconcile_expired_remote_runner_claims_for_runner(
+                chrono::Utc::now().timestamp_millis().max(0) as u64,
+                Some(runner_id),
+            )
+            .expect("reconcile broker jobs");
+        return ok(json!({
+            "reconciled_count": reconciled.len(),
+            "reconciled": reconciled,
+        }));
+    }
     // Reverse-runner file transfer (`RunnerFileChannel::BrokerHttp`) posts
     // `/files/{mkdir,upload,download}` for the same host the fixture runs on, so
     // the fixture performs the real filesystem operation. Without these the
