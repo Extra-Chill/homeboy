@@ -182,6 +182,17 @@ pub fn route_after_parse(
         None
     };
     let normalized_args = inject_agent_task_cook_attempt_plan(normalized_args, cook_plan.as_ref())?;
+    let generic_detached_handoff = if lab_command.is_some()
+        && inferred_runner_id.is_some()
+        && cli.detach_after_handoff
+        && run_handoff.is_none()
+        && retry_handoff.is_none()
+        && cook_plan.is_none()
+    {
+        Some(materialize_generic_detached_lab_handoff(&normalized_args)?)
+    } else {
+        None
+    };
     // Lab routing carries the durable plan opaquely as JSON (core does not
     // depend on the agent-task subsystem); serialize the selected typed plan.
     let durable_agent_task_plan = run_handoff
@@ -193,6 +204,11 @@ pub fn route_after_parse(
                 .map(|handoff| &handoff.plan)
                 .or(cook_plan.as_ref())
         })
+        .or_else(|| {
+            generic_detached_handoff
+                .as_ref()
+                .map(|handoff| &handoff.plan)
+        })
         .map(|plan| {
             serde_json::to_value(plan).map_err(|error| {
                 Error::internal_json(
@@ -202,6 +218,9 @@ pub fn route_after_parse(
             })
         })
         .transpose()?;
+    let durable_run_id = generic_detached_handoff
+        .as_ref()
+        .map(|handoff| handoff.run_id.as_str());
     let observer = lab_dispatch_observer(cli, &normalized_args, inferred_runner_id.as_deref());
     let active_run_id = observer
         .run_id()
@@ -249,6 +268,7 @@ pub fn route_after_parse(
                 .is_some_and(|contract| contract.command.routing_policy.read_only_polling),
             local_output_file: output_file,
             durable_agent_task_plan: durable_agent_task_plan.as_ref(),
+            durable_run_id,
             // A serialized run-plan has no workspace CLI argument. Carry its
             // canonical plan root through the portable source channel so Lab
             // snapshots it before remapping nested plan/config paths.
@@ -805,6 +825,7 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
                     reuse_compatible_snapshot: false,
                     local_output_file: None,
                     durable_agent_task_plan: Some(&durable_agent_task_plan),
+                    durable_run_id: None,
                     // A retry's baseline is controller-owned capability, not plan
                     // data. Stage that exact clean checkout; never substitute the
                     // controller's original workspace during nested Lab dispatch.
@@ -1040,6 +1061,38 @@ fn materialize_agent_task_cook_plan(
     crate::commands::agent_task::run::validate_cook_request(cook)?;
     let provision = crate::commands::agent_task::run::provision_cook_destination(cook)?;
     crate::commands::agent_task::run::compile_cook_plan(cook, provision).map(Some)
+}
+
+struct GenericDetachedLabHandoff {
+    run_id: String,
+    plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan,
+}
+
+/// Give detached portable commands a controller-owned identity before Lab
+/// admission. Agent-task commands retain their richer command-specific plans.
+fn materialize_generic_detached_lab_handoff(
+    args: &[String],
+) -> homeboy::core::Result<GenericDetachedLabHandoff> {
+    let run_id =
+        explicit_run_id(args).unwrap_or_else(|| format!("lab-offload-{}", uuid::Uuid::new_v4()));
+    let plan = homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new(
+        format!("lab-offload-{run_id}"),
+        Vec::new(),
+    );
+    agent_task_lifecycle::submit_plan(&plan, Some(&run_id))?;
+    Ok(GenericDetachedLabHandoff { run_id, plan })
+}
+
+fn explicit_run_id(args: &[String]) -> Option<String> {
+    args.iter().enumerate().find_map(|(index, arg)| {
+        arg.strip_prefix("--run-id=")
+            .map(str::to_string)
+            .or_else(|| {
+                (arg == "--run-id")
+                    .then(|| args.get(index + 1).cloned())
+                    .flatten()
+            })
+    })
 }
 
 fn lab_route_dispatch_timeout(command: &Commands) -> Option<std::time::Duration> {

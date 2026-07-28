@@ -2577,6 +2577,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             read_only_polling: request.recipe.read_only_polling,
             local_output_file: None,
             durable_agent_task_plan: Some(&request.durable_agent_task_plan),
+            durable_run_id: Some(&request.recipe.run_id),
             source_path: Some(source_path),
             verified_cook_baseline: request.recipe.verified_cook_baseline.as_ref(),
             require_controller_git_bundle: request.recipe.require_controller_git_bundle,
