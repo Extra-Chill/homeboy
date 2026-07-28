@@ -11,7 +11,8 @@ use homeboy::core::defaults;
 use homeboy::core::engine;
 use homeboy::core::engine::shell::quote_arg;
 use homeboy::core::observation::runs_service::{
-    self, PersistedArtifactCleanupOptions, RunnerDownloadCleanupOptions,
+    self, OrphanedArtifactBytesCleanupOptions, PersistedArtifactCleanupOptions,
+    RunnerDownloadCleanupOptions,
 };
 use homeboy::core::resource_cleanup_intent::ResourceCleanupIntent;
 use homeboy::core::worktree::{self, WorktreeCleanupOptions, WorktreeCleanupOutput};
@@ -69,6 +70,7 @@ pub enum CleanupCategoryArg {
     WorktreeProviders,
     TerminalRuns,
     PersistedRunArtifacts,
+    OrphanedArtifactBytes,
     RunnerDownloads,
     RemoteLabWorkspaces,
     RuntimeTmp,
@@ -639,6 +641,19 @@ const TERMINAL_RUNS_METADATA: CleanupInventoryCategoryMetadata = CleanupInventor
     apply_command: "homeboy runs retention --apply",
 };
 
+/// Crash residue under the artifact root that no database row can describe.
+/// This is the only artifact-root cleanup that is not row-driven, so it is
+/// scoped to the two name families a single private constructor owns rather
+/// than to "anything without a row" — see
+/// `runs_service::orphaned_artifact_bytes` for why a row join is unsafe here.
+const ORPHANED_ARTIFACT_BYTES_METADATA: CleanupInventoryCategoryMetadata =
+    CleanupInventoryCategoryMetadata {
+        category: "orphaned_artifact_bytes",
+        include_arg: "orphaned-artifact-bytes",
+        dry_run_command: "homeboy cleanup --include orphaned-artifact-bytes",
+        apply_command: "homeboy cleanup --include orphaned-artifact-bytes --apply",
+    };
+
 pub(crate) const RUNNER_DOWNLOADS_METADATA: CleanupInventoryCategoryMetadata =
     CleanupInventoryCategoryMetadata {
         category: "runner_downloads",
@@ -793,6 +808,24 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
             ));
         };
         categories.push(persisted_artifacts_category(persisted, resources, apply)?);
+    }
+
+    if selected.includes(CleanupCategoryArg::OrphanedArtifactBytes) {
+        let output =
+            runs_service::cleanup_orphaned_artifact_bytes(OrphanedArtifactBytesCleanupOptions {
+                apply,
+                limit: usize::try_from(limit).unwrap_or(usize::MAX),
+            })?;
+        categories.push(category_from_output(
+            ORPHANED_ARTIFACT_BYTES_METADATA,
+            apply,
+            output.planned_count,
+            output.removed_count,
+            output.skipped_count,
+            output.planned_size_bytes,
+            output.removed_size_bytes,
+            output,
+        )?);
     }
 
     if selected.includes(CleanupCategoryArg::RunnerDownloads) {
@@ -2040,6 +2073,13 @@ mod tests {
                 "persisted-run-artifacts",
                 "homeboy runs artifact cleanup-persisted",
                 "homeboy runs artifact cleanup-persisted --apply",
+            ),
+            (
+                ORPHANED_ARTIFACT_BYTES_METADATA,
+                "orphaned_artifact_bytes",
+                "orphaned-artifact-bytes",
+                "homeboy cleanup --include orphaned-artifact-bytes",
+                "homeboy cleanup --include orphaned-artifact-bytes --apply",
             ),
             (
                 RUNNER_DOWNLOADS_METADATA,

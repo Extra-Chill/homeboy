@@ -1,20 +1,34 @@
 use super::*;
 
+/// Plan (and optionally apply) persisted-artifact cleanup against a freshly
+/// opened store.
+///
+/// Callers that already hold an open store — notably terminal-run retention,
+/// which plans once per candidate run — must use
+/// [`cleanup_persisted_artifacts_with_store`] instead. Every
+/// `ObservationStore::open_initialized` is a `create_dir_all`, two
+/// `pragma_update` calls, the globally-locked migration ladder, and an
+/// unfinished-publication reconciliation pass, so opening per run turns a
+/// bounded retention sweep into thousands of redundant connection opens.
 pub fn cleanup_persisted_artifacts(
     options: PersistedArtifactCleanupOptions,
 ) -> Result<PersistedArtifactCleanupOutcome> {
-    if options.older_than_days < 0 {
-        return Err(Error::validation_invalid_argument(
-            "older_than_days",
-            "--older-than-days must be zero or greater",
-            Some(options.older_than_days.to_string()),
-            None,
-        ));
-    }
-
+    validate_persisted_cleanup_options(&options)?;
     let artifact_root = crate::artifacts::root()?;
-    let created_before = (Utc::now() - Duration::days(options.older_than_days)).to_rfc3339();
     let store = ObservationStore::open_initialized()?;
+    cleanup_persisted_artifacts_with_store(&store, &artifact_root, options)
+}
+
+/// Plan (and optionally apply) persisted-artifact cleanup against a store and
+/// artifact root the caller already resolved.
+pub fn cleanup_persisted_artifacts_with_store(
+    store: &ObservationStore,
+    artifact_root: &Path,
+    options: PersistedArtifactCleanupOptions,
+) -> Result<PersistedArtifactCleanupOutcome> {
+    validate_persisted_cleanup_options(&options)?;
+
+    let created_before = (Utc::now() - Duration::days(options.older_than_days)).to_rfc3339();
     let candidates = store.list_artifact_cleanup_candidates(ArtifactCleanupFilter {
         created_before: Some(created_before),
         run_id: options.run_id.clone(),
@@ -37,8 +51,7 @@ pub fn cleanup_persisted_artifacts(
     let mut skipped_count = 0;
 
     for candidate in candidates.iter() {
-        let mut row =
-            classify_persisted_artifact(candidate, &artifact_root, options.terminal_only)?;
+        let mut row = classify_persisted_artifact(candidate, artifact_root, options.terminal_only)?;
         if row.action == "remove" {
             planned_record_count += 1;
             planned_size_bytes += row.size_bytes;
@@ -47,7 +60,7 @@ pub fn cleanup_persisted_artifacts(
                 _ => planned_file_count += usize::from(row.exists),
             }
             if options.apply {
-                apply_persisted_artifact_cleanup(&store, &candidate.artifact, &artifact_root)?;
+                apply_persisted_artifact_cleanup(store, &candidate.artifact, artifact_root)?;
                 removed_record_count += 1;
                 removed_size_bytes += row.size_bytes;
                 match row.artifact_type.as_str() {
@@ -64,7 +77,7 @@ pub fn cleanup_persisted_artifacts(
 
     Ok(PersistedArtifactCleanupOutcome {
         dry_run: !options.apply,
-        artifact_root,
+        artifact_root: artifact_root.to_path_buf(),
         older_than_days: options.older_than_days,
         totals: CleanupSizeTotals {
             inspected_count: candidates.len(),
@@ -80,6 +93,18 @@ pub fn cleanup_persisted_artifacts(
         skipped_count,
         rows,
     })
+}
+
+fn validate_persisted_cleanup_options(options: &PersistedArtifactCleanupOptions) -> Result<()> {
+    if options.older_than_days < 0 {
+        return Err(Error::validation_invalid_argument(
+            "older_than_days",
+            "--older-than-days must be zero or greater",
+            Some(options.older_than_days.to_string()),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 fn classify_persisted_artifact(
@@ -185,7 +210,7 @@ fn persisted_artifact_path_from_record(artifact_root: &Path, raw: &str) -> PathB
     }
 }
 
-fn symlink_metadata_if_exists(path: &Path) -> Result<Option<fs::Metadata>> {
+pub(crate) fn symlink_metadata_if_exists(path: &Path) -> Result<Option<fs::Metadata>> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => Ok(Some(metadata)),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -196,7 +221,7 @@ fn symlink_metadata_if_exists(path: &Path) -> Result<Option<fs::Metadata>> {
     }
 }
 
-fn path_is_within_root(path: &Path, artifact_root: &Path) -> bool {
+pub(crate) fn path_is_within_root(path: &Path, artifact_root: &Path) -> bool {
     if path
         .components()
         .any(|component| matches!(component, Component::ParentDir))

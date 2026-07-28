@@ -133,6 +133,78 @@ fn terminal_retention_is_dry_run_by_default_and_deletes_owned_lifecycle_on_apply
     });
 }
 
+/// Unix-only: blocking a candidate run requires an artifact path that exists
+/// but fails the safety revalidation, and a symlink is the portable-enough way
+/// to produce that state.
+#[cfg(unix)]
+#[test]
+fn terminal_retention_counts_only_the_runs_it_actually_deleted() {
+    with_isolated_home(|home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+
+        // Two aged terminal runs. One holds an artifact that cleanup must
+        // refuse (a symlink), so retention plans it as blocked and deletes
+        // only the other one.
+        let removable = store.start_run(sample_run("test")).expect("removable run");
+        let blocked = store.start_run(sample_run("test")).expect("blocked run");
+        for run in [&removable, &blocked] {
+            store
+                .finish_run(&run.id, RunStatus::Pass, None)
+                .expect("finish run");
+        }
+
+        let source = home.path().join("source.json");
+        std::fs::write(&source, "{}").expect("source bytes");
+        let removable_artifact = store
+            .record_artifact(&removable.id, "report", &source)
+            .expect("removable artifact");
+        let blocked_artifact = store
+            .record_artifact(&blocked.id, "report", &source)
+            .expect("blocked artifact");
+
+        // Replace the recorded bytes with a symlink so classification returns
+        // `skip` with `exists = true`, which is what blocks a candidate run.
+        let blocked_path = std::path::PathBuf::from(&blocked_artifact.path);
+        std::fs::remove_file(&blocked_path).expect("drop blocked bytes");
+        std::os::unix::fs::symlink(&source, &blocked_path).expect("symlink blocked bytes");
+
+        let path = store.status().expect("status").path;
+        drop(store);
+        let db = rusqlite::Connection::open(path).expect("raw db");
+        for id in [&removable.id, &blocked.id] {
+            db.execute(
+                "UPDATE runs SET finished_at = '2000-01-01T00:00:00Z' WHERE id = ?1",
+                [id],
+            )
+            .expect("age terminal run");
+        }
+        drop(db);
+
+        let applied = retain_terminal_runs(TerminalRunRetentionOptions {
+            apply: true,
+            older_than_days: 1,
+            limit: 10,
+        })
+        .expect("apply");
+
+        assert_eq!(applied.candidate_run_ids.len(), 2);
+        assert_eq!(applied.skipped_run_ids, vec![blocked.id.clone()]);
+        // Before the accounting fix this reported `1 - 1 == 0` because the
+        // planning-loop skip was subtracted from a set it was never in.
+        assert_eq!(applied.removed_run_count, 1);
+
+        let store = ObservationStore::open_initialized().expect("reopen");
+        assert!(store
+            .get_run(&removable.id)
+            .expect("removable read")
+            .is_none());
+        assert!(store.get_run(&blocked.id).expect("blocked read").is_some());
+        assert!(!std::path::Path::new(&removable_artifact.path).exists());
+        assert!(std::fs::symlink_metadata(&blocked_path).is_ok());
+    });
+}
+
 #[test]
 fn missing_run_guidance_prints_runner_routed_retrieval_commands() {
     let hints = missing_run_guidance_for_runner_ids("run-123", vec!["homeboy-lab".to_string()]);
