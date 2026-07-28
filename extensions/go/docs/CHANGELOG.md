@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.8.1] - 2026-07-28
+
+### Changed
+- drop retired manifest keys and dead validate scripts
+
 ## [1.8.0] - 2026-07-17
 
 ### Added
