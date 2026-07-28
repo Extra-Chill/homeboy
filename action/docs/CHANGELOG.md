@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.9.0] - 2026-07-28
+
+### Added
+- surface action phase progress
+
 ## [2.8.27] - 2026-07-28
 
 ### Fixed
