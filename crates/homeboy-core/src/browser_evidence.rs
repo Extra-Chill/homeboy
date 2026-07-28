@@ -3,11 +3,11 @@ use serde_json::{Map, Value};
 
 use crate::{Error, Result};
 
-pub const BROWSER_EVIDENCE_SCHEMA_VERSION: u64 = 1;
+pub(crate) const BROWSER_EVIDENCE_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct BrowserPerformanceProfileEnvelope {
+pub(crate) struct BrowserPerformanceProfileEnvelope {
     #[serde(default = "default_schema_version")]
     pub schema_version: u64,
     #[serde(default, alias = "url")]
@@ -40,7 +40,7 @@ pub struct BrowserPerformanceProfileEnvelope {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct BrowserNetworkRequestRow {
+pub(crate) struct BrowserNetworkRequestRow {
     #[serde(default, alias = "name")]
     pub url: String,
     #[serde(default)]
@@ -71,7 +71,7 @@ pub struct BrowserNetworkRequestRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct BrowserTimingRow {
+pub(crate) struct BrowserTimingRow {
     pub url: String,
     #[serde(default, alias = "normalizedUrl")]
     pub normalized_url: String,
@@ -97,7 +97,7 @@ pub struct BrowserTimingRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct BrowserPhaseMark {
+pub(crate) struct BrowserPhaseMark {
     pub name: String,
     #[serde(alias = "startTime", alias = "start_ms", alias = "startMs")]
     pub start_time_ms: f64,
@@ -105,7 +105,7 @@ pub struct BrowserPhaseMark {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct BrowserPhaseWindow {
+pub(crate) struct BrowserPhaseWindow {
     pub start_time_ms: f64,
     #[serde(default)]
     pub end_time_ms: Option<f64>,
@@ -114,7 +114,7 @@ pub struct BrowserPhaseWindow {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct BrowserArtifactMetadata {
+pub(crate) struct BrowserArtifactMetadata {
     pub path: String,
     #[serde(default)]
     pub kind: Option<String>,
@@ -124,7 +124,7 @@ pub struct BrowserArtifactMetadata {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct BrowserOriginEvidence {
+pub(crate) struct BrowserOriginEvidence {
     #[serde(default = "default_schema_version")]
     pub schema_version: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -153,7 +153,7 @@ pub struct BrowserOriginEvidence {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct BrowserOriginDeclaredService {
+pub(crate) struct BrowserOriginDeclaredService {
     pub host: String,
     pub port: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -162,7 +162,7 @@ pub struct BrowserOriginDeclaredService {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct BrowserWindowLocationEvidence {
+pub(crate) struct BrowserWindowLocationEvidence {
     pub origin: String,
     pub hostname: String,
     pub protocol: String,
@@ -173,7 +173,7 @@ pub struct BrowserWindowLocationEvidence {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct BrowserRedirectEvidence {
+pub(crate) struct BrowserRedirectEvidence {
     pub from_url: String,
     pub to_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -182,7 +182,7 @@ pub struct BrowserRedirectEvidence {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct BrowserBottleneckRow {
+pub(crate) struct BrowserBottleneckRow {
     pub kind: String,
     pub phase: String,
     pub message: String,
@@ -192,7 +192,7 @@ pub struct BrowserBottleneckRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct TraceEvent {
+pub(crate) struct TraceEvent {
     pub t_ms: f64,
     pub source: String,
     pub event: String,
@@ -202,7 +202,7 @@ pub struct TraceEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum TraceAssertionStatus {
+pub(crate) enum TraceAssertionStatus {
     Pass,
     Fail,
     Skip,
@@ -211,7 +211,7 @@ pub enum TraceAssertionStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct TraceAssertion {
+pub(crate) struct TraceAssertion {
     pub id: String,
     pub status: TraceAssertionStatus,
     pub message: String,
@@ -220,20 +220,20 @@ pub struct TraceAssertion {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct TraceTimeline {
+pub(crate) struct TraceTimeline {
     #[serde(default)]
     pub timeline: Vec<TraceEvent>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct TraceAssertions {
+pub(crate) struct TraceAssertions {
     #[serde(default)]
     pub assertions: Vec<TraceAssertion>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum TraceEnvelopeStatus {
+pub(crate) enum TraceEnvelopeStatus {
     Pass,
     Fail,
     Error,
@@ -242,7 +242,7 @@ pub enum TraceEnvelopeStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct TraceEnvelope {
+pub(crate) struct TraceEnvelope {
     pub component_id: String,
     pub scenario_id: String,
     pub status: TraceEnvelopeStatus,
