@@ -75,7 +75,24 @@ pub struct FuzzFailureDiagnostic {
     pub case_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
+    /// Narrow legacy classification label. Retains
+    /// `pre_execution_assembly_failure` / `php_bootstrap_fatal` /
+    /// `failed_campaign` / `workload_execution_failure`, and adds
+    /// `evidence_contract_failure` so a producer defect stops being reported
+    /// as a workload failure. Prefer `failure_domain` for new consumers.
     pub classification: String,
+    /// Which of the four failure families owns this run: `product_finding`,
+    /// `workload_failure`, `gate_failure`, or `evidence_contract_failure`.
+    pub failure_domain: String,
+    /// Did the code under test behave? Stays `passed` when every case passed
+    /// even if the run failed strict validation on missing evidence.
+    pub workload_verdict: String,
+    /// Was every declared piece of evidence delivered?
+    pub evidence_verdict: String,
+    /// The specific evidence-contract violations, each naming the declared
+    /// reference, its resolution base, and the producer that owed it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_violations: Vec<homeboy::fuzz::FuzzEvidenceViolation>,
     pub root_cause_chain: Vec<String>,
     pub executions: u64,
     pub source_identity: FuzzDiagnosticSourceIdentity,

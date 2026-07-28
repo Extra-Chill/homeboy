@@ -20,6 +20,7 @@ use serde_json::Value;
 
 use homeboy::core::observation::evidence_report::evidence_failure_summary;
 use homeboy::core::observation::{runs_service, ObservationStore, RunRecord};
+use homeboy::fuzz::{derive_fuzz_proof, FuzzProof};
 
 use super::{reconcile, CmdResult, RunsOutput};
 
@@ -48,6 +49,12 @@ pub struct RunsProofOutput {
     pub gate_failures: Vec<String>,
     /// Flattened scalar proof/scorecard signal fields, deterministic by key.
     pub signals: BTreeMap<String, Value>,
+    /// Reviewer-ready fuzz projection: exact component and rig identity, case
+    /// and finding totals, gate outcomes, coverage, execution inputs, the
+    /// evidence-contract verdict, and a Markdown rendering. Derived at read
+    /// time from the persisted run; absent for non-fuzz runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fuzz: Option<FuzzProof>,
 }
 
 pub fn proof(run_id: &str) -> CmdResult<RunsOutput> {
@@ -85,6 +92,9 @@ pub fn build_proof(run: &RunRecord) -> RunsProofOutput {
         error: failure.error,
         gate_failures: failure.gate_failures,
         signals,
+        // Derived, never persisted: a read-only projection must not mutate
+        // stored state, and freezing this derivation would stop it improving.
+        fuzz: derive_fuzz_proof(run),
     }
 }
 

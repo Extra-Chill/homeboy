@@ -11,9 +11,12 @@ use homeboy::core::engine::run_dir::RunDir;
 use homeboy::core::lifecycle::LifecyclePhaseStatus;
 use homeboy::core::observation::{RunRecord, RunStatus};
 use homeboy::fuzz::{
-    fuzz_gate_profile_contract, parse_fuzz_results_file, FuzzArtifact, FuzzCampaign,
-    FuzzExecutionRequest, FuzzFindingStatus, FuzzGateProfile, FuzzSamplingRequest,
-    FuzzTargetInventory, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
+    fuzz_campaign_case_totals, fuzz_campaign_finding_totals, fuzz_gate_profile_contract,
+    parse_fuzz_results_file, FuzzArtifact, FuzzCampaign, FuzzEvidenceContract,
+    FuzzEvidenceViolation, FuzzEvidenceViolationCode, FuzzExecutionRequest, FuzzFindingStatus,
+    FuzzGateProfile, FuzzSamplingRequest, FuzzTargetInventory,
+    FUZZ_ARTIFACT_ROOT_PRODUCER_CONTRACT, FUZZ_CONTRACT_VERSION, FUZZ_EXECUTION_REQUEST_SCHEMA,
+    FUZZ_RESULTS_FILE_PRODUCER_CONTRACT,
 };
 use homeboy::rig::{self, FuzzPrepareReport, RigSpec};
 use homeboy_extension::{self, ExtensionCapability, ExtensionRunner, FuzzConfig};
@@ -146,6 +149,19 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
     let expected_metric_gates =
         evaluate_expected_metric_gates(results.as_ref(), &args.expect_metric);
     let expected_metric_error = fuzz_expected_metric_error(&expected_metric_gates);
+    // These five channels report four different kinds of event. Collapsing
+    // them into one opaque string is what made a harness packaging error read
+    // as a product failure (#10513): the evidence-contract detail was
+    // discarded before the diagnostic was built, so the diagnosis fell back to
+    // sniffing successful runner stdout. Keep the classification alongside the
+    // collapsed string rather than instead of it, so `fuzz_run_outcome` and
+    // the existing `results_error` metadata member behave exactly as before.
+    let evidence_contract = fuzz_evidence_contract(
+        results_error.as_deref(),
+        postprocess_error.as_deref(),
+        artifact_validation_error.as_deref(),
+        &artifact_ref_validation,
+    );
     let combined_results_error = results_error
         .as_deref()
         .or(postprocess_error.as_deref())
@@ -195,6 +211,11 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         Vec::new()
     };
     let workload_path = selected_workload.and_then(|workload| workload.manifest_path.clone());
+    // The component revision was always available from the resolved execution
+    // context; fuzz simply never recorded it, which is why `runs dossier`
+    // reported `git_sha: null` for a campaign whose product revision was known
+    // (#10514).
+    let component_revision = homeboy::core::git::short_head_revision_at(&ctx.source_path);
     let persisted_evidence = persist_fuzz_run_evidence(FuzzRunEvidenceInput {
         run_id: Some(&effective_run_id),
         component_id: &ctx.component_id,
@@ -214,6 +235,8 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         expected_metric_gates: &expected_metric_gates,
         results_error: combined_results_error,
         missing_artifact_refs: &artifact_ref_validation.missing_refs,
+        evidence_contract: &evidence_contract,
+        component_revision: component_revision.as_deref(),
         postprocess: &postprocess,
         payloads: &payloads,
     })?;
@@ -246,6 +269,14 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
                             .iter()
                             .map(|reference| reference.canonical_uri().to_string())
                             .collect(),
+                        // Without this the diagnosis never sees the evidence
+                        // failure and falls back to sniffing runner output.
+                        &evidence_contract,
+                        &fuzz_run_gates(
+                            results.as_ref(),
+                            args.effective_gate_profile().as_core(),
+                            &expected_metric_gates,
+                        ),
                     )
                 })
         })
@@ -845,6 +876,11 @@ pub(super) struct FuzzRunEvidenceInput<'a> {
     pub(super) expected_metric_gates: &'a [super::types::FuzzGateEvaluation],
     pub(super) results_error: Option<&'a str>,
     pub(super) missing_artifact_refs: &'a [String],
+    /// Classified evidence-contract verdict for this run. Persisted so a
+    /// later reader does not have to re-sniff a collapsed error string.
+    pub(super) evidence_contract: &'a FuzzEvidenceContract,
+    /// Exact revision of the component source that was fuzzed.
+    pub(super) component_revision: Option<&'a str>,
     pub(super) postprocess: &'a [FuzzArtifactPostprocessOutput],
     pub(super) payloads: &'a [homeboy::fuzz::FuzzPayload],
 }
@@ -882,6 +918,16 @@ pub(super) fn persist_fuzz_run_evidence(
         "campaign_id": input.results.map(|campaign| campaign.id.as_str()),
         "results_error": input.results_error,
         "missing_artifact_refs": input.missing_artifact_refs,
+        // Classified companion to the collapsed `results_error` string above.
+        // Additive: older readers keep using `results_error` and
+        // `missing_artifact_refs`, which are unchanged.
+        "evidence_contract": input.evidence_contract,
+        "component_revision": input.component_revision,
+        // Case and finding totals are already in the parsed campaign; the run
+        // record simply never carried them, which forced reviewers to read the
+        // full result envelope to state "19/19 cases passed, 0 findings".
+        "case_totals": input.results.map(fuzz_campaign_case_totals),
+        "finding_totals": input.results.map(fuzz_campaign_finding_totals),
         "coverage_completeness": input.results.map(fuzz_coverage_completeness),
         "gates": fuzz_run_gates(
             input.results,
@@ -915,7 +961,7 @@ pub(super) fn persist_fuzz_run_evidence(
             .ok()
             .map(|path| path.to_string_lossy().to_string()),
         homeboy_version: Some(homeboy_product_identity::product_version().to_string()),
-        git_sha: None,
+        git_sha: input.component_revision.map(str::to_string),
         rig_id: input.rig_id.map(str::to_string),
         metadata_json: metadata,
     };
@@ -972,7 +1018,14 @@ pub(super) fn persist_fuzz_run_evidence(
 
 #[derive(Default)]
 pub(super) struct FuzzArtifactRefValidation {
+    /// Declared refs that resolved inside the artifact root but are absent.
+    /// Kept for the existing `missing_artifact_refs` metadata member.
     pub(super) missing_refs: Vec<String>,
+    /// Every way the artifact side of the evidence contract was broken,
+    /// classified. Includes the missing refs plus refs that escape the root,
+    /// are the wrong kind, or cannot be read — three cases that used to be
+    /// silently discarded.
+    pub(super) violations: Vec<FuzzEvidenceViolation>,
     pub(super) error: Option<String>,
 }
 
@@ -983,53 +1036,121 @@ pub(super) fn fuzz_artifact_ref_validation(
     let Some(campaign) = results else {
         return FuzzArtifactRefValidation::default();
     };
-    let mut missing_refs = Vec::new();
+    let mut violations = Vec::new();
     for artifact in &campaign.artifacts {
-        if let Some(path) = artifact
-            .artifact
-            .as_ref()
-            .and_then(|artifact| artifact.path.as_deref())
-        {
-            collect_missing_artifact_ref(path, artifacts_dir, &mut missing_refs);
+        if let Some(contract) = artifact.artifact.as_ref() {
+            if let Some(path) = contract.path.as_deref() {
+                collect_artifact_ref_violation(
+                    path,
+                    Some(contract.artifact_type.as_str()),
+                    artifacts_dir,
+                    &mut violations,
+                );
+            }
         }
     }
-    collect_missing_artifact_refs_from_metadata(
+    collect_artifact_ref_violations_from_metadata(
         &campaign.metadata,
         artifacts_dir,
-        &mut missing_refs,
+        &mut violations,
     );
+    violations.sort_by(|left, right| {
+        left.declared_ref
+            .cmp(&right.declared_ref)
+            .then_with(|| left.code.as_str().cmp(right.code.as_str()))
+    });
+    violations.dedup();
+
+    let mut missing_refs = violations
+        .iter()
+        .filter(|violation| violation.code == FuzzEvidenceViolationCode::ArtifactRefMissing)
+        .filter_map(|violation| violation.declared_ref.clone())
+        .collect::<Vec<_>>();
     missing_refs.sort();
     missing_refs.dedup();
 
-    let error = (!missing_refs.is_empty()).then(|| {
-        format!(
+    // Preserve the exact legacy sentence for the missing case so operators and
+    // existing assertions keep recognizing it, and append the newly detected
+    // classes rather than replacing the message.
+    let mut messages = Vec::new();
+    if !missing_refs.is_empty() {
+        messages.push(format!(
             "fuzz campaign references artifact path(s) missing from HOMEBOY_FUZZ_ARTIFACTS_DIR: {}",
             missing_refs.join(", ")
-        )
-    });
+        ));
+    }
+    let other = violations
+        .iter()
+        .filter(|violation| violation.code != FuzzEvidenceViolationCode::ArtifactRefMissing)
+        .map(FuzzEvidenceViolation::root_cause_line)
+        .collect::<Vec<_>>();
+    if !other.is_empty() {
+        messages.push(format!(
+            "fuzz campaign declared unusable artifact reference(s): {}",
+            other.join("; ")
+        ));
+    }
+    let error = (!messages.is_empty()).then(|| messages.join(" | "));
+
     FuzzArtifactRefValidation {
         missing_refs,
+        violations,
         error,
     }
 }
 
-fn collect_missing_artifact_refs_from_metadata(
+/// Assemble the campaign-level evidence contract from the channels that
+/// report *undelivered evidence*.
+///
+/// Deliberately excludes expected-metric gate failures: a gate that did not
+/// hold is a statement about the workload's declared pass criteria, not about
+/// missing evidence, and folding it in here is exactly the collapse #10513
+/// reported.
+pub(super) fn fuzz_evidence_contract(
+    results_error: Option<&str>,
+    postprocess_error: Option<&str>,
+    required_artifact_error: Option<&str>,
+    artifact_refs: &FuzzArtifactRefValidation,
+) -> FuzzEvidenceContract {
+    let mut violations = artifact_refs.violations.clone();
+    if let Some(error) = results_error {
+        violations.push(
+            FuzzEvidenceViolation::new(FuzzEvidenceViolationCode::ResultsUnparseable, error)
+                .with_producer_contract(FUZZ_RESULTS_FILE_PRODUCER_CONTRACT),
+        );
+    }
+    if let Some(error) = required_artifact_error {
+        violations.push(
+            FuzzEvidenceViolation::new(FuzzEvidenceViolationCode::RequiredArtifactAbsent, error)
+                .with_producer_contract(FUZZ_ARTIFACT_ROOT_PRODUCER_CONTRACT),
+        );
+    }
+    if let Some(error) = postprocess_error {
+        violations.push(FuzzEvidenceViolation::new(
+            FuzzEvidenceViolationCode::RequiredPostprocessFailed,
+            error,
+        ));
+    }
+    FuzzEvidenceContract::from_violations(violations)
+}
+
+fn collect_artifact_ref_violations_from_metadata(
     value: &serde_json::Value,
     artifacts_dir: &Path,
-    missing_refs: &mut Vec<String>,
+    violations: &mut Vec<FuzzEvidenceViolation>,
 ) {
     match value {
         serde_json::Value::Object(object) => {
             if let Some(refs) = object.get("artifact_refs") {
-                collect_artifact_refs_value(refs, artifacts_dir, missing_refs);
+                collect_artifact_refs_value(refs, artifacts_dir, violations);
             }
             for value in object.values() {
-                collect_missing_artifact_refs_from_metadata(value, artifacts_dir, missing_refs);
+                collect_artifact_ref_violations_from_metadata(value, artifacts_dir, violations);
             }
         }
         serde_json::Value::Array(values) => {
             for value in values {
-                collect_missing_artifact_refs_from_metadata(value, artifacts_dir, missing_refs);
+                collect_artifact_ref_violations_from_metadata(value, artifacts_dir, violations);
             }
         }
         _ => {}
@@ -1039,21 +1160,24 @@ fn collect_missing_artifact_refs_from_metadata(
 fn collect_artifact_refs_value(
     value: &serde_json::Value,
     artifacts_dir: &Path,
-    missing_refs: &mut Vec<String>,
+    violations: &mut Vec<FuzzEvidenceViolation>,
 ) {
     match value {
         serde_json::Value::String(path) => {
-            collect_missing_artifact_ref(path, artifacts_dir, missing_refs)
+            collect_artifact_ref_violation(path, None, artifacts_dir, violations)
         }
         serde_json::Value::Array(values) => {
             for value in values {
-                collect_artifact_refs_value(value, artifacts_dir, missing_refs);
+                collect_artifact_refs_value(value, artifacts_dir, violations);
             }
         }
         serde_json::Value::Object(object) => {
+            let declared_type = object
+                .get("artifact_type")
+                .and_then(serde_json::Value::as_str);
             for key in ["path", "artifact", "ref"] {
                 if let Some(path) = object.get(key).and_then(serde_json::Value::as_str) {
-                    collect_missing_artifact_ref(path, artifacts_dir, missing_refs);
+                    collect_artifact_ref_violation(path, declared_type, artifacts_dir, violations);
                     return;
                 }
             }
@@ -1062,33 +1186,99 @@ fn collect_artifact_refs_value(
     }
 }
 
-fn collect_missing_artifact_ref(path: &str, artifacts_dir: &Path, missing_refs: &mut Vec<String>) {
-    let Some(resolved) = resolve_local_fuzz_artifact_ref(path, artifacts_dir) else {
-        return;
+/// How a declared artifact reference resolves against the artifact root.
+enum FuzzArtifactRefResolution {
+    /// Not a local path at all — a URI or an empty string. Not this
+    /// contract's business.
+    NotLocal,
+    /// Local-looking but escaping the artifact root. Previously discarded
+    /// with the same code path as a legitimate remote URI, so a campaign
+    /// declaring `../outside.json` passed validation silently.
+    Escapes,
+    Local(PathBuf),
+}
+
+fn collect_artifact_ref_violation(
+    path: &str,
+    declared_type: Option<&str>,
+    artifacts_dir: &Path,
+    violations: &mut Vec<FuzzEvidenceViolation>,
+) {
+    let base = artifacts_dir.display().to_string();
+    let violation = |code: FuzzEvidenceViolationCode, message: String| {
+        FuzzEvidenceViolation::new(code, message)
+            .with_declared_ref(path)
+            .with_resolution_base(base.clone())
+            .with_producer_contract(FUZZ_ARTIFACT_ROOT_PRODUCER_CONTRACT)
     };
-    if !resolved.exists() {
-        missing_refs.push(path.to_string());
+    match resolve_local_fuzz_artifact_ref(path, artifacts_dir) {
+        FuzzArtifactRefResolution::NotLocal => {}
+        FuzzArtifactRefResolution::Escapes => violations.push(violation(
+            FuzzEvidenceViolationCode::ArtifactRefUnresolvable,
+            "declared artifact reference resolves outside the fuzz artifact root".to_string(),
+        )),
+        FuzzArtifactRefResolution::Local(resolved) => match std::fs::symlink_metadata(&resolved) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                violations.push(violation(
+                    FuzzEvidenceViolationCode::ArtifactRefMissing,
+                    "declared artifact is absent from the fuzz artifact root".to_string(),
+                ))
+            }
+            Err(error) => violations.push(violation(
+                FuzzEvidenceViolationCode::ArtifactRefUnreadable,
+                format!("declared artifact could not be stat'd: {error}"),
+            )),
+            Ok(metadata) => {
+                let expects_directory = declared_type == Some("directory");
+                if expects_directory != metadata.is_dir() {
+                    violations.push(violation(
+                        FuzzEvidenceViolationCode::ArtifactRefWrongKind,
+                        format!(
+                            "declared artifact_type `{}` but the path on disk is a {}",
+                            declared_type.unwrap_or("file"),
+                            if metadata.is_dir() {
+                                "directory"
+                            } else {
+                                "file"
+                            }
+                        ),
+                    ));
+                } else if !metadata.is_dir() && std::fs::File::open(&resolved).is_err() {
+                    violations.push(violation(
+                        FuzzEvidenceViolationCode::ArtifactRefUnreadable,
+                        "declared artifact exists but cannot be opened for reading".to_string(),
+                    ));
+                }
+            }
+        },
     }
 }
 
-fn resolve_local_fuzz_artifact_ref(path: &str, artifacts_dir: &Path) -> Option<PathBuf> {
+fn resolve_local_fuzz_artifact_ref(path: &str, artifacts_dir: &Path) -> FuzzArtifactRefResolution {
     let trimmed = path.trim();
     if trimmed.is_empty()
         || trimmed.contains("://")
         || trimmed.starts_with("homeboy://")
         || trimmed.starts_with("runner-artifact://")
     {
-        return None;
+        return FuzzArtifactRefResolution::NotLocal;
     }
     let candidate = Path::new(trimmed);
     if candidate.is_absolute() {
-        candidate
-            .starts_with(artifacts_dir)
-            .then(|| candidate.to_path_buf())
+        if candidate.starts_with(artifacts_dir) {
+            FuzzArtifactRefResolution::Local(candidate.to_path_buf())
+        } else {
+            FuzzArtifactRefResolution::Escapes
+        }
+    } else if trimmed.starts_with("..") {
+        FuzzArtifactRefResolution::Escapes
     } else {
-        (!trimmed.starts_with(".."))
-            .then(|| artifacts_dir.join(candidate))
-            .filter(|path| path.starts_with(artifacts_dir))
+        let joined = artifacts_dir.join(candidate);
+        if joined.starts_with(artifacts_dir) {
+            FuzzArtifactRefResolution::Local(joined)
+        } else {
+            FuzzArtifactRefResolution::Escapes
+        }
     }
 }
 
