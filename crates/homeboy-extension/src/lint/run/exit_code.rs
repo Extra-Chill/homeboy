@@ -42,9 +42,13 @@ pub(super) fn normalize_producer_exit_code(
     }
 }
 
-pub(super) fn effective_lint_exit_code(exit_code: i32, baseline_exit_override: Option<i32>) -> i32 {
+pub(super) fn effective_lint_exit_code(
+    exit_code: i32,
+    baseline_exit_override: Option<i32>,
+    hard_error: bool,
+) -> i32 {
     match baseline_exit_override {
-        Some(0) if exit_code >= 2 => exit_code,
+        Some(0) if hard_error => exit_code.max(1),
         Some(override_code) => override_code,
         None => exit_code,
     }
