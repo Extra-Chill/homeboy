@@ -42,12 +42,23 @@ pub fn run(args: StatusArgs, _global: &super::GlobalArgs) -> CmdResult<StatusRes
         .then(|| homeboy::core::runtime_promotion::acquire("status refresh", "status"))
         .transpose()?;
 
-    if args.path.is_some() {
-        return run_path_status(&args);
+    // Explicit scope selection. `--path` and `--project` keep their historical
+    // routes (checkout inspection and the project dashboard); the remaining
+    // selectors resolve through the shared scope resolver into the same
+    // component summary the default view builds.
+    match args.scope.selection() {
+        Some(Scope::Path { .. }) => return run_path_status(&args),
+        Some(Scope::Project(ref project_id)) => return run_project_dashboard(project_id, &args),
+        Some(selected) => {
+            let timer = StatusTimer::new(args.timings);
+            let components = scope::resolve_scope_component_records(&selected)?;
+            return summarize_components(components, &args, timer);
+        }
+        None => {}
     }
 
     // Project dashboard mode: `homeboy status <project-id>`
-    if let Some(ref project_id) = args.project {
+    if let Some(ref project_id) = args.target {
         return run_project_dashboard(project_id, &args);
     }
 
@@ -237,10 +248,10 @@ fn summarize_components(
 
 /// Path override mode: inspect one checkout without requiring registry membership.
 fn run_path_status(args: &StatusArgs) -> CmdResult<StatusResult> {
-    let path = args.path.as_deref();
+    let path = args.scope.path.as_deref();
     let mut timer = StatusTimer::new(args.timings);
     timer.begin("resolve_path_component");
-    let component = component::resolve_effective(args.project.as_deref(), path, None)?;
+    let component = component::resolve_effective(args.target.as_deref(), path, None)?;
     timer.finish("resolve_path_component");
 
     if args.full {
@@ -542,8 +553,11 @@ mod tests {
 
     fn status_args(project: Option<String>, path: String, full: bool) -> StatusArgs {
         StatusArgs {
-            project,
-            path: Some(path),
+            target: project,
+            scope: crate::commands::utils::args::ScopeArgs {
+                path: Some(path),
+                ..Default::default()
+            },
             full,
             uncommitted: false,
             needs_release: false,
@@ -559,8 +573,8 @@ mod tests {
 
     fn default_status_args() -> StatusArgs {
         StatusArgs {
-            project: None,
-            path: None,
+            target: None,
+            scope: crate::commands::utils::args::ScopeArgs::default(),
             full: false,
             uncommitted: false,
             needs_release: false,
@@ -730,8 +744,8 @@ mod tests {
 
         match cli.command {
             Commands::Status(args) => {
-                assert_eq!(args.project, None);
-                assert_eq!(args.path.as_deref(), Some("/tmp/example"));
+                assert_eq!(args.target, None);
+                assert_eq!(args.scope.path.as_deref(), Some("/tmp/example"));
                 assert!(args.full);
             }
             _ => panic!("expected status command"),
@@ -752,11 +766,111 @@ mod tests {
 
         match cli.command {
             Commands::Status(args) => {
-                assert_eq!(args.project.as_deref(), Some("wordpress-playground"));
-                assert_eq!(args.path.as_deref(), Some("/tmp/wp-playground"));
+                assert_eq!(args.target.as_deref(), Some("wordpress-playground"));
+                assert_eq!(args.scope.path.as_deref(), Some("/tmp/wp-playground"));
                 assert!(args.full);
             }
             _ => panic!("expected status command"),
+        }
+    }
+
+    fn parse_status(argv: &[&str]) -> StatusArgs {
+        match Cli::try_parse_from(argv)
+            .expect("status invocation should parse")
+            .command
+        {
+            Commands::Status(args) => args,
+            _ => panic!("expected status command"),
+        }
+    }
+
+    /// Every filter/positional spelling `homeboy status` accepted before
+    /// `ScopeArgs` must still parse the same way.
+    #[test]
+    fn previously_valid_status_invocations_still_parse() {
+        let bare = parse_status(&["homeboy", "status"]);
+        assert!(bare.target.is_none());
+        assert!(bare.scope.is_unscoped());
+
+        let positional = parse_status(&["homeboy", "status", "wordpress-playground"]);
+        assert_eq!(positional.target.as_deref(), Some("wordpress-playground"));
+        assert!(positional.scope.is_unscoped());
+
+        let filters = parse_status(&[
+            "homeboy",
+            "status",
+            "--all",
+            "--uncommitted",
+            "--needs-release",
+            "--ready",
+            "--docs-only",
+            "--outdated",
+            "--unreleased",
+            "--timings",
+            "--refresh",
+            "--full",
+        ]);
+        assert!(filters.all);
+        assert!(filters.uncommitted);
+        assert!(filters.needs_release);
+        assert!(filters.ready);
+        assert!(filters.docs_only);
+        assert!(filters.outdated);
+        assert!(filters.unreleased);
+        assert!(filters.timings);
+        assert!(filters.refresh);
+        assert!(filters.full);
+
+        let short_all = parse_status(&["homeboy", "status", "-a"]);
+        assert!(short_all.all);
+    }
+
+    #[test]
+    fn status_scope_selectors_resolve_to_their_variants() {
+        assert_eq!(
+            parse_status(&["homeboy", "status", "--project", "growth"])
+                .scope
+                .selection(),
+            Some(Scope::Project("growth".to_string()))
+        );
+        assert_eq!(
+            parse_status(&["homeboy", "status", "--component", "homeboy"])
+                .scope
+                .selection(),
+            Some(Scope::Component("homeboy".to_string()))
+        );
+        assert_eq!(
+            parse_status(&["homeboy", "status", "--fleet", "growth"])
+                .scope
+                .selection(),
+            Some(Scope::Fleet("growth".to_string()))
+        );
+        assert_eq!(
+            parse_status(&["homeboy", "status", "--rig", "studio"])
+                .scope
+                .selection(),
+            Some(Scope::Rig("studio".to_string()))
+        );
+        assert_eq!(
+            parse_status(&["homeboy", "status", "--workspace"])
+                .scope
+                .selection(),
+            Some(Scope::Workspace)
+        );
+    }
+
+    #[test]
+    fn status_scope_selectors_conflict_with_each_other() {
+        for argv in [
+            vec!["homeboy", "status", "--project", "a", "--component", "b"],
+            vec!["homeboy", "status", "--component", "a", "--path", "/tmp/a"],
+            vec!["homeboy", "status", "--project", "a", "--workspace"],
+            vec!["homeboy", "status", "--fleet", "a", "--rig", "b"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&argv).is_err(),
+                "conflicting status scopes should be rejected: {argv:?}"
+            );
         }
     }
 

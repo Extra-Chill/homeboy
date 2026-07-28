@@ -6,6 +6,7 @@ use homeboy_triage::{
 use homeboy::core::Error;
 use std::path::PathBuf;
 
+use super::utils::args::ScopeArgs;
 use super::CmdResult;
 
 #[derive(Args)]
@@ -135,25 +136,11 @@ enum TriageCommand {
         #[arg(long)]
         ordered: bool,
 
-        /// Landing scope: project id.
-        #[arg(long, conflicts_with_all = ["fleet", "component", "path", "workspace"])]
-        project: Option<String>,
-
-        /// Landing scope: fleet id.
-        #[arg(long, conflicts_with_all = ["project", "component", "path", "workspace"])]
-        fleet: Option<String>,
-
-        /// Landing scope: registered component id.
-        #[arg(long, conflicts_with_all = ["project", "fleet", "path", "workspace"])]
-        component: Option<String>,
-
-        /// Landing scope: checkout path, bypassing the registry.
-        #[arg(long, conflicts_with_all = ["project", "fleet", "component", "workspace"])]
-        path: Option<String>,
-
-        /// Landing scope: all configured workspace repos. This is the default when no scope is supplied.
-        #[arg(long, conflicts_with_all = ["project", "fleet", "component", "path"])]
-        workspace: bool,
+        // Landing scope. Defaults to every configured workspace repo when no
+        // selector is supplied, which is what the removed `--workspace` bool
+        // already meant.
+        #[command(flatten)]
+        scope: ScopeArgs,
     },
 }
 
@@ -193,16 +180,11 @@ pub fn run(args: TriageArgs, _global: &super::GlobalArgs) -> CmdResult<TriageCom
         branch,
         source_issue,
         ordered,
-        project,
-        fleet,
-        component,
-        path,
-        workspace: _,
+        scope,
     } = command
     {
-        let target = resolve_landing_target(project, fleet, component, path)?;
         let output = triage::landing(TriageLandingOptions {
-            target,
+            target: scope.resolve(),
             repo,
             pr_refs,
             branch_patterns: branch,
@@ -249,30 +231,6 @@ pub fn run(args: TriageArgs, _global: &super::GlobalArgs) -> CmdResult<TriageCom
         TriageCommandOutput::Report(triage::run(target, options)?),
         0,
     ))
-}
-
-fn resolve_landing_target(
-    project: Option<String>,
-    fleet: Option<String>,
-    component: Option<String>,
-    path: Option<String>,
-) -> Result<TriageTarget, Error> {
-    if let Some(project) = project {
-        return Ok(TriageTarget::Project(project));
-    }
-    if let Some(fleet) = fleet {
-        return Ok(TriageTarget::Fleet(fleet));
-    }
-    if let Some(component) = component {
-        return Ok(TriageTarget::Component(component));
-    }
-    if let Some(path) = path {
-        return Ok(TriageTarget::Path {
-            path,
-            component_id: None,
-        });
-    }
-    Ok(TriageTarget::Workspace)
 }
 
 fn parse_watch_duration(name: &str, raw: &str) -> Result<std::time::Duration, Error> {
@@ -360,7 +318,7 @@ fn canonicalize_for_compare(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_component_target, TriageArgs};
+    use super::{resolve_component_target, TriageArgs, TriageCommand};
     use clap::Parser;
     use homeboy_triage::TriageTarget;
 
@@ -406,6 +364,138 @@ mod tests {
                 assert_eq!(component_id, None);
             }
             other => panic!("expected TriageTarget::Path, got {other:?}"),
+        }
+    }
+
+    fn landing_scope(argv: &[&str]) -> TriageTarget {
+        let cli = TestCli::try_parse_from(argv).expect("landing invocation should parse");
+        match cli.args.command.expect("landing subcommand") {
+            TriageCommand::Landing { scope, .. } => scope.resolve(),
+            other => panic!("expected landing subcommand, got {other:?}"),
+        }
+    }
+
+    /// Every landing scope spelling that parsed before `ScopeArgs` must still
+    /// parse to the same target. These are user-facing flags other tooling
+    /// invokes; a silently changed spelling is a breaking change.
+    #[test]
+    fn landing_scope_flags_keep_their_previous_spellings() {
+        assert_eq!(
+            landing_scope(&["triage", "landing", "--project", "growth"]),
+            TriageTarget::Project("growth".to_string())
+        );
+        assert_eq!(
+            landing_scope(&["triage", "landing", "--fleet", "growth"]),
+            TriageTarget::Fleet("growth".to_string())
+        );
+        assert_eq!(
+            landing_scope(&["triage", "landing", "--component", "homeboy"]),
+            TriageTarget::Component("homeboy".to_string())
+        );
+        assert_eq!(
+            landing_scope(&["triage", "landing", "--path", "/src/homeboy"]),
+            TriageTarget::Path {
+                path: "/src/homeboy".to_string(),
+                component_id: None,
+            }
+        );
+        assert_eq!(
+            landing_scope(&["triage", "landing", "--workspace"]),
+            TriageTarget::Workspace
+        );
+    }
+
+    #[test]
+    fn landing_without_a_scope_still_defaults_to_workspace() {
+        assert_eq!(
+            landing_scope(&["triage", "landing"]),
+            TriageTarget::Workspace
+        );
+    }
+
+    /// The documented landing invocations from `docs/commands/triage.md`.
+    #[test]
+    fn documented_landing_invocations_still_parse() {
+        for argv in [
+            vec![
+                "triage",
+                "landing",
+                "Extra-Chill/homeboy#2238",
+                "Automattic/static-site-importer#118",
+                "--drilldown",
+            ],
+            vec![
+                "triage",
+                "landing",
+                "--repo",
+                "Extra-Chill/homeboy",
+                "--branch",
+                "fixture/*",
+                "--drilldown",
+            ],
+            vec![
+                "triage",
+                "landing",
+                "--workspace",
+                "--branch",
+                "e2e/*",
+                "--limit",
+                "100",
+            ],
+            vec![
+                "triage", "landing", "--repo", "Extra-Chill/homeboy", "--ordered", "2238", "2239",
+                "2240",
+            ],
+        ] {
+            assert!(
+                TestCli::try_parse_from(&argv).is_ok(),
+                "documented invocation should parse: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn landing_scope_selectors_still_conflict() {
+        for argv in [
+            vec!["triage", "landing", "--project", "a", "--fleet", "b"],
+            vec!["triage", "landing", "--project", "a", "--component", "b"],
+            vec!["triage", "landing", "--component", "a", "--path", "/src/a"],
+            vec!["triage", "landing", "--fleet", "a", "--workspace"],
+            vec!["triage", "landing", "--path", "/src/a", "--workspace"],
+        ] {
+            assert!(
+                TestCli::try_parse_from(&argv).is_err(),
+                "conflicting landing scopes should be rejected: {argv:?}"
+            );
+        }
+    }
+
+    /// `--rig` is the one selector landing did not previously accept. It comes
+    /// free with the shared group and resolves through the same
+    /// `resolve_target_components` path every other scope uses.
+    #[test]
+    fn landing_gains_the_rig_scope_from_the_shared_group() {
+        assert_eq!(
+            landing_scope(&["triage", "landing", "--rig", "studio"]),
+            TriageTarget::Rig("studio".to_string())
+        );
+    }
+
+    /// The scope *subcommands* are a separate, still-supported surface.
+    #[test]
+    fn scope_subcommands_are_unchanged() {
+        for argv in [
+            vec!["triage", "component", "homeboy"],
+            vec!["triage", "component", "--path", "/src/homeboy"],
+            vec!["triage", "project", "growth"],
+            vec!["triage", "fleet", "growth"],
+            vec!["triage", "rig", "studio"],
+            vec!["triage", "workspace"],
+        ] {
+            assert!(
+                TestCli::try_parse_from(&argv).is_ok(),
+                "scope subcommand should parse: {argv:?}"
+            );
         }
     }
 }

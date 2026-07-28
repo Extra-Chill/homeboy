@@ -6,14 +6,20 @@ use std::time::Instant;
 
 use clap::Args;
 
+use crate::commands::utils::args::ScopeArgs;
+
 #[derive(Args)]
 pub struct StatusArgs {
     /// Project ID — show version dashboard for a project's components
-    pub project: Option<String>,
+    #[arg(value_name = "PROJECT")]
+    pub target: Option<String>,
 
-    /// Inspect this checkout path instead of the registered component path
-    #[arg(long, value_name = "PATH")]
-    pub path: Option<String>,
+    // Entity selection. `--path` is the pre-existing "inspect this checkout
+    // instead of the registered component path" override and keeps composing
+    // with the positional target; the registry selectors resolve through the
+    // shared scope resolver.
+    #[command(flatten)]
+    pub scope: ScopeArgs,
 
     /// Show the full workspace/context report (the old init behavior)
     #[arg(long)]

@@ -76,6 +76,10 @@ homeboy triage landing --workspace --branch 'e2e/*' --limit 100 --output ./landi
 homeboy triage landing --repo Extra-Chill/homeboy --ordered 2238 2239 2240
 ```
 
+Landing takes the shared scope selectors — `--project`, `--fleet`, `--component`,
+`--rig`, `--path`, `--workspace` — which are mutually exclusive and default to
+`--workspace` when none is supplied.
+
 When a PR head branch matches a persisted `homeboy worktree` record for the same GitHub repo, the JSON row gains `local_worktrees` entries with the task worktree ID, local path, branch, base ref, dirty state, unpushed commit count, safety reasons, and optional task/run provenance. The summary also reports `local_worktrees`, `local_worktrees_dirty`, and `local_worktrees_unpushed` counts so an orchestrator can quickly see which PRs need local cleanup or pushes before landing.
 
 ## Output Signals
