@@ -257,12 +257,12 @@ impl MeasurementOutcome {
     /// **The invariant.** `false` means no verdict-producing path may render
     /// `pass` from this measurement.
     pub fn permits_pass(&self) -> bool {
-        match self {
+        matches!(
+            self,
             MeasurementOutcome::Measured { .. }
-            | MeasurementOutcome::EmptyPopulation
-            | MeasurementOutcome::Advisory => true,
-            MeasurementOutcome::Unmeasured(_) | MeasurementOutcome::Contradicted { .. } => false,
-        }
+                | MeasurementOutcome::EmptyPopulation
+                | MeasurementOutcome::Advisory
+        )
     }
 
     /// A broken instrument. Neither `pass` nor `unknown` is an honest answer, so
