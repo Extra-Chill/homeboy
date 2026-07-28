@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.15] - 2026-07-28
+
+### Fixed
+- accept untyped recovery zips
+
 ## [3.34.13] - 2026-07-28
 
 ### Fixed
