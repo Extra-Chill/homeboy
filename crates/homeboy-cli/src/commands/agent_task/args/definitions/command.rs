@@ -69,6 +69,8 @@ pub enum AgentTaskCommand {
     Latest(LatestArgs),
     Logs(LogsArgs),
     Artifacts(StatusArgs),
+    /// Discover or attach selected outputs retained in a terminal Lab Cook workspace.
+    RetainedArtifacts(RetainedArtifactsArgs),
     Evidence(EvidenceArgs),
     Diagnose(DiagnoseArgs),
     /// Recover a missing or corrupted immutable controller runtime pin.
@@ -179,6 +181,28 @@ pub struct AgentTaskAuthArgs {
 pub struct AgentTaskControllerArgs {
     #[command(subcommand)]
     pub command: AgentTaskControllerCommand,
+}
+
+#[derive(Args, Debug)]
+pub struct RetainedArtifactsArgs {
+    #[command(subcommand)]
+    pub command: RetainedArtifactsCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RetainedArtifactsCommand {
+    /// Resolve the retained workspace and print bounded, run-ID-only attach guidance.
+    Discover { run_id: String },
+    /// Attach one repository-relative file or directory from the retained workspace.
+    Attach {
+        run_id: String,
+        /// Repository-relative path below the retained workspace.
+        #[arg(long)]
+        path: String,
+        /// Durable artifact name to record on the owning run.
+        #[arg(long)]
+        name: String,
+    },
 }
 #[derive(Args, Debug)]
 pub struct ProvidersArgs {

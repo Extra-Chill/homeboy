@@ -20,6 +20,16 @@ pub struct WorkspaceTerminalAuthorityReceipt {
     pub remote_workspace: String,
 }
 
+/// A retained Lab workspace that remains authoritatively bound to one terminal
+/// agent task. Callers address files below this root relatively.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RetainedWorkspace {
+    pub run_id: String,
+    pub runner_id: String,
+    pub runner_job_id: String,
+    pub remote_workspace: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct WorkspaceTerminalAuthorityRelease {
     schema: String,
@@ -37,6 +47,15 @@ fn authority_digest(run_id: &str, runner_id: &str, remote_workspace: &str) -> St
     digest.update([0]);
     digest.update(remote_workspace.as_bytes());
     format!("{:x}", digest.finalize())
+}
+
+fn run_index_path(run_id: &str) -> Result<PathBuf> {
+    let mut digest = Sha256::new();
+    digest.update(run_id.as_bytes());
+    Ok(paths::homeboy_data()?
+        .join("workspace-terminal-authority")
+        .join("by-run")
+        .join(format!("{:x}.json", digest.finalize())))
 }
 
 fn receipt_path(run_id: &str, runner_id: &str, remote_workspace: &str) -> Result<PathBuf> {
@@ -112,7 +131,10 @@ fn persist_workspace_terminal_authority(receipt: WorkspaceTerminalAuthorityRecei
                     Error::internal_json(error.to_string(), Some(path.display().to_string()))
                 })?;
             if existing == receipt {
-                return Ok(());
+                return homeboy_core::engine::local_files::write_json_file_owner_only(
+                    &run_index_path(&receipt.run_id)?,
+                    &existing,
+                );
             }
             return Err(Error::validation_invalid_argument(
                 "workspace_terminal_authority",
@@ -121,7 +143,11 @@ fn persist_workspace_terminal_authority(receipt: WorkspaceTerminalAuthorityRecei
                 None,
             ));
         }
-        homeboy_core::engine::local_files::write_json_file_owner_only(&path, &receipt)
+        homeboy_core::engine::local_files::write_json_file_owner_only(&path, &receipt)?;
+        homeboy_core::engine::local_files::write_json_file_owner_only(
+            &run_index_path(&receipt.run_id)?,
+            &receipt,
+        )
     })
 }
 
@@ -184,6 +210,49 @@ pub fn resolve_workspace_terminal_authority(
             Some(path.display().to_string()),
             None,
         )
+    })
+}
+
+/// Resolve the retained Lab workspace for a terminal agent task without
+/// relying on a caller-provided runner path. A released receipt deliberately
+/// fails closed so callers can distinguish a reaped workspace from an empty
+/// discovery result.
+pub fn resolve_retained_workspace(run_id: &str) -> Result<RetainedWorkspace> {
+    let index_path = run_index_path(run_id)?;
+    if !index_path.exists() {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "agent task has no retained Lab workspace record",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    let receipt: WorkspaceTerminalAuthorityReceipt =
+        serde_json::from_slice(&std::fs::read(&index_path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(index_path.display().to_string()))
+        })?)
+        .map_err(|error| {
+            Error::internal_json(error.to_string(), Some(index_path.display().to_string()))
+        })?;
+    let receipt = resolve_workspace_terminal_authority(
+        run_id,
+        &receipt.runner_id,
+        &receipt.remote_workspace,
+        Some(&receipt.runner_job_id),
+    )?
+    .ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "run_id",
+            "retained Lab workspace authority is unavailable; the workspace may have been reaped before artifacts were attached",
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    Ok(RetainedWorkspace {
+        run_id: receipt.run_id,
+        runner_id: receipt.runner_id,
+        runner_job_id: receipt.runner_job_id,
+        remote_workspace: receipt.remote_workspace,
     })
 }
 
@@ -335,6 +404,11 @@ mod tests {
             persist_workspace_terminal_authority(receipt)
                 .expect("terminal progression is idempotent");
 
+            assert!(resolve_retained_workspace("run-1")
+                .expect("discover from run id after record compaction")
+                .remote_workspace
+                .ends_with("workspace-1"));
+
             assert!(resolve_workspace_terminal_authority(
                 "run-1",
                 "reverse-or-direct",
@@ -350,6 +424,7 @@ mod tests {
                 Some("other-job")
             )
             .is_err());
+            assert!(resolve_retained_workspace("run-1").is_err());
             begin_workspace_terminal_authority_release(
                 "run-1",
                 "reverse-or-direct",
