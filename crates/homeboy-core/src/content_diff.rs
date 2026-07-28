@@ -253,20 +253,25 @@ fn scan_directory(
 }
 
 fn entry_mode(metadata: &fs::Metadata, options: &TreeScanOptions) -> String {
-    if !options.record_executable_mode {
-        return "0".to_string();
-    }
-    #[cfg(unix)]
-    {
-        executable_mode_tag(std::os::unix::fs::PermissionsExt::mode(
-            &metadata.permissions(),
-        ))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = metadata;
+    if options.record_executable_mode {
+        platform_executable_mode(metadata)
+    } else {
         "0".to_string()
     }
+}
+
+/// Executable bits as the platform reports them.
+#[cfg(unix)]
+fn platform_executable_mode(metadata: &fs::Metadata) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    executable_mode_tag(metadata.permissions().mode())
+}
+
+/// Targets without a mode concept compare every entry as non-executable, which
+/// is the same answer the previous deploy walker gave there.
+#[cfg(not(unix))]
+fn platform_executable_mode(_metadata: &fs::Metadata) -> String {
+    "0".to_string()
 }
 
 pub fn excluded(path: &str, excludes: &[String]) -> bool {
