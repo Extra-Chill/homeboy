@@ -8,10 +8,11 @@ use base64::Engine;
 
 use crate::workspace::sync::{
     active_resource_lifecycle_liveness, encoded_materialized_workspace_metadata_is_valid,
-    prune_scan_command, prune_workspaces, revalidated_candidate_is_deletable,
-    runner_job_liveness_with, ssh_process_liveness_command, ssh_prune_delete_command,
-    ssh_prune_delete_command_with_terminal_owner, ssh_prune_delete_materialized_workspace_command,
-    sync_workspace, update_workspace_resource_lifecycle, workspace_liveness_with_size_observation,
+    has_terminal_delete_on_success_lifecycle_with, prune_scan_command, prune_workspaces,
+    revalidated_candidate_is_deletable, runner_job_liveness_with, ssh_process_liveness_command,
+    ssh_prune_delete_command, ssh_prune_delete_command_with_terminal_owner,
+    ssh_prune_delete_materialized_workspace_command, sync_workspace,
+    update_workspace_resource_lifecycle, workspace_liveness_with_size_observation,
     ActiveResourceLifecycleLiveness, RunAuthority, WORKSPACE_METADATA_FILE,
 };
 use crate::workspace::types::{
@@ -270,6 +271,31 @@ fn active_lifecycle_lease_requires_unambiguous_terminal_run_authority() {
     assert!(matches!(
         active_resource_lifecycle_liveness(&ambiguous, |_| RunAuthority::Terminal),
         ActiveResourceLifecycleLiveness::Unknown("active_resource_lifecycle_owner_ambiguous")
+    ));
+}
+
+#[test]
+fn terminal_delete_on_success_lifecycle_requires_exact_durable_authority() {
+    let mut metadata = active_lifecycle_metadata("run-terminal", "run-terminal");
+    metadata["resource_lifecycle"]["cleanup_policy"] = serde_json::json!("delete_on_success");
+    assert!(has_terminal_delete_on_success_lifecycle_with(
+        &metadata,
+        |_| RunAuthority::Terminal,
+    ));
+    assert!(!has_terminal_delete_on_success_lifecycle_with(
+        &metadata,
+        |_| RunAuthority::Active,
+    ));
+    assert!(!has_terminal_delete_on_success_lifecycle_with(
+        &metadata,
+        |_| RunAuthority::Unavailable,
+    ));
+
+    let mut ambiguous = active_lifecycle_metadata("run-terminal", "other-run");
+    ambiguous["resource_lifecycle"]["cleanup_policy"] = serde_json::json!("delete_on_success");
+    assert!(!has_terminal_delete_on_success_lifecycle_with(
+        &ambiguous,
+        |_| RunAuthority::Terminal,
     ));
 }
 
@@ -1204,6 +1230,24 @@ fn ssh_materialized_workspace_delete_requires_exact_inactive_lifecycle() {
     assert!(output.status.success(), "{output:?}");
     assert_ne!(String::from_utf8_lossy(&output.stdout), "removed");
     assert!(process_owned.exists());
+}
+
+#[test]
+fn snapshot_git_materialized_workspace_uses_the_same_bounded_lifecycle_contract() {
+    let root = tempfile::tempdir().expect("workspace root");
+    let workspace = root.path().join("_lab_workspaces/snapshot-git");
+    write_materialized_workspace(&workspace);
+    let metadata_path = workspace.join(WORKSPACE_METADATA_FILE);
+    let mut metadata: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
+            .expect("metadata json");
+    metadata["sync_mode"] = serde_json::json!("snapshot-git");
+    fs::write(&metadata_path, metadata.to_string()).expect("write snapshot-git metadata");
+
+    assert!(encoded_materialized_workspace_metadata_is_valid(
+        &encoded_workspace_metadata(&workspace),
+        &workspace,
+    ));
 }
 
 #[test]
