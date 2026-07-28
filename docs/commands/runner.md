@@ -329,7 +329,7 @@ Lab offload selection.
 ### `refresh-plan`
 
 ```sh
-homeboy runner refresh-plan --runner <runner-id> --workspace . --runner-cwd /runner/workspaces/app --run-id matrix-refresh-1 --output artifacts/review --summary artifacts/review/summary.json -- npm test
+homeboy runner refresh-plan --runner <runner-id> --workspace . --runner-cwd /runner/workspaces/app --run-id matrix-refresh-1 --produces artifacts/review --summary artifacts/review/summary.json -- npm test
 ```
 
 Plans a runner-backed refresh loop before dispatching matrix-style work, without
@@ -341,6 +341,13 @@ declared evidence/artifact paths, and the ordered `next_commands` to verify the
 runner, sync the workspace, run the refresh, and inspect the produced evidence.
 Source and fixture paths passed with `--source`/`--fixture` must exist before the
 plan is emitted; `--sync-mode` accepts `snapshot`, `snapshot-git`, or `git`.
+
+Declared produced evidence uses `--produces` and `--summary`. `--produces` was
+spelled `--output` through 0.321.0, which collided with the process-wide global
+`--output <PATH>` ("write the JSON result envelope to this file") and left both
+meanings unreachable in a clap-defined order (#10566). On this command `--output`
+now unambiguously means the global envelope path; use `--produces` to declare a
+produced artifact.
 
 ### `connect`
 
@@ -991,6 +998,16 @@ attached:
 entry in `operator_hints`. A non-empty `probe_degradations` list means the answer
 is **partial** — the runner did not respond in time — which is how an operator
 distinguishes "the Lab is wedged" from "there is nothing to report".
+
+The same ledger carries `readonly_probe.unavailable`, which is *not* a remote
+timeout: a probe that reads the controller's own ambient environment could not
+run there at all. Its `timeout_seconds` is `0` and its hint is labelled
+`DEGRADED PROBE (...)` so it cannot be mistaken for a wedged runner. The
+controller-side git ancestry probe (`controller_git_ancestry`) reports this way
+when `runner status --full` runs outside a Homeboy checkout: recovery guidance
+falls back to the controller's own build ref, git's `fatal: not a git
+repository` is captured into `detail` instead of being printed in front of the
+result envelope, and the runner answer itself is unaffected (#10525).
 
 `runs list --include-active-runner-jobs` deliberately reads the latency-bounded
 indexed active-job snapshot rather than the full status report: it does not

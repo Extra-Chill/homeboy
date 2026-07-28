@@ -11,16 +11,39 @@ homeboy extension <COMMAND>
 ### `list`
 
 ```sh
-homeboy extension list [-p|--project <project_id>]
+homeboy extension list [-p|--project <project_id>] [--skip-ready-check]
 ```
 
 ### `show`
 
 ```sh
-homeboy extension show <extension_id>
+homeboy extension show <extension_id> [--skip-ready-check]
 ```
 
 Print detailed manifest, runtime, capability, and readiness information for one installed extension.
+
+### Readiness is the expensive part of inventory
+
+Everything `list`/`show` report except `ready`, `ready_reason`, and
+`ready_detail` is read from the installed manifest. `ready` comes from running
+the extension's `ready_check`, an arbitrary operator-authored shell command —
+a WordPress doctor, an npm probe, a Codebox health script. Both commands still
+probe by default, so their output is unchanged; two things bound the cost:
+
+- **`--skip-ready-check`** answers "what is installed, from where, at which
+  revision" without spawning anything. `ready_reason` is then
+  `ready_check_skipped` and `ready` carries no live signal — the same shape the
+  re-entrancy guard has always used, so the JSON contract does not change.
+- **Every `ready_check` is bounded** at 30s, overridable with
+  `HOMEBOY_EXTENSION_READY_CHECK_TIMEOUT_SECONDS`. A probe that hits the bound
+  has its process group terminated and reports
+  `ready_reason: "ready_check_timeout"`; the surrounding metadata is still
+  returned. Before this, a slow doctor could hang inventory indefinitely
+  (#10517).
+
+The bound is per extension, not aggregate: `list` over *n* extensions is bounded
+by *n* × the per-check budget. Use `--skip-ready-check` when only metadata is
+wanted.
 
 ### `run`
 
@@ -202,7 +225,7 @@ Executable extensions define their runtime behavior in their extension manifest 
 
 - `run_command`: Shell command to execute the extension. Template variables: `{{extensionPath}}`, `{{entrypoint}}`, `{{args}}`, plus project context vars.
 - `setup_command`: Optional shell command to set up the extension (run during install/update).
-- `ready_check`: Optional shell command to check if extension is ready (exit 0 = ready).
+- `ready_check`: Optional shell command to check if extension is ready (exit 0 = ready). Bounded at 30s per invocation; override with `HOMEBOY_EXTENSION_READY_CHECK_TIMEOUT_SECONDS`.
 - `env`: Optional environment variables to set when running.
 
 ## Release Configuration
@@ -233,7 +256,9 @@ Extension entry (`extensions[]`):
 - `id`, `name`, `version`, `description`
 - `runtime`: `executable` (has runtime config) or `platform` (no runtime config)
 - `compatible` (with optional `--project`)
-- `ready` (runtime readiness based on `ready_check`)
+- `ready` (runtime readiness based on `ready_check`; see `ready_reason` for
+  `ready_check_skipped` / `ready_check_timeout` / `ready_check_reentrant_skipped`,
+  each of which means the check did not produce a live pass/fail)
 - `linked`: whether the extension is symlinked
 - `path`: extension directory path (may be empty if unknown)
 - Optional fields include `ready_reason`, `ready_detail`, `error`, `symlink_target`, `source_revision`, `cli_tool`, `cli_display_name`, `actions`, `has_setup`, and `has_ready_check`.

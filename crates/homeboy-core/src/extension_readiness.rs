@@ -1,7 +1,9 @@
+use std::time::Duration;
+
 use serde::Serialize;
 
 use crate::project::Project;
-use crate::server::execute_local_command_in_dir;
+use crate::server::execute_local_command_in_dir_with_timeout;
 use homeboy_engine_primitives::template;
 
 use crate::extension_store::load_extension;
@@ -16,6 +18,48 @@ pub struct ExtensionReadyStatus {
     pub detail: Option<String>,
 }
 
+/// Whether a caller wants readiness actually probed, or only the metadata that
+/// costs nothing to read.
+///
+/// A `ready_check` is an arbitrary operator-authored shell command declared by
+/// the extension; core neither knows nor bounds what it does. Inventory
+/// commands (`extension list`, `extension show`) exist to answer "what is
+/// installed, from where, at which revision", and that question must not be
+/// gated behind an unrelated toolchain's health script (#10517).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtensionReadinessMode {
+    /// Run the declared `ready_check`, bounded by [`ready_check_timeout`].
+    Probe,
+    /// Do not spawn anything; report the probe as deliberately not run.
+    Skip,
+}
+
+/// Wall-clock bound applied to a single `ready_check`.
+///
+/// Deliberately generous — a `ready_check` may legitimately compile or install
+/// something — but never unbounded. #10517 reported `extension list` blowing
+/// past a 120s operator bound and a readiness child eventually dying to
+/// SIGTERM, which is the failure mode a bound exists to convert into an answer.
+pub const DEFAULT_READY_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Environment override for [`ready_check_timeout`], in whole seconds.
+pub const READY_CHECK_TIMEOUT_ENV: &str = "HOMEBOY_EXTENSION_READY_CHECK_TIMEOUT_SECONDS";
+
+/// The bound applied to each `ready_check` invocation.
+pub fn ready_check_timeout() -> Duration {
+    ready_check_timeout_from(std::env::var(READY_CHECK_TIMEOUT_ENV).ok().as_deref())
+}
+
+/// Resolve the bound from a raw override. Split from the environment read so
+/// the "never unbounded" contract is deterministically testable. A zero or
+/// unparseable override is ignored rather than reinstating the hang.
+fn ready_check_timeout_from(raw: Option<&str>) -> Duration {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_READY_CHECK_TIMEOUT)
+}
+
 /// Environment sentinel set while a `ready_check` runs. A `ready_check` command
 /// can invoke `homeboy` (e.g. `homeboy component show <id>`), which would in turn
 /// re-evaluate readiness and re-run the same `ready_check` — an unbounded
@@ -23,7 +67,20 @@ pub struct ExtensionReadyStatus {
 /// detect that it is already inside a `ready_check` and skip re-running it.
 const READY_CHECK_ACTIVE_ENV: &str = "HOMEBOY_EXTENSION_READY_CHECK_ACTIVE";
 
+/// `ready_reason` reported when a caller asked for metadata only.
+pub const READY_CHECK_SKIPPED_REASON: &str = "ready_check_skipped";
+
+/// `ready_reason` reported when a `ready_check` hit its wall-clock bound.
+pub const READY_CHECK_TIMEOUT_REASON: &str = "ready_check_timeout";
+
 pub fn extension_ready_status(extension: &ExtensionManifest) -> ExtensionReadyStatus {
+    extension_ready_status_with(extension, ExtensionReadinessMode::Probe)
+}
+
+pub fn extension_ready_status_with(
+    extension: &ExtensionManifest,
+    mode: ExtensionReadinessMode,
+) -> ExtensionReadyStatus {
     let Some(runtime) = extension.runtime() else {
         return ExtensionReadyStatus {
             ready: true,
@@ -39,6 +96,19 @@ pub fn extension_ready_status(extension: &ExtensionManifest) -> ExtensionReadySt
             detail: None,
         };
     };
+
+    // The caller asked for metadata only. Mirror the re-entrant case below: the
+    // check did not run, the reason says so, and the answer does not pretend to
+    // be a failed probe. (#10517)
+    if matches!(mode, ExtensionReadinessMode::Skip) {
+        return ExtensionReadyStatus {
+            ready: true,
+            reason: Some(READY_CHECK_SKIPPED_REASON.to_string()),
+            detail: Some(
+                "ready_check not run: this command was asked for metadata only. Run `homeboy extension show <id>` without --skip-ready-check for live readiness.".to_string(),
+            ),
+        };
+    }
 
     // Re-entry guard: if we are already inside a `ready_check`, do not run it
     // again. A `ready_check` that shells back into `homeboy` (component/extension
@@ -68,12 +138,14 @@ pub fn extension_ready_status(extension: &ExtensionManifest) -> ExtensionReadySt
         ("entrypoint", entrypoint.as_str()),
     ];
     let command = template::render(ready_check, &vars);
+    let timeout = ready_check_timeout();
     // Mark the child (and anything it spawns) as running inside a ready_check so
     // a re-entrant `homeboy` invocation trips the guard above.
-    let output = execute_local_command_in_dir(
+    let output = execute_local_command_in_dir_with_timeout(
         &command,
         Some(extension_path),
         Some(&[(READY_CHECK_ACTIVE_ENV, "1")]),
+        timeout,
     );
 
     if output.success {
@@ -81,6 +153,24 @@ pub fn extension_ready_status(extension: &ExtensionManifest) -> ExtensionReadySt
             ready: true,
             reason: None,
             detail: None,
+        };
+    }
+
+    // A probe that ran out of wall clock is not the same answer as a probe that
+    // ran and said no. Naming it keeps "the doctor is slow" distinguishable from
+    // "the extension is broken", and keeps the surrounding metadata usable.
+    if output.timed_out {
+        return ExtensionReadyStatus {
+            ready: false,
+            reason: Some(READY_CHECK_TIMEOUT_REASON.to_string()),
+            detail: Some(format!(
+                "ready_check '{}' exceeded its {}s bound and its process group was terminated; \
+                 extension metadata is unaffected. Set {} to change the bound, or pass \
+                 --skip-ready-check to inventory commands.",
+                command,
+                timeout.as_secs(),
+                READY_CHECK_TIMEOUT_ENV
+            )),
         };
     }
 
@@ -194,5 +284,75 @@ mod tests {
 
         assert!(status.ready, "a passing ready_check reports ready");
         assert_eq!(status.reason, None);
+    }
+
+    /// Metadata inspection must not spawn an operator-authored shell command.
+    /// The `ready_check` here fails instantly if it ever runs, and the sentinel
+    /// is explicitly absent so the re-entry guard cannot mask the result.
+    #[test]
+    fn a_skipped_ready_check_never_runs_the_command() {
+        let manifest = manifest_with_ready_check("/tmp", "exit 1");
+        let prior = std::env::var_os(READY_CHECK_ACTIVE_ENV);
+        std::env::remove_var(READY_CHECK_ACTIVE_ENV);
+
+        let status = extension_ready_status_with(&manifest, ExtensionReadinessMode::Skip);
+
+        if let Some(value) = prior {
+            std::env::set_var(READY_CHECK_ACTIVE_ENV, value);
+        }
+
+        assert_eq!(status.reason.as_deref(), Some(READY_CHECK_SKIPPED_REASON));
+        assert!(
+            status.ready,
+            "a skipped probe reports 'not evaluated', not 'not ready'"
+        );
+        assert!(status.detail.unwrap_or_default().contains("metadata only"));
+    }
+
+    /// A `ready_check` that outlives its budget must produce an answer rather
+    /// than hanging the inventory command that asked for it (#10517). Uses a
+    /// one-second override so the test costs a second, not the 30s default.
+    #[test]
+    fn a_ready_check_that_outlives_its_bound_reports_a_timeout_instead_of_hanging() {
+        let manifest = manifest_with_ready_check("/tmp", "sleep 30");
+        let prior_active = std::env::var_os(READY_CHECK_ACTIVE_ENV);
+        let prior_timeout = std::env::var_os(READY_CHECK_TIMEOUT_ENV);
+        std::env::remove_var(READY_CHECK_ACTIVE_ENV);
+        std::env::set_var(READY_CHECK_TIMEOUT_ENV, "1");
+
+        let status = extension_ready_status(&manifest);
+
+        match prior_active {
+            Some(value) => std::env::set_var(READY_CHECK_ACTIVE_ENV, value),
+            None => std::env::remove_var(READY_CHECK_ACTIVE_ENV),
+        }
+        match prior_timeout {
+            Some(value) => std::env::set_var(READY_CHECK_TIMEOUT_ENV, value),
+            None => std::env::remove_var(READY_CHECK_TIMEOUT_ENV),
+        }
+
+        assert!(!status.ready);
+        assert_eq!(status.reason.as_deref(), Some(READY_CHECK_TIMEOUT_REASON));
+        let detail = status.detail.unwrap_or_default();
+        assert!(detail.contains("exceeded its 1s bound"), "{detail}");
+        assert!(detail.contains("metadata is unaffected"), "{detail}");
+    }
+
+    #[test]
+    fn the_ready_check_bound_is_never_unbounded_and_honors_a_positive_override() {
+        assert_eq!(ready_check_timeout_from(None), DEFAULT_READY_CHECK_TIMEOUT);
+        // "0" would reintroduce the unbounded probe this bound exists to prevent.
+        assert_eq!(
+            ready_check_timeout_from(Some("0")),
+            DEFAULT_READY_CHECK_TIMEOUT
+        );
+        assert_eq!(
+            ready_check_timeout_from(Some("not-a-number")),
+            DEFAULT_READY_CHECK_TIMEOUT
+        );
+        assert_eq!(
+            ready_check_timeout_from(Some(" 3 ")),
+            Duration::from_secs(3)
+        );
     }
 }
