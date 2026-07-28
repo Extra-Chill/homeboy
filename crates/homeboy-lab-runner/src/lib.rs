@@ -154,10 +154,11 @@ pub use evidence::register_runner_evidence_provider;
 pub use evidence::runner_artifact_store_token;
 pub use evidence::runner_job_log_snapshot_for_session;
 pub use evidence::{
-    download_remote_artifact, is_remote_runner_artifact_path, is_reportable_artifact_evidence_path,
-    is_retrievable_runner_artifact, mirror_connected_runner_run, mirrored_runner_job_identity,
-    refresh_mirrored_daemon_evidence, reportable_artifact_evidence_path, runner_job_log_snapshot,
-    RemoteArtifactDownload, RunnerJobLogSnapshot,
+    download_remote_artifact, download_remote_artifact_with_intent, is_remote_runner_artifact_path,
+    is_reportable_artifact_evidence_path, is_retrievable_runner_artifact,
+    mirror_connected_runner_run, mirrored_runner_job_identity, refresh_mirrored_daemon_evidence,
+    reportable_artifact_evidence_path, runner_job_log_snapshot, RemoteArtifactDownload,
+    RunnerJobLogSnapshot,
 };
 pub use execution::{
     daemon_api_get, daemon_api_post, exec, promote_runner_exec_artifact_dirs,

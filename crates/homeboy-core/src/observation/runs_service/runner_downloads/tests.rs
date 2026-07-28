@@ -1,4 +1,5 @@
 use super::*;
+use crate::runner_download_cache::{record_download_intent, RunnerDownloadIntent};
 
 /// A clock far enough ahead that everything created during a test reads as
 /// past the age floor unless its mtime is deliberately moved forward.
@@ -46,9 +47,26 @@ fn running_run(id: &str) -> RunRecord {
     }
 }
 
-/// Write `<artifact-root>/runner/<runner>/<run>/<name>` and return the cache
-/// directory. This is the exact layout `download_remote_artifact` produces.
+/// Write `<artifact-root>/runner/<runner>/<run>/<name>` **tagged as an internal
+/// fetch**, and return the cache directory. This is the exact layout
+/// `download_remote_artifact_with_intent(.., InternalFetch)` produces, and it is
+/// the only shape this category can ever reclaim, so it is the default for
+/// tests exercising the age floor and the liveness veto.
 fn write_cached_download(
+    root: &Path,
+    runner: &str,
+    run: &str,
+    name: &str,
+    bytes: &[u8],
+) -> PathBuf {
+    let cache = write_untagged_download(root, runner, run, name, bytes);
+    record_download_intent(&cache, RunnerDownloadIntent::InternalFetch, name);
+    cache
+}
+
+/// The same bytes with no intent marker: either an operator pull, or any cache
+/// directory written before intent tagging existed. Retained unconditionally.
+fn write_untagged_download(
     root: &Path,
     runner: &str,
     run: &str,
@@ -133,7 +151,9 @@ fn missing_cache_root_is_an_empty_plan_and_never_opens_the_store() {
 fn a_freshly_pulled_artifact_is_never_removed() {
     // The data-loss case #10564 was filed for: `homeboy runs artifacts <run>
     // --pull` writes here, and a bare `homeboy cleanup --apply` used to remove
-    // the whole tree with no age floor at all.
+    // the whole tree with no age floor at all. The cache is tagged
+    // `internal_fetch` so the age floor is the only thing that can save it —
+    // an operator-owned tag would make the assertion pass for the wrong reason.
     let home = tempfile::tempdir().expect("home");
     let cache = write_cached_download(home.path(), "lab", "run-1", "trace.zip", b"trace");
     let options = options(true);
@@ -536,6 +556,99 @@ fn a_symlink_inside_a_cache_is_counted_but_never_followed() {
     assert!(outside.join("precious.bin").exists());
     // The link contributed no measured bytes from the far side of the link.
     assert_eq!(outcome.removed_size_bytes, 5);
+}
+
+#[test]
+fn an_untagged_cache_is_retained_forever_no_matter_how_old() {
+    // #10585. Age proves the bytes are old; it cannot prove they are homeboy's.
+    // Every cache directory written before intent tagging existed is untagged,
+    // and untagged means operator-owned.
+    let home = tempfile::tempdir().expect("home");
+    let cache = write_untagged_download(home.path(), "lab", "run-1", "trace.zip", b"trace");
+    let options = options(true);
+
+    let outcome = aged_sweep(home.path(), &options, no_running_runs);
+
+    assert_eq!(outcome.planned_count, 0);
+    assert_eq!(outcome.removed_count, 0);
+    assert_eq!(outcome.skipped_count, 1);
+    let row = row_for(&outcome, "lab/run-1");
+    assert_eq!(row.intent, "unrecorded");
+    assert!(row.reason.contains("fail closed"));
+    // The age is still reported, so an operator can see what is accumulating.
+    assert!(row.age_seconds >= RUNNER_DOWNLOAD_MIN_AGE.as_secs());
+    assert!(cache.join("trace.zip").exists());
+}
+
+#[test]
+fn an_operator_pull_is_retained_past_the_age_floor() {
+    let home = tempfile::tempdir().expect("home");
+    let pulled = write_untagged_download(home.path(), "lab", "run-1", "trace.zip", b"trace");
+    record_download_intent(&pulled, RunnerDownloadIntent::OperatorPull, "artifact-1");
+    let internal = write_cached_download(home.path(), "lab", "run-2", "trace.zip", b"trace");
+
+    let options = options(true);
+    let outcome = aged_sweep(home.path(), &options, no_running_runs);
+
+    assert_eq!(outcome.removed_count, 1);
+    assert!(pulled.exists(), "an operator pull is never swept");
+    assert!(!internal.exists(), "an internal fetch past the floor is");
+    assert_eq!(row_for(&outcome, "lab/run-1").intent, "operator_pull");
+    assert!(row_for(&outcome, "lab/run-1")
+        .reason
+        .contains("only the operator releases them"));
+    assert_eq!(row_for(&outcome, "lab/run-2").intent, "internal_fetch");
+    assert_eq!(row_for(&outcome, "lab/run-2").action, "removed");
+}
+
+#[test]
+fn an_internal_fetch_that_later_served_an_operator_pull_is_retained() {
+    // Operator ownership is sticky in the writer, and the predicate must honour
+    // the merged tag rather than the most recent fetch.
+    let home = tempfile::tempdir().expect("home");
+    let cache = write_cached_download(home.path(), "lab", "run-1", "trace.zip", b"trace");
+    record_download_intent(&cache, RunnerDownloadIntent::OperatorPull, "artifact-2");
+
+    let options = options(true);
+    let outcome = aged_sweep(home.path(), &options, no_running_runs);
+
+    assert_eq!(outcome.removed_count, 0);
+    assert_eq!(row_for(&outcome, "lab/run-1").intent, "operator_pull");
+    assert!(cache.exists());
+}
+
+#[test]
+fn a_corrupt_intent_marker_retains_rather_than_releases() {
+    let home = tempfile::tempdir().expect("home");
+    let cache = write_cached_download(home.path(), "lab", "run-1", "trace.zip", b"trace");
+    fs::write(cache.join(RUNNER_DOWNLOAD_MARKER_FILE), b"{ truncated").expect("corrupt marker");
+
+    let options = options(true);
+    let outcome = aged_sweep(home.path(), &options, no_running_runs);
+
+    assert_eq!(outcome.removed_count, 0);
+    assert_eq!(row_for(&outcome, "lab/run-1").intent, "unreadable");
+    assert!(row_for(&outcome, "lab/run-1")
+        .reason
+        .contains("fail closed"));
+    assert!(cache.exists());
+}
+
+#[test]
+fn the_intent_marker_is_not_counted_as_downloaded_bytes_but_is_still_removed() {
+    // The marker is homeboy's bookkeeping. Counting it would inflate every
+    // reported file count and size by a file the operator never downloaded.
+    let home = tempfile::tempdir().expect("home");
+    let cache = write_cached_download(home.path(), "lab", "run-1", "trace.zip", b"trace");
+    assert!(cache.join(RUNNER_DOWNLOAD_MARKER_FILE).exists());
+
+    let dry = aged_sweep(home.path(), &options(false), no_running_runs);
+    assert_eq!(dry.file_count, 1);
+    assert_eq!(dry.planned_size_bytes, 5);
+
+    let applied = aged_sweep(home.path(), &options(true), no_running_runs);
+    assert_eq!(applied.removed_count, 1);
+    assert!(!cache.exists());
 }
 
 #[test]

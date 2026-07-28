@@ -183,11 +183,8 @@ implemented by terminal-run retention:
   row join.
 - Controller-scratch index compaction for missing or deleted terminal tombstones.
 - Aging removed task-worktree records out of workspace registries.
-- Tagging runner artifact downloads at the writer so an operator's deliberate
-  pull is distinguishable from an internal auto-fetch. Until then
-  `runner-downloads` stays out of the bare sweep.
-- Sanitizing the path components `download_remote_artifact` joins. It
-  percent-decodes runner/run ids and accepts a remote-supplied `filename`
-  verbatim, so a `/` in any of them produces a non-canonical cache depth that
-  the liveness veto cannot key on.
+- Re-evaluating whether `runner-downloads` can rejoin the bare sweep now that
+  the writer tags its output (#10585). The tag exists and cleanup reads it, but
+  every cache directory predating the tag is untagged and therefore retained, so
+  the default-sweep decision needs its own evidence after a backfill window.
 - Detecting collisions between task-worktree and adopted-workspace registry handles.

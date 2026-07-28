@@ -758,25 +758,14 @@ fn pull_artifacts_to_local(
 }
 
 /// Derive a filesystem-safe filename from an artifact id for `--pull-dir`
-/// targets. Mirrors the conservative substitution used elsewhere for derived
-/// artifact paths so unusual ids cannot escape the target directory.
+/// targets.
+///
+/// One implementation, shared with the runner download cache writer
+/// (#10586): this substitution used to exist only here, on the `--pull-dir`
+/// path, while the default cache path joined the remote's name unsanitized.
+/// Two copies is how that gap reopens.
 fn sanitize_artifact_filename(artifact_id: &str) -> String {
-    let sanitized = artifact_id
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    let trimmed = sanitized.trim_matches(['.', '_']).to_string();
-    if trimmed.is_empty() {
-        "artifact".to_string()
-    } else {
-        trimmed
-    }
+    homeboy::core::runner_download_cache::sanitize_artifact_file_name(artifact_id)
 }
 
 pub fn env(run_id: &str) -> CmdResult<RunsOutput> {

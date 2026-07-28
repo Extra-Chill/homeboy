@@ -94,7 +94,7 @@ apply.
 | `terminal-runs` | — (aggregate only) | Terminal observation records, their artifact bytes, and lifecycle directories | Durable run row in a terminal state | `retention.terminal_run_days`; unsafe local artifact paths keep the run |
 | `persisted-run-artifacts` | `homeboy runs artifact cleanup-persisted` | Persisted artifact files/directories and their DB rows | `artifacts` row joined to a terminal run | `retention.terminal_run_days`; active/unknown run state, non-local bytes, out-of-root paths, and symlinks are skipped |
 | `orphaned-artifact-bytes` | — (aggregate only) | Two crash-residue name families under the artifact root | Name shape from a single private constructor plus a parsed UUID; the database is deliberately **not** consulted | Fixed 24h floor, not operator-overridable; a failed size measurement changes the verdict in neither direction |
-| `runner-downloads` (opt-in only) | `homeboy runs artifact cleanup-downloads` | Cache directories under `<artifact-root>/runner` | Canonical `<runner-id>/<run-id>` shape emitted by the single writer; the database is deliberately **not** joined | Fixed 24h floor over the *newest* byte in the cache directory, plus a non-terminal-run veto; unreadable state retains. Narrowed by `--runner`/`--run-id`, which never waive the predicate |
+| `runner-downloads` (opt-in only) | `homeboy runs artifact cleanup-downloads` | Cache directories under `<artifact-root>/runner` | Canonical `<runner-id>/<run-id>` shape emitted by the single writer, **plus an explicit `internal_fetch` intent marker**; the database is deliberately **not** joined | Fixed 24h floor over the *newest* byte in the cache directory, plus a non-terminal-run veto; an absent, unreadable, or `operator_pull` marker retains, as does any unreadable state. Narrowed by `--runner`/`--run-id`, which never waive the predicate |
 | `runner-binary-caches` | `homeboy runner cache-prune <runner>` | Unselected managed Homeboy binary slots on a runner | Canonical `homeboy-*` / `dev/<16-hex>` slot layout with a regular expected binary | 24h floor; configured binary, process-owned slots, symlinks, and malformed layouts preserved; selection revalidated immediately before removal |
 | `remote-lab-workspaces` | `homeboy runner workspace prune <runner>` | Orphaned runner-side Lab workspaces | `homeboy/runner-workspace/v1` metadata plus a resolvable `local_path`; never outside `_lab_workspaces` | 24h floor; pending apply-back or an unexpired lifecycle TTL preserves the workspace |
 | `runtime-tmp` | `homeboy self cleanup-runtime-tmp` | Orphaned Homeboy runtime temp entries | Owner id recorded in the entry | `retention.runtime_tmp_days` plus byte/count budgets; entries whose owner process is running are preserved |
@@ -161,12 +161,32 @@ location of the operator's file.
 Before #10564 this category was an unconditional `rm -rf` of the whole root with
 no age floor, no liveness check, and no ownership proof of the contents, so a
 bare sweep deleted artifacts an operator had pulled seconds earlier. The
-predicate above fixes the acute data-loss case. It cannot fix the remaining one:
-the writer emits the *same* name shape for an operator's deliberate pull and for
-an internal auto-fetch, so "reclaimable transient" and "the operator's copy" are
-not distinguishable by name. Until the writer tags its output, requiring an
-explicit `--include` is the honest contract — being absent from a default sweep
-is cheap and reversible, and a wrong delete is neither.
+predicate above fixes the acute data-loss case.
+
+The writer now also records *why* each cache directory exists (#10585). It
+writes a `.homeboy-download.json` sidecar inside the cache directory holding the
+strongest claim made on it, and cleanup reads it:
+
+| marker | verdict |
+| --- | --- |
+| absent | retain — untagged bytes are treated as operator-owned |
+| unreadable or unparseable | retain |
+| `operator_pull` | retain |
+| `internal_fetch` | eligible; the age floor and the liveness veto still decide |
+
+Only an explicit `internal_fetch` relaxes anything, and operator ownership is
+sticky: a cache directory that has served one operator pull never downgrades. In
+practice this means **every cache directory written before this change is
+retained**, because none of them carries a marker. That is deliberate — the
+alternative is inferring intent from bytes that never recorded it — and it means
+`--include runner-downloads` reclaims nothing until internal fetches have been
+re-run against the tagging writer. The bytes stay visible in
+`cleanup retained-storage` and in the per-row `intent` field the whole time.
+
+The category stays out of the bare sweep for now. Re-evaluating that is a
+separate decision with its own evidence, once the backfill window has passed;
+being absent from a default sweep is cheap and reversible, and a wrong delete is
+neither.
 
 The bytes stay fully visible: `homeboy cleanup retained-storage` accounts for
 them in two halves (what a sweep would reclaim, and what it is holding on to)

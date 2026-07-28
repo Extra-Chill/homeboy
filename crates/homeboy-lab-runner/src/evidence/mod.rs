@@ -16,7 +16,9 @@ pub use tokens::{
     is_retrievable_runner_artifact, reportable_artifact_evidence_path, runner_artifact_store_token,
 };
 
-pub use download::{download_remote_artifact, RemoteArtifactDownload};
+pub use download::{
+    download_remote_artifact, download_remote_artifact_with_intent, RemoteArtifactDownload,
+};
 
 pub use homeboy_core::api_jobs::RunnerJobLogSnapshot;
 pub use mirror::runner_job_log_snapshot_for_session;

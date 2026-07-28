@@ -5,8 +5,10 @@ use homeboy_core::change_artifact::{
 };
 use homeboy_core::{Error, Result};
 
+use homeboy_core::runner_download_cache::RunnerDownloadIntent;
+
 use super::{
-    apply_change_artifact, download_remote_artifact, is_retrievable_runner_artifact,
+    apply_change_artifact, download_remote_artifact_with_intent, is_retrievable_runner_artifact,
     RunnerExecOutput, RunnerWorkspaceApplyOutput,
 };
 
@@ -105,7 +107,10 @@ pub(super) fn apply_lab_promotion_patch(
 
 fn read_lab_patch_artifact(path: &str) -> Result<String> {
     let local_path = if is_retrievable_runner_artifact(path) {
-        download_remote_artifact(path, None)?.output_path
+        // Internal: the patch is read once and applied; the operator never sees
+        // this cache path (#10585).
+        download_remote_artifact_with_intent(path, None, RunnerDownloadIntent::InternalFetch)?
+            .output_path
     } else {
         PathBuf::from(path)
     };
