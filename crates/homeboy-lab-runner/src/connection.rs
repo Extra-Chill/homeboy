@@ -1860,6 +1860,54 @@ pub(crate) fn reverse_broker_job_snapshot_at(
     Ok((job, events))
 }
 
+/// Reconcile terminal runner jobs through the session's authoritative transport.
+/// The returned body is transport-neutral so callers retain one command contract.
+pub fn reconcile_terminal_jobs(runner_id: &str) -> Result<Value> {
+    let report = status(runner_id)?;
+    let Some(session) = report.session.filter(|_| report.connected) else {
+        return Err(Error::validation_invalid_argument(
+            "runner_id",
+            format!("runner `{runner_id}` is not connected"),
+            Some(runner_id.to_string()),
+            None,
+        ));
+    };
+    reconcile_terminal_jobs_for_session(
+        &session,
+        |_| {
+            let data = crate::execution::daemon_api_post_for_session(
+                &session,
+                "/jobs/reconcile-terminal",
+            )?;
+            crate::execution::canonical_daemon_body(&data, "direct daemon reconcile response")
+                .cloned()
+        },
+        || reverse_broker_reconcile(runner_id),
+    )
+}
+
+fn reconcile_terminal_jobs_for_session<T>(
+    session: &RunnerSession,
+    direct: impl FnOnce(&str) -> Result<T>,
+    reverse: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if let Some(local_url) = session.local_url.as_deref() {
+        return direct(local_url);
+    }
+    if session.mode == RunnerTunnelMode::Reverse {
+        return reverse();
+    }
+    Err(Error::validation_invalid_argument(
+        "runner_id",
+        format!(
+            "runner `{}` has no authoritative job reconciliation endpoint",
+            session.runner_id
+        ),
+        Some(session.runner_id.clone()),
+        None,
+    ))
+}
+
 /// Submit a redacted, replayable request to a connected reverse broker. Secret
 /// values are intentionally absent: the worker resolves named references when
 /// it prepares the claimed process.

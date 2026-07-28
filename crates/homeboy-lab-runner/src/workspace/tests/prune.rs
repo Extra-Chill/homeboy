@@ -8,7 +8,8 @@ use base64::Engine;
 
 use crate::workspace::sync::{
     active_resource_lifecycle_liveness, encoded_materialized_workspace_metadata_is_valid,
-    prune_scan_command, prune_workspaces, ssh_process_liveness_command, ssh_prune_delete_command,
+    prune_scan_command, prune_workspaces, revalidated_candidate_is_deletable,
+    runner_job_liveness_with, ssh_process_liveness_command, ssh_prune_delete_command,
     ssh_prune_delete_command_with_terminal_owner, ssh_prune_delete_materialized_workspace_command,
     sync_workspace, update_workspace_resource_lifecycle, workspace_liveness_with_size_observation,
     ActiveResourceLifecycleLiveness, RunAuthority, WORKSPACE_METADATA_FILE,
@@ -17,6 +18,7 @@ use crate::workspace::types::{
     RunnerWorkspacePruneOptions, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
 };
 use crate::{MaterializedWorkspace, WorkspaceCleanupPolicy, WorkspaceTerminalOutcome};
+use homeboy_core::api_jobs::JobStatus;
 
 #[test]
 fn prune_workspaces_previews_orphans_without_deleting_by_default() {
@@ -180,7 +182,7 @@ fn prune_preserves_process_owned_workspace_in_preview_and_apply() {
 }
 
 #[test]
-fn prune_preserves_active_job_lifecycle_lease() {
+fn prune_preserves_job_lifecycle_lease_when_authority_is_unavailable() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let runner_root = tempfile::tempdir().expect("runner root tempdir");
         let workspace = runner_root.path().join("_lab_workspaces/active-lease");
@@ -228,7 +230,7 @@ fn prune_preserves_active_job_lifecycle_lease() {
 
         assert_eq!(exit_code, 0);
         assert!(output.removed.is_empty());
-        assert_eq!(output.skipped_live_count, 1);
+        assert_eq!(output.skipped_unknown_count, 1);
         assert!(workspace.exists());
     });
 }
@@ -261,7 +263,7 @@ fn active_lifecycle_lease_requires_unambiguous_terminal_run_authority() {
     });
     assert!(matches!(
         active_resource_lifecycle_liveness(&job_owned, |_| RunAuthority::Terminal),
-        ActiveResourceLifecycleLiveness::Live
+        ActiveResourceLifecycleLiveness::NotActive
     ));
 
     let ambiguous = active_lifecycle_metadata("run-terminal", "other-run");
@@ -269,6 +271,83 @@ fn active_lifecycle_lease_requires_unambiguous_terminal_run_authority() {
         active_resource_lifecycle_liveness(&ambiguous, |_| RunAuthority::Terminal),
         ActiveResourceLifecycleLiveness::Unknown("active_resource_lifecycle_owner_ambiguous")
     ));
+}
+
+#[test]
+fn runner_job_authority_requires_exact_transport_state_and_consistent_snapshot() {
+    let active = vec!["job-1".to_string()];
+    for (name, exact, snapshot, state) in [
+        (
+            "direct-live",
+            Ok(JobStatus::Running),
+            Some(&active[..]),
+            "live",
+        ),
+        (
+            "reverse-live",
+            Ok(JobStatus::Queued),
+            Some(&active[..]),
+            "live",
+        ),
+        (
+            "terminal",
+            Ok(JobStatus::Succeeded),
+            Some(&[][..]),
+            "inactive",
+        ),
+        ("absent", Err(absent_job_error()), Some(&[][..]), "inactive"),
+        (
+            "unavailable",
+            Err(homeboy_core::Error::internal_unexpected(
+                "transport unavailable",
+            )),
+            None,
+            "unknown",
+        ),
+        (
+            "terminal-listed",
+            Ok(JobStatus::Failed),
+            Some(&active[..]),
+            "unknown",
+        ),
+        (
+            "live-omitted",
+            Ok(JobStatus::Running),
+            Some(&[][..]),
+            "unknown",
+        ),
+        (
+            "absent-listed",
+            Err(absent_job_error()),
+            Some(&active[..]),
+            "unknown",
+        ),
+    ] {
+        assert_eq!(
+            runner_job_liveness_with("job-1", exact, snapshot).state,
+            state,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn prune_revalidates_job_authority_before_deletion() {
+    let scanned = runner_job_liveness_with("job-1", Ok(JobStatus::Succeeded), Some(&[]));
+    let revalidated = runner_job_liveness_with(
+        "job-1",
+        Ok(JobStatus::Running),
+        Some(&["job-1".to_string()]),
+    );
+
+    assert!(revalidated_candidate_is_deletable(&scanned));
+    assert!(!revalidated_candidate_is_deletable(&revalidated));
+}
+
+fn absent_job_error() -> homeboy_core::Error {
+    let mut error = homeboy_core::Error::internal_unexpected("daemon request returned HTTP 404");
+    error.details["daemon_transport_error"] = serde_json::json!({ "http_status": 404 });
+    error
 }
 
 #[test]
@@ -895,7 +974,7 @@ fn ssh_prune_scan_command_advances_past_a_timed_out_size_measurement() {
 }
 
 #[test]
-fn unavailable_size_does_not_override_inactive_ownership_evidence() {
+fn unavailable_job_authority_fails_closed_despite_inactive_process_evidence() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let root = tempfile::tempdir().expect("workspace root");
         let workspace = root.path().join("_lab_workspaces/orphan");
@@ -924,14 +1003,14 @@ fn unavailable_size_does_not_override_inactive_ownership_evidence() {
         );
 
         metadata["job_id"] = serde_json::json!("active-job");
-        metadata["resource_lifecycle"] = serde_json::json!({ "status": "active" });
+        metadata["resource_lifecycle"] = serde_json::json!({ "status": "terminal" });
         let evidence =
             workspace_liveness_with_size_observation(&runner, &metadata, &workspace, false);
-        assert_eq!(evidence.state, "live");
+        assert_eq!(evidence.state, "unknown");
         assert_eq!(
             evidence.observations,
             vec![
-                "active_resource_lifecycle_lease",
+                "runner_job_probe_failed",
                 "workspace_size_measurement_unavailable"
             ]
         );
