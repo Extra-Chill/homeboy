@@ -21,6 +21,7 @@ use homeboy_core::observation::homeboy_findings_from_test_analysis_input;
 use homeboy_core::validation_progress::{write_command_artifact, ValidationProgressRecorder};
 use homeboy_engine_primitives::baseline::BaselineFlags;
 use homeboy_engine_primitives::local_files;
+use homeboy_engine_primitives::measurement::{Measurement, Verdict};
 use homeboy_engine_primitives::output_parse::ParseSpec;
 pub use homeboy_extension_contract::test_results::TestRunWorkflowResult;
 pub use homeboy_extension_contract::test_workflow::RawTestOutput;
@@ -77,6 +78,24 @@ struct NoTestsApplicableEvidence {
     nonce: String,
     reason: String,
 }
+/// Classify what the test runner actually measured.
+///
+/// Executed assertions -- `passed + failed` -- are the unit of evidence.
+/// `skipped` is deliberately excluded: an all-skipped result proves only that
+/// the runner started. Absent counts are [`Measurement::unreported`], which is
+/// a different state from a counted zero and reads differently to an operator.
+///
+/// No population is supplied. The runner does not independently know how many
+/// tests *should* have run (that is what `--filter` and the extension's
+/// selection are for), so a zero here is honestly `ZeroUnits`
+/// rather than a provably broken instrument.
+fn test_measurement(test_counts: Option<&TestCounts>) -> Measurement {
+    match test_counts {
+        Some(counts) => Measurement::units(counts.passed + counts.failed),
+        None => Measurement::unreported(),
+    }
+}
+
 fn test_run_status(
     runner_success: bool,
     test_counts: Option<&TestCounts>,
@@ -86,16 +105,42 @@ fn test_run_status(
         return "failed";
     }
 
+    // The one legitimate escape from the measurement requirement, and it is
+    // gated on POSITIVE evidence rather than on absence: `no_tests_applicable`
+    // is only true when the extension wrote a nonce-matched, schema-matched
+    // evidence file naming its reason. "The instrument reported nothing" can
+    // never reach here.
     if no_tests_applicable {
         return "skipped";
     }
 
     // A zero count or an all-skipped result proves only that the runner
     // started. A passing test gate needs evidence that it executed a test.
-    if test_counts.is_some_and(|counts| counts.passed + counts.failed > 0 && counts.failed == 0) {
-        "passed"
+    //
+    // This predicate is now shared (#10685). The behaviour is unchanged in
+    // every case -- see `test_run_status_matches_the_shared_predicate` -- but
+    // the reasoning is no longer private to this function, and the audit and
+    // lint gates answer the same question the same way.
+    let intended = if test_counts.is_some_and(|counts| counts.failed == 0) {
+        Verdict::Pass
     } else {
-        "failed"
+        Verdict::Fail
+    };
+    match test_measurement(test_counts).assess().constrain(intended) {
+        Ok(Verdict::Pass) => "passed",
+        // `Unknown` collapses to `"failed"` here, and only here. This status is
+        // a published string in the command output envelope that downstream
+        // consumers match on, so introducing a fourth value is a breaking
+        // change rather than an additive one. The *label* is therefore lossy
+        // while the *decision* is not: an unmeasured run has never rendered
+        // green on this path and still does not. `test_phase_report` in
+        // `report.rs` carries the distinction that a reader needs -- "test
+        // runner reported zero executed tests" versus a timeout versus real
+        // failures -- so nothing an operator acts on is lost.
+        Ok(Verdict::Unknown) | Ok(Verdict::Fail) => "failed",
+        // Unreachable on this path: `test_measurement` never establishes a
+        // population, so `Contradicted` cannot be produced. Fail closed.
+        Err(_) => "failed",
     }
 }
 
@@ -181,7 +226,19 @@ fn run_main_test_workflow_inner(
             // it just means the change-to-test mapping missed the impacted
             // files. Documentation/config-only changes leave
             // `source_changes_without_tests` empty and still pass. (#8340)
-            if !scope.source_changes_without_tests.is_empty() {
+            //
+            // Restated through the shared predicate (#10685) without changing
+            // behaviour: zero tests selected is the observation, and the
+            // impacted source files are the independently-known population that
+            // says whether that zero is honest. A non-empty population makes
+            // this `Contradicted` -- a provably broken instrument, and the one
+            // outcome that is a hard error rather than an `unknown`. #8340
+            // reached that conclusion on its own, three months before #10685
+            // named it; the two agree exactly, which is the main reason this
+            // predicate is worth sharing.
+            let scope_measurement = Measurement::units(scope.selected_files.len() as u64)
+                .against_population(scope.source_changes_without_tests.len() as u64);
+            if scope_measurement.assess().is_broken_instrument() {
                 let impacted = &scope.source_changes_without_tests;
                 let preview = impacted
                     .iter()
@@ -1662,6 +1719,99 @@ mod tests {
         assert_eq!(
             test_run_status(true, Some(&TestCounts::new(1, 0, 0, 1)), false),
             "failed"
+        );
+    }
+
+    /// Recorded no-measurement scenarios, fed through the real status function.
+    ///
+    /// Assert the effect, not the command string (#10685). The post-merge audit
+    /// gate passed for weeks because its test asserted the command it invoked
+    /// rather than what that command produced, so every case here is a shape
+    /// actually observed in a CI run and every assertion is about the verdict
+    /// that came out.
+    #[test]
+    fn no_recorded_unmeasured_shape_renders_green() {
+        let unmeasured: &[(&str, Option<TestCounts>)] = &[
+            (
+                "child killed before writing its results sidecar (#10639/#10644): counts absent \
+                 entirely",
+                None,
+            ),
+            (
+                "runner exited 0 having executed nothing: `0 passed; 0 failed`",
+                Some(TestCounts::new(0, 0, 0, 0)),
+            ),
+            (
+                "every selected test skipped: the runner started and measured no assertion",
+                Some(TestCounts::new(12, 0, 0, 12)),
+            ),
+            (
+                "a total was reported but no assertion resolved -- the shape a truncated \
+                 summary parse produces",
+                Some(TestCounts::new(412, 0, 0, 0)),
+            ),
+        ];
+
+        for (scenario, counts) in unmeasured {
+            assert_eq!(
+                test_run_status(true, counts.as_ref(), false),
+                "failed",
+                "an unmeasured test phase rendered green: {scenario}"
+            );
+        }
+    }
+
+    /// The migration onto the shared predicate is behaviour-preserving.
+    ///
+    /// Stated as a property over the whole reachable input space rather than as
+    /// a handful of examples, because "identical behaviour" is the entire claim
+    /// the refactor rests on and examples cannot support it.
+    #[test]
+    fn test_run_status_matches_the_shared_predicate() {
+        for runner_success in [true, false] {
+            for no_tests in [true, false] {
+                for counts in [
+                    None,
+                    Some(TestCounts::new(0, 0, 0, 0)),
+                    Some(TestCounts::new(1, 0, 0, 1)),
+                    Some(TestCounts::new(3, 3, 0, 0)),
+                    Some(TestCounts::new(3, 2, 1, 0)),
+                    Some(TestCounts::new(3, 0, 3, 0)),
+                    Some(TestCounts::new(9, 4, 0, 5)),
+                ] {
+                    // The rule as it stood before #10685, verbatim.
+                    let legacy = if !runner_success {
+                        "failed"
+                    } else if no_tests {
+                        "skipped"
+                    } else if counts.as_ref().is_some_and(|counts| {
+                        counts.passed + counts.failed > 0 && counts.failed == 0
+                    }) {
+                        "passed"
+                    } else {
+                        "failed"
+                    };
+                    assert_eq!(
+                        test_run_status(runner_success, counts.as_ref(), no_tests),
+                        legacy,
+                        "shared-predicate migration changed behaviour for \
+                         runner_success={runner_success} no_tests={no_tests} counts={counts:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `skipped` is the one exit from the measurement requirement, and it is
+    /// reached only through positive, nonce-bound evidence -- never through the
+    /// absence of counts.
+    #[test]
+    fn only_signed_evidence_can_skip_the_measurement_requirement() {
+        assert_eq!(test_run_status(true, None, true), "skipped");
+        assert_eq!(
+            test_run_status(true, None, false),
+            "failed",
+            "absent counts must never be read as `nothing to test`"
         );
     }
 

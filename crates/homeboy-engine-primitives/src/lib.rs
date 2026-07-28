@@ -21,6 +21,7 @@ pub mod grammar;
 pub mod identifier;
 pub mod language;
 pub mod local_files;
+pub mod measurement;
 pub mod output_parse;
 pub mod phase_timing;
 pub mod provider_registry;

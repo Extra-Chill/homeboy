@@ -82,3 +82,30 @@ pub(crate) struct ScopedLintRun {
     pub(crate) step: Option<String>,
     pub(crate) changed_files: Vec<String>,
 }
+
+/// The resolved changed-file lint scope, plus the population it was resolved
+/// from.
+///
+/// The population is carried alongside the runs because `runs.is_empty()` on
+/// its own is ambiguous, and the workflow used to render an unconditional
+/// `passed` for both readings of it (#10685):
+///
+///   * nothing changed at all — a genuinely empty population, and an honest
+///     green; and
+///   * files changed but no declared lint route claimed any of them — which is
+///     *usually* also honest (a documentation-only diff), and is *sometimes* a
+///     route glob that stopped matching.
+///
+/// `measurement_ok` deliberately does not adjudicate between those two: the
+/// route matcher is simultaneously the instrument and the only thing that
+/// knows the population, so a broken matcher and an empty population are
+/// indistinguishable from inside. What the predicate *does* demand is that the
+/// two states stop rendering identically, so `changed_files_considered` is
+/// recorded and reported rather than discarded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScopedLintPlan {
+    pub(crate) runs: Vec<ScopedLintRun>,
+    /// Changed files considered before route matching. Zero means the diff
+    /// itself was empty.
+    pub(crate) changed_files_considered: usize,
+}
