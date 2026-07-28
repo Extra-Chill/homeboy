@@ -521,8 +521,8 @@ mod tests {
                 let Commands::Daemon(args) = cli.command else {
                     panic!("expected daemon command");
                 };
-                let error = run(args)
-                    .expect_err("an isolated home has no recoverable daemon state");
+                let error =
+                    run(args).expect_err("an isolated home has no recoverable daemon state");
                 assert!(
                     !error.message.contains(refused_flag),
                     "{refused_flag} must no longer gate recovery, got {}",
@@ -682,8 +682,7 @@ mod tests {
                 panic!("expected daemon command");
             };
 
-            let error = run(args)
-                .expect_err("legacy alias must not mutate");
+            let error = run(args).expect_err("legacy alias must not mutate");
             assert!(error.message.contains("migration-only"));
             let rendered = format!("{error:?}");
             for field in [
@@ -710,8 +709,7 @@ mod tests {
             panic!("expected daemon command");
         };
 
-        let error = run(args)
-            .expect_err("absent daemon lease fails before recovery");
+        let error = run(args).expect_err("absent daemon lease fails before recovery");
         assert!(!error.message.contains("migration-only"));
     }
 
@@ -730,8 +728,7 @@ mod tests {
             panic!("expected daemon command");
         };
 
-        let error = run(args)
-            .expect_err("invalid daemon address should reach handler validation");
+        let error = run(args).expect_err("invalid daemon address should reach handler validation");
 
         assert!(error.message.contains("Invalid daemon bind address"));
     }
