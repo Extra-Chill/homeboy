@@ -3,6 +3,7 @@ use std::ops::Deref;
 
 use base64::Engine;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::agent_task_lifecycle_event::{
@@ -193,15 +194,25 @@ pub fn mirror_daemon_evidence(
     let result = (|| {
         let remote_runs =
             mirror_remote_observation_runs(&store, runner, job, result, notification_route)?;
-        if remote_runs.is_empty() {
+        if remote_runs.is_empty() || job.status == JobStatus::Failed {
             mirror_terminal_job_artifacts(&store, runner, job, &local_job_run)?;
         }
         let patch = mirrored_patch_result(&store, runner, job, result.get("patch"))?;
-        let runs = if remote_runs.is_empty() {
+        let mut runs = if remote_runs.is_empty() {
             vec![local_job_run.run.clone()]
         } else {
             remote_runs
         };
+        if job.status == JobStatus::Failed && !runs.iter().any(|run| run.id == local_job_run.run.id)
+        {
+            // Remote observations describe workload output; retain the local
+            // runner-exec record that owns terminal command diagnostics.
+            runs.push(local_job_run.run.clone());
+        }
+        let runs = runs
+            .into_iter()
+            .map(|run| attach_controller_failure_artifact_refs(&store, run))
+            .collect::<Result<Vec<_>>>()?;
         let primary_run = primary_mirrored_run(&runs).unwrap_or_else(|| runs[0].clone());
         Ok(Some(MirroredDaemonEvidence {
             run: primary_run,
@@ -250,9 +261,25 @@ pub fn mirror_reverse_broker_evidence(
             )
             })?;
         let runs;
+        let local_artifacts = if job.status == JobStatus::Failed {
+            Some(mirror_reverse_terminal_artifacts(
+                &store,
+                runner,
+                broker_url,
+                job,
+                &local_job_run,
+            )?)
+        } else {
+            None
+        };
         if declared_run_ids.is_empty() {
-            let artifacts =
-                mirror_reverse_terminal_artifacts(&store, runner, broker_url, job, &local_job_run)?;
+            let artifacts = local_artifacts.unwrap_or(mirror_reverse_terminal_artifacts(
+                &store,
+                runner,
+                broker_url,
+                job,
+                &local_job_run,
+            )?);
             runs = vec![record_reverse_broker_metadata(
                 &store,
                 local_job_run.run.clone(),
@@ -269,8 +296,13 @@ pub fn mirror_reverse_broker_evidence(
             // typed details. Their job artifacts remain durable controller
             // evidence, while the declared identities are explicitly retained
             // as unresolved provenance rather than fabricated run records.
-            let artifacts =
-                mirror_reverse_terminal_artifacts(&store, runner, broker_url, job, &local_job_run)?;
+            let artifacts = local_artifacts.unwrap_or(mirror_reverse_terminal_artifacts(
+                &store,
+                runner,
+                broker_url,
+                job,
+                &local_job_run,
+            )?);
             runs = vec![record_reverse_broker_metadata(
                 &store,
                 local_job_run.run.clone(),
@@ -355,6 +387,10 @@ pub fn mirror_reverse_broker_evidence(
                 },
             )?;
         }
+        let mut runs = runs
+            .into_iter()
+            .map(|run| attach_controller_failure_artifact_refs(&store, run))
+            .collect::<Result<Vec<_>>>()?;
         let patch = mirrored_patch_result(
             &store,
             runner,
@@ -363,6 +399,29 @@ pub fn mirror_reverse_broker_evidence(
                 .get("patch")
                 .or_else(|| result.pointer("/data/patch")),
         )?;
+        if job.status == JobStatus::Failed && !runs.iter().any(|run| run.id == local_job_run.run.id)
+        {
+            runs.push(local_job_run.run.clone());
+        }
+        let runs = runs
+            .into_iter()
+            .map(|run| {
+                record_reverse_broker_metadata(
+                    &store,
+                    run,
+                    runner,
+                    broker_url,
+                    job,
+                    events,
+                    result,
+                    Vec::new(),
+                    None,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .map(|run| attach_controller_failure_artifact_refs(&store, run))
+            .collect::<Result<Vec<_>>>()?;
         let primary_run = primary_mirrored_run(&runs).unwrap_or_else(|| runs[0].clone());
         Ok(Some(MirroredDaemonEvidence {
             run: primary_run,
@@ -408,6 +467,18 @@ fn record_reverse_broker_metadata(
     unresolved_run_refs: Option<&[String]>,
 ) -> Result<RunRecord> {
     let mut metadata = run.metadata_json.clone();
+    let unresolved_run_refs = unresolved_run_refs.map(|refs| refs.to_vec()).or_else(|| {
+        metadata
+            .pointer("/lab/reverse_broker/unresolved_run_refs")
+            .and_then(Value::as_array)
+            .map(|refs| {
+                refs.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|refs| !refs.is_empty())
+    });
     metadata["lab"]["reverse_broker"] = json!({
         "runner_id": runner.id.clone(), "job_id": job.id.to_string(), "broker_url": broker_url,
         "status": job.status, "events": bounded_remote_events(events), "event_count": events.len(),
@@ -485,8 +556,19 @@ pub fn refresh_mirrored_daemon_evidence(run_id: &str) -> Result<Option<Vec<RunRe
         return Ok(None);
     };
     let runner = load(&runner_id)?;
-    let job = fetch_daemon_job(&runner_id, &job_id)?;
-    let events = fetch_daemon_events(&runner_id, &job_id)?;
+    let reverse_broker_url = run
+        .metadata_json
+        .pointer("/lab/reverse_broker/broker_url")
+        .and_then(Value::as_str);
+    let (job, events) = match reverse_broker_url {
+        Some(broker_url) => {
+            crate::connection::reverse_broker_job_snapshot_at(broker_url, &runner_id, &job_id)?
+        }
+        None => (
+            fetch_daemon_job(&runner_id, &job_id)?,
+            fetch_daemon_events(&runner_id, &job_id)?,
+        ),
+    };
     let result = result_event_data(&events).unwrap_or_else(|| json!({}));
     let cwd = run.cwd.as_deref().unwrap_or("");
     let command = run
@@ -494,6 +576,26 @@ pub fn refresh_mirrored_daemon_evidence(run_id: &str) -> Result<Option<Vec<RunRe
         .as_ref()
         .map(|command| vec![command.clone()])
         .unwrap_or_default();
+    if let Some(broker_url) = reverse_broker_url {
+        let mirrored = mirror_reverse_broker_evidence(
+            &runner,
+            broker_url,
+            cwd,
+            &command,
+            &job,
+            &events,
+            &result,
+            (run.kind == "runner-exec").then_some(run_id),
+            None,
+        )?;
+        if matches!(
+            job.status,
+            JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
+        ) {
+            crate::connection::reverse_broker_reconcile_at(&runner_id, broker_url)?;
+        }
+        return Ok(mirrored.map(|evidence| evidence.runs));
+    }
     refresh_mirrored_daemon_evidence_with(
         &store,
         &runner,
@@ -536,16 +638,27 @@ where
     let result = (|| {
         reconcile()?;
         let remote_runs = mirror_remote_observation_runs(store, runner, job, result, None)?;
-        if remote_runs.is_empty()
-            && matches!(
-                job.status,
-                JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
-            )
-        {
+        let terminal = matches!(
+            job.status,
+            JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
+        );
+        if terminal && (remote_runs.is_empty() || job.status == JobStatus::Failed) {
             mirror_terminal_job_artifacts(store, runner, job, &local_job_run)?;
-            return Ok(Some(vec![local_job_run.run.clone()]));
         }
-        Ok(Some(remote_runs))
+        let mut runs = if remote_runs.is_empty() {
+            vec![local_job_run.run.clone()]
+        } else {
+            remote_runs
+        };
+        if job.status == JobStatus::Failed && !runs.iter().any(|run| run.id == local_job_run.run.id)
+        {
+            runs.push(local_job_run.run.clone());
+        }
+        Ok(Some(
+            runs.into_iter()
+                .map(|run| attach_controller_failure_artifact_refs(store, run))
+                .collect::<Result<Vec<_>>>()?,
+        ))
     })();
     if result.is_err() {
         discard_owned_synthetic_run(store, &local_job_run);
@@ -741,10 +854,20 @@ pub(super) fn mirror_job_run(
         "run_label": inferred_label,
         "explicit_run_id": run_id,
     });
+    if let Some(failure) = runner_failure_projection(runner, job, result) {
+        lab["failure"] = failure;
+    }
     if let Some(event) = agent_task_lifecycle_event {
         lab["agent_task_lifecycle_event"] = event;
     }
     if run_id.is_none() {
+        lab["synthetic_publication_token"] = Value::String(synthetic_token.clone());
+    }
+    // Every runner-controlled value crosses this boundary through recursive
+    // redaction; numeric/status provenance remains typed and intact.
+    lab = homeboy_core::redaction::redact_json(&lab);
+    if run_id.is_none() {
+        // Controller-generated ownership capability, never runner input.
         lab["synthetic_publication_token"] = Value::String(synthetic_token.clone());
     }
     if let Some(run_id) = run_id {
@@ -792,22 +915,37 @@ pub(super) fn mirror_job_run(
         status: job_status_as_run_status(job.status).to_string(),
         command: Some(redact_argv_shell_display(command)),
         cwd: Some(cwd.to_string()),
-        homeboy_version: None,
+        homeboy_version: result
+            .pointer("/data/execution_record/orchestration_provenance/job_command_binary/version")
+            .or_else(|| {
+                result.pointer(
+                    "/data/execution_record/orchestration_provenance/configured_job_binary/version",
+                )
+            })
+            .and_then(Value::as_str)
+            .map(str::to_string),
         git_sha: None,
         rig_id: None,
-        metadata_json: json!({ "lab": lab }),
+        metadata_json: json!({
+            "exit_code": runner_terminal_exit_code(job, result),
+            "lab": lab,
+        }),
     };
     let mut run = run;
     if let Some(notification_route) = notification_route {
         notification_route.insert_into_metadata(&mut run.metadata_json);
     }
     let synthetic_ownership = if run_id.is_none() {
-        store
-            .import_synthetic_run(&run, &synthetic_token)?
-            .then(|| SyntheticRunOwnership {
-                run_id: run.id.clone(),
-                publication_token: synthetic_token,
-            })
+        let inserted = store.import_synthetic_run(&run, &synthetic_token)?;
+        if !inserted && job.status.is_terminal() {
+            // A progress mirror owns the same deterministic synthetic ID. Upsert
+            // its terminal result so restart/reconcile cannot leave it running.
+            store.upsert_imported_run_preserving_terminal(&run)?;
+        }
+        inserted.then(|| SyntheticRunOwnership {
+            run_id: run.id.clone(),
+            publication_token: synthetic_token,
+        })
     } else {
         import_run_if_absent(store, &run)?;
         None
@@ -847,6 +985,103 @@ pub(super) fn bounded_remote_events(events: &[JobEvent]) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+/// Preserve the terminal diagnosis the runner already emitted without copying
+/// its unbounded event stream into the controller-owned observation row.
+fn runner_failure_projection(runner: &Runner, job: &Job, result: &Value) -> Option<Value> {
+    let exit_code = runner_terminal_exit_code(job, result)?;
+    if exit_code == 0 {
+        return None;
+    }
+    // Hash exactly the original terminal stream bytes; display only its
+    // recursively redacted bounded tail so the digest remains reproducible.
+    let stderr_original = result
+        .get("stderr")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let stderr = homeboy_core::redaction::redact_string(stderr_original);
+    let error = [
+        result.get("error"),
+        result.pointer("/data/error"),
+        result.pointer("/data/outcome/result/error"),
+        result.pointer("/outcome/result/error"),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|value| value.is_object())
+    .map(homeboy_core::redaction::redact_json);
+    let artifact_refs = [result.get("artifacts"), result.get("artifact_refs")]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|artifact| {
+            let id = artifact.get("id").and_then(Value::as_str)?;
+            Some(json!({
+                "id": id,
+                "name": artifact.get("name"),
+                "path": artifact.get("path"),
+                "url": artifact.get("url"),
+            }))
+        })
+        .collect::<Vec<_>>();
+    Some(json!({
+        "schema": "homeboy/runner-exec-failure-projection/v1",
+        "failure_code": error.as_ref().and_then(|value| value.get("code")).cloned(),
+        "message": error.as_ref().and_then(|value| value.get("message")).cloned()
+            .or_else(|| result.get("error").filter(|value| value.is_string()).map(homeboy_core::redaction::redact_json)),
+        "details": error.as_ref().and_then(|value| value.get("details")).cloned(),
+        "phase": result.get("phase").cloned().or_else(|| result.pointer("/data/phase").cloned()),
+        "exit_code": exit_code,
+        "signal": result.get("signal").cloned(),
+        "stderr_tail": stderr.chars().rev().take(4_096).collect::<String>().chars().rev().collect::<String>(),
+        "stderr_sha256": format!("{:x}", Sha256::digest(stderr_original.as_bytes())),
+        "runner_id": runner.id.clone(),
+        "runner_job_id": job.id.to_string(),
+        "runner_job_logs_command": format!("homeboy runner job logs {} {}", runner.id, job.id),
+        "remote_command_result_command": format!("homeboy runner job logs {} {} --json", runner.id, job.id),
+        "source_snapshot": job.source_snapshot.clone(),
+        "path_materialization_plan": job.path_materialization_plan.clone(),
+        "runner_job_projection": job.runner_job_projection.clone(),
+        "execution_record": result.pointer("/data/execution_record").cloned(),
+        "orchestration_provenance": result.pointer("/data/orchestration_provenance").cloned(),
+        "artifact_refs": artifact_refs,
+    }))
+}
+
+fn runner_terminal_exit_code(job: &Job, result: &Value) -> Option<i64> {
+    result
+        .get("exit_code")
+        .and_then(Value::as_i64)
+        .or((job.status == JobStatus::Failed).then_some(1))
+}
+
+/// Failure evidence never exposes a runner artifact token. Only artifacts the
+/// controller already verified and persisted are made resolvable from evidence.
+fn attach_controller_failure_artifact_refs(
+    store: &ObservationStore,
+    mut run: RunRecord,
+) -> Result<RunRecord> {
+    let Some(failure) = run.metadata_json.pointer_mut("/lab/failure") else {
+        return Ok(run);
+    };
+    let artifacts = store.list_artifacts(&run.id)?;
+    let refs = artifacts
+        .into_iter()
+        .filter_map(|artifact| {
+            Some(json!({
+                "id": artifact.id,
+                "kind": artifact.kind,
+                "path": format!("homeboy://run/{}/artifact/{}", run.id, artifact.id),
+                "sha256": artifact.sha256?,
+                "size_bytes": artifact.size_bytes?,
+            }))
+        })
+        .collect::<Vec<_>>();
+    failure["artifact_refs"] = Value::Array(refs);
+    run = store.update_run_metadata(&run.id, run.metadata_json)?;
+    Ok(run)
 }
 
 fn mirror_remote_observation_runs(

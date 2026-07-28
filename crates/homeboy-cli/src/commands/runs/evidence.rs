@@ -162,6 +162,19 @@ mod tests {
                         "scenario_metrics": [{"scenario_id":"cold","metrics":{"p95_ms":42.0}}],
                         "resource_policy": {"hot_command":"bench"},
                         "lab": {
+                            "failure": {
+                                "schema": "homeboy/runner-exec-failure-projection/v1",
+                                "failure_code": "validation.invalid_argument",
+                                "phase": "preflight",
+                                "exit_code": 1,
+                                "runner_id": "lab-default",
+                                "runner_job_id": "job-1",
+                                "stderr_tail": "invalid input",
+                                "stderr_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                                "runner_job_logs_command": "homeboy runner job logs lab-default job-1",
+                                "remote_command_result_command": "homeboy runner job logs lab-default job-1 --json",
+                                "artifact_refs": []
+                            },
                             "remote_events": [{
                                 "data": {
                                     "data": {
@@ -310,6 +323,17 @@ mod tests {
                 .contains("cleanup-persisted --run-id"));
             assert!(output.failure.failed);
             assert_eq!(output.failure.exit_code, Some(1));
+            let runner_failure = output.failure.runner_failure.expect("runner failure");
+            assert_eq!(
+                runner_failure.failure_code.as_deref(),
+                Some("validation.invalid_argument")
+            );
+            assert_eq!(runner_failure.phase.as_deref(), Some("preflight"));
+            assert_eq!(runner_failure.runner_job_id, "job-1");
+            assert_eq!(
+                runner_failure.runner_job_logs_command,
+                "homeboy runner job logs lab-default job-1"
+            );
             assert_eq!(output.failure.gate_failures, vec!["p95_ms exceeded"]);
             assert_eq!(output.failure.hints, vec!["inspect artifacts"]);
             assert_eq!(

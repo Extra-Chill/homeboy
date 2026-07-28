@@ -18,7 +18,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{run_owner_pid, running_status_note, ArtifactRecord, RunRecord};
@@ -249,6 +249,81 @@ pub struct EvidenceFailureSummary {
     pub hints: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub child_command_failures: Vec<Value>,
+    /// Runner-owned terminal diagnostics projected into controller evidence.
+    /// Missing for local and pre-projection records to preserve their schema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_failure: Option<RunnerFailureEvidence>,
+}
+
+/// Versioned, controller-owned projection of a runner terminal failure.
+/// Unknown or malformed legacy metadata is omitted from evidence rather than
+/// making `runs evidence` unreadable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunnerFailureEvidence {
+    pub schema: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    pub exit_code: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<String>,
+    pub stderr_tail: String,
+    /// Digest input is the original runner stderr bytes, before redaction.
+    pub stderr_sha256: String,
+    pub runner_id: String,
+    pub runner_job_id: String,
+    pub runner_job_logs_command: String,
+    pub remote_command_result_command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_snapshot: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_materialization_plan: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_job_projection: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_record: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestration_provenance: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_refs: Vec<RunnerFailureArtifactRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunnerFailureArtifactRef {
+    pub id: String,
+    pub kind: String,
+    pub path: String,
+    pub sha256: String,
+    pub size_bytes: i64,
+}
+
+impl RunnerFailureEvidence {
+    pub const SCHEMA: &'static str = "homeboy/runner-exec-failure-projection/v1";
+
+    pub fn from_metadata(value: &Value) -> Option<Self> {
+        let evidence: Self = serde_json::from_value(value.clone()).ok()?;
+        (evidence.schema == Self::SCHEMA
+            && !evidence.runner_id.is_empty()
+            && !evidence.runner_job_id.is_empty()
+            && evidence.stderr_sha256.len() == 64
+            && evidence
+                .stderr_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            && evidence.artifact_refs.iter().all(|artifact| {
+                !artifact.id.is_empty()
+                    && !artifact.path.is_empty()
+                    && artifact.sha256.len() == 64
+                    && artifact.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    && artifact.size_bytes >= 0
+            }))
+        .then_some(evidence)
+    }
 }
 
 #[derive(Serialize)]
@@ -643,6 +718,9 @@ pub fn evidence_failure_summary(run: &RunRecord) -> EvidenceFailureSummary {
         gate_failures: string_array(metadata.get("gate_failures")),
         hints: string_array(metadata.get("hints")),
         child_command_failures: child_command_failures(metadata),
+        runner_failure: metadata
+            .pointer("/lab/failure")
+            .and_then(RunnerFailureEvidence::from_metadata),
     }
 }
 
