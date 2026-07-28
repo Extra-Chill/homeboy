@@ -24,15 +24,12 @@ pub(crate) enum ExistingReleaseAction {
     /// Published release and nothing to attach in this run: a genuine
     /// idempotent no-op.
     AlreadyPublished,
-    /// Unpublished Draft carrying assets, with nothing further to attach. The
-    /// artifacts were already uploaded (by this pipeline's earlier publish
-    /// stage or a previous attempt); publishing is the only remaining action
-    /// that makes the pushed tag deliverable.
+    /// Unpublished Draft ready to publish, either because its assets were
+    /// already uploaded or because the component does not declare an artifact.
     PublishDraft,
-    /// Unpublished Draft with no assets, and nothing to attach. Publishing here
-    /// would mark an empty release `latest` and point every downloader at a
-    /// release with no binaries — strictly worse than the Draft. Fail loudly
-    /// instead and hand the operator the repair commands.
+    /// Unpublished Draft for an artifact-expecting component with no assets and
+    /// nothing to attach. Publishing here would mark an incomplete release
+    /// `latest`, so fail loudly and hand the operator the repair commands.
     EmptyDraft,
     /// This run carries artifacts. Reconcile and verify the assets first; the
     /// publish decision is made only after verification succeeds.
@@ -42,11 +39,13 @@ pub(crate) enum ExistingReleaseAction {
 /// Classify an already-existing GitHub Release.
 ///
 /// `has_artifacts` is whether *this run* resolved release artifacts to attach;
-/// `existing_asset_count` is how many assets the release already carries.
+/// `existing_asset_count` is how many assets the release already carries;
+/// `expects_artifacts` reflects whether the component declares a build artifact.
 pub(crate) fn existing_release_action(
     is_draft: bool,
     has_artifacts: bool,
     existing_asset_count: usize,
+    expects_artifacts: bool,
 ) -> ExistingReleaseAction {
     if has_artifacts {
         return ExistingReleaseAction::ReconcileAssets;
@@ -54,7 +53,7 @@ pub(crate) fn existing_release_action(
     if !is_draft {
         return ExistingReleaseAction::AlreadyPublished;
     }
-    if existing_asset_count == 0 {
+    if existing_asset_count == 0 && expects_artifacts {
         return ExistingReleaseAction::EmptyDraft;
     }
     ExistingReleaseAction::PublishDraft
