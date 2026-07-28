@@ -1,4 +1,5 @@
-//! Pins the globally-propagated clap argument surface.
+//! Pins the globally-propagated clap argument surface, and asserts the whole
+//! command tree is a legal clap definition.
 //!
 //! Lives beside `cli_surface/mod.rs` rather than inside its `mod tests` block
 //! because that file sits 7 lines under the audit's 1500-line `god_file`
@@ -52,4 +53,27 @@ fn root_global_flag_surface_is_pinned() {
         "the globally-propagated flag surface changed; update remote \
          capability negotiation and docs before accepting this",
     );
+}
+
+/// `Command::build()` is the only thing that runs clap's `debug_assert` suite
+/// over *every* node at once. Nothing in normal operation does: `get_matches`
+/// builds the root and then only the subcommands argv actually descends into,
+/// so a malformed definition on a rarely-parsed command ships silently — clap's
+/// assertions are compiled out of a release binary. That is exactly how
+/// `runner refresh-plan` shipped a local `--output` that collided with the
+/// propagated global `--output` all the way into 0.321.0 (#10566).
+///
+/// This is the canary #10563 deferred. It deliberately does not live next to
+/// the reference-doc generator: that module reads the derived tree *without*
+/// building, so a definition defect reports as a definition defect here instead
+/// of masquerading as stale documentation.
+///
+/// A failure here is a real defect in a `#[derive(Args)]`/`#[derive(Subcommand)]`
+/// declaration. The panic message names the offending command and option.
+#[test]
+fn the_whole_command_tree_is_a_legal_clap_definition() {
+    // `build()` propagates every global into all ~530 nodes and asserts the
+    // result; the built tree itself is not otherwise needed here.
+    let mut command = Cli::command();
+    command.build();
 }
