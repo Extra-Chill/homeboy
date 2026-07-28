@@ -9,6 +9,7 @@
 pub mod agent_task_config;
 pub mod agent_task_outcome;
 pub mod env_materialization_plan;
+pub mod materialization_currency;
 pub mod notification_payload;
 pub mod notification_route;
 pub mod path_materialization;

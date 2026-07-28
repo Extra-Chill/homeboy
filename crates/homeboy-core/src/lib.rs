@@ -127,6 +127,7 @@ pub mod local_permissions;
 pub use homeboy_lifecycle_contract::lifecycle;
 pub mod loop_lifecycle;
 pub mod markdown;
+pub use homeboy_lab_contract::materialization_currency;
 pub mod matrix_artifact_summary;
 pub use homeboy_lab_contract::notification_payload;
 pub use homeboy_lab_contract::notification_route;

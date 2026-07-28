@@ -17,17 +17,50 @@
 //! - `commits_behind` — `git rev-list --count built_from_sha..HEAD`.
 //!
 //! When `built_from_sha` differs from `source_sha` the build is stale: the
-//! source has commits the dist predates. The check is pure git + filesystem
-//! mtimes, assumes no package manager or language, and is computed on the
+//! source has commits the dist predates. The check is computed on the
 //! controller-local artifact directory (real mtimes) before it is snapshotted
 //! to the runner.
+//!
+//! # Why this is a heuristic and cannot become a content comparison
+//!
+//! This module answers a *derivation* question — "is this built output behind
+//! the source it was compiled from?" — not an *identity* question. An artifact
+//! and its source are different bytes by construction, so no digest computed
+//! over either one can be compared against the other. A derivation can only be
+//! bound by evidence recorded at build time by the build step, and the build
+//! step here is opaque and outside this product's control: there is nothing to
+//! ask for a source identity, and nowhere to have asked it.
+//!
+//! That leaves timestamps, whose weakness is inherent rather than incidental:
+//! transport and checkout both write mtimes, so a freshly created checkout
+//! makes every artifact in it look newly built. The shared currency contract
+//! records this evidence class as `CurrencyEvidence::BuildTimestamp`, one that
+//! should prefer an unknown verdict over a confident one.
+//!
+//! # Traversal caveat
+//!
+//! The mtime walk takes the *newest* file time under the artifact directory, so
+//! anything written into that directory after the build — a dependency tree
+//! installed in place, a cache, a scratch area — drags the apparent build time
+//! forward and can mask a stale build. The skip list below covers the common
+//! case by name only; it is not a general solution, and a directory it does not
+//! name will still hide staleness.
 
 use std::path::Path;
 use std::time::SystemTime;
 
+use homeboy_core::materialization_currency::{Currency, CurrencyEvidence};
 use serde::Serialize;
 
 use super::workspace::git_output;
+
+/// Directory names skipped by the mtime walk because they are written by
+/// something other than the build and would otherwise drag the apparent build
+/// time forward. Matched by exact name at any depth.
+///
+/// Named by convention, not derived from any declared project model, so this
+/// list is a mitigation rather than a rule. See the traversal caveat above.
+const MTIME_WALK_SKIPPED_DIRECTORY_NAMES: &[&str] = &[".git", "node_modules"];
 
 /// Env var that escalates a stale runtime-overlay build from a warning to a hard
 /// error for a single run. Accepts the usual truthy spellings (`1`, `true`,
@@ -42,6 +75,11 @@ pub(super) const REQUIRE_FRESH_RUNTIME_OVERLAY_ENV: &str =
 pub(super) struct RuntimeOverlayBuildProvenance {
     /// Coarse verdict for the artifact's freshness relative to its source.
     pub(super) status: RuntimeOverlayBuildStatus,
+    /// The same verdict in the shared currency vocabulary, so a reader of a run
+    /// record can compare this against every other materialization's verdict
+    /// without knowing this module's private status names. Derived from
+    /// `status`; see [`RuntimeOverlayBuildStatus::currency`].
+    pub(super) currency: Currency,
     /// `true` only when the build is provably behind its source checkout.
     pub(super) stale: bool,
     /// Path to the git checkout that contains the artifact directory.
@@ -83,6 +121,41 @@ pub(super) enum RuntimeOverlayBuildStatus {
     /// The artifact directory holds no files to date, so there is no build to
     /// compare.
     UnknownNoArtifacts,
+    /// The artifact directory is in a git checkout with files in it, but a git
+    /// probe needed for the comparison did not return a usable answer, so
+    /// neither `Fresh` nor `Stale` was established.
+    ///
+    /// This case previously reported `Fresh`: the probe results were carried in
+    /// `Option`s, every failure collapsed to `None`, and `None` fell through
+    /// the `commits_behind > 0` test to the fresh branch. A broken git
+    /// invocation therefore certified a stale build as current.
+    UnknownProbeFailed,
+}
+
+impl RuntimeOverlayBuildStatus {
+    /// This status as a shared currency verdict.
+    ///
+    /// The evidence is [`CurrencyEvidence::BuildTimestamp`], so a `Current`
+    /// verdict here is an indication and not a proof — see this module's header
+    /// for why no stronger evidence is obtainable.
+    pub(super) fn currency(self) -> Currency {
+        match self {
+            Self::Fresh => Currency::Current,
+            Self::Stale => Currency::stale(format!(
+                "built artifact predates the source checkout HEAD (evidence: {})",
+                CurrencyEvidence::BuildTimestamp.as_str()
+            )),
+            Self::UnknownNoGit => Currency::unknown(
+                "artifact directory is not inside a source checkout, so it has no build provenance to compare".to_string(),
+            ),
+            Self::UnknownNoArtifacts => Currency::unknown(
+                "artifact directory holds no files, so there is no build to compare".to_string(),
+            ),
+            Self::UnknownProbeFailed => Currency::unknown(
+                "a source-history probe did not return a usable answer, so build currency was not established".to_string(),
+            ),
+        }
+    }
 }
 
 impl RuntimeOverlayBuildProvenance {
@@ -91,6 +164,7 @@ impl RuntimeOverlayBuildProvenance {
     pub(super) fn unverifiable() -> Self {
         Self {
             status: RuntimeOverlayBuildStatus::UnknownNoGit,
+            currency: RuntimeOverlayBuildStatus::UnknownNoGit.currency(),
             stale: false,
             source_checkout: None,
             source_sha: None,
@@ -143,6 +217,7 @@ pub(super) fn assess_runtime_overlay_build_freshness(
     let Some(newest_mtime) = newest_mtime else {
         return RuntimeOverlayBuildProvenance {
             status: RuntimeOverlayBuildStatus::UnknownNoArtifacts,
+            currency: RuntimeOverlayBuildStatus::UnknownNoArtifacts.currency(),
             stale: false,
             source_checkout: Some(checkout.clone()),
             source_sha,
@@ -177,15 +252,23 @@ pub(super) fn assess_runtime_overlay_build_freshness(
         _ => None,
     };
 
-    let stale = matches!(commits_behind, Some(count) if count > 0);
-    let status = if stale {
-        RuntimeOverlayBuildStatus::Stale
-    } else {
-        RuntimeOverlayBuildStatus::Fresh
+    // Fail closed. `commits_behind` is `None` for every way the comparison can
+    // fail to produce an answer: HEAD unreadable, the `--before` walk empty or
+    // errored, the count unparseable. Treating that absence as "not behind"
+    // certified a stale build as fresh, which is the exact failure this module
+    // exists to prevent.
+    let (status, stale) = match commits_behind {
+        Some(0) => (RuntimeOverlayBuildStatus::Fresh, false),
+        Some(_) => (RuntimeOverlayBuildStatus::Stale, true),
+        // Unknown is reported, not escalated: `stale` stays false so this does
+        // not turn every unprobeable overlay into a warning or, under the
+        // require-fresh opt-in, a hard failure.
+        None => (RuntimeOverlayBuildStatus::UnknownProbeFailed, false),
     };
 
     RuntimeOverlayBuildProvenance {
         status,
+        currency: status.currency(),
         stale,
         source_checkout: Some(checkout),
         source_sha,
@@ -234,9 +317,9 @@ fn short_sha(sha: &str) -> String {
     sha.chars().take(12).collect()
 }
 
-/// Walk the artifact directory and return the newest file mtime, skipping
-/// `.git` and `node_modules` so dependency-install churn does not mask a stale
-/// build. Returns `None` when there are no files.
+/// Walk the artifact directory and return the newest file mtime, skipping the
+/// directory names in [`MTIME_WALK_SKIPPED_DIRECTORY_NAMES`] so their churn does
+/// not mask a stale build. Returns `None` when there are no files.
 fn newest_artifact_mtime(dir: &Path) -> Option<SystemTime> {
     let mut newest: Option<SystemTime> = None;
     let mut stack = vec![dir.to_path_buf()];
@@ -246,7 +329,10 @@ fn newest_artifact_mtime(dir: &Path) -> Option<SystemTime> {
         };
         for entry in entries.flatten() {
             let file_name = entry.file_name();
-            if matches!(file_name.to_str(), Some(".git" | "node_modules")) {
+            if file_name
+                .to_str()
+                .is_some_and(|name| MTIME_WALK_SKIPPED_DIRECTORY_NAMES.contains(&name))
+            {
                 continue;
             }
             let Ok(file_type) = entry.file_type() else {
@@ -274,6 +360,8 @@ mod tests {
     use std::process::Command;
 
     use chrono::{Duration, Utc};
+
+    use homeboy_core::materialization_currency::{Currency, CurrencyEvidence};
 
     use super::{
         assess_runtime_overlay_build_freshness, require_fresh_runtime_overlay,
@@ -401,6 +489,59 @@ mod tests {
         assert_eq!(provenance.status, RuntimeOverlayBuildStatus::UnknownNoGit);
         assert!(!provenance.stale);
         assert!(provenance.source_sha.is_none());
+    }
+
+    /// A checkout whose history cannot be read is unknown, not fresh.
+    ///
+    /// A repository with no commits reaches every probe this module makes:
+    /// `--show-toplevel` succeeds, artifacts exist, and both `rev-parse HEAD`
+    /// and the `--before` walk fail. Those failures used to collapse into
+    /// `commits_behind: None`, which fell through the `> 0` test onto the fresh
+    /// branch — so a build whose currency was entirely unestablished was
+    /// certified as reflecting the current source.
+    #[test]
+    fn unknown_when_a_history_probe_cannot_answer() {
+        let repo = tempfile::tempdir().expect("repo");
+        init_repo(repo.path());
+        let dist = write_dist(repo.path());
+
+        let provenance = assess_runtime_overlay_build_freshness(&dist);
+
+        assert_eq!(
+            provenance.status,
+            RuntimeOverlayBuildStatus::UnknownProbeFailed
+        );
+        assert!(provenance.currency.is_unknown());
+        assert!(!provenance.currency.is_current());
+        assert!(provenance.source_sha.is_none());
+        assert!(provenance.built_from_sha.is_none());
+        assert!(provenance.commits_behind.is_none());
+        // Unknown is reported, not escalated: no warning, so the require-fresh
+        // opt-in cannot turn an unprobeable overlay into a hard failure.
+        assert!(!provenance.stale);
+        assert!(stale_runtime_overlay_warning("cli", "/local/dist", &provenance).is_none());
+    }
+
+    #[test]
+    fn every_status_carries_the_shared_currency_verdict() {
+        assert_eq!(
+            RuntimeOverlayBuildStatus::Fresh.currency(),
+            Currency::Current
+        );
+        assert!(RuntimeOverlayBuildStatus::Stale.currency().is_stale());
+        for status in [
+            RuntimeOverlayBuildStatus::UnknownNoGit,
+            RuntimeOverlayBuildStatus::UnknownNoArtifacts,
+            RuntimeOverlayBuildStatus::UnknownProbeFailed,
+        ] {
+            assert!(
+                status.currency().is_unknown(),
+                "expected unknown currency for {status:?}"
+            );
+        }
+        // This module's verdict rests on filesystem timestamps, which the
+        // contract records as evidence that cannot prove content equality.
+        assert!(!CurrencyEvidence::BuildTimestamp.proves_content_equality());
     }
 
     #[test]
