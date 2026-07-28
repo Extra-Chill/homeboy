@@ -46,6 +46,19 @@ pub const REGISTRY: &[StructuredSidecarSchema] = &[
         shape: StructuredSidecarShape::Array,
         required_fields: &[],
     },
+    // Duration is a first-class test fact, and it travels on its own key so a
+    // slow suite can never be confused with a failing one. Optional inbound
+    // enrichment: core derives durations from the runner's captured stdout, so
+    // an extension that never writes this file loses nothing. Extensions that
+    // can report richer timings than stdout carries write it here. (#10655)
+    StructuredSidecarSchema {
+        key: "test.durations",
+        schema_version: "v1",
+        path: run_dir::files::TEST_DURATIONS,
+        producer: Some("test"),
+        shape: StructuredSidecarShape::Object,
+        required_fields: &[],
+    },
     StructuredSidecarSchema {
         key: "bench.results",
         schema_version: "v1",
@@ -220,6 +233,7 @@ mod tests {
             "lint.findings",
             "test.results",
             "test.failures",
+            "test.durations",
             "bench.results",
             "trace.results",
         ] {
@@ -233,6 +247,7 @@ mod tests {
         validate_payload("lint.findings", &json!([{ "message": "lint failed" }])).unwrap();
         validate_payload("test.results", &json!({ "total": 2, "failed": 0 })).unwrap();
         validate_payload("test.failures", &json!([{ "message": "test failed" }])).unwrap();
+        validate_payload("test.durations", &json!({ "measured_seconds": 12.5 })).unwrap();
         validate_payload("bench.results", &json!({ "results": [] })).unwrap();
         validate_payload("trace.results", &json!({ "runs": [] })).unwrap();
         validate_payload("bench.results", &json!({ "browser_profiles": [] })).unwrap();

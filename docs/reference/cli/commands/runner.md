@@ -253,7 +253,7 @@ Show persisted runner tunnel status
 ## `homeboy runner disconnect`
 
 ```sh
-homeboy runner disconnect <ID>
+homeboy runner disconnect [OPTIONS] <ID>
 ```
 
 Close a runner tunnel and remove its persisted session state
@@ -261,6 +261,10 @@ Close a runner tunnel and remove its persisted session state
 | Argument | Required | Description |
 | --- | --- | --- |
 | `<ID>` | yes | Runner ID |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--local-recovery` | flag | Remove only this controller's matching local tunnel/session state without contacting the remote runner |
 
 ## `homeboy runner refresh-homeboy`
 

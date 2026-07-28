@@ -51,6 +51,11 @@
 
 name: Main Guard
 
+# A dispatched qualification is an immutable release proof; a push is only a
+# latest-tip health signal. The run name is the stable lookup key used by
+# release.yml when a dispatch starts after main has moved again.
+run-name: ${{ inputs.qualification_sha && format('Release Qualification {0}', inputs.qualification_sha) || 'Main Guard' }}
+
 on:
   push:
     branches: [main]
@@ -63,6 +68,10 @@ on:
         description: 'Audit profile to run (full = all discovery detectors).'
         required: false
         default: 'full'
+      qualification_sha:
+        description: 'Immutable commit SHA to qualify for a release.'
+        required: false
+        type: string
 
 # Latest merge wins. This gate answers exactly one question — "is main green
 # RIGHT NOW?" — and that answer is a pure function of the current tip, so a
@@ -86,8 +95,10 @@ on:
 # Push and sweep get separate groups so a merge train never cancels the weekly
 # audit sweep (and vice versa).
 concurrency:
-  group: main-guard-${{ github.event_name == 'push' && 'post-merge' || 'sweep' }}
-  cancel-in-progress: true
+  group: main-guard-${{ inputs.qualification_sha && format('qualification-{0}', inputs.qualification_sha) || (github.event_name == 'push' && 'post-merge' || 'sweep') }}
+  # A qualification proves one immutable release candidate and must survive
+  # newer merges. Push monitoring remains latest-wins.
+  cancel-in-progress: ${{ inputs.qualification_sha == '' }}
 
 permissions:
   contents: read
@@ -103,7 +114,7 @@ jobs:
   # every merge. One release build now feeds all three.
   gate-build:
     name: Build
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || inputs.qualification_sha != ''
     runs-on: ubuntu-latest
     # Least privilege: this job compiles and uploads, it never files issues.
     permissions:
@@ -111,6 +122,8 @@ jobs:
       actions: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.qualification_sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
 
       # Deliberately the same cache key as release.yml's gate-build: both run
@@ -180,7 +193,7 @@ jobs:
   # `continue-on-error` from the audit step below.
   full-audit-gate:
     name: Full-tree audit gate
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || inputs.qualification_sha != ''
     needs: gate-build
     runs-on: ubuntu-latest
     # Pure pass/fail gate — deliberately cannot file issues, unlike the sweep.
@@ -190,6 +203,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.qualification_sha || github.sha }}
           fetch-depth: 0
 
       - name: Download homeboy binary
@@ -286,12 +300,13 @@ jobs:
   # autofix/auto-push path to disable. This gate never mutates the repo.
   full-lint-gate:
     name: Full-suite lint gate
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || inputs.qualification_sha != ''
     needs: gate-build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.qualification_sha || github.sha }}
           fetch-depth: 0
 
       - name: Download homeboy binary
@@ -338,12 +353,13 @@ jobs:
 
   full-test-gate:
     name: Full-suite test gate
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || inputs.qualification_sha != ''
     needs: gate-build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.qualification_sha || github.sha }}
           fetch-depth: 0
 
       - name: Download homeboy binary
@@ -390,7 +406,7 @@ jobs:
 
   full-audit:
     name: Full-tree audit → tracking issues
-    if: github.event_name != 'push'
+    if: github.event_name != 'push' && inputs.qualification_sha == ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

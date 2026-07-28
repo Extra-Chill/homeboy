@@ -293,6 +293,13 @@ pub(super) fn remove_session(runner_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Delete only the snapshot this controller inspected. A changed session is a
+/// new connection and must be left for its owner to manage.
+pub(super) fn remove_session_if_matches(runner_id: &str, expected: &RunnerSession) -> Result<bool> {
+    let path = session_path(runner_id)?;
+    remove_session_at_if_matches(&path, expected)
+}
+
 pub(super) fn remove_ownership(runner_id: &str) -> Result<()> {
     let path = ownership_path(runner_id)?;
     if path.exists() {
@@ -301,6 +308,24 @@ pub(super) fn remove_ownership(runner_id: &str) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+pub(super) fn remove_ownership_if_matches(
+    runner_id: &str,
+    expected: &RunnerSession,
+) -> Result<bool> {
+    let path = ownership_path(runner_id)?;
+    remove_session_at_if_matches(&path, expected)
+}
+
+fn remove_session_at_if_matches(path: &PathBuf, expected: &RunnerSession) -> Result<bool> {
+    if read_session_at(path)? != Some(expected.clone()) {
+        return Ok(false);
+    }
+    std::fs::remove_file(path).map_err(|err| {
+        Error::internal_io(err.to_string(), Some(format!("delete {}", path.display())))
+    })?;
+    Ok(true)
 }
 
 pub(super) fn has_live_peer_session(session: &RunnerSession) -> Result<bool> {
@@ -443,6 +468,21 @@ mod tests {
             last_seen_at: None,
             leaseless_recovery_evidence: None,
         }
+    }
+
+    #[test]
+    fn compare_and_delete_retains_a_changed_controller_session() {
+        let root = TempDir::new().expect("session directory");
+        let path = root.path().join("controller.json");
+        let recorded = session("controller", "lease-recorded");
+        let replacement = session("controller", "lease-reconnected");
+        write_session_at(&path, &replacement).expect("write replacement session");
+
+        assert!(!remove_session_at_if_matches(&path, &recorded).expect("compare session"));
+        assert_eq!(
+            read_session_at(&path).expect("read replacement session"),
+            Some(replacement)
+        );
     }
 
     fn serve_health(

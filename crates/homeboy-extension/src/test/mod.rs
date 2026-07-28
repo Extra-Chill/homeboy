@@ -3,6 +3,7 @@ pub use homeboy_extension_contract::test_result::TestScopeOutput;
 pub mod analyze;
 pub mod baseline;
 pub mod drift;
+pub mod durations;
 pub mod parsing;
 pub mod report;
 pub mod run;
@@ -26,6 +27,10 @@ pub use baseline::{
     TestBaseline, TestBaselineComparison, TestCounts,
 };
 pub use drift::{ChangeType, DriftReport, DriftedTest, ProductionChange};
+pub use durations::{
+    build_test_durations, parse_duration_samples, parse_test_durations_file, SlowTestFinding,
+    SlowTestPolicy, TestDurationSamples, TestDurations, TestUnitDuration, SLOWEST_UNITS_REPORTED,
+};
 pub use parsing::{
     build_test_summary, parse_coverage_file, parse_failures_file, parse_test_failures_from_text,
     parse_test_results_failures_file, parse_test_results_file, parse_test_results_file_with_spec,
@@ -998,6 +1003,7 @@ fn is_direct_changed_test_path(file: &str) -> bool {
         || path_lower.starts_with("test/")
         || path_lower.starts_with("__tests__/")
         || path_lower.contains("/tests/")
+        || path_lower.contains("/test/")
         || path_lower.contains("/__tests__/")
     {
         return true;
@@ -1085,11 +1091,19 @@ mod tests {
         );
         assert_eq!(
             changed_test_file_for_path("src/core/extension/test/mod.rs"),
-            None
+            Some("src/core/extension/test/mod.rs".to_string())
         );
         assert_eq!(
             changed_test_file_for_path("src/core/audit_test.rs"),
             Some("src/core/audit_test.rs".to_string())
+        );
+        assert_eq!(
+            changed_test_file_for_path("crates/homeboy-extension/src/test/report.rs"),
+            Some("crates/homeboy-extension/src/test/report.rs".to_string())
+        );
+        assert_eq!(
+            changed_test_file_for_path("crates/homeboy-extension/src/test/run.rs"),
+            Some("crates/homeboy-extension/src/test/run.rs".to_string())
         );
     }
 

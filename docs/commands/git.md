@@ -247,7 +247,7 @@ Safety behavior:
 
 ### PR Landing Train
 
-`homeboy git pr land` lands a list of PRs one at a time. It inspects the next PR immediately before merging, merges only clean PRs with successful reported checks, then rechecks the next PR after each merge. The command pauses at the first blocker and emits a final fleet status table.
+`homeboy git pr land` lands a list of PRs one at a time. It binds the next PR to its exact head SHA, waits up to 15 minutes for every reported head check to become terminal, and merges only a clean PR with no unwaived failures. The command pauses at the first blocker and emits a resumable check report with each check's conclusion and link.
 
 ```sh
 homeboy git pr land Extra-Chill/homeboy 123 124 125
@@ -257,7 +257,10 @@ homeboy git pr land Extra-Chill/homeboy https://github.com/Extra-Chill/homeboy/p
 Safety behavior:
 
 - PRs merge sequentially by default; there is no parallel landing mode.
-- A PR with failing, pending, or unreported required checks blocks the train.
+- A PR with failing, pending, or unreported checks blocks the train, including non-required checks.
+- A head change while checks are being observed blocks the train; rerun the emitted resume command against the new head.
+- `--check-waiver HEAD_SHA|CHECK_NAME|APPROVER` records an explicit waiver for one named non-required failure on exactly one head SHA.
+- `--max-check-wait-seconds` bounds waiting; a timeout preserves the PR and reports the exact resume command.
 - A `CLEAN` merge state without reported successful checks is not considered ready.
 - If GitHub reports a base-branch-modified merge race, Homeboy recomputes readiness and retries within `--max-base-retries`.
 - Dirty dependent PRs are refreshed only when an explicit helper program is supplied with `--refresh-helper`; helper arguments are passed directly, not through a shell.

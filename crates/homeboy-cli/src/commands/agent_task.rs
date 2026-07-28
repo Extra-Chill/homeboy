@@ -18,6 +18,7 @@ pub mod doctor;
 pub mod fanout;
 pub mod loop_definition;
 pub mod prompts;
+pub mod retained_artifacts;
 pub mod review;
 pub mod run;
 pub mod status;
@@ -39,8 +40,8 @@ pub use args::{
     CompileLoopArgs, ContractArgs, ContractFormat, CookContinueArgs, DiagnoseArgs, EvidenceArgs,
     FinalizePrArgs, GateFeedbackArgs, LatestArgs, ListArgs, LogsArgs, PromoteArgs,
     PromotionProviderArgs, ProvidersArgs, ReconcileRecordsArgs, ReplayProviderBoundaryArgs,
-    RetryArgs, ReviewArgs, RunPlanArgs, RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs,
-    SubmitArgs, VerifyGateArgs,
+    RetainedArtifactsArgs, RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs,
+    RuntimeRecoverArgs, RuntimeValidateArgs, StatusArgs, SubmitArgs, VerifyGateArgs,
 };
 pub(crate) use status::diagnostic_summary_from_aggregate;
 
@@ -142,6 +143,7 @@ pub(crate) fn run_with_cook_progress(
         ),
         AgentTaskCommand::Logs(status_args) => status::logs(status_args),
         AgentTaskCommand::Artifacts(status_args) => status::artifacts(status_args),
+        AgentTaskCommand::RetainedArtifacts(args) => retained_artifacts::run(args),
         AgentTaskCommand::Evidence(evidence_args) => status::evidence(evidence_args),
         AgentTaskCommand::Diagnose(diagnose_args) => status::diagnose(diagnose_args),
         AgentTaskCommand::RuntimeRecover(args) => status::recover_runtime(args),

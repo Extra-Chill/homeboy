@@ -1,0 +1,351 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6m 57s
+     Running unittests src/lib.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/homeboy-abf98f33ed6bbb38)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/bench-audit-self.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/bench_audit_self-d5b568bcaff4cc21)
+
+running 2 tests
+test tests::maxrss_to_bytes_converts_unix_kib_units ... ok
+test tests::result_json_includes_max_and_per_iteration_peak_rss ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/homeboy-b640e4e77f102f1b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/agent_task_promotion_provider.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/agent_task_promotion_provider-4e99673ccbb43cfd)
+
+running 2 tests
+test promotion_provider_applies_a_typed_patch_request ... ok
+test promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_id ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+     Running tests/agent_task_provider_flag_diagnostic.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/agent_task_provider_flag_diagnostic-26341e20df825942)
+
+running 3 tests
+test unrelated_unknown_cook_flag_keeps_clap_diagnostic_without_promotion_hint ... ok
+test cook_accepts_current_executor_selection_flags ... ok
+test historical_cook_executor_flags_emit_the_migration_snapshot ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+     Running tests/agent_tool_dispatch.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/agent_tool_dispatch-a49eee2d2bdb44cb)
+
+running 6 tests
+test agent_tool_dispatch_outputs_raw_control_plane_validation_result ... ok
+test bound_captured_stream_keeps_trailing_tail_when_truncated ... ok
+test bound_captured_stream_retains_full_source_within_limit ... ok
+test agent_tool_dispatch_outputs_raw_denied_result_without_wrapper ... ok
+test agent_tool_github_issue_create_uses_body_file_for_shell_sensitive_markdown ... ok
+test agent_tool_dispatch_handles_workspace_write_and_read ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+     Running tests/audit_debt_workflow_test.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/audit_debt_workflow_test-ab3aa040ac519b95)
+
+running 19 tests
+test audit_corpus_gate_accepts_a_recorded_review_audit_payload ... ok
+test audit_corpus_gate_rejects_a_collapsed_but_non_empty_corpus ... ok
+test audit_corpus_gate_rejects_an_empty_corpus ... ok
+test audit_corpus_gate_fails_closed_without_an_output_directory ... ok
+test audit_corpus_gate_rejects_the_historical_audit_json_filename ... ok
+test post_merge_failures_are_attributable_to_a_merge ... ok
+test post_merge_full_audit_gate_blocks_on_an_empty_corpus ... ok
+test audit_corpus_gate_rejects_the_umbrella_review_shape ... ok
+test post_merge_full_audit_gate_can_actually_see_the_tree ... ok
+test post_merge_gates_are_blocking ... ok
+test post_merge_gates_never_mutate_the_repository ... ok
+test post_merge_gates_run_at_full_scope ... ok
+test post_merge_gates_run_the_release_blocking_command_set ... ok
+test reporting_only_audit_verdict_carries_a_follow_up_issue ... ok
+test post_merge_gates_share_a_single_build ... ok
+test scheduled_debt_triage_remains_non_blocking_and_separate ... ok
+test superseded_post_merge_runs_are_cancelled ... ok
+test audit_corpus_gate_surfaces_a_failed_audit_instead_of_blaming_missing_output ... ok
+test audit_corpus_gate_reports_the_floor_it_applied ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/audit_source_policy_config_test.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/audit_source_policy_config_test-648fa5f5f55c4b18)
+
+running 8 tests
+test every_configured_term_declares_a_supported_match_mode ... ok
+test lint_suppression_attributes_stay_allowlisted ... ok
+test new_term_findings_are_covered_by_the_baseline_policy_section ... ok
+test ci_provider_terms_are_configured ... ok
+test org_and_product_identity_terms_are_configured ... ok
+test package_manager_and_install_channel_terms_are_configured ... ok
+test rust_toolchain_terms_are_configured ... ok
+test toolchain_output_formats_are_configured_in_regex_mode ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/cleanup_next_actions.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/cleanup_next_actions-db9defa24f930a38)
+
+running 3 tests
+test aggregate_repo_artifact_next_action_excludes_unignored_work ... ok
+test aggregate_runner_binary_cache_next_action_applies_owned_candidate ... ok
+test aggregate_repo_artifact_next_action_runs_outside_a_checkout ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests/cook_lab_handoff_test.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/cook_lab_handoff_test-4b8c724ddb8d0cd8)
+
+running 5 tests
+test cook_rejects_queue_only_before_worktree_resolution ... ok
+test cook_rejects_invalid_controller_transport_before_worktree_resolution ... ok
+test cook_help_does_not_advertise_queue_only ... ok
+test non_tty_client_must_choose_one_lab_observation_mode ... ok
+test cook_rejects_local_detach_before_worktree_resolution has been running for over 60 seconds
+test cook_rejects_local_detach_before_worktree_resolution ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 78.33s
+
+     Running tests/deps_test.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/deps_test-7bdd8ca2392e7269)
+
+running 11 tests
+test non_composer_component_returns_clear_unsupported_error ... ok
+test stack_plan_dedupes_cycles_by_edge_identity ... ok
+test stack_apply_dry_run_passes_constraint_to_default_provider_update ... ok
+test stack_plan_compatibility_fields_are_serialized_from_homeboy_plan ... ok
+test stack_plan_walks_declared_downstream_edges_in_order ... ok
+test status_prefers_neutral_adapter_manifest_over_builtin_manifests ... ok
+test neutral_adapter_manifest_discovers_install_command_and_runs_update_install ... ok
+test update_with_constraint_changes_manifest_and_lock_for_local_path_package ... ignored, integration test mutates real composer manifests/locks and shells out to composer
+test stack_plan_derives_edges_from_provider_reported_dependency_identities ... ok
+test stack_plan_keeps_explicit_edge_config_when_provider_edge_matches ... ok
+provider buildtest update_runs_component_provider_install_and_optional_rebuild ... ok
+
+test result: ok. 10 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 3.47s
+
+     Running tests/output_dispatch.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/output_dispatch-952dd36b4bd7c4e6)
+
+running 1 test
+test adapter_backed_contract_preserves_stdout_and_output_file_envelopes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running tests/output_errors.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/output_errors-6604c23c6b5614dd)
+
+running 6 tests
+test command_owned_output_path_is_not_rejected_as_global_format ... ok
+test remote_command_failed_creates_error_with_details ... ok
+test compact_runner_status_includes_summary_and_full_continuation ... ok
+test full_runner_status_includes_lab_diagnostics ... ok
+test explicit_json_path_is_allowed ... ok
+test validation_error_writes_json_output_file ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.72s
+
+     Running tests/product_identity_test.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/product_identity_test-b204ab2cf66a3b2b)
+
+running 1 test
+test shipped_root_binary_reports_root_version_and_source_commit ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/promotion_provider_stdin.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/promotion_provider_stdin-b13b906c9cf6965e)
+
+running 1 test
+test promotion_provider_reads_its_request_from_process_stdin ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/readonly_cli_lock_test.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/readonly_cli_lock_test-83656eeffa347b74)
+
+running 1 test
+hint: Using 'master' as the name for the initial branch. This default branch name
+hint: will change to "main" in Git 3.0. To configure the initial branch name
+hint: to use in all of your new repositories, which will suppress this warning,
+hint: call:
+hint:
+hint: 	git config --global init.defaultBranch <name>
+hint:
+hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+hint: 'development'. The just-created branch can be renamed via this command:
+hint:
+hint: 	git branch -m <name>
+hint:
+hint: Disable this message with "git config set advice.defaultBranchName false"
+Initialized empty Git repository in /tmp/hb-test-KVwm3Y/repository/.git/
+test read_only_cli_commands_complete_while_runtime_promotion_is_held ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.76s
+
+     Running tests/redaction_test.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/redaction_test-abedc1fee40c3aa4)
+
+running 2 tests
+test redaction_free_functions_use_default_policy ... ok
+test redaction_public_api_supports_downstream_evidence_hygiene ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/refactor_transform_test.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/refactor_transform_test-89dd35378f5d4095)
+
+running 3 tests
+test transform_output_can_include_full_match_details ... ok
+test rename_defaults_to_cwd_git_worktree_without_component_metadata ... ok
+test transform_output_samples_match_details_at_scale ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.95s
+
+     Running tests/release_expected_assets_test.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/release_expected_assets_test-84122a02e4ab3ada)
+
+running 5 tests
+test recovery_records_control_binary_and_release_target_provenance_separately ... ok
+test the_plan_job_still_fails_closed_when_cargo_dist_plans_no_artifacts ... ok
+test expected_assets_reproduce_the_real_published_cargo_dist_inventory ... ok
+test planned_artifacts_alone_are_not_the_published_inventory ... ok
+test the_stranded_v0_321_1_draft_matches_the_expected_inventory_exactly ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/release_workflow_test.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/release_workflow_test-00e98049bba06074)
+
+running 29 tests
+test release_audit_is_advisory_without_losing_raw_failure_outcome ... ok
+test release_audit_preserves_changed_since_baseline_consumption ... ok
+test release_ci_disables_homeboy_update_checks ... ok
+test release_artifact_builds_survive_recovery_skips_but_fail_closed_on_required_builds ... ok
+test release_concurrency_scopes_recovery_runs_to_the_requested_tag ... ok
+test release_finish_head_pipeline_uses_homeboy_action_head_inputs ... ok
+test release_fails_loudly_when_prepared_release_does_not_publish ... ok
+test release_fast_path_keeps_every_publication_verification ... ok
+test release_host_checkout_fetches_full_history_for_finalizer_ancestry_validation ... ok
+test release_preflight_validates_the_private_workspace_build_before_mutating_release_state ... ok
+test release_prepare_and_publish_preflight_runner_disk ... ok
+test release_planning_skips_quality_gates_already_owned_by_gate_jobs ... ok
+test release_prepare_uses_prepared_output_to_unlock_publish_jobs ... ok
+test release_prepare_waits_for_command_policy_not_raw_gates ... ok
+test release_quality_policy_checks_out_event_commit_before_running_script ... ok
+test release_quality_policy_defaults_to_lint_and_test_blocking ... ok
+test release_recovery_bypasses_quality_gates_and_still_prepares ... ok
+test release_recovery_propagates_dist_opt_in_and_dirty_allowance_through_all_dist_phases ... ok
+test release_recovery_records_control_binary_lineage_against_the_release_target ... ok
+test release_recovery_restores_only_the_cargo_dist_overlay_before_finalization ... ok
+test release_shared_binary_uses_the_publication_host_runtime_baseline ... ok
+test release_recovery_skips_the_artifact_rebuild_when_the_draft_is_already_complete ... ok
+test release_test_gate_exposes_release_blocking_policy_to_rust_tests ... ok
+test release_test_gate_does_not_repeat_separate_lint_gate ... ok
+test release_workflow_declared_drift_maintenance_is_narrow_not_generic ... ok
+test release_workflow_publishes_binary_channels_not_crates_io ... ok
+test release_workflow_has_no_generic_source_autofix ... ok
+test release_quality_policy_blocks_review_test_failures_and_allows_passing_gates ... ok
+test release_omits_unused_windows_artifacts_while_ci_checks_windows_source ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+
+     Running tests/report_browser_evidence_compare_test.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/report_browser_evidence_compare_test-f1bbddefac0effe7)
+
+running 8 tests
+test can_include_local_paths_when_requested ... ok
+test compares_browser_evidence_across_multiple_run_dirs ... ok
+test compares_repeats_matrix_variants_and_browser_deltas ... ok
+test promotes_declared_browser_summary_metrics ... ok
+test keeps_runtime_and_artifact_manifests_out_of_variant_matrix ... ok
+test ingests_metrics_from_declared_artifact_files ... ok
+test surfaces_failed_advisory_assertions_in_json_and_markdown ... ok
+test can_run_visual_compare_through_declared_provider ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running tests/report_compare_test.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/report_compare_test-8cc2e5c1022ea892)
+
+running 2 tests
+test report_compare_summarizes_file_artifact_deltas ... ok
+test report_compare_accepts_run_artifact_refs ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/report_failure_digest_test.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/report_failure_digest_test-afab871850030c1c)
+
+running 22 tests
+test digest_rendering_tests::error_statuses_render_command_sections_and_classify_as_failures ... ok
+test digest_rendering_tests::caps_lint_findings_in_failure_digest ... ok
+test digest_rendering_tests::classifies_failures_as_branch_introduced_when_baseline_has_distinct_failures ... ok
+test digest_rendering_tests::classifies_failures_as_baseline_present_when_all_head_failures_match_baseline ... ok
+test digest_rendering_tests::missing_json_renders_explicit_structured_details_unavailable ... ok
+test digest_rendering_tests::execution_failed_state_remains_human_needed_without_quality_findings ... ok
+test digest_rendering_tests::matrix_execution_states_render_quality_findings_separately_from_execution_failure ... ok
+test digest_rendering_tests::renders_lint_failure_digest_from_fixture ... ok
+test digest_rendering_tests::renders_mixed_failures_after_autofix_attempted_as_human_needed ... ok
+test digest_rendering_tests::renders_mixed_failures_with_autofix_enabled_not_attempted ... ok
+test digest_rendering_tests::renders_test_failure_digest_from_fixture ... ok
+test digest_rendering_tests::reports_inconclusive_when_baseline_artifact_cannot_be_parsed ... ok
+test digest_rendering_tests::renders_audit_failure_digest_from_fixture ... ok
+test digest_rendering_tests::reports_baseline_red_with_command_and_artifact_evidence ... ok
+test trace_bench_digest_tests::renders_tooling_metadata_from_json_file ... ok
+test trace_bench_digest_tests::renders_bench_status_and_artifact_paths ... ok
+test trace_bench_digest_tests::renders_sample_runtime_partial_manifest_and_failure_phase ... ok
+test trace_bench_digest_tests::renders_trace_error_status_from_failure_envelope ... ok
+test trace_bench_digest_tests::renders_trace_pass_status_and_artifact_paths ... ok
+test trace_bench_digest_tests::renders_trace_fail_status_without_inlining_artifact_content ... ok
+test trace_bench_digest_tests::renders_trace_span_summaries_with_metadata_and_missing_endpoints ... ok
+test trace_bench_digest_tests::renders_trace_toolchain_provenance ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/report_performance_digest_test.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/report_performance_digest_test-746eb38a0a92a972)
+
+running 5 tests
+test missing_optional_artifacts_degrade_gracefully ... ok
+test renders_managed_service_preview_url_artifact_metadata ... ok
+test reads_persisted_uuid_prefixed_artifacts ... ok
+test renders_max_peak_rss_from_multi_run_memory ... ok
+test renders_resource_summary_budget_findings_and_baseline_health ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/reverse_cook_queue_acceptance.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/reverse_cook_queue_acceptance-fde0b7dcd4346e6e)
+
+running 1 test
+test detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once has been running for over 60 seconds
+test detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 470.21s
+
+     Running tests/rig_local_artifact_registration.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/rig_local_artifact_registration-c2162035c279d034)
+
+running 1 test
+test failed_nested_cli_registration_is_visible_to_runs_artifacts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+     Running tests/self_checks_test.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/self_checks_test-533ba8b0ced94236)
+
+running 5 tests
+test missing_extension_and_self_check_keeps_existing_error ... ok
+lint self-check ran
+visible failure stderr
+visible failure stdout
+test lint_runs_declared_self_check_without_extensions ... ok
+test self-check ran
+test test_runs_declared_self_check_without_extensions ... ok
+test non_zero_self_check_fails_command_and_surfaces_output ... ok
+test json_self_check_failure_reports_bounded_large_output_metadata ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+     Running tests/stale_linked_rig_recovery.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/stale_linked_rig_recovery-605a40023ad9eceb)
+
+running 3 tests
+test hermetic_fixture_command_cannot_use_operator_paths_or_installed_homeboy ... ok
+test bench_recovery_preserves_conflicting_user_owned_rig ... ok
+test bench_repairs_missing_linked_rig_source_from_path_override ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+
+     Running tests/wp_codebox_test_artifact_evidence.rs (/home/runner/.local/share/homeboy/cargo-targets/homeboy-b706ed1ffed4/debug/deps/wp_codebox_test_artifact_evidence-20e3bf0f352f4135)
+
+running 1 test
+test failing_provider_test_artifacts_remain_retrievable_after_scratch_cleanup ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.06s
+
