@@ -178,12 +178,41 @@ mod tests {
             .run_id
     }
 
-    fn controller_admission_stamped(run_id: &str) -> bool {
+    /// A value no reconciling read can produce, planted in the metadata key
+    /// that `status()` rewrites on every record it refreshes.
+    const UNREFRESHED_SENTINEL: &str = "homeboy/test/unrefreshed-admission";
+
+    /// Mark a durable record as not-yet-refreshed.
+    ///
+    /// The presence of `controller_admission` is *not* evidence that a read
+    /// refreshed a record: `submit_plan` stamps that key when the record is
+    /// created (`b9618df8b`), so it is already there the moment `seed_record`
+    /// returns. That invalidated the original witness and made these two tests
+    /// fail from the day they landed (#10658).
+    ///
+    /// Overwriting the key with a sentinel restores the intended evidence:
+    /// `status()` replaces it unconditionally, so the sentinel surviving means
+    /// no refreshing — and therefore no writing — pass touched the record.
+    fn mark_unrefreshed(run_id: &str) {
+        crate::agent_task_lifecycle::lifecycle_store::mutate_record(run_id, |record| {
+            record.metadata["controller_admission"] = Value::String(UNREFRESHED_SENTINEL.into());
+            true
+        })
+        .expect("stamp unrefreshed sentinel")
+        .expect("durable record");
+        assert!(
+            is_unrefreshed(run_id),
+            "sentinel must be durable before it can witness anything"
+        );
+    }
+
+    fn is_unrefreshed(run_id: &str) -> bool {
         agent_task_lifecycle::exact_record(run_id)
             .expect("durable record")
             .metadata
             .get("controller_admission")
-            .is_some()
+            .and_then(Value::as_str)
+            == Some(UNREFRESHED_SENTINEL)
     }
 
     #[test]
@@ -200,14 +229,15 @@ mod tests {
     fn probe_by_id_resolves_one_record_without_scanning_or_writing() {
         // #10308: resolving a single agent-task id must be an indexed read, not
         // a full-corpus refresh. The scanning path refreshes every record
-        // through `status()`, which stamps `controller_admission` on each one —
-        // so the absence of that stamp is durable evidence that neither the
-        // probed record nor its siblings were scanned or written.
+        // through `status()`, which rewrites `controller_admission` on each one
+        // — so a sentinel planted in that key surviving the probe is durable
+        // evidence that neither the probed record nor its siblings were scanned
+        // or written.
         with_isolated_home(|_| {
             let target = seed_record("run-probe-target");
             let sibling = seed_record("run-probe-sibling");
-            assert!(!controller_admission_stamped(&target));
-            assert!(!controller_admission_stamped(&sibling));
+            mark_unrefreshed(&target);
+            mark_unrefreshed(&sibling);
 
             let item = AgentTaskActivityProvider
                 .probe_by_id(&target)
@@ -221,14 +251,16 @@ mod tests {
                 item.refs.agent_task_run_id.as_deref(),
                 Some(target.as_str())
             );
-            assert!(!controller_admission_stamped(&target));
-            assert!(!controller_admission_stamped(&sibling));
+            assert!(is_unrefreshed(&target));
+            assert!(is_unrefreshed(&sibling));
 
             // Control: the scanning path the probe replaces does refresh — and
             // therefore write — every record, which is the cost being avoided.
+            // Without this the assertions above would also hold for a witness
+            // that simply never changes.
             agent_task_lifecycle::list_records().expect("records listed");
-            assert!(controller_admission_stamped(&target));
-            assert!(controller_admission_stamped(&sibling));
+            assert!(!is_unrefreshed(&target));
+            assert!(!is_unrefreshed(&sibling));
         });
     }
 
@@ -284,13 +316,14 @@ mod tests {
         with_isolated_home(|_| {
             register();
             let run_id = seed_record("run-show-probe");
+            mark_unrefreshed(&run_id);
 
             let report = homeboy_core::activity::show_activity(&run_id).expect("show activity");
 
             assert_eq!(report.items.len(), 1);
             assert_eq!(report.items[0].id, run_id);
             assert_eq!(report.items[0].source_store, "agent-task.lifecycle");
-            assert!(!controller_admission_stamped(&run_id));
+            assert!(is_unrefreshed(&run_id));
         });
     }
 }

@@ -1929,8 +1929,13 @@ mod tests {
         assert_eq!(report.environment.inherited[0].value, "kept");
     }
 
+    /// Toolchain preflight is declared, never inferred. A gate command is a
+    /// shell program: its first token can be a builtin, a provider-owned alias,
+    /// or part of a compound expression, so probing it as an executable would
+    /// change what the gate means. `c3462d472` made preflight opt-in for that
+    /// reason and this test tracked the removed inference until #10658.
     #[test]
-    fn existing_gate_commands_are_automatic_toolchain_requirements() {
+    fn only_declared_gate_toolchains_are_preflight_requirements() {
         let options = VerifyGateOptions {
             verify: vec!["cargo test --lib".to_string()],
             private_verify: vec!["npm test".to_string()],
@@ -1943,17 +1948,27 @@ mod tests {
 
         assert_eq!(
             options.required_toolchains(),
-            vec![
-                AgentTaskGateToolchainRequirement {
-                    command: "cargo".to_string(),
-                    probe_arguments: vec!["metadata".to_string()],
-                },
-                AgentTaskGateToolchainRequirement {
-                    command: "npm".to_string(),
-                    probe_arguments: vec!["--version".to_string()],
-                },
-            ]
+            vec![AgentTaskGateToolchainRequirement {
+                command: "cargo".to_string(),
+                probe_arguments: vec!["metadata".to_string()],
+            }]
         );
+    }
+
+    /// A gate command whose first token is a shell builtin or a compound
+    /// expression declares no toolchain at all. Nothing is probed for it.
+    #[test]
+    fn shell_gate_commands_contribute_no_inferred_toolchain() {
+        let options = VerifyGateOptions {
+            verify: vec![
+                "test -f Cargo.toml && cargo test --lib".to_string(),
+                "[ -d target ]".to_string(),
+            ],
+            private_verify: vec!["npm test".to_string()],
+            ..VerifyGateOptions::default()
+        };
+
+        assert!(options.required_toolchains().is_empty());
     }
 
     #[cfg(unix)]
