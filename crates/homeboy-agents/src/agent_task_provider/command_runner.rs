@@ -551,6 +551,33 @@ pub(super) fn run_materialized_provider_command_once(
             json!({ "provider": provider.id, "command": command }),
         );
     };
+    // A signal-terminated executor and an executor that ran to completion
+    // without emitting an outcome are different failures with different
+    // causes. Collapsing an external kill (OOM killer, runner/daemon shutdown,
+    // operator SIGTERM) into `provider_empty_stdout` points the operator at
+    // the provider when the real cause was the kill. Homeboy's own deadline
+    // and liveness kills return above, so a signal here means termination was
+    // initiated outside this wait loop.
+    if let Some(signal) = exit_signal(&status) {
+        if serde_json::from_str::<AgentTaskOutcome>(&stdout).is_err() {
+            return signal_termination_outcome(
+                request,
+                provider,
+                &command,
+                &status,
+                signal,
+                &stdout,
+                &stderr,
+                SignalTerminationContext {
+                    elapsed_ms: started.elapsed().as_millis(),
+                    requested_timeout_ms,
+                    process_timeout_ms: process_timeout.as_millis(),
+                    liveness_timeout_ms: request.limits.liveness_timeout_ms,
+                    execution_deadline_unix_ms: request.limits.execution_deadline_unix_ms,
+                },
+            );
+        }
+    }
     if stdout.is_empty() {
         return failure_outcome(
             request,
@@ -993,6 +1020,182 @@ fn executor_process_diagnostic_data(
     })
 }
 
+/// Timing/budget context captured at the moment a provider process was
+/// observed to have died from a signal. Recorded verbatim in the diagnostic so
+/// an operator can tell "no deadline was configured" apart from "a deadline
+/// expired" without re-deriving it from the aggregate.
+pub(super) struct SignalTerminationContext {
+    pub elapsed_ms: u128,
+    pub requested_timeout_ms: u64,
+    pub process_timeout_ms: u128,
+    pub liveness_timeout_ms: Option<u64>,
+    pub execution_deadline_unix_ms: Option<u64>,
+}
+
+/// Human-readable name for the POSIX signals a provider process realistically
+/// dies from. Unknown signals fall back to their number so the diagnostic
+/// never loses the raw value.
+fn signal_name(signal: i32) -> Option<&'static str> {
+    Some(match signal {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        4 => "SIGILL",
+        6 => "SIGABRT",
+        8 => "SIGFPE",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        13 => "SIGPIPE",
+        14 => "SIGALRM",
+        15 => "SIGTERM",
+        24 => "SIGXCPU",
+        25 => "SIGXFSZ",
+        _ => return None,
+    })
+}
+
+fn signal_label(signal: i32) -> String {
+    match signal_name(signal) {
+        Some(name) => format!("signal {signal} ({name})"),
+        None => format!("signal {signal}"),
+    }
+}
+
+/// Best-effort attribution of who ended the process. Homeboy's own deadline and
+/// liveness kills never reach this path, so anything observed here was
+/// initiated outside the provider wait loop. The specific signal still narrows
+/// the likely source, which is the difference between "look at the provider"
+/// and "look at host memory pressure".
+fn signal_termination_initiator(signal: i32) -> &'static str {
+    match signal {
+        9 => "external_sigkill",
+        15 => "external_sigterm",
+        2 | 3 => "external_interrupt",
+        1 => "external_hangup",
+        4 | 6 | 8 | 11 => "provider_crash",
+        _ => "external_signal",
+    }
+}
+
+fn signal_termination_hints(signal: i32, stdout: &str, stderr: &str) -> Vec<String> {
+    let mut hints = Vec::new();
+    match signal {
+        9 => {
+            hints.push("SIGKILL is what the Linux OOM killer sends: check `dmesg -T | grep -i -e oom -e 'killed process'` and cgroup `memory.events` on the host or CI runner that ran this provider.".to_string());
+            hints.push("SIGKILL cannot be trapped, so no provider-side diagnostics exist. Re-run with more memory headroom or lower provider concurrency before blaming the provider.".to_string());
+        }
+        15 | 2 | 3 | 1 => {
+            hints.push("Termination was requested from outside this Homeboy wait loop (operator, supervisor, runner/daemon shutdown, CI job cancellation, or a parent process-group kill).".to_string());
+            hints.push("Check the supervising process (systemd unit, CI job timeout, terminal that owns the process group) before treating this as a provider defect.".to_string());
+        }
+        4 | 6 | 8 | 11 => {
+            hints.push("This signal indicates the provider process itself crashed (illegal instruction, abort, arithmetic fault, or segfault). Capture a core dump or provider-side logs.".to_string());
+        }
+        _ => {}
+    }
+    if stdout.is_empty() && stderr.is_empty() {
+        hints.push("No stdout/stderr was captured before termination, which is expected for an uncatchable or immediate kill. Absence of provider output is not evidence of a provider defect here.".to_string());
+    }
+    hints
+}
+
+/// Classify a provider process that died from a signal without leaving a
+/// parseable outcome. Deliberately reuses the existing `provider_error` status
+/// and `provider` failure classification: the wire enums are consumed by
+/// independently released extensions, so this fix is additive at the schema
+/// level and only replaces the misleading diagnostic class/message/data.
+#[allow(clippy::too_many_arguments)]
+fn signal_termination_outcome(
+    request: &AgentTaskRequest,
+    provider: &AgentTaskExecutorProvider,
+    command: &str,
+    status: &std::process::ExitStatus,
+    signal: i32,
+    stdout: &str,
+    stderr: &str,
+    context: SignalTerminationContext,
+) -> AgentTaskOutcome {
+    let mut data = executor_process_diagnostic_data(
+        &provider.id,
+        &provider.backend,
+        command,
+        status,
+        stdout,
+        stderr,
+        &provider_output_redactions(request, provider),
+    );
+    if let Some(object) = data.as_object_mut() {
+        object.insert(
+            "signal_name".to_string(),
+            signal_name(signal)
+                .map(|name| Value::String(name.to_string()))
+                .unwrap_or(Value::Null),
+        );
+        object.insert(
+            "termination_initiator".to_string(),
+            Value::String(signal_termination_initiator(signal).to_string()),
+        );
+        object.insert(
+            "homeboy_initiated_termination".to_string(),
+            Value::Bool(false),
+        );
+        object.insert(
+            "likely_oom_kill".to_string(),
+            Value::Bool(signal == 9 && stdout.is_empty() && stderr.is_empty()),
+        );
+        object.insert(
+            "elapsed_ms".to_string(),
+            Value::from(u64::try_from(context.elapsed_ms).unwrap_or(u64::MAX)),
+        );
+        object.insert(
+            "timeout_ms".to_string(),
+            Value::from(context.requested_timeout_ms),
+        );
+        object.insert(
+            "process_timeout_ms".to_string(),
+            Value::from(u64::try_from(context.process_timeout_ms).unwrap_or(u64::MAX)),
+        );
+        object.insert(
+            "liveness_timeout_ms".to_string(),
+            context
+                .liveness_timeout_ms
+                .map(Value::from)
+                .unwrap_or(Value::Null),
+        );
+        object.insert(
+            "execution_deadline_unix_ms".to_string(),
+            context
+                .execution_deadline_unix_ms
+                .map(Value::from)
+                .unwrap_or(Value::Null),
+        );
+        object.insert(
+            "signal_remediation_hints".to_string(),
+            Value::from(signal_termination_hints(signal, stdout, stderr)),
+        );
+    }
+
+    let stdout_note = if stdout.is_empty() {
+        "no stdout was captured".to_string()
+    } else {
+        format!("{} bytes of unparseable stdout were captured", stdout.len())
+    };
+
+    failure_outcome(
+        request,
+        AgentTaskOutcomeStatus::ProviderError,
+        AgentTaskFailureClassification::Provider,
+        "agent_task.provider_signal_terminated",
+        format!(
+            "provider '{}' was terminated by {} after {}ms before producing an outcome ({stdout_note}); termination was not initiated by Homeboy's provider deadline or liveness watchdog",
+            provider.id,
+            signal_label(signal),
+            context.elapsed_ms
+        ),
+        data,
+    )
+}
+
 fn surface_provider_process_failure(
     outcome: &mut AgentTaskOutcome,
     request: &AgentTaskRequest,
@@ -1024,7 +1227,7 @@ fn surface_provider_process_failure(
     let exit_description = status
         .code()
         .map(|code| format!("status {code}"))
-        .or_else(|| exit_signal(status).map(|signal| format!("signal {signal}")))
+        .or_else(|| exit_signal(status).map(signal_label))
         .unwrap_or_else(|| "unknown status".to_string());
     let stderr_tail = data
         .get("stderr")

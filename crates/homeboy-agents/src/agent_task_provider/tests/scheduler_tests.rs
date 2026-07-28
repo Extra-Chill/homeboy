@@ -459,6 +459,82 @@ fn provider_empty_stdout_captures_bounded_stderr_and_exit_context() {
         .any(|reference| reference.kind == "executor-result"));
 }
 
+/// A provider killed by an external SIGTERM must not be reported as
+/// "the provider produced no output". The two failures have different causes
+/// and different remediations, and collapsing them sends operators at the
+/// provider when the real cause was the kill.
+#[cfg(unix)]
+#[test]
+fn provider_external_sigterm_is_not_reported_as_empty_stdout() {
+    let command = format!(
+        "node {}",
+        script("process.kill(process.pid, 'SIGTERM'); setInterval(() => {}, 1000);")
+    );
+    let (request, provider) = request("task-external-sigterm", command);
+
+    let outcome = run_provider_command(&request, &provider, None);
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
+    assert_eq!(
+        outcome.diagnostics[0].class, "agent_task.provider_signal_terminated",
+        "{:?}",
+        outcome.diagnostics
+    );
+    let data = &outcome.diagnostics[0].data;
+    assert_eq!(data["signal"], json!(15));
+    assert_eq!(data["signal_name"], json!("SIGTERM"));
+    assert_eq!(data["exit_code"], serde_json::Value::Null);
+    assert_eq!(data["termination_initiator"], json!("external_sigterm"));
+    assert_eq!(data["homeboy_initiated_termination"], json!(false));
+    assert_eq!(data["likely_oom_kill"], json!(false));
+    assert!(data["elapsed_ms"].is_u64(), "{data}");
+    assert_eq!(data["execution_deadline_unix_ms"], serde_json::Value::Null);
+    assert!(outcome
+        .summary
+        .as_deref()
+        .expect("summary")
+        .contains("SIGTERM"));
+}
+
+/// SIGKILL with no captured output is the signature of the Linux OOM killer,
+/// which is a real failure mode on both this host and CI runners. The
+/// diagnostic has to say so instead of blaming the provider for silence it
+/// could not have avoided.
+#[cfg(unix)]
+#[test]
+fn provider_sigkill_records_probable_oom_context() {
+    let command = format!(
+        "node {}",
+        // Distinct body length keeps this script file separate from the
+        // SIGTERM script, which is keyed by body length.
+        script("process.kill(process.pid, 'SIGKILL'); setInterval(() => {}, 10_000);")
+    );
+    let (request, provider) = request("task-external-sigkill", command);
+
+    let outcome = run_provider_command(&request, &provider, None);
+
+    assert_eq!(
+        outcome.diagnostics[0].class, "agent_task.provider_signal_terminated",
+        "{:?}",
+        outcome.diagnostics
+    );
+    let data = &outcome.diagnostics[0].data;
+    assert_eq!(data["signal"], json!(9));
+    assert_eq!(data["signal_name"], json!("SIGKILL"));
+    assert_eq!(data["termination_initiator"], json!("external_sigkill"));
+    assert_eq!(data["likely_oom_kill"], json!(true));
+    let hints = data["signal_remediation_hints"]
+        .as_array()
+        .expect("signal remediation hints");
+    assert!(
+        hints
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(|hint| hint.contains("OOM")),
+        "{hints:?}"
+    );
+}
+
 #[test]
 fn provider_empty_stdout_records_failed_run_with_executor_evidence() {
     homeboy_core::test_support::with_isolated_home(|_| {
