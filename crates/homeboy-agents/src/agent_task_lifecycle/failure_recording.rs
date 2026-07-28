@@ -653,6 +653,7 @@ pub(crate) fn record_aggregate(
     crate::controller_scratch::finalize_run(&record.run_id)?;
     store::write_aggregate_and_record(record, aggregate)?;
     record_terminal_artifact_projection(record, aggregate)?;
+    update_cook_candidate_after_completion(record, aggregate, None)?;
     Ok(record.clone())
 }
 
