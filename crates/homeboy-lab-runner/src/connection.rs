@@ -2734,6 +2734,10 @@ pub fn disconnect(runner_id: &str) -> Result<RunnerDisconnectReport> {
     stop_transport_recovery::disconnect_with_force(runner_id, false)
 }
 
+pub fn disconnect_local_recovery(runner_id: &str) -> Result<RunnerDisconnectReport> {
+    stop_transport_recovery::disconnect_local_recovery(runner_id)
+}
+
 #[cfg(test)]
 mod indexed_inspection_tests {
     #[test]
