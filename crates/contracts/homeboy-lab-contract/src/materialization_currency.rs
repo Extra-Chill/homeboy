@@ -253,7 +253,11 @@ pub fn compare_identities(
             recorded.algorithm, observed.algorithm
         ));
     }
-    compare_content_digests(subject, Some(&recorded.digest), Some(&observed.digest))
+    compare_content_digests(
+        subject,
+        Some(recorded.digest.as_str()),
+        Some(observed.digest.as_str()),
+    )
 }
 
 /// Compare a recorded and observed content digest.
