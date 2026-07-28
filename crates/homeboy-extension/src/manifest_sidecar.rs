@@ -55,6 +55,7 @@ fn default_structured_sidecar_path(name: &str) -> String {
         "lint.producers" => run_dir::files::LINT_PRODUCERS,
         "test.results" => run_dir::files::TEST_RESULTS,
         "test.failures" => run_dir::files::TEST_FAILURES,
+        "test.durations" => run_dir::files::TEST_DURATIONS,
         "test.coverage" => run_dir::files::COVERAGE,
         "bench.results" => run_dir::files::BENCH_RESULTS,
         "fuzz.results" => run_dir::files::FUZZ_RESULTS,
@@ -76,7 +77,7 @@ fn default_structured_sidecar_producer(name: &str) -> Option<String> {
 
     match name {
         "lint.findings" | "lint.producers" => Some("lint"),
-        "test.results" | "test.failures" | "test.coverage" => Some("test"),
+        "test.results" | "test.failures" | "test.durations" | "test.coverage" => Some("test"),
         "bench.results" => Some("bench"),
         "fuzz.results" => Some("fuzz"),
         "trace.results" | "trace.artifacts" => Some("trace"),

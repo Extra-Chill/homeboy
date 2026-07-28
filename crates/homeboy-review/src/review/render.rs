@@ -21,7 +21,7 @@ use homeboy_code_audit::AuditCommandOutput;
 use homeboy_core::ci_profile::CiRunOutput;
 use homeboy_core::top_n::top_n_by;
 use homeboy_extension::lint::LintCommandOutput;
-use homeboy_extension::test::TestCommandOutput;
+use homeboy_extension::test::{TestCommandOutput, TestDurations, TestUnitDuration};
 use homeboy_extension::ExtensionPhaseTiming;
 use homeboy_finding::HomeboyFinding;
 
@@ -33,6 +33,9 @@ mod audit;
 /// Maximum bullets shown per stage. Anything beyond is collapsed into a
 /// `(... N more)` hint so PR comments stay skim-friendly.
 const TOP_N: usize = 10;
+
+/// How many timed test units the duration block lists.
+const SLOWEST_TESTS_REPORTED: usize = 5;
 
 /// Render a `ReviewCommandOutput` into a PR-comment-ready markdown body.
 pub fn render_pr_comment(output: &ReviewCommandOutput) -> String {
@@ -180,6 +183,9 @@ fn render_test_stage(out: &mut String, stage: &ReviewStage<TestCommandOutput>) {
     render_stage_header(out, stage);
     if let Some(ref output) = stage.output {
         render_test_body(out, output);
+        if let Some(ref durations) = output.test_durations {
+            render_test_durations(out, durations);
+        }
         render_extension_phase_timings(out, &output.extension_phase_timings);
     }
     render_stage_hint(out, stage);
@@ -287,6 +293,100 @@ fn render_test_findings(out: &mut String, findings: &[HomeboyFinding]) {
     }
 }
 
+/// Render the test stage's duration block.
+///
+/// Rendered after the pass/fail body and never merged into it: a slow test and
+/// a failing test are different findings with different fixes, and collapsing
+/// them would make a suite that is merely expensive look broken. Nothing here
+/// contributes to the stage's finding count or its verdict. (#10655)
+fn render_test_durations(out: &mut String, durations: &TestDurations) {
+    if durations.is_empty() {
+        return;
+    }
+
+    if !durations.complete {
+        let _ = writeln!(
+            out,
+            "- :hourglass: _Timings are **incomplete**{}_",
+            durations
+                .incomplete_reason
+                .as_deref()
+                .map(|reason| format!(" — {reason}"))
+                .unwrap_or_default()
+        );
+    }
+
+    for finding in durations.slow.iter().take(TOP_N) {
+        let _ = writeln!(out, "- :snail: **SLOW** — {}", finding.message);
+    }
+    if durations.slow.len() > TOP_N {
+        let _ = writeln!(
+            out,
+            "- _… {} more duration finding(s)_",
+            durations.slow.len() - TOP_N
+        );
+    }
+
+    // A binary whose time is already accounted for by a per-test sample is
+    // skipped, so the same seconds are never listed twice under two names.
+    let localised: std::collections::BTreeSet<&str> = durations
+        .tests
+        .iter()
+        .filter_map(|unit| unit.binary.as_deref())
+        .collect();
+    let mut timed: Vec<&TestUnitDuration> = durations
+        .tests
+        .iter()
+        .chain(
+            durations
+                .binaries
+                .iter()
+                .filter(|unit| !localised.contains(unit.name.as_str())),
+        )
+        .filter(|unit| unit.seconds.is_some())
+        .collect();
+    if timed.is_empty() {
+        return;
+    }
+    timed.sort_by(|a, b| {
+        b.seconds
+            .partial_cmp(&a.seconds)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    let _ = writeln!(out, "- _Slowest tests:_");
+    for unit in timed.into_iter().take(SLOWEST_TESTS_REPORTED) {
+        let _ = writeln!(out, "  - {}", format_test_unit_duration(unit));
+    }
+
+    if let (Some(measured), Some(budget)) = (durations.measured_seconds, durations.budget_seconds) {
+        let _ = writeln!(
+            out,
+            "- _Measured suite time: {:.1}s of a {:.0}s budget_",
+            measured, budget
+        );
+    } else if let Some(measured) = durations.measured_seconds {
+        let _ = writeln!(out, "- _Measured suite time: {:.1}s_", measured);
+    }
+}
+
+fn format_test_unit_duration(unit: &TestUnitDuration) -> String {
+    let mut line = match unit.seconds {
+        Some(seconds) => format!("`{}` — {:.1}s", unit.name, seconds),
+        // An unmeasured unit is unknown, never zero. Say so rather than
+        // printing a number nobody measured.
+        None => format!("`{}` — duration unknown", unit.name),
+    };
+    if let Some(share) = unit.budget_share {
+        let _ = write!(line, "; {:.0}% of budget", share * 100.0);
+    }
+    if let Some(share) = unit.measured_share {
+        let _ = write!(line, "; {:.0}% of suite", share * 100.0);
+    }
+    line
+}
+
 fn audit_extension_phase_timings(output: &AuditCommandOutput) -> &[ExtensionPhaseTiming] {
     match output {
         AuditCommandOutput::Full {
@@ -382,7 +482,9 @@ mod tests {
     use homeboy_core::ci_profile::{CiContext, CiJobRunOutput, CiRunOutput, CiRunSelection};
     use homeboy_core::quality::{build_quality_plan, QualityPlanOptions};
     use homeboy_extension::lint::LintCommandOutput;
-    use homeboy_extension::test::{TestCommandOutput, TestCounts};
+    use homeboy_extension::test::{
+        SlowTestFinding, TestCommandOutput, TestCounts, TestDurations, TestUnitDuration,
+    };
     use homeboy_extension::CiJobMapping;
     use homeboy_extension::{PhaseReport, PhaseStatus, VerificationPhase};
     use homeboy_finding::HomeboyFinding;
@@ -602,6 +704,7 @@ mod tests {
                 failed,
                 skipped,
             }),
+            test_durations: None,
             findings: None,
             coverage: None,
             baseline_comparison: None,
@@ -626,6 +729,45 @@ mod tests {
             .line((idx + 10) as i64)
             .metadata("test_name", format!("tests::suite::case_{:02}", idx))
             .build()
+    }
+
+    fn slow_unit(name: &str, seconds: f64, budget_share: f64) -> TestUnitDuration {
+        let mut unit = TestUnitDuration::new(name, "binary-summary");
+        unit.seconds = Some(seconds);
+        unit.budget_share = Some(budget_share);
+        unit
+    }
+
+    fn durations_with_a_slow_test() -> TestDurations {
+        TestDurations {
+            phase_seconds: Some(600.0),
+            measured_seconds: Some(561.8),
+            budget_seconds: Some(1500.0),
+            binaries: vec![
+                slow_unit("tests/reverse_cook_queue_acceptance.rs", 470.21, 0.3135),
+                slow_unit("tests/cook_lab_handoff_test.rs", 78.33, 0.0522),
+            ],
+            slow: vec![SlowTestFinding {
+                rule: "slow-test-unit".to_string(),
+                name: "detached_cook_accepts_reverse_capacity_queue".to_string(),
+                binary: Some("tests/reverse_cook_queue_acceptance.rs".to_string()),
+                seconds: Some(470.21),
+                min_seconds: None,
+                budget_share: Some(0.3135),
+                measured_share: Some(0.837),
+                message: "`detached_cook_accepts_reverse_capacity_queue` ran 470.2s — 31% of the 1500s test budget".to_string(),
+                incomplete: false,
+            }],
+            ..TestDurations::default()
+        }
+    }
+
+    fn stage_test_passing_but_slow() -> ReviewStage<TestCommandOutput> {
+        let mut stage = stage_test_passing(450);
+        if let Some(output) = stage.output.as_mut() {
+            output.test_durations = Some(durations_with_a_slow_test());
+        }
+        stage
     }
 
     fn test_with_findings(total: usize) -> TestCommandOutput {
@@ -1063,5 +1205,85 @@ mod tests {
             "renderer must not emit a section header:\n{}",
             md
         );
+    }
+    #[test]
+    fn a_slow_test_is_reported_on_a_passing_stage() {
+        let mut env = passing_envelope();
+        env.test = stage_test_passing_but_slow();
+        let md = render_pr_comment(&env);
+
+        assert!(
+            md.contains("**SLOW**") && md.contains("detached_cook_accepts_reverse_capacity_queue"),
+            "{md}"
+        );
+        assert!(md.contains("- _Slowest tests:_"), "{md}");
+        assert!(
+            md.contains("`tests/reverse_cook_queue_acceptance.rs` — 470.2s; 31% of budget"),
+            "{md}"
+        );
+        assert!(
+            md.contains("Measured suite time: 561.8s of a 1500s budget"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn a_slow_test_does_not_make_the_stage_look_failed() {
+        let mut env = passing_envelope();
+        env.test = stage_test_passing_but_slow();
+        let md = render_pr_comment(&env);
+
+        // The whole point of a separate field: an expensive suite still reads
+        // as green, and the finding count a reviewer sees is unchanged.
+        assert!(md.contains(":white_check_mark: **test**"), "{md}");
+        assert!(!md.contains(":x: **test**"), "{md}");
+        assert!(md.contains("**0** finding(s)"), "{md}");
+        assert!(!md.contains("more failed test(s)"), "{md}");
+    }
+
+    #[test]
+    fn incomplete_timings_are_labelled_and_unknown_durations_are_not_printed_as_zero() {
+        let mut durations = durations_with_a_slow_test();
+        durations.complete = false;
+        durations.incomplete_reason = Some("test child terminated at its 1500s budget".to_string());
+        durations.binaries.push(TestUnitDuration::new(
+            "tests/killed.rs",
+            "long-running-notice",
+        ));
+        durations.slow.push(SlowTestFinding {
+            rule: "unfinished-test-unit".to_string(),
+            name: "tests/killed.rs".to_string(),
+            binary: None,
+            seconds: None,
+            min_seconds: Some(60.0),
+            budget_share: None,
+            measured_share: None,
+            message: "`tests/killed.rs` was still running after at least 60s and never reported a duration".to_string(),
+            incomplete: true,
+        });
+
+        let mut env = passing_envelope();
+        env.test = stage_test_passing_but_slow();
+        env.test.output.as_mut().unwrap().test_durations = Some(durations);
+        let md = render_pr_comment(&env);
+
+        assert!(
+            md.contains("Timings are **incomplete** — test child terminated at its 1500s budget"),
+            "{md}"
+        );
+        assert!(md.contains("never reported a duration"), "{md}");
+        assert!(
+            !md.contains("`tests/killed.rs` — 0.0s"),
+            "an unmeasured unit must never be rendered as instantaneous: {md}"
+        );
+    }
+
+    #[test]
+    fn a_stage_without_durations_renders_exactly_as_before() {
+        let mut env = passing_envelope();
+        env.test = stage_test_passing(450);
+        let baseline = render_pr_comment(&env);
+        assert!(!baseline.contains("Slowest tests"), "{baseline}");
+        assert!(!baseline.contains("SLOW"), "{baseline}");
     }
 }

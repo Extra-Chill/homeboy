@@ -3,6 +3,7 @@ pub use homeboy_extension_contract::test_result::TestScopeOutput;
 pub mod analyze;
 pub mod baseline;
 pub mod drift;
+pub mod durations;
 pub mod parsing;
 pub mod report;
 pub mod run;
@@ -26,6 +27,10 @@ pub use baseline::{
     TestBaseline, TestBaselineComparison, TestCounts,
 };
 pub use drift::{ChangeType, DriftReport, DriftedTest, ProductionChange};
+pub use durations::{
+    build_test_durations, parse_duration_samples, parse_test_durations_file, SlowTestFinding,
+    SlowTestPolicy, TestDurationSamples, TestDurations, TestUnitDuration,
+};
 pub use parsing::{
     build_test_summary, parse_coverage_file, parse_failures_file, parse_test_failures_from_text,
     parse_test_results_failures_file, parse_test_results_file, parse_test_results_file_with_spec,
