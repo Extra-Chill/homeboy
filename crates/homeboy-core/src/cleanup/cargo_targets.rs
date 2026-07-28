@@ -153,8 +153,9 @@ pub fn cleanup_shared_cargo_targets(
                 .or_default() += 1;
             continue;
         }
+        let legacy = is_legacy_store(Path::new(&store.path));
         let eligible = store.reasons.iter().any(|reason| reason == "age_expired")
-            || remaining > options.max_bytes;
+            || (!legacy && remaining > options.max_bytes);
         if !eligible {
             *retained_by_reason
                 .entry("within age and size budget".to_string())
@@ -174,7 +175,12 @@ pub fn cleanup_shared_cargo_targets(
     if options.apply {
         for store in &candidates {
             let path = Path::new(&store.path);
-            match remove_store_if_unleased(path, options.now, options.lease_ttl)? {
+            match remove_store_if_unleased(
+                path,
+                options.now,
+                options.older_than,
+                options.lease_ttl,
+            )? {
                 RemoveOutcome::Removed => {
                     applied_count += 1;
                     reclaimed_bytes += store.size_bytes;
@@ -241,24 +247,58 @@ enum RemoveOutcome {
 fn remove_store_if_unleased(
     path: &Path,
     now: SystemTime,
+    older_than: Duration,
     lease_ttl: Duration,
 ) -> Result<RemoveOutcome> {
-    let lock = match OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path.join(LOCK_FILE))
-    {
-        Ok(lock) => lock,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(RemoveOutcome::Missing)
+    let legacy_last_used = legacy_last_used(path);
+    let legacy = legacy_last_used.is_some();
+    let lock = if legacy {
+        match OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(path.join(LOCK_FILE))
+        {
+            Ok(lock) => lock,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Ok(RemoveOutcome::Protected)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(RemoveOutcome::Missing)
+            }
+            Err(error) => {
+                return Err(io_error(
+                    error,
+                    "create shared Cargo target lock for cleanup",
+                ));
+            }
         }
-        Err(error) => return Err(io_error(error, "open shared Cargo target lock for cleanup")),
+    } else {
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path.join(LOCK_FILE))
+        {
+            Ok(lock) => lock,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(RemoveOutcome::Missing)
+            }
+            Err(error) => return Err(io_error(error, "open shared Cargo target lock for cleanup")),
+        }
     };
     match lock.try_lock_exclusive() {
         Ok(true) => {}
         Ok(false) | Err(_) => return Ok(RemoveOutcome::Protected),
     }
-    if lease_is_fresh(path, now, lease_ttl)? {
+    if legacy {
+        // The lock is created only after recording stale filesystem evidence, as
+        // creating it updates the directory timestamp used by legacy stores.
+        if !legacy_lifecycle_sidecars_absent(path)
+            || !is_expired(legacy_last_used.expect("checked above"), now, older_than)
+        {
+            return Ok(RemoveOutcome::Protected);
+        }
+    } else if lease_is_fresh(path, now, lease_ttl)? {
         return Ok(RemoveOutcome::Protected);
     }
     match fs::remove_dir_all(path) {
@@ -293,16 +333,12 @@ fn inventory(
         if !metadata.is_dir() {
             continue;
         }
-        let Some(last_used_unix_ms) = last_used(&path) else {
+        let Some(last_used_unix_ms) = last_used(&path).or_else(|| legacy_last_used(&path)) else {
             stores.push(skipped_store(&path, "missing Homeboy lifecycle metadata"));
             continue;
         };
         let mut reasons = Vec::new();
-        if now
-            .duration_since(UNIX_EPOCH + Duration::from_millis(last_used_unix_ms))
-            .unwrap_or_default()
-            >= older_than
-        {
+        if is_expired(last_used_unix_ms, now, older_than) {
             reasons.push("age_expired".to_string());
         }
         if store_is_active(&path, now, lease_ttl)? {
@@ -389,6 +425,64 @@ fn last_used(path: &Path) -> Option<u64> {
         .and_then(|value| value.trim().parse().ok())
 }
 
+fn legacy_last_used(path: &Path) -> Option<u64> {
+    is_legacy_store(path)
+        .then(|| latest_modified(path))??
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|modified| modified.as_millis() as u64)
+}
+
+fn is_legacy_store(path: &Path) -> bool {
+    is_canonical_store(path) && legacy_sidecars_absent(path)
+}
+
+fn is_canonical_store(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("homeboy-"))
+        .is_some_and(|hash| {
+            matches!(hash.len(), 12 | 64)
+                && hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        })
+}
+
+fn legacy_sidecars_absent(path: &Path) -> bool {
+    [LOCK_FILE, LEASE_FILE, OWNER_FILE, LAST_USED_FILE]
+        .iter()
+        .all(|name| sidecar_absent(path, name))
+}
+
+fn legacy_lifecycle_sidecars_absent(path: &Path) -> bool {
+    [LEASE_FILE, OWNER_FILE, LAST_USED_FILE]
+        .iter()
+        .all(|name| sidecar_absent(path, name))
+}
+
+fn sidecar_absent(path: &Path, name: &str) -> bool {
+    matches!(fs::symlink_metadata(path.join(name)), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn latest_modified(path: &Path) -> Option<SystemTime> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    let mut latest = metadata.modified().ok()?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        for entry in fs::read_dir(path).ok()? {
+            let modified = latest_modified(&entry.ok()?.path())?;
+            latest = latest.max(modified);
+        }
+    }
+    Some(latest)
+}
+
+fn is_expired(last_used_unix_ms: u64, now: SystemTime, older_than: Duration) -> bool {
+    now.duration_since(UNIX_EPOCH + Duration::from_millis(last_used_unix_ms))
+        .unwrap_or_default()
+        >= older_than
+}
+
 fn read_owner(path: &Path) -> Option<String> {
     fs::read_to_string(path.join(OWNER_FILE))
         .ok()
@@ -461,6 +555,22 @@ mod tests {
         drop(lease);
         write_last_used(&path, now.checked_sub(age).unwrap()).unwrap();
         path
+    }
+    fn legacy_store(root: &Path, now: SystemTime, hash_len: usize) -> PathBuf {
+        let path = root.join(format!("homeboy-{}", "a".repeat(hash_len)));
+        fs::create_dir(&path).unwrap();
+        let artifact = path.join("artifact");
+        fs::write(&artifact, b"payload").unwrap();
+        let stale = now.checked_sub(Duration::from_secs(61)).unwrap();
+        set_modified(&artifact, stale);
+        set_modified(&path, stale);
+        path
+    }
+    fn set_modified(path: &Path, modified: SystemTime) {
+        File::open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
     }
     #[test]
     fn managed_store_lifecycle_records_owner_lease_and_last_used() {
@@ -560,6 +670,57 @@ mod tests {
         );
         #[cfg(unix)]
         assert_eq!(output.retained_by_reason["direct-child symlink"], 1);
+    }
+
+    #[test]
+    fn stale_canonical_legacy_store_is_a_dry_run_candidate() {
+        let root = TempDir::new().unwrap();
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let historical = legacy_store(root.path(), now, 12);
+        let current = legacy_store(root.path(), now, 64);
+        let output = cleanup_shared_cargo_targets(options(root.path(), false, now)).unwrap();
+        assert_eq!(output.candidate_count, 2);
+        assert!(output
+            .candidates
+            .iter()
+            .any(|candidate| candidate.path == historical.to_string_lossy()));
+        assert!(output
+            .candidates
+            .iter()
+            .any(|candidate| candidate.path == current.to_string_lossy()));
+        assert_eq!(output.applied_count, 0);
+        assert!(historical.exists());
+        assert!(current.exists());
+    }
+
+    #[test]
+    fn apply_reclaims_stale_canonical_legacy_store() {
+        let root = TempDir::new().unwrap();
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let legacy = legacy_store(root.path(), now, 12);
+        let output = cleanup_shared_cargo_targets(options(root.path(), true, now)).unwrap();
+        assert_eq!(output.candidate_count, 1);
+        assert_eq!(output.applied_count, 1);
+        assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn malformed_or_partially_managed_legacy_store_is_protected() {
+        let root = TempDir::new().unwrap();
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let malformed = legacy_store(root.path(), now, 13);
+        let partially_managed = legacy_store(root.path(), now, 12);
+        fs::write(partially_managed.join(OWNER_FILE), "owner").unwrap();
+
+        let output = cleanup_shared_cargo_targets(options(root.path(), true, now)).unwrap();
+
+        assert_eq!(output.candidate_count, 0);
+        assert_eq!(
+            output.retained_by_reason["missing Homeboy lifecycle metadata"],
+            2
+        );
+        assert!(malformed.exists());
+        assert!(partially_managed.exists());
     }
 
     #[test]
