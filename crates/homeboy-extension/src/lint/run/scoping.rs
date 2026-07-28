@@ -39,6 +39,7 @@ pub(super) fn resolve_scoped_lint_runs(
             files
         };
 
+        let changed_files = component_relative_changed_files(component, changed_files);
         if changed_files.is_empty() {
             println!("No files in working tree changes");
             return Ok(Some(Vec::new()));
@@ -56,6 +57,7 @@ pub(super) fn resolve_scoped_lint_runs(
             None => git::get_files_changed_since(&component.local_path, git_ref)?,
         };
 
+        let changed_files = component_relative_changed_files(component, changed_files);
         if changed_files.is_empty() {
             println!("No files changed since {}", git_ref);
             return Ok(Some(Vec::new()));
@@ -65,6 +67,21 @@ pub(super) fn resolve_scoped_lint_runs(
     } else {
         Ok(None)
     }
+}
+
+fn component_relative_changed_files(
+    component: &Component,
+    changed_files: Vec<String>,
+) -> Vec<String> {
+    let Some(prefix) = git::get_component_path_prefix(&component.local_path) else {
+        return changed_files;
+    };
+    let prefix = format!("{}/", prefix.trim_end_matches('/'));
+
+    changed_files
+        .into_iter()
+        .filter_map(|file| file.strip_prefix(&prefix).map(str::to_string))
+        .collect()
 }
 
 pub(super) fn build_changed_lint_runs(
