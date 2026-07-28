@@ -320,7 +320,7 @@ Inventory or remove stale managed Homeboy binary slots on a runner
 | Option | Value | Description |
 | --- | --- | --- |
 | `--apply` | flag | Delete eligible slots. Omit for inventory only |
-| `--min-age-hours` | `<MIN_AGE_HOURS>` | Minimum slot age before an unselected slot is eligible |
+| `--min-age-hours` | `<MIN_AGE_HOURS>` | Minimum slot age before an unselected slot is eligible. Defaults to the shared runner age floor (`cleanup::RUNNER_MIN_AGE_HOURS`) |
 
 ## `homeboy runner exec`
 
@@ -628,8 +628,8 @@ Preview or remove orphaned runner-side Lab workspaces
 | Option | Value | Description |
 | --- | --- | --- |
 | `--apply` | flag | Delete the previewed orphaned workspaces. Without this flag, the command is a dry run |
-| `--min-age-hours` | `<MIN_AGE_HOURS>` | Minimum workspace age before it can be considered orphaned |
-| `--limit` | `<LIMIT>` | Maximum number of orphan candidates to report or remove |
+| `--min-age-hours` | `<MIN_AGE_HOURS>` | Minimum workspace age before it can be considered orphaned. Defaults to the shared runner age floor (`cleanup::RUNNER_MIN_AGE_HOURS`) |
+| `--limit` | `<LIMIT>` | Maximum number of orphan candidates to report or remove per pass. Defaults to the shared page size (`cleanup::RUNNER_WORKSPACE_PAGE_LIMIT`) |
 | `--passes` | `<PASSES>` | Maximum apply passes to run. Each pass re-scans and removes at most --limit candidates |
 | `--cursor` | `<CURSOR>` | Opaque continuation cursor returned by an incomplete workspace-prune scan |
 
