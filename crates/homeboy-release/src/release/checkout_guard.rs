@@ -8,7 +8,9 @@ use homeboy_core::git;
 pub(super) struct CheckoutRestoreEvidence {
     pub(super) original_head: String,
     pub(super) temporary_head: String,
-    pub(super) final_head: String,
+    pub(super) final_head: Option<String>,
+    pub(super) restored: bool,
+    pub(super) error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -56,28 +58,81 @@ impl ReleaseCheckoutGuard {
     }
 
     pub(super) fn restore_after_failure(&self) -> Result<CheckoutRestoreEvidence> {
-        let temporary_head = git_stdout(&self.path, &["rev-parse", "HEAD"])?;
-        abort_in_progress_operations(&self.path);
-        run_git_checked(&self.path, &["reset", "--hard"])?;
-        remove_new_untracked(&self.path, &self.original_untracked)?;
+        self.restore_after_failure_with_hook(|| {})
+    }
 
-        match &self.original_ref {
+    fn restore_after_failure_with_hook(&self, after_capture: impl FnOnce()) -> Result<CheckoutRestoreEvidence> {
+        let temporary_head = git_stdout(&self.path, &["rev-parse", "HEAD"])?;
+        after_capture();
+        let mut errors = Vec::new();
+        abort_in_progress_operations(&self.path);
+        record_cleanup_error(
+            &mut errors,
+            run_git_checked(&self.path, &["reset", "--hard"]),
+        );
+        record_cleanup_error(
+            &mut errors,
+            remove_new_untracked(&self.path, &self.original_untracked),
+        );
+
+        let checkout_result = match &self.original_ref {
             OriginalRef::Branch(branch) => {
-                run_git_checked(&self.path, &["checkout", "-q", branch])?
+                run_git_checked(&self.path, &["checkout", "-q", branch])
             }
             OriginalRef::Detached => {
-                run_git_checked(&self.path, &["checkout", "-q", &self.original_head])?
+                run_git_checked(&self.path, &["checkout", "-q", &self.original_head])
             }
+        };
+        record_cleanup_error(&mut errors, checkout_result);
+
+        let before_restore = git_stdout(&self.path, &["rev-parse", "HEAD"]);
+        match before_restore {
+            Ok(head) if head == self.original_head => {}
+            Ok(head) if head == temporary_head => record_cleanup_error(
+                &mut errors,
+                run_git_checked(&self.path, &["reset", "--hard", &self.original_head]),
+            ),
+            Ok(head) => errors.push(format!(
+                "checkout HEAD moved concurrently to {head}; expected release commit {temporary_head} or original HEAD {}",
+                self.original_head
+            )),
+            Err(error) => errors.push(format!("failed to inspect HEAD before restore: {error}")),
         }
 
-        run_git_checked(&self.path, &["reset", "--hard", &self.original_head])?;
-        remove_new_untracked(&self.path, &self.original_untracked)?;
-        let final_head = git_stdout(&self.path, &["rev-parse", "HEAD"])?;
+        record_cleanup_error(
+            &mut errors,
+            remove_new_untracked(&self.path, &self.original_untracked),
+        );
+        // This read is deliberately independent of the cleanup commands above.
+        // Rollback evidence must describe the checkout that actually remains.
+        let final_head = match git_stdout(&self.path, &["rev-parse", "HEAD"]) {
+            Ok(head) => Some(head),
+            Err(error) => {
+                errors.push(format!("failed to verify final HEAD: {error}"));
+                None
+            }
+        };
+        let restored = errors.is_empty() && final_head.as_deref() == Some(&self.original_head);
+        if errors.is_empty() && !restored {
+            errors.push(format!(
+                "rollback verification mismatch: expected {}, observed {}",
+                self.original_head,
+                final_head.as_deref().unwrap_or("unavailable")
+            ));
+        }
         Ok(CheckoutRestoreEvidence {
             original_head: self.original_head.clone(),
             temporary_head,
             final_head,
+            restored,
+            error: (!errors.is_empty()).then(|| errors.join("; ")),
         })
+    }
+}
+
+fn record_cleanup_error(errors: &mut Vec<String>, result: Result<()>) {
+    if let Err(error) = result {
+        errors.push(error.to_string());
     }
 }
 
@@ -237,7 +292,9 @@ mod tests {
         );
         assert_eq!(rollback.original_head, original_head);
         assert_ne!(rollback.temporary_head, rollback.original_head);
-        assert_eq!(rollback.final_head, rollback.original_head);
+        assert!(rollback.restored);
+        assert_eq!(rollback.final_head.as_deref(), Some(rollback.original_head.as_str()));
+        assert_eq!(rollback.error, None);
         assert_eq!(git_stdout_for_test(dir, &["status", "--porcelain=v1"]), "");
         assert!(!dir.join("generated.txt").exists());
         assert_eq!(
@@ -295,6 +352,39 @@ mod tests {
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains("Uncommitted tracked changes"));
+    }
+
+    #[test]
+    fn concurrent_head_movement_is_reported_without_overwriting_it() {
+        let temp = init_repo();
+        let dir = temp.path();
+        let original_head = git_stdout_for_test(dir, &["rev-parse", "HEAD"]);
+        let guard = ReleaseCheckoutGuard::capture(&component(dir))
+            .expect("capture")
+            .expect("git repo");
+
+        std::fs::write(dir.join("file.txt"), "release\n").expect("write release change");
+        run_git(dir, &["add", "."]);
+        run_git(dir, &["commit", "-q", "-m", "release: v1.0.0"]);
+        let release_commit = git_stdout_for_test(dir, &["rev-parse", "HEAD"]);
+
+        let rollback = guard
+            .restore_after_failure_with_hook(|| {
+                std::fs::write(dir.join("file.txt"), "concurrent\n")
+                    .expect("write concurrent change");
+                run_git(dir, &["add", "."]);
+                run_git(dir, &["commit", "-q", "-m", "fix: concurrent movement"]);
+            })
+            .expect("rollback evidence");
+        let concurrent_head = git_stdout_for_test(dir, &["rev-parse", "HEAD"]);
+
+        assert!(!rollback.restored);
+        assert_eq!(rollback.original_head, original_head);
+        assert_eq!(rollback.temporary_head, release_commit);
+        assert_eq!(rollback.final_head.as_deref(), Some(concurrent_head.as_str()));
+        assert!(rollback.error.as_deref().unwrap().contains("moved concurrently"));
+        assert_ne!(concurrent_head, original_head);
+        assert_ne!(concurrent_head, release_commit);
     }
 
     fn git_stdout_for_test(dir: &std::path::Path, args: &[&str]) -> String {

@@ -129,15 +129,40 @@ fn restore_checkout_after_failed_run(
 
     if let Some(checkout_guard) = checkout_guard {
         let evidence = checkout_guard.restore_after_failure()?;
+        let restored = evidence.restored;
+        let recovery_action = (!restored)
+            .then(|| format!("homeboy release {} --apply", run.component_id));
+        let tag_state = if run.result.steps.iter().any(|step| {
+            step.step_type == "git.tag" && matches!(step.status, ReleaseStepStatus::Success)
+        }) {
+            "local_tag_created"
+        } else {
+            "not_created"
+        };
         run.result.rollback = Some(ReleaseRollbackEvidence {
+            status: if restored { "restored" } else { "interrupted" }.to_string(),
             original_head: evidence.original_head,
+            release_commit: evidence.temporary_head.clone(),
             temporary_head: evidence.temporary_head,
             final_head: evidence.final_head,
+            tag_state: tag_state.to_string(),
+            error: evidence.error,
+            recovery_action: recovery_action.clone(),
         });
         if let Some(summary) = &mut run.result.summary {
-            summary.next_actions.push(
-                "Inspect remote branch and tag state before retrying: git ls-remote --heads --tags origin"
-                    .to_string(),
+            if let Some(action) = recovery_action {
+                summary.next_actions.push(action);
+            } else {
+                summary.next_actions.push(
+                    "Inspect remote branch and tag state before retrying: git ls-remote --heads --tags origin"
+                        .to_string(),
+                );
+            }
+        }
+        if !restored {
+            run.result.status = ReleaseStepStatus::Failed;
+            run.result.warnings.push(
+                "Release rollback was interrupted; checkout recovery is still required".to_string(),
             );
         }
     }

@@ -207,9 +207,19 @@ pub struct ReleaseRunResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseRollbackEvidence {
+    /// `restored` means final_head was independently observed at original_head.
+    /// `interrupted` requires operator recovery and must never be presented as
+    /// rollback success.
+    pub status: String,
     pub original_head: String,
     pub temporary_head: String,
-    pub final_head: String,
+    pub release_commit: String,
+    pub final_head: Option<String>,
+    pub tag_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_action: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
