@@ -77,6 +77,17 @@ and look at `outdated`. Together, `unreleased_merges` (tag-vs-merged),
 - `--outdated` — (project mode) show only components whose installed-on-target version is behind the latest release
 - `--timings` — emit phase progress to stderr and include phase timings in JSON, useful when diagnosing slow status runs
 
+## Scope selectors
+
+Status takes the shared scope selectors, which are mutually exclusive:
+
+- `--project <ID>` — the project dashboard, same as the positional `[PROJECT]`
+- `--component <ID>` — summarize one registered component
+- `--fleet <ID>` / `--rig <ID>` / `--workspace` — summarize every component the
+  scope resolves to
+- `--path <PATH>` — inspect this checkout instead of the registered component
+  path; composes with the positional target
+
 ## Related
 
 - [component](component.md)
