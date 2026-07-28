@@ -9,7 +9,7 @@ use std::path::{Component, Path};
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use homeboy::agents::agent_tasks::lifecycle::resolve_retained_workspace;
+use homeboy::agents::agent_task_lifecycle::resolve_retained_workspace;
 use homeboy::core::Error;
 
 use super::super::CmdResult;

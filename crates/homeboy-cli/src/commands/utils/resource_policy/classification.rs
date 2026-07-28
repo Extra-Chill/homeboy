@@ -74,6 +74,16 @@ pub(super) fn agent_task_resource_behavior(
         // the answer describes (#9763).
         | agent_task::AgentTaskCommand::Providers(_)
         | agent_task::AgentTaskCommand::Review(_) => AgentTaskResourceBehavior::BoundedMetadataRead,
+        agent_task::AgentTaskCommand::RetainedArtifacts(retained) => match &retained.command {
+            // Discovery reads only the local immutable workspace receipt.
+            agent_task::RetainedArtifactsCommand::Discover { .. } => {
+                AgentTaskResourceBehavior::BoundedMetadataRead
+            }
+            // Attach may transfer a selected runner-side artifact and persists it.
+            agent_task::RetainedArtifactsCommand::Attach { .. } => {
+                AgentTaskResourceBehavior::AdmittedWorkload
+            }
+        },
         agent_task::AgentTaskCommand::Active(active) if !active.reconcile => {
             AgentTaskResourceBehavior::BoundedMetadataRead
         }
