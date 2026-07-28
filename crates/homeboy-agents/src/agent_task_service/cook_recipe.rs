@@ -1032,6 +1032,28 @@ pub fn resolve_cook_continuation_run_id(cook_or_attempt_id: &str) -> Result<Stri
     {
         return Ok(cook_or_attempt_id.to_string());
     }
+    if !agent_task_lifecycle::cook_index_exists(&recipe.cook_id)? {
+        let attempts = recipe
+            .attempts
+            .iter()
+            .map(|attempt| agent_task_lifecycle::AgentTaskCookIndexAttempt {
+                attempt: attempt.attempt,
+                run_id: attempt.run_id.clone(),
+                recorded_at: String::new(),
+            })
+            .collect();
+        let selection =
+            agent_task_lifecycle::select_cook_candidate_from_attempts(&recipe.cook_id, attempts)?;
+        if selection.incomplete {
+            return Err(Error::validation_invalid_argument(
+                "cook_id",
+                "candidate selection is incomplete after its bounded recovery window",
+                Some(recipe.cook_id.clone()),
+                None,
+            ));
+        }
+        return Ok(selection.run_id);
+    }
     let selection = agent_task_lifecycle::select_cook_candidate(&recipe.cook_id)?;
     if selection.incomplete {
         return Err(Error::validation_invalid_argument(
@@ -1722,6 +1744,16 @@ mod tests {
 
             assert_eq!(resolve_cook_continuation_run_id("cook").unwrap(), "run");
             assert_eq!(resolve_cook_continuation_run_id("run").unwrap(), "run");
+        });
+    }
+
+    #[test]
+    fn continuation_resolution_uses_recipe_when_legacy_cook_index_is_missing() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let recipe = recipe();
+            write_recipe(&recipe).unwrap();
+
+            assert_eq!(resolve_cook_continuation_run_id("cook").unwrap(), "run");
         });
     }
 

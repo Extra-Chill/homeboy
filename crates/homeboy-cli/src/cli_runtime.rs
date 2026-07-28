@@ -729,6 +729,9 @@ fn delegate_cook_continue_to_pinned_runtime(
 ) -> homeboy::core::Result<Option<i32>> {
     let run_id =
         crate::agents::agent_tasks::service::resolve_cook_continuation_run_id(cook_or_attempt_id)?;
+    if current_runtime_owns_terminal_cook_continuation(&run_id)? {
+        return Ok(None);
+    }
     if let Some(pinned) =
         crate::agents::agent_tasks::lifecycle::runner_pinned_runtime_for_mutation(&run_id)?
     {
@@ -772,6 +775,46 @@ fn delegate_cook_continue_to_runner_pinned_runtime(
     }
     print!("{}", output.stdout);
     Ok(exit_code)
+}
+
+/// A newer coordinator must repair a recipe-bound terminal attempt before an
+/// older pinned runtime can resume it. Provider execution remains pinned; this
+/// exception only covers terminal work already accepted by the current Cook
+/// scheduler, so it cannot redispatch the provider.
+fn current_runtime_owns_terminal_cook_continuation(run_id: &str) -> homeboy::core::Result<bool> {
+    let Some(recipe) = crate::agents::agent_tasks::service::load_recipe_for_attempt(run_id)? else {
+        return Ok(false);
+    };
+    let record = crate::agents::agent_tasks::service::persisted_status(run_id)?;
+    if !matches!(
+        record.state,
+        crate::agents::agent_tasks::lifecycle::AgentTaskRunState::Succeeded
+            | crate::agents::agent_tasks::lifecycle::AgentTaskRunState::CandidateRecoverable
+            | crate::agents::agent_tasks::lifecycle::AgentTaskRunState::PartialRecoverable
+    ) {
+        return Ok(false);
+    }
+    crate::agents::agent_tasks::service::validate_recipe_attempt_record(&recipe, run_id, &record)?;
+    let scheduler_cook_id = record
+        .metadata
+        .get("cook_continuation_scheduler")
+        .and_then(|scheduler| scheduler.get("cook_id"))
+        .and_then(serde_json::Value::as_str);
+    let scheduler_build = record
+        .metadata
+        .get("cook_continuation_scheduler")
+        .and_then(|scheduler| scheduler.get("coordinator_build_identity"))
+        .and_then(serde_json::Value::as_str);
+    let originating_build = record
+        .metadata
+        .get("controller_runtime")
+        .and_then(|runtime| runtime.get("originating"))
+        .and_then(|originating| originating.get("build_identity"))
+        .and_then(serde_json::Value::as_str);
+    Ok(scheduler_cook_id == Some(recipe.cook_id.as_str())
+        && scheduler_build == Some(homeboy::core::build_identity::current().display.as_str())
+        && originating_build
+            .is_some_and(|build| build != homeboy::core::build_identity::current().display))
 }
 
 /// Fanout coordination is controller-owned and may span children from distinct
@@ -2413,7 +2456,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn cook_continue_reexecutes_the_verified_origin_runtime_for_the_exact_attempt() {
+    fn terminal_cook_without_a_current_scheduler_claim_reexecutes_the_origin_runtime() {
         crate::test_support::with_isolated_home(|home| {
             let target = home.path().join("active-task-worktree");
             std::fs::create_dir(&target).expect("create active task worktree");
@@ -2472,12 +2515,18 @@ mod tests {
                 Sha256::digest(std::fs::read(&runtime_a).expect("read runtime-A fixture"))
             );
             crate::agents::agent_tasks::lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.state = crate::agents::agent_tasks::lifecycle::AgentTaskRunState::Succeeded;
                 record.metadata["controller_runtime"] = serde_json::json!({
                     "originating": {
                         "build_identity": identity,
                         "pinned_executable": runtime_a,
                         "sha256": digest,
                     }
+                });
+                record.metadata["cook_continuation_scheduler"] = serde_json::json!({
+                    "status": "queued",
+                    "cook_id": cook_id,
+                    "run_id": run_id,
                 });
             })
             .expect("record runtime-A pin");
@@ -2513,6 +2562,79 @@ mod tests {
             assert_ne!(
                 pinned, runtime_a,
                 "runtime A must execute from its immutable pin"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repaired_terminal_cook_continuation_stays_with_the_current_coordinator() {
+        crate::test_support::with_isolated_home(|home| {
+            let target = home.path().join("terminal-task-worktree");
+            std::fs::create_dir(&target).expect("create terminal task worktree");
+            let mut plan: crate::agents::agent_tasks::scheduler::AgentTaskPlan =
+                serde_json::from_str(include_str!(
+                    "../../../tests/fixtures/agent_task_smoke_plan.json"
+                ))
+                .expect("deserialize durable test plan");
+            plan.tasks[0].workspace.root = Some(target.display().to_string());
+
+            let cook_id = "cook-runtime-legacy-terminal";
+            let run_id = "cook-runtime-legacy-terminal-attempt-1";
+            let options = crate::agents::agent_tasks::service::AgentTaskCookServiceOptions {
+                cook_id: cook_id.to_string(),
+                initial_run_id: run_id.to_string(),
+                initial_plan: plan.clone(),
+                to_worktree: target.display().to_string(),
+                source_worktree_path: Some(target),
+                provider_command: None,
+                provider_invocation: None,
+                gates: Default::default(),
+                max_attempts: 1,
+                no_finalize: true,
+                base: "main".to_string(),
+                task_base_sha: None,
+                head: None,
+                title: "legacy terminal continuation fixture".to_string(),
+                commit_message: "legacy terminal continuation fixture".to_string(),
+                source_refs: Vec::new(),
+                protected_branches: Vec::new(),
+                ai_tool: "test".to_string(),
+                ai_model: None,
+                ai_used_for: "test".to_string(),
+                attempt_dispatcher: None,
+                harvest_context: Default::default(),
+            };
+            crate::agents::agent_tasks::service::persist_initial_recipe(&options)
+                .expect("persist legacy Cook recipe");
+            crate::agents::agent_tasks::lifecycle::submit_plan(&plan, Some(run_id))
+                .expect("persist legacy lifecycle run");
+            crate::agents::agent_tasks::lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.state = crate::agents::agent_tasks::lifecycle::AgentTaskRunState::Succeeded;
+                record.metadata["controller_runtime"] = serde_json::json!({
+                    "originating": { "build_identity": "homeboy legacy-runtime" }
+                });
+                record.metadata["cook_continuation_scheduler"] = serde_json::json!({
+                    "status": "queued",
+                    "cook_id": cook_id,
+                    "run_id": run_id,
+                    "coordinator_build_identity": homeboy::core::build_identity::current().display,
+                });
+            })
+            .expect("mark recipe-bound legacy attempt terminal");
+
+            assert_eq!(
+                delegate_cook_continue_to_pinned_runtime(
+                    cook_id,
+                    &[
+                        "homeboy".to_string(),
+                        "agent-task".to_string(),
+                        "cook-continue".to_string(),
+                        cook_id.to_string(),
+                    ],
+                )
+                .expect("current coordinator accepts repaired terminal attempt"),
+                None
             );
         });
     }
