@@ -2,6 +2,14 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.11] - 2026-07-28
+
+### Changed
+- drop retired manifest keys and dead validate scripts
+
+### Fixed
+- resolve installed validation helpers
+
 ## [3.34.9] - 2026-07-27
 
 ### Fixed
