@@ -233,7 +233,7 @@ pub(super) fn fuzz_failure_diagnostic(
     let cases = campaign
         .get("cases")
         .and_then(serde_json::Value::as_array)
-        .map(Vec::as_slice)
+        .map(|cases| cases.as_slice())
         .unwrap_or_default();
     let failed_cases = cases
         .iter()
@@ -338,8 +338,19 @@ pub(super) fn fuzz_failure_diagnostic(
     let executions = if classification == "pre_execution_assembly_failure" {
         0
     } else {
-        find_u64(result, &["executions", "execution_count", "executionCount"])
-            .unwrap_or_else(|| u64::from(case_id.is_some()))
+        find_u64(result, &["executions", "execution_count", "executionCount"]).unwrap_or_else(
+            || {
+                // For a campaign-level evidence failure there is no owning
+                // case, but the campaign still says how much ran. Reporting
+                // `1` there (the old `case_id.is_some()` fallback) understated
+                // a 19-case campaign.
+                if is_evidence_failure {
+                    cases.len() as u64
+                } else {
+                    u64::from(case_id.is_some())
+                }
+            },
+        )
     };
     if let Some(source_run_id) = source_run_id {
         evidence_refs.push(format!("homeboy://run/{source_run_id}"));

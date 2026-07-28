@@ -564,6 +564,75 @@ execution: `{artifact}`, `{artifact_file}`, `{case}`, `{case_id}`, `{run_id}`,
 `{case_artifact}`, and `{replay_artifact_id}`. Additional CLI args after `--`
 are appended to the rendered extension command.
 
+## Failure Taxonomy
+
+A failed fuzz run belongs to exactly one of four families, and they have
+different owners:
+
+| Domain | Owner | Meaning |
+| --- | --- | --- |
+| `product_finding` | the code under test | The workload executed and the product misbehaved. A discovery. |
+| `workload_failure` | the runner or harness | The workload could not execute correctly. |
+| `gate_failure` | the declared pass criteria | Execution and evidence were fine; a gate was not met. |
+| `evidence_contract_failure` | whoever promised the evidence | Declared evidence was not delivered. Says nothing about the product. |
+
+`homeboy fuzz inspect <run-id>` reports the domain alongside two verdicts that
+are deliberately kept separate:
+
+- `workload_verdict` — `passed`, `failed`, or `unknown`. A campaign whose cases
+  all passed keeps `passed` even when the overall strict run fails because a
+  declared artifact is absent. `unknown` means no campaign was produced, so
+  there is nothing to judge.
+- `evidence_verdict` — `complete`, `incomplete`, or `unknown`.
+
+An `evidence_contract_failure` is a campaign-level event, so no case id is
+assigned to it, and its root-cause chain leads with the declared artifact
+reference, the base it was resolved against, and the producer contract that
+owed it — not with runner output.
+
+The classified verdict is persisted on the run as `metadata.evidence_contract`
+(`homeboy/fuzz-evidence-contract/v1`) with these violation codes:
+
+| Code | Meaning |
+| --- | --- |
+| `artifact_ref_missing` | A declared path resolved inside `HOMEBOY_FUZZ_ARTIFACTS_DIR` but nothing is there. |
+| `artifact_ref_unresolvable` | A relative declared path escapes the artifact root. |
+| `artifact_ref_wrong_kind` | The path exists but contradicts the declared `artifact_type`. |
+| `artifact_ref_unreadable` | The path exists and is the right kind but cannot be read. |
+| `required_artifact_absent` | A `--require-*` artifact the campaign never declared. |
+| `results_unparseable` | The runner emitted a result file Homeboy could not normalize. |
+| `required_postprocess_failed` | A required artifact post-process step failed. |
+
+A gate that did not hold is **not** an evidence-contract violation. Producers
+can check a candidate contract before attaching it with
+`homeboy contract validate homeboy/fuzz-evidence-contract/v1 --file <path>`.
+
+## Reviewer Proof
+
+`homeboy runs proof <run-id>` projects a bounded reviewer view for a fuzz run
+under `fuzz` (`homeboy/fuzz-proof/v1`). It answers what was fuzzed, at what
+commit, with what inputs, and against what pass criteria:
+
+- exact component revision (`component.revision`) and rig revision plus content
+  hash and dirty/linked state (`rig`);
+- case totals by outcome and finding totals by status and severity;
+- gate totals with observed/expected values for every failed gate;
+- declared versus proven target and operation coverage plus named coverage
+  dimensions;
+- seed, workload, profile, isolation, placement, and Homeboy version;
+- tracker references and the evidence-contract verdict;
+- `gaps` — every reviewer-relevant fact the run did not record, stated rather
+  than guessed;
+- `markdown` — a rendering suitable for pasting into a pull-request comment.
+
+The projection is derived at read time from the persisted run and writes
+nothing. `source` is stamped by the reader, so a payload cannot claim Homeboy
+derived something it did not.
+
+```bash
+homeboy runs proof <run-id> --json -q '$.fuzz.markdown'
+```
+
 ## Portable Fuzz Evidence Bundles
 
 `homeboy runs export --run <run-id> --output <dir>` exports runs, artifacts,

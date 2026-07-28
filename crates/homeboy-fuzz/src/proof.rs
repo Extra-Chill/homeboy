@@ -353,8 +353,10 @@ pub fn derive_fuzz_proof(run: &RunRecord) -> Option<FuzzProof> {
         gaps: Vec::new(),
         markdown: String::new(),
     };
-    proof.gaps = gaps(&proof);
-    proof.markdown = render_markdown(&proof);
+    let derived_gaps = gaps(&proof);
+    proof.gaps = derived_gaps;
+    let rendered = render_markdown(&proof);
+    proof.markdown = rendered;
     Some(proof)
 }
 
