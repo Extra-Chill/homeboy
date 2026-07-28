@@ -3596,9 +3596,12 @@ pub(crate) fn routing_ready() -> bool {
 /// registration. Keeping this explicit prevents partial embedders from routing
 /// detached work before they initialize the Lab runtime.
 pub fn enable_production_routing() {
-    install_production_execution_adapter(Arc::new(StageExecutionAdapter::new(Arc::new(
-        ProductionLabStagingOperations,
-    ))));
+    static ENABLED: OnceLock<()> = OnceLock::new();
+    ENABLED.get_or_init(|| {
+        install_production_execution_adapter(Arc::new(StageExecutionAdapter::new(Arc::new(
+            ProductionLabStagingOperations,
+        ))));
+    });
 }
 
 fn cancellations() -> &'static Mutex<HashMap<String, LabStagingCancellationToken>> {
