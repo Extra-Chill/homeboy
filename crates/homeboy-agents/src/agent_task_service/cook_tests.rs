@@ -4806,6 +4806,19 @@ fn adoption_by_cook_id_selects_the_latest_substantive_candidate_not_a_newer_empt
             Some(second_run_id.to_string()),
             "continuation must keep the selected substantive attempt, not the latest alias"
         );
+        std::fs::remove_file(
+            homeboy_core::paths::homeboy_data()
+                .unwrap()
+                .join("agent-task-cooks")
+                .join(cook_id)
+                .join("index.json"),
+        )
+        .expect("remove legacy-missing Cook index fixture");
+        assert_eq!(
+            super::super::resolve_cook_continuation_run_id(cook_id)
+                .expect("recipe attempts preserve substantive selection without an index"),
+            second_run_id
+        );
     });
 }
 

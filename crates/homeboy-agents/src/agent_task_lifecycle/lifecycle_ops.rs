@@ -1378,16 +1378,17 @@ pub fn status_with_options(
             | AgentTaskRunState::CandidateRecoverable
             | AgentTaskRunState::PartialRecoverable
     ) {
-        let recipe = record
+        let recipe_by_cook_id = record
             .metadata
             .get("cook_id")
             .and_then(Value::as_str)
             .map(crate::agent_task_service::load_recipe)
-            .transpose()
-            .and_then(|recipe| match recipe {
-                Some(recipe) => Ok(Some(recipe)),
-                None => crate::agent_task_service::load_recipe_for_attempt(&record.run_id),
-            });
+            .transpose();
+        let recipe = match recipe_by_cook_id {
+            Ok(Some(recipe)) => Ok(Some(recipe)),
+            Ok(None) => crate::agent_task_service::load_recipe_for_attempt(&record.run_id),
+            Err(error) => Err(error),
+        };
         match recipe {
             Ok(Some(recipe)) => {
                 let cook_id = recipe.cook_id.clone();
@@ -1410,6 +1411,8 @@ pub fn status_with_options(
                         ) {
                             Ok(enqueued) => {
                                 let run_id = record.run_id.clone();
+                                let coordinator_build_identity =
+                                    homeboy_core::build_identity::current().display;
                                 let candidate =
                                     record.latest_executor_evidence.as_ref().map(|evidence| {
                                         json!({
@@ -1431,6 +1434,7 @@ pub fn status_with_options(
                                         "status": status,
                                         "cook_id": cook_id,
                                         "run_id": run_id,
+                                        "coordinator_build_identity": coordinator_build_identity,
                                         "candidate": candidate,
                                     }),
                                 );
@@ -2089,6 +2093,10 @@ pub fn cook_index(cook_id: &str) -> Result<AgentTaskCookIndex> {
     store::read_cook_index(&sanitize_run_id(cook_id))
 }
 
+pub fn cook_index_exists(cook_id: &str) -> Result<bool> {
+    store::cook_index_exists(&sanitize_run_id(cook_id))
+}
+
 #[cfg(test)]
 pub(crate) fn replace_cook_index_for_test(index: &AgentTaskCookIndex) -> Result<()> {
     store::write_cook_index_for_test(index)
@@ -2130,6 +2138,33 @@ const COOK_CANDIDATE_SELECTION_WINDOW: usize = 64;
 /// attempt has candidate bytes, retain the legacy latest attempt for old runs.
 pub fn select_cook_candidate(cook_id: &str) -> Result<AgentTaskCookCandidateSelection> {
     let index = cook_index(cook_id)?;
+    select_cook_candidate_from_index(cook_id, index)
+}
+
+pub fn select_cook_candidate_from_attempts(
+    cook_id: &str,
+    attempts: Vec<AgentTaskCookIndexAttempt>,
+) -> Result<AgentTaskCookCandidateSelection> {
+    let latest_run_id = attempts
+        .last()
+        .map(|attempt| attempt.run_id.clone())
+        .unwrap_or_default();
+    select_cook_candidate_from_index(
+        cook_id,
+        AgentTaskCookIndex {
+            schema: schemas::COOK_INDEX.to_string(),
+            cook_id: cook_id.to_string(),
+            latest_run_id,
+            latest_substantive_candidate: None,
+            attempts,
+        },
+    )
+}
+
+fn select_cook_candidate_from_index(
+    cook_id: &str,
+    index: AgentTaskCookIndex,
+) -> Result<AgentTaskCookCandidateSelection> {
     if let Some(candidate) = index.latest_substantive_candidate.as_ref() {
         if substantive_candidate(&candidate.run_id).as_ref()
             == Some(&(candidate.task_id.clone(), candidate.artifact_id.clone()))

@@ -286,6 +286,10 @@ pub(super) fn read_cook_index(cook_id: &str) -> Result<AgentTaskCookIndex> {
     read_json(&cook_index_path(cook_id)?)
 }
 
+pub(super) fn cook_index_exists(cook_id: &str) -> Result<bool> {
+    Ok(cook_index_path(cook_id)?.exists())
+}
+
 pub(super) fn update_cook_index(
     cook_id: &str,
     mutate: impl FnOnce(&mut AgentTaskCookIndex) -> bool,
