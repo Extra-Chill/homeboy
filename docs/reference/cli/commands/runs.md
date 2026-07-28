@@ -30,7 +30,6 @@ Inspect persisted observation runs and artifacts
 | `homeboy runs fuzz-compare` | Compare two persisted fuzz runs by exact run id |
 | `homeboy runs hotspots` | Aggregate hotspot rankings across persisted fuzz run artifacts |
 | `homeboy runs reconcile` | Mark orphaned running observation records stale |
-| `homeboy runs retention` | Plan or apply bounded retention of terminal observation rows and dependent records |
 | `homeboy runs watch` | Block and stream a run's status until it reaches a terminal state, exiting with a code that reflects pass/fail. Works for attached and detached/offloaded runs |
 | `homeboy runs cancel` | Cooperatively cancel a persisted foreground run before its next stage |
 | `homeboy runs show` | Show one persisted observation run |
@@ -188,20 +187,6 @@ Mark orphaned running observation records stale
 | --- | --- | --- |
 | `--dry-run` | flag | Preview orphaned running records without mutating them |
 | `--limit` | `<LIMIT>` | Maximum running records to inspect |
-
-## `homeboy runs retention`
-
-```sh
-homeboy runs retention [OPTIONS]
-```
-
-Plan or apply bounded retention of terminal observation rows and dependent records
-
-| Option | Value | Description |
-| --- | --- | --- |
-| `--apply` | flag | Delete the planned terminal rows. Without this flag, only reports the plan |
-| `--older-than-days` | `<OLDER_THAN_DAYS>` | Only include terminal runs finished more than this many days ago |
-| `--limit` | `<LIMIT>` | Maximum terminal run rows to inspect and remove in one invocation |
 
 ## `homeboy runs watch`
 
@@ -457,13 +442,13 @@ Plan or delete persisted local run artifacts and their database records
 | Option | Value | Description |
 | --- | --- | --- |
 | `--apply` | flag | Delete planned artifact files/directories and their DB rows. Without this flag, only reports the plan |
-| `--older-than-days` | `<OLDER_THAN_DAYS>` | Only include artifacts older than this many days |
+| `--older-than-days` | `<OLDER_THAN_DAYS>` | Only include artifacts older than this many days. Defaults to the configured `retention.terminal_run_days` |
 | `--run-id` | `<RUN_ID>` | Limit cleanup to one run id |
 | `--kind` | `<KIND>` | Limit cleanup to one artifact kind |
 | `--type` | `<ARTIFACT_TYPE>` | Limit cleanup to one artifact type (`file` or `directory`) |
 | `--run-kind` | `<RUN_KIND>` | Limit cleanup to one run kind (`bench`, `trace`, etc.) |
 | `--component` | `<COMPONENT_ID>` | Limit cleanup to one component id |
-| `--limit` | `<LIMIT>` | Maximum artifact rows to inspect in one invocation |
+| `--limit` | `<LIMIT>` | Maximum artifact rows to inspect in one invocation. Defaults to the configured `retention.limit` |
 
 ## `homeboy runs artifact postprocess`
 

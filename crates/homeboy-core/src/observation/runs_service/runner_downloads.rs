@@ -228,6 +228,7 @@ pub fn cleanup_runner_downloads(
 
 /// Validated narrowing filters. Both are single normal path components, so they
 /// can only ever select *within* the cache root.
+#[derive(Debug)]
 struct CleanupFilters {
     runner: Option<String>,
     run_id: Option<String>,
