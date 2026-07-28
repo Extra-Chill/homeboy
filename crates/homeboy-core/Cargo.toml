@@ -28,15 +28,12 @@ homeboy-command-contract = { version = "0.1.0", path = "../contracts/homeboy-com
 homeboy-api-jobs-contract = { version = "0.1.0", path = "../contracts/homeboy-api-jobs-contract" }
 homeboy-source-snapshot-contract = { version = "0.1.0", path = "../contracts/homeboy-source-snapshot-contract" }
 homeboy-component-contract = { version = "0.1.0", path = "../contracts/homeboy-component-contract" }
-homeboy-cli-contract = { version = "0.1.0", path = "../contracts/homeboy-cli-contract" }
 homeboy-execution-contract = { version = "0.1.0", path = "../contracts/homeboy-execution-contract" }
 homeboy-gate-contract = { version = "0.1.0", path = "../contracts/homeboy-gate-contract" }
 homeboy-run-lifecycle-contract = { version = "0.1.0", path = "../contracts/homeboy-run-lifecycle-contract" }
 homeboy-error = { version = "0.1.0", path = "../homeboy-error" }
 homeboy-finding = { version = "0.1.0", path = "../homeboy-finding" }
-homeboy-output = { version = "0.1.0", path = "../homeboy-output" }
 homeboy-paths = { version = "0.1.0", path = "../homeboy-paths" }
-homeboy-process = { version = "0.1.0", path = "../homeboy-process" }
 homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
 homeboy-release-contract = { version = "0.1.0", path = "../contracts/homeboy-release-contract" }
 homeboy-audit-contract = { version = "0.1.0", path = "../contracts/homeboy-audit-contract" }
@@ -47,7 +44,6 @@ homeboy-lifecycle-contract = { version = "0.1.0", path = "../contracts/homeboy-l
 homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
 homeboy-lab-contract = { version = "0.1.0", path = "../contracts/homeboy-lab-contract" }
 homeboy-lab-runner-contract = { version = "0.1.0", path = "../contracts/homeboy-lab-runner-contract" }
-homeboy-agents-contract = { version = "0.1.0", path = "../contracts/homeboy-agents-contract" }
 homeboy-redaction = { version = "0.1.0", path = "../homeboy-redaction" }
 base64 = "0.22"
 serde = { version = "1.0", features = ["derive"] }
@@ -65,6 +61,7 @@ core-foundation-sys = "0.8"
 security-framework-sys = "2.17"
 reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls", "socks", "http2", "charset", "system-proxy"] }
 chrono = "0.4"
+ctrlc = "3.4"
 fs4 = "0.13"
 semver = "1.0"
 libc = "0.2"

@@ -171,7 +171,7 @@ fn job_logs(
     if follow {
         // The handler only requests a cooperative exit; it never cancels the
         // remote job. The printed cursor is sufficient to resume exactly once.
-        homeboy_process::install_shutdown_handler(stop.clone(), "runner job log follow")?;
+        homeboy::core::process::install_shutdown_handler(stop.clone(), "runner job log follow")?;
     }
     while follow && !runner_job_terminal(snapshot.job.status) {
         std::thread::sleep(poll_interval);

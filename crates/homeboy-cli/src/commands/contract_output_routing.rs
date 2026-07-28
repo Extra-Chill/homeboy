@@ -12,7 +12,6 @@ use crate::commands::{adapter, file, logs, report, review, runner, runtime, ssh,
 use crate::command_contract::{
     CommandDescriptor, CommandJsonFamily, CommandOutputContractKind, CommandOutputDescriptor,
     CommandOutputFileMode, CommandRawOutputMode, CommandResponseMode, CommandResponsePlan,
-    CommandStdoutMode,
 };
 
 impl Commands {
@@ -118,10 +117,7 @@ impl Commands {
         let descriptor = self.output_descriptor(spec, has_output_file);
 
         CommandResponsePlan {
-            stdout: match descriptor.response_mode {
-                CommandResponseMode::Json => CommandStdoutMode::JsonEnvelope,
-                CommandResponseMode::Raw(raw_mode) => CommandStdoutMode::Raw(raw_mode),
-            },
+            stdout: descriptor.response_mode,
             output_file: descriptor.output_file_mode,
         }
     }

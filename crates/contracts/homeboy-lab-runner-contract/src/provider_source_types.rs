@@ -33,3 +33,45 @@ pub struct AgentTaskProviderRunnerSource {
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Extension-declared source roots arrive as JSON from outside this
+    /// repository, so the accepted shape is a wire contract: the three optional
+    /// fields must stay optional and unknown keys must land in `extra` rather
+    /// than being rejected. Asserted here so relocating the type across crates
+    /// cannot silently tighten it.
+    #[test]
+    fn a_minimal_source_root_round_trips_and_keeps_unknown_keys() {
+        let source: AgentTaskProviderRunnerSource = serde_json::from_value(serde_json::json!({
+            "id": "runtime",
+            "label": "Runtime checkout",
+            "path": "~/.cache/homeboy/runtime",
+            "declared_by": "sample-extension",
+        }))
+        .expect("minimal source root deserializes");
+
+        assert_eq!(source.remote_url, None);
+        assert_eq!(source.git_ref, None);
+        assert_eq!(source.remediation, None);
+        assert_eq!(
+            source.extra.get("declared_by").and_then(Value::as_str),
+            Some("sample-extension"),
+            "unknown keys are preserved in `extra`, not rejected"
+        );
+
+        let reserialized = serde_json::to_value(&source).expect("source root serializes");
+        assert_eq!(
+            reserialized,
+            serde_json::json!({
+                "id": "runtime",
+                "label": "Runtime checkout",
+                "path": "~/.cache/homeboy/runtime",
+                "declared_by": "sample-extension",
+            }),
+            "absent optional fields stay absent on the wire"
+        );
+    }
+}

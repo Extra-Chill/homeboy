@@ -16,7 +16,6 @@ path = "src/lib.rs"
 [dependencies]
 homeboy-core = { version = "0.1.0", path = "../homeboy-core" }
 homeboy-engine-primitives = { version = "0.1.0", path = "../homeboy-engine-primitives" }
-homeboy-process = { version = "0.1.0", path = "../homeboy-process" }
 homeboy-extension = { version = "0.1.0", path = "../homeboy-extension" }
 homeboy-extension-contract = { version = "0.1.0", path = "../contracts/homeboy-extension-contract" }
 homeboy-release = { version = "0.1.0", path = "../homeboy-release" }
@@ -32,9 +31,9 @@ homeboy-fuzz = { version = "0.1.0", path = "../homeboy-fuzz" }
 homeboy-issues = { version = "0.1.0", path = "../homeboy-issues" }
 homeboy-triage = { version = "0.1.0", path = "../homeboy-triage" }
 homeboy-tunnel = { version = "0.1.0", path = "../homeboy-tunnel" }
-homeboy-cli-contract = { version = "0.1.0", path = "../contracts/homeboy-cli-contract" }
 homeboy-product-identity = { version = "0.1.0", path = "../homeboy-product-identity" }
 homeboy-lab-contract = { version = "0.1.0", path = "../contracts/homeboy-lab-contract" }
+homeboy-lab-runner-contract = { version = "0.1.0", path = "../contracts/homeboy-lab-runner-contract" }
 base64 = "0.22"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

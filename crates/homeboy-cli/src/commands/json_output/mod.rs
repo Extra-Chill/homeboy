@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::cli_surface::Commands;
-use crate::command_contract::{CommandDispatchFamily, CommandSpec};
+use crate::command_contract::{CommandJsonFamily, CommandSpec};
 
 use super::agent_task_summary::{agent_task_summary_kind, render_agent_task_summary};
 use super::output_runtime::{CommandPresentation, CommandRun};
@@ -292,10 +292,10 @@ fn dispatch(command: Commands, spec: &CommandSpec) -> (homeboy::core::Result<Val
         Err(command) => command,
     };
 
-    match spec.dispatch_family() {
-        CommandDispatchFamily::Quality => quality::dispatch(command),
-        CommandDispatchFamily::Workspace => workspace::dispatch(command),
-        CommandDispatchFamily::Ops => ops::dispatch(command),
+    match spec.json_family {
+        CommandJsonFamily::Quality => quality::dispatch(command),
+        CommandJsonFamily::Workspace => workspace::dispatch(command),
+        CommandJsonFamily::Ops => ops::dispatch(command),
     }
 }
 

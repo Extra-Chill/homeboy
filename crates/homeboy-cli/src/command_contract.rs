@@ -73,19 +73,18 @@ pub(crate) use lab::{
 // Lab-label constants needed by the relocated lab routing in
 // commands::contract_lab_routing (the spec module itself stays private).
 pub use output::{
-    CommandDescriptor, CommandDispatchFamily, CommandJsonFamily, CommandOutputContractKind,
-    CommandOutputDescriptor, CommandOutputFileMode, CommandRawOutputMode, CommandResponseMode,
-    CommandResponsePlan, CommandStdoutMode,
+    CommandDescriptor, CommandJsonFamily, CommandOutputContractKind, CommandOutputDescriptor,
+    CommandOutputFileMode, CommandRawOutputMode, CommandResponseMode, CommandResponsePlan,
 };
 pub use public_variants::{PublicOutputVariantContract, PUBLIC_OUTPUT_VARIANT_CONTRACTS};
 pub use registry::{
     registered_contract, registered_contracts, ContractRegistryEntry, ContractRegistrySummary,
 };
 pub use spec::{
-    non_core_command_doc_slugs, registered_command, registered_command_dispatch_family,
-    registered_command_json_family, runtime_extension_command_doc_slugs, support_command_doc_slugs,
-    CommandDocKind, CommandDocSpec, CommandLabSupportSummary, CommandPathSafetySpec,
-    CommandSafetySpec, CommandSpec, COMMAND_DOC_REGISTRY, COMMAND_SPECS,
+    non_core_command_doc_slugs, registered_command, registered_command_json_family,
+    runtime_extension_command_doc_slugs, support_command_doc_slugs, CommandDocKind, CommandDocSpec,
+    CommandLabSupportSummary, CommandPathSafetySpec, CommandSafetySpec, CommandSpec,
+    COMMAND_DOC_REGISTRY, COMMAND_SPECS,
 };
 pub(crate) use spec::{
     AGENT_TASK_AUTH_STATUS_LAB_LABEL, AGENT_TASK_CONTROLLER_FROM_SPEC_LAB_LABEL,

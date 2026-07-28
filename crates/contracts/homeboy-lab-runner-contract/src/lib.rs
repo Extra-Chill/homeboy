@@ -6,6 +6,22 @@
 //! (e.g. the runner kind, or the env-var markers used when an exec crosses a
 //! remote-runner boundary). Those plain-data contracts live here so core can
 //! reference them without a `core -> runner` edge.
+//!
+//! Two single-type crates were folded in here for the same reason they existed
+//! separately — both are behavior-free runner contracts below core, and both
+//! were already depended on by a subset of this crate's dependents:
+//!
+//! - [`Placement`] (was `homeboy-cli-contract`): the requested execution
+//!   location, read by core's Lab routing and by the runner's Lab selection.
+//! - [`AgentTaskProviderRunnerSource`] (was `homeboy-agents-contract`): a
+//!   managed source checkout homeboy keeps synced on the runner, read by core's
+//!   agent-runtime manifest and by `homeboy-agents`.
+
+mod placement;
+mod provider_source_types;
+
+pub use placement::Placement;
+pub use provider_source_types::AgentTaskProviderRunnerSource;
 
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -79,7 +79,7 @@ pub use workspace_types::*;
 
 // AgentTaskProviderRunnerSource lives in the below-core contract (core reads its
 // git ref); re-export it here so agent-side consumers keep the same path.
-pub use homeboy_agents_contract::AgentTaskProviderRunnerSource;
+pub use homeboy_lab_runner_contract::AgentTaskProviderRunnerSource;
 
 #[cfg(test)]
 use catalog::{

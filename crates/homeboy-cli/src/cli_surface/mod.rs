@@ -13,10 +13,11 @@ use crate::commands::{
 const VERSION: &str = homeboy_product_identity::product_version();
 const DEFAULT_COMMAND_SURFACE_DEPTH: usize = 8;
 
-// Placement moved to the internal `homeboy-cli-contract` crate so `core` routing
-// can use it without depending on the full CLI definition. Re-exported here to
-// keep existing `cli_surface::Placement` call sites working.
-pub use homeboy_cli_contract::Placement;
+// Placement lives in the below-core `homeboy-lab-runner-contract` crate so both
+// `core` routing and runner selection can use it without depending on the full
+// CLI definition. Re-exported here to keep existing `cli_surface::Placement`
+// call sites working.
+pub use homeboy_lab_runner_contract::Placement;
 
 #[derive(Parser)]
 #[command(name = "homeboy")]
