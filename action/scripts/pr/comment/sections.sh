@@ -66,7 +66,11 @@ append_review_report_section() {
 status_icon() {
   case "$1" in
     pass|passed) printf '%s\n' ':white_check_mark:' ;;
-    fail|failed|timeout) printf '%s\n' ':x:' ;;
+    fail|failed) printf '%s\n' ':x:' ;;
+    # Distinct from :x: on purpose. A reader scanning section icons must be
+    # able to tell "this change broke tests" from "the suite never finished"
+    # without opening the run.
+    timeout) printf '%s\n' ':hourglass_flowing_sand:' ;;
     baseline_red|inconclusive) printf '%s\n' ':warning:' ;;
     skipped) printf '%s\n' ':fast_forward:' ;;
     *) printf '%s\n' ':warning:' ;;

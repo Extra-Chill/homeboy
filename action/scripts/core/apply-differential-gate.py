@@ -179,8 +179,15 @@ def main() -> int:
         base_command = quality_base_command(command)
         if base_command not in {"audit", "lint", "test"}:
             continue
-        if status != "fail":
+        # A timeout is admitted here so that a candidate which ran out of clock
+        # can still be recognised as pre-existing when the baseline ran out of
+        # clock too. Before this, `timeout` skipped the gate entirely and stayed
+        # a hard red even when main was equally unable to finish, which is the
+        # one thing differential gating exists to rule out.
+        if status not in {"fail", "timeout"}:
             continue
+
+        timed_out = status == "timeout"
 
         current = metric_for(command, current_dir)
         base = metric_for(command, base_dir)
@@ -192,6 +199,27 @@ def main() -> int:
             adjusted[command] = "baseline_red"
             print(
                 f"::warning::Differential gate marked {command} baseline_red: baseline command `{command_label(command, base_metadata)}` exited {base_metadata.get('exit_code', 'unknown')} before comparable counts were available",
+                file=sys.stderr,
+            )
+            continue
+
+        # Past this point the baseline is healthy, so an incomplete candidate
+        # run is the candidate's problem and must keep blocking.
+        #
+        # This guard must precede every count-based branch below. Counts from a
+        # suite that was killed mid-run are not comparable to counts from one
+        # that finished: a timeout typically reports *fewer* failures than the
+        # baseline (often zero, because the results sidecar was never written),
+        # so `current <= base` would read as an improvement and silently mark
+        # the command `pass`. Turning "the suite never finished" into a green
+        # gate is a strictly worse failure than the false red this change
+        # exists to remove. `inconclusive` is equally wrong here -- it only
+        # warns, and a timeout against a healthy baseline is actionable.
+        if timed_out:
+            print(
+                f"::error::Differential gate kept {command} as timeout: the candidate run did not "
+                f"finish, so its counts are not comparable to the baseline. Raise the command's "
+                f"execution budget or reduce suite duration; do not read this as a test failure.",
                 file=sys.stderr,
             )
             continue
