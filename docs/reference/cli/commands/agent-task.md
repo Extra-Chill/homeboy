@@ -1465,3 +1465,4 @@ Run a one-command end-to-end controller proof from a named profile + runner
 | `--seed` | `<SEED>` | Optional explicit seed material for run-scoped identity. Defaults to a fresh timestamp so each invocation derives an isolated run/loop id |
 | `--max-actions` | `<N>` | Maximum controller actions to execute once preflight passes |
 | `--preflight-only` | flag | Run preflight reconciliation only; do not dispatch even when it passes |
+
