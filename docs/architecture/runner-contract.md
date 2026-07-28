@@ -284,6 +284,40 @@ Optional `"partial": "<label>"` field when counts are incomplete (e.g.
 Array of per-failure objects with file, line, test name, and the error
 message. Used by `homeboy review test --analyze` for cluster analysis.
 
+### `HOMEBOY_TEST_DURATIONS_FILE` — test durations (optional)
+
+Duration is a first-class test fact and travels on its own key, so a slow
+suite can never be confused with a failing one. Core already derives
+per-binary durations from the runner's captured stdout, so an extension
+that never writes this file loses nothing; write it only when the runner
+can report richer timings than its terminal output carries.
+
+```json
+{
+  "phase_seconds": 612.4,
+  "measured_seconds": 561.8,
+  "budget_seconds": 1500,
+  "complete": true,
+  "binaries": [
+    { "name": "tests/slow_case.rs", "seconds": 470.21, "tests": 1,
+      "source": "binary-summary" }
+  ],
+  "tests": [
+    { "name": "slow_case", "binary": "tests/slow_case.rs", "seconds": 470.21,
+      "source": "sole-test-attribution" }
+  ]
+}
+```
+
+Every duration is optional. **Omit `seconds` for a unit that never
+reported one** — a unit killed mid-run is unmeasured, not instantaneous,
+and writing `0` would make the test that consumed the whole budget look
+like the fastest in the suite. Set `"complete": false` with an
+`"incomplete_reason"` when the run did not finish.
+
+Durations never change a phase verdict. They are reported and, past a
+threshold, flagged; they cannot pass or fail a run.
+
 ### `HOMEBOY_LINT_FINDINGS_FILE` — lint findings
 
 Array of objects with the shape:

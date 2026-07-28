@@ -36,6 +36,7 @@ pub mod files {
     pub const LINT_CHANGED_FILES: &str = "lint-changed-files.txt";
     pub const TEST_RESULTS: &str = "test-results.json";
     pub const TEST_FAILURES: &str = "test-failures.json";
+    pub const TEST_DURATIONS: &str = "test-durations.json";
     pub const NO_TESTS_APPLICABLE: &str = "no-tests-applicable.json";
     pub const COVERAGE: &str = "coverage.json";
     pub const FIX_RESULTS: &str = "fix-results.json";
@@ -180,6 +181,12 @@ impl RunDir {
             (
                 crate::product_identity::PRODUCT_IDENTITY.env_var("TEST_FAILURES_FILE"),
                 self.step_file(files::TEST_FAILURES)
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            (
+                crate::product_identity::PRODUCT_IDENTITY.env_var("TEST_DURATIONS_FILE"),
+                self.step_file(files::TEST_DURATIONS)
                     .to_string_lossy()
                     .to_string(),
             ),

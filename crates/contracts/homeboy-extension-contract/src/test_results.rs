@@ -10,6 +10,7 @@ use homeboy_refactor_contract::AppliedRefactor;
 use crate::ci_context::CiContext;
 use crate::runner_contract::{PhaseFailure, PhaseReport};
 use crate::test_analysis::{TestAnalysis, TestAnalysisInput};
+use crate::test_duration::TestDurations;
 use crate::test_parsing::{CoverageOutput, TestSummaryOutput};
 use crate::test_result::{TestCounts, TestScopeOutput};
 use crate::test_workflow::{
@@ -33,6 +34,12 @@ pub struct TestCommandOutput {
     pub failure: Option<PhaseFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_counts: Option<TestCounts>,
+    /// Duration facts for this phase. Deliberately separate from `findings`:
+    /// those drive failure classification, and a slow test is not a failing
+    /// test. `None` when nothing could be measured — never a zeroed block.
+    /// (#10655)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_durations: Option<TestDurations>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub findings: Option<Vec<HomeboyFinding>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -74,6 +81,8 @@ pub struct TestRunWorkflowResult {
     pub component: String,
     pub exit_code: i32,
     pub test_counts: Option<TestCounts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_durations: Option<TestDurations>,
     pub findings: Option<Vec<HomeboyFinding>>,
     #[serde(skip)]
     pub failure_analysis_input: Option<TestAnalysisInput>,

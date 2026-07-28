@@ -2,6 +2,10 @@ use crate as extension;
 use crate::runner::tail_lines;
 use crate::test::analyze::{analyze, TestAnalysis, TestAnalysisInput};
 use crate::test::baseline::{self, TestBaselineComparison, TestCounts};
+use crate::test::durations::{
+    build_test_durations, parse_duration_samples, parse_test_durations_file, SlowTestPolicy,
+    TestDurations,
+};
 use crate::test::{
     build_test_runner, build_test_summary, compute_changed_test_scope,
     normalize_test_passthrough_args, parse_coverage_file, parse_failures_file,
@@ -162,6 +166,7 @@ fn run_main_test_workflow_inner(
         None
     };
     let failures_file = run_dir.step_file(run_dir::files::TEST_FAILURES);
+    let durations_file = run_dir.step_file(run_dir::files::TEST_DURATIONS);
 
     let changed_test_files = changed_scope
         .as_ref()
@@ -213,6 +218,7 @@ fn run_main_test_workflow_inner(
                     component: args.component_label,
                     exit_code: 1,
                     test_counts: None,
+                    test_durations: None,
                     findings,
                     failure_analysis_input: None,
                     coverage: None,
@@ -248,6 +254,7 @@ fn run_main_test_workflow_inner(
                 component: args.component_label,
                 exit_code: 0,
                 test_counts: None,
+                test_durations: None,
                 findings: None,
                 failure_analysis_input: None,
                 coverage: None,
@@ -339,6 +346,10 @@ fn run_main_test_workflow_inner(
         "phase=child command=test runner timeout={}s; streaming bounded child supervision",
         timeout.as_secs()
     );
+    // Homeboy's own clock. Unlike anything parsed out of runner output it is
+    // always available — including when the child is killed before it prints a
+    // single summary line — so the suite-level duration survives a timeout.
+    let child_started = std::time::Instant::now();
     let output = runner
         .env_if(args.changed_since.is_some(), "SCOPE_MODE", "changed")
         .env_if(
@@ -354,6 +365,7 @@ fn run_main_test_workflow_inner(
         .script_args(&passthrough_args)
         .timeout(Some(timeout))
         .run()?;
+    let child_elapsed = child_started.elapsed().as_secs_f64();
     let stdout_artifact = write_command_artifact(run_dir, 0, "stdout", &output.stdout)?;
     let stderr_artifact = write_command_artifact(run_dir, 0, "stderr", &output.stderr)?;
     progress.finish(0, output.exit_code, stdout_artifact, stderr_artifact)?;
@@ -369,6 +381,18 @@ fn run_main_test_workflow_inner(
                 .and_then(|spec| parse_test_results_text_with_spec(&output.stdout, spec))
                 .or_else(|| parse_test_results_text(&output.stdout))
         });
+    // Duration capture. Advisory throughout: it is derived from evidence that
+    // already exists, it is attached to its own field, and nothing below reads
+    // it when deciding status, exit code, or baseline comparison. A slow test
+    // is a finding, not a failure. (#10655)
+    let test_durations = collect_test_durations(
+        &durations_file,
+        &output.stdout,
+        child_elapsed,
+        output.timed_out,
+        timeout,
+    );
+
     let no_tests_applicable = no_tests_applicable(
         no_tests_policy_enabled,
         &no_tests_evidence_file,
@@ -613,6 +637,7 @@ fn run_main_test_workflow_inner(
         component: args.component_label,
         exit_code,
         test_counts,
+        test_durations,
         findings,
         failure_analysis_input,
         coverage,
@@ -625,6 +650,57 @@ fn run_main_test_workflow_inner(
         raw_output,
         extension_phase_timings,
     })
+}
+
+/// Assemble the duration picture for one test child.
+///
+/// Order of preference: an extension-written `test.durations` sidecar (richer
+/// timings than stdout can carry), then the runner's own output. Homeboy's
+/// wall-clock measurement of the child is attached either way, because it is
+/// the only duration that survives a kill.
+///
+/// A terminated child never finishes writing its evidence, so its timings are
+/// necessarily partial. They are still returned — the run that blows the
+/// budget is precisely the one where knowing what consumed it matters — but
+/// they are marked `complete: false` and carry an explicit reason, so a
+/// partial picture can never be read as a full one. Nothing here can fail the
+/// run: an unreadable sidecar or unparseable output yields no durations, not
+/// an error.
+fn collect_test_durations(
+    durations_file: &Path,
+    stdout: &str,
+    child_elapsed: f64,
+    timed_out: bool,
+    budget: Duration,
+) -> Option<TestDurations> {
+    let incomplete_reason = timed_out.then(|| {
+        format!(
+            "test child terminated at its {}s budget; timings cover only what completed first",
+            budget.as_secs()
+        )
+    });
+
+    if let Ok(Some(mut declared)) = parse_test_durations_file(durations_file) {
+        if declared.phase_seconds.is_none() {
+            declared.phase_seconds = Some(child_elapsed);
+        }
+        if declared.budget_seconds.is_none() {
+            declared.budget_seconds = Some(budget.as_secs_f64());
+        }
+        if let Some(reason) = incomplete_reason {
+            declared.complete = false;
+            declared.incomplete_reason = Some(reason);
+        }
+        return Some(declared);
+    }
+
+    let durations = build_test_durations(
+        parse_duration_samples(stdout),
+        Some(child_elapsed),
+        SlowTestPolicy::for_budget(Some(budget)),
+        incomplete_reason,
+    );
+    (!durations.is_empty()).then_some(durations)
 }
 
 fn parse_compiler_failures(stdout: &str, stderr: &str) -> Option<TestAnalysisInput> {
@@ -771,6 +847,7 @@ fn failed_test_workflow(
         component,
         exit_code: 2,
         test_counts: None,
+        test_durations: None,
         findings: None,
         failure_analysis_input: None,
         coverage: None,
@@ -1103,6 +1180,7 @@ pub fn run_self_check_test_workflow_with_progress(
         component: component_label,
         exit_code: output.exit_code,
         test_counts: None,
+        test_durations: None,
         findings: None,
         failure_analysis_input: None,
         coverage: None,
@@ -1180,6 +1258,101 @@ mod tests {
     use super::*;
     use crate::test::TestFailure;
     use homeboy_core::component::ComponentScriptsConfig;
+
+    /// Two lines of a real cargo test run: one binary that finished and
+    /// reported its time, and one that started and never did.
+    const PARTIAL_RUNNER_OUTPUT: &str = concat!(
+        "     Running tests/fast.rs (/t/deps/fast-0123456789abcdef)\n",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.00s\n",
+        "     Running tests/slow.rs (/t/deps/slow-fedcba9876543210)\n",
+        "running 1 test\n",
+        "test the_slow_one has been running for over 60 seconds\n",
+    );
+
+    #[test]
+    fn a_killed_test_child_still_yields_labelled_partial_timings() {
+        // `execute_capability_script` returns partial stdout on timeout (see
+        // its own test), so the durations path receives exactly this shape.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let durations = collect_test_durations(
+            &dir.path().join("absent.json"),
+            PARTIAL_RUNNER_OUTPUT,
+            1500.0,
+            true,
+            Duration::from_secs(1500),
+        )
+        .expect("partial output still yields durations");
+
+        assert!(!durations.complete, "a killed run is never a full picture");
+        assert!(durations
+            .incomplete_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("1500s budget")));
+        assert_eq!(
+            durations.measured_seconds,
+            Some(4.0),
+            "only what actually reported is counted"
+        );
+        assert!(durations
+            .slow
+            .iter()
+            .any(|finding| finding.rule == "unfinished-test-unit"
+                && finding.name.contains("the_slow_one")
+                && finding.seconds.is_none()));
+    }
+
+    #[test]
+    fn unparseable_output_still_reports_the_wall_clock_and_no_fabricated_totals() {
+        // Homeboy's own measurement of the child is real evidence even when the
+        // runner printed nothing timeable, so it is reported. What must never
+        // be invented is a *measured* total: no binary reported, so the sum is
+        // unknown, not zero.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let durations = collect_test_durations(
+            &dir.path().join("absent.json"),
+            "error: could not compile `homeboy`\n",
+            12.0,
+            false,
+            Duration::from_secs(1500),
+        )
+        .expect("the wall clock is always available");
+
+        assert_eq!(durations.phase_seconds, Some(12.0));
+        assert_eq!(
+            durations.measured_seconds, None,
+            "nothing reported means unknown, never zero"
+        );
+        assert!(durations.binaries.is_empty());
+        assert!(durations.tests.is_empty());
+        assert!(durations.slow.is_empty());
+        assert!(durations.complete);
+    }
+
+    #[test]
+    fn a_declared_durations_sidecar_wins_over_stdout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("test-durations.json");
+        std::fs::write(
+            &path,
+            r#"{"measured_seconds":99.0,"binaries":[{"name":"declared","seconds":99.0,"source":"binary-summary"}]}"#,
+        )
+        .expect("write sidecar");
+
+        let durations = collect_test_durations(
+            &path,
+            PARTIAL_RUNNER_OUTPUT,
+            120.0,
+            false,
+            Duration::from_secs(1500),
+        )
+        .expect("sidecar is consumed");
+
+        assert_eq!(durations.measured_seconds, Some(99.0));
+        assert_eq!(durations.binaries.len(), 1);
+        // Homeboy's own measurements still fill the gaps the sidecar left.
+        assert_eq!(durations.phase_seconds, Some(120.0));
+        assert_eq!(durations.budget_seconds, Some(1500.0));
+    }
 
     #[test]
     fn reported_artifact_locators_are_normalized_and_deduplicated() {
@@ -1280,6 +1453,7 @@ mod tests {
                 component: "fixture".to_string(),
                 exit_code: 1,
                 test_counts: Some(TestCounts::new(1, 0, 1, 0)),
+                test_durations: None,
                 findings: None,
                 failure_analysis_input: None,
                 coverage: None,
@@ -1374,6 +1548,7 @@ mod tests {
             component: "homeboy".to_string(),
             exit_code: 101,
             test_counts: None,
+            test_durations: None,
             findings: Some(findings),
             failure_analysis_input: Some(input),
             coverage: None,
