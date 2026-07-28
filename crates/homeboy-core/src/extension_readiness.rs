@@ -21,11 +21,11 @@ pub struct ExtensionReadyStatus {
 /// Whether a caller wants readiness actually probed, or only the metadata that
 /// costs nothing to read.
 ///
-/// A `ready_check` is an arbitrary operator-authored shell command — a WordPress
-/// doctor, an npm install probe, a Codebox health script. Inventory commands
-/// (`extension list`, `extension show`) exist to answer "what is installed,
-/// from where, at which revision", and that question must not be gated behind
-/// someone else's PHP (#10517).
+/// A `ready_check` is an arbitrary operator-authored shell command declared by
+/// the extension; core neither knows nor bounds what it does. Inventory
+/// commands (`extension list`, `extension show`) exist to answer "what is
+/// installed, from where, at which revision", and that question must not be
+/// gated behind an unrelated toolchain's health script (#10517).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtensionReadinessMode {
     /// Run the declared `ready_check`, bounded by [`ready_check_timeout`].

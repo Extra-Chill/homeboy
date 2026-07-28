@@ -183,10 +183,9 @@ fn probe_degradation_hints() -> Vec<String> {
     readonly_probe::degradations()
         .into_iter()
         .map(|degradation| {
-            // `PARTIAL STATUS` is documented as "the runner did not answer in
-            // time". A probe that could not run in the *controller's* own
-            // environment says nothing about the runner, so it gets its own
-            // label rather than raising a false wedged-Lab alarm (#10525).
+            // `PARTIAL STATUS` means "the runner did not answer in time". A
+            // probe that failed in the *controller's* own environment says
+            // nothing about the runner: label it apart (#10525).
             let label = if degradation.reason_code == readonly_probe::REASON_PROBE_UNAVAILABLE {
                 "DEGRADED PROBE"
             } else {
