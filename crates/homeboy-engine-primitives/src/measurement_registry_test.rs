@@ -160,12 +160,16 @@ const VERDICT_SITES: &[VerdictSite] = &[
     },
     VerdictSite {
         file: "crates/homeboy-extension/src/lint/run/workflow.rs",
-        basis: MeasurementBasis::EmptyPopulation,
+        basis: MeasurementBasis::Unguarded,
         note:
-            "The changed-file early exit. #10685 gave it ScopedLintPlan::changed_files_considered \
-               so `nothing changed` and `47 files changed and matched no lint route` stop \
-               rendering identically. The verdict is deliberately not moved -- see the comment at \
-               the call site for why the predicate cannot adjudicate this one.",
+            "Two greens. The changed-file early exit is EmptyPopulation-shaped, and #10685 gave it \
+               ScopedLintPlan::changed_files_considered so `nothing changed` and `47 files changed \
+               and matched no lint route` stop rendering identically. The other -- \
+               `status = if exit_code == 0` -- is downstream of effective_lint_exit_code, which \
+               rewrites a non-zero lint exit to zero whenever drift did not increase. That is \
+               UNGUARDED: an empty findings set against a non-empty baseline reads as `drift \
+               reduced` and renders green. See the doc comment on effective_lint_exit_code for \
+               why it is recorded rather than patched here.",
     },
     VerdictSite {
         file: "crates/homeboy-extension/src/test/parsing.rs",
