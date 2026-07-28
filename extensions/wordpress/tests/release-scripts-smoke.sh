@@ -16,6 +16,8 @@
 #   - scripts/release/publish.sh executes the release-latest branch mirror
 #     when homeboy.json configures it and emits the branch name in the
 #     receipt.
+#   - scripts/release/publish.sh uses a single authoritative WordPress ZIP
+#     recovery artifact and rejects ambiguous or invalid recovery artifacts.
 #
 # Stubs gh and git for the happy-path tests so we never touch the network
 # or a real GitHub repository.
@@ -310,6 +312,107 @@ else
   else
     echo "OK: publish.sh force-pushes release-latest branch when configured"
   fi
+fi
+
+# ---------------------------------------------------------------------------
+# publish.sh: uses an external recovery ZIP supplied by Homeboy and returns
+# its absolute path in the receipt.
+# ---------------------------------------------------------------------------
+RECOVERY_DIR="$(mktemp -d -t homeboy-wp-release-recovery.XXXXXX)"
+trap 'rm -rf "${WORK_DIR}" "${STUB_BIN_DIR}" "${HAPPY_DIR}" "${BRANCH_DIR}" "${RECOVERY_DIR}"' EXIT
+RECOVERY_ZIP="${RECOVERY_DIR}/recovered-plugin.zip"
+python3 -c "
+import zipfile
+with zipfile.ZipFile('${RECOVERY_ZIP}', 'w') as z:
+  z.writestr('recovered-plugin/recovered-plugin.php', '<?php\n/**\n * Plugin Name: Recovered Plugin\n * Version: 1.0.0\n */')
+"
+
+set +e
+publish_out="$(
+  cd "${RECOVERY_DIR}" && \
+  PATH="${STUB_BIN_DIR}:${PATH}" \
+  GITHUB_REPOSITORY="example/recovered-plugin" \
+  HOMEBOY_SETTINGS_JSON='{"release":{"tag":"v1.0.0","component_id":"recovered-plugin","artifacts":[{"path":"'"${RECOVERY_ZIP}"'","artifact_type":"wordpress-zip"}]}}' \
+  "${PUBLISH_SH}" 2>&1
+)"
+publish_status=$?
+set -e
+
+if [[ ${publish_status} -ne 0 ]]; then
+  echo "FAIL: publish.sh (recovery ZIP) exited ${publish_status}; output: ${publish_out}" >&2
+  failures=$((failures + 1))
+elif ! echo "${publish_out}" | tail -1 | jq -e --arg path "${RECOVERY_ZIP}" '.success == true and .artifact_path == $path' >/dev/null 2>&1; then
+  echo "FAIL: publish.sh receipt did not return recovery ZIP path; got: ${publish_out}" >&2
+  failures=$((failures + 1))
+else
+  echo "OK: publish.sh uses the supplied recovery ZIP"
+fi
+
+# publish.sh: multiple WordPress ZIP recovery artifacts must not silently
+# select one based on declaration order.
+set +e
+publish_err="$(
+  cd "${RECOVERY_DIR}" && \
+  PATH="${STUB_BIN_DIR}:${PATH}" \
+  GITHUB_REPOSITORY="example/recovered-plugin" \
+  HOMEBOY_SETTINGS_JSON='{"release":{"tag":"v1.0.0","component_id":"recovered-plugin","artifacts":[{"path":"'"${RECOVERY_ZIP}"'","type":"wordpress-zip"},{"path":"'"${RECOVERY_ZIP}"'","artifact_type":"wordpress-zip"}]}}' \
+  "${PUBLISH_SH}" 2>&1 >/dev/null
+)"
+publish_status=$?
+set -e
+
+if [[ ${publish_status} -eq 0 ]]; then
+  echo "FAIL: publish.sh accepted ambiguous recovery ZIP artifacts" >&2
+  failures=$((failures + 1))
+elif ! echo "${publish_err}" | grep -q "multiple WordPress ZIP recovery artifacts"; then
+  echo "FAIL: publish.sh did not surface the ambiguous-recovery error; got: ${publish_err}" >&2
+  failures=$((failures + 1))
+else
+  echo "OK: publish.sh rejects ambiguous recovery ZIP artifacts"
+fi
+
+# publish.sh: a matching recovery artifact needs a non-empty string path.
+set +e
+publish_err="$(
+  cd "${RECOVERY_DIR}" && \
+  PATH="${STUB_BIN_DIR}:${PATH}" \
+  GITHUB_REPOSITORY="example/recovered-plugin" \
+  HOMEBOY_SETTINGS_JSON='{"release":{"tag":"v1.0.0","component_id":"recovered-plugin","artifacts":[{"path":null,"type":"wordpress-zip"}]}}' \
+  "${PUBLISH_SH}" 2>&1 >/dev/null
+)"
+publish_status=$?
+set -e
+
+if [[ ${publish_status} -eq 0 ]]; then
+  echo "FAIL: publish.sh accepted an invalid recovery ZIP path" >&2
+  failures=$((failures + 1))
+elif ! echo "${publish_err}" | grep -q "path must be a non-empty string"; then
+  echo "FAIL: publish.sh did not surface the invalid-recovery-path error; got: ${publish_err}" >&2
+  failures=$((failures + 1))
+else
+  echo "OK: publish.sh rejects invalid recovery ZIP paths"
+fi
+
+# publish.sh: a selected recovery artifact must resolve to a regular file.
+set +e
+publish_err="$(
+  cd "${RECOVERY_DIR}" && \
+  PATH="${STUB_BIN_DIR}:${PATH}" \
+  GITHUB_REPOSITORY="example/recovered-plugin" \
+  HOMEBOY_SETTINGS_JSON='{"release":{"tag":"v1.0.0","component_id":"recovered-plugin","artifacts":[{"path":"'"${RECOVERY_DIR}"'","type":"wordpress-zip"}]}}' \
+  "${PUBLISH_SH}" 2>&1 >/dev/null
+)"
+publish_status=$?
+set -e
+
+if [[ ${publish_status} -eq 0 ]]; then
+  echo "FAIL: publish.sh accepted a recovery ZIP path that is not a regular file" >&2
+  failures=$((failures + 1))
+elif ! echo "${publish_err}" | grep -q "expected release artifact"; then
+  echo "FAIL: publish.sh did not reject the non-file recovery path; got: ${publish_err}" >&2
+  failures=$((failures + 1))
+else
+  echo "OK: publish.sh rejects recovery ZIP paths that are not regular files"
 fi
 
 # ---------------------------------------------------------------------------
