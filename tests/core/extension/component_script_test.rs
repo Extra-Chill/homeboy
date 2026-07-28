@@ -383,6 +383,80 @@ fn command_dispatch_falls_back_to_extension_when_component_script_is_absent() {
 }
 
 #[test]
+fn full_extension_test_supplies_canonical_result_sidecar() {
+    with_isolated_home(|home| {
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::write(
+            dir.path().join("homeboy.json"),
+            r#"{
+  "id": "fixture",
+  "extensions": { "fixture-extension": {} }
+}"#,
+        )
+        .expect("homeboy.json should be written");
+
+        let extension_dir = home
+            .path()
+            .join(".config/homeboy/extensions/fixture-extension");
+        fs::create_dir_all(&extension_dir).expect("extension dir should be created");
+        fs::write(
+            extension_dir.join("fixture-extension.json"),
+            r#"{
+  "name": "Fixture extension",
+  "version": "1.0.0",
+  "test": {
+    "extension_script": "test.sh",
+    "result_parse": {
+      "extension_script": "parse-results.sh",
+      "adapters": ["fixture-json"]
+    }
+  }
+}"#,
+        )
+        .expect("extension manifest should be written");
+        let extension_script = extension_dir.join("test.sh");
+        fs::write(
+            &extension_script,
+            r#"#!/bin/sh
+set -eu
+test -n "$HOMEBOY_TEST_RESULTS_FILE"
+mkdir -p "$(dirname "$HOMEBOY_TEST_RESULTS_FILE")"
+printf '{"schema":"fixture/test-results/v1","total":2,"passed":2,"failed":0,"skipped":0}\n' > "$HOMEBOY_TEST_RESULTS_FILE"
+"#,
+        )
+        .expect("extension script should be written");
+        let parser_script = extension_dir.join("parse-results.sh");
+        fs::write(
+            &parser_script,
+            r#"#!/bin/sh
+set -eu
+test "$1" = "$HOMEBOY_TEST_RESULTS_FILE"
+test "${2:-}" = "fixture-json"
+grep -q 'fixture/test-results/v1' "$1"
+source "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
+homeboy_write_test_results 2 2 0 0
+"#,
+        )
+        .expect("parser script should be written");
+        for script in [&extension_script, &parser_script] {
+            let mut perms = fs::metadata(script).expect("script metadata").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(script, perms).expect("script should be executable");
+        }
+
+        let (output, exit_code) = run_test(test_command_args(dir.path()), &GlobalArgs {})
+            .expect("extension test should run");
+
+        assert_eq!(exit_code, 0);
+        assert!(output.passed);
+        let counts = output.test_counts.expect("test counts");
+        assert_eq!(counts.total, 2);
+        assert_eq!(counts.passed, 2);
+        assert_eq!(counts.failed, 0);
+    });
+}
+
+#[test]
 fn changed_wordpress_php_smoke_test_executes_with_generic_result_adapter() {
     with_isolated_home(|home| {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -422,7 +496,7 @@ fn changed_wordpress_php_smoke_test_executes_with_generic_result_adapter() {
         let extension_script = extension_dir.join("test.sh");
         fs::write(
             &extension_script,
-            "#!/bin/sh\nprintf '%s' \"$HOMEBOY_CHANGED_TEST_FILES\" | grep -q 'tests/patterns/patterns-ability-smoke.php'\nprintf 'wordpress smoke passed=1 failed=0\\n'\n",
+            "#!/bin/sh\nset -eu\nprintf '%s' \"$HOMEBOY_CHANGED_TEST_FILES\" | grep -q 'tests/patterns/patterns-ability-smoke.php'\ntest -n \"$HOMEBOY_TEST_RESULTS_FILE\"\nmkdir -p \"$(dirname \"$HOMEBOY_TEST_RESULTS_FILE\")\"\nprintf '{\"total\":1,\"passed\":1,\"failed\":0,\"skipped\":0}\\n' > \"$HOMEBOY_TEST_RESULTS_FILE\"\n",
         )
         .expect("extension script should be written");
         let mut perms = fs::metadata(&extension_script)
