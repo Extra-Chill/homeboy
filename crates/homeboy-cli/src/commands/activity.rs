@@ -3,7 +3,12 @@ use std::time::{Duration, Instant};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use homeboy::core::activity::{self, ActivityItem, ActivityReport, ActivityScope, ActivityState};
+use homeboy::core::activity::{
+    self, ActivityEvidenceRef, ActivityItem, ActivityReport, ActivityScope, ActivityState,
+};
+use homeboy::core::notification_payload::{
+    NotifyAction, NotifyAttachment, NotifyEventKind, NotifyPayload, NotifySubject,
+};
 use homeboy::core::notify::{self, NotifyEvent, NotifyOutcome};
 use homeboy::core::{Error, Result};
 
@@ -413,14 +418,79 @@ fn maybe_notify(
     } else {
         format!("{:?}", item.state).to_lowercase()
     };
-    Some(notify::dispatch(&NotifyEvent {
-        title: format!("homeboy activity {status}"),
-        body: format!("{} {}", item.kind, item.id),
-        status,
-        run_id: item.id.clone(),
-        transport: None,
-        route: None,
-    }))
+    // The watched item already carries its command, runner placement, next
+    // actions, and artifact/evidence refs. Previously all of it was dropped and
+    // the notification said only "<kind> <id>".
+    let kind = if timed_out {
+        NotifyEventKind::NeedsAttention
+    } else {
+        NotifyEventKind::Completed
+    };
+    let payload = NotifyPayload::new(
+        kind,
+        NotifySubject::new(item.kind.clone(), item.id.clone()).with_phase(if timed_out {
+            "watch_timeout"
+        } else {
+            "terminal"
+        }),
+    )
+    .with_fact("Status", status.clone())
+    .with_optional_fact("Command", item.command.clone())
+    .with_optional_fact("Runner", item.runner.runner_id.clone())
+    .with_optional_fact("Finished", item.finished_at.clone())
+    .with_action(
+        NotifyAction::new("show", format!("homeboy activity show {}", item.id)).with_kind("show"),
+    );
+    let payload = item
+        .next_actions
+        .iter()
+        .fold(payload, |payload, action| {
+            payload.with_action(NotifyAction::new(
+                action.label.clone(),
+                action.command.clone(),
+            ))
+        })
+        .with_attachments(
+            item.artifacts
+                .iter()
+                .map(|artifact| notify_attachment(&item.id, "artifact", artifact))
+                .chain(
+                    item.evidence
+                        .iter()
+                        .map(|evidence| notify_attachment(&item.id, "evidence", evidence)),
+                ),
+        );
+
+    Some(notify::dispatch(
+        &NotifyEvent {
+            title: format!("homeboy activity {status}"),
+            body: format!("{} {}", item.kind, item.id),
+            status,
+            run_id: item.id.clone(),
+            kind,
+            transport: None,
+            route: None,
+            payload: None,
+        }
+        .with_payload(payload),
+    ))
+}
+
+/// Project an activity evidence ref into a deliverable attachment.
+///
+/// `fetch_command` is what makes this useful to a transport that cannot attach
+/// files: it renders the exact retrieval command instead of a bare path.
+fn notify_attachment(
+    owner_id: &str,
+    kind: &str,
+    reference: &ActivityEvidenceRef,
+) -> NotifyAttachment {
+    NotifyAttachment::new(
+        reference.id.clone(),
+        kind,
+        reference.uri.clone(),
+        format!("homeboy runs artifact get {owner_id} {}", reference.id),
+    )
 }
 
 fn parse_duration(raw: &str) -> Result<Duration> {

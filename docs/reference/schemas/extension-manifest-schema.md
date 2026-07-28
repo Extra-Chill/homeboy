@@ -219,6 +219,37 @@ non-secret transport-owned values. Transport IDs must be unique within an
 extension; an ID declared by multiple installed extensions is rejected at
 delivery time.
 
+**The argv contract is frozen.** Transports validate their own argv and reject
+unknown flags, so homeboy will not add flags to it. A transport that implements
+only the six values above keeps working at every future homeboy version.
+
+#### Structured payload (optional)
+
+Everything a transport needs to *act* on an event, rather than only display it,
+is delivered through the child process environment. A transport that ignores
+these variables is unaffected.
+
+| Variable | Meaning |
+| --- | --- |
+| `HOMEBOY_NOTIFY_KIND` | Lifecycle position: `queued`, `started`, `progress`, `completed`, `needs_attention`. Always set. |
+| `HOMEBOY_NOTIFY_PAYLOAD_SCHEMA` | Payload contract id, currently `homeboy/notification-payload/v1`. Version-gate on this before parsing. |
+| `HOMEBOY_NOTIFY_PAYLOAD` | The serialized payload. Set only when the producer supplied one. |
+| `HOMEBOY_NOTIFY_PAYLOAD_TRUNCATED` | `1` when members were dropped to keep the payload within its size budget. |
+
+The payload carries `subject` (generic class, id, component, parent, attempt,
+phase), ordered `facts`, executable `actions`, external `links`, and
+`attachments`. Attachments name a homeboy artifact by id, uri, and
+`fetch_command`, and may carry `media_type`, `display_name`, `byte_size`,
+`caption`, and a `group_id`/`role` pair for related evidence such as
+`source`/`candidate`/`diff`.
+
+Nothing is lost by ignoring the payload: `--body` is rendered *from* it, so a
+text-only transport receives the same information as bounded prose.
+
+Transports that print a JSON object on stdout have it retained verbatim in
+homeboy's `NotifyOutcome.result`, so delivery mode, attempt counts, truncation,
+and classified error kinds survive instead of collapsing to an exit code.
+
 Known sidecar names default to these run-directory paths when `path` is omitted:
 
 | Name | Default path |

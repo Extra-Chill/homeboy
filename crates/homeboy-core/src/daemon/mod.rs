@@ -1082,11 +1082,17 @@ fn completion_notify_loop(interval: std::time::Duration, shutdown: mpsc::Receive
                 if !won_race {
                     continue;
                 }
-                let event = crate::notify::NotifyEvent::run_completed_with_route(
+                let mut event = crate::notify::NotifyEvent::run_completed_with_route(
                     &completed_id,
                     status,
                     route.as_ref(),
                 );
+                // The completed record is already loaded above; carry its
+                // component, command, and evidence handles instead of
+                // re-deriving prose from the id and status alone.
+                if let Some(run) = run.as_ref() {
+                    event = event.with_payload(crate::notify::run_completed_payload(run));
+                }
                 let _ = crate::notify::dispatch(&event);
             }
         }

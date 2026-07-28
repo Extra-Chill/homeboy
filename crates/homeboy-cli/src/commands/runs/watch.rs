@@ -248,7 +248,8 @@ fn maybe_notify(args: &RunsWatchArgs, result: &WatchResult) -> Option<NotifyOutc
         &result.run.metadata_json,
     );
     let event =
-        NotifyEvent::run_completed_with_route(&args.run_id, &result.run.status, route.as_ref());
+        NotifyEvent::run_completed_with_route(&args.run_id, &result.run.status, route.as_ref())
+            .with_payload(notify::run_completed_payload(&result.run));
     Some(notify::dispatch(&event))
 }
 

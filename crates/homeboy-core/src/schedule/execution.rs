@@ -4,6 +4,7 @@ use homeboy_engine_primitives::content_hash;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::notification_payload::{NotifyAction, NotifyEventKind, NotifyPayload, NotifySubject};
 
 use super::state::{load_state, save_state, ScheduleState};
 use super::types::{NotifyPolicy, Schedule, ScheduledCommand};
@@ -499,32 +500,52 @@ fn notify(schedule: &Schedule, outcome: &ScheduleRunOutcome) -> (bool, Option<St
         _ => None,
     };
 
-    let title = format!("schedule {} — {}", schedule.id, outcome.status);
-    let mut body = format!("Command: {}\n", schedule.command_display());
-    body.push_str(&format!(
-        "Status: {} (exit {})\n",
-        outcome.status, outcome.exit_code
-    ));
-    body.push_str(&format!(
-        "Result: {}\n",
+    // The facts a schedule notification used to hand-format into prose are now
+    // structured once. The prose is rendered from them, so a text-only
+    // transport keeps the same information and a payload-aware one can act on
+    // it (re-run the schedule, inspect the failure) without parsing English.
+    let run_id = format!("schedule-{}-{}", schedule.id, outcome.started_at);
+    let payload = NotifyPayload::new(
+        NotifyEventKind::Completed,
+        NotifySubject::new("schedule", schedule.id.clone()).with_phase("scheduled_run"),
+    )
+    .with_fact("Command", schedule.command_display())
+    .with_fact(
+        "Status",
+        format!("{} (exit {})", outcome.status, outcome.exit_code),
+    )
+    .with_fact(
+        "Result",
         if outcome.changed {
             "changed since the previous run"
         } else {
             "unchanged"
-        }
+        },
+    )
+    .with_optional_fact("Summary", outcome.summary.clone())
+    .with_action(NotifyAction::new(
+        "show schedule",
+        format!("homeboy schedule show {}", schedule.id),
+    ))
+    .with_action(NotifyAction::new(
+        "run now",
+        format!("homeboy schedule run {}", schedule.id),
     ));
-    if let Some(summary) = &outcome.summary {
-        body.push_str(&format!("Summary: {summary}\n"));
-    }
 
     let event = crate::notify::NotifyEvent {
-        run_id: format!("schedule-{}-{}", schedule.id, outcome.started_at),
+        run_id,
         status: outcome.status.clone(),
-        title,
-        body,
+        title: format!("schedule {} — {}", schedule.id, outcome.status),
+        body: format!(
+            "Schedule {} finished with status {}",
+            schedule.id, outcome.status
+        ),
+        kind: NotifyEventKind::Completed,
         transport: route.as_ref().map(|route| route.transport.clone()),
         route: route.as_ref().map(|route| route.route.clone()),
-    };
+        payload: None,
+    }
+    .with_payload(payload);
     let result = crate::notify::dispatch(&event);
     (result.delivered, result.error)
 }
