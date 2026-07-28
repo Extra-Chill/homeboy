@@ -3,6 +3,42 @@
 use super::*;
 
 #[test]
+fn detached_planless_handoff_persists_explicit_bench_label_before_handoff() {
+    crate::test_support::with_isolated_home(|_| {
+        let handoff = materialize_generic_detached_lab_handoff(&[
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "--run-id".to_string(),
+            "ssi-fixture-37-20260727-runtime-fixed".to_string(),
+        ])
+        .expect("persist detached bench handoff");
+
+        assert_eq!(handoff.run_id, "ssi-fixture-37-20260727-runtime-fixed");
+        let record = agent_task_lifecycle::status(&handoff.run_id)
+            .expect("interrupted caller leaves a discoverable run");
+        assert!(!record.state.is_terminal());
+        assert_eq!(record.plan_id, handoff.plan.plan_id);
+    });
+}
+
+#[test]
+fn detached_planless_handoff_reuses_the_same_explicit_bench_label() {
+    crate::test_support::with_isolated_home(|_| {
+        let args = vec![
+            "homeboy".to_string(),
+            "bench".to_string(),
+            "--run-id=ssi-fixture-37-20260727-runtime-fixed".to_string(),
+        ];
+        let first = materialize_generic_detached_lab_handoff(&args).expect("first handoff");
+        let second = materialize_generic_detached_lab_handoff(&args).expect("replayed handoff");
+
+        assert_eq!(first.run_id, second.run_id);
+        assert_eq!(first.plan.plan_id, second.plan.plan_id);
+        assert!(agent_task_lifecycle::status(&first.run_id).is_ok());
+    });
+}
+
+#[test]
 fn explicit_local_promotion_defers_target_resolution_to_promotion() {
     let args = [
         "homeboy",

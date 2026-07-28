@@ -30,6 +30,8 @@ pub struct LabOffloadRequest<'a> {
     /// The controller-materialized task plan to retain if this offload creates
     /// a durable agent-task record before the runner accepts its child job.
     pub durable_agent_task_plan: Option<&'a homeboy_agents::agent_task_scheduler::AgentTaskPlan>,
+    /// Stable controller-owned identity for detached planless commands.
+    pub durable_run_id: Option<&'a str>,
     /// Controller checkout selected independently of the remote command argv.
     /// This keeps process cwd in the runner job while retaining an exact local
     /// source for Git materialization and path remapping.
@@ -66,6 +68,7 @@ impl<'a> LabOffloadRequest<'a> {
             read_only_polling: false,
             local_output_file: None,
             durable_agent_task_plan: None,
+            durable_run_id: None,
             source_path: None,
             verified_cook_baseline: None,
             require_controller_git_bundle: false,
@@ -100,6 +103,7 @@ mod tests {
             read_only_polling,
             local_output_file,
             durable_agent_task_plan,
+            durable_run_id,
             source_path,
             verified_cook_baseline,
             require_controller_git_bundle,
@@ -122,6 +126,7 @@ mod tests {
         assert!(!read_only_polling);
         assert!(local_output_file.is_none());
         assert!(durable_agent_task_plan.is_none());
+        assert!(durable_run_id.is_none());
         assert!(source_path.is_none());
         assert!(verified_cook_baseline.is_none());
         assert!(!require_controller_git_bundle);

@@ -49,6 +49,7 @@ impl LabOffloadProvider for RunnerLabOffload {
             read_only_polling: request.read_only_polling,
             local_output_file: request.local_output_file,
             durable_agent_task_plan: durable_agent_task_plan.as_ref(),
+            durable_run_id: request.durable_run_id,
             source_path: request.source_path,
             verified_cook_baseline: request.verified_cook_baseline,
             require_controller_git_bundle: request.require_controller_git_bundle,

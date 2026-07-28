@@ -1114,6 +1114,72 @@ pub(crate) fn run_lab_offload_inner(
         ));
     }
 
+    // Detached commands without an agent-task argv shape receive their durable
+    // plan and identity from routing. Admit the controller job before capacity
+    // checks or remote preparation so caller loss cannot orphan staging.
+    if request.detach_after_handoff
+        && request.durable_agent_task_plan.is_some()
+        && request.durable_run_id.is_some()
+    {
+        let run_id = request.durable_run_id.expect("checked durable run id");
+        emit_durable_run_id_before_execution(
+            run_id,
+            runner_id,
+            request.local_output_file,
+            &mut messages,
+        );
+        let controller_job_id = match crate::lab_staging_controller::submit_detached_staging(
+            run_id,
+            runner_id,
+            selection.mode.clone(),
+            &request,
+        ) {
+            Ok(controller_job_id) => controller_job_id,
+            Err(error) => {
+                if error.retryable != Some(true) {
+                    if let Some(durable_plan) = request.durable_agent_task_plan {
+                        let _ = agent_task_lifecycle::record_pre_execution_failure(
+                            run_id,
+                            durable_plan,
+                            "lab_staging_submission",
+                            &error,
+                        );
+                    }
+                }
+                return Err(
+                    error.with_hint(format!("Retry: homeboy agent-task retry {run_id} --run"))
+                );
+            }
+        };
+        let controller_job_commands = controller_job_retrieval_commands(&controller_job_id);
+        let stdout = serde_json::to_string_pretty(&serde_json::json!({
+            "success": true,
+            "data": {
+                "status": "materializing",
+                "durable_run_id": run_id,
+                "controller_job_id": controller_job_id,
+                "retrieval_commands": {
+                    "status": format!("homeboy agent-task status {run_id}"),
+                    "controller_job": controller_job_commands.show,
+                    "controller_job_watch": controller_job_commands.watch,
+                },
+            }
+        }))
+        .unwrap_or_else(|_| {
+            format!("Lab staging controller job {controller_job_id} accepted for {run_id}")
+        });
+        return Ok(LabOffloadOutcome::InFlight {
+            plan,
+            stdout: format!("{stdout}\n"),
+            stderr: format!(
+                "Lab staging continues in controller job `{controller_job_id}`.\nNext: homeboy agent-task status {run_id}\nNext: {}\nNext: {}\n",
+                controller_job_commands.show, controller_job_commands.watch,
+            ),
+            exit_code: 0,
+            output_file_content: Some(format!("{stdout}\n")),
+        });
+    }
+
     require_available_lab_runner(
         runner_id,
         &runner_status,

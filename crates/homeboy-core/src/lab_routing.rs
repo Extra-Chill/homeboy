@@ -64,6 +64,8 @@ pub struct LabRoutingRequest<'a> {
     /// subsystem. Only its presence is consulted along the routing path; the
     /// agent-task layer owns the typed plan.
     pub durable_agent_task_plan: Option<&'a serde_json::Value>,
+    /// Stable controller-owned identity for a detached planless command.
+    pub durable_run_id: Option<&'a str>,
     /// Controller checkout selected independently of CLI argv, such as the
     /// logical primary workspace of a materialized retry plan.
     pub source_path: Option<&'a std::path::Path>,
@@ -670,6 +672,7 @@ fn execute_lab_offload_with_timeout(
     let read_only_polling = request.read_only_polling;
     let local_output_file = request.local_output_file.map(str::to_string);
     let durable_agent_task_plan = request.durable_agent_task_plan.cloned();
+    let durable_run_id = request.durable_run_id.map(str::to_string);
     let source_path = request.source_path.map(std::path::Path::to_path_buf);
     let verified_cook_baseline = request.verified_cook_baseline.cloned();
     let require_controller_git_bundle = request.require_controller_git_bundle;
@@ -695,6 +698,7 @@ fn execute_lab_offload_with_timeout(
             read_only_polling,
             local_output_file: local_output_file.as_deref(),
             durable_agent_task_plan: durable_agent_task_plan.as_ref(),
+            durable_run_id: durable_run_id.as_deref(),
             source_path: source_path.as_deref(),
             verified_cook_baseline: verified_cook_baseline.as_ref(),
             require_controller_git_bundle,
@@ -888,6 +892,7 @@ mod tests {
             read_only_polling: false,
             local_output_file: None,
             durable_agent_task_plan: None,
+            durable_run_id: None,
             source_path: None,
             verified_cook_baseline: None,
             require_controller_git_bundle: false,
@@ -1251,6 +1256,7 @@ mod tests {
                 read_only_polling: false,
                 local_output_file: None,
                 durable_agent_task_plan: None,
+                durable_run_id: None,
                 source_path: None,
                 verified_cook_baseline: None,
                 require_controller_git_bundle: false,
