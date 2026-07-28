@@ -290,39 +290,53 @@ pub fn record_attempt_git_worktree(
 /// pointer file.
 ///
 /// A linked worktree's `.git` is a regular file containing
-/// `gitdir: <repo>/.git/worktrees/<id>`. That file is written by Git, names the
-/// exact registration directory, and is unambiguous — ownership by recorded
-/// metadata, not by a database join. A normal checkout (`.git` is a directory)
-/// has no registration to prune and answers `None`, as does any pointer we
-/// cannot parse or resolve. Fail closed: an unreadable pointer must never be
-/// guessed at, because the consequence of guessing is `git worktree remove`
-/// against the wrong repository.
+/// `gitdir: <repo>/.git/worktrees/<id>`, and that registration directory holds
+/// a `gitdir` file pointing back at `<worktree>/.git`. Both files are written
+/// by Git, so following them is ownership by recorded metadata, not by a
+/// database join — and requiring the two to agree makes a half-written or
+/// recycled registration unusable rather than merely suspicious.
+///
+/// The worktree path is taken from Git's own back-pointer rather than from the
+/// argument, so the recorded string is byte-identical to what a later prune
+/// will read back. Canonicalizing our argument instead would disagree with Git
+/// on any platform where the temporary or home directory is reached through a
+/// symlink.
+///
+/// A normal checkout (`.git` is a directory) has no registration to prune and
+/// answers `None`, as does any pointer that cannot be parsed, resolved, or
+/// cross-checked. Fail closed: the consequence of guessing here is
+/// `git worktree remove` against the wrong repository.
 fn linked_worktree_registration(worktree: &Path) -> Option<ControllerScratchGitWorktree> {
     let pointer = worktree.join(".git");
     if !fs::symlink_metadata(&pointer).ok()?.is_file() {
         return None;
     }
     let contents = fs::read_to_string(&pointer).ok()?;
-    let gitdir = contents.lines().find_map(|line| {
+    let registration = contents.lines().find_map(|line| {
         line.trim()
             .strip_prefix("gitdir:")
             .map(|value| PathBuf::from(value.trim()))
     })?;
     // `<repo>/.git/worktrees/<id>` -> `<repo>`. Anything shallower is not a
     // linked-worktree registration and is refused rather than reinterpreted.
-    let registrations = gitdir.parent()?;
+    let registrations = registration.parent()?;
     if registrations.file_name()? != "worktrees" {
         return None;
     }
-    let git_dir = registrations.parent()?;
-    let source_root = git_dir.parent()?;
+    let source_root = registrations.parent()?.parent()?;
     if !source_root.is_dir() {
         return None;
     }
+    // Git's back-pointer: `<registration>/gitdir` names `<worktree>/.git`.
+    let back_pointer = fs::read_to_string(registration.join("gitdir")).ok()?;
+    let recorded_worktree = PathBuf::from(back_pointer.trim()).parent()?.to_path_buf();
+    if recorded_worktree.canonicalize().ok()? != worktree.canonicalize().ok()? {
+        return None;
+    }
     Some(ControllerScratchGitWorktree {
-        path: worktree.canonicalize().ok()?.display().to_string(),
+        path: recorded_worktree.display().to_string(),
         source_root: source_root.canonicalize().ok()?.display().to_string(),
-        registration: gitdir.display().to_string(),
+        registration: registration.display().to_string(),
     })
 }
 
@@ -335,7 +349,9 @@ fn linked_worktree_registration(worktree: &Path) -> Option<ControllerScratchGitW
 ///
 /// * the worktree path must really be absent — an existing worktree is live;
 /// * `<registration>/gitdir` must still name exactly `<worktree>/.git`, so a
-///   reused registration id can never be mistaken for ours;
+///   reused or recycled registration id can never be mistaken for ours. The
+///   recorded path came out of this same file, so this is an exact match, not
+///   a normalization guess;
 /// * a `locked` marker retains, exactly as Git's own prune does.
 ///
 /// Every failure retains. Nothing here consults the run database.
@@ -3131,5 +3147,256 @@ mod tests {
             .status()
             .expect("run git");
         assert!(status.success(), "git {args:?}");
+    }
+
+    /// Build a source repository with one pushed commit on `main` plus a
+    /// linked attempt worktree detached at that commit, exactly the shape
+    /// `prepare_attempt_workspace` produces.
+    fn attempt_worktree(root: &Path, lease: &Path) -> (PathBuf, PathBuf) {
+        let remote = root.join("remote.git");
+        run_git(root, &["init", "--bare", remote.to_str().expect("remote")]);
+        let source = clean_checkout(root, &remote, "source");
+        fs::create_dir_all(lease).expect("lease");
+        let worktree = lease.join("workspace");
+        run_git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                worktree.to_str().expect("worktree"),
+                "main",
+            ],
+        );
+        (source, worktree)
+    }
+
+    /// The `.git` pointer file Git writes in a linked worktree names its exact
+    /// registration. A normal checkout has no registration to prune.
+    #[test]
+    fn linked_worktree_registration_is_read_from_gits_own_pointer_file() {
+        let root = tempfile::tempdir().expect("root");
+        let lease = root.path().join("lease");
+        let (source, worktree) = attempt_worktree(root.path(), &lease);
+
+        let registration =
+            linked_worktree_registration(&worktree).expect("linked worktree registration");
+        assert_eq!(
+            Path::new(&registration.source_root),
+            source.canonicalize().expect("source").as_path()
+        );
+        assert_eq!(
+            Path::new(&registration.path)
+                .canonicalize()
+                .expect("recorded worktree"),
+            worktree.canonicalize().expect("worktree")
+        );
+        assert!(Path::new(&registration.registration).is_dir());
+        assert!(
+            Path::new(&registration.registration)
+                .canonicalize()
+                .expect("registration")
+                .starts_with(
+                    source
+                        .join(".git/worktrees")
+                        .canonicalize()
+                        .expect("registrations")
+                ),
+            "registration must live under the source repository"
+        );
+
+        assert!(
+            linked_worktree_registration(&source).is_none(),
+            "a normal checkout has no linked registration"
+        );
+        assert!(
+            linked_worktree_registration(&lease).is_none(),
+            "a plain directory has no linked registration"
+        );
+    }
+
+    /// The preservation proof, in both directions. A detached attempt worktree
+    /// sitting on a pushed branch tip holds nothing unique; one commit later it
+    /// holds the only copy of that commit.
+    #[test]
+    fn attempt_worktree_preservation_requires_an_anchoring_ref() {
+        let root = tempfile::tempdir().expect("root");
+        let lease = root.path().join("lease");
+        let (source, worktree) = attempt_worktree(root.path(), &lease);
+
+        assert!(
+            attempt_worktree_commits_are_preserved(&worktree, &source),
+            "a detached checkout at a pushed branch tip holds no unique commit"
+        );
+
+        fs::write(worktree.join("candidate.txt"), "candidate\n").expect("candidate");
+        run_git(&worktree, &["add", "."]);
+        run_git(&worktree, &["commit", "-m", "candidate"]);
+
+        assert!(
+            !attempt_worktree_commits_are_preserved(&worktree, &source),
+            "a commit reachable only from the attempt HEAD must never be considered preserved"
+        );
+
+        // A linked worktree shares its source repository's object store, so a
+        // branch created there anchors the same commit and the proof flips back.
+        let head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&worktree)
+            .output()
+            .expect("attempt HEAD");
+        let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        run_git(&source, &["branch", "adopted", &head]);
+        assert!(
+            attempt_worktree_commits_are_preserved(&worktree, &source),
+            "an anchoring branch makes the same commit preserved"
+        );
+    }
+
+    /// #10568: cleanup must unregister through Git, not delete the directory
+    /// behind it. Before this fix the source repository kept a live
+    /// `.git/worktrees/<id>` entry after every reclaimed attempt.
+    #[test]
+    fn cleanup_unregisters_a_linked_attempt_worktree_instead_of_stranding_it() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("root");
+            let lease = root.path().join("lease");
+            let (source, worktree) = attempt_worktree(root.path(), &lease);
+            let registration = linked_worktree_registration(&worktree)
+                .expect("linked worktree registration")
+                .registration;
+
+            let mut stored = resource(&lease, root.path());
+            stored.lifecycle_state = "released".to_string();
+            stored.git_worktree = linked_worktree_registration(&worktree);
+            write_index(&ControllerScratchIndex {
+                schema: schema(),
+                resources: vec![stored],
+            })
+            .expect("index");
+
+            let preview = cleanup(ControllerScratchCleanupOptions {
+                apply: false,
+                limit: 10,
+                full: true,
+                retention_override_seconds: None,
+            })
+            .expect("preview");
+            assert_eq!(preview.candidate_count, 1, "{:?}", preview.skipped);
+            assert_eq!(preview.registered_worktree_count, 1);
+
+            let applied = cleanup(ControllerScratchCleanupOptions {
+                apply: true,
+                limit: 10,
+                full: true,
+                retention_override_seconds: None,
+            })
+            .expect("apply");
+            assert_eq!(applied.applied_count, 1, "{:?}", applied.skipped);
+            assert!(!lease.exists());
+            assert!(
+                !Path::new(&registration).exists(),
+                "the Git registration must not outlive the worktree"
+            );
+            let listed = Command::new("git")
+                .args(["worktree", "list", "--porcelain"])
+                .current_dir(&source)
+                .output()
+                .expect("git worktree list");
+            assert!(
+                !String::from_utf8_lossy(&listed.stdout)
+                    .contains(worktree.to_str().expect("worktree")),
+                "the source repository must no longer list the attempt worktree"
+            );
+        });
+    }
+
+    /// Unpushed, unmerged work is sacred: it is reported, never reclaimed.
+    #[test]
+    fn an_attempt_worktree_holding_the_only_copy_of_a_commit_is_reported_not_removed() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().expect("root");
+            let lease = root.path().join("lease");
+            let (_source, worktree) = attempt_worktree(root.path(), &lease);
+            fs::write(worktree.join("candidate.txt"), "candidate\n").expect("candidate");
+            run_git(&worktree, &["add", "."]);
+            run_git(&worktree, &["commit", "-m", "unique candidate"]);
+
+            let mut stored = resource(&lease, root.path());
+            stored.lifecycle_state = "released".to_string();
+            stored.git_worktree = linked_worktree_registration(&worktree);
+            write_index(&ControllerScratchIndex {
+                schema: schema(),
+                resources: vec![stored],
+            })
+            .expect("index");
+
+            let applied = cleanup(ControllerScratchCleanupOptions {
+                apply: true,
+                limit: 10,
+                full: true,
+                // Even the most aggressive retention override must not reach it.
+                retention_override_seconds: Some(0),
+            })
+            .expect("apply");
+
+            assert_eq!(applied.applied_count, 0);
+            assert_eq!(applied.candidate_count, 0);
+            assert_eq!(
+                applied.skipped[0].reason,
+                "git checkout has dirty or unpushed state"
+            );
+            assert!(worktree.join("candidate.txt").exists());
+        });
+    }
+
+    /// A registration whose worktree directory is already gone is pruned by
+    /// identity, and only when the registration still agrees it is ours.
+    #[test]
+    fn stranded_registrations_are_pruned_by_identity_only() {
+        let root = tempfile::tempdir().expect("root");
+        let lease = root.path().join("lease");
+        let (_source, worktree) = attempt_worktree(root.path(), &lease);
+        let registration =
+            linked_worktree_registration(&worktree).expect("linked worktree registration");
+
+        assert!(
+            !prune_stranded_worktree_registration(&registration),
+            "a live worktree must never have its registration pruned"
+        );
+
+        // Reproduce the historical leak: delete the directory behind Git.
+        fs::remove_dir_all(&worktree).expect("delete worktree behind git");
+        assert!(Path::new(&registration.registration).is_dir());
+
+        let mismatched = ControllerScratchGitWorktree {
+            path: worktree.display().to_string(),
+            source_root: registration.source_root.clone(),
+            registration: Path::new(&registration.registration)
+                .parent()
+                .expect("registrations")
+                .join("some-other-attempt")
+                .display()
+                .to_string(),
+        };
+        assert!(
+            !prune_stranded_worktree_registration(&mismatched),
+            "a registration that does not name this worktree is not ours"
+        );
+
+        fs::write(Path::new(&registration.registration).join("locked"), "held")
+            .expect("lock registration");
+        assert!(
+            !prune_stranded_worktree_registration(&registration),
+            "a locked registration retains, exactly as `git worktree prune` does"
+        );
+        fs::remove_file(Path::new(&registration.registration).join("locked")).expect("unlock");
+
+        assert!(prune_stranded_worktree_registration(&registration));
+        assert!(!Path::new(&registration.registration).exists());
+        assert!(
+            !prune_stranded_worktree_registration(&registration),
+            "pruning is idempotent"
+        );
     }
 }
