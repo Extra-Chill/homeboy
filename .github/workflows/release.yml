@@ -986,10 +986,42 @@ jobs:
           RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
           RELEASE_VERSION: ${{ needs.prepare.outputs['release-version'] }}
           EXPECTED_ASSETS: ${{ needs.plan.outputs.expected-assets }}
+          CONTROL_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           mkdir -p draft-adoption
           COMMIT="$(git rev-parse "${RELEASE_TAG}^{}")"
+
+          # ── Control-binary lineage (issue #10519) ──
+          # This checkout is the RELEASE TARGET (the tag). The binary that will
+          # publish it was built from CONTROL_SHA. Recovery is meant to run code
+          # NEWER than the tag it repairs — that is how a publisher fix merged
+          # after the tag reaches the stranded release at all. The inverse is
+          # not safe: a control binary from a tree that never contained the tag
+          # would apply a release contract this tag was never planned under.
+          # Record the relationship so the publisher can enforce that boundary.
+          #
+          # Every unresolvable path emits `null`, never `false`: an ambiguous
+          # answer must degrade to "unverified", not brick an already-stranded
+          # release. Only a definitive "not an ancestor" blocks recovery.
+          CONTAINS_TARGET=null
+          if ! git cat-file -e "${CONTROL_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "${CONTROL_SHA}" 2>/dev/null || true
+          fi
+          if git cat-file -e "${CONTROL_SHA}^{commit}" 2>/dev/null; then
+            set +e
+            git merge-base --is-ancestor "${COMMIT}" "${CONTROL_SHA}" 2>/dev/null
+            ANCESTRY_STATUS=$?
+            set -e
+            case "${ANCESTRY_STATUS}" in
+              0) CONTAINS_TARGET=true ;;
+              1) CONTAINS_TARGET=false ;;
+              *) echo "::warning::git merge-base --is-ancestor exited ${ANCESTRY_STATUS}; recovery control lineage reported as unverified." ;;
+            esac
+          else
+            echo "::warning::Control commit ${CONTROL_SHA} is not present in this checkout; recovery control lineage reported as unverified."
+          fi
+
           jq -n \
             --arg schema homeboy.draft-adoption \
             --argjson schema_version 1 \
@@ -998,7 +1030,10 @@ jobs:
             --arg version "${RELEASE_VERSION}" \
             --arg commit "${COMMIT}" \
             --argjson expected_assets "${EXPECTED_ASSETS}" \
-            '{schema: $schema, schema_version: $schema_version, component_id: $component_id, tag: $tag, version: $version, commit: $commit, expected_assets: $expected_assets}' > draft-adoption/manifest.json
+            --arg control_commit "${CONTROL_SHA}" \
+            --argjson contains_target "${CONTAINS_TARGET}" \
+            '{schema: $schema, schema_version: $schema_version, component_id: $component_id, tag: $tag, version: $version, commit: $commit, expected_assets: $expected_assets, control: {commit: $control_commit, contains_target: $contains_target}}' > draft-adoption/manifest.json
+          echo "::notice::Recovery control lineage: control ${CONTROL_SHA} vs target ${COMMIT} (contains_target=${CONTAINS_TARGET})"
 
       - name: Download current Homeboy finalizer
         if: needs.prepare.outputs.recovery-release == 'true'
