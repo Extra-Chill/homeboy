@@ -346,15 +346,17 @@ impl FuzzEvidenceContract {
             }
         }
         // The legacy `results_error` collapsed five distinct channels into one
-        // string. Only promote it when it is not already represented by the
-        // missing-ref list, and classify it as `Unknown` rather than guessing a
-        // code from substring sniffing.
+        // string. Promote it only when it is not already represented by the
+        // missing-ref list and is not a gate failure wearing the same field.
+        // Classify what is left as `Unknown` rather than guessing a code from
+        // substring sniffing.
         if violations.is_empty() {
             if let Some(error) = metadata
                 .get("results_error")
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|error| !error.is_empty())
+                .filter(|error| !is_legacy_gate_failure_message(error))
             {
                 violations.push(FuzzEvidenceViolation::new(
                     FuzzEvidenceViolationCode::Unknown,
@@ -364,6 +366,21 @@ impl FuzzEvidenceContract {
         }
         Self::from_violations(violations)
     }
+}
+
+/// The exact prefix Homeboy itself writes into the legacy collapsed
+/// `results_error` member for an expected-metric gate failure.
+///
+/// Matching it is matching our own emitted format, not sniffing arbitrary
+/// runner text. A gate that did not hold is a statement about declared pass
+/// criteria, so reconstructing it as an evidence-contract violation would
+/// blame the producer for the very collapse this taxonomy removes. New runs
+/// never reach this path: they carry a structured `evidence_contract` that
+/// excludes gate failures at production time.
+const LEGACY_GATE_FAILURE_PREFIX: &str = "fuzz expected metric gate(s) failed";
+
+fn is_legacy_gate_failure_message(error: &str) -> bool {
+    error.starts_with(LEGACY_GATE_FAILURE_PREFIX)
 }
 
 /// The producer channel that owes artifacts declared by a campaign.
@@ -672,6 +689,22 @@ mod tests {
             FuzzEvidenceViolationCode::Unknown
         );
         assert_eq!(contract.violations[0].message, "runner exploded");
+    }
+
+    /// A legacy run whose only failure was a gate must not be reconstructed as
+    /// an evidence-contract violation. `results_error` collapsed both, so the
+    /// reader has to un-collapse it or it re-creates the reported bug in the
+    /// opposite direction.
+    #[test]
+    fn a_legacy_gate_failure_in_results_error_is_not_an_evidence_violation() {
+        let metadata = serde_json::json!({
+            "results_error": "fuzz expected metric gate(s) failed: p95_ms expected 500 observed 900"
+        });
+
+        let contract = FuzzEvidenceContract::from_run_metadata(&metadata);
+
+        assert!(contract.complete);
+        assert!(contract.violations.is_empty());
     }
 
     #[test]
