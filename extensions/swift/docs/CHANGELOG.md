@@ -2,6 +2,11 @@
 
 All notable changes to the **swift** extension will be documented in this file.
 
+## [2.8.1] - 2026-07-28
+
+### Changed
+- drop retired manifest keys and dead validate scripts
+
 ## [2.8.0] - 2026-07-17
 
 ### Added
