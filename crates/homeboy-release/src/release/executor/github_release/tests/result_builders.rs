@@ -2,6 +2,7 @@
 
 use crate::release::types::ReleaseStepStatus;
 
+use super::super::gh_cli::{gh_failure_diagnostic, GhCommandOutput};
 use super::super::{
     create_failed_result, not_created_result, published_existing_draft_result,
     published_release_url, unfinished_release_result, upload_failed_result, upload_success_result,
@@ -46,11 +47,16 @@ fn create_failed_result_reports_generated_notes_failed_as_failure() {
         "v0.10.6",
         &test_repo(),
         "generated-notes-failed",
-        String::new(),
-        "HTTP 502: bad gateway".to_string(),
+        &GhCommandOutput {
+            stdout: String::new(),
+            stderr: "HTTP 502: bad gateway".to_string(),
+            exit_code: Some(1),
+            timed_out: false,
+        },
         test_repair(),
         &test_body(),
         Some("build/v0.10.6-release-notes.md"),
+        &[],
     );
 
     assert_eq!(result.status, ReleaseStepStatus::Failed);
@@ -76,11 +82,16 @@ fn create_failed_result_reports_plain_create_failure() {
         "v0.10.6",
         &test_repo(),
         "gh-command-failed",
-        String::new(),
-        "release v0.10.6 already exists".to_string(),
+        &GhCommandOutput {
+            stdout: String::new(),
+            stderr: "release v0.10.6 already exists".to_string(),
+            exit_code: Some(1),
+            timed_out: false,
+        },
         test_repair(),
         &test_body(),
         Some("build/v0.10.6-release-notes.md"),
+        &[],
     );
 
     assert_eq!(result.status, ReleaseStepStatus::Failed);
@@ -100,6 +111,7 @@ fn upload_failed_result_is_failed_but_records_release_exists() {
         false,
         1,
         test_repair(),
+        &[],
     );
 
     assert_eq!(result.status, ReleaseStepStatus::Failed);
@@ -128,6 +140,7 @@ fn upload_timeout_is_classified_and_preserves_empty_stderr() {
         true,
         1,
         test_repair(),
+        &[],
     );
     assert_eq!(data_bool(&result, "timed_out"), Some(true));
     assert_eq!(
@@ -139,6 +152,54 @@ fn upload_timeout_is_classified_and_preserves_empty_stderr() {
         Some(124)
     );
     assert!(result.error.as_deref().unwrap().contains("timed out"));
+}
+
+#[test]
+fn upload_failed_result_sanitizes_persisted_output() {
+    let result = upload_failed_result(
+        "v0.10.6",
+        &test_repo(),
+        format!(
+            "https://user:password@example.test/file?token=secret {}",
+            "x".repeat(5000)
+        ),
+        "Authorization: Bearer secret".to_string(),
+        Some(1),
+        false,
+        1,
+        test_repair(),
+        &[],
+    );
+    let data = result.data.as_ref().expect("failed result data");
+    let stdout = data["stdout"].as_str().expect("sanitized stdout");
+    let stderr = data["stderr"].as_str().expect("sanitized stderr");
+    assert!(!stdout.contains("password"));
+    assert!(!stdout.contains("secret"));
+    assert!(!stderr.contains("secret"));
+    assert!(stdout.len() <= 4096 + "...[truncated]".len());
+}
+
+#[test]
+fn create_failed_result_sanitizes_persisted_output() {
+    let result = create_failed_result(
+        "v0.10.6",
+        &test_repo(),
+        "gh-command-failed",
+        &GhCommandOutput {
+            stdout: "token=secret".repeat(1000),
+            stderr: "Authorization: Bearer secret".to_string(),
+            exit_code: Some(1),
+            timed_out: false,
+        },
+        test_repair(),
+        &test_body(),
+        None,
+        &[],
+    );
+    let data = result.data.as_ref().expect("failed result data");
+    assert!(!data["stdout"].as_str().unwrap().contains("secret"));
+    assert!(!data["stderr"].as_str().unwrap().contains("secret"));
+    assert!(data["stdout"].as_str().unwrap().len() <= 4096 + "...[truncated]".len());
 }
 
 #[test]
@@ -202,6 +263,7 @@ fn an_unfinished_release_is_failed_so_the_tag_is_never_reported_as_delivered() {
         "draft-publish-failed",
         "`gh release edit --draft=false` failed for v0.320.0: HTTP 502",
         test_repair(),
+        &[],
     );
 
     assert_eq!(result.status, ReleaseStepStatus::Failed);
@@ -234,6 +296,7 @@ fn an_empty_draft_is_refused_with_the_same_failed_contract() {
         "draft-release-has-no-assets",
         "Refusing to publish an empty release over the pushed tag.",
         test_repair(),
+        &[],
     );
 
     assert_eq!(result.status, ReleaseStepStatus::Failed);
@@ -242,6 +305,47 @@ fn an_empty_draft_is_refused_with_the_same_failed_contract() {
         data_str(&result, "reason"),
         Some("draft-release-has-no-assets")
     );
+}
+
+#[test]
+fn failed_results_retain_structured_command_diagnostics() {
+    let output = GhCommandOutput {
+        stdout: String::new(),
+        stderr: "HTTP 403\nX-GitHub-Request-Id: request-123\nAuthorization: token ghp_secret"
+            .to_string(),
+        exit_code: Some(1),
+        timed_out: false,
+    };
+    let diagnostic = gh_failure_diagnostic(
+        "gh release edit --draft=false",
+        "repos/example-org/studio-web/releases/v0.10.6",
+        &output,
+    );
+    let result = unfinished_release_result(
+        "v0.10.6",
+        &test_repo(),
+        "draft-publish-failed",
+        "gh release edit --draft=false exited with status 1",
+        test_repair(),
+        &[diagnostic],
+    );
+
+    let details = result
+        .data
+        .as_ref()
+        .and_then(|data| data.get("error_details"))
+        .expect("structured diagnostic details retained");
+    assert_eq!(details["code"], "github_command_failed");
+    let failures = details
+        .get("failures")
+        .and_then(|value| value.as_array())
+        .expect("structured diagnostic retained");
+    assert_eq!(failures[0]["http_status"], 403);
+    assert_eq!(failures[0]["github_request_id"], "request-123");
+    assert!(!failures[0]["stderr"]
+        .as_str()
+        .unwrap()
+        .contains("ghp_secret"));
 }
 
 #[test]

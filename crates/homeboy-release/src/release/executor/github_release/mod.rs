@@ -27,7 +27,7 @@ pub(crate) use run::validate_declared_build_artifact;
 // step to gate tag-availability preflight, so they are part of the module's
 // non-test surface.
 pub(crate) use gh_cli::{
-    download_small_release_asset, gh_failure_detail, gh_is_authenticated, gh_is_available,
+    download_small_release_asset, gh_failure_diagnostic, gh_is_authenticated, gh_is_available,
     gh_release_exists, gh_release_metadata, github_release_publications,
     github_release_upload_timeout, reconcile_release_publications, run_gh_command,
     validate_draft_adoption, verify_release_publications,

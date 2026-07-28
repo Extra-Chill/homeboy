@@ -4,11 +4,22 @@ use crate::release::types::ReleaseStepResult;
 use homeboy_core::git::release_download::GitHubRepo;
 
 use super::super::{step_failed, step_success};
-use super::gh_cli::ReleaseAssetPublication;
+use super::gh_cli::{gh_diagnostic_text, GitHubCommandFailureDiagnostic, ReleaseAssetPublication};
 use super::notes::GitHubReleaseBody;
 use super::repair::{
     existing_draft_repair_hints, repair_data, repair_hints, GitHubReleaseRepairCommands,
 };
+
+fn github_command_error_details(
+    diagnostics: &[GitHubCommandFailureDiagnostic],
+) -> Option<serde_json::Value> {
+    (!diagnostics.is_empty()).then(|| {
+        serde_json::json!({
+            "code": "github_command_failed",
+            "failures": diagnostics,
+        })
+    })
+}
 
 pub(crate) fn published_release_url(
     github: &GitHubRepo,
@@ -98,8 +109,9 @@ pub(crate) fn unfinished_release_result(
     reason: &str,
     error: &str,
     repair: GitHubReleaseRepairCommands,
+    diagnostics: &[GitHubCommandFailureDiagnostic],
 ) -> ReleaseStepResult {
-    let data = serde_json::json!({
+    let mut data = serde_json::json!({
         "skipped": false,
         "release_created": true,
         "published": false,
@@ -110,6 +122,9 @@ pub(crate) fn unfinished_release_result(
         "repo": github.repo,
         "repair": repair_data(&repair),
     });
+    if let Some(details) = github_command_error_details(diagnostics) {
+        data["error_details"] = details;
+    }
 
     step_failed(
         "github.release",
@@ -160,13 +175,15 @@ pub(crate) fn create_failed_result(
     tag: &str,
     github: &GitHubRepo,
     reason: &str,
-    stdout: String,
-    stderr: String,
+    output: &super::gh_cli::GhCommandOutput,
     repair: GitHubReleaseRepairCommands,
     body: &GitHubReleaseBody,
     persisted_notes_path: Option<&str>,
+    diagnostics: &[GitHubCommandFailureDiagnostic],
 ) -> ReleaseStepResult {
-    let data = serde_json::json!({
+    let stdout = gh_diagnostic_text(&output.stdout);
+    let stderr = gh_diagnostic_text(&output.stderr);
+    let mut data = serde_json::json!({
         "skipped": false,
         "release_created": false,
         "reason": reason,
@@ -184,6 +201,9 @@ pub(crate) fn create_failed_result(
         "release_body_source": body.source_label(),
         "release_body_file": persisted_notes_path,
     });
+    if let Some(details) = github_command_error_details(diagnostics) {
+        data["error_details"] = details;
+    }
 
     let detail = stderr.trim();
     let error = if detail.is_empty() {
@@ -214,8 +234,11 @@ pub(crate) fn upload_failed_result(
     timed_out: bool,
     artifact_count: usize,
     repair: GitHubReleaseRepairCommands,
+    diagnostics: &[GitHubCommandFailureDiagnostic],
 ) -> ReleaseStepResult {
-    let data = serde_json::json!({
+    let stdout = gh_diagnostic_text(&stdout);
+    let stderr = gh_diagnostic_text(&stderr);
+    let mut data = serde_json::json!({
         "skipped": false,
         "release_created": true,
         "reason": "gh-upload-failed",
@@ -230,6 +253,9 @@ pub(crate) fn upload_failed_result(
         "artifact_count": artifact_count,
         "repair": repair_data(&repair),
     });
+    if let Some(details) = github_command_error_details(diagnostics) {
+        data["error_details"] = details;
+    }
 
     let detail = stderr.trim();
     let error = if timed_out {
