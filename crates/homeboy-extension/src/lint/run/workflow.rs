@@ -22,6 +22,23 @@ use homeboy_core::finding::HomeboyFinding;
 use homeboy_core::validation_progress::{write_command_artifact, ValidationProgressRecorder};
 use std::path::{Path, PathBuf};
 
+struct LintRunEvidence {
+    findings: Vec<HomeboyFinding>,
+    declared_producers: Vec<homeboy_core::finding::FindingProducerSummary>,
+    findings_file: PathBuf,
+    producers_file: PathBuf,
+    changed_files: Option<Vec<String>>,
+    step: Option<String>,
+    success: bool,
+    exit_code: i32,
+}
+
+struct ScopedLintOutput {
+    output: extension::RunnerOutput,
+    evidence: Vec<LintRunEvidence>,
+    child_run_dirs: Vec<RunDir>,
+}
+
 /// Run the main lint workflow.
 ///
 /// Handles changed-file scoping, autofix planning, lint runner execution,
@@ -60,8 +77,9 @@ pub fn run_main_lint_workflow(
     }
 
     // Run lint
-    let output = if let Some(ref runs) = scoped_runs {
-        run_scoped_lint_runs(component, &args, run_dir, runs)?
+    let (output, evidence, child_run_dirs) = if let Some(ref runs) = scoped_runs {
+        let scoped = run_scoped_lint_runs(component, &args, run_dir, runs)?;
+        (scoped.output, scoped.evidence, scoped.child_run_dirs)
     } else {
         let mut progress = ValidationProgressRecorder::new(
             run_dir,
@@ -99,31 +117,64 @@ pub fn run_main_lint_workflow(
         let stdout_artifact = write_command_artifact(run_dir, 0, "stdout", &output.stdout)?;
         let stderr_artifact = write_command_artifact(run_dir, 0, "stderr", &output.stderr)?;
         progress.finish(0, output.exit_code, stdout_artifact, stderr_artifact)?;
-        output
+        let lint_findings_file = run_dir.step_file(run_dir::files::LINT_FINDINGS);
+        if !lint_findings_file.is_file() {
+            return Err(missing_findings_evidence_error(&lint_findings_file));
+        }
+        let lint_producers_file = run_dir.step_file(run_dir::files::LINT_PRODUCERS);
+        let evidence = vec![LintRunEvidence {
+            findings: lint_baseline::parse_findings_file(&lint_findings_file)?,
+            declared_producers: parse_lint_producer_summaries_file(&lint_producers_file)?,
+            findings_file: lint_findings_file,
+            producers_file: lint_producers_file,
+            changed_files: None,
+            step: None,
+            success: output.success,
+            exit_code: output.exit_code,
+        }];
+        (output, evidence, Vec::new())
     };
 
-    let lint_findings_file = run_dir.step_file(run_dir::files::LINT_FINDINGS);
-    let lint_producers_file = run_dir.step_file(run_dir::files::LINT_PRODUCERS);
-    let parsed_lint_findings = lint_baseline::parse_findings_file(&lint_findings_file)?;
-    let scoped_filter_removed_findings = scoped_runs.is_some() && !parsed_lint_findings.is_empty();
-    let raw_lint_findings =
-        filter_findings_to_scoped_files(parsed_lint_findings, scoped_runs.as_deref());
-    let lint_findings = filter_lint_findings(raw_lint_findings, &args);
+    let mut lint_findings = Vec::new();
+    let mut producer_summaries = Vec::new();
+    for evidence in evidence {
+        let had_findings = !evidence.findings.is_empty();
+        let declared_producers_empty = evidence.declared_producers.is_empty();
+        let scoped_run = evidence
+            .changed_files
+            .as_ref()
+            .map(|changed_files| ScopedLintRun {
+                glob: String::new(),
+                step: evidence.step.clone(),
+                changed_files: changed_files.clone(),
+            });
+        let route_findings = filter_findings_to_scoped_files(
+            evidence.findings,
+            scoped_run.as_ref().map(std::slice::from_ref),
+        );
+        let route_findings = filter_lint_findings(route_findings, &args);
+        let mut route_producers = build_lint_producer_summaries(
+            &route_findings,
+            &evidence.findings_file,
+            &evidence.producers_file,
+            evidence.declared_producers,
+            evidence.success,
+            evidence.exit_code,
+            evidence.step.as_deref(),
+        );
+        if evidence.changed_files.is_some()
+            && had_findings
+            && route_findings.is_empty()
+            && evidence.exit_code == 1
+            && declared_producers_empty
+        {
+            mark_zero_finding_producers_passed(&mut route_producers);
+        }
+        lint_findings.extend(route_findings);
+        producer_summaries.extend(route_producers);
+    }
     let formatting_findings =
         extract_formatting_findings(&output.stdout, &output.stderr, source_path);
-    let declared_producers = parse_lint_producer_summaries_file(&lint_producers_file)?;
-    let mut producer_summaries = build_lint_producer_summaries(
-        &lint_findings,
-        &lint_findings_file,
-        &lint_producers_file,
-        declared_producers,
-        output.success,
-        output.exit_code,
-        None,
-    );
-    if scoped_filter_removed_findings && lint_findings.is_empty() && output.exit_code == 1 {
-        mark_zero_finding_producers_passed(&mut producer_summaries);
-    }
 
     let mut hints = Vec::new();
 
@@ -139,8 +190,16 @@ pub fn run_main_lint_workflow(
     let (baseline_comparison, baseline_exit_override) =
         process_baseline(source_path, &args, &lint_findings)?;
 
-    let exit_code = effective_lint_exit_code(lint_exit_code, baseline_exit_override);
+    let harness_error = lint_exit_code != 0
+        && self_check_output_is_harness_failure(output.exit_code, &output.stdout, &output.stderr);
+    let hard_error = output.exit_code >= 2
+        || harness_error
+        || producer_summaries
+            .iter()
+            .any(|producer| producer.status == "error");
+    let exit_code = effective_lint_exit_code(lint_exit_code, baseline_exit_override, hard_error);
     let status = if exit_code == 0 { "passed" } else { "failed" }.to_string();
+    finish_scoped_lint_run_dirs(&child_run_dirs, exit_code == 0);
     let lint_clean = lint_findings.is_empty() && exit_code == 0;
 
     // Hint assembly — point to the auto-fix CTA for autofixable findings.
@@ -185,10 +244,6 @@ pub fn run_main_lint_workflow(
 
     // A non-zero exit with zero findings whose runner output shows infra
     // markers is a harness failure, not a real lint failure.
-    let harness_error = exit_code != 0
-        && lint_findings.is_empty()
-        && self_check_output_is_harness_failure(output.exit_code, &output.stdout, &output.stderr);
-
     Ok(LintRunWorkflowResult {
         status,
         component: args.component_label,
@@ -219,12 +274,14 @@ fn run_scoped_lint_runs(
     args: &LintRunWorkflowArgs,
     run_dir: &RunDir,
     runs: &[ScopedLintRun],
-) -> homeboy_core::Result<extension::RunnerOutput> {
+) -> homeboy_core::Result<ScopedLintOutput> {
     let mut success = true;
     let mut exit_code = 0;
     let mut stdout = String::new();
     let mut stderr = String::new();
     let mut extension_phase_timings = Vec::new();
+    let mut evidence = Vec::new();
+    let mut child_run_dirs = Vec::new();
     let mut progress = ValidationProgressRecorder::new(
         run_dir,
         None,
@@ -276,6 +333,31 @@ fn run_scoped_lint_runs(
         let stdout_artifact = write_command_artifact(run_dir, index, "stdout", &output.stdout)?;
         let stderr_artifact = write_command_artifact(run_dir, index, "stderr", &output.stderr)?;
         progress.finish(index, output.exit_code, stdout_artifact, stderr_artifact)?;
+        let findings_file = active_run_dir.step_file(run_dir::files::LINT_FINDINGS);
+        if !findings_file.is_file() {
+            finish_scoped_lint_run_dir(scoped_run_dir.as_ref(), false);
+            return Err(missing_findings_evidence_error(&findings_file));
+        }
+        let producers_file = active_run_dir.step_file(run_dir::files::LINT_PRODUCERS);
+        let parsed_findings = lint_baseline::parse_findings_file(&findings_file);
+        let declared_producers = parse_lint_producer_summaries_file(&producers_file);
+        let (parsed_findings, declared_producers) = match (parsed_findings, declared_producers) {
+            (Ok(findings), Ok(producers)) => (findings, producers),
+            (Err(error), _) | (_, Err(error)) => {
+                finish_scoped_lint_run_dir(scoped_run_dir.as_ref(), false);
+                return Err(error);
+            }
+        };
+        evidence.push(LintRunEvidence {
+            findings: parsed_findings,
+            declared_producers,
+            findings_file,
+            producers_file,
+            changed_files: Some(run.changed_files.clone()),
+            step: run.step.clone(),
+            success: output.success,
+            exit_code: output.exit_code,
+        });
         extension_phase_timings.extend(output.extension_phase_timings);
         if !stdout.is_empty() && !stdout.ends_with('\n') {
             stdout.push('\n');
@@ -288,22 +370,44 @@ fn run_scoped_lint_runs(
 
         if !output.success {
             success = false;
-            if exit_code == 0 {
+            if exit_code == 0 || output.exit_code >= 2 {
                 exit_code = output.exit_code;
             }
         }
-        finish_scoped_lint_run_dir(scoped_run_dir.as_ref(), output.success);
+        if let Some(scoped_run_dir) = scoped_run_dir {
+            child_run_dirs.push(scoped_run_dir);
+        }
     }
 
-    Ok(extension::RunnerOutput {
-        exit_code,
-        success,
-        stdout,
-        stderr,
-        timed_out: false,
-        child_resource: None,
-        extension_phase_timings,
+    Ok(ScopedLintOutput {
+        output: extension::RunnerOutput {
+            exit_code,
+            success,
+            stdout,
+            stderr,
+            timed_out: false,
+            child_resource: None,
+            extension_phase_timings,
+        },
+        evidence,
+        child_run_dirs,
     })
+}
+
+fn finish_scoped_lint_run_dirs(run_dirs: &[RunDir], success: bool) {
+    for run_dir in run_dirs {
+        finish_scoped_lint_run_dir(Some(run_dir), success);
+    }
+}
+
+fn missing_findings_evidence_error(path: &Path) -> homeboy_core::Error {
+    homeboy_core::Error::internal_io(
+        format!(
+            "Lint runner did not produce required findings evidence {}",
+            path.display()
+        ),
+        Some("lint.findings.evidence".to_string()),
+    )
 }
 
 pub(super) fn finish_scoped_lint_run_dir(run_dir: Option<&RunDir>, success: bool) {
