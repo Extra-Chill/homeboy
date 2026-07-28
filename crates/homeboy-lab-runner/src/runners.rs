@@ -15,6 +15,7 @@
 // Stable top-level contracts
 // ----------------------------------------------------------------------------
 
+pub use crate::runner_capability_inventory;
 pub use crate::{
     apply_change_artifact, apply_workspace_patch, broker_auth_store_path,
     broker_submit_token_for_runner, broker_token_from_env, close_reconnected_job_log_owner,
@@ -55,8 +56,8 @@ pub use crate::{
     RunnerActiveJobSource, RunnerActiveJobState, RunnerActiveJobsSnapshot, RunnerAdmissionSummary,
     RunnerArtifactRef, RunnerAvailability, RunnerBinaryCachePruneEntry,
     RunnerBinaryCachePruneOptions, RunnerBinaryCachePruneOutput, RunnerBinarySource,
-    RunnerCapabilityPreflight, RunnerChangedRuntimePath, RunnerConnectReport,
-    RunnerDaemonGenerationStatus, RunnerDevSyncOptions, RunnerDevSyncOutput,
+    RunnerCapabilityInventory, RunnerCapabilityPreflight, RunnerChangedRuntimePath,
+    RunnerConnectReport, RunnerDaemonGenerationStatus, RunnerDevSyncOptions, RunnerDevSyncOutput,
     RunnerDisconnectReport, RunnerExecDiagnostics, RunnerExecMode, RunnerExecOptions,
     RunnerExecOutput, RunnerExecPromotedOutput, RunnerExecStructuredSummary, RunnerFailureKind,
     RunnerJob, RunnerKind, RunnerLifecycleOwner, RunnerMutationArtifacts,

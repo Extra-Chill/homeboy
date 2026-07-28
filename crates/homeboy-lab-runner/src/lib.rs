@@ -127,9 +127,9 @@ pub use apply::{
 };
 pub use capabilities::{
     evaluate_lab_runner_capabilities_for_runner, prepare_lab_runner_capability,
-    LabRunnerCapabilityContract, LabRunnerGateDecision, LabRunnerGateMode,
-    PreparedLabRunnerCapability, RunnerCapabilityPreflight, RunnerRequiredTool,
-    RunnerToolCapabilityRequirement,
+    runner_capability_inventory, LabRunnerCapabilityContract, LabRunnerGateDecision,
+    LabRunnerGateMode, PreparedLabRunnerCapability, RunnerCapabilityInventory,
+    RunnerCapabilityPreflight, RunnerRequiredTool, RunnerToolCapabilityRequirement,
 };
 pub(crate) use command_path::normalize_runner_command_env_for_homeboy_path;
 pub use command_path::preflight_remote_argv_path_translation;
@@ -654,6 +654,8 @@ pub fn lab_runner_readiness() -> Result<LabRunnerReadiness> {
         .filter(|runner| runner.kind == RunnerKind::Ssh)
         .filter_map(|runner| {
             let status = status(&runner.id).ok()?;
+            let capabilities_ready = runner_capability_inventory(&runner.id)
+                .is_ok_and(|inventory| !inventory.runtime_ids.is_empty());
             let mode = status
                 .session
                 .as_ref()
@@ -666,7 +668,7 @@ pub fn lab_runner_readiness() -> Result<LabRunnerReadiness> {
                 stale_daemon: status.stale_daemon.is_some(),
                 active_jobs: status.active_jobs.len(),
                 active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
-                capabilities_ready: true,
+                capabilities_ready,
             })
         })
         .collect();
@@ -822,6 +824,8 @@ pub(crate) fn default_lab_runner_availability() -> Result<Vec<RunnerAvailability
                 return None;
             }
             let status = status(&runner.id).ok()?;
+            let capabilities_ready = runner_capability_inventory(&runner.id)
+                .is_ok_and(|inventory| !inventory.runtime_ids.is_empty());
             let mode = status
                 .session
                 .as_ref()
@@ -834,7 +838,7 @@ pub(crate) fn default_lab_runner_availability() -> Result<Vec<RunnerAvailability
                 stale_daemon: status.stale_daemon.is_some(),
                 active_jobs: status.active_jobs.len(),
                 active_jobs_available: status.active_job_state == RunnerActiveJobState::Available,
-                capabilities_ready: true,
+                capabilities_ready,
             };
             Some(candidate.availability())
         })

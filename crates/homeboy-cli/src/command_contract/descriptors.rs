@@ -40,6 +40,11 @@ macro_rules! ops_command_descriptors {
             (deploy, Deploy, crate::commands::deploy::run),
             (harvest, Harvest, crate::commands::harvest::run),
             (daemon, Daemon, crate::commands::daemon::run),
+            (
+                deferred_workload,
+                DeferredWorkload,
+                crate::commands::deferred_workload::run
+            ),
             (schedule, Schedule, crate::commands::schedule::run),
             (status, Status, crate::commands::status::run),
             (git, Git, crate::commands::git::run),
@@ -71,6 +76,7 @@ macro_rules! ops_command_spec {
     (deploy) => { command_spec_with_safety("deploy", CommandJsonFamily::Ops, operator_safety(Some("--dry-run"), DEPLOY_DANGEROUS_FLAGS)) };
     (harvest) => { command_spec_with_safety("harvest", CommandJsonFamily::Ops, operator_safety(Some("--dry-run"), &["--apply"])) };
     (daemon) => { command_spec("daemon", CommandJsonFamily::Ops) };
+    (deferred_workload) => { command_spec("deferred-workload", CommandJsonFamily::Ops) };
     (schedule) => { command_spec("schedule", CommandJsonFamily::Ops) };
     (status) => { command_spec("status", CommandJsonFamily::Ops) };
     (git) => { CommandSpec { subcommand_safety: GIT_SUBCOMMAND_SAFETY, ..command_spec("git", CommandJsonFamily::Ops) } };

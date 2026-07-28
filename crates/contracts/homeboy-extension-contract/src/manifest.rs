@@ -197,6 +197,12 @@ pub struct CompositionConfig {
 
 impl ExtensionManifest {
     pub fn validate_notification_transports(&self) -> homeboy_error::Result<()> {
+        if let Some(test) = &self.test {
+            test.portable_env.validate()?;
+            crate::manifest_toolchain_config::validate_test_secret_env_references(
+                &test.secret_env,
+            )?;
+        }
         let mut ids = std::collections::HashSet::new();
         for transport in &self.notification_transports {
             transport.validate()?;

@@ -17,7 +17,7 @@ use crate::{
 use homeboy_core::component::Component;
 use homeboy_core::git;
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 pub use analyze::{FailureCategory, FailureCluster, TestAnalysis, TestAnalysisInput, TestFailure};
@@ -47,6 +47,69 @@ pub fn resolve_test_command(
     component: &Component,
 ) -> homeboy_core::error::Result<ExtensionExecutionContext> {
     crate::resolve_execution_context(component, ExtensionCapability::Test)
+}
+
+/// Resolve only the process environment explicitly declared portable by the
+/// selected test extension. Values are intentionally absent when unset.
+pub struct PortableTestEnv {
+    pub public_env: Vec<(String, String)>,
+    pub secret_env: BTreeMap<String, String>,
+}
+
+/// Resolve the public process environment and runner-resolved secret identities
+/// explicitly declared by the selected test extension.
+pub fn portable_env(component: &Component) -> homeboy_core::Result<PortableTestEnv> {
+    let context = resolve_test_command(component)?;
+    let manifest = crate::load_extension(&context.extension_id)?;
+    let Some(test) = manifest.test else {
+        return Ok(PortableTestEnv {
+            public_env: Vec::new(),
+            secret_env: BTreeMap::new(),
+        });
+    };
+    let config = test.portable_env;
+    let secret_env = test.secret_env;
+    let mut names = BTreeSet::new();
+    for key in config.keys {
+        if std::env::var_os(&key).is_some() {
+            names.insert(key);
+        }
+    }
+    for (name, _) in std::env::vars_os() {
+        let name = name.to_string_lossy();
+        if config
+            .prefixes
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+        {
+            names.insert(name.into_owned());
+        }
+    }
+    Ok(PortableTestEnv {
+        public_env: names
+            .into_iter()
+            // Prefix declarations remain public-only even when an ambient
+            // controller happens to expose a credential-shaped variable.
+            .filter(|name| !looks_like_secret_env_name(name))
+            .filter_map(|name| std::env::var(&name).ok().map(|value| (name, value)))
+            .collect(),
+        secret_env,
+    })
+}
+
+fn looks_like_secret_env_name(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    [
+        "PASSWORD",
+        "PASSWD",
+        "SECRET",
+        "TOKEN",
+        "API_KEY",
+        "PRIVATE_KEY",
+        "CREDENTIAL",
+    ]
+    .iter()
+    .any(|marker| name.contains(marker))
 }
 
 #[allow(clippy::too_many_arguments)]

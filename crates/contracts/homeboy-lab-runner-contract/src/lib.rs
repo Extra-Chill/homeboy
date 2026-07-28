@@ -247,6 +247,10 @@ impl RunnerCapabilityPreflight {
 pub struct PreparedLabRunnerCapability {
     pub command: &'static str,
     pub required_tools: Vec<RunnerRequiredTool>,
+    /// Declared workload capabilities retained from the command contract.
+    /// Consumers that have a capability inventory can make admission decisions
+    /// without reconstructing the original command contract.
+    pub required_capabilities: Vec<String>,
 }
 
 impl From<PreparedLabRunnerCapability> for RunnerCapabilityPreflight {

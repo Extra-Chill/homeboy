@@ -313,6 +313,14 @@ impl CliRuntime {
                 unsupported_message: summary.unsupported_message,
             }
         });
+        // Deferred records outlive their worker. Startup restarts the singleton
+        // so expired claims recover without another deferral request.
+        if !matches!(
+            normalized.get(1..3),
+            Some([command, subcommand]) if command == "deferred-workload" && subcommand == "worker"
+        ) {
+            let _ = crate::commands::deferred_workload::restart_worker_if_pending();
+        }
 
         if is_top_level_version_request(&normalized) {
             println!("{}", upgrade::current_build_version());
@@ -1239,6 +1247,19 @@ fn preflight_hot_command(
                         })
                     })
             };
+            let runner_admits_offload = runner_admits_offload
+                && selected_lab_runner.is_none_or(|runner_id| {
+                    review_test_runner_requirements(cli).is_none_or(|requirements| {
+                        crate::runner::runners::runner_capability_inventory(runner_id)
+                            .map(|inventory| {
+                                requirements.is_satisfied_by(
+                                    &inventory.runtime_ids,
+                                    &inventory.capabilities,
+                                )
+                            })
+                            .unwrap_or(false)
+                    })
+                });
             let explicit_runner_placement = explicit_runner_placement(cli, hot_command);
             // An explicit runner resolves workload placement before resource
             // guidance. Controller pressure still matters for handoff overhead,
@@ -1305,6 +1326,9 @@ fn preflight_hot_command(
                     ),
                     runner_admits_offload,
                 ) {
+                    if review_test_deferred_workload_eligible(cli, warning, runner_admits_offload) {
+                        return None;
+                    }
                     output_runtime::emit_json_result_for_identity(
                         Err(err),
                         output_file,
@@ -1318,6 +1342,52 @@ fn preflight_hot_command(
     }
 
     None
+}
+
+fn review_test_runner_requirements(
+    cli: &Cli,
+) -> Option<homeboy::core::deferred_workload::DeferredWorkloadRequirements> {
+    let Commands::Review(review) = &cli.command else {
+        return None;
+    };
+    let crate::commands::review::ReviewCommand::Test(test) = review.command.as_ref()? else {
+        return None;
+    };
+    let contract = test.lab_contract();
+    contract.is_portable().then(
+        || homeboy::core::deferred_workload::DeferredWorkloadRequirements {
+            required_runtimes: ["homeboy".to_string()].into(),
+            required_capabilities: contract
+                .extra_required_capabilities
+                .iter()
+                .map(|capability| (*capability).to_string())
+                .collect(),
+        },
+    )
+}
+
+fn review_test_deferred_workload_eligible(
+    cli: &Cli,
+    warning: &resource_policy::ResourcePolicyWarning,
+    runner_admits_offload: bool,
+) -> bool {
+    cli.runner.is_none()
+        && !runner_admits_offload
+        && matches!(
+            warning.recommendation,
+            crate::commands::resources::ResourceRecommendation::Warm
+                | crate::commands::resources::ResourceRecommendation::Hot
+        )
+        && matches!(
+            cli.placement,
+            crate::cli_surface::Placement::Auto | crate::cli_surface::Placement::LabOrLocal
+        )
+        && matches!(
+            &cli.command,
+            Commands::Review(review)
+                if matches!(review.command, Some(crate::commands::review::ReviewCommand::Test(_)))
+                    && review.lab_contract().is_some_and(|contract| contract.is_portable())
+        )
 }
 
 fn resource_policy_runner_hint<'a>(

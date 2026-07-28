@@ -12,6 +12,7 @@ const LAB_CLI_ARGUMENT_IDS: &[&str] = &[
     "skip_deps_hydration",
     "preserve_workspace_on_failure",
     "runner_env",
+    "runner_secret_env",
     "lab_env_json",
     "runner_workspace_root",
 ];

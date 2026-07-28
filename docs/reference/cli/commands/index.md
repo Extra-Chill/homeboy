@@ -6,7 +6,7 @@ Hand-written narrative for these commands lives in `docs/commands/`. -->
 
 # Homeboy CLI reference (generated)
 
-`homeboy` exposes 523 visible commands across 40 top-level command families. Every page below is generated from the clap command tree in `crates/homeboy-cli`, so it cannot drift from the binary.
+`homeboy` exposes 526 visible commands across 41 top-level command families. Every page below is generated from the clap command tree in `crates/homeboy-cli`, so it cannot drift from the binary.
 
 Hand-written narrative lives in the [commands index](../../../commands/commands-index.md). Global flags are documented in [the root command reference](../homeboy-root-command.md). Machine-readable safety, docs, output, and Lab metadata come from `homeboy contract manifest`.
 
@@ -14,6 +14,7 @@ Hand-written narrative lives in the [commands index](../../../commands/commands-
 | --- | --- | --- |
 | `homeboy activity` | [activity.md](activity.md) | Unified view of active and recently finished Homeboy work |
 | `homeboy agent-task` | [agent-task.md](agent-task.md) | Run generic agent task plans |
+| `homeboy deferred-workload` | [deferred-workload.md](deferred-workload.md) | Resume portable workloads deferred until a runner is ready |
 | `homeboy project` | [project.md](project.md) | Manage project configuration |
 | `homeboy ssh` | [ssh.md](ssh.md) | SSH into a project server or configured server |
 | `homeboy server` | [server.md](server.md) | Manage SSH server configurations |

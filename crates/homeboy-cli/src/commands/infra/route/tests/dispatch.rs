@@ -69,6 +69,108 @@ use tempfile::tempdir;
 use super::*;
 
 #[test]
+fn review_test_inlines_external_database_service_profile_before_lab_handoff() {
+    let profile = tempdir().expect("profile directory");
+    let settings = profile.path().join("phpunit-db-service.json");
+    fs::write(
+        &settings,
+        r#"{"database_service":{"host":"127.0.0.1","port":3306,"user":"root"}}"#,
+    )
+    .expect("write settings profile");
+    let cli = Cli::parse_from([
+        "homeboy",
+        "review",
+        "test",
+        "fixture",
+        "--settings-json-file",
+        settings.to_str().expect("utf8 settings path"),
+        "--setting-json",
+        "database_service={\"host\":\"db.lab\"}",
+    ]);
+    let args = vec![
+        "homeboy".to_string(),
+        "review".to_string(),
+        "test".to_string(),
+        "fixture".to_string(),
+        "--settings-json-file".to_string(),
+        settings.to_string_lossy().to_string(),
+        "--setting-json".to_string(),
+        "database_service={\"host\":\"db.lab\"}".to_string(),
+    ];
+
+    let routed = inline_test_settings_profiles(&cli, &args).expect("portable settings args");
+
+    assert!(!routed.iter().any(|arg| arg == "--settings-json-file"));
+    let profile_setting = routed
+        .windows(2)
+        .find(|pair| pair[0] == "--setting-json" && pair[1].starts_with("database_service="))
+        .expect("profile converted to a typed setting");
+    assert!(profile_setting[1].contains("127.0.0.1"));
+    assert!(
+        routed
+            .iter()
+            .position(|arg| arg == &profile_setting[1])
+            .expect("profile setting index")
+            < routed
+                .iter()
+                .rposition(|arg| arg == "database_service={\"host\":\"db.lab\"}")
+                .expect("explicit setting index")
+    );
+}
+
+#[test]
+fn credential_profile_is_rejected_without_persisting_plaintext() {
+    let profile = tempdir().expect("profile directory");
+    let settings = profile.path().join("credentials.json");
+    fs::write(
+        &settings,
+        r#"{"database_service":{"host":"db.lab","password":"fixture-password"}}"#,
+    )
+    .expect("write settings profile");
+    let cli = Cli::parse_from([
+        "homeboy",
+        "review",
+        "test",
+        "fixture",
+        "--settings-json-file",
+        settings.to_str().expect("utf8 settings path"),
+    ]);
+    let args = vec![
+        "homeboy".to_string(),
+        "review".to_string(),
+        "test".to_string(),
+        "fixture".to_string(),
+        "--settings-json-file".to_string(),
+        settings.to_string_lossy().to_string(),
+    ];
+
+    let error = inline_test_settings_profiles(&cli, &args).expect_err("credential profile refused");
+
+    assert!(error.message.contains("database_service.password"));
+    assert!(error.message.contains("cannot be inlined"));
+    assert!(error.message.contains("--runner-secret-env"));
+    assert!(!error.to_string().contains("fixture-password"));
+}
+
+#[test]
+fn deferred_workload_command_is_portable_and_omits_controller_placement() {
+    let portable = portable_deferred_args(&[
+        "homeboy".to_string(),
+        "--placement".to_string(),
+        "lab-or-local".to_string(),
+        "review".to_string(),
+        "test".to_string(),
+        "fixture".to_string(),
+    ]);
+
+    assert_eq!(
+        portable,
+        vec!["homeboy", "review", "test", "fixture"],
+        "the worker supplies its selected runner at replay time"
+    );
+}
+
+#[test]
 fn lab_cook_dispatcher_recipe_round_trips_exact_transport() {
     let dispatcher = LabCookAttemptDispatcher {
         runner_id: "homeboy-lab".to_string(),
@@ -422,15 +524,13 @@ fn lab_job_overrides_parse_env_json_and_workspace_root() {
         "homeboy",
         "--runner-env",
         "STUDIO_NATIVE_TRACE_SAMPLE_RUNTIME_PLUGIN_PATH=/tmp/sample-runtime",
-        "--runner-env",
-        "API_TOKEN=secret-token",
+        "--runner-secret-env",
+        "API_TOKEN",
         "--lab-env-json",
         r#"{"EXTRA_PATH":"/tmp/extra","EMPTY":null}"#,
         "--runner-workspace-root",
         "/srv/job-workspace",
         "review",
-        "test",
-        "studio-native",
     ]);
 
     let overrides = lab_job_overrides(&cli).expect("overrides");
@@ -451,6 +551,21 @@ fn lab_job_overrides_parse_env_json_and_workspace_root() {
 }
 
 #[test]
+fn lab_job_overrides_reject_sensitive_runner_env_values() {
+    let cli = Cli::parse_from([
+        "homeboy",
+        "--runner-env",
+        "API_TOKEN=secret-token",
+        "review",
+    ]);
+
+    let error = lab_job_overrides(&cli).expect_err("plaintext runner secret is refused");
+
+    assert_eq!(error.details["field"], "runner-env");
+    assert!(error.message.contains("--runner-secret-env API_TOKEN"));
+}
+
+#[test]
 fn lab_job_overrides_reject_invalid_env_shapes() {
     let cli = Cli::parse_from(["homeboy", "--runner-env", "NO_EQUALS", "review"]);
     let err = lab_job_overrides(&cli).expect_err("invalid pair");
@@ -459,6 +574,242 @@ fn lab_job_overrides_reject_invalid_env_shapes() {
     let cli = Cli::parse_from(["homeboy", "--lab-env-json", "[]", "review"]);
     let err = lab_job_overrides(&cli).expect_err("invalid json object");
     assert_eq!(err.code.as_str(), "validation.invalid_argument");
+}
+
+#[test]
+fn deferred_plan_persists_public_env_and_runner_secret_identity_without_plaintext() {
+    crate::test_support::with_isolated_home(|_| {
+        let input = homeboy::core::deferred_workload::DeferredWorkloadInput {
+            command_label: "review test".to_string(),
+            args: vec![
+                "homeboy".to_string(),
+                "review".to_string(),
+                "test".to_string(),
+            ],
+            placement: "auto".to_string(),
+            resource_requirement: "eligible_lab_runner".to_string(),
+            portability: "portable_lab_route".to_string(),
+            reason: "fixture".to_string(),
+            ci_alternative: "CI".to_string(),
+            resolved_contract: serde_json::json!({}),
+            resolved_resources: serde_json::json!({}),
+            test_requirements: homeboy::core::deferred_workload::DeferredWorkloadRequirements {
+                required_runtimes: ["homeboy".to_string()].into(),
+                required_capabilities: Default::default(),
+            },
+            job_overrides: runners::LabJobOverrides {
+                env: [
+                    ("DB_SERVICE_HOST".to_string(), "db.fixture".to_string()),
+                    ("DB_SERVICE_PORT".to_string(), "3306".to_string()),
+                ]
+                .into(),
+                secret_env_names: vec!["DB_SERVICE_PASSWORD".to_string()],
+                workspace_root: None,
+            },
+        };
+        let deferred = homeboy::core::deferred_workload::defer(input).expect("defer fixture");
+        assert_eq!(deferred.job_overrides.env["DB_SERVICE_HOST"], "db.fixture");
+        assert_eq!(deferred.job_overrides.env["DB_SERVICE_PORT"], "3306");
+        assert!(!deferred
+            .job_overrides
+            .env
+            .contains_key("DB_SERVICE_PASSWORD"));
+        assert_eq!(
+            deferred.job_overrides.secret_env_names,
+            ["DB_SERVICE_PASSWORD"]
+        );
+        let durable_json = serde_json::to_string(&deferred).expect("deferred JSON");
+        let status_json = serde_json::to_string(
+            &crate::commands::deferred_workload::redacted_record(&deferred),
+        )
+        .expect("status JSON");
+        for json in [&durable_json, &status_json] {
+            assert!(!json.contains("fixture-password"));
+            assert!(!json.contains("DB_SERVICE_PASSWORD\":\""));
+            assert!(json.contains("DB_SERVICE_PASSWORD"));
+        }
+    });
+}
+
+#[test]
+fn deferred_status_redacts_all_settings_arguments() {
+    let mut record = homeboy::core::deferred_workload::DeferredWorkload {
+        id: "deferred-settings".to_string(),
+        fingerprint: "fixture".to_string(),
+        command_label: "review test".to_string(),
+        args: vec![
+            "homeboy".to_string(),
+            "review".to_string(),
+            "test".to_string(),
+            "--setting".to_string(),
+            "mode=debug".to_string(),
+            "--setting-json=database_service={\"password\":\"fixture-password\"}".to_string(),
+        ],
+        placement: "auto".to_string(),
+        resource_requirement: "eligible_lab_runner".to_string(),
+        portability: "portable_lab_route".to_string(),
+        reason: "fixture".to_string(),
+        ci_alternative: "CI".to_string(),
+        resolved_contract: serde_json::json!({}),
+        resolved_resources: serde_json::json!({}),
+        test_requirements: homeboy::core::deferred_workload::DeferredWorkloadRequirements {
+            required_runtimes: ["homeboy".to_string()].into(),
+            required_capabilities: Default::default(),
+        },
+        job_overrides: Default::default(),
+        state: homeboy::core::deferred_workload::DeferredWorkloadState::Deferred,
+        created_at_ms: 0,
+        updated_at_ms: 0,
+        runner_id: None,
+        claim_owner: None,
+        claim_expires_at_ms: None,
+    };
+    record
+        .job_overrides
+        .secret_env_names
+        .push("DB_SERVICE_PASSWORD".to_string());
+
+    let status = crate::commands::deferred_workload::redacted_record(&record).to_string();
+
+    assert!(!status.contains("mode=debug"));
+    assert!(!status.contains("fixture-password"));
+    assert!(status.contains("[REDACTED]"));
+}
+
+#[test]
+fn manifest_resolved_portable_db_service_warm_defers_and_dispatches_secret_identity() {
+    crate::test_support::with_isolated_home(|home| {
+        let component = tempdir().expect("component directory");
+        fs::write(
+            component.path().join("homeboy.json"),
+            r#"{"id":"portable-db-consumer","extensions":{"portable-db-service":{}}}"#,
+        )
+        .expect("component manifest");
+        let extension_dir = home
+            .path()
+            .join(".config/homeboy/extensions/portable-db-service");
+        fs::create_dir_all(&extension_dir).expect("extension directory");
+        fs::write(
+            extension_dir.join("portable-db-service.json"),
+            include_str!(
+                "../../../../../../../tests/fixtures/extension_manifests/portable-db-service.json"
+            ),
+        )
+        .expect("portable DB service manifest");
+        let _env = EnvGuard::set_many(&[
+            ("DB_SERVICE_HOST", Some("db.fixture")),
+            ("DB_SERVICE_PORT", Some("3306")),
+            ("DB_SERVICE_PASSWORD", Some("fixture-password")),
+        ]);
+        let path = component.path().to_str().expect("component path");
+        let cli = Cli::parse_from([
+            "homeboy",
+            "review",
+            "test",
+            "--path",
+            path,
+            "--runner-secret-env",
+            "DB_SERVICE_PASSWORD",
+        ]);
+
+        let overrides = lab_job_overrides(&cli).expect("manifest-resolved overrides");
+        assert_eq!(overrides.env["DB_SERVICE_HOST"], "db.fixture");
+        assert_eq!(overrides.env["DB_SERVICE_PORT"], "3306");
+        assert_eq!(overrides.secret_env_names, ["DB_SERVICE_PASSWORD"]);
+        let deferred = homeboy::core::deferred_workload::defer(
+            deferred_workload_input(
+                &cli,
+                &[
+                    "homeboy".to_string(),
+                    "review".to_string(),
+                    "test".to_string(),
+                ],
+                review_test_deferred_requirements(&cli).expect("review test requirements"),
+            )
+            .expect("deferred input"),
+        )
+        .expect("warm deferral");
+        let durable = serde_json::to_string(&deferred).expect("durable deferred record");
+        assert!(!durable.contains("fixture-password"));
+
+        let ready = std::cell::Cell::new(false);
+        let ready_after_wait = &ready;
+        crate::commands::deferred_workload::run_worker_with(
+            "worker-token",
+            || {
+                Ok(ready.get().then(|| {
+                    crate::commands::deferred_workload::RunnerCapabilityInventory {
+                        runner_id: "compatible-runner".to_string(),
+                        runtime_ids: ["homeboy".to_string()].into(),
+                        capabilities: ["homeboy".to_string()].into(),
+                    }
+                }))
+            },
+            |record, runner_id, _| {
+                assert_eq!(runner_id, "compatible-runner");
+                assert_eq!(record.job_overrides.env["DB_SERVICE_HOST"], "db.fixture");
+                assert_eq!(
+                    record.job_overrides.secret_env_names,
+                    ["DB_SERVICE_PASSWORD"]
+                );
+                assert!(!serde_json::to_string(record)
+                    .expect("record JSON")
+                    .contains("fixture-password"));
+                Ok(true)
+            },
+            || 10,
+            |_| ready_after_wait.set(true),
+        )
+        .expect("compatible runner dispatch");
+        assert_eq!(
+            homeboy::core::deferred_workload::records().expect("records")[0].state,
+            homeboy::core::deferred_workload::DeferredWorkloadState::Dispatched
+        );
+    });
+}
+
+#[test]
+fn deferred_runner_env_wins_over_later_manifest_ambient_value() {
+    crate::test_support::with_isolated_home(|home| {
+        let component = tempdir().expect("component directory");
+        fs::write(
+            component.path().join("homeboy.json"),
+            r#"{"id":"portable-db-consumer","extensions":{"portable-db-service":{}}}"#,
+        )
+        .expect("component manifest");
+        let extension_dir = home
+            .path()
+            .join(".config/homeboy/extensions/portable-db-service");
+        fs::create_dir_all(&extension_dir).expect("extension directory");
+        fs::write(
+            extension_dir.join("portable-db-service.json"),
+            include_str!(
+                "../../../../../../../tests/fixtures/extension_manifests/portable-db-service.json"
+            ),
+        )
+        .expect("portable DB service manifest");
+        let _env = EnvGuard::set_many(&[
+            ("DB_SERVICE_HOST", Some("B")),
+            ("DB_SERVICE_PORT", Some("3306")),
+        ]);
+        let path = component.path().to_str().expect("component path");
+
+        let replay_args = vec![
+            "homeboy".to_string(),
+            "--runner-env".to_string(),
+            "DB_SERVICE_HOST=A".to_string(),
+            "review".to_string(),
+            "test".to_string(),
+            "--path".to_string(),
+            path.to_string(),
+        ];
+        let replay = Cli::parse_from(replay_args);
+        let overrides = lab_job_overrides(&replay).expect("replay overrides");
+
+        assert_eq!(overrides.env["DB_SERVICE_HOST"], "A");
+        assert_eq!(overrides.env["DB_SERVICE_PORT"], "3306");
+        assert_eq!(overrides.secret_env_names, ["DB_SERVICE_PASSWORD"]);
+    });
 }
 
 #[test]
@@ -1404,12 +1755,42 @@ fn cook_to_worktree_provider_workspace_survives_failed_attempt_and_lab_retry() {
         let workspace = tempfile::tempdir().expect("workspace");
         git_init(workspace.path());
         let provider_dir = tempfile::tempdir().expect("provider dir");
+        let provider_workspace = provider_dir.path().join("worktree");
+        let commit = Command::new("git")
+            .args([
+                "-c",
+                "user.email=fixture@example.com",
+                "-c",
+                "user.name=Fixture",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "fixture",
+            ])
+            .current_dir(workspace.path())
+            .output()
+            .expect("create fixture commit");
+        assert!(commit.status.success(), "{:?}", commit);
+        let worktree = Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "cook-six-fixture-generic-parity",
+                provider_workspace
+                    .to_str()
+                    .expect("utf8 provider workspace"),
+            ])
+            .current_dir(workspace.path())
+            .output()
+            .expect("create linked provider workspace");
+        assert!(worktree.status.success(), "{:?}", worktree);
         let provider = provider_dir.path().join("provider");
         let payload = serde_json::json!({
             "worktrees": [{
                 "handle": "blocks-engine@cook-six-fixture-generic-parity",
-                "path": workspace.path(),
-                "branch": "main",
+                "path": provider_workspace,
+                "branch": "cook-six-fixture-generic-parity",
                 "safety": { "dirty": false, "unpushed": false, "primary": false }
             }]
         });
@@ -1434,9 +1815,10 @@ fn cook_to_worktree_provider_workspace_survives_failed_attempt_and_lab_retry() {
             homeboy::core::defaults::WorktreeProviderConfig {
                 enabled: true,
                 kind: homeboy::core::defaults::WorktreeProviderKind::Command,
-                apply_enabled: false,
+                apply_enabled: true,
                 commands: homeboy::core::defaults::WorktreeProviderCommands {
                     resolve: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
+                    ensure: Some(vec![provider.display().to_string(), "{handle}".to_string()]),
                     ..Default::default()
                 },
                 list_result_mapping: Some(
@@ -1458,6 +1840,12 @@ fn cook_to_worktree_provider_workspace_survives_failed_attempt_and_lab_retry() {
             "homeboy",
             "agent-task",
             "cook",
+            "--repo",
+            "blocks-engine",
+            "--head",
+            "cook-six-fixture-generic-parity",
+            "--task-url",
+            "https://example.com/tasks/cook-six-fixture-generic-parity",
             "--to-worktree",
             "blocks-engine@cook-six-fixture-generic-parity",
             "--verify",
@@ -1470,7 +1858,7 @@ fn cook_to_worktree_provider_workspace_survives_failed_attempt_and_lab_retry() {
         let plan = materialize_agent_task_cook_plan(&cook_cli)
             .expect("materialize cook plan")
             .expect("cook plan");
-        let expected_root = workspace.path().display().to_string();
+        let expected_root = provider_workspace.display().to_string();
         assert_eq!(
             plan.tasks[0].workspace.root.as_deref(),
             Some(expected_root.as_str())
@@ -1495,7 +1883,7 @@ fn cook_to_worktree_provider_workspace_survives_failed_attempt_and_lab_retry() {
 
         assert_eq!(
             handoff.primary_workspace,
-            workspace.path().canonicalize().expect("root")
+            provider_workspace.canonicalize().expect("root")
         );
         assert_eq!(
             handoff.plan.tasks[0].workspace.root.as_deref(),

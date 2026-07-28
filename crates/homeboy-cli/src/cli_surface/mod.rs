@@ -4,10 +4,10 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::commands::{
-    activity, agent_task, api, bench, cleanup, component, config, contract, daemon, db, deploy,
-    extension, file, fleet, fuzz, git, harvest, logs, observe, project, refactor, release, report,
-    review, rig, runner, runs, runtime, schedule, self_cmd, server, ssh, stack, status, trace,
-    triage, tunnel, upgrade, worktree,
+    activity, agent_task, api, bench, cleanup, component, config, contract, daemon, db,
+    deferred_workload, deploy, extension, file, fleet, fuzz, git, harvest, logs, observe, project,
+    refactor, release, report, review, rig, runner, runs, runtime, schedule, self_cmd, server, ssh,
+    stack, status, trace, triage, tunnel, upgrade, worktree,
 };
 
 const VERSION: &str = homeboy_product_identity::product_version();
@@ -107,6 +107,11 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "KEY=VALUE")]
     pub runner_env: Vec<String>,
 
+    /// Reference a runner-owned secret environment variable for a Lab offload.
+    /// The runner resolves this identity; Homeboy never accepts its value here.
+    #[arg(long, global = true, value_name = "NAME")]
+    pub runner_secret_env: Vec<String>,
+
     /// Add job-scoped Lab offload environment from a JSON object without mutating runner config.
     #[arg(long, global = true, value_name = "JSON")]
     pub lab_env_json: Option<String>,
@@ -145,6 +150,9 @@ pub enum Commands {
     /// Run generic agent task plans
     #[command(name = "agent-task")]
     AgentTask(agent_task::AgentTaskArgs),
+    /// Resume portable workloads deferred until a runner is ready
+    #[command(name = "deferred-workload")]
+    DeferredWorkload(deferred_workload::DeferredWorkloadArgs),
     /// Manage project configuration
     Project(project::ProjectArgs),
     /// SSH into a project server or configured server

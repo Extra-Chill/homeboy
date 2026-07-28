@@ -107,6 +107,12 @@ pub struct TestArgs {
 
 impl TestArgs {
     pub(crate) fn lab_contract(&self) -> LabCommandContract {
+        if self.baseline_args.baseline || self.baseline_args.ratchet {
+            return LabCommandContract::local_only(
+                TEST_LAB_LABEL,
+                "test baseline and ratchet modes write source-owned baseline state on the controller",
+            );
+        }
         LabCommandContract::portable(TEST_LAB_LABEL, self.write.then_some("--write"), true, &[])
             .release_gate()
     }
@@ -268,7 +274,10 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
             precomputed_changed_files: changed_files_from_args(&args)?,
             json_summary: args.json_summary,
             restore_checkout: args.restore_checkout,
-            ci_env: test_runner_ci_env(ci_job.as_ref()),
+            ci_env: test_runner_ci_env(ci_job.as_ref())
+                .into_iter()
+                .chain(extension_test::portable_env(&ctx.component)?.public_env)
+                .collect(),
             passthrough_args: passthrough_args.clone(),
         },
         runner.run_dir(),
@@ -1187,6 +1196,39 @@ mod tests {
             cli.test.setting_args.settings_json_file,
             vec![PathBuf::from("base.json"), PathBuf::from("profile.json")]
         );
+    }
+
+    #[test]
+    fn baseline_and_ratchet_test_modes_remain_controller_local() {
+        for flag in ["--baseline", "--ratchet"] {
+            let args = TestCli::try_parse_from(["test", "homeboy", flag])
+                .expect("test mode should parse")
+                .test;
+            let contract = args.lab_contract();
+
+            assert!(matches!(
+                contract.portability,
+                crate::command_contract::LabCommandPortability::LocalOnly(reason)
+                    if reason.contains("source-owned baseline state")
+            ));
+            assert!(!contract.routing_policy.default_lab_offload);
+        }
+    }
+
+    #[test]
+    fn externally_configured_test_mode_remains_lab_portable() {
+        let args = TestCli::try_parse_from([
+            "test",
+            "homeboy",
+            "--settings-json-file",
+            "phpunit-db-service.json",
+            "--setting-json",
+            "database_service={\"host\":\"127.0.0.1\",\"port\":3306}",
+        ])
+        .expect("external database-service settings should parse")
+        .test;
+
+        assert!(args.lab_contract().is_portable());
     }
 
     #[test]
