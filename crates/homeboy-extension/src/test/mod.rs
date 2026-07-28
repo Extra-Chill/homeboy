@@ -29,7 +29,7 @@ pub use baseline::{
 pub use drift::{ChangeType, DriftReport, DriftedTest, ProductionChange};
 pub use durations::{
     build_test_durations, parse_duration_samples, parse_test_durations_file, SlowTestFinding,
-    SlowTestPolicy, TestDurationSamples, TestDurations, TestUnitDuration,
+    SlowTestPolicy, TestDurationSamples, TestDurations, TestUnitDuration, SLOWEST_UNITS_REPORTED,
 };
 pub use parsing::{
     build_test_summary, parse_coverage_file, parse_failures_file, parse_test_failures_from_text,

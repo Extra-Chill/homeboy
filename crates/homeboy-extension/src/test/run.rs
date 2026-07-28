@@ -1259,6 +1259,101 @@ mod tests {
     use crate::test::TestFailure;
     use homeboy_core::component::ComponentScriptsConfig;
 
+    /// Two lines of a real cargo test run: one binary that finished and
+    /// reported its time, and one that started and never did.
+    const PARTIAL_RUNNER_OUTPUT: &str = concat!(
+        "     Running tests/fast.rs (/t/deps/fast-0123456789abcdef)\n",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.00s\n",
+        "     Running tests/slow.rs (/t/deps/slow-fedcba9876543210)\n",
+        "running 1 test\n",
+        "test the_slow_one has been running for over 60 seconds\n",
+    );
+
+    #[test]
+    fn a_killed_test_child_still_yields_labelled_partial_timings() {
+        // `execute_capability_script` returns partial stdout on timeout (see
+        // its own test), so the durations path receives exactly this shape.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let durations = collect_test_durations(
+            &dir.path().join("absent.json"),
+            PARTIAL_RUNNER_OUTPUT,
+            1500.0,
+            true,
+            Duration::from_secs(1500),
+        )
+        .expect("partial output still yields durations");
+
+        assert!(!durations.complete, "a killed run is never a full picture");
+        assert!(durations
+            .incomplete_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("1500s budget")));
+        assert_eq!(
+            durations.measured_seconds,
+            Some(4.0),
+            "only what actually reported is counted"
+        );
+        assert!(durations
+            .slow
+            .iter()
+            .any(|finding| finding.rule == "unfinished-test-unit"
+                && finding.name.contains("the_slow_one")
+                && finding.seconds.is_none()));
+    }
+
+    #[test]
+    fn unparseable_output_still_reports_the_wall_clock_and_no_fabricated_totals() {
+        // Homeboy's own measurement of the child is real evidence even when the
+        // runner printed nothing timeable, so it is reported. What must never
+        // be invented is a *measured* total: no binary reported, so the sum is
+        // unknown, not zero.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let durations = collect_test_durations(
+            &dir.path().join("absent.json"),
+            "error: could not compile `homeboy`\n",
+            12.0,
+            false,
+            Duration::from_secs(1500),
+        )
+        .expect("the wall clock is always available");
+
+        assert_eq!(durations.phase_seconds, Some(12.0));
+        assert_eq!(
+            durations.measured_seconds, None,
+            "nothing reported means unknown, never zero"
+        );
+        assert!(durations.binaries.is_empty());
+        assert!(durations.tests.is_empty());
+        assert!(durations.slow.is_empty());
+        assert!(durations.complete);
+    }
+
+    #[test]
+    fn a_declared_durations_sidecar_wins_over_stdout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("test-durations.json");
+        std::fs::write(
+            &path,
+            r#"{"measured_seconds":99.0,"binaries":[{"name":"declared","seconds":99.0,"source":"binary-summary"}]}"#,
+        )
+        .expect("write sidecar");
+
+        let durations = collect_test_durations(
+            &path,
+            PARTIAL_RUNNER_OUTPUT,
+            120.0,
+            false,
+            Duration::from_secs(1500),
+        )
+        .expect("sidecar is consumed");
+
+        assert_eq!(durations.measured_seconds, Some(99.0));
+        assert_eq!(durations.binaries.len(), 1);
+        // Homeboy's own measurements still fill the gaps the sidecar left.
+        assert_eq!(durations.phase_seconds, Some(120.0));
+        assert_eq!(durations.budget_seconds, Some(1500.0));
+    }
+
     #[test]
     fn reported_artifact_locators_are_normalized_and_deduplicated() {
         let mut timings = Vec::new();

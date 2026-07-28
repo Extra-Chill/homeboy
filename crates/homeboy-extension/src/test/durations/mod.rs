@@ -70,8 +70,9 @@ pub const DEFAULT_SLOW_UNIT_FLOOR_SECONDS: f64 = 30.0;
 /// it happens.
 pub const DEFAULT_SUITE_BUDGET_SHARE: f64 = 0.75;
 
-/// How many units the report surfaces.
-pub const SLOWEST_UNITS_REPORTED: usize = 10;
+/// How many timed units a report surfaces. Enough to show where the time went
+/// without turning every PR comment into a profile.
+pub const SLOWEST_UNITS_REPORTED: usize = 5;
 
 const SLOW_UNIT_SHARE_ENV: &str = "HOMEBOY_SLOW_TEST_BUDGET_SHARE";
 const SLOW_UNIT_FLOOR_ENV: &str = "HOMEBOY_SLOW_TEST_FLOOR_SECONDS";

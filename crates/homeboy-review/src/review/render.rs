@@ -21,7 +21,9 @@ use homeboy_code_audit::AuditCommandOutput;
 use homeboy_core::ci_profile::CiRunOutput;
 use homeboy_core::top_n::top_n_by;
 use homeboy_extension::lint::LintCommandOutput;
-use homeboy_extension::test::{TestCommandOutput, TestDurations, TestUnitDuration};
+use homeboy_extension::test::{
+    TestCommandOutput, TestDurations, TestUnitDuration, SLOWEST_UNITS_REPORTED,
+};
 use homeboy_extension::ExtensionPhaseTiming;
 use homeboy_finding::HomeboyFinding;
 
@@ -33,9 +35,6 @@ mod audit;
 /// Maximum bullets shown per stage. Anything beyond is collapsed into a
 /// `(... N more)` hint so PR comments stay skim-friendly.
 const TOP_N: usize = 10;
-
-/// How many timed test units the duration block lists.
-const SLOWEST_TESTS_REPORTED: usize = 5;
 
 /// Render a `ReviewCommandOutput` into a PR-comment-ready markdown body.
 pub fn render_pr_comment(output: &ReviewCommandOutput) -> String {
@@ -356,7 +355,7 @@ fn render_test_durations(out: &mut String, durations: &TestDurations) {
     });
 
     let _ = writeln!(out, "- _Slowest tests:_");
-    for unit in timed.into_iter().take(SLOWEST_TESTS_REPORTED) {
+    for unit in timed.into_iter().take(SLOWEST_UNITS_REPORTED) {
         let _ = writeln!(out, "  - {}", format_test_unit_duration(unit));
     }
 
