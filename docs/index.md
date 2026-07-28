@@ -46,6 +46,7 @@ Mental models and vocabulary:
 Exact CLI, configuration, schema, and output details:
 
 - [Reference index](reference/index.md)
+- [Generated CLI reference](reference/cli/commands/index.md)
 - [Root command and global flags](reference/cli/homeboy-root-command.md)
 - [Command index](commands/commands-index.md)
 - [Configuration reference](reference/configuration.md)
