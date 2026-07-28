@@ -254,11 +254,13 @@ pub fn mirror_reverse_broker_evidence(
         let terminal_result: homeboy_core::api_jobs::RemoteRunnerJobResult =
             serde_json::from_value(result.clone()).map_err(|error| {
                 Error::validation_invalid_argument(
-                "result.observation_run_details",
-                "reverse runner terminal result is not a valid typed observation detail contract",
-                Some(error.to_string()),
-                None,
-            )
+                    "result.observation_run_details",
+                    format!(
+                        "reverse runner terminal result is not a valid typed observation detail contract: {error}"
+                    ),
+                    None,
+                    None,
+                )
             })?;
         let runs;
         let local_artifacts = if job.status == JobStatus::Failed {
@@ -510,6 +512,40 @@ pub fn mirror_daemon_job_progress(
         None,
     )
     .map(|run| run.run)
+}
+
+pub fn mirror_reverse_broker_job_progress(
+    runner: &Runner,
+    broker_url: &str,
+    cwd: &str,
+    command: &[String],
+    job: &Job,
+    run_id: Option<&str>,
+) -> Result<RunRecord> {
+    let store = ObservationStore::open_initialized()?;
+    let run = mirror_job_run(
+        &store,
+        runner,
+        cwd,
+        command,
+        job,
+        &[],
+        &json!({}),
+        run_id,
+        None,
+    )?
+    .run;
+    record_reverse_broker_metadata(
+        &store,
+        run,
+        runner,
+        broker_url,
+        job,
+        &[],
+        &json!({}),
+        Vec::new(),
+        None,
+    )
 }
 
 /// Records that the controller can no longer observe an accepted runner job.

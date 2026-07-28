@@ -317,6 +317,18 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
             .count(),
         1,
     );
+    let terminal_result = broker
+        .store
+        .events(completed.id)
+        .expect("broker events")
+        .into_iter()
+        .find(|event| event.kind == JobEventKind::Result)
+        .and_then(|event| event.data)
+        .expect("broker terminal result event");
+    assert!(
+        terminal_result.get("exit_code").is_some(),
+        "broker terminal result preserves the typed payload: {terminal_result}"
+    );
 
     let (_, duplicate_code) =
         homeboy::runner::run_reverse_worker(homeboy::runner::ReverseRunnerWorkerOptions {

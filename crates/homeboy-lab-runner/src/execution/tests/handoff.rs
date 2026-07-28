@@ -381,6 +381,7 @@ fn lab_offload_handoff_persists_run_when_job_is_accepted() {
             &["homeboy".to_string(), "trace".to_string()],
             &job,
             None,
+            None,
         )
         .expect("persist handoff run");
 
@@ -400,6 +401,38 @@ fn lab_offload_handoff_persists_run_when_job_is_accepted() {
 }
 
 #[test]
+fn reverse_handoff_persists_broker_transport_for_post_disconnect_refresh() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner = ssh_runner();
+        let job = running_job();
+        let command = vec!["homeboy".to_string(), "trace".to_string()];
+        let run_id = persist_lab_offload_handoff_run(
+            &runner,
+            "/srv/homeboy/project",
+            &command,
+            &job,
+            None,
+            Some("http://127.0.0.1:4321"),
+        )
+        .expect("persist reverse handoff run");
+
+        let store = homeboy_core::observation::ObservationStore::open_initialized().expect("store");
+        let run = store
+            .get_run(&run_id)
+            .expect("get run")
+            .expect("persisted reverse handoff run");
+        assert_eq!(
+            run.metadata_json["lab"]["reverse_broker"]["broker_url"],
+            "http://127.0.0.1:4321"
+        );
+        assert_eq!(
+            run.metadata_json["lab"]["reverse_broker"]["job_id"],
+            job.id.to_string()
+        );
+    });
+}
+
+#[test]
 fn accepted_job_that_disappears_persists_a_terminal_controller_failure() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let runner = ssh_runner();
@@ -410,9 +443,15 @@ fn accepted_job_that_disappears_persists_a_terminal_controller_failure() {
             "runtime".to_string(),
             "refresh".to_string(),
         ];
-        let run_id =
-            persist_lab_offload_handoff_run(&runner, "/srv/homeboy/project", &command, &job, None)
-                .expect("accepted handoff mirror");
+        let run_id = persist_lab_offload_handoff_run(
+            &runner,
+            "/srv/homeboy/project",
+            &command,
+            &job,
+            None,
+            None,
+        )
+        .expect("accepted handoff mirror");
 
         let err = terminal_runner_poll_failure(
             &runner,
@@ -480,9 +519,15 @@ fn transient_daemon_transport_drop_keeps_the_durable_job_recoverable() {
             "runtime".to_string(),
             "refresh".to_string(),
         ];
-        let run_id =
-            persist_lab_offload_handoff_run(&runner, "/srv/homeboy/project", &command, &job, None)
-                .expect("accepted handoff mirror");
+        let run_id = persist_lab_offload_handoff_run(
+            &runner,
+            "/srv/homeboy/project",
+            &command,
+            &job,
+            None,
+            None,
+        )
+        .expect("accepted handoff mirror");
 
         // A transport-layer drop: the daemon endpoint became unreachable while
         // polling. This is the shape `runner_daemon_health_failure` classifies

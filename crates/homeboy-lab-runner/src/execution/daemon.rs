@@ -221,7 +221,9 @@ pub(super) fn exec_via_daemon(
         }
     }
     let persisted_run_id = mirror_evidence
-        .then(|| persist_lab_offload_handoff_run(runner, &cwd, &command, &job, run_id.as_deref()))
+        .then(|| {
+            persist_lab_offload_handoff_run(runner, &cwd, &command, &job, run_id.as_deref(), None)
+        })
         .flatten();
     validate_generic_exec_mirror_run_id(
         run_id_owns_generic_exec,
