@@ -8,6 +8,8 @@ use homeboy_core::git::release_download::GitHubRepo;
 use super::{github_release_repair_commands, GitHubReleaseBody, GitHubReleaseRepairCommands};
 
 mod changelog_url_tests;
+mod delivery_tests;
+mod draft_lookup_tests;
 mod notes_tests;
 mod repair_tests;
 mod result_builders;

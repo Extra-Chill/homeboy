@@ -2,11 +2,13 @@
 //!
 //! Split across focused submodules:
 //! - [`run`] — the `github.release` step entry point and lifecycle driver.
+//! - [`delivery`] — publication-state gating for an already-existing release.
 //! - [`notes`] — release-body construction, generated-notes probes, footers.
 //! - [`results`] — `ReleaseStepResult` builders for each outcome.
 //! - [`repair`] — manual-recovery command builders, hints, and logging.
 //! - [`gh_cli`] — `gh` CLI probes, environment, and command construction.
 
+mod delivery;
 mod gh_cli;
 mod notes;
 mod repair;
@@ -37,7 +39,11 @@ pub(crate) use gh_cli::{
 #[cfg(test)]
 pub(crate) use crate::release::types::ReleaseStepResult;
 #[cfg(test)]
-pub(crate) use gh_cli::{github_cli_env, github_release_artifact_paths};
+pub(crate) use delivery::{existing_release_action, ExistingReleaseAction};
+#[cfg(test)]
+pub(crate) use gh_cli::{
+    github_cli_env, github_release_artifact_paths, parse_listed_release_metadata,
+};
 #[cfg(test)]
 pub(crate) use notes::{
     build_github_release_body, fallback_release_notes, github_changelog_url,
@@ -51,6 +57,6 @@ pub(crate) use repair::{
 };
 #[cfg(test)]
 pub(crate) use results::{
-    create_failed_result, not_created_result, published_release_url, upload_failed_result,
-    upload_success_result,
+    create_failed_result, not_created_result, published_existing_draft_result,
+    published_release_url, unfinished_release_result, upload_failed_result, upload_success_result,
 };

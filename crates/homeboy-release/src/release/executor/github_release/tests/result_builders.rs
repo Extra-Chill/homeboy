@@ -3,8 +3,8 @@
 use crate::release::types::ReleaseStepStatus;
 
 use super::super::{
-    create_failed_result, not_created_result, published_release_url, upload_failed_result,
-    upload_success_result,
+    create_failed_result, not_created_result, published_existing_draft_result,
+    published_release_url, unfinished_release_result, upload_failed_result, upload_success_result,
 };
 use super::{data_bool, data_str, test_body, test_repair, test_repo};
 
@@ -158,6 +158,89 @@ fn verified_upload_result_is_successful_only_after_publication() {
             .and_then(|data| data.get("artifact_count"))
             .and_then(|value| value.as_u64()),
         Some(2)
+    );
+}
+
+#[test]
+fn publishing_a_stranded_draft_is_a_success_not_a_skip() {
+    // Issue #10441: finishing a draft that was left behind a pushed tag is a
+    // real delivery action. It must not be reported as an idempotent skip,
+    // because the release only became downloadable in this run.
+    let result = published_existing_draft_result(
+        "v0.320.0",
+        &test_repo(),
+        15,
+        "https://github.com/example-org/studio-web/releases/tag/v0.320.0",
+    );
+
+    assert_eq!(result.status, ReleaseStepStatus::Success);
+    assert_eq!(data_bool(&result, "skipped"), Some(false));
+    assert_eq!(data_bool(&result, "published"), Some(true));
+    assert_eq!(data_str(&result, "reason"), Some("draft-release-published"));
+    assert_eq!(
+        data_str(&result, "action"),
+        Some("github.release.publish_existing_draft")
+    );
+    assert_eq!(
+        result
+            .data
+            .as_ref()
+            .and_then(|data| data.get("artifact_count"))
+            .and_then(|value| value.as_u64()),
+        Some(15)
+    );
+}
+
+#[test]
+fn an_unfinished_release_is_failed_so_the_tag_is_never_reported_as_delivered() {
+    // Issue #10441: the tag is already durable on origin by the time this step
+    // runs. Reporting success over a release that is still a draft tells every
+    // downstream consumer the version shipped when nothing is downloadable.
+    let result = unfinished_release_result(
+        "v0.320.0",
+        &test_repo(),
+        "draft-publish-failed",
+        "`gh release edit --draft=false` failed for v0.320.0: HTTP 502",
+        test_repair(),
+    );
+
+    assert_eq!(result.status, ReleaseStepStatus::Failed);
+    assert_eq!(data_bool(&result, "skipped"), Some(false));
+    assert_eq!(data_bool(&result, "published"), Some(false));
+    // The release object does exist — recovery must resume it, not re-tag.
+    assert_eq!(data_bool(&result, "release_created"), Some(true));
+    assert_eq!(data_str(&result, "reason"), Some("draft-publish-failed"));
+    assert!(result.error.as_deref().unwrap().contains("HTTP 502"));
+    // Recovery guidance must point at the existing draft, never at a new tag.
+    assert!(result
+        .hints
+        .iter()
+        .any(|hint| hint.message.contains("Resume the existing draft")));
+    assert!(result
+        .hints
+        .iter()
+        .any(|hint| hint.message.contains("--draft=false")));
+    assert!(result
+        .hints
+        .iter()
+        .all(|hint| !hint.message.contains("release create")));
+}
+
+#[test]
+fn an_empty_draft_is_refused_with_the_same_failed_contract() {
+    let result = unfinished_release_result(
+        "v0.319.3",
+        &test_repo(),
+        "draft-release-has-no-assets",
+        "Refusing to publish an empty release over the pushed tag.",
+        test_repair(),
+    );
+
+    assert_eq!(result.status, ReleaseStepStatus::Failed);
+    assert_eq!(data_bool(&result, "published"), Some(false));
+    assert_eq!(
+        data_str(&result, "reason"),
+        Some("draft-release-has-no-assets")
     );
 }
 

@@ -39,10 +39,15 @@
 #    release on top of it. Waiting one cycle is strictly better than either
 #    double-publishing a live release or burying a fresh one over a tag that
 #    turns out to be stranded.
-# 4. Scanning stops at the first *published* release. Recovery is confined to
+# 4. *Recovery* stops at the first published release. Recovery is confined to
 #    the contiguous run of unpublished tags at the head of the tag list.
 #    Resurrecting an ancient orphan sitting below a published release would
 #    ship stale artifacts and disturb `latest`; that is a human decision.
+#    *Reporting* does not stop there. Dropping those orphans silently is how
+#    v0.319.3 (no release) and v0.320.0 (Draft, 15 assets) became permanently
+#    invisible the moment v0.321.0 published above them. They are named in a
+#    warning and in the job summary, with the opt-in `workflow_dispatch`
+#    command to publish and the `git push origin :refs/tags/...` to drop.
 # 5. Oldest-first. When several tags are stranded the lowest version is chosen
 #    so releases publish in version order — later versions' notes and changelog
 #    ranges assume their predecessors shipped, and GitHub derives "latest" from
@@ -117,7 +122,10 @@ min_age_seconds=$(( MIN_AGE_MINUTES * 60 ))
 
 stranded_tags=()
 stranded_reasons=()
+buried_tags=()
+buried_reasons=()
 hold_reason=''
+past_published=0
 
 while IFS= read -r tag; do
   [ -n "${tag}" ] || continue
@@ -134,22 +142,46 @@ while IFS= read -r tag; do
   # Provenance: only tags whose commit is a Homeboy release commit are ours.
   subject="$(git log -1 --format=%s "${commit}")"
   if [ "${subject}" != "release: ${tag}" ]; then
-    echo "::notice::Ignoring tag ${tag} for recovery: commit subject is '${subject}', not 'release: ${tag}'"
+    if [ "${past_published}" -eq 0 ]; then
+      echo "::notice::Ignoring tag ${tag} for recovery: commit subject is '${subject}', not 'release: ${tag}'"
+    fi
     continue
   fi
 
   # Provenance: the tag must live on the branch this workflow releases from.
   if ! git merge-base --is-ancestor "${commit}" HEAD; then
-    echo "::notice::Ignoring tag ${tag} for recovery: not reachable from the release branch"
+    if [ "${past_published}" -eq 0 ]; then
+      echo "::notice::Ignoring tag ${tag} for recovery: not reachable from the release branch"
+    fi
     continue
   fi
 
   entry="$(jq -c --arg tag "${tag}" 'map(select(.tagName == $tag)) | first // empty' "${RELEASES_JSON}")"
 
   if [ -n "${entry}" ] && [ "$(jq -r '.isDraft' <<< "${entry}")" != "true" ]; then
-    # First published release found. Everything older is either published or a
-    # historical orphan that must not be resurrected automatically.
-    break
+    # First published release found. Automatic recovery stops here: a newer
+    # published release already owns `latest`, so resurrecting something below
+    # it would ship stale artifacts and reorder delivery. That rule is right.
+    #
+    # REPORTING deliberately does not stop here (issue #10441). Silently
+    # dropping everything below the boundary is how v0.319.3 (no release) and
+    # v0.320.0 (Draft, 15 assets) became permanently invisible the moment
+    # v0.321.0 published above them — no run will ever look at them again, and
+    # nothing tells an operator they exist. Keep scanning and name them.
+    past_published=1
+    continue
+  fi
+
+  if [ -z "${entry}" ]; then
+    reason='no GitHub Release'
+  else
+    reason='Draft GitHub Release'
+  fi
+
+  if [ "${past_published}" -eq 1 ]; then
+    buried_tags+=("${tag}")
+    buried_reasons+=("${reason}")
+    continue
   fi
 
   tag_epoch="$(git log -1 --format=%ct "${commit}")"
@@ -159,17 +191,37 @@ while IFS= read -r tag; do
     break
   fi
 
-  if [ -z "${entry}" ]; then
-    stranded_reasons+=('no GitHub Release')
-  else
-    stranded_reasons+=('Draft GitHub Release')
-  fi
+  stranded_reasons+=("${reason}")
   stranded_tags+=("${tag}")
 done < <(git tag --list --sort=-v:refname | head -n "${SCAN_LIMIT}")
 
 for index in "${!stranded_tags[@]}"; do
   echo "::warning::Stranded prepared release: ${stranded_tags[${index}]} (${stranded_reasons[${index}]})"
 done
+
+# Orphans below the published boundary are reported but never auto-recovered.
+# Republishing them is a human decision — it disturbs `latest` and ships
+# artifacts a newer release has already superseded — so the operator gets the
+# exact opt-in command instead of a silent drop.
+if [ "${#buried_tags[@]}" -gt 0 ]; then
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    {
+      printf '### Orphaned release tags (manual action required)\n\n'
+      printf 'These tags have no published GitHub Release and sit below a release that already published, so automatic recovery will never select them.\n\n'
+      printf '| Tag | State | Publish it | Or drop it |\n'
+      printf '| --- | --- | --- | --- |\n'
+    } >> "${GITHUB_STEP_SUMMARY}"
+  fi
+  for index in "${!buried_tags[@]}"; do
+    buried_tag="${buried_tags[${index}]}"
+    buried_reason="${buried_reasons[${index}]}"
+    echo "::warning::Orphaned release tag ${buried_tag} (${buried_reason}) sits below an already-published release, so it will NOT be recovered automatically. Publish it deliberately with: gh workflow run release.yml -f release_tag=${buried_tag} — or drop it with: git push origin :refs/tags/${buried_tag}"
+    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+      printf '| `%s` | %s | `gh workflow run release.yml -f release_tag=%s` | `git push origin :refs/tags/%s` |\n' \
+        "${buried_tag}" "${buried_reason}" "${buried_tag}" "${buried_tag}" >> "${GITHUB_STEP_SUMMARY}"
+    fi
+  done
+fi
 
 if [ -n "${hold_reason}" ]; then
   # Holding beats both alternatives: recovering could double-publish a live

@@ -5,6 +5,7 @@ use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
 
 use super::super::step_success;
+use super::delivery::{existing_release_action, ExistingReleaseAction};
 use super::gh_cli::{
     gh_command, gh_is_authenticated, gh_is_available, gh_release_exists,
     github_release_publications,
@@ -15,8 +16,9 @@ use super::notes::{
 };
 use super::repair::{gh_auth_failure_message, github_release_repair_commands, log_repair_commands};
 use super::results::{
-    create_failed_result, not_created_result, published_release_url, skipped_result,
-    upload_failed_result, upload_success_result_with_publications,
+    create_failed_result, not_created_result, published_existing_draft_result,
+    published_release_url, skipped_result, unfinished_release_result, upload_failed_result,
+    upload_success_result_with_publications,
 };
 use super::{
     gh_failure_detail, gh_release_metadata, github_release_upload_timeout,
@@ -146,25 +148,118 @@ pub(crate) fn run_github_release(
 
     let repo_flag = format!("{}/{}", github.owner, github.repo);
     if gh_release_exists(&github, &component.github, &tag, &repo_flag) {
-        // A pre-existing release is a retry boundary. Reconcile its assets by
-        // canonical name and digest before uploading anything.
-        if !has_artifacts {
-            homeboy_core::log_status!(
-                "release",
-                "GitHub Release {} already exists for {} — skipping (idempotent)",
-                tag,
-                repo_flag
-            );
-            return Ok(skipped_result(
-                &tag,
-                &github,
-                "release-already-exists",
-                None,
-            ));
+        // A pre-existing release is a retry boundary. Read its PUBLICATION
+        // state before deciding anything (issue #10441). By the time this step
+        // runs the tag is already durable on `origin` — `release.yml`'s
+        // cargo-dist matrix checks the tag out and builds with
+        // `dist build --tag=<tag>`, so the tag has to exist before any artifact
+        // can — which means an unpublished Draft here is a pushed tag that
+        // ships nothing. This step is the pipeline's last chance to close that
+        // window, so "a release object exists" is not sufficient to report
+        // success; it must also be published.
+        let metadata = match gh_release_metadata(&github, &component.github, &tag, &repo_flag) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                let repair = repair_commands(None, None);
+                let detail = format!(
+                    "GitHub Release {} exists for {} but its publication state could not be read: {}",
+                    tag, repo_flag, error
+                );
+                homeboy_core::log_status!("release", "✗ {}", detail);
+                log_repair_commands(&repair);
+                return Ok(unfinished_release_result(
+                    &tag,
+                    &github,
+                    "release-state-unreadable",
+                    &detail,
+                    repair,
+                ));
+            }
+        };
+
+        match existing_release_action(metadata.is_draft, has_artifacts, metadata.assets.len()) {
+            ExistingReleaseAction::AlreadyPublished => {
+                homeboy_core::log_status!(
+                    "release",
+                    "GitHub Release {} is already published for {} — skipping (idempotent)",
+                    tag,
+                    repo_flag
+                );
+                return Ok(skipped_result(
+                    &tag,
+                    &github,
+                    "release-already-published",
+                    None,
+                ));
+            }
+            ExistingReleaseAction::EmptyDraft => {
+                // Publishing an assetless draft would make it `latest` and send
+                // every downloader (and the Homebrew formula) to a release with
+                // no binaries. That is worse than leaving the draft for the
+                // recovery path, which can still upload artifacts into it.
+                let repair = repair_commands(None, None);
+                let detail = format!(
+                    "GitHub Release {} for {} is an unpublished draft with no assets, and this run has no artifacts to attach. Refusing to publish an empty release over the pushed tag.",
+                    tag, repo_flag
+                );
+                homeboy_core::log_status!("release", "✗ {}", detail);
+                log_repair_commands(&repair);
+                return Ok(unfinished_release_result(
+                    &tag,
+                    &github,
+                    "draft-release-has-no-assets",
+                    &detail,
+                    repair,
+                ));
+            }
+            ExistingReleaseAction::PublishDraft => {
+                homeboy_core::log_status!(
+                    "release",
+                    "GitHub Release {} for {} is an unpublished draft with {} asset(s) — publishing it so the pushed tag delivers",
+                    tag,
+                    repo_flag,
+                    metadata.assets.len()
+                );
+                let publish_args = ["release", "edit", &tag, "--draft=false", "-R", &repo_flag];
+                let publish_output = run_gh_command(
+                    gh_command(&github, &component.github, &publish_args),
+                    github_release_upload_timeout(),
+                );
+                if publish_output.timed_out || publish_output.exit_code != Some(0) {
+                    let repair = repair_commands(None, None);
+                    let detail = format!(
+                        "{}: {}",
+                        gh_failure_detail("gh release edit --draft=false", &publish_output),
+                        publish_output.stderr.trim()
+                    );
+                    homeboy_core::log_status!("release", "✗ {}", detail);
+                    log_repair_commands(&repair);
+                    return Ok(unfinished_release_result(
+                        &tag,
+                        &github,
+                        "draft-publish-failed",
+                        &detail,
+                        repair,
+                    ));
+                }
+                let url = published_release_url(&github, &tag, "", &publish_output.stdout);
+                homeboy_core::log_status!(
+                    "release",
+                    "Published previously stranded GitHub Release: {}",
+                    url
+                );
+                return Ok(published_existing_draft_result(
+                    &tag,
+                    &github,
+                    metadata.assets.len(),
+                    &url,
+                ));
+            }
+            // This run carries artifacts: reconcile and verify the assets by
+            // canonical name and digest before any publish decision is made.
+            ExistingReleaseAction::ReconcileAssets => {}
         }
 
-        let metadata = gh_release_metadata(&github, &component.github, &tag, &repo_flag)
-            .map_err(|error| Error::internal_unexpected(error))?;
         let (uploads, existing) = reconcile_release_publications(
             &publications,
             &metadata.assets,

@@ -51,6 +51,75 @@ pub(super) fn skipped_result(
     step_success("github.release", "github.release", Some(data), Vec::new())
 }
 
+/// An existing GitHub Release was still an unpublished Draft and this run
+/// published it (issue #10441).
+///
+/// The tag was already durable on `origin` — the cargo-dist build matrix checks
+/// the tag out, so it must exist before any artifact can be built — which means
+/// the Draft was a pushed tag that shipped nothing. Publishing it is the action
+/// that makes the tag deliverable, so this is a real `Success`, not a skip.
+pub(crate) fn published_existing_draft_result(
+    tag: &str,
+    github: &GitHubRepo,
+    asset_count: usize,
+    url: &str,
+) -> ReleaseStepResult {
+    step_success(
+        "github.release",
+        "github.release",
+        Some(serde_json::json!({
+            "action": "github.release.publish_existing_draft",
+            "skipped": false,
+            "reason": "draft-release-published",
+            "tag": tag,
+            "host": github.host,
+            "owner": github.owner,
+            "repo": github.repo,
+            "url": url,
+            "artifact_count": asset_count,
+            "published": true,
+        })),
+        Vec::new(),
+    )
+}
+
+/// A GitHub Release exists for the tag but this run could neither confirm nor
+/// make it published (issue #10441).
+///
+/// This must be `Failed`. The tag is already on `origin`, so reporting success
+/// here publishes nothing while telling every downstream consumer — and the
+/// `verify-published` release-workflow gate — that the version shipped. The
+/// three states that land here are: the release's publication state could not
+/// be read, `gh release edit --draft=false` failed, and an empty Draft that
+/// must not be published over.
+pub(crate) fn unfinished_release_result(
+    tag: &str,
+    github: &GitHubRepo,
+    reason: &str,
+    error: &str,
+    repair: GitHubReleaseRepairCommands,
+) -> ReleaseStepResult {
+    let data = serde_json::json!({
+        "skipped": false,
+        "release_created": true,
+        "published": false,
+        "reason": reason,
+        "tag": tag,
+        "host": github.host,
+        "owner": github.owner,
+        "repo": github.repo,
+        "repair": repair_data(&repair),
+    });
+
+    step_failed(
+        "github.release",
+        "github.release",
+        Some(data),
+        Some(error.to_string()),
+        existing_draft_repair_hints(&repair),
+    )
+}
+
 /// The GitHub Release object was NOT created and cannot be recovered in this
 /// run (no `gh` binary / not authenticated). This must be `Failed`, not a
 /// success-with-`skipped`, so the release pipeline halts before publish/upload
