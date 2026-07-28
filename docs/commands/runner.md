@@ -999,6 +999,16 @@ entry in `operator_hints`. A non-empty `probe_degradations` list means the answe
 is **partial** — the runner did not respond in time — which is how an operator
 distinguishes "the Lab is wedged" from "there is nothing to report".
 
+The same ledger carries `readonly_probe.unavailable`, which is *not* a remote
+timeout: a probe that reads the controller's own ambient environment could not
+run there at all. Its `timeout_seconds` is `0` and its hint is labelled
+`DEGRADED PROBE (...)` so it cannot be mistaken for a wedged runner. The
+controller-side git ancestry probe (`controller_git_ancestry`) reports this way
+when `runner status --full` runs outside a Homeboy checkout: recovery guidance
+falls back to the controller's own build ref, git's `fatal: not a git
+repository` is captured into `detail` instead of being printed in front of the
+result envelope, and the runner answer itself is unaffected (#10525).
+
 `runs list --include-active-runner-jobs` deliberately reads the latency-bounded
 indexed active-job snapshot rather than the full status report: it does not
 reconcile the daemon generation ledger, so a wedged Lab cannot block a listing.

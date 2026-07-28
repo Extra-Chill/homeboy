@@ -59,7 +59,9 @@ pub struct ReadOnlyProbeDegradation {
     pub runner_id: Option<String>,
     /// Machine-readable classification of the degradation.
     pub reason_code: &'static str,
-    /// The bound that fired, in seconds.
+    /// The bound that fired, in seconds. `0` when the probe never reached its
+    /// bound because it could not run at all
+    /// (see [`REASON_PROBE_UNAVAILABLE`]).
     pub timeout_seconds: u64,
     /// Operator-facing explanation of what is missing from the result.
     pub detail: String,
@@ -69,6 +71,13 @@ pub struct ReadOnlyProbeDegradation {
 pub const REASON_PROBE_TIMEOUT: &str = "readonly_probe.timeout";
 /// Probe was cut short because the caller cancelled (SIGINT/SIGTERM).
 pub const REASON_PROBE_INTERRUPTED: &str = "readonly_probe.interrupted";
+/// Probe could not run at all in the caller's environment — a required tool is
+/// missing, or the ambient context it reads (a git checkout, say) is absent.
+/// Distinct from a timeout: no bound ever applied, so `timeout_seconds` is `0`.
+/// The subprocess diagnostic that explains it belongs in `detail`, so a
+/// read-only command can drop the ambient failure from its *streams* without
+/// dropping it from its *answer* (#10525).
+pub const REASON_PROBE_UNAVAILABLE: &str = "readonly_probe.unavailable";
 
 // Per-thread ledger, mirroring the existing `ACTIVE_PROBE_LIMITS` design in
 // `homeboy-core`'s SSH client. Inspection commands probe and drain on the same

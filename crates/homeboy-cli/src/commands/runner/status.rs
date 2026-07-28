@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::process::Command;
 
 use homeboy::core::agent_runtime_manifest::{
     discover_agent_runtime_catalog, AgentRuntimeDiagnosticFollowup,
@@ -15,6 +14,7 @@ use homeboy::runner::runners::{
 };
 
 use super::super::CmdResult;
+use super::controller_ancestry::commits_are_ancestral;
 use super::types::{
     LabFollowup, LabRunnerHomeboyOutput, LabSelectedRunnerOutput, RunnerArtifactFeatureDiagnostics,
     RunnerConnectionOutput, RunnerExecutableRequirementDiagnostics, RunnerExtra,
@@ -183,8 +183,17 @@ fn probe_degradation_hints() -> Vec<String> {
     readonly_probe::degradations()
         .into_iter()
         .map(|degradation| {
+            // `PARTIAL STATUS` is documented as "the runner did not answer in
+            // time". A probe that could not run in the *controller's* own
+            // environment says nothing about the runner, so it gets its own
+            // label rather than raising a false wedged-Lab alarm (#10525).
+            let label = if degradation.reason_code == readonly_probe::REASON_PROBE_UNAVAILABLE {
+                "DEGRADED PROBE"
+            } else {
+                "PARTIAL STATUS"
+            };
             format!(
-                "PARTIAL STATUS ({}): {}",
+                "{label} ({}): {}",
                 degradation.reason_code, degradation.detail
             )
         })
@@ -1051,13 +1060,6 @@ fn recovery_refresh_ref_with(
         }
         _ => controller_ref.to_string(),
     }
-}
-
-fn commits_are_ancestral(older: &str, newer: &str) -> bool {
-    Command::new("git")
-        .args(["merge-base", "--is-ancestor", older, newer])
-        .status()
-        .is_ok_and(|status| status.success())
 }
 
 pub(crate) fn declared_run_followups(
