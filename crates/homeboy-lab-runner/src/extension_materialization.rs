@@ -19,6 +19,10 @@ use super::{
     copy_snapshot_to_directory, exec, Runner, RunnerExecOptions, RunnerFileTransfer, RunnerKind,
 };
 
+fn extension_snapshot_excludes() -> Vec<String> {
+    vec!["._*".to_string(), "**/._*".to_string()]
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct RunnerExtensionMaterializationRequest {
     pub(crate) id: String,
@@ -443,12 +447,13 @@ fn sync_controller_snapshot(
     plan: &RunnerExtensionMaterializationPlan,
 ) -> Result<()> {
     let synced_source_path = plan.synced_source_path.trim_end_matches('/');
+    let excludes = extension_snapshot_excludes();
     match runner.kind {
-        RunnerKind::Local => copy_snapshot_to_directory(
-            Path::new(&plan.source_path),
-            Path::new(synced_source_path),
-            &[],
-        ),
+        RunnerKind::Local => {
+            let destination = Path::new(synced_source_path);
+            copy_snapshot_to_directory(Path::new(&plan.source_path), destination, &excludes)?;
+            remove_appledouble_files(destination)
+        }
         RunnerKind::Ssh => {
             let transfer = RunnerFileTransfer::for_runner(runner, None)?;
             upload_snapshot(runner, plan, &transfer)
@@ -465,10 +470,14 @@ fn upload_snapshot(
         Error::internal_io(err.to_string(), Some("stage extension overlay".to_string()))
     })?;
     let staged = tempdir.path().join("source");
-    copy_snapshot_to_directory(Path::new(&plan.source_path), &staged, &[])?;
+    let excludes = extension_snapshot_excludes();
+    copy_snapshot_to_directory(Path::new(&plan.source_path), &staged, &excludes)?;
+    remove_appledouble_files(&staged)?;
     let archive = tempdir.path().join("source.tar");
     let status = Command::new("tar")
+        .env("COPYFILE_DISABLE", "1")
         .args([
+            "--no-xattrs",
             "-C",
             &staged.display().to_string(),
             "-cf",
@@ -497,11 +506,7 @@ fn upload_snapshot(
         })?;
     transfer.ensure_directory(remote_parent)?;
     transfer.upload_file(&archive.display().to_string(), &remote_archive)?;
-    let extract = format!(
-        "set -e\nrm -rf {dest}\nmkdir -p {dest}\ntar -xf {archive} -C {dest}\nrm -f {archive}\n",
-        dest = shell::quote_path(&plan.synced_source_path),
-        archive = shell::quote_path(&remote_archive),
-    );
+    let extract = extension_snapshot_extract_command(&plan.synced_source_path, &remote_archive);
     let (_output, exit_code) = exec(&runner.id, RunnerExecOptions::diagnostic_raw_shell(extract))?;
     if exit_code != 0 {
         return Err(Error::validation_invalid_argument(
@@ -515,6 +520,14 @@ fn upload_snapshot(
         ));
     }
     Ok(())
+}
+
+fn extension_snapshot_extract_command(destination: &str, archive: &str) -> String {
+    let destination = shell::quote_path(destination);
+    format!(
+        "set -e\nrm -rf {destination}\nmkdir -p {destination}\ntar -xf {archive} -C {destination}\nfind {destination} -name '._*' -delete\nrm -f {archive}\n",
+        archive = shell::quote_path(archive),
+    )
 }
 
 fn run_materialization_command(
@@ -733,7 +746,9 @@ fn collect_hash_entries(
     children.sort_by_key(|entry| entry.path());
     for entry in children {
         let path = entry.path();
-        if entry.file_name().to_string_lossy() == ".git" {
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if file_name == ".git" || file_name.starts_with("._") {
             continue;
         }
         let metadata = fs::symlink_metadata(&path)
@@ -747,6 +762,26 @@ fn collect_hash_entries(
                 .to_string_lossy()
                 .replace('\\', "/");
             entries.push((relative, path));
+        }
+    }
+    Ok(())
+}
+
+fn remove_appledouble_files(path: &Path) -> Result<()> {
+    let children = fs::read_dir(path)
+        .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?;
+    for entry in children {
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?;
+        if metadata.is_dir() {
+            remove_appledouble_files(&path)?;
+        } else if entry.file_name().to_string_lossy().starts_with("._") {
+            fs::remove_file(&path).map_err(|err| {
+                Error::internal_io(err.to_string(), Some(path.display().to_string()))
+            })?;
         }
     }
     Ok(())
@@ -1057,6 +1092,100 @@ mod tests {
             "{}/_lab_workspaces/dev-extensions/nodejs/",
             workspace.path().display()
         )));
+    }
+
+    #[test]
+    fn controller_snapshot_ignores_appledouble_metadata() {
+        let workspace = tempfile::tempdir().expect("runner workspace");
+        let mut runner = runner();
+        runner.workspace_root = Some(workspace.path().to_string_lossy().to_string());
+        let source = tempfile::tempdir().expect("extension source");
+        let rules = source
+            .path()
+            .join("node_modules/eslint-plugin-jest/lib/rules");
+        fs::create_dir_all(&rules).expect("rules directory");
+        fs::write(source.path().join("nodejs.json"), r#"{"id":"nodejs"}"#).expect("manifest");
+        fs::write(rules.join("consistent-test-it.js"), "module.exports = {};")
+            .expect("JavaScript rule");
+        let hash_without_metadata =
+            extension_source_content_hash(source.path()).expect("source hash");
+        fs::write(rules.join("._consistent-test-it.js"), b"\0\x05\x16\x07ATTR")
+            .expect("AppleDouble metadata");
+        let hash_with_metadata = extension_source_content_hash(source.path()).expect("source hash");
+
+        assert_eq!(hash_with_metadata, hash_without_metadata);
+
+        let request = RunnerExtensionMaterializationRequest {
+            id: "nodejs".to_string(),
+            revision: "abc123".to_string(),
+            source: RunnerExtensionMaterializationSource::ControllerSnapshot {
+                local_path: source.path().to_path_buf(),
+            },
+        };
+        let provenance = materialize_runner_extension_with_exec(
+            &runner,
+            "homeboy",
+            None,
+            &request,
+            &mut |_runner_id, _options| Ok((output(), 0)),
+        )
+        .expect("materializes");
+        let synced_rules = Path::new(&provenance.synced_source_path)
+            .join("node_modules/eslint-plugin-jest/lib/rules");
+
+        assert!(synced_rules.join("consistent-test-it.js").exists());
+        assert!(!synced_rules.join("._consistent-test-it.js").exists());
+    }
+
+    #[test]
+    fn staged_extension_cleanup_removes_nested_appledouble_metadata() {
+        let staged = tempfile::tempdir().expect("staged extension");
+        let rules = staged.path().join("node_modules/plugin/rules");
+        fs::create_dir_all(&rules).expect("rules directory");
+        fs::write(rules.join("rule.js"), "module.exports = {};").expect("JavaScript rule");
+        fs::write(rules.join("._rule.js"), b"\0\x05\x16\x07ATTR").expect("AppleDouble metadata");
+
+        remove_appledouble_files(staged.path()).expect("clean staged extension");
+
+        assert!(rules.join("rule.js").exists());
+        assert!(!rules.join("._rule.js").exists());
+    }
+
+    #[test]
+    fn runner_extraction_removes_appledouble_metadata() {
+        let fixture = tempfile::tempdir().expect("extension fixture");
+        let source = fixture.path().join("source");
+        let destination = fixture.path().join("destination");
+        let archive = fixture.path().join("source.tar");
+        fs::create_dir_all(&source).expect("source directory");
+        fs::write(source.join("rule.js"), "module.exports = {};").expect("JavaScript rule");
+        fs::write(source.join("._rule.js"), b"\0\x05\x16\x07ATTR").expect("AppleDouble metadata");
+        let archive_status = Command::new("tar")
+            .args([
+                "-C",
+                &source.display().to_string(),
+                "-cf",
+                &archive.display().to_string(),
+                ".",
+            ])
+            .status()
+            .expect("archive fixture");
+        assert!(archive_status.success());
+
+        let extract_status = Command::new("sh")
+            .args([
+                "-c",
+                &extension_snapshot_extract_command(
+                    &destination.display().to_string(),
+                    &archive.display().to_string(),
+                ),
+            ])
+            .status()
+            .expect("extract fixture");
+
+        assert!(extract_status.success());
+        assert!(destination.join("rule.js").exists());
+        assert!(!destination.join("._rule.js").exists());
     }
 
     #[test]
