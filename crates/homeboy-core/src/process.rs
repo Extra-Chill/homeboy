@@ -631,44 +631,6 @@ pub fn windows_taskkill_process_tree_step(pid: u32) -> ProcessStep {
     ProcessStep::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"])
 }
 
-/// Best available process-tree termination for cleanup paths that cannot leave
-/// an unrecorded child behind. Callers still reap and kill the root as a final
-/// fallback when this returns an error.
-pub fn terminate_process_tree_best_effort(pid: u32) -> Result<()> {
-    #[cfg(unix)]
-    {
-        terminate_process_tree(pid).map(|_| ())
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let step = windows_taskkill_process_tree_step(pid);
-        let status = Command::new(&step.program)
-            .args(&step.args)
-            .status()
-            .map_err(|error| {
-                Error::internal_unexpected(format!(
-                    "terminate process tree {pid} with taskkill: {error}"
-                ))
-            })?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(Error::internal_unexpected(format!(
-                "terminate process tree {pid} with taskkill exited {status}"
-            )))
-        }
-    }
-
-    #[cfg(all(not(unix), not(target_os = "windows")))]
-    {
-        let _ = pid;
-        Err(Error::internal_unexpected(
-            "process-tree termination is unsupported on this platform; root-process fallback is required",
-        ))
-    }
-}
-
 /// Force-terminate an owned process tree without allowing cleanup itself to
 /// exceed `timeout`. Linux snapshots descendants from procfs so children that
 /// changed sessions or process groups remain under the owner's cleanup scope.
