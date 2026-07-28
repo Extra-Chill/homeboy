@@ -1,6 +1,6 @@
 # Compiler Warning Extension Contract Gap
 
-Issue #2242 asks Homeboy core to move compiler-warning collection and compiler-warning fix generation behind extension-owned contracts. Validation and formatting already have extension script contracts (`scripts.validate` and `scripts.format`), but compiler warnings do not.
+Issue #2242 asks Homeboy core to move compiler-warning collection and compiler-warning fix generation behind extension-owned contracts. Formatting already has an extension script contract (`scripts.format`), but compiler warnings do not.
 
 ## Required Upstream Contract
 

@@ -513,7 +513,7 @@ mod tests {
         std::fs::write(
             extension_dir.join(format!("{extension_id}.json")),
             format!(
-                r#"{{"name":"{extension_id}","version":"1.0.0","{capability}":{{"extension_script":"{capability}.sh"}},"composition":{{"includes":[{includes_json}],"roles":{{"javascript":"nodejs","project":["a","b"]}}}}}}"#
+                r#"{{"name":"{extension_id}","version":"1.0.0","{capability}":{{"extension_script":"{capability}.sh"}},"composition":{{"includes":[{includes_json}]}}}}"#
             ),
         )
         .expect("extension manifest");
