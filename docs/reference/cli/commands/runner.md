@@ -651,7 +651,7 @@ Plan a runner-backed refresh loop before dispatching matrix-style work
 | `--workspace` | `<WORKSPACE>` | Controller-side workspace or worktree to sync to the runner |
 | `--runner-cwd` | `<RUNNER_CWD>` | Runner-side cwd for the eventual runner exec command |
 | `--run-id` | `<RUN_ID>` | Stable run id to use for the produced evidence |
-| `--output` | `<PATH>` | Produced output directory or file. Relative paths are resolved from --runner-cwd |
+| `--produces` | `<PATH>` | Produced output directory or file. Relative paths are resolved from --runner-cwd |
 | `--summary` | `<PATH>` | Produced summary directory or file. Relative paths are resolved from --runner-cwd |
 | `--source` | `<PATH>` | Source path that must exist before the refresh is dispatched. Repeat for multiple paths |
 | `--fixture` | `<PATH>` | Fixture path that must exist before the refresh is dispatched. Repeat for multiple paths |

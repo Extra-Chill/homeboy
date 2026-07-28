@@ -329,7 +329,7 @@ Lab offload selection.
 ### `refresh-plan`
 
 ```sh
-homeboy runner refresh-plan --runner <runner-id> --workspace . --runner-cwd /runner/workspaces/app --run-id matrix-refresh-1 --output artifacts/review --summary artifacts/review/summary.json -- npm test
+homeboy runner refresh-plan --runner <runner-id> --workspace . --runner-cwd /runner/workspaces/app --run-id matrix-refresh-1 --produces artifacts/review --summary artifacts/review/summary.json -- npm test
 ```
 
 Plans a runner-backed refresh loop before dispatching matrix-style work, without
@@ -341,6 +341,13 @@ declared evidence/artifact paths, and the ordered `next_commands` to verify the
 runner, sync the workspace, run the refresh, and inspect the produced evidence.
 Source and fixture paths passed with `--source`/`--fixture` must exist before the
 plan is emitted; `--sync-mode` accepts `snapshot`, `snapshot-git`, or `git`.
+
+Declared produced evidence uses `--produces` and `--summary`. `--produces` was
+spelled `--output` through 0.321.0, which collided with the process-wide global
+`--output <PATH>` ("write the JSON result envelope to this file") and left both
+meanings unreachable in a clap-defined order (#10566). On this command `--output`
+now unambiguously means the global envelope path; use `--produces` to declare a
+produced artifact.
 
 ### `connect`
 

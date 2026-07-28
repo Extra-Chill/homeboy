@@ -32,8 +32,13 @@ pub struct RefreshPlanArgs {
     #[arg(long = "run-id")]
     run_id: String,
 
+    // Spelled `--produces`, not `--output`: the process-wide global
+    // `--output <PATH>` already means "write the JSON result envelope here", and
+    // declaring a second `--output` on this command made both unreachable in a
+    // clap-defined order and tripped `Long option names must be unique for each
+    // argument` under debug assertions (#10566).
     /// Produced output directory or file. Relative paths are resolved from --runner-cwd.
-    #[arg(long = "output", value_name = "PATH")]
+    #[arg(long = "produces", value_name = "PATH")]
     outputs: Vec<String>,
 
     /// Produced summary directory or file. Relative paths are resolved from --runner-cwd.
@@ -198,7 +203,7 @@ pub fn refresh_plan(args: RefreshPlanArgs) -> homeboy::core::Result<LabRefreshPl
             "refresh-plan requires a command after --",
             None,
             Some(vec![
-                "Example: homeboy runner refresh-plan --runner lab --workspace . --runner-cwd /workspace/app --run-id run-1 --output artifacts/review -- npm test".to_string(),
+                "Example: homeboy runner refresh-plan --runner lab --workspace . --runner-cwd /workspace/app --run-id run-1 --produces artifacts/review -- npm test".to_string(),
             ]),
         ));
     }

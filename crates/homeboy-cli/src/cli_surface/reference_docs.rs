@@ -35,11 +35,12 @@
 //! all ~500 nodes, which this module strips again anyway; and it runs clap's
 //! `debug_assert` suite over the whole tree, which turns any pre-existing
 //! definition defect anywhere in the CLI into a *docs* test failure. That is not
-//! hypothetical: `runner refresh-plan` declares a local `--output` that collides
-//! with the propagated global `--output`, and building trips
-//! `Long option names must be unique for each argument`. Once that is fixed, a
-//! deliberate `build()`-based assertion canary would be a good separate guard;
-//! it should not be smuggled in as a side effect of generating docs.
+//! hypothetical: `runner refresh-plan` used to declare a local `--output` that
+//! collided with the propagated global `--output`, and building tripped
+//! `Long option names must be unique for each argument`. That defect is fixed
+//! (#10566, the flag is now `--produces`) and the deliberate `build()`-based
+//! canary lives in `global_flag_surface_tests`, where a definition defect
+//! reports as a definition defect instead of as stale documentation.
 //!
 //! # Why it does not overwrite `docs/commands/`
 //!
