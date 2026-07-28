@@ -215,11 +215,20 @@ pub(super) struct RunnerConnectInput {
     pub(super) confirm_control_plane_lost: bool,
 }
 
-pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOutput> {
+/// Argument-shape validation for `runner connect`, split out so it can be
+/// exercised without attempting an SSH connection.
+///
+/// The three `--confirm-*` inputs are deprecated no-ops: every fact they
+/// asserted is proven on the runner, under its own locks, before it mutates
+/// anything. They stay accepted for one release so composed repair commands and
+/// released operator muscle memory keep working. A confirmation supplied
+/// *without* its recovery mode still means the operator selected no recovery, so
+/// it is refused rather than silently ignored.
+pub(super) fn validate_connect_input(input: &RunnerConnectInput) -> homeboy::core::Result<()> {
     let RunnerConnectInput {
         reverse,
-        runner_id,
-        broker_url,
+        runner_id: _,
+        broker_url: _,
         adopt_orphan_lease,
         confirm_pid_dead,
         adopt_live_lease,
@@ -232,13 +241,38 @@ pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOu
         recorded_endpoint,
         confirm_control_plane_lost,
     } = input;
-    if adopt_orphan_lease.is_some() && !confirm_pid_dead {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "confirm_pid_dead",
-            "--adopt-orphan-lease requires --confirm-pid-dead",
-            None,
-            Some(vec!["Inspect `homeboy daemon status` on the runner before adopting its exact dead lease.".to_string()]),
-        ));
+    for (supplied, flag, selector, mode_selected) in [
+        (
+            *confirm_pid_dead,
+            "--confirm-pid-dead",
+            "--adopt-orphan-lease <lease> or --recover-missing-lease-state <lease>",
+            adopt_orphan_lease.is_some() || recover_missing_lease_state.is_some(),
+        ),
+        (
+            *confirm_no_daemon_owner,
+            "--confirm-no-daemon-owner",
+            "--reconcile-leaseless-orphans",
+            *reconcile_leaseless_orphans,
+        ),
+        (
+            *confirm_control_plane_lost,
+            "--confirm-control-plane-lost",
+            "--recover-missing-lease-state <lease>",
+            recover_missing_lease_state.is_some(),
+        ),
+    ] {
+        if supplied && !mode_selected {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "recovery_mode",
+                format!(
+                    "{flag} is a deprecated no-op and selects no recovery; pass {selector} to choose the recovery mode"
+                ),
+                None,
+                Some(vec![format!(
+                    "The runner proves this condition itself before mutating anything; {flag} can be dropped entirely."
+                )]),
+            ));
+        }
     }
     if adopt_live_lease.is_some() != expected_live_pid.is_some() {
         return Err(homeboy::core::Error::validation_invalid_argument(
@@ -248,7 +282,7 @@ pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOu
             None,
         ));
     }
-    if reverse && adopt_live_lease.is_some() {
+    if *reverse && adopt_live_lease.is_some() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "adopt_live_lease",
             "live daemon adoption only applies to direct SSH runner connections",
@@ -264,7 +298,7 @@ pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOu
             None,
         ));
     }
-    if reverse && adopt_orphan_lease.is_some() {
+    if *reverse && adopt_orphan_lease.is_some() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "adopt_orphan_lease",
             "orphan daemon adoption only applies to direct SSH runner connections",
@@ -272,15 +306,7 @@ pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOu
             None,
         ));
     }
-    if reconcile_leaseless_orphans != confirm_no_daemon_owner {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "reconcile_leaseless_orphans",
-            "--reconcile-leaseless-orphans requires --confirm-no-daemon-owner, and vice versa",
-            None,
-            None,
-        ));
-    }
-    if reverse && reconcile_leaseless_orphans {
+    if *reverse && *reconcile_leaseless_orphans {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "reconcile_leaseless_orphans",
             "lease-less recovery only applies to direct SSH runner connections",
@@ -289,7 +315,7 @@ pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOu
         ));
     }
     let recovery_mode_count = usize::from(adopt_orphan_lease.is_some())
-        + usize::from(reconcile_leaseless_orphans)
+        + usize::from(*reconcile_leaseless_orphans)
         + usize::from(recover_missing_lease_state.is_some())
         + usize::from(adopt_live_lease.is_some());
     if recovery_mode_count > 1 {
@@ -300,20 +326,20 @@ pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOu
             None,
         ));
     }
+    // `--recorded-pid` and `--recorded-endpoint` are evidence the runner cannot
+    // reconstruct once its state record is gone, so they remain required. The
+    // confirmations that used to be demanded alongside them are not.
     if recover_missing_lease_state.is_some()
-        && (!confirm_pid_dead
-            || !confirm_control_plane_lost
-            || recorded_pid.is_none()
-            || recorded_endpoint.is_none())
+        && (recorded_pid.is_none() || recorded_endpoint.is_none())
     {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "recover_missing_lease_state",
-            "--recover-missing-lease-state requires --recorded-pid, --recorded-endpoint, --confirm-pid-dead, and --confirm-control-plane-lost",
+            "--recover-missing-lease-state requires --recorded-pid and --recorded-endpoint",
             None,
             None,
         ));
     }
-    if reverse && recover_missing_lease_state.is_some() {
+    if *reverse && recover_missing_lease_state.is_some() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "recover_missing_lease_state",
             "state-loss recovery only applies to direct SSH runner connections",
@@ -321,6 +347,27 @@ pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOu
             None,
         ));
     }
+    Ok(())
+}
+
+pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOutput> {
+    validate_connect_input(&input)?;
+    let RunnerConnectInput {
+        reverse,
+        runner_id,
+        broker_url,
+        adopt_orphan_lease,
+        confirm_pid_dead: _deprecated_confirm_pid_dead,
+        adopt_live_lease,
+        expected_live_pid,
+        confirm_untracked_child_dead,
+        reconcile_leaseless_orphans,
+        confirm_no_daemon_owner: _deprecated_confirm_no_daemon_owner,
+        recover_missing_lease_state,
+        recorded_pid,
+        recorded_endpoint,
+        confirm_control_plane_lost: _deprecated_confirm_control_plane_lost,
+    } = input;
     let (report, exit_code) = if reverse {
         let runner_id = runner_id.ok_or_else(|| {
             homeboy::core::Error::validation_invalid_argument(
@@ -392,7 +439,9 @@ pub(super) fn redact_runner_output_env(output: &mut RunnerOutput) {
 
 #[cfg(test)]
 mod tests {
-    use super::{connect, RunnerConnectInput};
+    // Argument validation is exercised through `validate_connect_input` rather
+    // than `connect` so no test can fall through to a real SSH attempt.
+    use super::{validate_connect_input, RunnerConnectInput};
 
     fn input() -> RunnerConnectInput {
         RunnerConnectInput {
@@ -414,78 +463,148 @@ mod tests {
     }
 
     #[test]
-    fn leaseless_recovery_requires_both_affirmative_flags() {
-        for (recover, confirm) in [(true, false), (false, true)] {
-            let error = connect(
-                "runner",
+    fn deprecated_confirmations_without_a_recovery_mode_are_refused() {
+        for (flag, input) in [
+            (
+                "--confirm-pid-dead",
                 RunnerConnectInput {
-                    reconcile_leaseless_orphans: recover,
-                    confirm_no_daemon_owner: confirm,
+                    confirm_pid_dead: true,
                     ..input()
                 },
-            )
-            .expect_err("partial confirmation must fail before connecting");
-            assert!(error
-                .message
-                .contains("--reconcile-leaseless-orphans requires"));
+            ),
+            (
+                "--confirm-no-daemon-owner",
+                RunnerConnectInput {
+                    confirm_no_daemon_owner: true,
+                    ..input()
+                },
+            ),
+            (
+                "--confirm-control-plane-lost",
+                RunnerConnectInput {
+                    confirm_control_plane_lost: true,
+                    ..input()
+                },
+            ),
+        ] {
+            let error = validate_connect_input(&input)
+                .expect_err("a confirmation that selects no recovery mode must fail");
+            assert!(
+                error.message.contains(flag),
+                "expected {flag} in {}",
+                error.message
+            );
+            assert!(
+                error.message.contains("deprecated no-op"),
+                "expected a deprecation notice in {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_modes_no_longer_demand_hand_confirmations() {
+        // The runner proves each of these facts itself, under its own locks,
+        // before it mutates anything: PID death for orphan adoption, owner
+        // absence for lease-less recovery, and state/endpoint loss for
+        // state-loss recovery. Selecting the mode alone must now validate.
+        for input in [
+            RunnerConnectInput {
+                adopt_orphan_lease: Some("lease-dead".to_string()),
+                ..input()
+            },
+            RunnerConnectInput {
+                reconcile_leaseless_orphans: true,
+                ..input()
+            },
+            RunnerConnectInput {
+                recover_missing_lease_state: Some("lease".to_string()),
+                recorded_pid: Some(42),
+                recorded_endpoint: Some("127.0.0.1:7421".to_string()),
+                ..input()
+            },
+        ] {
+            validate_connect_input(&input)
+                .expect("selecting a recovery mode must not require a confirmation flag");
+        }
+    }
+
+    #[test]
+    fn deprecated_confirmations_remain_accepted_alongside_their_mode() {
+        // The released spellings still appear in composed repair commands and in
+        // operator runbooks, so they must keep validating for one release.
+        for input in [
+            RunnerConnectInput {
+                adopt_orphan_lease: Some("lease-dead".to_string()),
+                confirm_pid_dead: true,
+                ..input()
+            },
+            RunnerConnectInput {
+                reconcile_leaseless_orphans: true,
+                confirm_no_daemon_owner: true,
+                ..input()
+            },
+            RunnerConnectInput {
+                recover_missing_lease_state: Some("lease".to_string()),
+                recorded_pid: Some(42),
+                recorded_endpoint: Some("127.0.0.1:7421".to_string()),
+                confirm_pid_dead: true,
+                confirm_control_plane_lost: true,
+                ..input()
+            },
+        ] {
+            validate_connect_input(&input)
+                .expect("released confirmation spellings stay accepted for one release");
         }
     }
 
     #[test]
     fn untracked_child_confirmation_requires_exact_orphan_lease_mode() {
-        let error = connect(
-            "runner",
-            RunnerConnectInput {
-                confirm_untracked_child_dead: vec![uuid::Uuid::new_v4()],
-                ..input()
-            },
-        )
+        let error = validate_connect_input(&RunnerConnectInput {
+            confirm_untracked_child_dead: vec![uuid::Uuid::new_v4()],
+            ..input()
+        })
         .expect_err("untracked child confirmation is only valid for exact adoption");
         assert!(error.message.contains("requires --adopt-orphan-lease"));
     }
 
     #[test]
     fn reverse_connections_cannot_reconcile_leaseless_jobs() {
-        let error = connect(
-            "runner",
-            RunnerConnectInput {
-                reverse: true,
-                reconcile_leaseless_orphans: true,
-                confirm_no_daemon_owner: true,
-                ..input()
-            },
-        )
+        let error = validate_connect_input(&RunnerConnectInput {
+            reverse: true,
+            reconcile_leaseless_orphans: true,
+            confirm_no_daemon_owner: true,
+            ..input()
+        })
         .expect_err("reverse recovery is unsupported");
         assert!(error.message.contains("direct SSH"));
     }
 
     #[test]
     fn reverse_connections_cannot_adopt_live_daemons() {
-        let error = connect(
-            "runner",
-            RunnerConnectInput {
-                reverse: true,
-                adopt_live_lease: Some("lease-live".to_string()),
-                expected_live_pid: Some(42),
-                ..input()
-            },
-        )
+        let error = validate_connect_input(&RunnerConnectInput {
+            reverse: true,
+            adopt_live_lease: Some("lease-live".to_string()),
+            expected_live_pid: Some(42),
+            ..input()
+        })
         .expect_err("reverse connections have no direct SSH daemon ownership");
         assert!(error.message.contains("direct SSH"));
     }
 
     #[test]
-    fn state_loss_recovery_requires_exact_evidence_and_confirmations() {
-        let error = connect(
-            "runner",
-            RunnerConnectInput {
-                recover_missing_lease_state: Some("lease".to_string()),
-                confirm_control_plane_lost: true,
-                ..input()
-            },
-        )
+    fn state_loss_recovery_still_requires_unreconstructable_evidence() {
+        // `--recorded-pid` and `--recorded-endpoint` are not confirmations: once
+        // the state record is gone the runner cannot recompute them, so they
+        // stay required while the confirmations alongside them do not.
+        let error = validate_connect_input(&RunnerConnectInput {
+            recover_missing_lease_state: Some("lease".to_string()),
+            confirm_control_plane_lost: true,
+            ..input()
+        })
         .expect_err("partial state-loss evidence must fail before connecting");
         assert!(error.message.contains("--recorded-pid"));
+        assert!(!error.message.contains("--confirm-control-plane-lost"));
     }
 
     #[test]
@@ -519,8 +638,8 @@ mod tests {
             },
         ];
         for input in conflicting_inputs {
-            let error =
-                connect("runner", input).expect_err("multiple recovery modes must fail before SSH");
+            let error = validate_connect_input(&input)
+                .expect_err("multiple recovery modes must fail before SSH");
             assert!(error.message.contains("mutually exclusive"));
         }
     }
