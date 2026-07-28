@@ -101,7 +101,38 @@ pub(crate) fn materialize_lab_job_extension_overlays(
             None,
         ));
     }
+    assert_lab_extension_overlay_clean(&runner.id, runtime_root, "after-registry-link")?;
     Ok(overlays)
+}
+
+pub(crate) fn assert_lab_extension_overlay_clean(
+    runner_id: &str,
+    runtime_root: &str,
+    phase: &str,
+) -> Result<()> {
+    let command = extension_overlay_clean_assertion_command(runtime_root, phase);
+    let (output, exit_code) = exec(runner_id, RunnerExecOptions::diagnostic_raw_shell(command))?;
+    if exit_code == 0 {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "extensions",
+        format!(
+            "AppleDouble metadata contaminated the job-scoped extension overlay {phase}: {}",
+            runner_exec_detail(&output)
+        ),
+        Some(runtime_root.to_string()),
+        None,
+    ))
+}
+
+fn extension_overlay_clean_assertion_command(runtime_root: &str, phase: &str) -> String {
+    let extensions = format!("{}/extensions", runtime_root.trim_end_matches('/'));
+    format!(
+        "set -e\ncontaminant=$(find {extensions} -name '._*' -print -quit)\nif [ -n \"$contaminant\" ]; then printf '%s\\n' {message} \"$contaminant\" >&2; exit 86; fi\n",
+        extensions = shell::quote_path(&extensions),
+        message = shell::quote_arg(&format!("AppleDouble contamination {phase}: %s")),
+    )
 }
 
 fn materialize_lab_job_extension_overlay_snapshots(
@@ -525,7 +556,7 @@ fn upload_snapshot(
 fn extension_snapshot_extract_command(destination: &str, archive: &str) -> String {
     let destination = shell::quote_path(destination);
     format!(
-        "set -e\nrm -rf {destination}\nmkdir -p {destination}\ntar -xf {archive} -C {destination}\nfind {destination} -name '._*' -delete\nrm -f {archive}\n",
+        "set -e\nrm -rf {destination}\nmkdir -p {destination}\ntar -xf {archive} -C {destination}\nfind {destination} -name '._*' -delete\ncontaminant=$(find {destination} -name '._*' -print -quit)\nif [ -n \"$contaminant\" ]; then printf 'AppleDouble contamination after extraction: %s\\n' \"$contaminant\" >&2; exit 86; fi\nrm -f {archive}\n",
         archive = shell::quote_path(archive),
     )
 }
@@ -1186,6 +1217,39 @@ mod tests {
         assert!(extract_status.success());
         assert!(destination.join("rule.js").exists());
         assert!(!destination.join("._rule.js").exists());
+    }
+
+    #[test]
+    fn extension_overlay_assertion_identifies_contaminated_phase() {
+        let runtime = tempfile::tempdir().expect("extension runtime");
+        let extension = runtime.path().join("extensions/wordpress");
+        fs::create_dir_all(&extension).expect("extension directory");
+        fs::write(extension.join("rule.js"), "module.exports = {};").expect("JavaScript rule");
+        let clean = Command::new("sh")
+            .args([
+                "-c",
+                &extension_overlay_clean_assertion_command(
+                    &runtime.path().display().to_string(),
+                    "before-dispatch",
+                ),
+            ])
+            .status()
+            .expect("assert clean overlay");
+        assert!(clean.success());
+
+        fs::write(extension.join("._rule.js"), b"\0\x05\x16\x07ATTR")
+            .expect("AppleDouble metadata");
+        let contaminated = Command::new("sh")
+            .args([
+                "-c",
+                &extension_overlay_clean_assertion_command(
+                    &runtime.path().display().to_string(),
+                    "before-dispatch",
+                ),
+            ])
+            .status()
+            .expect("assert contaminated overlay");
+        assert_eq!(contaminated.code(), Some(86));
     }
 
     #[test]

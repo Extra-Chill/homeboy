@@ -617,6 +617,22 @@ pub(crate) fn exec_lab_context(
         &remote_cwd,
         &context.path_remaps,
     )?;
+    if let Some(home) = context
+        .lab_metadata
+        .pointer("/execution_bundle/extension_runtime_home")
+        .and_then(serde_json::Value::as_str)
+    {
+        if let Some(runtime_root) = std::path::Path::new(home)
+            .parent()
+            .and_then(std::path::Path::to_str)
+        {
+            crate::extension_materialization::assert_lab_extension_overlay_clean(
+                runner_id,
+                runtime_root,
+                "before-dispatch",
+            )?;
+        }
+    }
     context
         .overhead
         .record(LabOffloadPhase::Preflight, pre_dispatch_started.elapsed());
