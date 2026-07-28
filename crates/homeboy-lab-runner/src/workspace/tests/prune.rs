@@ -192,6 +192,7 @@ fn prune_preserves_job_lifecycle_lease_when_authority_is_unavailable() {
         let mut metadata: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
                 .expect("metadata json");
+        metadata["run_id"] = serde_json::json!("active-job");
         metadata["job_id"] = serde_json::json!("active-job");
         metadata["resource_lifecycle"] = serde_json::json!({
             "owner": "runner.workspace",
@@ -232,7 +233,96 @@ fn prune_preserves_job_lifecycle_lease_when_authority_is_unavailable() {
         assert_eq!(exit_code, 0);
         assert!(output.removed.is_empty());
         assert_eq!(output.skipped_unknown_count, 1);
+        assert_eq!(output.withheld_by_liveness_reason.len(), 1);
+        assert_eq!(
+            output.withheld_by_liveness_reason[0].reason,
+            "active_resource_lifecycle_authority_unavailable"
+        );
+        assert_eq!(output.withheld_by_liveness_reason[0].workspace_count, 1);
+        assert!(output.withheld_by_liveness_reason[0].bytes > 0);
         assert!(workspace.exists());
+    });
+}
+
+#[test]
+fn retained_terminal_receipt_reclassifies_and_releases_compacted_workspace() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let runner_id = "lab-local-prune-terminal-receipt";
+        let run_id = "compacted-terminal-run";
+        let job_id = "job-from-prior-runner-generation";
+        let source_parent = tempfile::tempdir().expect("source parent");
+        let source = source_parent.path().join("retained-source");
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        let workspace = runner_root.path().join("_lab_workspaces/retained-terminal");
+        fs::create_dir_all(&source).expect("source dir");
+        fs::write(source.join("file.txt"), "source\n").expect("source file");
+        write_terminal_workspace(&workspace, &source, runner_root.path(), run_id);
+        crate::create(
+            &format!(
+                r#"{{"id":"{runner_id}","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+        homeboy_agents::agent_task_lifecycle::persist_workspace_terminal_authority_for_test(
+            run_id,
+            runner_id,
+            job_id,
+            &workspace.display().to_string(),
+        )
+        .expect("persist retained terminal authority");
+
+        let (preview, _) = prune_workspaces(
+            runner_id,
+            RunnerWorkspacePruneOptions {
+                apply: false,
+                min_age_hours: 0,
+                limit: 10,
+                passes: 1,
+                cursor: None,
+            },
+        )
+        .expect("preview receipt-authorized workspace");
+        assert_eq!(preview.candidates.len(), 1);
+        assert_eq!(preview.candidates[0].reason, "terminal_resource_lifecycle");
+        assert!(preview.withheld_by_liveness_reason.is_empty());
+        homeboy_agents::agent_task_lifecycle::begin_workspace_terminal_authority_release(
+            run_id,
+            runner_id,
+            &workspace.display().to_string(),
+        )
+        .expect("simulate interruption before workspace deletion");
+
+        let (applied, _) = prune_workspaces(
+            runner_id,
+            RunnerWorkspacePruneOptions {
+                apply: true,
+                min_age_hours: 0,
+                limit: 10,
+                passes: 1,
+                cursor: None,
+            },
+        )
+        .expect("remove receipt-authorized workspace");
+        assert_eq!(applied.removed.len(), 1);
+        assert!(!workspace.exists());
+        homeboy_agents::agent_task_lifecycle::persist_workspace_terminal_authority_for_test(
+            run_id,
+            runner_id,
+            job_id,
+            &workspace.display().to_string(),
+        )
+        .expect("late terminal projection is suppressed after deletion");
+        assert!(
+            homeboy_agents::agent_task_lifecycle::resolve_workspace_terminal_authority(
+                run_id,
+                runner_id,
+                &workspace.display().to_string(),
+                Some(job_id),
+            )
+            .is_err()
+        );
     });
 }
 
@@ -1356,6 +1446,36 @@ fn write_orphan_workspace(path: &Path) {
         serde_json::json!({
             "schema": "homeboy/runner-workspace/v1",
             "local_path": path.join("missing-source").display().to_string(),
+        })
+        .to_string(),
+    )
+    .expect("workspace metadata");
+}
+
+fn write_terminal_workspace(path: &Path, source: &Path, runner_root: &Path, run_id: &str) {
+    fs::create_dir_all(path.join(".homeboy")).expect("workspace metadata dir");
+    fs::write(path.join("file.txt"), "retained\n").expect("workspace file");
+    fs::write(
+        path.join(WORKSPACE_METADATA_FILE),
+        serde_json::json!({
+            "schema": "homeboy/runner-workspace/v1",
+            "run_id": run_id,
+            "local_path": source.display().to_string(),
+            "remote_path": path.display().to_string(),
+            "resource_lifecycle": {
+                "owner": "runner.workspace",
+                "run_id": run_id,
+                "runner_id": null,
+                "path": path.display().to_string(),
+                "root_bound": runner_root.join("_lab_workspaces").display().to_string(),
+                "kind": "runner_workspace",
+                "ttl": null,
+                "cleanup_policy": "delete_on_success",
+                "evidence_retention": "metadata",
+                "cleanup_intent": "dry_run",
+                "cleanup_command": null,
+                "status": "active"
+            }
         })
         .to_string(),
     )
