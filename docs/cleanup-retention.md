@@ -1,7 +1,9 @@
 # Cleanup Retention Scope
 
 `homeboy cleanup --include terminal-runs` is the lifecycle owner for terminal
-observation records. Its dry-run output includes each candidate run, its
+observation records, and since #10316 it is the only surface for them: the
+`homeboy runs retention` specialist carried no argument the aggregate could not
+express and was deleted. Its dry-run output includes each candidate run, its
 registered persisted-artifact cleanup plan, and any agent-task lifecycle
 directory. Apply revalidates local artifact paths, removes eligible artifact
 bytes and lifecycle directories, then removes the terminal database records.
@@ -85,6 +87,30 @@ configured `homeboy_path`, slots with open files or process working directories,
 symlinks, malformed or partial layouts, and candidates that change identity are
 retained. Apply revalidates selection, inode identity, layout, symlink state,
 and process ownership immediately before removal.
+
+## Retained Storage Accounting
+
+`homeboy cleanup retained-storage` explains where disk went without deleting
+anything. It accumulates read-only plans from the controller-runtime,
+shared-Cargo-target, controller-scratch, and runtime-temp categories, from the
+SQLite observation index, and — since #10316 — from the artifact root itself
+through `persisted-run-artifacts`, `runner-downloads`, and
+`orphaned-artifact-bytes`. Before that the one command whose purpose is "where
+did my disk go" never called `artifacts::root()` at all.
+
+Records carry a `liveness`, and `reclaimable` is reported separately from the
+retained totals. "Cleanup cannot free this" and "cleanup has not freed this yet"
+are different answers, so `retained_bytes` and `reclaimable_bytes` are never
+summed together. `safe_next_commands` names a reclaim command for every category
+the report can produce a record for.
+
+The SQLite row is explicitly scoped to the index, not the artifact bytes it
+indexes; the artifact payloads are accounted for by the artifact-root categories
+and dwarf the database.
+
+Protected persisted artifacts are summarized as one counted record rather than
+one zero-byte row each: only rows classified for removal carry a measured size,
+and an unmeasured size is reported as zero and never inferred.
 
 ## Remaining Scope
 

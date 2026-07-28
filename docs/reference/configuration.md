@@ -59,11 +59,30 @@ variables.
 
 ### `RetentionConfig`
 
+Every cleanup entry point — the aggregate `homeboy cleanup --include <category>`
+and each category specialist — resolves these values through one shared policy
+(`homeboy_core::cleanup::resolve_cleanup_policy`). A widened window here applies
+everywhere; no command carries its own default. An unset command flag means
+"use the configured value", and a negative window or non-positive limit is
+rejected on every entry point rather than only on the ones that re-check their
+own arguments.
+
 - `terminal_run_days` — Age threshold before terminal persisted-run artifacts are eligible for cleanup (default: 30). Active and unknown run states remain protected.
 - `runtime_tmp_days` — Age threshold for Homeboy runtime temporary entries (default: 7).
 - `runtime_run_max_bytes` — Maximum aggregate failed runtime-run evidence retained (default: 1 GiB).
 - `runtime_run_max_count` — Maximum failed runtime-run directories retained (default: 100).
-- `limit` — Maximum persisted-run artifact records inspected per aggregate cleanup invocation (default: 1000).
+- `limit` — Maximum records inspected per cleanup invocation (default: 1000).
+- `controller_runtime_days` — Age threshold before an unreferenced controller runtime identity is eligible (default: 30).
+- `controller_runtime_max_bytes` — Byte budget above which unreferenced controller runtime identities are reclaimed regardless of age.
+- `shared_store_days` — Age threshold for shared Cargo target stores.
+- `shared_store_max_bytes` — Byte budget for shared Cargo target stores.
+- `shared_store_lease_seconds` — Lease TTL that keeps an in-use shared Cargo target store alive.
+
+Runner-side age floors are deliberately *not* configuration keys. Both the
+runner Lab-workspace and managed-binary-cache floors live on a remote host whose
+clock and in-flight uploads the controller cannot fully observe, so lowering
+them stays an explicit per-invocation `--min-age-hours` argument instead of a
+persisted default that would silently apply to every future sweep.
 
 ### `TriageConfig`
 

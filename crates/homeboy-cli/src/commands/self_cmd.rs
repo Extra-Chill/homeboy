@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand};
 use homeboy::cli_surface::current_command_surface_doctor_report;
 use homeboy::core::build_identity;
+use homeboy::core::cleanup;
 use homeboy::core::engine;
 use homeboy::core::{api_jobs::JobStore, paths};
 use homeboy::runner::runners::{self as runner, Runner, RunnerKind, RunnerStatusReport};
@@ -47,20 +48,24 @@ pub struct SelfCleanupRuntimeTmpArgs {
     #[arg(long)]
     pub apply: bool,
     /// Only include entries older than this many days.
-    #[arg(long, default_value_t = 7)]
-    pub older_than_days: u64,
+    /// Defaults to the configured `retention.runtime_tmp_days`.
+    #[arg(long)]
+    pub older_than_days: Option<u64>,
     /// Only include entries whose directory/file name starts with this prefix.
     #[arg(long)]
     pub prefix: Option<String>,
     /// Maximum temp entries to inspect in one invocation.
-    #[arg(long, default_value_t = 1000)]
-    pub limit: usize,
+    /// Defaults to the configured `retention.limit`.
+    #[arg(long)]
+    pub limit: Option<i64>,
     /// Maximum aggregate bytes retained for failed runtime run evidence.
-    #[arg(long, default_value_t = 1024 * 1024 * 1024)]
-    pub run_max_bytes: u64,
+    /// Defaults to the configured `retention.runtime_run_max_bytes`.
+    #[arg(long)]
+    pub run_max_bytes: Option<u64>,
     /// Maximum failed runtime run directories retained.
-    #[arg(long, default_value_t = 100)]
-    pub run_max_count: usize,
+    /// Defaults to the configured `retention.runtime_run_max_count`.
+    #[arg(long)]
+    pub run_max_count: Option<usize>,
     /// Continue bounded runtime-run inspection from a prior next_cursor.
     #[arg(long)]
     pub cursor: Option<String>,
@@ -128,19 +133,38 @@ pub fn run(args: SelfArgs) -> CmdResult<Value> {
             Ok((json, exit_code))
         }
         SelfCommand::CleanupRuntimeTmp(args) => {
+            // Resolved by the shared policy so this specialist and `homeboy
+            // cleanup --include runtime-tmp` cannot honor different windows
+            // (#10316). The clap defaults used to be literal `7`/`1000`/`1
+            // GiB`/`100`, so a widened `retention.runtime_tmp_days` was honored
+            // by the aggregate and silently ignored here.
+            let policy = cleanup::resolve_cleanup_policy(cleanup::CleanupPolicyOverrides {
+                limit: args.limit,
+                runtime_tmp_days: args.older_than_days,
+                runtime_run_max_bytes: args.run_max_bytes,
+                runtime_run_max_count: args.run_max_count,
+                ..cleanup::CleanupPolicyOverrides::default()
+            })?;
             let output = engine::temp::cleanup_runtime_tmp_bounded(
                 engine::temp::RuntimeTempCleanupOptions {
                     apply: args.apply,
-                    older_than_days: args.older_than_days,
+                    older_than_days: policy.runtime_tmp_days,
                     prefix: args.prefix.as_deref(),
-                    limit: args.limit,
-                    run_max_bytes: args.run_max_bytes,
-                    run_max_count: args.run_max_count,
+                    limit: policy.scan_limit(),
+                    run_max_bytes: policy.runtime_run_max_bytes,
+                    run_max_count: policy.runtime_run_max_count,
                     cursor: args.cursor.as_deref(),
                 },
             )?;
-            let json = serde_json::to_value(output)
+            let mut json = serde_json::to_value(output)
                 .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
+            if let Value::Object(ref mut object) = json {
+                object.insert(
+                    "retention".to_string(),
+                    serde_json::to_value(policy)
+                        .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?,
+                );
+            }
             Ok((json, 0))
         }
         SelfCommand::Docs(args) => {
@@ -235,5 +259,53 @@ fn runner_kind_label(kind: &RunnerKind) -> &'static str {
     match kind {
         RunnerKind::Local => "local",
         RunnerKind::Ssh => "ssh",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::SelfCleanupRuntimeTmpArgs;
+
+    #[derive(Parser)]
+    struct CleanupRuntimeTmpCli {
+        #[command(flatten)]
+        args: SelfCleanupRuntimeTmpArgs,
+    }
+
+    #[test]
+    fn runtime_tmp_budgets_default_to_the_configured_policy() {
+        // Regression for #10316: these were `default_value_t` literals (7 days,
+        // 1000 entries, 1 GiB, 100 runs) that shadowed
+        // `retention.runtime_tmp_days` and friends. An operator who widened the
+        // configured window still had this command delete at 7 days while
+        // `homeboy cleanup --include runtime-tmp` honored the configuration.
+        let cli = CleanupRuntimeTmpCli::parse_from(["cleanup-runtime-tmp"]);
+        assert_eq!(cli.args.older_than_days, None);
+        assert_eq!(cli.args.limit, None);
+        assert_eq!(cli.args.run_max_bytes, None);
+        assert_eq!(cli.args.run_max_count, None);
+        assert_eq!(cli.args.prefix, None);
+        assert!(!cli.args.apply);
+    }
+
+    #[test]
+    fn runtime_tmp_budgets_still_accept_explicit_overrides() {
+        let cli = CleanupRuntimeTmpCli::parse_from([
+            "cleanup-runtime-tmp",
+            "--older-than-days",
+            "2",
+            "--limit",
+            "9",
+            "--run-max-bytes",
+            "1024",
+            "--run-max-count",
+            "3",
+        ]);
+        assert_eq!(cli.args.older_than_days, Some(2));
+        assert_eq!(cli.args.limit, Some(9));
+        assert_eq!(cli.args.run_max_bytes, Some(1024));
+        assert_eq!(cli.args.run_max_count, Some(3));
     }
 }

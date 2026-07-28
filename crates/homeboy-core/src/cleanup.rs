@@ -20,6 +20,12 @@ pub use cargo_targets::{
     CargoTargetCleanupOptions, CargoTargetCleanupOutput, SharedCargoTargetLease,
 };
 mod extension_declarations;
+mod policy;
+pub use policy::{
+    cleanup_policy_from_retention, resolve_cleanup_policy, CleanupPolicy, CleanupPolicyOverrides,
+    CLEANUP_POLICY_SCHEMA, RUNNER_MIN_AGE_HOURS, RUNNER_WORKSPACE_APPLY_PASSES,
+    RUNNER_WORKSPACE_DRY_RUN_PASSES, RUNNER_WORKSPACE_PAGE_LIMIT,
+};
 mod self_artifacts;
 
 use extension_declarations::extension_artifact_declarations;

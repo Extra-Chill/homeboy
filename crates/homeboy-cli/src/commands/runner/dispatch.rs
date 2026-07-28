@@ -220,7 +220,10 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             &runner_id,
             runner::RunnerBinaryCachePruneOptions {
                 apply,
-                min_age_hours,
+                // One named age floor shared with `homeboy cleanup --include
+                // runner-binary-caches` (#10316).
+                min_age_hours: min_age_hours
+                    .unwrap_or(homeboy::core::cleanup::RUNNER_MIN_AGE_HOURS),
             },
         )),
         RunnerCommand::Exec {

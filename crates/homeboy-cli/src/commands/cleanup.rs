@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
-use std::time::Duration;
 
 use clap::{Args, Subcommand, ValueEnum};
 use homeboy::core::cleanup::{
-    self, ArtifactCleanupOptions, ArtifactCleanupSort, ResourceCleanupOptions,
+    self, ArtifactCleanupOptions, ArtifactCleanupSort, CleanupPolicy, CleanupPolicyOverrides,
+    ResourceCleanupOptions,
 };
 use homeboy::core::controller_runtime::{self, ControllerRuntimeRetentionOverrides};
 use homeboy::core::defaults;
@@ -256,6 +256,11 @@ struct RetainedStorageAggregate {
     size_bytes: u64,
 }
 
+/// Liveness assigned to storage a cleanup category would reclaim on its next
+/// apply. Every other liveness value describes storage cleanup is holding on
+/// to, which is what `retained_count`/`retained_bytes` total.
+const LIVENESS_RECLAIMABLE: &str = "reclaimable";
+
 #[derive(Debug, Serialize)]
 struct RetainedStorageReport {
     command: &'static str,
@@ -263,6 +268,11 @@ struct RetainedStorageReport {
     inspected_count: usize,
     retained_count: usize,
     retained_bytes: u64,
+    /// Inspected storage a cleanup category would reclaim on its next apply.
+    /// Kept separate from the retained totals so "cleanup cannot free this" and
+    /// "cleanup has not freed this yet" are never added together.
+    reclaimable_count: usize,
+    reclaimable_bytes: u64,
     by_category: Vec<RetainedStorageAggregate>,
     by_reason: Vec<RetainedStorageAggregate>,
     by_owner: Vec<RetainedStorageAggregate>,
@@ -314,12 +324,14 @@ fn retained_storage_report(
         });
     }
 
-    let retention = defaults::load_config().retention;
+    // The report reads the same resolved policy the delete paths use, so an
+    // operator cannot be shown a window cleanup would not actually apply.
+    let policy = cleanup::resolve_cleanup_policy(CleanupPolicyOverrides::default())?;
     let cargo = cleanup::shared_cargo_target_inventory(
         None,
         std::time::SystemTime::now(),
-        Duration::from_secs(retention.shared_store_days.saturating_mul(86_400)),
-        Duration::from_secs(retention.shared_store_lease_seconds),
+        policy.shared_store_min_age(),
+        policy.shared_store_lease_ttl(),
     )?;
     for store in cargo {
         let reason = if store
@@ -375,11 +387,13 @@ fn retained_storage_report(
     let runtime_tmp =
         engine::temp::cleanup_runtime_tmp_bounded(engine::temp::RuntimeTempCleanupOptions {
             apply: false,
-            older_than_days: retention.runtime_tmp_days,
+            older_than_days: policy.runtime_tmp_days,
             prefix: None,
+            // A read-only accounting pass: the report must total every retained
+            // entry, so it is not bounded by the delete-path record budget.
             limit: usize::MAX,
-            run_max_bytes: retention.runtime_run_max_bytes,
-            run_max_count: retention.runtime_run_max_count,
+            run_max_bytes: policy.runtime_run_max_bytes,
+            run_max_count: policy.runtime_run_max_count,
             cursor: None,
         })?;
     for row in runtime_tmp
@@ -414,6 +428,8 @@ fn retained_storage_report(
         });
     }
 
+    records.extend(artifact_root_records(policy)?);
+
     let database_path = homeboy::core::observation::store::database_path()?;
     let metadata = std::fs::metadata(&database_path).ok();
     let sqlite = RetainedStorageSqlite {
@@ -426,7 +442,10 @@ fn retained_storage_report(
     if sqlite.exists {
         records.push(RetainedStorageRecord {
             category: "sqlite_observation_store".to_string(),
-            reason: "durable lifecycle database; compaction delegated".to_string(),
+            // Explicitly scoped: this is the index, not the bytes it indexes.
+            // Artifact payloads are accounted for by the artifact-root
+            // categories above and dwarf the database itself.
+            reason: "durable lifecycle database (index only, not indexed artifact bytes); compaction delegated".to_string(),
             owner: "homeboy".to_string(),
             run_id: None,
             liveness: "managed".to_string(),
@@ -445,6 +464,127 @@ fn retained_storage_report(
     ))
 }
 
+/// Account for the artifact root — the product's primary output store.
+///
+/// `cleanup retained-storage` used to accumulate from five sources and never
+/// reach `artifacts::root()`, so the one command whose purpose is "where did my
+/// disk go" was blind to the largest store on the box (#10316).
+///
+/// Every producer here runs its category planner with `apply: false`. These are
+/// read-only plans: nothing in this function deletes, and none of the reported
+/// sizes are used as a deletion predicate by anyone. Bytes a planner would
+/// reclaim are reported as [`LIVENESS_RECLAIMABLE`] so they are never summed
+/// into the "cleanup cannot free this" total.
+fn artifact_root_records(
+    policy: CleanupPolicy,
+) -> homeboy::core::Result<Vec<RetainedStorageRecord>> {
+    let mut records = Vec::new();
+
+    let persisted = runs_service::cleanup_persisted_artifacts(PersistedArtifactCleanupOptions {
+        apply: false,
+        older_than_days: policy.terminal_run_days,
+        run_id: None,
+        kind: None,
+        artifact_type: None,
+        run_kind: None,
+        component_id: None,
+        limit: policy.limit,
+        terminal_only: true,
+    })?;
+    let artifact_root = persisted.artifact_root.display().to_string();
+    for row in persisted.rows {
+        // Only `remove` rows carry a measured size; `skip` rows are classified
+        // before any measurement happens. Reporting a zero-byte row for every
+        // protected artifact would bury the real answer, so retained rows are
+        // summarized as one counted record instead of one row each.
+        if row.action != "remove" {
+            continue;
+        }
+        let owner = row
+            .component_id
+            .clone()
+            .unwrap_or_else(|| format!("run kind {}", row.run_kind));
+        records.push(RetainedStorageRecord {
+            category: "persisted_run_artifacts".to_string(),
+            reason: row.reason,
+            owner,
+            run_id: Some(row.run_id),
+            liveness: LIVENESS_RECLAIMABLE.to_string(),
+            age: "unknown".to_string(),
+            age_seconds: None,
+            size_bytes: row.size_bytes,
+            reference: format!("{artifact_root}/{}", row.path),
+        });
+    }
+    let protected = persisted.skipped_count;
+    if protected > 0 {
+        records.push(RetainedStorageRecord {
+            category: "persisted_run_artifacts".to_string(),
+            reason: format!(
+                "{protected} artifact(s) protected by an active, unknown, remote, or unsafe-path run; bytes not measured"
+            ),
+            owner: "homeboy".to_string(),
+            run_id: None,
+            liveness: "lifecycle_pinned".to_string(),
+            age: "unknown".to_string(),
+            age_seconds: None,
+            // Advisory-signal rule: an unmeasured size is reported as zero and
+            // never inferred. It must not move a verdict in either direction.
+            size_bytes: 0,
+            reference: format!("{artifact_root} (protected persisted artifacts)"),
+        });
+    }
+
+    let downloads = runs_service::cleanup_runner_downloads(RunnerDownloadCleanupOptions {
+        apply: false,
+        runner: None,
+        run_id: None,
+    })?;
+    if downloads.size_bytes > 0 || downloads.file_count > 0 || downloads.directory_count > 0 {
+        records.push(RetainedStorageRecord {
+            category: "runner_downloads".to_string(),
+            reason: format!(
+                "cached runner artifact downloads ({} file(s), {} directory(ies))",
+                downloads.file_count, downloads.directory_count
+            ),
+            owner: "homeboy".to_string(),
+            run_id: None,
+            liveness: LIVENESS_RECLAIMABLE.to_string(),
+            age: "unknown".to_string(),
+            age_seconds: None,
+            size_bytes: downloads.size_bytes,
+            reference: downloads.root.display().to_string(),
+        });
+    }
+
+    let orphaned =
+        runs_service::cleanup_orphaned_artifact_bytes(OrphanedArtifactBytesCleanupOptions {
+            apply: false,
+            limit: policy.scan_limit(),
+        })?;
+    if orphaned.planned_count > 0 {
+        records.push(RetainedStorageRecord {
+            category: "orphaned_artifact_bytes".to_string(),
+            reason: format!(
+                "{} crash-residue path(s) past the fixed {}s age floor",
+                orphaned.planned_count, orphaned.min_age_seconds
+            ),
+            owner: "homeboy".to_string(),
+            run_id: None,
+            liveness: LIVENESS_RECLAIMABLE.to_string(),
+            age: age_bucket(orphaned.min_age_seconds),
+            age_seconds: Some(orphaned.min_age_seconds),
+            size_bytes: orphaned.planned_size_bytes,
+            reference: format!(
+                "{} (orphaned artifact bytes)",
+                orphaned.artifact_root.display()
+            ),
+        });
+    }
+
+    Ok(records)
+}
+
 fn build_retained_storage_report(
     mut records: Vec<RetainedStorageRecord>,
     limit: usize,
@@ -458,7 +598,13 @@ fn build_retained_storage_report(
             .then_with(|| left.reference.cmp(&right.reference))
     });
     let inspected_count = records.len();
-    let retained_bytes = records.iter().map(|record| record.size_bytes).sum();
+    let (reclaimable, retained): (Vec<_>, Vec<_>) = records
+        .iter()
+        .partition(|record| record.liveness == LIVENESS_RECLAIMABLE);
+    let retained_count = retained.len();
+    let retained_bytes = retained.iter().map(|record| record.size_bytes).sum();
+    let reclaimable_count = reclaimable.len();
+    let reclaimable_bytes = reclaimable.iter().map(|record| record.size_bytes).sum();
     let start = cursor
         .and_then(|cursor| records.iter().position(|record| record.reference == cursor))
         .map_or(0, |index| index + 1);
@@ -475,8 +621,10 @@ fn build_retained_storage_report(
         command: "cleanup.retained_storage",
         mode: "report",
         inspected_count,
-        retained_count: inspected_count,
+        retained_count,
         retained_bytes,
+        reclaimable_count,
+        reclaimable_bytes,
         by_category: aggregate_retained(&records, |record| record.category.clone()),
         by_reason: aggregate_retained(&records, |record| record.reason.clone()),
         by_owner: aggregate_retained(&records, |record| match &record.run_id {
@@ -487,11 +635,17 @@ fn build_retained_storage_report(
         by_age: aggregate_retained(&records, |record| record.age.clone()),
         largest_examples: examples,
         continuation,
+        // One entry per category this report can account for. Omitting the
+        // artifact-root categories used to leave an operator staring at bytes
+        // the report itself could not name a reclaim command for.
         safe_next_commands: vec![
             "homeboy cleanup --include runtime-tmp".to_string(),
             "homeboy cleanup --include controller-scratch".to_string(),
             "homeboy cleanup --include controller-runtimes".to_string(),
             "homeboy cleanup --include shared-cargo-targets".to_string(),
+            "homeboy cleanup --include persisted-run-artifacts".to_string(),
+            "homeboy cleanup --include runner-downloads".to_string(),
+            "homeboy cleanup --include orphaned-artifact-bytes".to_string(),
             "homeboy db status".to_string(),
         ],
         sqlite,
@@ -544,21 +698,10 @@ pub struct CleanupInventoryOutput {
 }
 
 /// Stable, serialized policy snapshot for a cleanup plan or apply result.
-#[derive(Debug, Serialize)]
-pub struct CleanupRetentionManifest {
-    pub schema: &'static str,
-    pub terminal_run_days: i64,
-    pub runtime_tmp_days: u64,
-    pub runtime_run_max_bytes: u64,
-    pub runtime_run_max_count: usize,
-    pub shared_store_days: u64,
-    pub shared_store_max_bytes: u64,
-    pub shared_store_lease_seconds: u64,
-    pub controller_runtime_days: u64,
-    pub controller_runtime_max_bytes: u64,
-    pub limit: i64,
-    pub terminal_run_guard: bool,
-}
+///
+/// This is the resolved policy itself rather than a copy of it, so the reported
+/// manifest cannot describe a window the deletion did not apply.
+pub type CleanupRetentionManifest = CleanupPolicy;
 
 #[derive(Debug, Serialize)]
 pub struct CleanupInventoryCategory {
@@ -577,6 +720,23 @@ pub struct CleanupInventoryCategory {
     pub output: Value,
 }
 
+/// Naming for one cleanup category plus the specialist command that reaches it
+/// with category-specific arguments.
+///
+/// The specialist names are deliberately retained. #10316 proposed deleting
+/// them and re-homing every specialist option as an `--include`-scoped flag on
+/// the aggregate, but each surviving specialist accepts a *narrowing* argument
+/// the aggregate cannot express (`--run-id`, `--kind`, `--component`,
+/// `--prefix`, `--runner`, `--passes`, `--cursor`) or is an explicit destructive
+/// escape hatch (`runtime controller-prune --ignore-retention`). Folding those
+/// into one command would put a dozen single-category flags on a surface that
+/// sweeps thirteen categories.
+///
+/// What was genuinely duplicated is the *policy*: each specialist used to carry
+/// its own `default_value_t` retention literal. Those now resolve through
+/// [`cleanup::resolve_cleanup_policy`], so a widened configuration window
+/// applies to every entry point. See `docs/commands/cleanup.md` for the full
+/// classification.
 #[derive(Clone, Copy)]
 pub(crate) struct CleanupInventoryCategoryMetadata {
     pub(crate) category: &'static str,
@@ -636,11 +796,16 @@ const PERSISTED_RUN_ARTIFACTS_METADATA: CleanupInventoryCategoryMetadata =
         apply_command: "homeboy runs artifact cleanup-persisted --apply",
     };
 
+/// `homeboy runs retention` was deleted in #10316. It was the one specialist
+/// with no narrowing argument left — its `--apply`, `--older-than-days`, and
+/// `--limit` are exactly the aggregate's, so it was a second name for one
+/// operation rather than a different one. The canonical surface is the only
+/// surface.
 const TERMINAL_RUNS_METADATA: CleanupInventoryCategoryMetadata = CleanupInventoryCategoryMetadata {
     category: "terminal_runs",
     include_arg: "terminal-runs",
-    dry_run_command: "homeboy runs retention",
-    apply_command: "homeboy runs retention --apply",
+    dry_run_command: "homeboy cleanup --include terminal-runs",
+    apply_command: "homeboy cleanup --include terminal-runs --apply",
 };
 
 /// Crash residue under the artifact root that no database row can describe.
@@ -715,17 +880,18 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
     let selected = CleanupCategorySelection::new(args.include, args.exclude);
     let apply = args.apply;
     let config = defaults::load_config();
-    let configured = &config.retention;
-    let terminal_run_days = args.older_than_days.unwrap_or(configured.terminal_run_days);
-    let limit = args.limit.unwrap_or(configured.limit);
-    if terminal_run_days < 0 || limit < 1 {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "retention",
-            "--older-than-days must be zero or greater and --limit must be positive",
-            None,
-            None,
-        ));
-    }
+    // One resolver for every category and every specialist command. The
+    // aggregate no longer derives its own windows.
+    let policy = cleanup::cleanup_policy_from_retention(
+        &config.retention,
+        CleanupPolicyOverrides {
+            terminal_run_days: args.older_than_days,
+            limit: args.limit,
+            ..CleanupPolicyOverrides::default()
+        },
+    )?;
+    let terminal_run_days = policy.terminal_run_days;
+    let limit = policy.limit;
     let mut categories = Vec::new();
 
     if selected.includes(CleanupCategoryArg::RepoArtifacts) {
@@ -824,7 +990,7 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
         let output =
             runs_service::cleanup_orphaned_artifact_bytes(OrphanedArtifactBytesCleanupOptions {
                 apply,
-                limit: usize::try_from(limit).unwrap_or(usize::MAX),
+                limit: policy.scan_limit(),
             })?;
         categories.push(category_from_output(
             ORPHANED_ARTIFACT_BYTES_METADATA,
@@ -857,22 +1023,22 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
     }
 
     if selected.includes(CleanupCategoryArg::RemoteLabWorkspaces) {
-        categories.extend(remote_lab_workspace_categories(apply)?);
+        categories.extend(remote_lab_workspace_categories(policy, apply)?);
     }
 
     if selected.includes(CleanupCategoryArg::RunnerBinaryCaches) {
-        categories.extend(runner_binary_cache_categories(apply)?);
+        categories.extend(runner_binary_cache_categories(policy, apply)?);
     }
 
     if selected.includes(CleanupCategoryArg::RuntimeTmp) {
         let output =
             engine::temp::cleanup_runtime_tmp_bounded(engine::temp::RuntimeTempCleanupOptions {
                 apply,
-                older_than_days: configured.runtime_tmp_days,
+                older_than_days: policy.runtime_tmp_days,
                 prefix: None,
-                limit: usize::try_from(limit).unwrap_or(usize::MAX),
-                run_max_bytes: configured.runtime_run_max_bytes,
-                run_max_count: configured.runtime_run_max_count,
+                limit: policy.scan_limit(),
+                run_max_bytes: policy.runtime_run_max_bytes,
+                run_max_count: policy.runtime_run_max_count,
                 cursor: args.cursor.as_deref(),
             })?;
         categories.push(category_from_output(
@@ -891,7 +1057,7 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
         let output = homeboy::agents::controller_scratch::cleanup(
             homeboy::agents::controller_scratch::ControllerScratchCleanupOptions {
                 apply,
-                limit: usize::try_from(limit).unwrap_or(usize::MAX),
+                limit: policy.scan_limit(),
                 full: args.full,
                 // Thread the operator's explicit `--older-than-days` override
                 // into the retention eligibility decision so released, clean,
@@ -951,12 +1117,12 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
         let output = cleanup::cleanup_shared_cargo_targets(cleanup::CargoTargetCleanupOptions {
             root: None,
             apply,
-            older_than: Duration::from_secs(configured.shared_store_days.saturating_mul(86_400)),
-            max_bytes: configured.shared_store_max_bytes,
-            limit: usize::try_from(limit).unwrap_or(usize::MAX),
+            older_than: policy.shared_store_min_age(),
+            max_bytes: policy.shared_store_max_bytes,
+            limit: policy.scan_limit(),
             cursor: args.cursor.clone(),
             now: std::time::SystemTime::now(),
-            lease_ttl: Duration::from_secs(configured.shared_store_lease_seconds),
+            lease_ttl: policy.shared_store_lease_ttl(),
         })?;
         categories.push(category_from_output(
             SHARED_CARGO_TARGETS_METADATA,
@@ -1000,20 +1166,7 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
         skipped_count,
         estimated_bytes,
         reclaimed_bytes,
-        retention: CleanupRetentionManifest {
-            schema: "homeboy/retention-manifest/v1",
-            terminal_run_days,
-            runtime_tmp_days: configured.runtime_tmp_days,
-            runtime_run_max_bytes: configured.runtime_run_max_bytes,
-            runtime_run_max_count: configured.runtime_run_max_count,
-            shared_store_days: configured.shared_store_days,
-            shared_store_max_bytes: configured.shared_store_max_bytes,
-            shared_store_lease_seconds: configured.shared_store_lease_seconds,
-            controller_runtime_days: configured.controller_runtime_days,
-            controller_runtime_max_bytes: configured.controller_runtime_max_bytes,
-            limit,
-            terminal_run_guard: true,
-        },
+        retention: policy,
         categories,
         actionable,
     })
@@ -1322,6 +1475,7 @@ fn persisted_artifacts_category(
 }
 
 fn remote_lab_workspace_categories(
+    policy: CleanupPolicy,
     apply: bool,
 ) -> homeboy::core::Result<Vec<CleanupInventoryCategory>> {
     let mut categories = Vec::new();
@@ -1351,9 +1505,12 @@ fn remote_lab_workspace_categories(
             &status.runner_id,
             RunnerWorkspacePruneOptions {
                 apply,
-                min_age_hours: 24,
-                limit: 25,
-                passes: if apply { 10 } else { 1 },
+                min_age_hours: policy.runner_min_age_hours,
+                // A page size, not a delete budget: `--limit` is a record
+                // budget for row-driven categories and is deliberately not
+                // wired here. See `cleanup::RUNNER_WORKSPACE_PAGE_LIMIT`.
+                limit: policy.runner_workspace_page_limit,
+                passes: CleanupPolicy::runner_workspace_passes(apply),
                 cursor: None,
             },
         ) {
@@ -1418,15 +1575,17 @@ fn remote_workspace_category(
 }
 
 fn runner_binary_cache_categories(
+    policy: CleanupPolicy,
     apply: bool,
 ) -> homeboy::core::Result<Vec<CleanupInventoryCategory>> {
     runner::list()?
         .into_iter()
-        .map(|configured| runner_binary_cache_category(&configured.id, apply))
+        .map(|configured| runner_binary_cache_category(policy, &configured.id, apply))
         .collect()
 }
 
 fn runner_binary_cache_category(
+    policy: CleanupPolicy,
     runner_id: &str,
     apply: bool,
 ) -> homeboy::core::Result<CleanupInventoryCategory> {
@@ -1439,7 +1598,7 @@ fn runner_binary_cache_category(
         runner_id,
         RunnerBinaryCachePruneOptions {
             apply,
-            min_age_hours: 24,
+            min_age_hours: policy.runner_min_age_hours,
         },
     ) {
         Ok((output, _)) => output,
@@ -1982,6 +2141,102 @@ mod tests {
         );
         assert_eq!(continuation.largest_examples[0].reference, "runtime-a");
         assert_eq!(age_bucket(3_600), "under_1d");
+        // No existing producer emits `reclaimable`, so the split is inert until
+        // an artifact-root producer contributes.
+        assert_eq!(report.reclaimable_count, 0);
+        assert_eq!(report.reclaimable_bytes, 0);
+    }
+
+    fn retained_record(category: &str, liveness: &str, size_bytes: u64) -> RetainedStorageRecord {
+        RetainedStorageRecord {
+            category: category.to_string(),
+            reason: "test".to_string(),
+            owner: "homeboy".to_string(),
+            run_id: None,
+            liveness: liveness.to_string(),
+            age: "unknown".to_string(),
+            age_seconds: None,
+            size_bytes,
+            reference: format!("{category}/{liveness}"),
+        }
+    }
+
+    fn test_sqlite() -> RetainedStorageSqlite {
+        RetainedStorageSqlite {
+            path: "homeboy.sqlite".to_string(),
+            exists: true,
+            size_bytes: 10,
+            status_command: "homeboy db status",
+            compaction: "delegated",
+        }
+    }
+
+    #[test]
+    fn reclaimable_storage_is_never_summed_into_the_retained_total() {
+        // "cleanup cannot free this" and "cleanup has not freed this yet" are
+        // different answers to "where did my disk go". Adding them together
+        // would tell an operator their disk is unreclaimable when it is not.
+        let report = build_retained_storage_report(
+            vec![
+                retained_record("shared_cargo_targets", "active", 100),
+                retained_record("persisted_run_artifacts", LIVENESS_RECLAIMABLE, 900),
+                retained_record("runner_downloads", LIVENESS_RECLAIMABLE, 50),
+            ],
+            10,
+            None,
+            test_sqlite(),
+        );
+
+        assert_eq!(report.inspected_count, 3);
+        assert_eq!(report.retained_count, 1);
+        assert_eq!(report.retained_bytes, 100);
+        assert_eq!(report.reclaimable_count, 2);
+        assert_eq!(report.reclaimable_bytes, 950);
+        // Both remain visible in the dimensional aggregates, which cover every
+        // inspected record.
+        assert!(report
+            .by_liveness
+            .iter()
+            .any(|row| row.key == LIVENESS_RECLAIMABLE && row.size_bytes == 950));
+    }
+
+    #[test]
+    fn retained_storage_names_a_reclaim_command_for_every_artifact_root_category() {
+        let report = build_retained_storage_report(Vec::new(), 1, None, test_sqlite());
+
+        // The report used to accumulate from five sources and never reach the
+        // artifact root, so an operator saw bytes it could not name a command
+        // for (#10316).
+        for category in [
+            "persisted-run-artifacts",
+            "runner-downloads",
+            "orphaned-artifact-bytes",
+        ] {
+            assert!(
+                report
+                    .safe_next_commands
+                    .iter()
+                    .any(|command| command == &format!("homeboy cleanup --include {category}")),
+                "missing reclaim command for {category}"
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_and_specialist_share_one_runner_age_floor() {
+        // The aggregate carried a literal `24` beside each specialist's
+        // `default_value_t = 24`. One named constant is now the only source.
+        assert_eq!(cleanup::RUNNER_MIN_AGE_HOURS, 24);
+        let policy = cleanup::cleanup_policy_from_retention(
+            &defaults::RetentionConfig::default(),
+            CleanupPolicyOverrides::default(),
+        )
+        .expect("resolve policy");
+        assert_eq!(policy.runner_min_age_hours, cleanup::RUNNER_MIN_AGE_HOURS);
+        assert_eq!(
+            policy.runner_workspace_page_limit,
+            cleanup::RUNNER_WORKSPACE_PAGE_LIMIT
+        );
     }
 
     #[test]
@@ -2143,8 +2398,8 @@ mod tests {
                 TERMINAL_RUNS_METADATA,
                 "terminal_runs",
                 "terminal-runs",
-                "homeboy runs retention",
-                "homeboy runs retention --apply",
+                "homeboy cleanup --include terminal-runs",
+                "homeboy cleanup --include terminal-runs --apply",
             ),
             (
                 PERSISTED_RUN_ARTIFACTS_METADATA,

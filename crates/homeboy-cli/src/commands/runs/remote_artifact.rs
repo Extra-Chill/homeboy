@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use homeboy::core::cleanup::{resolve_cleanup_policy, CleanupPolicyOverrides};
 use homeboy::core::observation::artifact_preview;
 use homeboy::core::observation::runs_service::{
     self, PersistedArtifactCleanupOptions, RunnerDownloadCleanupOptions,
@@ -445,15 +446,27 @@ pub fn cleanup_downloads(args: RunsArtifactCleanupDownloadsArgs) -> CmdResult<Ru
 }
 
 pub fn cleanup_persisted(args: RunsArtifactCleanupPersistedArgs) -> CmdResult<RunsOutput> {
+    // Same resolver as `homeboy cleanup --include persisted-run-artifacts`.
+    // The narrowing filters below (`--run-id`, `--kind`, `--type`,
+    // `--run-kind`, `--component`) are what keep this specialist alive; the
+    // retention window is not one of them (#10316).
+    let policy = resolve_cleanup_policy(CleanupPolicyOverrides {
+        terminal_run_days: args.older_than_days,
+        limit: args.limit,
+        ..CleanupPolicyOverrides::default()
+    })?;
     let outcome = runs_service::cleanup_persisted_artifacts(PersistedArtifactCleanupOptions {
         apply: args.apply,
-        older_than_days: args.older_than_days,
+        older_than_days: policy.terminal_run_days,
         run_id: args.run_id,
         kind: args.kind,
         artifact_type: args.artifact_type,
         run_kind: args.run_kind,
         component_id: args.component_id,
-        limit: args.limit,
+        limit: policy.limit,
+        // Never widened by an operator flag: releasing evidence for a run that
+        // is still executing, or whose state cannot be read, is a data-loss
+        // path, not a retention preference.
         terminal_only: true,
     })?;
 
@@ -461,6 +474,7 @@ pub fn cleanup_persisted(args: RunsArtifactCleanupPersistedArgs) -> CmdResult<Ru
         RunsOutput::ArtifactCleanupPersisted(RunsArtifactCleanupPersistedOutput {
             command: "runs.artifact.cleanup-persisted",
             dry_run: outcome.dry_run,
+            retention: policy,
             artifact_root: outcome.artifact_root.display().to_string(),
             older_than_days: outcome.older_than_days,
             inspected_count: outcome.totals.inspected_count,
@@ -1057,13 +1071,13 @@ mod tests {
             // active lease, even when the age threshold is zero.
             let active = cleanup_persisted(RunsArtifactCleanupPersistedArgs {
                 apply: true,
-                older_than_days: 0,
+                older_than_days: Some(0),
                 run_id: Some(run.id.clone()),
                 kind: None,
                 artifact_type: None,
                 run_kind: None,
                 component_id: None,
-                limit: 100,
+                limit: Some(100),
             })
             .expect("active cleanup")
             .0;
@@ -1081,13 +1095,13 @@ mod tests {
 
             let dry = cleanup_persisted(RunsArtifactCleanupPersistedArgs {
                 apply: false,
-                older_than_days: 0,
+                older_than_days: Some(0),
                 run_id: Some(run.id.clone()),
                 kind: None,
                 artifact_type: None,
                 run_kind: None,
                 component_id: None,
-                limit: 100,
+                limit: Some(100),
             })
             .expect("dry-run")
             .0;
@@ -1103,13 +1117,13 @@ mod tests {
 
             let applied = cleanup_persisted(RunsArtifactCleanupPersistedArgs {
                 apply: true,
-                older_than_days: 0,
+                older_than_days: Some(0),
                 run_id: Some(run.id.clone()),
                 kind: None,
                 artifact_type: None,
                 run_kind: None,
                 component_id: None,
-                limit: 100,
+                limit: Some(100),
             })
             .expect("apply")
             .0;

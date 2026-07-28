@@ -358,8 +358,10 @@ pub(super) enum RunnerCommand {
         apply: bool,
 
         /// Minimum slot age before an unselected slot is eligible.
-        #[arg(long, default_value_t = 24)]
-        min_age_hours: u64,
+        /// Defaults to the shared runner age floor
+        /// (`cleanup::RUNNER_MIN_AGE_HOURS`).
+        #[arg(long)]
+        min_age_hours: Option<u64>,
     },
     /// Execute a command on a configured runner. Use `homeboy runner exec [HOMEBOY_OPTIONS] <RUNNER> -- <COMMAND>...`.
     #[command(

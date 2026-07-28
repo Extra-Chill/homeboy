@@ -1,6 +1,7 @@
 use clap::{Subcommand, ValueEnum};
 use serde::Serialize;
 
+use homeboy::core::cleanup;
 use homeboy::runner::runners::{
     self as runner, RunnerWorkspaceApplyOutput, RunnerWorkspaceListOutput,
     RunnerWorkspacePruneOutput, RunnerWorkspacePullOutput, RunnerWorkspaceSnapshotFilters,
@@ -128,12 +129,16 @@ pub(super) enum RunnerWorkspaceCommand {
         apply: bool,
 
         /// Minimum workspace age before it can be considered orphaned.
-        #[arg(long, default_value_t = 24)]
-        min_age_hours: u64,
+        /// Defaults to the shared runner age floor
+        /// (`cleanup::RUNNER_MIN_AGE_HOURS`).
+        #[arg(long)]
+        min_age_hours: Option<u64>,
 
-        /// Maximum number of orphan candidates to report or remove.
-        #[arg(long, default_value_t = 25)]
-        limit: usize,
+        /// Maximum number of orphan candidates to report or remove per pass.
+        /// Defaults to the shared page size
+        /// (`cleanup::RUNNER_WORKSPACE_PAGE_LIMIT`).
+        #[arg(long)]
+        limit: Option<usize>,
 
         /// Maximum apply passes to run. Each pass re-scans and removes at most --limit candidates.
         #[arg(long, default_value_t = 1)]
@@ -221,8 +226,11 @@ pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceO
             &runner_id,
             runner::RunnerWorkspacePruneOptions {
                 apply,
-                min_age_hours,
-                limit,
+                // One named age floor shared with `homeboy cleanup --include
+                // remote-lab-workspaces`, which used to carry its own literal
+                // `24` beside this command's `default_value_t = 24` (#10316).
+                min_age_hours: min_age_hours.unwrap_or(cleanup::RUNNER_MIN_AGE_HOURS),
+                limit: limit.unwrap_or(cleanup::RUNNER_WORKSPACE_PAGE_LIMIT),
                 passes,
                 cursor,
             },

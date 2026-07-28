@@ -846,7 +846,14 @@ homeboy runner workspace prune <runner-id> --cursor <opaque-cursor>
 
 `workspace prune` only removes metadata-backed, inactive Lab workspaces that are old enough, have no pending patch or diff artifact, and are orphaned or have an expired lifecycle TTL. It never removes outside `_lab_workspaces`.
 
-`--limit` bounds the workspace directories inspected, sized, retained in memory, and removed in each pass. `--passes` bounds apply passes. Output now includes `scanned_workspace_count` and `scan_complete`: when `scan_complete` is false, `has_more` is true, `continuation_cursor` is an opaque token that resumes strictly after the last inspected workspace, and `total_candidate_*` plus `remaining_candidate_*` describe only the inspected window. Use the emitted `next_command` or `drain_command` unchanged; both carry the cursor when needed.
+`--min-age-hours` defaults to the shared runner age floor (24 hours) that
+`homeboy cleanup --include remote-lab-workspaces` and `homeboy runner
+cache-prune` also apply; it is one named constant rather than a literal repeated
+per command. `--limit` defaults to the shared page size (25) and bounds the
+workspace directories inspected, sized, retained in memory, and removed in each
+pass; it is a page size, not a delete budget, which is why the aggregate
+`--limit` record budget is deliberately not wired to it. `--passes` bounds apply
+passes. Output now includes `scanned_workspace_count` and `scan_complete`: when `scan_complete` is false, `has_more` is true, `continuation_cursor` is an opaque token that resumes strictly after the last inspected workspace, and `total_candidate_*` plus `remaining_candidate_*` describe only the inspected window. Use the emitted `next_command` or `drain_command` unchanged; both carry the cursor when needed.
 
 ### `workspace apply`
 
