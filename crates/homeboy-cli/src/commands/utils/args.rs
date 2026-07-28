@@ -866,8 +866,8 @@ mod scope_args_tests {
     #[test]
     fn selectors_are_mutually_exclusive() {
         let valued = ["--project", "--fleet", "--component", "--rig", "--path"];
-        for (index, first) in valued.iter().enumerate() {
-            for second in valued.iter().skip(index + 1) {
+        for (index, first) in valued.iter().copied().enumerate() {
+            for second in valued.iter().copied().skip(index + 1) {
                 let argv = vec!["scoped", first, "a", second, "b"];
                 assert!(
                     TestCli::try_parse_from(&argv).is_err(),
