@@ -3,10 +3,19 @@
 # incremental compilation and lower peak build memory. They are path-only
 # dependencies of the `homeboy` crate. The entire workspace is private; the
 # shipped CLI artifact remains the single `homeboy` binary.
-members = ["crates/*", "crates/contracts/*"]
-# `crates/*` also globs the `crates/contracts` grouping directory, which is not
-# itself a crate; exclude it so only the contract crates under it are members.
-exclude = ["crates/contracts"]
+#
+# Both globs are prefix-qualified (`homeboy-*`) rather than a bare `crates/*`.
+# A bare `crates/*` also matches the `crates/contracts` grouping directory,
+# which is not itself a crate, so cargo fails to load its (nonexistent)
+# manifest. The previous workaround was `exclude = ["crates/contracts"]`, but
+# cargo's `exclude` matches by path PREFIX and outranks the members globs, so it
+# silently dropped all 18 `crates/contracts/*` crates from the workspace too
+# (#10550). Keeping the grouping directory out of the glob in the first place is
+# what makes the membership honest. Every crate under `crates/` and
+# `crates/contracts/` is named `homeboy-*`; `workspace_membership_is_complete`
+# in `crates/homeboy-paths` fails closed if a crate is ever added that these
+# globs would miss.
+members = ["crates/homeboy-*", "crates/contracts/homeboy-*"]
 
 [package]
 name = "homeboy"
