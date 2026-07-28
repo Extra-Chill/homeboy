@@ -703,6 +703,9 @@ fn delegate_agent_task_lifecycle_to_pinned_runtime(
             }
             crate::commands::agent_task::AgentTaskCommand::Resume(args) => Some(&args.run_id),
             crate::commands::agent_task::AgentTaskCommand::CookContinue(args) => {
+                if matches!(cli.placement, crate::cli_surface::Placement::Local) {
+                    return Ok(None);
+                }
                 return delegate_cook_continue_to_pinned_runtime(&args.cook_or_attempt_id, normalized_args);
             }
             _ => None,
@@ -2521,6 +2524,32 @@ mod tests {
                 "cook id's",
             ),
             "'/tmp/controller runtimes/homeboy'\\''s' agent-task cook-continue 'cook id'\\''s'"
+        );
+    }
+
+    #[test]
+    fn explicit_local_cook_continuation_bypasses_runner_runtime_delegation() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "--placement",
+            "local",
+            "agent-task",
+            "cook-continue",
+            "controller-owned-cook",
+        ]);
+        let args = vec![
+            "homeboy".to_string(),
+            "--placement".to_string(),
+            "local".to_string(),
+            "agent-task".to_string(),
+            "cook-continue".to_string(),
+            "controller-owned-cook".to_string(),
+        ];
+
+        assert_eq!(
+            delegate_agent_task_lifecycle_to_pinned_runtime(&cli, &args)
+                .expect("explicit local continuation stays on the controller"),
+            None
         );
     }
 
