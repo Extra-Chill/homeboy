@@ -647,6 +647,59 @@ pub fn pinned_runtime_for_mutation(run_id: &str) -> Result<Option<std::path::Pat
     })
 }
 
+/// A v2 controller-runtime pin that belongs to a persisted runner transport,
+/// rather than the controller filesystem currently handling a continuation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerPinnedRuntime {
+    pub runner_id: String,
+    pub executable: std::path::PathBuf,
+}
+
+/// Resolve a runner-owned v2 pin before attempting local migration or
+/// validation. Historical Lab records stored the runner's immutable path as the
+/// controller pin; re-executing it through the recorded runner lets that host
+/// retain the normal digest and identity checks.
+pub fn runner_pinned_runtime_for_mutation(run_id: &str) -> Result<Option<RunnerPinnedRuntime>> {
+    let record = store::read_record(&resolve_run_id(run_id)?)?;
+    let Some(runner_id) = record
+        .runner_id()
+        .filter(|runner_id| !runner_id.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(runtime) = record
+        .metadata
+        .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
+    else {
+        return Ok(None);
+    };
+    // Only v2 metadata carries the immutable digest that the runner validates.
+    if runtime
+        .pointer("/originating/sha256")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        return Ok(None);
+    }
+    let Some(executable) = runtime
+        .pointer("/originating/pinned_executable")
+        .and_then(Value::as_str)
+        .filter(|executable| !executable.trim().is_empty())
+        .map(std::path::PathBuf::from)
+    else {
+        return Ok(None);
+    };
+    // Existing local pins retain the established migration and validation path.
+    // A missing v2 path on a runner-backed record is runner-owned provenance.
+    if executable.is_file() {
+        return Ok(None);
+    }
+    Ok(Some(RunnerPinnedRuntime {
+        runner_id: runner_id.to_string(),
+        executable,
+    }))
+}
+
 /// Seal the currently executing controller into an immutable runtime before a
 /// new cook begins its local routing and admission work.  Participates in the
 /// FIFO admission queue so concurrent seals wait their turn instead of
