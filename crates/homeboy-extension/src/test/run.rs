@@ -298,6 +298,10 @@ fn run_main_test_workflow_inner(
         .iter()
         .fold(runner, |runner, (key, value)| runner.env(key, value));
     let runner = runner
+        .env(
+            "HOMEBOY_TEST_RESULTS_FILE",
+            results_file.to_string_lossy().as_ref(),
+        )
         .env_if(
             no_tests_policy_enabled,
             NO_TESTS_APPLICABLE_FILE_ENV,
