@@ -1486,6 +1486,17 @@ where
     run_cook_with_finalizer(options, executor, finalize_or_load_cook_pr)
 }
 
+pub fn run_terminal_cook_continuation<E>(
+    options: AgentTaskCookServiceOptions,
+    executor: E,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+{
+    let side_effects = DefaultCookSideEffects::new(finalize_or_load_cook_pr);
+    run_cook_with_boundaries_observed_policy(options, executor, side_effects, None, true)
+}
+
 /// Run Cook while reporting the authoritative attempt only after its durable
 /// recipe has been persisted. Callers must treat pre-observer work as
 /// invocation-local because no run recovery identity exists yet.
@@ -1564,12 +1575,37 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
+    run_cook_with_boundaries_observed_policy(
+        options,
+        executor,
+        side_effects,
+        durable_observer,
+        false,
+    )
+}
+
+fn run_cook_with_boundaries_observed_policy<E, S>(
+    options: AgentTaskCookServiceOptions,
+    executor: E,
+    side_effects: S,
+    durable_observer: Option<&CookProgressObserver<'_>>,
+    allow_historical_terminal: bool,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    S: CookSideEffectService,
+{
     // Every exit from the observed boundary funnels through one notification
     // point — including the durable-failure report built from a controller
     // error — so the failure path is not the one that stays silent.
     let notification_options = options.clone();
-    let result =
-        run_cook_with_boundaries_reported(options, executor, side_effects, durable_observer);
+    let result = run_cook_with_boundaries_reported(
+        options,
+        executor,
+        side_effects,
+        durable_observer,
+        allow_historical_terminal,
+    );
     if let Ok(result) = &result {
         if cook_status_is_terminal(&result.value.status) {
             crate::agent_task_notify::cook_terminal(
@@ -1587,6 +1623,7 @@ fn run_cook_with_boundaries_reported<E, S>(
     executor: E,
     side_effects: S,
     durable_observer: Option<&CookProgressObserver<'_>>,
+    allow_historical_terminal: bool,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
 where
     E: AgentTaskExecutorAdapter + Clone,
@@ -1598,6 +1635,7 @@ where
         executor,
         side_effects,
         durable_observer,
+        allow_historical_terminal,
     ) {
         Ok(result) => result,
         Err(error) => return durable_cook_error_report(&failure_options, error),
@@ -1662,6 +1700,7 @@ fn run_cook_with_boundaries_observed_inner<E, S>(
     executor: E,
     mut side_effects: S,
     durable_observer: Option<&CookProgressObserver<'_>>,
+    allow_historical_terminal: bool,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
 where
     E: AgentTaskExecutorAdapter + Clone,
@@ -1731,7 +1770,7 @@ where
     // turn replay into a conflicting new cook.
     let requested_run_id = options.initial_run_id.clone();
     let mut options = if existing_recipe {
-        let mut reconstructed = if adopted_model.is_some() {
+        let mut reconstructed = if adopted_model.is_some() || allow_historical_terminal {
             super::reconstruct_adoption_options_with_dispatcher(
                 &recipe,
                 options.attempt_dispatcher,
