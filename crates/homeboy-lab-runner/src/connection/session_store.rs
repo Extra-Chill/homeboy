@@ -1,4 +1,5 @@
 use super::*;
+use crate::session::RunnerConnectFailureEvidence;
 
 pub(super) fn session_is_live(session: &RunnerSession) -> bool {
     session_is_live_with_timeout(session, Duration::from_secs(2))
@@ -1004,8 +1005,25 @@ pub(super) fn failed_connect(
             leaseless_recovery: None,
             state_loss_recovery: None,
             leaseless_recovery_evidence: None,
-            failure_kind: Some(failure_kind),
+            failure_kind: Some(failure_kind.clone()),
             failure_message: Some(failure_message),
+            failure_evidence: Some(RunnerConnectFailureEvidence {
+                recovery_command: format!("homeboy runner connect {}", shell::quote_arg(runner_id)),
+                classification: match failure_kind {
+                    RunnerFailureKind::SshFailure => "ssh".to_string(),
+                    RunnerFailureKind::MissingRemoteHomeboy => "version".to_string(),
+                    RunnerFailureKind::DaemonStartupFailure => "daemon_startup".to_string(),
+                    RunnerFailureKind::TunnelFailure => "tunnel".to_string(),
+                },
+                remote_start_command: None,
+                known_remote_pid: None,
+                known_remote_lease_id: None,
+                remote_address: None,
+                local_address: None,
+                tunnel_state: Some("not_established".to_string()),
+                health_attempt_count: 0,
+                health_attempts: Vec::new(),
+            }),
         },
         20,
     )

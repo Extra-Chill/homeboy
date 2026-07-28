@@ -336,6 +336,7 @@ fn connect_runner_for_offload(
             leaseless_recovery_evidence: None,
             failure_kind: Some(super::RunnerFailureKind::SshFailure),
             failure_message: Some(reason),
+            failure_evidence: None,
         },
         exit_code,
     ))
@@ -461,6 +462,7 @@ fn connected_runner_connect_report_from_session(
                 .and_then(|v| serde_json::from_value(v).ok()),
             failure_kind: None,
             failure_message: None,
+            failure_evidence: None,
         },
         0,
     ))

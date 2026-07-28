@@ -3,6 +3,11 @@
 use clap::Parser;
 use std::collections::HashMap;
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 use super::*;
 
@@ -87,6 +92,46 @@ fn repeated_tunnel_flaps_continue_to_select_the_same_active_daemon() {
         assert_eq!(daemon.lease_id.as_deref(), Some("lease-active"));
         assert_eq!(daemon.pid, Some(4242));
     }
+}
+
+#[test]
+fn recovery_reconnect_uses_the_published_replacement_generation() {
+    let replacement = DaemonStartResult {
+        address: "127.0.0.1:45678".to_string(),
+        pid: 5678,
+        state_path: "/state/generation-b.json".to_string(),
+        lease_id: "lease-generation-b".to_string(),
+    };
+
+    let daemon = remote_daemon_from_recovery(&replacement, "homeboy test+configured");
+
+    assert_eq!(daemon.address, "127.0.0.1:45678");
+    assert_eq!(daemon.pid, Some(5678));
+    assert_eq!(daemon.lease_id.as_deref(), Some("lease-generation-b"));
+    assert_eq!(
+        daemon.build_identity.as_deref(),
+        Some("homeboy test+configured")
+    );
+}
+
+#[test]
+fn recovery_replacement_does_not_reuse_the_interrupted_session_generation() {
+    let interrupted = direct_ssh_session("lease-generation-a");
+    let replacement = DaemonStartResult {
+        address: "127.0.0.1:45678".to_string(),
+        pid: 5678,
+        state_path: "/state/generation-b.json".to_string(),
+        lease_id: "lease-generation-b".to_string(),
+    };
+
+    let daemon = remote_daemon_from_recovery(&replacement, "homeboy test+configured");
+
+    assert_ne!(
+        daemon.address,
+        interrupted.remote_daemon_address.expect("old address")
+    );
+    assert_ne!(daemon.pid, interrupted.remote_daemon_pid);
+    assert_ne!(daemon.lease_id, interrupted.remote_daemon_lease_id);
 }
 
 #[test]
@@ -650,8 +695,13 @@ fn remote_leaseless_recovery_decodes_and_propagates_report() {
 
 #[test]
 fn state_loss_recovery_delegation_decodes_and_serializes_auditable_evidence() {
-    let command =
-        remote_state_loss_recovery_command("/opt/homeboy", "lease-old", 4242, "127.0.0.1:7421");
+    let command = remote_state_loss_recovery_command(
+        "/opt/homeboy",
+        "lease-old",
+        4242,
+        "127.0.0.1:7421",
+        "operation-1",
+    );
     assert!(command.contains("--recorded-endpoint 127.0.0.1:7421"));
     let envelope = parse_envelope(
         r#"{"success":true,"data":{
@@ -729,24 +779,61 @@ fn runner_connect_persists_recovery_evidence_after_daemon_failure() {
     test_support::with_isolated_home(|home| {
         let daemon = home.path().join("remote-homeboy");
         let argv_path = home.path().join("recovery-argv");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let expected_address = address.to_string();
+        let endpoint = std::thread::spawn(move || {
+            // The local reachability check opens a TCP socket before the
+            // health and identity requests.
+            for _ in 0..16 {
+                let (mut stream, _) = listener.accept().expect("endpoint request");
+                let mut request = [0; 4096];
+                let length = stream.read(&mut request).expect("read endpoint request");
+                let request = String::from_utf8_lossy(&request[..length]);
+                let body = if request.starts_with("GET /health ") {
+                    r#"{"freshness":{"fresh":true,"restartable":true,"lease_id":"lease-new","pid":42,"active_jobs":0},"pid":42}"#
+                } else {
+                    r#"{"version":"0.284.0","build_identity":{"display":"homeboy 0.284.0+test"}}"#
+                };
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .expect("endpoint response");
+            }
+        });
         std::fs::write(
             &daemon,
-            r#"#!/bin/sh
+            format!(
+                r#"#!/bin/sh
 case "$1 $2" in
   "self identity")
-printf '%s\n' '{"success":true,"data":{"version":"0.284.0","display":"homeboy 0.284.0+test"}}'
+printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test"}}}}'
 ;;
 "daemon reconcile-leaseless-orphans")
 if [ "$3" = "--help" ]; then
-  printf '%s\n' 'OPTIONS:' '    --confirm-no-daemon-owner'
+   printf '%s\n' 'OPTIONS:' '    --confirm-no-daemon-owner' '    --replacement-operation-id <ID>'
 else
   printf '%s\n' "$@" > "$HOMEBOY_TEST_RECOVERY_ARGV"
-  printf '%s\n' '{"success":true,"data":{"affected_job_ids":[],"affected_job_count":0,"affected_jobs":[],"historical_lease_ids":[],"evidence_snapshot_path":"/tmp/jobs.snapshot","ownership_proof":["owner lock acquired"],"retry_guidance":"retry","replacement":{"pid":42,"address":"127.0.0.1:7421","state_path":"/tmp/state.json","lease_id":"lease-new"}}}'
+   printf '%s\n' '{{"success":true,"data":{{"affected_job_ids":[],"affected_job_count":0,"affected_jobs":[],"historical_lease_ids":[],"evidence_snapshot_path":"/tmp/jobs.snapshot","ownership_proof":["owner lock acquired"],"retry_guidance":"retry","replacement":{{"pid":42,"address":"{address}","state_path":"/tmp/state.json","lease_id":"lease-new"}}}}}}'
 fi
-;;
-  "daemon status") exit 1 ;;
+ ;;
+"daemon recover-missing-lease-state")
+   if [ "$3" = "--help" ]; then
+     printf '%s\n' 'OPTIONS:' '    --replacement-operation-id <ID>'
+   else
+   printf '%s\n' '{{"success":true,"data":{{"recovered_lease_id":"lease-interrupted","recorded_dead_pid":41,"recorded_endpoint":"127.0.0.1:7419","affected_job_ids":[],"affected_job_count":0,"evidence_snapshot_path":"/tmp/jobs.snapshot","ownership_proof":["owner lock acquired"],"retry_guidance":"retry","replacement":{{"pid":42,"address":"{address}","state_path":"/tmp/state.json","lease_id":"lease-new"}}}}}}'
+   fi
+ ;;
+   "daemon status") exit 99 ;;
 esac
 "#,
+                address = address,
+            ),
         )
         .expect("write remote Homeboy shim");
         let mut permissions = std::fs::metadata(&daemon)
@@ -782,14 +869,11 @@ esac
             connect_with_orphan_adoption("local-runner", None, &[], true, None, None, None)
                 .expect("connect result");
 
+        assert_eq!(exit_code, 0);
+        assert!(report.connected);
         assert_eq!(
-            exit_code, 20,
-            "the shim intentionally rejects status after recovery"
-        );
-        assert!(!report.connected);
-        assert_eq!(
-            report.failure_kind,
-            Some(RunnerFailureKind::DaemonStartupFailure)
+            report.remote_daemon_address.as_deref(),
+            Some(expected_address.as_str())
         );
         assert_eq!(
             report
@@ -821,8 +905,14 @@ esac
         let session = read_session("local-runner")
             .expect("read recovery session")
             .expect("recovery session");
-        assert!(session.local_url.is_none());
-        assert!(session.local_port.is_none());
+        assert_eq!(
+            session.remote_daemon_address.as_deref(),
+            Some(expected_address.as_str())
+        );
+        assert_eq!(session.remote_daemon_lease_id.as_deref(), Some("lease-new"));
+        assert_eq!(session.remote_daemon_pid, Some(42));
+        assert!(session.local_url.is_some());
+        assert_eq!(session.local_port, Some(address.port()));
         let recovery_evidence: crate::RunnerLeaselessRecoveryEvidence = serde_json::from_value(
             session
                 .leaseless_recovery_evidence
@@ -839,20 +929,326 @@ esac
                 .lease_id,
             "lease-new"
         );
+        let argv = std::fs::read_to_string(argv_path).expect("read dispatched recovery argv");
+        assert!(argv.starts_with(
+            "daemon\nreconcile-leaseless-orphans\n--confirm-no-daemon-owner\n--replacement-operation-id\n"
+        ));
+        assert!(argv.ends_with("\n--addr\n127.0.0.1:0\n"));
+        let (state_loss_report, state_loss_exit) = connect_with_orphan_adoption(
+            "local-runner",
+            None,
+            &[],
+            false,
+            Some("lease-interrupted"),
+            Some(41),
+            Some("127.0.0.1:7419"),
+        )
+        .expect("state-loss reconnect result");
+        assert_eq!(state_loss_exit, 0);
+        assert!(state_loss_report.connected);
+        assert_eq!(state_loss_report.remote_daemon_pid, Some(42));
         assert_eq!(
-            std::fs::read_to_string(argv_path).expect("read dispatched recovery argv"),
-            "daemon\nreconcile-leaseless-orphans\n--confirm-no-daemon-owner\n--addr\n127.0.0.1:0\n"
+            state_loss_report
+                .state_loss_recovery
+                .as_ref()
+                .map(|recovery| recovery.replacement.lease_id.as_str()),
+            Some("lease-new")
         );
+        drop(endpoint);
+    });
+}
+
+/// #10430: once recovery creates B, losing the controller's bounded health
+/// requests must leave enough durable evidence for the next invocation to
+/// authenticate B. It must never create an unjournaled C.
+#[cfg(unix)]
+#[test]
+fn recovery_retry_reattaches_journaled_b_after_two_lost_health_requests() {
+    test_support::with_isolated_home(|home| {
+        let daemon = home.path().join("remote-homeboy");
+        let generation_count = home.path().join("daemon-generations");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let health_requests = Arc::new(AtomicUsize::new(0));
+        let health_requests_for_server = Arc::clone(&health_requests);
+        let endpoint = std::thread::spawn(move || {
+            for request_number in 0..7 {
+                let (mut stream, _) = listener.accept().expect("endpoint request");
+                let mut request = [0; 4096];
+                let length = stream.read(&mut request).expect("read endpoint request");
+                let request = String::from_utf8_lossy(&request[..length]);
+                // `wait_for_tcp` proves listener reachability before health.
+                if request.is_empty() {
+                    continue;
+                }
+                if request.starts_with("GET /health ") {
+                    let health_request = health_requests_for_server.fetch_add(1, Ordering::SeqCst);
+                    if health_request < 2 {
+                        // Simulate a controller response loss after B started.
+                        drop(stream);
+                        continue;
+                    }
+                    let body = r#"{"freshness":{"fresh":true,"restartable":true,"lease_id":"lease-b","pid":4242,"active_jobs":0},"pid":4242}"#;
+                    stream
+                        .write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes())
+                        .expect("health response");
+                } else {
+                    assert!(
+                        request.starts_with("GET /version "),
+                        "request {request_number}: {request}"
+                    );
+                    let body = r#"{"version":"0.284.0","build_identity":{"display":"homeboy 0.284.0+test"},"lease":{"lease_id":"lease-b"}}"#;
+                    stream
+                        .write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes())
+                        .expect("version response");
+                }
+            }
+        });
+        std::fs::write(
+            &daemon,
+            format!(
+                r#"#!/bin/sh
+case "$1 $2" in
+  "self identity")
+    printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test"}}}}'
+    ;;
+  "daemon reconcile-leaseless-orphans")
+    if [ "$3" = "--help" ]; then
+      printf '%s\n' 'OPTIONS:' '    --confirm-no-daemon-owner' '    --replacement-operation-id <ID>'
+    else
+      count=0
+      if [ -f "{generation_count}" ]; then count=$(cat "{generation_count}"); fi
+      count=$((count + 1))
+      printf '%s' "$count" > "{generation_count}"
+      printf '%s\n' '{{"success":true,"data":{{"affected_job_ids":[],"affected_job_count":0,"affected_jobs":[],"historical_lease_ids":[],"evidence_snapshot_path":"/tmp/jobs.snapshot","ownership_proof":["owner lock acquired"],"retry_guidance":"retry","replacement":{{"pid":4242,"address":"{address}","state_path":"/tmp/state-b.json","lease_id":"lease-b"}}}}}}'
+    fi
+    ;;
+  "daemon status") exit 99 ;;
+esac
+"#,
+                address = address,
+                generation_count = generation_count.display(),
+            ),
+        )
+        .expect("write remote Homeboy shim");
+        let mut permissions = std::fs::metadata(&daemon).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&daemon, permissions).expect("make shim executable");
+        server::create(
+            &serde_json::json!({ "id": "local-runner", "host": "localhost", "user": "test" })
+                .to_string(),
+            false,
+        )
+        .expect("create local server");
+        crate::create(
+            &serde_json::json!({
+                "id": "local-runner",
+                "kind": "ssh",
+                "homeboy_path": daemon,
+            })
+            .to_string(),
+            false,
+        )
+        .expect("enable local runner");
+
+        let (first, first_exit) =
+            connect_with_orphan_adoption("local-runner", None, &[], true, None, None, None)
+                .expect("first connect result");
+        assert_eq!(first_exit, 20);
+        let evidence = first.failure_evidence.expect("known B failure evidence");
+        assert_eq!(evidence.known_remote_lease_id.as_deref(), Some("lease-b"));
+        assert_eq!(evidence.known_remote_pid, Some(4242));
+        assert_eq!(evidence.health_attempt_count, 2);
+        assert_eq!(evidence.health_attempts.len(), 2);
+        assert_eq!(
+            evidence.recovery_command,
+            "homeboy runner connect local-runner"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&generation_count).expect("generation count"),
+            "1"
+        );
+
+        let journal_dir = homeboy_core::paths::runner_sessions_dir()
+            .expect("runner sessions")
+            .join("local-runner");
+        let pending: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(journal_dir.join("pending-replacement.json"))
+                .expect("B journal"),
+        )
+        .expect("B journal JSON");
+        assert_eq!(pending["remote_daemon_lease_id"], "lease-b");
+        assert_eq!(pending["remote_daemon_pid"], 4242);
+        assert!(journal_dir.join("replacement-operation.json").exists());
+
+        let (second, second_exit) =
+            connect_with_orphan_adoption("local-runner", None, &[], true, None, None, None)
+                .expect("second connect result");
+        assert_eq!(
+            second_exit, 0,
+            "second connect failed: {:?}",
+            second.failure_message
+        );
+        assert!(second.connected);
+        assert_eq!(second.remote_daemon_pid, Some(4242));
+        assert_eq!(
+            std::fs::read_to_string(&generation_count).expect("generation count"),
+            "1"
+        );
+        assert_eq!(health_requests.load(Ordering::SeqCst), 3);
+        assert!(!journal_dir.join("pending-replacement.json").exists());
+        assert!(!journal_dir.join("replacement-operation.json").exists());
+        endpoint.join().expect("endpoint");
+    });
+}
+
+/// #10430: normal ensure-running must use the same durable replay boundary as
+/// explicit recovery. If its response is lost after B starts, retrying must
+/// replay B's receipt instead of reconciling leases and creating C.
+#[cfg(unix)]
+#[test]
+fn normal_start_response_loss_replays_b_without_creating_c() {
+    test_support::with_isolated_home(|home| {
+        let daemon = home.path().join("remote-homeboy");
+        let generation_count = home.path().join("daemon-generations");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        let health_requests = Arc::new(AtomicUsize::new(0));
+        let health_requests_for_server = Arc::clone(&health_requests);
+        let endpoint = std::thread::spawn(move || {
+            for request_number in 0..4 {
+                let (mut stream, _) = listener.accept().expect("endpoint request");
+                let mut request = [0; 4096];
+                let length = stream.read(&mut request).expect("read endpoint request");
+                let request = String::from_utf8_lossy(&request[..length]);
+                if request.is_empty() {
+                    continue;
+                }
+                if request.starts_with("GET /health ") {
+                    health_requests_for_server.fetch_add(1, Ordering::SeqCst);
+                    let body = r#"{"freshness":{"fresh":true,"restartable":true,"lease_id":"lease-b","pid":4242,"active_jobs":0},"pid":4242}"#;
+                    stream
+                        .write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes())
+                        .expect("health response");
+                } else {
+                    assert!(
+                        request.starts_with("GET /version "),
+                        "request {request_number}: {request}"
+                    );
+                    let body = r#"{"version":"0.284.0","build_identity":{"display":"homeboy 0.284.0+test"},"lease":{"lease_id":"lease-b"}}"#;
+                    stream
+                        .write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes())
+                        .expect("version response");
+                }
+            }
+        });
+        std::fs::write(
+            &daemon,
+            format!(
+                r#"#!/bin/sh
+case "$1 $2" in
+  "self identity")
+    printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test"}}}}'
+    ;;
+  "daemon status")
+    printf '%s\n' '{{"success":true,"data":{{"running":false,"fresh":false,"reachable":false,"freshness":{{"active_jobs":0}}}}}}'
+    ;;
+  "daemon ensure-running")
+    if [ "$3" = "--help" ]; then
+      printf '%s\n' 'OPTIONS:' '    --replacement-operation-id <ID>'
+    elif [ -f "{generation_count}" ]; then
+      printf '%s\n' '{{"success":true,"data":{{"pid":4242,"address":"{address}","state_path":"/tmp/state-b.json","lease_id":"lease-b"}}}}'
+    else
+      printf '%s' '1' > "{generation_count}"
+      # The daemon has durably recorded B's operation key, but its SSH response
+      # was lost before the controller could persist B's coordinates.
+      exit 99
+    fi
+    ;;
+esac
+"#,
+                address = address,
+                generation_count = generation_count.display(),
+            ),
+        )
+        .expect("write remote Homeboy shim");
+        let mut permissions = std::fs::metadata(&daemon).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&daemon, permissions).expect("make shim executable");
+        server::create(
+            &serde_json::json!({ "id": "local-runner", "host": "localhost", "user": "test" })
+                .to_string(),
+            false,
+        )
+        .expect("create local server");
+        crate::create(
+            &serde_json::json!({
+                "id": "local-runner",
+                "kind": "ssh",
+                "homeboy_path": daemon,
+            })
+            .to_string(),
+            false,
+        )
+        .expect("enable local runner");
+
+        let (_first, first_exit) =
+            connect_with_orphan_adoption("local-runner", None, &[], false, None, None, None)
+                .expect("first connect result");
+        assert_eq!(first_exit, 20);
+        assert_eq!(
+            std::fs::read_to_string(&generation_count).expect("B start count"),
+            "1"
+        );
+
+        let journal_dir = homeboy_core::paths::runner_sessions_dir()
+            .expect("runner sessions")
+            .join("local-runner");
+        let operation: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(journal_dir.join("replacement-operation.json"))
+                .expect("ensure-running journal"),
+        )
+        .expect("ensure-running journal JSON");
+        assert_eq!(operation["kind"], "ensure-running");
+        assert!(operation["operation_id"].as_str().is_some());
+        assert!(operation["replay_command"]
+            .as_str()
+            .is_some_and(|command| command.contains("--replacement-operation-id")));
+
+        let (second, second_exit) =
+            connect_with_orphan_adoption("local-runner", None, &[], false, None, None, None)
+                .expect("second connect result");
+        assert_eq!(
+            second_exit, 0,
+            "second connect failed: {:?}",
+            second.failure_message
+        );
+        assert!(second.connected);
+        assert_eq!(second.remote_daemon_pid, Some(4242));
+        assert_eq!(
+            std::fs::read_to_string(&generation_count).expect("B only start count"),
+            "1",
+            "replay must return B rather than starting C"
+        );
+        assert_eq!(health_requests.load(Ordering::SeqCst), 1);
+        assert!(!journal_dir.join("pending-replacement.json").exists());
+        assert!(!journal_dir.join("replacement-operation.json").exists());
+        endpoint.join().expect("endpoint");
     });
 }
 
 #[test]
 fn state_loss_recovery_delegation_uses_the_canonical_exact_contract() {
-    let command =
-        remote_state_loss_recovery_command("/opt/homeboy", "lease exact", 4242, "127.0.0.1:4242");
+    let command = remote_state_loss_recovery_command(
+        "/opt/homeboy",
+        "lease exact",
+        4242,
+        "127.0.0.1:4242",
+        "operation-1",
+    );
     assert_eq!(
         command,
-        "/opt/homeboy daemon recover-missing-lease-state --lease-id 'lease exact' --recorded-pid 4242 --recorded-endpoint 127.0.0.1:4242 --confirm-pid-dead --confirm-control-plane-lost --addr 127.0.0.1:0"
+        "/opt/homeboy daemon recover-missing-lease-state --lease-id 'lease exact' --recorded-pid 4242 --recorded-endpoint 127.0.0.1:4242 --confirm-pid-dead --confirm-control-plane-lost --replacement-operation-id operation-1 --addr 127.0.0.1:0"
     );
 }
 
@@ -860,7 +1256,7 @@ fn state_loss_recovery_delegation_uses_the_canonical_exact_contract() {
 fn leaseless_recovery_uses_confirm_no_daemon_owner_contract() {
     let contract = negotiate_leaseless_recovery_contract(&command_output(
         true,
-        "OPTIONS:\n    --confirm-no-daemon-owner\n",
+        "OPTIONS:\n    --confirm-no-daemon-owner\n    --replacement-operation-id <ID>\n",
         false,
     ))
     .expect("one-flag contract");
@@ -869,7 +1265,8 @@ fn leaseless_recovery_uses_confirm_no_daemon_owner_contract() {
         contract,
         RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner
     );
-    let command = remote_leaseless_recovery_command("/opt/homeboy", "127.0.0.1:0", contract);
+    let command =
+        remote_leaseless_recovery_command("/opt/homeboy", "127.0.0.1:0", contract, "operation-1");
     assert!(command.contains("--confirm-no-daemon-owner"));
     assert!(!command.contains("--reconcile-leaseless-orphans"));
     assert!(!command.contains("--confirm-control-plane-lost"));
@@ -945,7 +1342,7 @@ fn leaseless_recovery_parses_only_exact_option_declarations() {
 #[test]
 fn leaseless_recovery_evidence_records_selected_contract_and_command_identity() {
     for (help, expected_contract) in [(
-        "Options:\n    --confirm-no-daemon-owner\n",
+        "Options:\n    --confirm-no-daemon-owner\n    --replacement-operation-id <ID>\n",
         RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner,
     )] {
         let contract = negotiate_leaseless_recovery_contract(&command_output(true, help, false))
@@ -1013,6 +1410,31 @@ fn failed_connect_without_recovery_omits_recovery_evidence() {
 
     let serialized = serde_json::to_value(report).expect("serialize failed connect");
     assert!(serialized.get("leaseless_recovery_evidence").is_none());
+    assert_eq!(
+        serialized["failure_evidence"]["tunnel_state"],
+        "not_established"
+    );
+    assert_eq!(
+        serialized["failure_evidence"]["recovery_command"],
+        "homeboy runner connect runner"
+    );
+}
+
+#[test]
+fn hanging_ssh_connect_is_classified_as_a_timeout() {
+    let message = bounded_remote_failure_message(
+        "SSH connectivity check",
+        &homeboy_core::server::CommandOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            success: false,
+            exit_code: 124,
+            timed_out: true,
+            child_resource: None,
+        },
+    );
+    assert!(message.contains("timed out"));
+    assert!(message.contains("runner connect"));
 }
 
 #[test]
@@ -1241,6 +1663,7 @@ fn idle_stale_replacement_uses_actual_endpoint_envelopes_and_reprobes_the_new_ow
                 None,
                 &[],
                 None,
+                None,
             )
             .expect("replacement succeeds");
             assert_eq!(daemon.lease_id.as_deref(), Some("lease-new"));
@@ -1270,6 +1693,7 @@ fn idle_stale_replacement_refuses_a_post_stop_owner_or_identity_change() {
                 None,
                 &[],
                 None,
+                None,
             )
             .expect_err("concurrent stale daemon is refused");
             assert!(error.contains("ownership changed"));
@@ -1292,6 +1716,7 @@ fn idle_stale_replacement_refuses_a_post_stop_identity_change() {
                 configured_identity,
                 None,
                 &[],
+                None,
                 None,
             )
             .expect_err("stale replacement identity is refused");

@@ -44,7 +44,8 @@ pub mod runner_workspace_root;
 pub use artifact_download::ArtifactDownload;
 pub use broker_config::{render_broker_config, BrokerConfig, BrokerConfigOptions, ServiceIdentity};
 pub use control::{
-    adopt_orphaned_lease, artifact_content_url, ensure_running, fetch_artifact_to_path,
+    adopt_orphaned_lease, artifact_content_url, ensure_running,
+    ensure_running_with_replacement_operation, fetch_artifact_to_path,
     reconcile_dead_lease_orphans, reconcile_leaseless_orphans, recover_missing_child_identity,
     recover_missing_lease_state, start_background, supervise, ArtifactFetchOutcome,
 };

@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
+use homeboy_core::engine::shell;
 use homeboy_core::server::{Server, SshClient};
 
 use super::super::session::RunnerStaleRuntimePath;
@@ -15,6 +16,7 @@ use super::{
 };
 use crate::connection::remote_daemon::parse_json_from_mixed_stdout;
 use crate::daemon_repair;
+use crate::session::RunnerConnectFailureEvidence;
 use crate::{RunnerConnectReport, RunnerFailureKind};
 use std::collections::BTreeMap;
 
@@ -33,28 +35,55 @@ struct DaemonHealthReport {
 pub(super) fn connect_remote_daemon(
     server: &Server,
     _client: &SshClient,
-    _homeboy: &str,
+    homeboy: &str,
     daemon: RemoteDaemon,
-    _expected_version: &str,
-    _expected_identity: &str,
+    expected_version: &str,
+    expected_identity: &str,
     runner_id: &str,
     session_path: &Path,
 ) -> std::result::Result<(u16, Option<u32>, String, RemoteDaemon), (RunnerConnectReport, i32)> {
-    let failed_after_tunnel = |tunnel_pid: Option<u32>, message: String| {
+    let failed_after_tunnel = |tunnel_pid: Option<u32>,
+                               message: String,
+                               health_attempts: Vec<String>,
+                               local_url: &str| {
         if let Some(pid) = tunnel_pid {
             terminate_pid(pid);
         }
-        failed_connect(
+        let (mut report, exit_code) = failed_connect(
             runner_id,
             session_path.to_path_buf(),
             RunnerFailureKind::DaemonStartupFailure,
             message,
-        )
+        );
+        report.failure_evidence = Some(RunnerConnectFailureEvidence {
+            recovery_command: format!("homeboy runner connect {}", shell::quote_arg(runner_id)),
+            classification: "daemon_health".to_string(),
+            remote_start_command: Some(format!(
+                "{} daemon ensure-running --addr 127.0.0.1:0",
+                shell::quote_arg(homeboy)
+            )),
+            known_remote_pid: daemon.pid,
+            known_remote_lease_id: daemon.lease_id.clone(),
+            remote_address: Some(daemon.address.clone()),
+            local_address: Some(local_url.to_string()),
+            tunnel_state: Some("established_then_health_failed".to_string()),
+            health_attempt_count: health_attempts.len(),
+            health_attempts,
+        });
+        (report, exit_code)
     };
     let (local_port, tunnel_pid, local_url) =
         open_daemon_tunnel(server, &daemon, runner_id, session_path)?;
     match probe_daemon_health_until_ready(&local_url, &daemon) {
-        Ok(()) => Ok((local_port, tunnel_pid, local_url, daemon)),
+        Ok(()) if endpoint_identity_matches(&local_url, expected_version, expected_identity) => {
+            Ok((local_port, tunnel_pid, local_url, daemon))
+        }
+        Ok(()) => Err(failed_after_tunnel(
+            tunnel_pid,
+            "remote daemon endpoint identity did not match the controller-selected generation; refusing to publish it".to_string(),
+            Vec::new(),
+            &local_url,
+        )),
         Err(DaemonHealthProbeFailure::IdentityMismatch(report)) => Err(failed_after_tunnel(
             tunnel_pid,
             format!(
@@ -62,11 +91,29 @@ pub(super) fn connect_remote_daemon(
                 daemon.lease_id, daemon.pid, report.freshness.lease_id, report.pid,
                 active_job_recovery_guidance(&daemon),
             ),
+            Vec::new(),
+            &local_url,
         )),
-        Err(DaemonHealthProbeFailure::Unreachable(message)) => {
-            Err(failed_after_tunnel(tunnel_pid, message))
+        Err(DaemonHealthProbeFailure::Unreachable { message, attempts }) => {
+            Err(failed_after_tunnel(tunnel_pid, message, attempts, &local_url))
         }
     }
+}
+
+fn endpoint_identity_matches(
+    local_url: &str,
+    expected_version: &str,
+    expected_identity: &str,
+) -> bool {
+    let identity_matches = expected_identity.trim().is_empty()
+        || daemon_http_identity(local_url)
+            .ok()
+            .is_some_and(|identity| identity.trim() == expected_identity.trim());
+    let version_matches = expected_version.trim().is_empty()
+        || daemon_http_version(local_url)
+            .ok()
+            .is_some_and(|version| versions_match(&version, expected_version));
+    identity_matches && version_matches
 }
 
 #[derive(Debug)]
@@ -75,7 +122,10 @@ enum DaemonHealthProbeFailure {
     /// just started. This is authoritative and must fail immediately.
     IdentityMismatch(Box<DaemonHealthReport>),
     /// The daemon endpoint could not be reached within the settle budget.
-    Unreachable(String),
+    Unreachable {
+        message: String,
+        attempts: Vec<String>,
+    },
 }
 
 /// A freshly started daemon can have its TCP listener accepting connections
@@ -91,22 +141,29 @@ fn probe_daemon_health_until_ready(
     local_url: &str,
     daemon: &RemoteDaemon,
 ) -> std::result::Result<(), DaemonHealthProbeFailure> {
-    const SETTLE_BUDGET: Duration = Duration::from_secs(10);
+    const MAX_ATTEMPTS: usize = 2;
     const RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
-    let deadline = std::time::Instant::now() + SETTLE_BUDGET;
-    let mut last_error;
-    loop {
+    let mut attempts = Vec::with_capacity(MAX_ATTEMPTS);
+    for attempt in 1..=MAX_ATTEMPTS {
         match daemon_health_report(local_url) {
             Ok(report) if health_identity_matches(&report, daemon) => return Ok(()),
             Ok(report) => return Err(DaemonHealthProbeFailure::IdentityMismatch(Box::new(report))),
-            Err(message) => last_error = message,
+            Err(message) => attempts.push(format!("attempt {attempt}: {message}")),
         }
-        if std::time::Instant::now() >= deadline {
-            return Err(DaemonHealthProbeFailure::Unreachable(last_error));
+        if attempt < MAX_ATTEMPTS {
+            std::thread::sleep(RETRY_INTERVAL);
         }
-        std::thread::sleep(RETRY_INTERVAL);
     }
+    Err(DaemonHealthProbeFailure::Unreachable {
+        message: format!(
+            "remote daemon health endpoint failed after {MAX_ATTEMPTS} bounded requests: {}",
+            attempts
+                .last()
+                .expect("health probe records failed attempt")
+        ),
+        attempts,
+    })
 }
 
 fn active_job_recovery_guidance(daemon: &RemoteDaemon) -> String {
@@ -143,14 +200,21 @@ fn open_daemon_tunnel(
         ));
     };
 
-    let local_port = reserve_loopback_port().map_err(|err| {
-        failed_connect(
-            runner_id,
-            session_path.to_path_buf(),
-            RunnerFailureKind::TunnelFailure,
-            err.to_string(),
-        )
-    })?;
+    // A loopback runner already shares the controller network namespace, so
+    // its published endpoint is the reachable local endpoint. Avoid reserving
+    // an unrelated port when no SSH forwarding process is needed.
+    let local_port = if matches!(server.host.as_str(), "localhost" | "127.0.0.1" | "::1") {
+        remote_addr.port()
+    } else {
+        reserve_loopback_port().map_err(|err| {
+            failed_connect(
+                runner_id,
+                session_path.to_path_buf(),
+                RunnerFailureKind::TunnelFailure,
+                err.to_string(),
+            )
+        })?
+    };
     let tunnel = open_loopback_tunnel(
         server,
         local_port,

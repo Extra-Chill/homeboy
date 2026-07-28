@@ -35,7 +35,10 @@ pub(super) fn remote_homeboy_version(
     client: &SshClient,
     homeboy: &str,
 ) -> std::result::Result<String, String> {
-    parse_remote_homeboy_version(&client.execute(&remote_homeboy_version_command(homeboy)))
+    parse_remote_homeboy_version(&client.execute_with_timeout(
+        &remote_homeboy_version_command(homeboy),
+        REMOTE_DAEMON_STATUS_TIMEOUT,
+    ))
 }
 
 /// Read the remote Homeboy version under a hard wall-clock bound (#10418).
@@ -93,7 +96,10 @@ pub(super) fn remote_homeboy_identity(
     client: &SshClient,
     homeboy: &str,
 ) -> std::result::Result<RemoteHomeboyIdentity, String> {
-    let output = client.execute(&remote_homeboy_identity_command(homeboy));
+    let output = client.execute_with_timeout(
+        &remote_homeboy_identity_command(homeboy),
+        REMOTE_DAEMON_STATUS_TIMEOUT,
+    );
     if output.success {
         if let Some(identity) = parse_self_identity_output(&output.stdout) {
             return Ok(identity);
@@ -573,6 +579,7 @@ pub(super) fn ensure_remote_daemon(
     orphan_lease_id: Option<&str>,
     confirmed_no_pid_job_ids: &[uuid::Uuid],
     live_lease_expectation: Option<(&str, u32)>,
+    replacement_operation_id: Option<&str>,
 ) -> std::result::Result<RemoteDaemon, String> {
     let mut status = remote_daemon_status(client, homeboy)?;
     probe_remote_daemon_endpoint(client, &mut status);
@@ -611,15 +618,26 @@ pub(super) fn ensure_remote_daemon(
             daemon.inspected_freshness = Some(inspected_freshness);
             return Ok(daemon);
         }
-        RemoteDaemonConnectAction::Start => return remote_daemon_ensure_running(client, homeboy),
+        RemoteDaemonConnectAction::Start => {
+            negotiate_ensure_running_operation_id(client, homeboy, replacement_operation_id)?;
+            journal_ensure_running_replay(runner_id, homeboy, replacement_operation_id)?;
+            return remote_daemon_ensure_running(client, homeboy, replacement_operation_id);
+        }
         RemoteDaemonConnectAction::ReplaceIdleStale => {
+            // Prove idempotent replacement support before stopping A. Otherwise
+            // a controller response loss could leave no recoverable owner.
+            negotiate_ensure_running_operation_id(client, homeboy, replacement_operation_id)?;
+            // Persist B's idempotent receipt key before removing A. A retry then
+            // replays this command before inspecting or replacing any lease.
+            journal_ensure_running_replay(runner_id, homeboy, replacement_operation_id)?;
             let daemon = status.daemon.as_ref().expect("replacement requires daemon");
             let lease_id = daemon
                 .lease_id
                 .as_deref()
                 .expect("replacement requires lease");
             remote_daemon_force_stop(client, homeboy, lease_id)?;
-            let replacement = remote_daemon_ensure_running(client, homeboy)?;
+            let replacement =
+                remote_daemon_ensure_running(client, homeboy, replacement_operation_id)?;
             return verify_remote_daemon_replacement(
                 client,
                 homeboy,
@@ -628,6 +646,41 @@ pub(super) fn ensure_remote_daemon(
             );
         }
     }
+}
+
+fn journal_ensure_running_replay(
+    runner_id: &str,
+    homeboy: &str,
+    replacement_operation_id: Option<&str>,
+) -> std::result::Result<(), String> {
+    if replacement_operation_id.is_none() {
+        return Ok(());
+    }
+    crate::generation_store::record_replacement_operation_replay(
+        runner_id,
+        "ensure-running",
+        &remote_daemon_ensure_running_command(homeboy, replacement_operation_id),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn negotiate_ensure_running_operation_id(
+    client: &SshClient,
+    homeboy: &str,
+    replacement_operation_id: Option<&str>,
+) -> std::result::Result<(), String> {
+    let Some(_) = replacement_operation_id else {
+        return Ok(());
+    };
+    let command = format!("{} daemon ensure-running --help", shell::quote_arg(homeboy));
+    let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
+    if !output.success {
+        return Err("remote Homeboy must be upgraded: unable to negotiate daemon ensure-running --replacement-operation-id before mutation".to_string());
+    }
+    if !declared_long_options(&output.stdout).contains("--replacement-operation-id") {
+        return Err("remote Homeboy must be upgraded: daemon ensure-running does not support --replacement-operation-id".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1157,12 +1210,10 @@ pub(super) fn remote_daemon_active_jobs(data: &Value) -> usize {
 pub(super) fn remote_daemon_ensure_running(
     client: &SshClient,
     homeboy: &str,
+    replacement_operation_id: Option<&str>,
 ) -> std::result::Result<RemoteDaemon, String> {
-    let command = format!(
-        "{} daemon ensure-running --addr 127.0.0.1:0",
-        shell::quote_arg(homeboy)
-    );
-    let output = client.execute(&command);
+    let command = remote_daemon_ensure_running_command(homeboy, replacement_operation_id);
+    let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
     if !output.success {
         return Err(command_failure_message(
             "remote daemon ensure-running failed",
@@ -1202,6 +1253,19 @@ pub(super) fn remote_daemon_ensure_running(
         build_identity: None,
         inspected_freshness: None,
     })
+}
+
+pub(super) fn remote_daemon_ensure_running_command(
+    homeboy: &str,
+    replacement_operation_id: Option<&str>,
+) -> String {
+    format!(
+        "{} daemon ensure-running {} --addr 127.0.0.1:0",
+        shell::quote_arg(homeboy),
+        replacement_operation_id
+            .map(|id| format!("--replacement-operation-id {}", shell::quote_arg(id)))
+            .unwrap_or_default(),
+    )
 }
 
 /// Start an independent daemon store for a runner generation. Keep HOME intact:

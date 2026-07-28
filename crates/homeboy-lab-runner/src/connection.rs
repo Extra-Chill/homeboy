@@ -14,7 +14,7 @@ use homeboy_core::api_jobs::{
     RemoteRunnerJobResult, RunnerJobSource,
 };
 use homeboy_core::daemon::{
-    DaemonFreshnessReport, DaemonLeaselessRecoveryResult, DaemonStaleReasonCode,
+    DaemonFreshnessReport, DaemonLeaselessRecoveryResult, DaemonStaleReasonCode, DaemonStartResult,
     DaemonStateLossRecoveryResult,
 };
 use homeboy_core::engine::shell;
@@ -38,6 +38,7 @@ use homeboy_core::broker_auth;
 const REVERSE_RUNNER_HEARTBEAT_TTL: Duration = Duration::from_secs(90);
 const REMOTE_LEASELESS_RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const REMOTE_LEASELESS_RECOVERY_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+const REMOTE_RUNNER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 // A reader may wait for an in-flight reconnect, but never indefinitely behind a
 // controller-local tunnel that disappeared during a link flap.
 const DIRECT_TUNNEL_RECOVERY_WAIT: Duration = Duration::from_secs(30);
@@ -111,7 +112,7 @@ pub(crate) fn rotate_daemon_generation(
         format!("\"{state_dir}\""),
         shell::quote_arg(candidate_homeboy),
     );
-    let output = client.execute(&command);
+    let output = client.execute_with_timeout(&command, REMOTE_RUNNER_CONNECT_TIMEOUT);
     if !output.success {
         return Err(Error::validation_invalid_argument(
             "reconnect",
@@ -368,13 +369,13 @@ fn connect_with_orphan_adoption_and_live_lease(
         ));
     };
 
-    let ssh_probe = client.execute("true");
+    let ssh_probe = client.execute_with_timeout("true", REMOTE_RUNNER_CONNECT_TIMEOUT);
     if !ssh_probe.success {
         return Ok(failed_connect(
             runner_id,
             session_path,
             RunnerFailureKind::SshFailure,
-            command_failure_message("SSH connectivity check failed", &ssh_probe),
+            bounded_remote_failure_message("SSH connectivity check", &ssh_probe),
         ));
     }
 
@@ -409,69 +410,178 @@ fn connect_with_orphan_adoption_and_live_lease(
     let previous_session =
         super::generation_store::admission_session(runner_id, previous_session.as_ref())?
             .or(previous_session);
+    let pending_replacement = super::generation_store::pending_replacement(runner_id)?;
+    // This write precedes every remote mutation. A retry reuses the same key
+    // even when the SSH command completed but its response was lost.
+    let replacement_operation_id = super::generation_store::replacement_operation(runner_id)?;
 
     let mut leaseless_recovery = None;
     let mut state_loss_recovery = None;
-    if let Some(lease_id) = missing_lease_id {
-        let recorded_pid = recorded_pid.ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "recorded_pid",
-                "state-loss recovery requires a recorded PID",
-                None,
-                None,
-            )
-        })?;
-        let recorded_endpoint = recorded_endpoint.ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "recorded_endpoint",
-                "state-loss recovery requires a recorded endpoint",
-                None,
-                None,
-            )
-        })?;
-        let capability = format!(
-            "{} daemon recover-missing-lease-state --help",
-            shell::quote_arg(homeboy),
-        );
-        let capability =
-            client.execute_with_timeout(&capability, REMOTE_LEASELESS_RECOVERY_TIMEOUT);
-        if !capability.success {
-            return Ok(failed_connect(
+    // Recovery creates a new immutable generation. Its endpoint, not the
+    // previous session, is the only safe reconnect target for this attempt.
+    let mut recovery_daemon = pending_replacement
+        .as_ref()
+        .map(remote_daemon_from_session)
+        .transpose()?;
+    // A journaled command means the controller crossed the remote mutation
+    // boundary but did not durably receive B's coordinates. Replay it before
+    // inspecting A or selecting any ordinary replacement path.
+    if recovery_daemon.is_none() {
+        if let Some((kind, command)) =
+            super::generation_store::replacement_operation_replay(runner_id)?
+        {
+            let output = client.execute_with_timeout(&command, REMOTE_LEASELESS_RECOVERY_TIMEOUT);
+            if !output.success {
+                return Ok(failed_connect(
+                    runner_id,
+                    session_path,
+                    RunnerFailureKind::DaemonStartupFailure,
+                    format!(
+                        "replay pending replacement operation `{kind}`: {}",
+                        command_failure_message("remote operation failed", &output)
+                    ),
+                ));
+            }
+            let envelope = parse_envelope(&output.stdout).map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("parse pending replacement replay".to_string()),
+                )
+            })?;
+            if !envelope.success {
+                return Ok(failed_connect(
+                    runner_id,
+                    session_path,
+                    RunnerFailureKind::DaemonStartupFailure,
+                    format!("pending replacement operation `{kind}` returned an error envelope"),
+                ));
+            }
+            match kind.as_str() {
+                "state-loss" => {
+                    let recovery = decode_state_loss_recovery(envelope.data)?;
+                    recovery_daemon = Some(remote_daemon_from_recovery(
+                        &recovery.replacement,
+                        &configured_build_identity,
+                    ));
+                    state_loss_recovery = Some(recovery);
+                }
+                "leaseless" => {
+                    let recovery = decode_leaseless_recovery(envelope.data)?;
+                    recovery_daemon = Some(remote_daemon_from_recovery(
+                        &recovery.replacement,
+                        &configured_build_identity,
+                    ));
+                    leaseless_recovery = Some(recovery);
+                }
+                "ensure-running" => {
+                    let receipt: DaemonStartResult =
+                        serde_json::from_value(envelope.data.ok_or_else(|| {
+                            Error::internal_unexpected(
+                                "remote ensure-running replay returned no receipt",
+                            )
+                        })?)
+                        .map_err(|error| {
+                            Error::internal_json(
+                                error.to_string(),
+                                Some("parse pending ensure-running replay".to_string()),
+                            )
+                        })?;
+                    recovery_daemon = Some(remote_daemon_from_recovery(
+                        &receipt,
+                        &configured_build_identity,
+                    ));
+                }
+                _ => {
+                    return Ok(failed_connect(
+                        runner_id,
+                        session_path,
+                        RunnerFailureKind::DaemonStartupFailure,
+                        "pending replacement operation has an unsupported replay kind".to_string(),
+                    ))
+                }
+            }
+        }
+    }
+    if recovery_daemon.is_none() {
+        if let Some(lease_id) = missing_lease_id {
+            let recorded_pid = recorded_pid.ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "recorded_pid",
+                    "state-loss recovery requires a recorded PID",
+                    None,
+                    None,
+                )
+            })?;
+            let recorded_endpoint = recorded_endpoint.ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "recorded_endpoint",
+                    "state-loss recovery requires a recorded endpoint",
+                    None,
+                    None,
+                )
+            })?;
+            let capability = format!(
+                "{} daemon recover-missing-lease-state --help",
+                shell::quote_arg(homeboy),
+            );
+            let capability =
+                client.execute_with_timeout(&capability, REMOTE_LEASELESS_RECOVERY_TIMEOUT);
+            if !capability.success {
+                return Ok(failed_connect(
                 runner_id,
                 session_path,
                 RunnerFailureKind::DaemonStartupFailure,
                 "remote Homeboy does not support `daemon recover-missing-lease-state`; update the runner to a build with the canonical state-loss recovery contract before retrying".to_string(),
             ));
-        }
-        let command =
-            remote_state_loss_recovery_command(homeboy, lease_id, recorded_pid, recorded_endpoint);
-        let recovery = client.execute_with_timeout(&command, REMOTE_LEASELESS_RECOVERY_TIMEOUT);
-        if !recovery.success {
-            return Ok(failed_connect(
+            }
+            if !declared_long_options(&capability.stdout).contains("--replacement-operation-id") {
+                return Ok(failed_connect(runner_id, session_path, RunnerFailureKind::DaemonStartupFailure, "remote Homeboy must be upgraded: recover-missing-lease-state does not support --replacement-operation-id".to_string()));
+            }
+            let command = remote_state_loss_recovery_command(
+                homeboy,
+                lease_id,
+                recorded_pid,
+                recorded_endpoint,
+                &replacement_operation_id,
+            );
+            super::generation_store::record_replacement_operation_replay(
                 runner_id,
-                session_path,
-                RunnerFailureKind::DaemonStartupFailure,
-                state_loss_recovery_failure_message(&recovery),
+                "state-loss",
+                &command,
+            )?;
+            let recovery = client.execute_with_timeout(&command, REMOTE_LEASELESS_RECOVERY_TIMEOUT);
+            if !recovery.success {
+                return Ok(failed_connect(
+                    runner_id,
+                    session_path,
+                    RunnerFailureKind::DaemonStartupFailure,
+                    state_loss_recovery_failure_message(&recovery),
+                ));
+            }
+            let envelope = parse_envelope(&recovery.stdout).map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("parse state-loss daemon recovery".to_string()),
+                )
+            })?;
+            if !envelope.success {
+                return Ok(failed_connect(
+                    runner_id,
+                    session_path,
+                    RunnerFailureKind::DaemonStartupFailure,
+                    "remote exact state-loss recovery returned an error envelope".to_string(),
+                ));
+            }
+            let recovery = decode_state_loss_recovery(envelope.data)?;
+            recovery_daemon = Some(remote_daemon_from_recovery(
+                &recovery.replacement,
+                &configured_build_identity,
             ));
+            state_loss_recovery = Some(recovery);
         }
-        let envelope = parse_envelope(&recovery.stdout).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("parse state-loss daemon recovery".to_string()),
-            )
-        })?;
-        if !envelope.success {
-            return Ok(failed_connect(
-                runner_id,
-                session_path,
-                RunnerFailureKind::DaemonStartupFailure,
-                "remote exact state-loss recovery returned an error envelope".to_string(),
-            ));
-        }
-        state_loss_recovery = Some(decode_state_loss_recovery(envelope.data)?);
     }
     let mut recovery_evidence = None;
-    if reconcile_leaseless_orphans {
+    if recovery_daemon.is_none() && reconcile_leaseless_orphans {
         let recovery_addr = previous_session
             .as_ref()
             .and_then(|session| session.remote_daemon_address.as_deref())
@@ -485,10 +595,31 @@ fn connect_with_orphan_adoption_and_live_lease(
                 )
             },
             |contract| {
-                client.execute_with_timeout(
-                    &remote_leaseless_recovery_command(homeboy, recovery_addr, contract),
-                    REMOTE_LEASELESS_RECOVERY_TIMEOUT,
+                let command = remote_leaseless_recovery_command(
+                    homeboy,
+                    recovery_addr,
+                    contract,
+                    &replacement_operation_id,
+                );
+                // The negotiated command is persisted before its SSH mutation.
+                // A write failure aborts before the remote operation.
+                if super::generation_store::record_replacement_operation_replay(
+                    runner_id,
+                    "leaseless",
+                    &command,
                 )
+                .is_err()
+                {
+                    return homeboy_core::server::CommandOutput {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: "could not journal replacement operation".to_string(),
+                        exit_code: 1,
+                        timed_out: false,
+                        child_resource: None,
+                    };
+                }
+                client.execute_with_timeout(&command, REMOTE_LEASELESS_RECOVERY_TIMEOUT)
             },
         );
         let (contract, recovery) = match recovery {
@@ -526,6 +657,10 @@ fn connect_with_orphan_adoption_and_live_lease(
             ));
         }
         let recovery = decode_leaseless_recovery(envelope.data)?;
+        recovery_daemon = Some(remote_daemon_from_recovery(
+            &recovery.replacement,
+            &configured_build_identity,
+        ));
         recovery_evidence = Some(leaseless_recovery_evidence(
             contract,
             &configured_build_identity,
@@ -534,41 +669,42 @@ fn connect_with_orphan_adoption_and_live_lease(
         leaseless_recovery = Some(recovery);
     }
 
-    if let (Some(recovery), Some(evidence)) = (&leaseless_recovery, &recovery_evidence) {
-        let replacement = &recovery.replacement;
-        write_session(&RunnerSession {
-            runner_id: runner.id.clone(),
-            mode: RunnerTunnelMode::DirectSsh,
-            role: RunnerSessionRole::Controller,
-            server_id: Some(server_id.clone()),
-            controller_id: None,
-            broker_url: None,
-            remote_daemon_address: Some(replacement.address.clone()),
-            local_port: None,
-            local_url: None,
-            tunnel_pid: None,
-            remote_daemon_pid: Some(replacement.pid),
-            remote_daemon_lease_id: Some(replacement.lease_id.clone()),
-            homeboy_version: version.clone(),
-            homeboy_build_identity: Some(configured_build_identity.clone()),
-            connected_at: Utc::now().to_rfc3339(),
-            worker_identity: None,
-            worker_pid: None,
-            last_seen_at: None,
-            leaseless_recovery_evidence: serde_json::to_value(&evidence).ok(),
-        })?;
+    // The remote recovery response is the first point at which B's immutable
+    // coordinates exist. Journal them before opening a tunnel so interruption
+    // retries can authenticate B rather than touching the prior generation.
+    if pending_replacement.is_none() {
+        if let Some(daemon) = recovery_daemon.as_ref() {
+            super::generation_store::record_pending_replacement(
+                runner_id,
+                &pending_replacement_session(
+                    runner_id,
+                    &server_id,
+                    daemon,
+                    &version,
+                    &configured_build_identity,
+                    recovery_evidence.as_ref(),
+                )?,
+            )?;
+        }
     }
-
-    let daemon = ensure_remote_daemon(
-        &client,
-        homeboy,
-        runner_id,
-        previous_session.as_ref(),
-        &configured_build_identity,
-        orphan_lease_id,
-        confirmed_no_pid_job_ids,
-        live_lease_expectation,
-    );
+    let daemon = match recovery_daemon {
+        Some(daemon) => Ok(daemon),
+        // Normal reconnects must inspect the live daemon first: a reachable,
+        // compatible generation reattaches, while an idle stale generation
+        // follows ReplaceIdleStale instead of bypassing its fenced lifecycle.
+        None => ensure_remote_daemon(
+            &client,
+            homeboy,
+            runner_id,
+            previous_session.as_ref(),
+            &configured_build_identity,
+            orphan_lease_id,
+            confirmed_no_pid_job_ids,
+            live_lease_expectation,
+            Some(&replacement_operation_id),
+        )
+        .map(|daemon| daemon),
+    };
     let Ok(daemon) = daemon else {
         let (mut report, exit_code) = failed_connect_after_recovery(
             runner_id,
@@ -587,7 +723,7 @@ fn connect_with_orphan_adoption_and_live_lease(
         .build_identity
         .clone()
         .unwrap_or(configured_build_identity.clone());
-    let (local_port, tunnel_pid, local_url, daemon) = match connect_remote_daemon(
+    let connection = connect_remote_daemon(
         &server,
         &client,
         homeboy,
@@ -596,7 +732,8 @@ fn connect_with_orphan_adoption_and_live_lease(
         &expected_identity,
         runner_id,
         &session_path,
-    ) {
+    );
+    let (local_port, tunnel_pid, local_url, daemon) = match connection {
         Ok(connection) => connection,
         Err((mut report, exit_code)) => {
             attach_state_loss_recovery(&mut report, state_loss_recovery);
@@ -654,7 +791,7 @@ fn connect_with_orphan_adoption_and_live_lease(
     // drift still has authenticated promotion provenance to reconcile safely.
     if let Err(error) = promotion_lease
         .assert_generation()
-        .and_then(|_| super::generation_store::record_authenticated_admission(runner_id, &session))
+        .and_then(|_| super::generation_store::promote_pending_replacement(runner_id, &session))
         .and_then(|_| write_session(&session))
     {
         return Ok(session_write_failure_report(
@@ -689,9 +826,91 @@ fn connect_with_orphan_adoption_and_live_lease(
             leaseless_recovery_evidence: recovery_evidence,
             failure_kind: None,
             failure_message: None,
+            failure_evidence: None,
         },
         0,
     ))
+}
+
+fn remote_daemon_from_recovery(
+    replacement: &DaemonStartResult,
+    configured_build_identity: &str,
+) -> RemoteDaemon {
+    RemoteDaemon {
+        address: replacement.address.clone(),
+        pid: Some(replacement.pid),
+        lease_id: Some(replacement.lease_id.clone()),
+        version: None,
+        build_identity: Some(configured_build_identity.to_string()),
+        inspected_freshness: None,
+    }
+}
+
+fn remote_daemon_from_session(session: &RunnerSession) -> Result<RemoteDaemon> {
+    let address = session.remote_daemon_address.clone().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "pending_replacement",
+            "pending replacement has no address",
+            None,
+            None,
+        )
+    })?;
+    let lease_id = session.remote_daemon_lease_id.clone().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "pending_replacement",
+            "pending replacement has no lease",
+            None,
+            None,
+        )
+    })?;
+    let pid = session.remote_daemon_pid.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "pending_replacement",
+            "pending replacement has no PID",
+            None,
+            None,
+        )
+    })?;
+    Ok(RemoteDaemon {
+        address,
+        pid: Some(pid),
+        lease_id: Some(lease_id),
+        version: None,
+        build_identity: session.homeboy_build_identity.clone(),
+        inspected_freshness: None,
+    })
+}
+
+fn pending_replacement_session(
+    runner_id: &str,
+    server_id: &str,
+    daemon: &RemoteDaemon,
+    version: &str,
+    identity: &str,
+    recovery_evidence: Option<&RunnerLeaselessRecoveryEvidence>,
+) -> Result<RunnerSession> {
+    Ok(RunnerSession {
+        runner_id: runner_id.to_string(),
+        mode: RunnerTunnelMode::DirectSsh,
+        role: RunnerSessionRole::Controller,
+        server_id: Some(server_id.to_string()),
+        controller_id: None,
+        broker_url: None,
+        remote_daemon_address: Some(daemon.address.clone()),
+        local_port: None,
+        local_url: None,
+        tunnel_pid: None,
+        remote_daemon_pid: daemon.pid,
+        remote_daemon_lease_id: daemon.lease_id.clone(),
+        homeboy_version: version.to_string(),
+        homeboy_build_identity: Some(identity.to_string()),
+        connected_at: Utc::now().to_rfc3339(),
+        worker_identity: None,
+        worker_pid: None,
+        last_seen_at: None,
+        leaseless_recovery_evidence: recovery_evidence
+            .and_then(|evidence| serde_json::to_value(evidence).ok()),
+    })
 }
 
 fn verify_live_lease_adoption(
@@ -749,6 +968,7 @@ fn remote_leaseless_recovery_command(
     homeboy: &str,
     addr: &str,
     contract: RunnerLeaselessRecoveryContract,
+    replacement_operation_id: &str,
 ) -> String {
     let confirmations = match contract {
         RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner
@@ -756,8 +976,9 @@ fn remote_leaseless_recovery_command(
         | RunnerLeaselessRecoveryContract::ConfirmControlPlaneLost => "--confirm-no-daemon-owner",
     };
     format!(
-        "{} daemon reconcile-leaseless-orphans {confirmations} --addr {}",
+        "{} daemon reconcile-leaseless-orphans {confirmations} --replacement-operation-id {} --addr {}",
         shell::quote_arg(homeboy),
+        shell::quote_arg(replacement_operation_id),
         shell::quote_arg(addr),
     )
 }
@@ -799,6 +1020,10 @@ fn negotiate_leaseless_recovery_contract(
 
     let options = declared_long_options(&output.stdout);
     let confirm_no_daemon_owner = options.contains("--confirm-no-daemon-owner");
+    let replacement_operation_id = options.contains("--replacement-operation-id");
+    if !replacement_operation_id {
+        return Err("lease-less recovery capability probe did not advertise the canonical --replacement-operation-id contract; upgrade the remote Homeboy before mutation".to_string());
+    }
     if confirm_no_daemon_owner
         && !options.contains("--reconcile-leaseless-orphans")
         && !options.contains("--confirm-control-plane-lost")
@@ -922,6 +1147,20 @@ fn leaseless_recovery_failure_message(output: &homeboy_core::server::CommandOutp
     }
 }
 
+fn bounded_remote_failure_message(
+    operation: &str,
+    output: &homeboy_core::server::CommandOutput,
+) -> String {
+    if output.timed_out {
+        format!(
+            "{operation} timed out after {}s; retry the exact runner connect command",
+            REMOTE_RUNNER_CONNECT_TIMEOUT.as_secs()
+        )
+    } else {
+        command_failure_message(&format!("{operation} failed"), output)
+    }
+}
+
 fn state_loss_recovery_failure_message(output: &homeboy_core::server::CommandOutput) -> String {
     if output.timed_out {
         format!(
@@ -938,13 +1177,15 @@ fn remote_state_loss_recovery_command(
     lease_id: &str,
     recorded_pid: u32,
     recorded_endpoint: &str,
+    replacement_operation_id: &str,
 ) -> String {
     format!(
-        "{} daemon recover-missing-lease-state --lease-id {} --recorded-pid {} --recorded-endpoint {} --confirm-pid-dead --confirm-control-plane-lost --addr 127.0.0.1:0",
+        "{} daemon recover-missing-lease-state --lease-id {} --recorded-pid {} --recorded-endpoint {} --confirm-pid-dead --confirm-control-plane-lost --replacement-operation-id {} --addr 127.0.0.1:0",
         shell::quote_arg(homeboy),
         shell::quote_arg(lease_id),
         recorded_pid,
         shell::quote_arg(recorded_endpoint),
+        shell::quote_arg(replacement_operation_id),
     )
 }
 
@@ -1020,6 +1261,7 @@ pub fn connect_reverse(options: ReverseRunnerConnectOptions) -> Result<(RunnerCo
             leaseless_recovery_evidence: None,
             failure_kind: None,
             failure_message: None,
+            failure_evidence: None,
         },
         0,
     ))

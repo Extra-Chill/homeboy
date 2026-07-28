@@ -298,11 +298,12 @@ fn completed_leaseless_recovery_replays_the_exact_replacement_without_starting_a
             phase: super::StateLossRecoveryPhase::ReplacementStarted,
             replacement: Some(replacement.clone()),
             replacement_startup_token: Some("fake-startup-token".to_string()),
+            replacement_operation_id: None,
         };
         let path = crate::paths::daemon_leaseless_recovery_receipt_file().expect("receipt path");
         super::write_leaseless_recovery_receipt(&path, &receipt).expect("write receipt");
 
-        let replay = super::replay_leaseless_recovery(&status, "127.0.0.1:0")
+        let replay = super::replay_leaseless_recovery(&status, "127.0.0.1:0", None)
             .expect("replay lookup")
             .expect("exact completed recovery replays");
 
@@ -1721,6 +1722,7 @@ fn state_loss_receipt_survives_start_failure_and_replay_starts_once() {
             phase: super::StateLossRecoveryPhase::Reconciled,
             replacement: None,
             replacement_startup_token: None,
+            replacement_operation_id: None,
         };
         super::write_state_loss_receipt(&receipt_path, &receipt).expect("persist receipt");
         let error = super::complete_state_loss_replacement(&mut receipt, &receipt_path, || {
@@ -1761,9 +1763,12 @@ fn state_loss_receipt_refuses_mismatched_replay_inputs() {
         phase: super::StateLossRecoveryPhase::Reconciled,
         replacement: None,
         replacement_startup_token: None,
+        replacement_operation_id: None,
     };
     let endpoint = "127.0.0.1:7422".parse().expect("endpoint");
-    assert!(super::validate_state_loss_receipt(&receipt, "lease-old", 4242, endpoint).is_err());
+    assert!(
+        super::validate_state_loss_receipt(&receipt, "lease-old", 4242, endpoint, None).is_err()
+    );
 }
 
 #[test]
@@ -1786,6 +1791,7 @@ fn state_loss_replay_allows_zero_active_jobs_only_with_a_matching_receipt() {
         phase: super::StateLossRecoveryPhase::Reconciled,
         replacement: None,
         replacement_startup_token: None,
+        replacement_operation_id: None,
     };
     assert!(super::validate_state_loss_preconditions(
         "lease-old",
@@ -1795,7 +1801,9 @@ fn state_loss_replay_allows_zero_active_jobs_only_with_a_matching_receipt() {
         Some(&receipt),
     )
     .is_ok());
-    assert!(super::validate_state_loss_receipt(&receipt, "lease-old", 4242, endpoint).is_ok());
+    assert!(
+        super::validate_state_loss_receipt(&receipt, "lease-old", 4242, endpoint, None).is_ok()
+    );
 }
 
 #[test]
@@ -1813,6 +1821,7 @@ fn replacement_starting_replay_adopts_only_the_persisted_startup_token() {
             phase: super::StateLossRecoveryPhase::Reconciled,
             replacement: None,
             replacement_startup_token: None,
+            replacement_operation_id: None,
         };
         let error = super::start_state_loss_replacement_with(&mut receipt, &receipt_path, |_| {
             Err(crate::Error::internal_unexpected(

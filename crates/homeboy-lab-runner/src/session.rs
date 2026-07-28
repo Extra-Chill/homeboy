@@ -420,6 +420,27 @@ pub enum RunnerFailureKind {
     TunnelFailure,
 }
 
+/// Bounded evidence retained when a direct runner connect cannot complete.
+#[derive(Debug, Clone, Serialize)]
+pub struct RunnerConnectFailureEvidence {
+    pub recovery_command: String,
+    pub classification: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_start_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub known_remote_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub known_remote_lease_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tunnel_state: Option<String>,
+    pub health_attempt_count: usize,
+    pub health_attempts: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RunnerConnectReport {
     pub runner_id: String,
@@ -461,6 +482,8 @@ pub struct RunnerConnectReport {
     pub failure_kind: Option<RunnerFailureKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_evidence: Option<RunnerConnectFailureEvidence>,
 }
 
 /// A read-only indexed snapshot of one runner's persisted active jobs, built

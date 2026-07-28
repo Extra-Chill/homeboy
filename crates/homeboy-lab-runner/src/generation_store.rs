@@ -1,4 +1,5 @@
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -21,6 +22,81 @@ fn path(runner_id: &str) -> Result<PathBuf> {
     Ok(paths::runner_sessions_dir()?
         .join(runner_id)
         .join("generations.json"))
+}
+
+fn pending_replacement_path(runner_id: &str) -> Result<PathBuf> {
+    Ok(paths::runner_sessions_dir()?
+        .join(runner_id)
+        .join("pending-replacement.json"))
+}
+
+fn replacement_operation_path(runner_id: &str) -> Result<PathBuf> {
+    Ok(paths::runner_sessions_dir()?
+        .join(runner_id)
+        .join("replacement-operation.json"))
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ReplacementOperation {
+    runner_id: String,
+    operation_id: String,
+    #[serde(default)]
+    replay_command: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+fn write_durable_json<T: serde::Serialize>(path: &std::path::Path, value: &T) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::internal_unexpected("journal has no parent"))?;
+    std::fs::create_dir_all(parent).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create {}", parent.display())),
+        )
+    })?;
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("journal"),
+        uuid::Uuid::new_v4()
+    ));
+    let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize replacement journal".to_string()),
+        )
+    })?;
+    let mut file = File::create(&temporary).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create {}", temporary.display())),
+        )
+    })?;
+    file.write_all(&bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("write {}", temporary.display())),
+            )
+        })?;
+    std::fs::rename(&temporary, path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("rename {}", path.display())),
+        )
+    })?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("sync {}", parent.display())),
+            )
+        })
 }
 
 /// Serialize read-modify-write registry updates independently for each runner.
@@ -302,6 +378,107 @@ pub(crate) fn admission_session(
             .get(&generations.admission_owner)
             .map(|generation| generation.endpoint.clone())
     }))
+}
+
+/// A recovery-created daemon is durable before a controller can authenticate
+/// its tunnel. Retain its exact coordinates so an interruption cannot fall
+/// back to the superseded generation or start a competing daemon.
+pub(crate) fn pending_replacement(runner_id: &str) -> Result<Option<RunnerSession>> {
+    let path = pending_replacement_path(runner_id)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
+    })?;
+    let session: RunnerSession = serde_json::from_str(&raw)
+        .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
+    if session.runner_id != runner_id {
+        return Err(Error::config_invalid_value(
+            "pending_replacement.runner_id",
+            Some(session.runner_id),
+            format!("pending replacement must match runner `{runner_id}`"),
+        ));
+    }
+    Ok(Some(session))
+}
+
+/// Persist the controller id before invoking a remote lifecycle mutation. The
+/// daemon uses this exact id as its durable startup token/receipt key.
+pub(crate) fn replacement_operation(runner_id: &str) -> Result<String> {
+    with_registry_lock(runner_id, || {
+        let path = replacement_operation_path(runner_id)?;
+        if path.exists() {
+            let operation: ReplacementOperation =
+                serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
+                    Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
+                })?)
+                .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
+            if operation.runner_id != runner_id {
+                return Err(Error::config_invalid_value(
+                    "replacement_operation.runner_id",
+                    Some(operation.runner_id),
+                    "replacement operation must match its runner",
+                ));
+            }
+            return Ok(operation.operation_id);
+        }
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        write_durable_json(
+            &path,
+            &ReplacementOperation {
+                runner_id: runner_id.to_string(),
+                operation_id: operation_id.clone(),
+                replay_command: None,
+                kind: None,
+            },
+        )?;
+        Ok(operation_id)
+    })
+}
+
+pub(crate) fn replacement_operation_replay(runner_id: &str) -> Result<Option<(String, String)>> {
+    let path = replacement_operation_path(runner_id)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let operation: ReplacementOperation =
+        serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
+        })?)
+        .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
+    if operation.runner_id != runner_id {
+        return Err(Error::config_invalid_value(
+            "replacement_operation.runner_id",
+            Some(operation.runner_id),
+            "replacement operation must match its runner",
+        ));
+    }
+    Ok(operation.kind.zip(operation.replay_command))
+}
+
+pub(crate) fn record_replacement_operation_replay(
+    runner_id: &str,
+    kind: &str,
+    command: &str,
+) -> Result<()> {
+    with_registry_lock(runner_id, || {
+        let path = replacement_operation_path(runner_id)?;
+        let mut operation: ReplacementOperation =
+            serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
+            })?)
+            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
+        operation.replay_command = Some(command.to_string());
+        operation.kind = Some(kind.to_string());
+        write_durable_json(&path, &operation)
+    })
+}
+
+pub(crate) fn record_pending_replacement(runner_id: &str, session: &RunnerSession) -> Result<()> {
+    with_registry_lock(runner_id, || {
+        write_durable_json(&pending_replacement_path(runner_id)?, session)
+    })
 }
 
 /// Promote the direct session that status has just health-checked. The
@@ -813,20 +990,72 @@ pub(crate) fn record_authenticated_admission(
         Error::internal_unexpected("authenticated daemon session has no lease ID")
     })?;
     with_registry_lock(runner_id, || {
-        let mut generations = read_locked(runner_id, None)?
-            .unwrap_or_else(|| RollingGenerations::new(generation, session.clone()));
-        #[cfg(test)]
-        pause_authenticated_admission_after_read();
-        if let Some(entry) = generations.generations.get_mut(generation) {
-            // A reattached daemon gets a fresh local tunnel, so update the endpoint
-            // without disturbing jobs already pinned to this lease.
-            entry.endpoint = session.clone();
-        } else {
-            generations.begin(generation, session.clone());
-        }
-        generations.activate(generation);
-        write(runner_id, &generations)
+        record_authenticated_admission_locked(runner_id, session, generation)
     })
+}
+
+/// Promote B only after `connect_remote_daemon` has authenticated its lease,
+/// PID, version, and build identity. Keeping the pending record until this
+/// locked transaction commits makes every interruption retry B first.
+pub(crate) fn promote_pending_replacement(runner_id: &str, session: &RunnerSession) -> Result<()> {
+    let generation = session.remote_daemon_lease_id.as_deref().ok_or_else(|| {
+        Error::internal_unexpected("authenticated daemon session has no lease ID")
+    })?;
+    with_registry_lock(runner_id, || {
+        if let Some(pending) = pending_replacement(runner_id)? {
+            if pending.remote_daemon_lease_id.as_deref() != Some(generation)
+                || pending.remote_daemon_pid != session.remote_daemon_pid
+                || pending.remote_daemon_address != session.remote_daemon_address
+            {
+                return Err(Error::validation_invalid_argument(
+                    "pending_replacement",
+                    "authenticated daemon does not match the pending replacement; refusing authority promotion",
+                    Some(runner_id.to_string()),
+                    None,
+                ));
+            }
+        }
+        record_authenticated_admission_locked(runner_id, session, generation)?;
+        let path = pending_replacement_path(runner_id)?;
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("remove {}", path.display())),
+                )
+            })?;
+        }
+        let operation_path = replacement_operation_path(runner_id)?;
+        if operation_path.exists() {
+            std::fs::remove_file(&operation_path).map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("remove {}", operation_path.display())),
+                )
+            })?;
+        }
+        Ok(())
+    })
+}
+
+fn record_authenticated_admission_locked(
+    runner_id: &str,
+    session: &RunnerSession,
+    generation: &str,
+) -> Result<()> {
+    let mut generations = read_locked(runner_id, None)?
+        .unwrap_or_else(|| RollingGenerations::new(generation, session.clone()));
+    #[cfg(test)]
+    pause_authenticated_admission_after_read();
+    if let Some(entry) = generations.generations.get_mut(generation) {
+        // A reattached daemon gets a fresh local tunnel, so update the endpoint
+        // without disturbing jobs already pinned to this lease.
+        entry.endpoint = session.clone();
+    } else {
+        generations.begin(generation, session.clone());
+    }
+    generations.activate(generation);
+    write(runner_id, &generations)
 }
 
 pub(crate) fn record_job_run(
