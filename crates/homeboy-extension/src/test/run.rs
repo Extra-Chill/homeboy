@@ -582,6 +582,12 @@ fn run_main_test_workflow_inner(
     } else {
         None
     };
+    let mut extension_phase_timings = output.extension_phase_timings;
+    merge_reported_test_artifact_locators(
+        &mut extension_phase_timings,
+        &output.stdout,
+        &output.stderr,
+    );
 
     // When tests failed with no parseable counts, surface a dedicated hint so
     // the user understands `raw_output` is the only signal about what went
@@ -617,7 +623,7 @@ fn run_main_test_workflow_inner(
         test_scope: changed_scope,
         summary,
         raw_output,
-        extension_phase_timings: output.extension_phase_timings,
+        extension_phase_timings,
     })
 }
 
@@ -1120,11 +1126,81 @@ pub fn run_self_check_test_workflow_with_progress(
     })
 }
 
+fn merge_reported_test_artifact_locators(
+    timings: &mut Vec<ExtensionPhaseTiming>,
+    stdout: &str,
+    stderr: &str,
+) {
+    const MAX_LOCATORS: usize = 32;
+    let locator = regex::Regex::new(r"artifact://files/[A-Za-z0-9._/-]+")
+        .expect("artifact locator regex is valid");
+    let mut reported = std::collections::BTreeSet::new();
+    for value in [stdout, stderr] {
+        for candidate in locator.find_iter(value).map(|matched| matched.as_str()) {
+            let relative = candidate.trim_start_matches("artifact://files/");
+            let path = std::path::Path::new(relative);
+            if !path.as_os_str().is_empty()
+                && !path.is_absolute()
+                && path
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_)))
+            {
+                reported.insert(candidate.to_string());
+            }
+        }
+    }
+    if reported.is_empty() {
+        return;
+    }
+    let existing = timings
+        .iter()
+        .flat_map(|timing| timing.artifacts.iter())
+        .filter_map(|artifact| artifact.get("ref").and_then(serde_json::Value::as_str))
+        .collect::<std::collections::BTreeSet<_>>();
+    let artifacts = reported
+        .into_iter()
+        .filter(|candidate| !existing.contains(candidate.as_str()))
+        .take(MAX_LOCATORS)
+        .map(|reference| serde_json::json!({ "ref": reference }))
+        .collect::<Vec<_>>();
+    if !artifacts.is_empty() {
+        timings.push(ExtensionPhaseTiming {
+            name: "provider-reported-test-artifacts".to_string(),
+            duration_ms: 0,
+            status: Some("reported".to_string()),
+            message: None,
+            artifacts,
+            metadata: Default::default(),
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test::TestFailure;
     use homeboy_core::component::ComponentScriptsConfig;
+
+    #[test]
+    fn reported_artifact_locators_are_normalized_and_deduplicated() {
+        let mut timings = Vec::new();
+        merge_reported_test_artifact_locators(
+            &mut timings,
+            "artifact://files/test-results.json artifact://files/../escape.log",
+            "artifact://files/phpunit-output.log artifact://files/test-results.json",
+        );
+
+        assert_eq!(timings.len(), 1);
+        assert_eq!(timings[0].artifacts.len(), 2);
+        assert_eq!(
+            timings[0].artifacts[0]["ref"],
+            "artifact://files/phpunit-output.log"
+        );
+        assert_eq!(
+            timings[0].artifacts[1]["ref"],
+            "artifact://files/test-results.json"
+        );
+    }
     use homeboy_core::test_support::{exec_capable_tempdir, with_isolated_home};
 
     fn run_git(dir: &Path, args: &[&str]) -> String {

@@ -229,8 +229,16 @@ fn stage_observation<T: serde::Serialize + ReviewArtifactFindings>(
         "summary": command.summary,
         "hint": stage.hint,
         "skipped_reason": stage.skipped_reason,
-        "run_id": null,
+        "run_id": stage.output.as_ref().and_then(stage_run_id),
     })
+}
+
+fn stage_run_id<T: serde::Serialize>(output: &T) -> Option<String> {
+    serde_json::to_value(output)
+        .ok()?
+        .pointer("/_homeboy_actionable/run/id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }
 
 #[cfg(test)]

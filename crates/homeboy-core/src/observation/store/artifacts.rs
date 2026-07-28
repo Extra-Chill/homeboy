@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{params, OptionalExtension};
@@ -418,6 +419,57 @@ impl ObservationStore {
         metadata_json: serde_json::Value,
     ) -> Result<ArtifactRecord> {
         self.record_artifact_with_id_and_metadata(run_id, kind, path, None, metadata_json)
+    }
+
+    /// Persist bytes from an already-open regular file without reopening its
+    /// source pathname. The handle is copied to a controller-owned temporary
+    /// file first, then the normal immutable artifact publication path owns it.
+    pub fn record_artifact_from_open_file_with_metadata(
+        &self,
+        run_id: &str,
+        kind: &str,
+        source: &mut fs::File,
+        metadata_json: serde_json::Value,
+    ) -> Result<ArtifactRecord> {
+        let metadata = source.metadata().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("inspect opened artifact file".to_string()),
+            )
+        })?;
+        if !metadata.is_file() {
+            return Err(Error::validation_invalid_argument(
+                "artifact",
+                "opened artifact source is not a regular file",
+                None,
+                None,
+            ));
+        }
+        let mut snapshot = tempfile::NamedTempFile::new().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("create artifact snapshot".to_string()),
+            )
+        })?;
+        std::io::copy(source, snapshot.as_file_mut()).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("copy opened artifact snapshot".to_string()),
+            )
+        })?;
+        snapshot.as_file_mut().flush().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("flush artifact snapshot".to_string()),
+            )
+        })?;
+        snapshot.as_file().sync_all().map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("sync artifact snapshot".to_string()),
+            )
+        })?;
+        self.record_artifact_with_metadata(run_id, kind, snapshot.path(), metadata_json)
     }
 
     /// Record verified file bytes under a caller-provided stable logical id.
@@ -1600,6 +1652,40 @@ mod tests {
                     .file_name()
                     .to_string_lossy()
                     .starts_with(".artifact-")));
+        });
+    }
+
+    #[test]
+    fn opened_artifact_snapshot_uses_bytes_from_the_open_descriptor() {
+        with_isolated_home(|home| {
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(NewRunRecord::builder("test").cwd_path(home.path()).build())
+                .expect("run");
+            let source = home.path().join("test-results.json");
+            let replacement = home.path().join("replacement.json");
+            fs::write(&source, b"original bytes").expect("write original source");
+            let mut opened = fs::File::open(&source).expect("open original source");
+            fs::write(&replacement, b"replacement bytes").expect("write replacement source");
+            fs::rename(&replacement, &source).expect("replace source pathname");
+
+            let artifact = store
+                .record_artifact_from_open_file_with_metadata(
+                    &run.id,
+                    "test_artifact",
+                    &mut opened,
+                    serde_json::json!({ "locator": "artifact://files/test-results.json" }),
+                )
+                .expect("persist opened source");
+
+            assert_eq!(
+                fs::read(&source).expect("replacement bytes"),
+                b"replacement bytes"
+            );
+            assert_eq!(
+                fs::read(&artifact.path).expect("persisted bytes"),
+                b"original bytes"
+            );
         });
     }
 
