@@ -209,6 +209,9 @@ pub struct RetryArgs {
     pub new_run_id: Option<String>,
     #[arg(long)]
     pub run: bool,
+    /// Permit a new retry after every prior retry in this lineage is terminal.
+    #[arg(long, visible_alias = "allow-duplicate")]
+    pub force: bool,
 }
 #[derive(Args, Debug)]
 pub struct CancelArgs {

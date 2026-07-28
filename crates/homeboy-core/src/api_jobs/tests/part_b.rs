@@ -906,17 +906,18 @@ fn terminal_job_retention_compacts_existing_store_without_losing_active_recovery
             job.id
         })
         .collect::<Vec<_>>();
-    {
-        let mut inner = store.inner.lock().expect("job store mutex poisoned");
-        for (index, job_id) in terminal.iter().enumerate() {
-            let stored = inner.jobs.get_mut(job_id).expect("terminal job exists");
-            let timestamp = (index as u64 + 1) * 100;
-            stored.job.created_at_ms = timestamp;
-            stored.job.updated_at_ms = timestamp;
-            stored.job.finished_at_ms = Some(timestamp);
-        }
-    }
-    store.persist().expect("seed store persists");
+    store
+        .durable_transaction(|inner| {
+            for (index, job_id) in terminal.iter().enumerate() {
+                let stored = inner.jobs.get_mut(job_id).expect("terminal job exists");
+                let timestamp = (index as u64 + 1) * 100;
+                stored.job.created_at_ms = timestamp;
+                stored.job.updated_at_ms = timestamp;
+                stored.job.finished_at_ms = Some(timestamp);
+            }
+            Ok(())
+        })
+        .expect("seed store persists");
 
     let compacted = JobStore::open_without_reconciliation_with_retention(&path, 3, 2)
         .expect("existing store compacts on open");
@@ -1229,6 +1230,55 @@ fn remote_runner_submission_key_replays_one_redacted_durable_job() {
 }
 
 #[test]
+fn remote_runner_submit_and_claim_roll_back_after_a_durable_write_failure() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open_without_reconciliation(&path).expect("broker store");
+    let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+    request.metadata = Some(json!({ "submission_key": "write-failure" }));
+
+    store.fail_next_durable_writes(1);
+    assert!(store.submit_remote_runner_job(request.clone()).is_err());
+    assert!(store.list().is_empty(), "failed submit rolls back memory");
+    assert!(
+        JobStore::open_without_reconciliation(&path)
+            .expect("reopen")
+            .list()
+            .is_empty(),
+        "failed submit rolls back disk"
+    );
+
+    let job = store
+        .submit_remote_runner_job(request)
+        .expect("retry submits");
+    store.fail_next_durable_writes(1);
+    assert!(store
+        .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
+        .is_err());
+    assert_eq!(
+        store.get(job.id).expect("memory job").status,
+        JobStatus::Queued
+    );
+    assert_eq!(
+        JobStore::open_without_reconciliation(&path)
+            .expect("reopen")
+            .get(job.id)
+            .expect("disk job")
+            .status,
+        JobStatus::Queued
+    );
+    assert_eq!(
+        store
+            .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, None)
+            .expect("claim retry")
+            .expect("claim")
+            .job
+            .id,
+        job.id
+    );
+}
+
+#[test]
 fn remote_runner_submission_key_survives_restart_and_rejects_conflicts() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("jobs.json");
@@ -1284,6 +1334,136 @@ fn remote_runner_submission_key_concurrent_replay_creates_one_job() {
         .expect("second submit");
     assert_eq!(first.id, second.id);
     assert_eq!(store.list().len(), 1);
+}
+
+#[test]
+fn remote_runner_submission_key_concurrent_independent_stores_create_one_job() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("jobs.json");
+    let first_store = JobStore::open_without_reconciliation(&path).expect("first broker store");
+    let second_store = JobStore::open_without_reconciliation(&path).expect("second broker store");
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+    request.metadata = Some(json!({ "submission_key": "agent-task:v1:independent-brokers" }));
+
+    let first_barrier = std::sync::Arc::clone(&barrier);
+    let first_request = request.clone();
+    let first = std::thread::spawn(move || {
+        first_barrier.wait();
+        first_store.submit_remote_runner_job(first_request)
+    });
+    let second = std::thread::spawn(move || {
+        barrier.wait();
+        second_store.submit_remote_runner_job(request)
+    });
+
+    let first = first.join().expect("first submit").expect("first job");
+    let second = second.join().expect("second submit").expect("second job");
+    assert_eq!(first.id, second.id);
+
+    let recovered = JobStore::open_without_reconciliation(&path).expect("reopen broker store");
+    assert_eq!(recovered.list().len(), 1);
+    assert!(recovered
+        .events(first.id)
+        .expect("events")
+        .iter()
+        .any(|event| { event.message.as_deref() == Some("remote runner submission replayed") }));
+}
+
+#[test]
+fn remote_runner_submission_retry_preserves_concurrent_claim() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("jobs.json");
+    let submitter = JobStore::open_without_reconciliation(&path).expect("submitter store");
+    let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+    request.metadata = Some(json!({ "submission_key": "agent-task:v1:claim-interleaving" }));
+    let accepted = submitter
+        .submit_remote_runner_job(request.clone())
+        .expect("initial submission");
+    let claimer = JobStore::open_without_reconciliation(&path).expect("claimer store");
+    let retry = JobStore::open_without_reconciliation(&path).expect("retry store");
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+    let claim_barrier = std::sync::Arc::clone(&barrier);
+    let claim = std::thread::spawn(move || {
+        claim_barrier.wait();
+        claimer.claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, Some(1))
+    });
+    let replay = std::thread::spawn(move || {
+        barrier.wait();
+        retry.submit_remote_runner_job(request)
+    });
+
+    let claimed = claim.join().expect("claim thread").expect("claim result");
+    let replayed = replay
+        .join()
+        .expect("replay thread")
+        .expect("replay result");
+    assert_eq!(replayed.id, accepted.id);
+    assert_eq!(claimed.expect("job claimed").job.id, accepted.id);
+
+    let recovered = JobStore::open_without_reconciliation(&path).expect("reopen broker store");
+    assert_eq!(recovered.list().len(), 1);
+    assert_eq!(
+        recovered.get(accepted.id).expect("claimed job").status,
+        JobStatus::Running
+    );
+}
+
+#[test]
+fn remote_runner_submission_terminal_replay_returns_original_projection_without_progress() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("jobs.json");
+    let store = JobStore::open_without_reconciliation(&path).expect("broker store");
+    let mut request = remote_runner_request("homeboy-lab", Some("extrachill"));
+    request.metadata = Some(json!({ "submission_key": "agent-task:v1:terminal-lost-response" }));
+    let accepted = store
+        .submit_remote_runner_job(request.clone())
+        .expect("initial submission");
+    let claim = store
+        .claim_remote_runner_job("homeboy-lab", Some("extrachill"), 30_000, Some(1))
+        .expect("claim")
+        .expect("job claimed");
+    let claim_id = claim.job.claim_id.expect("claim id");
+    let terminal = store
+        .finish_remote_runner_job(
+            accepted.id,
+            "homeboy-lab",
+            &claim_id,
+            RemoteRunnerJobResult {
+                exit_code: 0,
+                stdout: None,
+                stderr: None,
+                patch: None,
+                mutation_artifacts: None,
+                data: None,
+                observation_run_ids: Vec::new(),
+                observation_run_details: Vec::new(),
+                observation_run_details_compatibility_degraded: false,
+                artifacts: Vec::new(),
+                artifact_refs: Vec::new(),
+                metrics: None,
+                capture: None,
+            },
+        )
+        .expect("terminal result");
+    let events_before = store.events(accepted.id).expect("terminal events");
+
+    let replay = JobStore::open_without_reconciliation(&path)
+        .expect("restarted broker")
+        .submit_remote_runner_job(request)
+        .expect("lost-response replay");
+    let events_after = JobStore::open_without_reconciliation(&path)
+        .expect("reopen broker")
+        .events(accepted.id)
+        .expect("terminal events after replay");
+
+    assert_eq!(replay.id, terminal.id);
+    assert_eq!(replay.status, JobStatus::Succeeded);
+    assert_eq!(events_after.len(), events_before.len());
+    assert!(!events_after
+        .iter()
+        .any(|event| event.message.as_deref() == Some("remote runner submission replayed")));
 }
 
 #[test]
@@ -1345,17 +1525,13 @@ fn compacted_submission_key_expires_without_creating_a_duplicate() {
             .submit_remote_runner_job(request.clone())
             .expect("submit");
         store
-            .inner
-            .lock()
-            .expect("store")
-            .jobs
-            .get_mut(&job.id)
-            .expect("job")
-            .job
-            .status = JobStatus::Succeeded;
+            .durable_transaction(|inner| {
+                inner.jobs.get_mut(&job.id).expect("job").job.status = JobStatus::Succeeded;
+                Ok(())
+            })
+            .expect("terminalize and compact job");
         requests.push((key.to_string(), request));
     }
-    store.persist().expect("compact terminal jobs");
     let expired_key = "agent-task:v1:compact-one".to_string();
     assert!(super::super::persistence::tombstone_path(&path).exists());
     assert!(
@@ -1396,15 +1572,11 @@ fn replay_tombstones_keep_terminal_payload_memory_bounded_across_restart() {
             .submit_remote_runner_job(request.clone())
             .expect("submit");
         store
-            .inner
-            .lock()
-            .expect("store")
-            .jobs
-            .get_mut(&job.id)
-            .expect("job")
-            .job
-            .status = JobStatus::Succeeded;
-        store.persist().expect("compact terminal job");
+            .durable_transaction(|inner| {
+                inner.jobs.get_mut(&job.id).expect("job").job.status = JobStatus::Succeeded;
+                Ok(())
+            })
+            .expect("terminalize and compact job");
         if index == 0 {
             first = Some(request);
         }
@@ -1457,7 +1629,9 @@ fn corrupt_replay_tombstone_journal_fails_closed() {
         .expect("job")
         .job
         .status = JobStatus::Succeeded;
-    store.persist().expect("persist first");
+    store
+        .durable_transaction(|_| Ok(()))
+        .expect("persist first");
     let mut second = remote_runner_request("homeboy-lab", Some("extrachill"));
     second.metadata = Some(json!({ "submission_key": "agent-task:v1:corrupt-two" }));
     let second_job = store
@@ -1472,7 +1646,9 @@ fn corrupt_replay_tombstone_journal_fails_closed() {
         .expect("job")
         .job
         .status = JobStatus::Succeeded;
-    store.persist().expect("compact first");
+    store
+        .durable_transaction(|_| Ok(()))
+        .expect("compact first");
     fs::write(
         super::super::persistence::tombstone_path(&path),
         "not json\n",

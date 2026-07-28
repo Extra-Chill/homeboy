@@ -443,7 +443,14 @@ where
         }
         // A runner re-submitting a retry must not erase the predecessor identity
         // that makes the reservation discoverable through the indexed lookup.
-        for key in ["retry_of", "retry_requested_at", "retry_origin"] {
+        for key in [
+            "retry_of",
+            "retried_from",
+            "retry_root",
+            "retries",
+            "retry_requested_at",
+            "retry_origin",
+        ] {
             if let Some(value) = existing.metadata.get(key) {
                 record.metadata[key] = value.clone();
             }
@@ -1612,7 +1619,77 @@ pub fn mark_resuming(run_id: &str) -> Result<AgentTaskRunRecord> {
 }
 
 pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRunRecord> {
+    retry_with_force_inner(run_id, requested_run_id, false, false)
+}
+
+pub(crate) fn record_metadata_value(run_id: &str, key: &str, value: Value) -> Result<()> {
+    store::mutate_record(&sanitize_run_id(run_id), |record| {
+        record
+            .ensure_metadata_object()
+            .insert(key.to_string(), value.clone());
+        record.updated_at = Some(now_timestamp());
+        true
+    })
+    .map(|_| ())
+}
+
+/// Reserve one successor for the complete retry lineage before admitting it.
+/// The advisory lock spans processes, so a lost CLI response can be retried
+/// without creating a second queued controller run.
+pub fn retry_with_force(
+    run_id: &str,
+    requested_run_id: Option<&str>,
+    force: bool,
+) -> Result<AgentTaskRunRecord> {
+    retry_with_force_inner(run_id, requested_run_id, force, true)
+}
+
+fn retry_with_force_inner(
+    run_id: &str,
+    requested_run_id: Option<&str>,
+    force: bool,
+    enforce_lineage_reservation: bool,
+) -> Result<AgentTaskRunRecord> {
     let source = store::read_record(&resolve_run_id(run_id)?)?;
+    let root_run_id = retry_root_run_id(&source)?;
+    let _reservation = enforce_lineage_reservation
+        .then(|| RetryLineageLock::lock(&root_run_id))
+        .transpose()?;
+    let mut requested_run_id = requested_run_id;
+    if enforce_lineage_reservation {
+        let records = store::read_records()?;
+        let mut successors = records
+            .into_iter()
+            .filter(|record| record.run_id != root_run_id)
+            .filter(|record| retry_root_run_id(record).ok().as_deref() == Some(&root_run_id))
+            .collect::<Vec<_>>();
+        successors.sort_by(|left, right| left.run_id.cmp(&right.run_id));
+        if let Some(active) = successors.iter().find(|record| !record.state.is_terminal()) {
+            if !force {
+                // A caller can lose the response after the first durable write.
+                // Replaying its exact requested successor is an idempotent read,
+                // not an attempt to allocate beside the active reservation.
+                if requested_run_id == Some(active.run_id.as_str()) {
+                    return Ok(active.clone());
+                }
+                return Err(active_retry_successor_error(active));
+            }
+            if requested_run_id == Some(active.run_id.as_str()) {
+                requested_run_id = None;
+            }
+        }
+        if !successors.is_empty() && !force {
+            return Err(Error::validation_invalid_argument(
+                "force",
+                format!(
+                    "retry lineage rooted at '{}' already has terminal successor(s); use --force to create another retry",
+                    root_run_id
+                ),
+                Some(root_run_id),
+                None,
+            ));
+        }
+    }
     let mut plan = load_controller_plan(&source.run_id)?;
     super::cook_workspace_restore::restore_initial_cook_candidate_workspace(&mut plan)?;
     super::cook_workspace_restore::restore_follow_up_cook_candidate_workspace(&mut plan)?;
@@ -1648,8 +1725,12 @@ pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRu
         metadata.insert("retry_origin".to_string(), Value::Object(retry_origin));
     }
     metadata.insert("retry_of".to_string(), json!(source.run_id));
+    if enforce_lineage_reservation {
+        metadata.insert("retried_from".to_string(), json!(source.run_id));
+        metadata.insert("retry_root".to_string(), json!(root_run_id));
+    }
     metadata.insert("retry_requested_at".to_string(), json!(now_timestamp()));
-    submit_plan_with_runtime_admission_on_runner_with_metadata(
+    let record = submit_plan_with_runtime_admission_on_runner_with_metadata(
         &plan,
         requested_run_id,
         execution_runner_id(),
@@ -1660,7 +1741,105 @@ pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRu
                 || Ok(store::read_record(run_id)?.state.is_terminal()),
             )
         },
+    )?;
+    if enforce_lineage_reservation {
+        persist_retry_lineage(&source.run_id, &root_run_id, &record.run_id)?;
+    }
+    Ok(record)
+}
+
+const RETRY_LINEAGE_LIMIT: usize = 16;
+
+struct RetryLineageLock {
+    #[allow(dead_code)]
+    file: File,
+}
+
+impl RetryLineageLock {
+    fn lock(root_run_id: &str) -> Result<Self> {
+        let path = paths::homeboy_data()?
+            .join("agent-task-runs")
+            .join("retry-lineages")
+            .join(format!("{}.lock", sanitize_run_id(root_run_id)));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| Error::internal_io(error.to_string(), None))?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(path.display().to_string()))
+            })?;
+        #[cfg(unix)]
+        if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_EX) } != 0 {
+            return Err(Error::internal_io(
+                std::io::Error::last_os_error().to_string(),
+                Some(format!("lock retry lineage {root_run_id}")),
+            ));
+        }
+        Ok(Self { file })
+    }
+}
+
+fn retry_root_run_id(record: &AgentTaskRunRecord) -> Result<String> {
+    let mut current = record.clone();
+    for _ in 0..RETRY_LINEAGE_LIMIT {
+        let Some(parent) = current.metadata.get("retry_of").and_then(Value::as_str) else {
+            return Ok(current.run_id);
+        };
+        current = store::read_record(&sanitize_run_id(parent))?;
+    }
+    Err(Error::validation_invalid_argument(
+        "retry_of",
+        "retry lineage exceeds the supported depth",
+        Some(record.run_id.clone()),
+        None,
+    ))
+}
+
+fn active_retry_successor_error(record: &AgentTaskRunRecord) -> Error {
+    Error::validation_invalid_argument(
+        "run_id",
+        format!(
+            "active retry successor '{}' is {:?}; inspect it with `homeboy agent-task status {}`",
+            record.run_id, record.state, record.run_id
+        ),
+        Some(record.run_id.clone()),
+        Some(vec![format!("homeboy agent-task status {}", record.run_id)]),
     )
+}
+
+fn persist_retry_lineage(source_run_id: &str, root_run_id: &str, child_run_id: &str) -> Result<()> {
+    let mut targets = vec![sanitize_run_id(source_run_id)];
+    let root_run_id = sanitize_run_id(root_run_id);
+    if !targets.contains(&root_run_id) {
+        targets.push(root_run_id.clone());
+    }
+    for run_id in targets {
+        store::mutate_record(&run_id, |record| {
+            let metadata = record.ensure_metadata_object();
+            let lineage = metadata
+                .entry("retries".to_string())
+                .or_insert_with(|| json!([]));
+            if !lineage.is_array() {
+                *lineage = json!([]);
+            }
+            let retries = lineage.as_array_mut().expect("retry lineage is an array");
+            if !retries.iter().any(|entry| entry == child_run_id) {
+                retries.push(json!(child_run_id));
+                if retries.len() > RETRY_LINEAGE_LIMIT {
+                    retries.drain(..retries.len() - RETRY_LINEAGE_LIMIT);
+                }
+            }
+            metadata.insert("retry_root".to_string(), json!(root_run_id));
+            record.updated_at = Some(now_timestamp());
+            true
+        })?;
+    }
+    Ok(())
 }
 
 /// Find the one lifecycle-first Cook retry reservation that can be bound to an

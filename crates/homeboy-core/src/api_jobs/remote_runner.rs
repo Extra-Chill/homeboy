@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use super::persistence::{
     apply_event_retention, job_not_found, lookup_tombstone, timestamp_ms, validate_transition,
-    write_durable_store_with_tombstones, ReplayTombstoneKind,
+    ReplayTombstoneKind,
 };
 use super::store::{JobStore, RemoteRunnerSubmission, StoredJob};
 use super::types::{Job, JobEvent, JobEventKind, JobStatus};
@@ -602,7 +602,7 @@ impl JobStore {
             .as_ref()
             .map(|_| request.submission_payload_fingerprint())
             .transpose()?;
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        self.durable_transaction(|inner| {
         if let Some(submission_key) = submission_key.as_deref() {
             let fingerprint = submission_fingerprint
                 .as_deref()
@@ -630,19 +630,24 @@ impl JobStore {
                             "durable runner submission index references a missing job",
                         )
                     })?;
-                let evidence = serde_json::json!({
-                    "schema": "homeboy/remote-runner-submission/v1",
-                    "submission_key": submission_key,
-                    "payload_fingerprint": fingerprint,
-                    "decision": "replay",
-                    "accepted_job_id": job.id,
-                });
-                drop(inner);
-                self.append_event(
+                if job.status.is_terminal() {
+                    // The original terminal snapshot is authoritative. A replay
+                    // is an observation, not new work or a legal state mutation.
+                    return Ok(job);
+                }
+                Self::append_event_already_locked(
+                    self,
+                    &mut *inner,
                     job.id,
                     JobEventKind::Progress,
                     Some("remote runner submission replayed".to_string()),
-                    Some(evidence),
+                    Some(serde_json::json!({
+                        "schema": "homeboy/remote-runner-submission/v1",
+                        "submission_key": submission_key,
+                        "payload_fingerprint": fingerprint,
+                        "decision": "replay",
+                        "accepted_job_id": job.id,
+                    })),
                 )?;
                 return Ok(job);
             }
@@ -766,25 +771,8 @@ impl JobStore {
         // Persist job creation, queue evidence, and key index as one locked
         // snapshot. This is the admission commit point used by lost-response
         // recovery and daemon restart replay.
-        if let Some(persistence) = &self.persistence {
-            let mut durable = super::store::DurableJobStore {
-                jobs: inner.jobs.values().cloned().collect(),
-                submission_keys: inner.submission_keys.clone(),
-                expired_submission_keys: inner.expired_submission_keys.clone(),
-                controller_submissions: inner.controller_submissions.clone(),
-                expired_controller_submissions: inner.expired_controller_submissions.clone(),
-                compaction: inner.compaction.clone(),
-            };
-            if let Err(error) = write_durable_store_with_tombstones(&persistence.path, &mut durable)
-            {
-                inner.jobs.remove(&job.id);
-                if let Some(submission_key) = request.submission_key() {
-                    inner.submission_keys.remove(submission_key);
-                }
-                return Err(error);
-            }
-        }
         Ok(job)
+        })
     }
 
     pub fn claim_remote_runner_job(
@@ -813,9 +801,7 @@ impl JobStore {
 
         let now = timestamp_ms();
         let lease_ms = lease_ms.max(1);
-        let mut claimed: Option<(Uuid, RemoteRunnerJobRequest)> = None;
-        {
-            let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        let claimed = self.durable_transaction(|inner| {
             if let Some(limit) = concurrency_limit {
                 let running = inner
                     .jobs
@@ -832,7 +818,7 @@ impl JobStore {
             }
             let mut candidates: Vec<_> = inner
                 .jobs
-                .values_mut()
+                .values()
                 .filter(|stored| {
                     stored.remote_runner.is_some()
                         && stored.job.status == JobStatus::Queued
@@ -847,37 +833,48 @@ impl JobStore {
                     stored.job.id,
                 )
             });
-            if let Some(stored) = candidates.into_iter().next() {
-                stored.job.status = JobStatus::Running;
-                stored.job.updated_at_ms = now;
-                stored.job.started_at_ms = Some(now);
-                stored.job.claim_id = Some(Uuid::new_v4().to_string());
-                stored.job.claimed_by_runner_id = Some(runner_id.to_string());
-                stored.job.claimed_at_ms = Some(now);
-                stored.job.claim_expires_at_ms = Some(now.saturating_add(lease_ms));
-                let remote_runner = stored
-                    .remote_runner
-                    .as_ref()
-                    .expect("filtered remote runner job has request");
-                let request = remote_runner
-                    .execution_request
-                    .as_ref()
-                    .unwrap_or(&remote_runner.request)
-                    .dispatch_request();
-                claimed = Some((stored.job.id, request));
+            if let Some(job_id) = candidates
+                .into_iter()
+                .next()
+                .map(|candidate| candidate.job.id)
+            {
+                let (job, request) = {
+                    let stored = inner.jobs.get_mut(&job_id).expect("candidate exists");
+                    stored.job.status = JobStatus::Running;
+                    stored.job.updated_at_ms = now;
+                    stored.job.started_at_ms = Some(now);
+                    stored.job.claim_id = Some(Uuid::new_v4().to_string());
+                    stored.job.claimed_by_runner_id = Some(runner_id.to_string());
+                    stored.job.claimed_at_ms = Some(now);
+                    stored.job.claim_expires_at_ms = Some(now.saturating_add(lease_ms));
+                    let remote_runner = stored
+                        .remote_runner
+                        .as_ref()
+                        .expect("filtered remote runner job has request");
+                    let request = remote_runner
+                        .execution_request
+                        .as_ref()
+                        .unwrap_or(&remote_runner.request)
+                        .dispatch_request();
+                    (stored.job.clone(), request)
+                };
+                Self::append_event_already_locked(
+                    self,
+                    inner,
+                    job_id,
+                    JobEventKind::Status,
+                    Some("remote runner job claimed".to_string()),
+                    Some(serde_json::json!({ "status": JobStatus::Running })),
+                )?;
+                return Ok(Some((job, request)));
             }
-        }
+            Ok(None)
+        })?;
 
-        let Some((job_id, request)) = claimed else {
+        let Some((job, request)) = claimed else {
             return Ok(None);
         };
-
-        self.persist()?;
-        self.append_status_event(job_id, JobStatus::Running, "remote runner job claimed")?;
-        Ok(Some(RemoteRunnerJobClaim {
-            job: self.get(job_id)?,
-            request,
-        }))
+        Ok(Some(RemoteRunnerJobClaim { job, request }))
     }
 
     pub fn append_remote_runner_event(
@@ -930,8 +927,7 @@ impl JobStore {
             )?;
         }
 
-        {
-            let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        self.durable_transaction(|inner| {
             let stored = inner
                 .jobs
                 .get_mut(&job_id)
@@ -944,8 +940,8 @@ impl JobStore {
                     artifact
                 })
                 .collect();
-        }
-        self.persist()?;
+            Ok(())
+        })?;
 
         self.transition(
             job_id,
@@ -970,16 +966,15 @@ impl JobStore {
     ) -> Result<Job> {
         self.ensure_remote_runner_claim(job_id, runner_id, claim_id)?;
         let now = timestamp_ms();
-        {
-            let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        self.durable_transaction(|inner| {
             let stored = inner
                 .jobs
                 .get_mut(&job_id)
                 .ok_or_else(|| job_not_found(job_id))?;
             stored.job.updated_at_ms = now;
             stored.job.claim_expires_at_ms = Some(now.saturating_add(lease_ms.max(1)));
-        }
-        self.persist()?;
+            Ok(())
+        })?;
         self.get(job_id)
     }
 
@@ -1024,79 +1019,77 @@ impl JobStore {
             ));
         }
 
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
-        let stored = inner
-            .jobs
-            .get_mut(&job_id)
-            .ok_or_else(|| job_not_found(job_id))?;
-        let Some(local_runner) = stored.local_runner.as_ref() else {
-            return Err(Error::validation_invalid_argument(
-                "job_id",
-                "job has no daemon-local runner projection",
-                Some(job_id.to_string()),
-                None,
-            ));
-        };
-        let Some(lifecycle) = local_runner.lifecycle.as_ref() else {
-            return Err(Error::validation_invalid_argument(
-                "job_id",
-                "daemon-local runner projection has no lifecycle metadata",
-                Some(job_id.to_string()),
-                None,
-            ));
-        };
-        let Some(durable_run_id) = lifecycle
-            .durable_run_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-        else {
-            return Err(Error::validation_invalid_argument(
-                "job_id",
-                "daemon-local runner projection has no durable run ID",
-                Some(job_id.to_string()),
-                None,
-            ));
-        };
-        if local_runner.runner_id != expected_runner_id {
-            return Err(Error::validation_invalid_argument(
-                "expected_runner_id",
-                "daemon-local runner projection belongs to a different runner",
-                Some(job_id.to_string()),
-                None,
-            ));
-        }
-        if durable_run_id != expected_durable_run_id {
-            return Err(Error::validation_invalid_argument(
-                "expected_durable_run_id",
-                "daemon-local runner projection belongs to a different durable run",
-                Some(job_id.to_string()),
-                None,
-            ));
-        }
-        if stored.job.status.is_terminal() {
-            return Ok(stored.job.clone());
-        }
-        validate_transition(stored.job.status, JobStatus::Cancelled)?;
-        let now = timestamp_ms();
-        stored.job.status = JobStatus::Cancelled;
-        stored.job.updated_at_ms = now;
-        stored.job.finished_at_ms = Some(now);
-        let event = JobEvent {
-            sequence: self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1,
-            job_id,
-            kind: JobEventKind::Status,
-            timestamp_ms: now,
-            message: Some("cancelled via strict runner projection".to_string()),
-            data: Some(serde_json::json!({ "status": JobStatus::Cancelled })),
-        };
-        stored.events.push(event);
-        apply_event_retention(&mut stored.events, self.event_retention_limit());
-        stored.job.event_count = stored.events.len();
-        let job = stored.job.clone();
-        drop(inner);
-        self.persist()?;
-        Ok(job)
+        self.durable_transaction(|inner| {
+            let stored = inner
+                .jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| job_not_found(job_id))?;
+            let Some(local_runner) = stored.local_runner.as_ref() else {
+                return Err(Error::validation_invalid_argument(
+                    "job_id",
+                    "job has no daemon-local runner projection",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            };
+            let Some(lifecycle) = local_runner.lifecycle.as_ref() else {
+                return Err(Error::validation_invalid_argument(
+                    "job_id",
+                    "daemon-local runner projection has no lifecycle metadata",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            };
+            let Some(durable_run_id) = lifecycle
+                .durable_run_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            else {
+                return Err(Error::validation_invalid_argument(
+                    "job_id",
+                    "daemon-local runner projection has no durable run ID",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            };
+            if local_runner.runner_id != expected_runner_id {
+                return Err(Error::validation_invalid_argument(
+                    "expected_runner_id",
+                    "daemon-local runner projection belongs to a different runner",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            if durable_run_id != expected_durable_run_id {
+                return Err(Error::validation_invalid_argument(
+                    "expected_durable_run_id",
+                    "daemon-local runner projection belongs to a different durable run",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            if stored.job.status.is_terminal() {
+                return Ok(stored.job.clone());
+            }
+            validate_transition(stored.job.status, JobStatus::Cancelled)?;
+            let now = timestamp_ms();
+            stored.job.status = JobStatus::Cancelled;
+            stored.job.updated_at_ms = now;
+            stored.job.finished_at_ms = Some(now);
+            let event = JobEvent {
+                sequence: self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1,
+                job_id,
+                kind: JobEventKind::Status,
+                timestamp_ms: now,
+                message: Some("cancelled via strict runner projection".to_string()),
+                data: Some(serde_json::json!({ "status": JobStatus::Cancelled })),
+            };
+            stored.events.push(event);
+            apply_event_retention(&mut stored.events, self.event_retention_limit());
+            stored.job.event_count = stored.events.len();
+            Ok(stored.job.clone())
+        })
     }
 
     pub(crate) fn reconcile_expired_remote_runner_claims(&self, now_ms: u64) -> Result<Vec<Job>> {

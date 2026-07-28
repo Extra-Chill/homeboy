@@ -1760,6 +1760,7 @@ where
     validate_cook_workspace(&options)?;
     validate_cook_candidate_group(&options.initial_plan)?;
     materialize_initial_cook_attempt(&options)?;
+    record_active_cook_worktree_warning(&options)?;
     // Durable identity now exists and resolves through the Cook alias. Publish
     // it before every remaining long controller phase — gate toolchain
     // preflight, transport preparation, and Lab materialization — so a caller
@@ -2808,6 +2809,51 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
             Some(vec!["Re-run Cook without a source CWD override so Homeboy binds the declared task worktree.".to_string()]),
         ));
     }
+    Ok(())
+}
+
+fn record_active_cook_worktree_warning(options: &AgentTaskCookServiceOptions) -> Result<()> {
+    let Some(source) = options.source_worktree_path.as_deref() else {
+        return Ok(());
+    };
+    let target = std::fs::canonicalize(source).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(source.display().to_string()))
+    })?;
+    let mut active = agent_task_lifecycle::list_records()?
+        .into_iter()
+        .filter(|record| record.run_id != options.initial_run_id && !record.state.is_terminal())
+        .filter(|record| record.metadata.get("cook_id").is_some())
+        .filter_map(|record| {
+            let plan = agent_task_lifecycle::load_plan_for_execution(&record.run_id).ok()?;
+            let matches_target = plan.tasks.iter().any(|task| {
+                task.workspace
+                    .root
+                    .as_deref()
+                    .and_then(|root| std::fs::canonicalize(root).ok())
+                    .as_ref()
+                    == Some(&target)
+            });
+            matches_target.then_some(record)
+        })
+        .collect::<Vec<_>>();
+    active.sort_by(|left, right| left.run_id.cmp(&right.run_id));
+    if active.is_empty() {
+        return Ok(());
+    }
+    let run_ids = active
+        .iter()
+        .map(|record| record.run_id.clone())
+        .collect::<Vec<_>>();
+    agent_task_lifecycle::record_metadata_value(
+        &options.initial_run_id,
+        "cook_active_worktree_warning",
+        serde_json::json!({
+            "schema": "homeboy/cook-active-worktree-warning/v1",
+            "canonical_worktree": target,
+            "active_run_ids": run_ids,
+            "status_commands": active.iter().map(|record| format!("homeboy agent-task status {}", record.run_id)).collect::<Vec<_>>(),
+        }),
+    )?;
     Ok(())
 }
 

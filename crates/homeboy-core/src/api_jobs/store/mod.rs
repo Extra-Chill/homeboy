@@ -1,15 +1,19 @@
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 
+use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use super::persistence::read_durable_store;
+#[cfg(test)]
+use super::persistence::reconcile_stale_jobs;
 use super::persistence::{
     apply_event_retention, compact_terminal_jobs, job_not_found, lookup_tombstone,
     prepare_tombstone_store, timestamp_ms, tombstone_store_report, validate_transition,
@@ -17,8 +21,6 @@ use super::persistence::{
     DEFAULT_EVENT_RETENTION_LIMIT, DEFAULT_TERMINAL_JOB_RETENTION_BYTES,
     DEFAULT_TERMINAL_JOB_RETENTION_LIMIT,
 };
-#[cfg(test)]
-use super::persistence::{read_durable_store, reconcile_stale_jobs};
 use super::remote_runner;
 use super::remote_runner::JobArtifactMetadata;
 use super::types::{Job, JobEvent, JobEventKind, JobStatus, RunnerJobProjection};
@@ -52,6 +54,8 @@ pub struct JobStore {
     pub(super) daemon_lease_id: Option<String>,
     #[cfg(test)]
     terminal_write_failures: Arc<AtomicU64>,
+    #[cfg(test)]
+    durable_write_failures: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +64,17 @@ pub(super) struct JobStorePersistence {
     pub(super) event_retention_limit: usize,
     pub(super) terminal_job_retention_limit: usize,
     pub(super) terminal_job_retention_bytes: usize,
+}
+
+/// The advisory lock held for one authoritative durable-store transaction.
+///
+/// Keep this private: callers must use [`JobStore::durable_transaction`] so
+/// they cannot mutate a stale in-memory snapshot between reload and commit.
+pub(super) struct DurableStoreTransaction {
+    // `flock` is process-wide on some targets but is not reentrant across file
+    // descriptors. Serialize local stores before taking the cross-process lock.
+    _process_guard: MutexGuard<'static, ()>,
+    _file: File,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -214,6 +229,154 @@ pub struct JobHandle {
 }
 
 impl JobStore {
+    pub(super) fn begin_durable_transaction(&self) -> Result<Option<DurableStoreTransaction>> {
+        let Some(persistence) = &self.persistence else {
+            return Ok(None);
+        };
+        static DURABLE_STORE_PROCESS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let process_guard = DURABLE_STORE_PROCESS_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("durable store process mutex poisoned");
+        let parent = persistence
+            .path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        fs::create_dir_all(parent).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("create {}", parent.display())),
+            )
+        })?;
+        let name = persistence
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("jobs.json");
+        let path = parent.join(format!(".{name}.transaction.lock"));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&path)
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(format!("open {}", path.display())))
+            })?;
+        file.lock_exclusive().map_err(|error| {
+            Error::internal_io(error.to_string(), Some(format!("lock {}", path.display())))
+        })?;
+        Ok(Some(DurableStoreTransaction {
+            _process_guard: process_guard,
+            _file: file,
+        }))
+    }
+
+    pub(super) fn reload_durable_snapshot_already_locked(
+        &self,
+        path: &std::path::Path,
+        inner: &mut JobStoreInner,
+    ) -> Result<()> {
+        let durable = read_durable_store(path)?;
+        let next_sequence = durable
+            .jobs
+            .iter()
+            .flat_map(|stored| stored.events.iter().map(|event| event.sequence))
+            .max()
+            .unwrap_or_default();
+        inner.jobs = durable
+            .jobs
+            .into_iter()
+            .map(|stored| (stored.job.id, stored))
+            .collect();
+        inner.submission_keys = durable.submission_keys;
+        inner.expired_submission_keys = durable.expired_submission_keys;
+        inner.controller_submissions = durable.controller_submissions;
+        inner.expired_controller_submissions = durable.expired_controller_submissions;
+        inner.compaction = durable.compaction;
+        self.next_event_sequence
+            .fetch_max(next_sequence, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Apply one mutation to the current durable snapshot and commit it before
+    /// releasing the inter-process lock. The closure is the only supported path
+    /// for a durable whole-snapshot mutation.
+    pub(super) fn durable_transaction<T>(
+        &self,
+        mutation: impl FnOnce(&mut JobStoreInner) -> Result<T>,
+    ) -> Result<T> {
+        let transaction = self.begin_durable_transaction()?;
+        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        if let Some(persistence) = &self.persistence {
+            self.reload_durable_snapshot_already_locked(&persistence.path, &mut inner)?;
+        }
+        let prior = inner.clone();
+        let output = match mutation(&mut inner) {
+            Ok(output) => output,
+            Err(error) => {
+                *inner = prior;
+                return Err(error);
+            }
+        };
+        if transaction.is_some() {
+            if let Err(error) = self.persist_inner_already_locked(&mut inner) {
+                *inner = prior;
+                return Err(error);
+            }
+        }
+        drop(inner);
+        drop(transaction);
+        Ok(output)
+    }
+
+    /// Commit the supplied authoritative in-memory state. The caller holds the
+    /// durable transaction lock and `inner` mutex; this helper never reloads or
+    /// acquires either lock.
+    pub(super) fn persist_inner_already_locked(&self, inner: &mut JobStoreInner) -> Result<()> {
+        let Some(persistence) = &self.persistence else {
+            return Ok(());
+        };
+        #[cfg(test)]
+        if self
+            .durable_write_failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(Error::internal_io(
+                "injected durable store write failure",
+                None,
+            ));
+        }
+        let mut durable = DurableJobStore {
+            jobs: inner.jobs.values().cloned().collect(),
+            submission_keys: inner.submission_keys.clone(),
+            expired_submission_keys: inner.expired_submission_keys.clone(),
+            controller_submissions: inner.controller_submissions.clone(),
+            expired_controller_submissions: inner.expired_controller_submissions.clone(),
+            compaction: inner.compaction.clone(),
+        };
+        compact_terminal_jobs(
+            &mut durable,
+            persistence.event_retention_limit,
+            persistence.terminal_job_retention_limit,
+            persistence.terminal_job_retention_bytes,
+        );
+        write_durable_store_with_tombstones(&persistence.path, &mut durable)?;
+        inner.jobs = durable
+            .jobs
+            .into_iter()
+            .map(|stored| (stored.job.id, stored))
+            .collect();
+        inner.submission_keys = durable.submission_keys;
+        inner.expired_submission_keys = durable.expired_submission_keys;
+        inner.controller_submissions = durable.controller_submissions;
+        inner.expired_controller_submissions = durable.expired_controller_submissions;
+        inner.compaction = durable.compaction;
+        Ok(())
+    }
+
     /// Count non-terminal jobs without opening or reconciling the durable store.
     ///
     /// Daemon status runs in a separate CLI process, so using [`Self::open`]
@@ -383,9 +546,35 @@ impl JobStore {
             daemon_lease_id: None,
             #[cfg(test)]
             terminal_write_failures: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            durable_write_failures: Arc::new(AtomicU64::new(0)),
         };
 
-        store.persist()?;
+        store.durable_transaction(|inner| {
+            let mut durable = DurableJobStore {
+                jobs: inner.jobs.values().cloned().collect(),
+                submission_keys: inner.submission_keys.clone(),
+                expired_submission_keys: inner.expired_submission_keys.clone(),
+                controller_submissions: inner.controller_submissions.clone(),
+                expired_controller_submissions: inner.expired_controller_submissions.clone(),
+                compaction: inner.compaction.clone(),
+            };
+            let next_sequence = reconcile_stale_jobs(&mut durable, event_retention_limit);
+            inner.jobs = durable
+                .jobs
+                .into_iter()
+                .map(|stored| (stored.job.id, stored))
+                .collect();
+            inner.submission_keys = durable.submission_keys;
+            inner.expired_submission_keys = durable.expired_submission_keys;
+            inner.controller_submissions = durable.controller_submissions;
+            inner.expired_controller_submissions = durable.expired_controller_submissions;
+            inner.compaction = durable.compaction;
+            store
+                .next_event_sequence
+                .fetch_max(next_sequence, Ordering::SeqCst);
+            Ok(())
+        })?;
         Ok(store)
     }
 
@@ -516,8 +705,10 @@ impl JobStore {
             daemon_lease_id: None,
             #[cfg(test)]
             terminal_write_failures: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            durable_write_failures: Arc::new(AtomicU64::new(0)),
         };
-        store.persist()?;
+        store.durable_transaction(|_| Ok(()))?;
         Ok(store)
     }
 
@@ -618,39 +809,39 @@ impl JobStore {
         idempotency_key: &str,
         now: u64,
     ) -> Result<AdmissionReservation> {
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
-        if let Some(stored) = inner
-            .jobs
-            .values_mut()
-            .filter(|stored| stored.admission_idempotency_key.as_deref() == Some(idempotency_key))
-            .min_by_key(|stored| (stored.job.created_at_ms, stored.job.id))
-        {
-            if stored.job.status.is_terminal() {
-                return Err(Error::validation_invalid_argument(
-                    "idempotency_key",
-                    "admission idempotency key belongs to a terminal reservation",
-                    Some(idempotency_key.to_string()),
-                    None,
-                ));
+        self.durable_transaction(|inner| {
+            if let Some(stored) = inner
+                .jobs
+                .values_mut()
+                .filter(|stored| {
+                    stored.admission_idempotency_key.as_deref() == Some(idempotency_key)
+                })
+                .min_by_key(|stored| (stored.job.created_at_ms, stored.job.id))
+            {
+                if stored.job.status.is_terminal() {
+                    return Err(Error::validation_invalid_argument(
+                        "idempotency_key",
+                        "admission idempotency key belongs to a terminal reservation",
+                        Some(idempotency_key.to_string()),
+                        None,
+                    ));
+                }
+                let lease = stored.admission_lease.as_mut().ok_or_else(|| {
+                    Error::internal_unexpected("active admission reservation is missing its lease")
+                })?;
+                lease.expires_at_ms = now.saturating_add(ADMISSION_RESERVATION_LEASE_MS);
+                lease.renewals = lease.renewals.saturating_add(1);
+                stored.job.updated_at_ms = now;
+                let reservation = AdmissionReservation {
+                    job: stored.job.clone(),
+                    token: lease.token.clone(),
+                    expires_at_ms: lease.expires_at_ms,
+                    created: false,
+                };
+                return Ok(reservation);
             }
-            let lease = stored.admission_lease.as_mut().ok_or_else(|| {
-                Error::internal_unexpected("active admission reservation is missing its lease")
-            })?;
-            lease.expires_at_ms = now.saturating_add(ADMISSION_RESERVATION_LEASE_MS);
-            lease.renewals = lease.renewals.saturating_add(1);
-            stored.job.updated_at_ms = now;
-            let reservation = AdmissionReservation {
-                job: stored.job.clone(),
-                token: lease.token.clone(),
-                expires_at_ms: lease.expires_at_ms,
-                created: false,
-            };
-            drop(inner);
-            self.persist()?;
-            return Ok(reservation);
-        }
-        drop(inner);
-        self.create_admission_inner(metadata, Some(idempotency_key.to_string()), now)
+            self.create_admission_inner(inner, metadata, Some(idempotency_key.to_string()), now)
+        })
     }
 
     pub(crate) fn create_admission_at(
@@ -658,7 +849,7 @@ impl JobStore {
         metadata: Value,
         now: u64,
     ) -> Result<AdmissionReservation> {
-        self.create_admission_inner(metadata, None, now)
+        self.durable_transaction(|inner| self.create_admission_inner(inner, metadata, None, now))
     }
 
     /// Legacy, tokenless admission used only by pre-lease protocol clients
@@ -680,19 +871,20 @@ impl JobStore {
 
     fn create_admission_inner(
         &self,
+        inner: &mut JobStoreInner,
         metadata: Value,
         idempotency_key: Option<String>,
         now: u64,
     ) -> Result<AdmissionReservation> {
-        let (job, created) = self.create_or_reuse_active_local_runner_job(
+        let (job, created) = self.create_or_reuse_active_local_runner_job_inner(
+            inner,
             "runner.admission",
             None,
             Some(metadata),
             None,
             None,
             idempotency_key.clone(),
-        );
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        )?;
         let stored = inner.jobs.get_mut(&job.id).expect("admission exists");
         if !created {
             let (token, expires_at_ms) = {
@@ -715,8 +907,6 @@ impl JobStore {
                 expires_at_ms,
                 created: false,
             };
-            drop(inner);
-            self.persist()?;
             return Ok(reservation);
         }
         let lease = AdmissionLease {
@@ -725,8 +915,6 @@ impl JobStore {
             renewals: 0,
         };
         stored.admission_lease = Some(lease.clone());
-        drop(inner);
-        self.persist()?;
         Ok(AdmissionReservation {
             job,
             token: lease.token,
@@ -741,61 +929,59 @@ impl JobStore {
         token: &str,
         now: u64,
     ) -> Result<AdmissionReservation> {
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
-        let stored = inner
-            .jobs
-            .get_mut(&job_id)
-            .ok_or_else(|| job_not_found(job_id))?;
-        let (token, expires_at_ms) = {
-            let lease = Self::admission_lease_for_live_job(stored, token, now)?;
-            lease.expires_at_ms = now.saturating_add(ADMISSION_RESERVATION_LEASE_MS);
-            lease.renewals = lease.renewals.saturating_add(1);
-            (lease.token.clone(), lease.expires_at_ms)
-        };
-        stored.job.updated_at_ms = now;
-        let reservation = AdmissionReservation {
-            job: stored.job.clone(),
-            token,
-            expires_at_ms,
-            created: false,
-        };
-        drop(inner);
-        self.persist()?;
-        Ok(reservation)
+        self.durable_transaction(|inner| {
+            let stored = inner
+                .jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| job_not_found(job_id))?;
+            let (token, expires_at_ms) = {
+                let lease = Self::admission_lease_for_live_job(stored, token, now)?;
+                lease.expires_at_ms = now.saturating_add(ADMISSION_RESERVATION_LEASE_MS);
+                lease.renewals = lease.renewals.saturating_add(1);
+                (lease.token.clone(), lease.expires_at_ms)
+            };
+            stored.job.updated_at_ms = now;
+            let reservation = AdmissionReservation {
+                job: stored.job.clone(),
+                token,
+                expires_at_ms,
+                created: false,
+            };
+            Ok(reservation)
+        })
     }
 
     pub(crate) fn release_admission_at(&self, job_id: Uuid, token: &str, now: u64) -> Result<Job> {
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
-        let stored = inner
-            .jobs
-            .get_mut(&job_id)
-            .ok_or_else(|| job_not_found(job_id))?;
-        let lease = stored.admission_lease.as_ref().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "job_id",
-                "job is not an admission reservation",
-                Some(job_id.to_string()),
-                None,
-            )
-        })?;
-        if lease.token != token {
-            return Err(Error::validation_invalid_argument(
-                "admission_token",
-                "admission reservation token does not match",
-                Some(job_id.to_string()),
-                None,
-            ));
-        }
-        if !stored.job.status.is_terminal() {
-            stored.job.status = JobStatus::Cancelled;
-            stored.job.updated_at_ms = now;
-            stored.job.finished_at_ms = Some(now);
-            stored.job.stale_reason = Some("admission reservation released".to_string());
-        }
-        let job = stored.job.clone();
-        drop(inner);
-        self.persist()?;
-        Ok(job)
+        self.durable_transaction(|inner| {
+            let stored = inner
+                .jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| job_not_found(job_id))?;
+            let lease = stored.admission_lease.as_ref().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "job_id",
+                    "job is not an admission reservation",
+                    Some(job_id.to_string()),
+                    None,
+                )
+            })?;
+            if lease.token != token {
+                return Err(Error::validation_invalid_argument(
+                    "admission_token",
+                    "admission reservation token does not match",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            if !stored.job.status.is_terminal() {
+                stored.job.status = JobStatus::Cancelled;
+                stored.job.updated_at_ms = now;
+                stored.job.finished_at_ms = Some(now);
+                stored.job.stale_reason = Some("admission reservation released".to_string());
+            }
+            let job = stored.job.clone();
+            Ok(job)
+        })
     }
 
     pub(crate) fn admission_is_leased(&self, job_id: Uuid) -> Result<bool> {
@@ -808,29 +994,26 @@ impl JobStore {
     }
 
     pub(crate) fn reconcile_expired_admissions_at(&self, now: u64) -> Result<Vec<Uuid>> {
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
-        let expired = inner
-            .jobs
-            .values_mut()
-            .filter_map(|stored| {
-                let lease = stored.admission_lease.as_ref()?;
-                if !stored.job.status.is_terminal() && lease.expires_at_ms <= now {
-                    stored.job.status = JobStatus::Failed;
-                    stored.job.updated_at_ms = now;
-                    stored.job.finished_at_ms = Some(now);
-                    stored.job.stale_reason =
-                        Some("admission reservation lease expired".to_string());
-                    Some(stored.job.id)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        drop(inner);
-        if !expired.is_empty() {
-            self.persist()?;
-        }
-        Ok(expired)
+        self.durable_transaction(|inner| {
+            let expired = inner
+                .jobs
+                .values_mut()
+                .filter_map(|stored| {
+                    let lease = stored.admission_lease.as_ref()?;
+                    if !stored.job.status.is_terminal() && lease.expires_at_ms <= now {
+                        stored.job.status = JobStatus::Failed;
+                        stored.job.updated_at_ms = now;
+                        stored.job.finished_at_ms = Some(now);
+                        stored.job.stale_reason =
+                            Some("admission reservation lease expired".to_string());
+                        Some(stored.job.id)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            Ok(expired)
+        })
     }
 
     pub(crate) fn reconcile_expired_admissions(&self) -> Result<Vec<Uuid>> {
@@ -855,6 +1038,30 @@ impl JobStore {
         local_runner: Option<LocalRunnerJob>,
         admission_idempotency_key: Option<String>,
     ) -> (Job, bool) {
+        self.durable_transaction(|inner| {
+            self.create_or_reuse_active_local_runner_job_inner(
+                inner,
+                operation,
+                source_snapshot,
+                metadata,
+                path_materialization_plan,
+                local_runner,
+                admission_idempotency_key,
+            )
+        })
+        .expect("local runner job creation must persist")
+    }
+
+    fn create_or_reuse_active_local_runner_job_inner(
+        &self,
+        inner: &mut JobStoreInner,
+        operation: impl Into<String>,
+        source_snapshot: Option<SourceSnapshot>,
+        metadata: Option<Value>,
+        path_materialization_plan: Option<PathMaterializationPlan>,
+        local_runner: Option<LocalRunnerJob>,
+        admission_idempotency_key: Option<String>,
+    ) -> Result<(Job, bool)> {
         let now = timestamp_ms();
         let runner_job_projection = metadata
             .as_ref()
@@ -889,7 +1096,6 @@ impl JobStore {
             runner_job_projection,
         };
 
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
         if let Some(idempotency_key) = admission_idempotency_key.as_deref() {
             if let Some(existing) = inner
                 .jobs
@@ -904,7 +1110,7 @@ impl JobStore {
                 .min_by_key(|stored| (stored.job.created_at_ms, stored.job.id))
                 .map(|stored| stored.job.clone())
             {
-                return (existing, false);
+                return Ok((existing, false));
             }
         } else if let Some(durable_run_id) = durable_run_id.as_deref() {
             if let Some(existing) = inner
@@ -919,7 +1125,7 @@ impl JobStore {
                 .min_by_key(|stored| (stored.job.created_at_ms, stored.job.id))
                 .map(|stored| stored.job.clone())
             {
-                return (existing, false);
+                return Ok((existing, false));
             }
         }
         let consumes_admission = local_runner.is_some();
@@ -952,19 +1158,24 @@ impl JobStore {
                 }
             }
         }
-        drop(inner);
-
-        if let Some(metadata) = metadata {
-            self.append_status_event_with_data(job.id, JobStatus::Queued, "job queued", metadata)
-        } else {
-            self.append_status_event(job.id, JobStatus::Queued, "job queued")
-        }
-        .expect("newly-created job must accept queued status event");
-        (
-            self.get(job.id)
-                .expect("newly-created job must be readable after insert"),
+        let data = metadata.unwrap_or_else(|| serde_json::json!({ "status": JobStatus::Queued }));
+        Self::append_event_already_locked(
+            self,
+            inner,
+            job.id,
+            JobEventKind::Status,
+            Some("job queued".to_string()),
+            Some(data),
+        )?;
+        Ok((
+            inner
+                .jobs
+                .get(&job.id)
+                .expect("newly-created job exists")
+                .job
+                .clone(),
             true,
-        )
+        ))
     }
 
     fn admission_lease_for_live_job<'a>(
@@ -1080,6 +1291,11 @@ impl JobStore {
         self.terminal_write_failures.store(count, Ordering::SeqCst);
     }
 
+    #[cfg(test)]
+    pub(crate) fn fail_next_durable_writes(&self, count: u64) {
+        self.durable_write_failures.store(count, Ordering::SeqCst);
+    }
+
     pub(crate) fn controller_job_state(&self, job_id: Uuid) -> Result<ControllerJobState> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
         inner
@@ -1103,73 +1319,73 @@ impl JobStore {
         job_id: Uuid,
         reason: String,
     ) -> Result<Job> {
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
-        let stored = inner
-            .jobs
-            .get_mut(&job_id)
-            .ok_or_else(|| job_not_found(job_id))?;
-        let prior = stored.clone();
-        let controller = stored.controller_job.as_mut().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "job_id",
-                "job is not a controller job",
-                Some(job_id.to_string()),
-                None,
-            )
-        })?;
-        if stored.job.status == JobStatus::Cancelled || controller.cancellation_requested {
-            return Ok(stored.job.clone());
-        }
-        if stored.job.status.is_terminal() {
-            return Err(Error::validation_invalid_argument(
-                "status",
-                "cannot cancel a terminal controller job that did not stop by cancellation",
-                Some(job_id.to_string()),
-                None,
-            ));
-        }
-        // Persist the intent before releasing this lock. Dispatchers only observe
-        // cancellation through this durable state, never through a transient flag.
-        controller.cancellation_requested = true;
-        controller.cancellation_reason = Some(reason.clone());
-        let claimless = stored.job.status == JobStatus::Queued
-            && controller.execution_claim_id.is_none()
-            && controller.checkpoint.is_none();
-        let now = timestamp_ms();
-        stored.job.updated_at_ms = now;
-        if claimless {
-            // A response-handoff failure leaves no worker to observe this request.
-            // Terminalize while holding the claim lock so dispatch cannot start it.
-            stored.job.status = JobStatus::Cancelled;
-            stored.job.finished_at_ms = Some(now);
-        }
-        if let Some(persistence) = &self.persistence {
-            let mut durable = DurableJobStore {
-                jobs: inner.jobs.values().cloned().collect(),
-                submission_keys: inner.submission_keys.clone(),
-                expired_submission_keys: inner.expired_submission_keys.clone(),
-                controller_submissions: inner.controller_submissions.clone(),
-                expired_controller_submissions: inner.expired_controller_submissions.clone(),
-                compaction: inner.compaction.clone(),
-            };
-            if let Err(error) = write_durable_store_with_tombstones(&persistence.path, &mut durable)
-            {
-                *inner.jobs.get_mut(&job_id).expect("controller job exists") = prior;
-                return Err(error);
+        self.durable_transaction(|inner| {
+            let stored = inner
+                .jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| job_not_found(job_id))?;
+            let controller = stored.controller_job.as_mut().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "job_id",
+                    "job is not a controller job",
+                    Some(job_id.to_string()),
+                    None,
+                )
+            })?;
+            if stored.job.status == JobStatus::Cancelled || controller.cancellation_requested {
+                return Ok(stored.job.clone());
             }
-        }
-        drop(inner);
-        if claimless {
-            self.append_status_event(job_id, JobStatus::Cancelled, reason)?;
-            return self.get(job_id);
-        }
-        self.append_event(
-            job_id,
-            JobEventKind::Progress,
-            Some("controller job cancellation requested".to_string()),
-            Some(serde_json::json!({ "phase": "cancellation_requested", "reason": reason })),
-        )?;
-        self.get(job_id)
+            if stored.job.status.is_terminal() {
+                return Err(Error::validation_invalid_argument(
+                    "status",
+                    "cannot cancel a terminal controller job that did not stop by cancellation",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            // Persist the intent before releasing this lock. Dispatchers only observe
+            // cancellation through this durable state, never through a transient flag.
+            controller.cancellation_requested = true;
+            controller.cancellation_reason = Some(reason.clone());
+            let claimless = stored.job.status == JobStatus::Queued
+                && controller.execution_claim_id.is_none()
+                && controller.checkpoint.is_none();
+            let now = timestamp_ms();
+            stored.job.updated_at_ms = now;
+            if claimless {
+                // A response-handoff failure leaves no worker to observe this request.
+                // Terminalize while holding the claim lock so dispatch cannot start it.
+                stored.job.status = JobStatus::Cancelled;
+                stored.job.finished_at_ms = Some(now);
+            }
+            if claimless {
+                Self::append_event_already_locked(
+                    self,
+                    inner,
+                    job_id,
+                    JobEventKind::Status,
+                    Some(reason),
+                    Some(serde_json::json!({ "status": JobStatus::Cancelled })),
+                )?;
+            } else {
+                Self::append_event_already_locked(
+                    self,
+                    inner,
+                    job_id,
+                    JobEventKind::Progress,
+                    Some("controller job cancellation requested".to_string()),
+                    Some(
+                        serde_json::json!({ "phase": "cancellation_requested", "reason": reason }),
+                    ),
+                )?;
+            }
+            Ok(inner
+                .jobs
+                .get(&job_id)
+                .expect("controller job exists")
+                .job
+                .clone())
+        })
     }
 
     pub(crate) fn controller_cancellation_requested(&self, job_id: Uuid) -> bool {
@@ -1183,17 +1399,19 @@ impl JobStore {
     }
 
     pub(crate) fn record_controller_prepared(&self, job_id: Uuid, prepared: Value) -> Result<()> {
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
-        let controller = inner
-            .jobs
-            .get_mut(&job_id)
-            .ok_or_else(|| job_not_found(job_id))?
-            .controller_job
-            .as_mut()
-            .ok_or_else(|| Error::internal_unexpected("controller worker lost its typed state"))?;
-        controller.checkpoint = Some(prepared);
-        drop(inner);
-        self.persist()
+        self.durable_transaction(|inner| {
+            let controller = inner
+                .jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| job_not_found(job_id))?
+                .controller_job
+                .as_mut()
+                .ok_or_else(|| {
+                    Error::internal_unexpected("controller worker lost its typed state")
+                })?;
+            controller.checkpoint = Some(prepared);
+            Ok(())
+        })
     }
 
     pub(crate) fn complete_controller_cancellation(&self, job_id: Uuid) -> Result<Job> {
@@ -1264,62 +1482,7 @@ impl JobStore {
         message: String,
         data: Value,
     ) -> Result<Job> {
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
-        let prior = inner.clone();
-        let now = timestamp_ms();
-        let first_sequence = self.next_event_sequence.fetch_add(2, Ordering::SeqCst) + 1;
-        let job = {
-            let stored = inner
-                .jobs
-                .get_mut(&job_id)
-                .ok_or_else(|| job_not_found(job_id))?;
-            let controller = stored.controller_job.as_mut().ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "job_id",
-                    "job is not a controller job",
-                    Some(job_id.to_string()),
-                    None,
-                )
-            })?;
-            if status == JobStatus::Succeeded && controller.cancellation_requested {
-                return Err(Error::validation_invalid_argument(
-                    "status",
-                    "cannot complete a controller job after durable cancellation was requested",
-                    Some(job_id.to_string()),
-                    None,
-                ));
-            }
-            validate_transition(stored.job.status, status)?;
-            stored.events.push(JobEvent {
-                sequence: first_sequence,
-                job_id,
-                kind: event_kind,
-                timestamp_ms: now,
-                message: Some(message.clone()),
-                data: Some(data),
-            });
-            stored.events.push(JobEvent {
-                sequence: first_sequence + 1,
-                job_id,
-                kind: JobEventKind::Status,
-                timestamp_ms: now,
-                message: Some(message),
-                data: Some(serde_json::json!({ "status": status })),
-            });
-            apply_event_retention(&mut stored.events, self.event_retention_limit());
-            stored.job.event_count = stored.events.len();
-            stored.job.status = status;
-            stored.job.updated_at_ms = now;
-            stored.job.finished_at_ms = Some(now);
-            controller.execution_claim_id = None;
-            stored.job.clone()
-        };
-        for submission in inner.controller_submissions.values_mut() {
-            if submission.job_id == job_id {
-                submission.terminal_job = Some(job.clone());
-            }
-        }
-        if let Some(persistence) = &self.persistence {
+        self.durable_transaction(|inner| {
             #[cfg(test)]
             if self
                 .terminal_write_failures
@@ -1328,43 +1491,66 @@ impl JobStore {
                 })
                 .is_ok()
             {
-                *inner = prior;
                 return Err(Error::internal_io(
                     "injected controller terminal persistence failure",
-                    Some(persistence.path.display().to_string()),
+                    None,
                 ));
             }
-            let mut durable = DurableJobStore {
-                jobs: inner.jobs.values().cloned().collect(),
-                submission_keys: inner.submission_keys.clone(),
-                expired_submission_keys: inner.expired_submission_keys.clone(),
-                controller_submissions: inner.controller_submissions.clone(),
-                expired_controller_submissions: inner.expired_controller_submissions.clone(),
-                compaction: inner.compaction.clone(),
+            let now = timestamp_ms();
+            let first_sequence = self.next_event_sequence.fetch_add(2, Ordering::SeqCst) + 1;
+            let job = {
+                let stored = inner
+                    .jobs
+                    .get_mut(&job_id)
+                    .ok_or_else(|| job_not_found(job_id))?;
+                let controller = stored.controller_job.as_mut().ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "job_id",
+                        "job is not a controller job",
+                        Some(job_id.to_string()),
+                        None,
+                    )
+                })?;
+                if status == JobStatus::Succeeded && controller.cancellation_requested {
+                    return Err(Error::validation_invalid_argument(
+                        "status",
+                        "cannot complete a controller job after durable cancellation was requested",
+                        Some(job_id.to_string()),
+                        None,
+                    ));
+                }
+                validate_transition(stored.job.status, status)?;
+                stored.events.push(JobEvent {
+                    sequence: first_sequence,
+                    job_id,
+                    kind: event_kind,
+                    timestamp_ms: now,
+                    message: Some(message.clone()),
+                    data: Some(data),
+                });
+                stored.events.push(JobEvent {
+                    sequence: first_sequence + 1,
+                    job_id,
+                    kind: JobEventKind::Status,
+                    timestamp_ms: now,
+                    message: Some(message),
+                    data: Some(serde_json::json!({ "status": status })),
+                });
+                apply_event_retention(&mut stored.events, self.event_retention_limit());
+                stored.job.event_count = stored.events.len();
+                stored.job.status = status;
+                stored.job.updated_at_ms = now;
+                stored.job.finished_at_ms = Some(now);
+                controller.execution_claim_id = None;
+                stored.job.clone()
             };
-            compact_terminal_jobs(
-                &mut durable,
-                persistence.event_retention_limit,
-                persistence.terminal_job_retention_limit,
-                persistence.terminal_job_retention_bytes,
-            );
-            if let Err(error) = write_durable_store_with_tombstones(&persistence.path, &mut durable)
-            {
-                *inner = prior;
-                return Err(error);
+            for submission in inner.controller_submissions.values_mut() {
+                if submission.job_id == job_id {
+                    submission.terminal_job = Some(job.clone());
+                }
             }
-            inner.jobs = durable
-                .jobs
-                .into_iter()
-                .map(|stored| (stored.job.id, stored))
-                .collect();
-            inner.submission_keys = durable.submission_keys;
-            inner.expired_submission_keys = durable.expired_submission_keys;
-            inner.controller_submissions = durable.controller_submissions;
-            inner.expired_controller_submissions = durable.expired_controller_submissions;
-            inner.compaction = durable.compaction;
-        }
-        Ok(job)
+            Ok(job)
+        })
     }
 
     pub(crate) fn append_event(
@@ -1374,38 +1560,9 @@ impl JobStore {
         message: Option<String>,
         data: Option<Value>,
     ) -> Result<JobEvent> {
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
-        let stored = inner
-            .jobs
-            .get_mut(&job_id)
-            .ok_or_else(|| job_not_found(job_id))?;
-        if kind != JobEventKind::Status && stored.job.status.is_terminal() {
-            return Err(Error::validation_invalid_argument(
-                "status",
-                format!("cannot append {:?} event to terminal job", kind),
-                Some(job_id.to_string()),
-                None,
-            ));
-        }
-
-        let event = JobEvent {
-            sequence: self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1,
-            job_id,
-            kind,
-            timestamp_ms: timestamp_ms(),
-            message,
-            data,
-        };
-
-        stored.events.push(event.clone());
-        apply_event_retention(&mut stored.events, self.event_retention_limit());
-        stored.job.event_count = stored.events.len();
-        stored.job.updated_at_ms = event.timestamp_ms;
-        drop(inner);
-
-        self.persist()?;
-
-        Ok(event)
+        self.durable_transaction(|inner| {
+            Self::append_event_already_locked(self, inner, job_id, kind, message, data)
+        })
     }
 
     pub(crate) fn run_background<T, F>(&self, operation: impl Into<String>, run: F) -> JobRunner
@@ -1426,7 +1583,7 @@ impl JobStore {
     ) -> Result<ControllerJobSubmissionOutcome> {
         let fingerprint = controller_submission_fingerprint(&controller_job);
         let now = timestamp_ms();
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        self.durable_transaction(|inner| {
         if let Some(existing) = inner.controller_submissions.get(&idempotency_key) {
             if existing.fingerprint != fingerprint {
                 return Err(controller_idempotency_conflict(&idempotency_key));
@@ -1434,7 +1591,7 @@ impl JobStore {
             let job = inner.jobs.get(&existing.job_id).ok_or_else(|| {
                 Error::internal_unexpected("controller submission index points at a missing job")
             })?;
-            return Ok(ControllerJobSubmissionOutcome::Existing(job.job.clone()));
+                return Ok(ControllerJobSubmissionOutcome::Existing(job.job.clone()));
         }
         if inner
             .expired_controller_submissions
@@ -1534,26 +1691,8 @@ impl JobStore {
                 terminal_job: None,
             },
         );
-        // Persist the initial event, job, and submission index as one admission
-        // commit. Roll back memory on failure so retries cannot observe a ghost.
-        if let Some(persistence) = &self.persistence {
-            let mut durable = DurableJobStore {
-                jobs: inner.jobs.values().cloned().collect(),
-                submission_keys: inner.submission_keys.clone(),
-                expired_submission_keys: inner.expired_submission_keys.clone(),
-                controller_submissions: inner.controller_submissions.clone(),
-                expired_controller_submissions: inner.expired_controller_submissions.clone(),
-                compaction: inner.compaction.clone(),
-            };
-            if let Err(error) = write_durable_store_with_tombstones(&persistence.path, &mut durable)
-            {
-                inner.jobs.remove(&job_id);
-                inner.controller_submissions.remove(&idempotency_key);
-                return Err(error);
-            }
-        }
-        drop(inner);
         Ok(ControllerJobSubmissionOutcome::Submitted(job_id))
+        })
     }
 
     /// Claim a controller job before starting a worker. This is intentionally a
@@ -1563,45 +1702,45 @@ impl JobStore {
         job_id: Uuid,
         recovery: bool,
     ) -> Result<ControllerJobState> {
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
-        let stored = inner
-            .jobs
-            .get_mut(&job_id)
-            .ok_or_else(|| job_not_found(job_id))?;
-        let controller = stored.controller_job.as_mut().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "job_id",
-                "job is not a controller job",
-                Some(job_id.to_string()),
-                None,
-            )
-        })?;
-        if stored.job.status.is_terminal() || (!recovery && controller.execution_claim_id.is_some())
-        {
-            return Err(Error::validation_invalid_argument(
-                "job_id",
-                "controller job is already claimed or terminal",
-                Some(job_id.to_string()),
-                None,
-            ));
-        }
-        if recovery && (controller.checkpoint.is_none() || controller.recovery_attempted) {
-            return Err(Error::validation_invalid_argument(
-                "job_id",
-                "controller job has no recoverable checkpoint",
-                Some(job_id.to_string()),
-                None,
-            ));
-        }
-        controller.execution_claim_id = Some(Uuid::new_v4().to_string());
-        controller.recovery_attempted |= recovery;
-        stored.job.status = JobStatus::Running;
-        stored.job.started_at_ms.get_or_insert_with(timestamp_ms);
-        stored.job.updated_at_ms = timestamp_ms();
-        let controller = controller.clone();
-        drop(inner);
-        self.persist()?;
-        Ok(controller)
+        self.durable_transaction(|inner| {
+            let stored = inner
+                .jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| job_not_found(job_id))?;
+            let controller = stored.controller_job.as_mut().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "job_id",
+                    "job is not a controller job",
+                    Some(job_id.to_string()),
+                    None,
+                )
+            })?;
+            if stored.job.status.is_terminal()
+                || (!recovery && controller.execution_claim_id.is_some())
+            {
+                return Err(Error::validation_invalid_argument(
+                    "job_id",
+                    "controller job is already claimed or terminal",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            if recovery && (controller.checkpoint.is_none() || controller.recovery_attempted) {
+                return Err(Error::validation_invalid_argument(
+                    "job_id",
+                    "controller job has no recoverable checkpoint",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            controller.execution_claim_id = Some(Uuid::new_v4().to_string());
+            controller.recovery_attempted |= recovery;
+            stored.job.status = JobStatus::Running;
+            stored.job.started_at_ms.get_or_insert_with(timestamp_ms);
+            stored.job.updated_at_ms = timestamp_ms();
+            let controller = controller.clone();
+            Ok(controller)
+        })
     }
 
     /// Atomically claim queued work for the explicit second phase of controller
@@ -1611,44 +1750,29 @@ impl JobStore {
         &self,
         job_id: Uuid,
     ) -> Result<ControllerJobStartOutcome> {
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
-        let stored = inner
-            .jobs
-            .get_mut(&job_id)
-            .ok_or_else(|| job_not_found(job_id))?;
-        let prior = stored.clone();
-        let controller = stored.controller_job.as_mut().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "job_id",
-                "job is not a controller job",
-                Some(job_id.to_string()),
-                None,
-            )
-        })?;
-        if stored.job.status != JobStatus::Queued || controller.execution_claim_id.is_some() {
-            return Ok(ControllerJobStartOutcome::Existing);
-        }
-        controller.execution_claim_id = Some(Uuid::new_v4().to_string());
-        stored.job.status = JobStatus::Running;
-        stored.job.started_at_ms.get_or_insert_with(timestamp_ms);
-        stored.job.updated_at_ms = timestamp_ms();
-        let controller = controller.clone();
-        if let Some(persistence) = &self.persistence {
-            let mut durable = DurableJobStore {
-                jobs: inner.jobs.values().cloned().collect(),
-                submission_keys: inner.submission_keys.clone(),
-                expired_submission_keys: inner.expired_submission_keys.clone(),
-                controller_submissions: inner.controller_submissions.clone(),
-                expired_controller_submissions: inner.expired_controller_submissions.clone(),
-                compaction: inner.compaction.clone(),
-            };
-            if let Err(error) = write_durable_store_with_tombstones(&persistence.path, &mut durable)
-            {
-                *inner.jobs.get_mut(&job_id).expect("controller job exists") = prior;
-                return Err(error);
+        self.durable_transaction(|inner| {
+            let stored = inner
+                .jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| job_not_found(job_id))?;
+            let controller = stored.controller_job.as_mut().ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "job_id",
+                    "job is not a controller job",
+                    Some(job_id.to_string()),
+                    None,
+                )
+            })?;
+            if stored.job.status != JobStatus::Queued || controller.execution_claim_id.is_some() {
+                return Ok(ControllerJobStartOutcome::Existing);
             }
-        }
-        Ok(ControllerJobStartOutcome::Claimed(controller))
+            controller.execution_claim_id = Some(Uuid::new_v4().to_string());
+            stored.job.status = JobStatus::Running;
+            stored.job.started_at_ms.get_or_insert_with(timestamp_ms);
+            stored.job.updated_at_ms = timestamp_ms();
+            let controller = controller.clone();
+            Ok(ControllerJobStartOutcome::Claimed(controller))
+        })
     }
 
     pub(crate) fn active_controller_jobs(&self) -> Vec<(Uuid, ControllerJobState)> {
@@ -1672,27 +1796,25 @@ impl JobStore {
     /// than replaying it on startup; its durable request and key remain evidence
     /// for the domain layer to inspect or retry with a new idempotency key.
     pub(crate) fn reconcile_unresolved_controller_jobs(&self) -> Result<Vec<Uuid>> {
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
-        let now = timestamp_ms();
-        let mut reconciled = Vec::new();
-        for stored in inner.jobs.values_mut() {
-            if stored.controller_job.is_some()
-                && matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
-            {
-                stored.job.status = JobStatus::Failed;
-                stored.job.updated_at_ms = now;
-                stored.job.finished_at_ms = Some(now);
-                stored.job.stale_reason = Some(
-                    "controller job was unresolved after daemon restart; not replayed".to_string(),
-                );
-                reconciled.push(stored.job.id);
+        self.durable_transaction(|inner| {
+            let now = timestamp_ms();
+            let mut reconciled = Vec::new();
+            for stored in inner.jobs.values_mut() {
+                if stored.controller_job.is_some()
+                    && matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
+                {
+                    stored.job.status = JobStatus::Failed;
+                    stored.job.updated_at_ms = now;
+                    stored.job.finished_at_ms = Some(now);
+                    stored.job.stale_reason = Some(
+                        "controller job was unresolved after daemon restart; not replayed"
+                            .to_string(),
+                    );
+                    reconciled.push(stored.job.id);
+                }
             }
-        }
-        drop(inner);
-        if !reconciled.is_empty() {
-            self.persist()?;
-        }
-        Ok(reconciled)
+            Ok(reconciled)
+        })
     }
 
     pub(crate) fn run_background_with_source_snapshot<T, F>(
@@ -1980,8 +2102,7 @@ impl JobStore {
         message: impl Into<String>,
     ) -> Result<Job> {
         let message = message.into();
-        {
-            let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        self.durable_transaction(|inner| {
             let stored = inner
                 .jobs
                 .get_mut(&job_id)
@@ -2021,12 +2142,20 @@ impl JobStore {
             if next_status.is_terminal() {
                 stored.job.finished_at_ms = Some(now);
             }
-        }
-
-        self.persist()?;
-
-        self.append_status_event(job_id, next_status, message)?;
-        self.get(job_id)
+            Self::append_event_already_locked(
+                self,
+                inner,
+                job_id,
+                JobEventKind::Status,
+                Some(message),
+                Some(serde_json::json!({ "status": next_status })),
+            )?;
+            inner
+                .jobs
+                .get(&job_id)
+                .map(|stored| stored.job.clone())
+                .ok_or_else(|| job_not_found(job_id))
+        })
     }
 
     pub(crate) fn reserve_local_child(&self, job_id: Uuid) -> Result<()> {
@@ -2059,85 +2188,55 @@ impl JobStore {
     ) -> Result<bool> {
         let reservation_id = Uuid::new_v4().to_string();
         let reservation_expires_at_ms = now.saturating_add(LOCAL_CHILD_RESERVATION_LEASE_MS);
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
-        let prior = inner
-            .jobs
-            .get(&job_id)
-            .cloned()
-            .ok_or_else(|| job_not_found(job_id))?;
-        if let Some((runner_id, capacity)) = runner_capacity {
-            let active = inner.jobs.values().filter(|candidate| {
-                candidate.job.id != job_id
-                    && matches!(candidate.job.status, JobStatus::Queued | JobStatus::Running)
-                    && candidate.local_child.is_some()
-                    && candidate
-                        .local_runner
-                        .as_ref()
-                        .is_some_and(|runner| runner.runner_id == runner_id)
-            });
-            if active.count() >= capacity {
-                return Ok(false);
-            }
-        }
-        let stored = inner.jobs.get_mut(&job_id).expect("job exists");
-        if stored.job.status != JobStatus::Queued {
-            return Err(Error::validation_invalid_argument(
-                "status",
-                "local child reservation requires a queued job",
-                Some(job_id.to_string()),
-                None,
-            ));
-        }
-        stored.local_child = Some(LocalChildExecution {
-            reservation_id: reservation_id.clone(),
-            reservation_expires_at_ms: Some(reservation_expires_at_ms),
-            process: None,
-        });
-        let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
-        stored.events.push(JobEvent {
-            sequence,
-            job_id,
-            kind: JobEventKind::Progress,
-            timestamp_ms: now,
-            message: Some("local runner child reserved before spawn".to_string()),
-            data: Some(serde_json::json!({
-                "phase": "child_reserved",
-                "reservation_id": reservation_id,
-                "reservation_expires_at_ms": reservation_expires_at_ms,
-            })),
-        });
-        stored.job.event_count = stored.events.len();
-        if let Some(persistence) = &self.persistence {
-            let mut durable = DurableJobStore {
-                jobs: inner.jobs.values().cloned().collect(),
-                submission_keys: inner.submission_keys.clone(),
-                expired_submission_keys: inner.expired_submission_keys.clone(),
-                controller_submissions: inner.controller_submissions.clone(),
-                expired_controller_submissions: inner.expired_controller_submissions.clone(),
-                compaction: inner.compaction.clone(),
-            };
-            compact_terminal_jobs(
-                &mut durable,
-                persistence.event_retention_limit,
-                persistence.terminal_job_retention_limit,
-                persistence.terminal_job_retention_bytes,
-            );
-            if let Err(error) = write_durable_store_with_tombstones(&persistence.path, &mut durable)
-            {
-                inner.jobs.insert(job_id, prior);
-                return Err(error);
-            }
-            inner.jobs = durable
+        self.durable_transaction(|inner| {
+            inner
                 .jobs
-                .iter()
-                .cloned()
-                .map(|stored| (stored.job.id, stored))
-                .collect();
-            inner.controller_submissions = durable.controller_submissions;
-            inner.expired_controller_submissions = durable.expired_controller_submissions;
-            inner.compaction = durable.compaction;
-        }
-        Ok(true)
+                .get(&job_id)
+                .ok_or_else(|| job_not_found(job_id))?;
+            if let Some((runner_id, capacity)) = runner_capacity {
+                let active = inner.jobs.values().filter(|candidate| {
+                    candidate.job.id != job_id
+                        && matches!(candidate.job.status, JobStatus::Queued | JobStatus::Running)
+                        && candidate.local_child.is_some()
+                        && candidate
+                            .local_runner
+                            .as_ref()
+                            .is_some_and(|runner| runner.runner_id == runner_id)
+                });
+                if active.count() >= capacity {
+                    return Ok(false);
+                }
+            }
+            let stored = inner.jobs.get_mut(&job_id).expect("job exists");
+            if stored.job.status != JobStatus::Queued {
+                return Err(Error::validation_invalid_argument(
+                    "status",
+                    "local child reservation requires a queued job",
+                    Some(job_id.to_string()),
+                    None,
+                ));
+            }
+            stored.local_child = Some(LocalChildExecution {
+                reservation_id: reservation_id.clone(),
+                reservation_expires_at_ms: Some(reservation_expires_at_ms),
+                process: None,
+            });
+            let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+            stored.events.push(JobEvent {
+                sequence,
+                job_id,
+                kind: JobEventKind::Progress,
+                timestamp_ms: now,
+                message: Some("local runner child reserved before spawn".to_string()),
+                data: Some(serde_json::json!({
+                    "phase": "child_reserved",
+                    "reservation_id": reservation_id,
+                    "reservation_expires_at_ms": reservation_expires_at_ms,
+                })),
+            });
+            stored.job.event_count = stored.events.len();
+            Ok(true)
+        })
     }
 
     /// Terminalize expired pre-spawn reservations. A PID-bound child has
@@ -2152,75 +2251,72 @@ impl JobStore {
         &self,
         now: u64,
     ) -> Result<Vec<Uuid>> {
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
-        let expired = inner
-            .jobs
-            .values()
-            .filter(|stored| {
-                stored.job.status == JobStatus::Queued
-                    && stored.local_child.as_ref().is_some_and(|child| {
-                        child.process.is_none()
-                            && child
-                                .reservation_expires_at_ms
-                                .is_some_and(|expires_at| expires_at <= now)
-                    })
-            })
-            .map(|stored| stored.job.id)
-            .collect::<Vec<_>>();
+        self.durable_transaction(|inner| {
+            let expired = inner
+                .jobs
+                .values()
+                .filter(|stored| {
+                    stored.job.status == JobStatus::Queued
+                        && stored.local_child.as_ref().is_some_and(|child| {
+                            child.process.is_none()
+                                && child
+                                    .reservation_expires_at_ms
+                                    .is_some_and(|expires_at| expires_at <= now)
+                        })
+                })
+                .map(|stored| stored.job.id)
+                .collect::<Vec<_>>();
 
-        for job_id in &expired {
-            let stored = inner.jobs.get_mut(job_id).expect("expired job exists");
-            let child = stored
-                .local_child
-                .as_ref()
-                .expect("expired reservation exists");
-            let reason = "local child reservation lease expired before spawn";
-            stored.job.status = JobStatus::Failed;
-            stored.job.updated_at_ms = now;
-            stored.job.finished_at_ms = Some(now);
-            stored.job.stale_reason = Some(reason.to_string());
-            let terminal_result = serde_json::json!({
-                "status": JobStatus::Failed,
-                "reason": "local_child_reservation_expired",
-                "retryable": true,
-                "reservation_id": child.reservation_id,
-                "reservation_expires_at_ms": child.reservation_expires_at_ms,
-            });
-            for (kind, message, data) in [
-                (
-                    JobEventKind::Error,
-                    reason.to_string(),
-                    terminal_result.clone(),
-                ),
-                (
-                    JobEventKind::Result,
-                    "retryable terminal reservation failure".to_string(),
-                    terminal_result.clone(),
-                ),
-                (
-                    JobEventKind::Status,
-                    "job marked failed after local child reservation lease expiry".to_string(),
-                    terminal_result,
-                ),
-            ] {
-                let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
-                stored.events.push(JobEvent {
-                    sequence,
-                    job_id: *job_id,
-                    kind,
-                    timestamp_ms: now,
-                    message: Some(message),
-                    data: Some(data),
+            for job_id in &expired {
+                let stored = inner.jobs.get_mut(job_id).expect("expired job exists");
+                let child = stored
+                    .local_child
+                    .as_ref()
+                    .expect("expired reservation exists");
+                let reason = "local child reservation lease expired before spawn";
+                stored.job.status = JobStatus::Failed;
+                stored.job.updated_at_ms = now;
+                stored.job.finished_at_ms = Some(now);
+                stored.job.stale_reason = Some(reason.to_string());
+                let terminal_result = serde_json::json!({
+                    "status": JobStatus::Failed,
+                    "reason": "local_child_reservation_expired",
+                    "retryable": true,
+                    "reservation_id": child.reservation_id,
+                    "reservation_expires_at_ms": child.reservation_expires_at_ms,
                 });
+                for (kind, message, data) in [
+                    (
+                        JobEventKind::Error,
+                        reason.to_string(),
+                        terminal_result.clone(),
+                    ),
+                    (
+                        JobEventKind::Result,
+                        "retryable terminal reservation failure".to_string(),
+                        terminal_result.clone(),
+                    ),
+                    (
+                        JobEventKind::Status,
+                        "job marked failed after local child reservation lease expiry".to_string(),
+                        terminal_result,
+                    ),
+                ] {
+                    let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+                    stored.events.push(JobEvent {
+                        sequence,
+                        job_id: *job_id,
+                        kind,
+                        timestamp_ms: now,
+                        message: Some(message),
+                        data: Some(data),
+                    });
+                }
+                apply_event_retention(&mut stored.events, self.event_retention_limit());
+                stored.job.event_count = stored.events.len();
             }
-            apply_event_retention(&mut stored.events, self.event_retention_limit());
-            stored.job.event_count = stored.events.len();
-        }
-        drop(inner);
-        if !expired.is_empty() {
-            self.persist()?;
-        }
-        Ok(expired)
+            Ok(expired)
+        })
     }
 
     /// Explicit, per-job legacy recovery. The supplied PID/start ticks must
@@ -2284,40 +2380,40 @@ impl JobStore {
                 ));
             }
         }
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
-        let stored = inner
-            .jobs
-            .get_mut(&job_id)
-            .ok_or_else(|| job_not_found(job_id))?;
-        if !matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
-            || stored.local_child.is_some()
-        {
-            return Err(Error::validation_invalid_argument(
+        self.durable_transaction(|inner| {
+            let stored = inner
+                .jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| job_not_found(job_id))?;
+            if !matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
+                || stored.local_child.is_some()
+            {
+                return Err(Error::validation_invalid_argument(
                 "job_id",
                 "legacy recovery requires one active job with no persisted local child identity",
                 Some(job_id.to_string()),
                 None,
             ));
-        }
-        let now = timestamp_ms();
-        stored.local_child = Some(LocalChildExecution {
-            reservation_id: format!("operator-recovery-{job_id}"),
-            reservation_expires_at_ms: None,
-            process: Some(LocalChildProcessIdentity {
-                pid,
-                process_group_id: None,
-                discriminator: LocalChildStartDiscriminator::LinuxProcStatStarttimeTicks {
-                    ticks: expected_starttime_ticks,
-                },
-            }),
-        });
-        stored.job.status = JobStatus::Failed;
-        stored.job.updated_at_ms = now;
-        stored.job.finished_at_ms = Some(now);
-        stored.job.stale_reason =
-            Some("operator-proven legacy child identity was absent or reused".to_string());
-        let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
-        stored.events.push(JobEvent {
+            }
+            let now = timestamp_ms();
+            stored.local_child = Some(LocalChildExecution {
+                reservation_id: format!("operator-recovery-{job_id}"),
+                reservation_expires_at_ms: None,
+                process: Some(LocalChildProcessIdentity {
+                    pid,
+                    process_group_id: None,
+                    discriminator: LocalChildStartDiscriminator::LinuxProcStatStarttimeTicks {
+                        ticks: expected_starttime_ticks,
+                    },
+                }),
+            });
+            stored.job.status = JobStatus::Failed;
+            stored.job.updated_at_ms = now;
+            stored.job.finished_at_ms = Some(now);
+            stored.job.stale_reason =
+                Some("operator-proven legacy child identity was absent or reused".to_string());
+            let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+            stored.events.push(JobEvent {
             sequence,
             job_id,
             kind: JobEventKind::Status,
@@ -2332,10 +2428,14 @@ impl JobStore {
                 "process": { "root_pid": pid, "linux_starttime_ticks": expected_starttime_ticks },
             })),
         });
-        stored.job.event_count = stored.events.len();
-        drop(inner);
-        self.persist()?;
-        self.get(job_id)
+            stored.job.event_count = stored.events.len();
+            Ok(inner
+                .jobs
+                .get(&job_id)
+                .expect("recovered job exists")
+                .job
+                .clone())
+        })
     }
 
     pub(crate) fn start_with_reserved_child_identity(
@@ -2345,15 +2445,12 @@ impl JobStore {
         process_group_id: Option<u32>,
         discriminator: LocalChildStartDiscriminator,
     ) -> Result<Job> {
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
-        let (prior, started) = {
+        self.durable_transaction(|inner| {
+        let started = {
             let stored = inner
                 .jobs
                 .get_mut(&job_id)
                 .ok_or_else(|| job_not_found(job_id))?;
-            // Retain the unclaimed reservation so a failed durable write never
-            // leaves queued visibility paired with an uncommitted child PID.
-            let prior = stored.clone();
             validate_transition(stored.job.status, JobStatus::Running)?;
             let local_child = stored.local_child.as_mut().ok_or_else(|| {
                 Error::internal_unexpected("local child spawned without a durable reservation")
@@ -2386,40 +2483,10 @@ impl JobStore {
             });
             apply_event_retention(&mut stored.events, self.event_retention_limit());
             stored.job.event_count = stored.events.len();
-            (prior, stored.job.clone())
+            stored.job.clone()
         };
-
-        if let Some(persistence) = &self.persistence {
-            let mut durable = DurableJobStore {
-                jobs: inner.jobs.values().cloned().collect(),
-                submission_keys: inner.submission_keys.clone(),
-                expired_submission_keys: inner.expired_submission_keys.clone(),
-                controller_submissions: inner.controller_submissions.clone(),
-                expired_controller_submissions: inner.expired_controller_submissions.clone(),
-                compaction: inner.compaction.clone(),
-            };
-            compact_terminal_jobs(
-                &mut durable,
-                persistence.event_retention_limit,
-                persistence.terminal_job_retention_limit,
-                persistence.terminal_job_retention_bytes,
-            );
-            if let Err(error) = write_durable_store_with_tombstones(&persistence.path, &mut durable)
-            {
-                *inner.jobs.get_mut(&job_id).expect("job exists") = prior;
-                return Err(error);
-            }
-            inner.jobs = durable
-                .jobs
-                .iter()
-                .cloned()
-                .map(|stored| (stored.job.id, stored))
-                .collect();
-            inner.controller_submissions = durable.controller_submissions;
-            inner.expired_controller_submissions = durable.expired_controller_submissions;
-            inner.compaction = durable.compaction;
-        }
         Ok(started)
+        })
     }
 
     pub(super) fn ensure_transition(&self, job_id: Uuid, next_status: JobStatus) -> Result<()> {
@@ -2486,40 +2553,42 @@ impl JobStore {
             .map(|persistence| persistence.terminal_job_retention_bytes)
             .unwrap_or(usize::MAX)
     }
+}
 
-    pub(super) fn persist(&self) -> Result<()> {
-        let Some(persistence) = &self.persistence else {
-            return Ok(());
-        };
-
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
-        let mut durable = DurableJobStore {
-            jobs: inner.jobs.values().cloned().collect(),
-            submission_keys: inner.submission_keys.clone(),
-            expired_submission_keys: inner.expired_submission_keys.clone(),
-            controller_submissions: inner.controller_submissions.clone(),
-            expired_controller_submissions: inner.expired_controller_submissions.clone(),
-            compaction: inner.compaction.clone(),
-        };
-        compact_terminal_jobs(
-            &mut durable,
-            self.event_retention_limit(),
-            self.terminal_job_retention_limit(),
-            self.terminal_job_retention_bytes(),
-        );
-        write_durable_store_with_tombstones(&persistence.path, &mut durable)?;
-        inner.jobs = durable
+impl JobStore {
+    pub(super) fn append_event_already_locked(
+        &self,
+        inner: &mut JobStoreInner,
+        job_id: Uuid,
+        kind: JobEventKind,
+        message: Option<String>,
+        data: Option<Value>,
+    ) -> Result<JobEvent> {
+        let stored = inner
             .jobs
-            .iter()
-            .cloned()
-            .map(|stored| (stored.job.id, stored))
-            .collect();
-        inner.submission_keys = durable.submission_keys;
-        inner.expired_submission_keys = durable.expired_submission_keys;
-        inner.controller_submissions = durable.controller_submissions;
-        inner.expired_controller_submissions = durable.expired_controller_submissions;
-        inner.compaction = durable.compaction;
-        Ok(())
+            .get_mut(&job_id)
+            .ok_or_else(|| job_not_found(job_id))?;
+        if kind != JobEventKind::Status && stored.job.status.is_terminal() {
+            return Err(Error::validation_invalid_argument(
+                "status",
+                format!("cannot append {:?} event to terminal job", kind),
+                Some(job_id.to_string()),
+                None,
+            ));
+        }
+        let event = JobEvent {
+            sequence: self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1,
+            job_id,
+            kind,
+            timestamp_ms: timestamp_ms(),
+            message,
+            data,
+        };
+        stored.events.push(event.clone());
+        apply_event_retention(&mut stored.events, self.event_retention_limit());
+        stored.job.event_count = stored.events.len();
+        stored.job.updated_at_ms = event.timestamp_ms;
+        Ok(event)
     }
 }
 

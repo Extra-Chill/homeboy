@@ -1155,6 +1155,31 @@ fn detached_retry_materializes_failed_plan_and_persists_bounded_preacceptance_fa
         assert!(remote_cli.detach_after_handoff);
         let replacement = agent_task_lifecycle::status(&handoff.run_id).expect("replacement");
         assert_eq!(replacement.metadata["retry_of"], "failed-run");
+        assert_eq!(replacement.metadata["retried_from"], "failed-run");
+        assert_eq!(replacement.metadata["retry_root"], "failed-run");
+        assert_eq!(
+            agent_task_lifecycle::status("failed-run")
+                .expect("source retry lineage")
+                .metadata["retries"],
+            serde_json::json!(["failed-run-retry-on-lab"])
+        );
+
+        // The Lab executes `run-plan` against the durable replacement. Its
+        // re-submission must retain retry lineage so later reconciliation can
+        // still resolve the retry reservation through the controller store.
+        agent_task_lifecycle::submit_plan(&handoff.plan, Some(&handoff.run_id))
+            .expect("resubmit replacement from Lab handoff");
+        let resubmitted =
+            agent_task_lifecycle::status(&handoff.run_id).expect("resubmitted replacement");
+        assert_eq!(resubmitted.metadata["retry_of"], "failed-run");
+        assert_eq!(resubmitted.metadata["retried_from"], "failed-run");
+        assert_eq!(resubmitted.metadata["retry_root"], "failed-run");
+        assert_eq!(
+            agent_task_lifecycle::status("failed-run")
+                .expect("source retry lineage remains idempotent")
+                .metadata["retries"],
+            serde_json::json!(["failed-run-retry-on-lab"])
+        );
 
         stage_retry_lab_handoff_before_preacceptance(Some(&handoff), Some("homeboy-lab"))
             .expect("stage replacement handoff before Lab preacceptance");

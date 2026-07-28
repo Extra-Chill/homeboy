@@ -194,6 +194,46 @@ pub fn complete_cook_operation(run_id: &str, operation_key: &str, result: Value)
     Ok(())
 }
 
+/// Restore a completed claim only when the caller has independently recovered
+/// the durable side effect. This repairs an interrupted source-record rewrite
+/// without allowing an arbitrary completion marker to invent work.
+pub fn recover_completed_cook_operation(
+    run_id: &str,
+    operation_key: &str,
+    result: Value,
+) -> Result<()> {
+    let run_id = sanitize_run_id(run_id);
+    let now = now_timestamp();
+    store::mutate_record(&run_id, |record| {
+        let metadata = record.ensure_metadata_object();
+        let claims = metadata
+            .entry(OPERATION_CLAIMS_KEY.to_string())
+            .or_insert_with(|| json!([]));
+        if !claims.is_array() {
+            *claims = json!([]);
+        }
+        let claims = claims.as_array_mut().expect("operation claims array");
+        if let Some(claim) = claims
+            .iter()
+            .find(|claim| claim["operation_key"] == json!(operation_key))
+        {
+            return claim["state"] != json!("completed");
+        }
+        claims.push(json!({
+            "operation_key": operation_key,
+            "state": "completed",
+            "leased_at": now,
+            "completed_at": now,
+            "owner_pid": std::process::id(),
+            "result": result,
+            "recovered_from_authoritative_successor": true,
+        }));
+        record.updated_at = Some(now.clone());
+        true
+    })?;
+    Ok(())
+}
+
 /// Terminalize a claimed operation that did not produce its external result.
 /// Failed claims retain their exact bounded diagnostic but are intentionally
 /// reclaimable by a later explicit continuation.

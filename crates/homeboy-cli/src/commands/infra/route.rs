@@ -1335,8 +1335,12 @@ fn materialize_agent_task_retry_handoff(
         return Ok(None);
     }
 
-    let retry_result =
-        crate::agents::agent_task_service::retry(&retry.run_id, retry.new_run_id.as_deref(), true)?;
+    let retry_result = crate::agents::agent_task_service::retry(
+        &retry.run_id,
+        retry.new_run_id.as_deref(),
+        true,
+        retry.force,
+    )?;
     if !retry_result.run {
         return Ok(None);
     }
