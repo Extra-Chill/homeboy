@@ -9,11 +9,22 @@ use homeboy::core::observation::{
 };
 use homeboy_extension::test as extension_test;
 use homeboy_extension::test::{
-    detect_test_drift, report, run_self_check_test_workflow_with_progress, TestCommandOutput,
-    TestRunWorkflowArgs,
+    build_test_summary, detect_test_drift, parse_test_failures_from_text,
+    parse_test_results_failures_file, parse_test_results_file, parse_test_results_text, report,
+    run_self_check_test_workflow_with_progress, test_failure_summary_items, TestAnalysisInput,
+    TestCommandOutput, TestFailure, TestRunWorkflowArgs,
 };
 use homeboy_extension::ExtensionCapability;
-use std::path::{Path, PathBuf};
+use serde_json::Value;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
+use std::os::unix::io::{AsRawFd, FromRawFd};
+#[cfg(windows)]
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+use std::path::{Component, Path, PathBuf};
 
 use super::source_command::{resolve_ci_job_for_command, resolve_source_context};
 use super::utils::args::{
@@ -262,16 +273,37 @@ pub fn run(args: TestArgs) -> CmdResult<TestCommandOutput> {
         },
         runner.run_dir(),
     );
-    let scratch_succeeded = workflow
-        .as_ref()
-        .is_ok_and(|workflow| workflow.exit_code == 0);
-    let workflow = runner.finish_with_scratch_outcome(
-        observation,
-        workflow,
-        scratch_succeeded,
-        |observation, workflow| finish_test_observation(Some(observation), workflow),
-        |observation, error| finish_test_observation_error(Some(observation), error),
-    )?;
+    let mut workflow = workflow;
+    let mut collection_failed = false;
+    if let (Some(observation), Ok(workflow_result)) = (observation.as_ref(), workflow.as_mut()) {
+        if let Err(error) = persist_declared_test_artifacts(observation, workflow_result) {
+            collection_failed = true;
+            workflow = Err(homeboy::core::Error::internal_unexpected(format!(
+                "test artifact collection failure: {error}"
+            )));
+        }
+    }
+    let scratch_succeeded = collection_failed
+        || workflow
+            .as_ref()
+            .is_ok_and(|workflow| workflow.exit_code == 0);
+    let workflow = if collection_failed {
+        runner.finish_with_finalized_error_cleanup(
+            observation,
+            workflow,
+            scratch_succeeded,
+            |observation, workflow| finish_test_observation(Some(observation), workflow),
+            |observation, error| finish_test_observation_error(Some(observation), error),
+        )
+    } else {
+        runner.finish_with_scratch_outcome(
+            observation,
+            workflow,
+            scratch_succeeded,
+            |observation, workflow| finish_test_observation(Some(observation), workflow),
+            |observation, error| finish_test_observation_error(Some(observation), error),
+        )
+    }?;
 
     let (mut output, exit_code) = report::from_main_workflow_with_ci_context(
         workflow,
@@ -412,6 +444,463 @@ fn finish_test_observation(
     persist_validation_progress_artifacts(&observation);
     persist_child_supervision_artifact(&observation);
     observation.active.finish(status, Some(metadata));
+}
+
+/// Persist provider-declared test artifacts before the runner connection or
+/// scratch run directory disappears. The declaration shape stays opaque: this
+/// boundary only recognizes a generic `artifact://files/<relative path>`
+/// locator rooted in the invocation run directory.
+fn persist_declared_test_artifacts(
+    observation: &TestObservation,
+    workflow: &mut extension_test::TestRunWorkflowResult,
+) -> homeboy::core::Result<()> {
+    let Some(run_dir) = observation
+        .run_dir
+        .as_ref()
+        .and_then(|path| RunDir::from_existing(path.clone()).ok())
+    else {
+        return Ok(());
+    };
+
+    let mut reported_locator_replacements = Vec::new();
+    for (timing_index, timing) in workflow.extension_phase_timings.iter_mut().enumerate() {
+        for (artifact_index, declaration) in timing.artifacts.iter_mut().enumerate() {
+            let Some(locator) = artifact_locator(declaration).map(str::to_string) else {
+                continue;
+            };
+            let Some(relative_path) = artifact_locator_relative_path(&locator) else {
+                let record = record_unavailable_test_artifact(
+                    observation,
+                    timing_index,
+                    artifact_index,
+                    &timing.name,
+                    &locator,
+                    "the locator has no controller-local file provenance",
+                )?;
+                reported_locator_replacements.push(reported_test_artifact_locator_replacement(
+                    &record, &locator,
+                ));
+                *declaration = persisted_test_artifact_declaration(&record, &timing.name);
+                continue;
+            };
+            let mut source =
+                match open_test_artifact_no_follow(&run_dir.path().join("files"), &relative_path) {
+                    Ok(source) => source,
+                    Err(error) => {
+                        let record = record_unavailable_test_artifact(
+                    observation,
+                    timing_index,
+                    artifact_index,
+                    &timing.name,
+                    &locator,
+                    &format!("the declared controller-local artifact file is unavailable: {error}"),
+                )?;
+                        reported_locator_replacements.push(
+                            reported_test_artifact_locator_replacement(&record, &locator),
+                        );
+                        *declaration = persisted_test_artifact_declaration(&record, &timing.name);
+                        continue;
+                    }
+                };
+            let record = observation
+                .active
+                .store()
+                .record_artifact_from_open_file_with_metadata(
+                    observation.active.run_id(),
+                    "test_artifact",
+                    &mut source,
+                    serde_json::json!({
+                        "source": "extension_phase_timing",
+                        "phase": timing.name,
+                        "locator": &locator,
+                    }),
+                )?;
+            reported_locator_replacements.push(reported_test_artifact_locator_replacement(
+                &record, &locator,
+            ));
+            *declaration = persisted_test_artifact_declaration(&record, &timing.name);
+        }
+    }
+    enrich_test_result_from_persisted_artifacts(observation, workflow)?;
+    rewrite_reported_artifact_locators(workflow, &reported_locator_replacements);
+    Ok(())
+}
+
+fn rewrite_reported_artifact_locators(
+    workflow: &mut extension_test::TestRunWorkflowResult,
+    replacements: &[(String, String)],
+) {
+    let Some(raw_output) = workflow.raw_output.as_mut() else {
+        return;
+    };
+    for (locator, replacement) in replacements {
+        raw_output.stdout_tail = raw_output.stdout_tail.replace(locator, replacement);
+        raw_output.stderr_tail = raw_output.stderr_tail.replace(locator, replacement);
+    }
+}
+
+fn open_test_artifact_no_follow(
+    files_root: &Path,
+    relative_path: &Path,
+) -> homeboy::core::Result<std::fs::File> {
+    #[cfg(windows)]
+    {
+        return open_test_artifact_no_follow_windows(files_root, relative_path);
+    }
+
+    #[cfg(unix)]
+    {
+        return open_test_artifact_no_follow_unix(files_root, relative_path);
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (files_root, relative_path);
+        return Err(homeboy::core::Error::internal_unexpected(
+            "descriptor-relative test artifact ingestion requires Unix openat support",
+        ));
+    }
+}
+
+#[cfg(windows)]
+fn open_test_artifact_no_follow_windows(
+    files_root: &Path,
+    relative_path: &Path,
+) -> homeboy::core::Result<std::fs::File> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+
+    let mut current = files_root.to_path_buf();
+    let components = relative_path.components().collect::<Vec<_>>();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(name) = component else {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "artifact",
+                "test artifact path must contain normal relative components",
+                Some(relative_path.display().to_string()),
+                None,
+            ));
+        };
+        current.push(name);
+        let final_component = index + 1 == components.len();
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).custom_flags(
+            FILE_FLAG_OPEN_REPARSE_POINT
+                | if final_component {
+                    0
+                } else {
+                    FILE_FLAG_BACKUP_SEMANTICS
+                },
+        );
+        let file = options.open(&current).map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "open test artifact component {}",
+                    current.display()
+                )),
+            )
+        })?;
+        let metadata = file.metadata().map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "inspect test artifact component {}",
+                    current.display()
+                )),
+            )
+        })?;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || (!final_component && !metadata.is_dir())
+            || (final_component && !metadata.is_file())
+        {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "artifact",
+                "test artifact path contains a reparse point or non-regular component",
+                Some(relative_path.display().to_string()),
+                None,
+            ));
+        }
+        if final_component {
+            return Ok(file);
+        }
+    }
+    Err(homeboy::core::Error::validation_invalid_argument(
+        "artifact",
+        "test artifact path is empty",
+        Some(relative_path.display().to_string()),
+        None,
+    ))
+}
+
+#[cfg(unix)]
+fn open_test_artifact_no_follow_unix(
+    files_root: &Path,
+    relative_path: &Path,
+) -> homeboy::core::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    options.custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW);
+    let mut directory = options.open(files_root).map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some(format!("open test artifact root {}", files_root.display())),
+        )
+    })?;
+    let components = relative_path.components().collect::<Vec<_>>();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(name) = component else {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "artifact",
+                "test artifact path must contain normal relative components",
+                Some(relative_path.display().to_string()),
+                None,
+            ));
+        };
+        let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| {
+            homeboy::core::Error::validation_invalid_argument(
+                "artifact",
+                "test artifact path contains an embedded NUL byte",
+                Some(relative_path.display().to_string()),
+                None,
+            )
+        })?;
+        let final_component = index + 1 == components.len();
+        let flags = libc::O_RDONLY
+            | libc::O_CLOEXEC
+            | libc::O_NOFOLLOW
+            | if final_component {
+                0
+            } else {
+                libc::O_DIRECTORY
+            };
+        // Each artifact-controlled component is resolved from its opened parent.
+        let descriptor = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+        if descriptor < 0 {
+            return Err(homeboy::core::Error::internal_io(
+                std::io::Error::last_os_error().to_string(),
+                Some(format!(
+                    "open test artifact component {}",
+                    relative_path.display()
+                )),
+            ));
+        }
+        let opened = unsafe { std::fs::File::from_raw_fd(descriptor) };
+        directory = opened;
+    }
+    let file = directory;
+    let metadata = file.metadata().map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some("inspect opened test artifact".to_string()),
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "artifact",
+            "opened test artifact is not a regular file",
+            Some(relative_path.display().to_string()),
+            None,
+        ));
+    }
+    Ok(file)
+}
+
+fn enrich_test_result_from_persisted_artifacts(
+    observation: &TestObservation,
+    workflow: &mut extension_test::TestRunWorkflowResult,
+) -> homeboy::core::Result<()> {
+    let artifacts = observation
+        .active
+        .store()
+        .list_artifacts(observation.active.run_id())?;
+    let mut parsed_failures = None;
+    let mut persisted_refs = Vec::new();
+    for artifact in artifacts {
+        let locator = artifact
+            .metadata_json
+            .get("locator")
+            .and_then(Value::as_str);
+        let Some(locator) = locator else { continue };
+        if artifact.artifact_type != "file" {
+            continue;
+        }
+        persisted_refs.push((
+            locator.to_string(),
+            format!(
+                "homeboy://run/{}/artifact/{}",
+                observation.active.run_id(),
+                artifact.id
+            ),
+        ));
+        if locator.ends_with("test-results.json") && workflow.test_counts.is_none() {
+            workflow.test_counts = parse_test_results_file(Path::new(&artifact.path))?;
+        }
+        if locator.ends_with("test-results.json") && parsed_failures.is_none() {
+            parsed_failures = parse_test_results_failures_file(
+                Path::new(&artifact.path),
+                workflow.test_counts.as_ref(),
+            )?;
+        }
+        if locator.ends_with("phpunit-output.log") {
+            let output = std::fs::read_to_string(&artifact.path).map_err(|error| {
+                homeboy::core::Error::internal_io(
+                    error.to_string(),
+                    Some(format!("read persisted test artifact {}", artifact.id)),
+                )
+            })?;
+            if workflow.test_counts.is_none() {
+                workflow.test_counts = parse_test_results_text(&output);
+            }
+            if parsed_failures.is_none() {
+                parsed_failures =
+                    parse_test_failures_from_text(&output, workflow.test_counts.as_ref());
+            }
+        }
+    }
+    if let Some(raw_output) = workflow.raw_output.as_mut() {
+        for (locator, reference) in persisted_refs {
+            raw_output.stdout_tail = raw_output.stdout_tail.replace(&locator, &reference);
+            raw_output.stderr_tail = raw_output.stderr_tail.replace(&locator, &reference);
+        }
+    }
+    if workflow.failure_analysis_input.is_none() {
+        workflow.failure_analysis_input = parsed_failures;
+    }
+    if workflow.failure_analysis_input.is_none()
+        && workflow
+            .test_counts
+            .as_ref()
+            .is_some_and(|counts| counts.failed > 0)
+    {
+        let counts = workflow.test_counts.as_ref().expect("checked above");
+        let input = TestAnalysisInput {
+            failures: vec![TestFailure {
+                test_name: "provider test results".to_string(),
+                test_file: String::new(),
+                error_type: "test_failure".to_string(),
+                message: format!(
+                    "{} test failure(s) reported by persisted test results",
+                    counts.failed
+                ),
+                source_file: String::new(),
+                source_line: 0,
+            }],
+            total: counts.total,
+            passed: counts.passed,
+        };
+        workflow.failure_analysis_input = Some(input);
+    }
+    if workflow.findings.is_none() {
+        workflow.findings = workflow
+            .failure_analysis_input
+            .as_ref()
+            .and_then(homeboy::core::observation::homeboy_findings_from_test_analysis_input);
+    }
+    let mut summary = build_test_summary(
+        workflow.test_counts.as_ref(),
+        workflow.analysis.as_ref(),
+        workflow.exit_code,
+    );
+    if let Some(input) = &workflow.failure_analysis_input {
+        summary.failures = test_failure_summary_items(&input.failures);
+    }
+    workflow.summary = Some(summary);
+    Ok(())
+}
+
+fn record_unavailable_test_artifact(
+    observation: &TestObservation,
+    timing_index: usize,
+    artifact_index: usize,
+    phase: &str,
+    locator: &str,
+    reason: &str,
+) -> homeboy::core::Result<homeboy::core::observation::ArtifactRecord> {
+    let artifact = homeboy::core::observation::ArtifactRecord {
+        id: format!(
+            "{}-test-artifact-{timing_index}-{artifact_index}",
+            observation.active.run_id()
+        ),
+        run_id: observation.active.run_id().to_string(),
+        kind: "test_artifact".to_string(),
+        artifact_type: "metadata-only".to_string(),
+        path: format!("metadata-only:{locator}"),
+        url: None,
+        public_url: None,
+        viewer_url: None,
+        viewer_links: Vec::new(),
+        sha256: None,
+        size_bytes: None,
+        mime: None,
+        metadata_json: serde_json::json!({
+            "source": "extension_phase_timing",
+            "phase": phase,
+            "locator": locator,
+            "unavailable_reason": reason,
+        }),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    observation.active.store().import_artifact(&artifact)?;
+    Ok(artifact)
+}
+
+fn persisted_test_artifact_declaration(
+    artifact: &homeboy::core::observation::ArtifactRecord,
+    phase: &str,
+) -> Value {
+    serde_json::json!({
+        "schema": "homeboy/review-artifact/v1",
+        "run_id": artifact.run_id,
+        "artifact_id": artifact.id,
+        "ref": format!("homeboy://run/{}/artifact/{}", artifact.run_id, artifact.id),
+        "phase": phase,
+        "available": artifact.artifact_type == "file",
+        "unavailable_reason": artifact.metadata_json.get("unavailable_reason"),
+    })
+}
+
+fn reported_test_artifact_locator_replacement(
+    artifact: &homeboy::core::observation::ArtifactRecord,
+    locator: &str,
+) -> (String, String) {
+    let reference = format!("homeboy://run/{}/artifact/{}", artifact.run_id, artifact.id);
+    let replacement = if artifact.artifact_type == "file" {
+        reference
+    } else {
+        let reason = artifact
+            .metadata_json
+            .get("unavailable_reason")
+            .and_then(Value::as_str)
+            .unwrap_or("evidence collection unavailable");
+        format!("{reference} (evidence collection unavailable: {reason})")
+    };
+    (locator.to_string(), replacement)
+}
+
+fn artifact_locator(declaration: &Value) -> Option<&str> {
+    ["path", "url", "ref", "uri"]
+        .into_iter()
+        .find_map(|key| declaration.get(key).and_then(Value::as_str))
+        .filter(|locator| !locator.trim().is_empty())
+}
+
+fn artifact_locator_relative_path(locator: &str) -> Option<PathBuf> {
+    let relative = locator.strip_prefix("artifact://files/")?;
+    let relative = Path::new(relative);
+    if relative.as_os_str().is_empty() || relative.is_absolute() {
+        return None;
+    }
+    let components = relative.components().collect::<Vec<_>>();
+    if components
+        .iter()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return None;
+    }
+    let normalized = components.iter().collect::<PathBuf>();
+    (normalized.as_os_str() == relative.as_os_str()).then_some(normalized)
 }
 
 fn persist_test_findings(
@@ -793,6 +1282,99 @@ mod tests {
     }
 
     #[test]
+    fn injected_artifact_store_failure_terminalizes_collection_and_cleans_scratch() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let args = sample_args();
+            let runner = ObservedWorkflowRunner::create("test homeboy").expect("runner");
+            let scratch_path = runner.run_dir().path().to_path_buf();
+            let files = scratch_path.join("files");
+            fs::create_dir(&files).expect("artifact files dir");
+            fs::write(files.join("test-results.json"), b"{\"failed\":1}").expect("result bytes");
+            let observation = start_test_observation(
+                "homeboy",
+                home.path(),
+                &args,
+                "test",
+                Some(runner.run_dir()),
+            )
+            .expect("observation");
+            let run_id = observation.active.run_id().to_string();
+            runner.bind_run_id(&run_id).expect("bind run id");
+            let database = homeboy::core::observation::store::database_path()
+                .expect("observation database path");
+            rusqlite::Connection::open(database)
+                .expect("open observation database")
+                .execute_batch(
+                    "CREATE TRIGGER fail_test_artifact_insert BEFORE INSERT ON artifacts WHEN NEW.kind = 'test_artifact' BEGIN SELECT RAISE(ABORT, 'injected test artifact store failure'); END;",
+                )
+                .expect("install artifact insertion fault");
+            let mut workflow = extension_test::TestRunWorkflowResult {
+                status: "failed".to_string(),
+                component: "homeboy".to_string(),
+                exit_code: 1,
+                test_counts: None,
+                findings: None,
+                failure_analysis_input: None,
+                coverage: None,
+                baseline_comparison: None,
+                analysis: None,
+                autofix: None,
+                hints: None,
+                test_scope: None,
+                summary: None,
+                raw_output: None,
+                extension_phase_timings: vec![homeboy_extension::ExtensionPhaseTiming {
+                    name: "provider-test".to_string(),
+                    duration_ms: 1,
+                    status: Some("failed".to_string()),
+                    message: None,
+                    artifacts: vec![serde_json::json!({
+                        "ref": "artifact://files/test-results.json"
+                    })],
+                    metadata: Default::default(),
+                }],
+            };
+            let collection_error = persist_declared_test_artifacts(&observation, &mut workflow)
+                .expect_err("injected artifact store failure must propagate");
+            assert!(collection_error
+                .to_string()
+                .contains("injected test artifact store failure"));
+            let error = homeboy::core::Error::internal_unexpected(format!(
+                "test artifact collection failure: {collection_error}"
+            ));
+
+            let result = runner.finish_with_finalized_error_cleanup(
+                Some(observation),
+                Err::<extension_test::TestRunWorkflowResult, _>(error),
+                true,
+                |observation, workflow| finish_test_observation(Some(observation), workflow),
+                |observation, error| finish_test_observation_error(Some(observation), error),
+            );
+
+            let error = result.expect_err("collection failure must be terminal");
+            assert!(error
+                .to_string()
+                .contains("test artifact collection failure"));
+            let run = ObservationStore::open_initialized()
+                .expect("store")
+                .get_run(&run_id)
+                .expect("read run")
+                .expect("run exists");
+            assert_eq!(run.status, "error");
+            assert_eq!(run.metadata_json["observation_status"], "error");
+            assert!(run.metadata_json["error"]
+                .as_str()
+                .expect("error metadata")
+                .contains("injected test artifact store failure"));
+            assert!(
+                !scratch_path.exists(),
+                "terminal collection failures clean scratch after recording the error"
+            );
+        });
+    }
+
+    #[test]
     fn test_observation_persists_test_failures_and_analysis_clusters() {
         with_isolated_home(|home| {
             let _xdg = XdgGuard::unset();
@@ -815,26 +1397,24 @@ mod tests {
             let analysis = extension_test::analyze::analyze("homeboy", &input);
             let cluster_fingerprint = format!("test-cluster::{}", analysis.clusters[0].id);
 
-            finish_test_observation(
-                Some(observation),
-                &extension_test::TestRunWorkflowResult {
-                    status: "failed".to_string(),
-                    component: "homeboy".to_string(),
-                    exit_code: 1,
-                    test_counts: None,
-                    findings: None,
-                    failure_analysis_input: Some(input),
-                    coverage: None,
-                    baseline_comparison: None,
-                    analysis: Some(analysis),
-                    autofix: None,
-                    hints: None,
-                    test_scope: None,
-                    summary: None,
-                    raw_output: None,
-                    extension_phase_timings: Vec::new(),
-                },
-            );
+            let workflow = extension_test::TestRunWorkflowResult {
+                status: "failed".to_string(),
+                component: "homeboy".to_string(),
+                exit_code: 1,
+                test_counts: None,
+                findings: None,
+                failure_analysis_input: Some(input),
+                coverage: None,
+                baseline_comparison: None,
+                analysis: Some(analysis),
+                autofix: None,
+                hints: None,
+                test_scope: None,
+                summary: None,
+                raw_output: None,
+                extension_phase_timings: Vec::new(),
+            };
+            finish_test_observation(Some(observation), &workflow);
 
             let store = ObservationStore::open_initialized().expect("store");
             let run = store
@@ -938,6 +1518,240 @@ mod tests {
                 .any(|artifact| artifact.kind == "validation_command_1_stderr"));
             run_dir.cleanup();
         });
+    }
+
+    #[test]
+    fn failing_test_persists_declared_artifacts_and_records_missing_provenance() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let args = sample_args();
+            let run_dir = RunDir::create().expect("run dir");
+            let files = run_dir.path().join("files");
+            fs::create_dir(&files).expect("artifact files dir");
+            fs::write(files.join("test-results.json"), b"{\"failed\":1}").expect("result bytes");
+            fs::write(
+                files.join("phpunit-output.log"),
+                b"PHPUnit 10.0\n\nThere was 1 failure:\n\n1) Tests\\ExampleTest::test_it_fails\nFailed asserting that false is true.\n\n/workspace/tests/ExampleTest.php:42\n\nFAILURES!\nTests: 1, Assertions: 1, Failures: 1\n",
+            )
+            .expect("log bytes");
+            let outside = home.path().join("outside.log");
+            fs::write(&outside, b"outside bytes").expect("outside bytes");
+            std::os::unix::fs::symlink(&outside, files.join("symlink.log"))
+                .expect("symlink artifact");
+            let outside_dir = home.path().join("outside-dir");
+            fs::create_dir(&outside_dir).expect("outside directory");
+            fs::write(outside_dir.join("escaped.log"), b"escaped bytes").expect("escaped bytes");
+            std::os::unix::fs::symlink(&outside_dir, files.join("nested"))
+                .expect("intermediate symlink artifact");
+            let observation =
+                start_test_observation("homeboy", home.path(), &args, "test", Some(&run_dir))
+                    .expect("observation");
+            let run_id = observation.active.run_id().to_string();
+            let timing = homeboy_extension::ExtensionPhaseTiming {
+                name: "provider-test".to_string(),
+                duration_ms: 1,
+                status: Some("failed".to_string()),
+                message: None,
+                artifacts: vec![
+                    serde_json::json!({ "ref": "artifact://files/test-results.json" }),
+                    serde_json::json!({ "ref": "artifact://files/phpunit-output.log" }),
+                    serde_json::json!({ "ref": "artifact://files/missing.log" }),
+                    serde_json::json!({ "ref": "artifact://files/../outside.log" }),
+                    serde_json::json!({ "ref": "artifact://files/symlink.log" }),
+                    serde_json::json!({ "ref": "artifact://files/nested/escaped.log" }),
+                ],
+                metadata: Default::default(),
+            };
+            let mut workflow = extension_test::TestRunWorkflowResult {
+                status: "failed".to_string(),
+                component: "homeboy".to_string(),
+                exit_code: 1,
+                test_counts: None,
+                findings: None,
+                failure_analysis_input: None,
+                coverage: None,
+                baseline_comparison: None,
+                analysis: None,
+                autofix: None,
+                hints: None,
+                test_scope: None,
+                summary: None,
+                raw_output: None,
+                extension_phase_timings: vec![timing],
+            };
+            persist_declared_test_artifacts(&observation, &mut workflow)
+                .expect("persist declared artifacts");
+            assert_eq!(
+                workflow.test_counts.as_ref().map(|counts| counts.failed),
+                Some(1)
+            );
+            assert_eq!(
+                workflow
+                    .failure_analysis_input
+                    .as_ref()
+                    .map(|input| input.failures.len()),
+                Some(1)
+            );
+            let failure = &workflow
+                .failure_analysis_input
+                .as_ref()
+                .expect("parsed PHPUnit failure")
+                .failures[0];
+            assert_eq!(failure.test_name, "Tests\\ExampleTest::test_it_fails");
+            assert_eq!(failure.message, "Failed asserting that false is true.");
+            assert_eq!(failure.source_file, "/workspace/tests/ExampleTest.php");
+            assert_eq!(failure.source_line, 42);
+            assert!(workflow
+                .findings
+                .as_ref()
+                .is_some_and(|findings| !findings.is_empty()));
+            assert_eq!(
+                workflow.findings.as_ref().expect("findings")[0].message,
+                "phpunit_failure: Failed asserting that false is true."
+            );
+            assert_eq!(
+                workflow.findings.as_ref().expect("findings")[0].metadata["test_name"],
+                "Tests\\ExampleTest::test_it_fails"
+            );
+            assert_eq!(
+                workflow.summary.as_ref().expect("summary").failures[0].test_name,
+                "Tests\\ExampleTest::test_it_fails"
+            );
+            assert_eq!(
+                workflow.summary.as_ref().expect("summary").failures[0].message,
+                "Failed asserting that false is true."
+            );
+            assert_eq!(
+                workflow.extension_phase_timings[0].artifacts[0]["ref"],
+                format!(
+                    "homeboy://run/{run_id}/artifact/{}",
+                    workflow.extension_phase_timings[0].artifacts[0]["artifact_id"]
+                        .as_str()
+                        .expect("artifact id")
+                )
+            );
+            assert!(workflow.extension_phase_timings[0].artifacts[0]
+                .get("source_locator")
+                .is_none());
+            finish_test_observation(Some(observation), &workflow);
+
+            run_dir.cleanup();
+            let artifacts = ObservationStore::open_initialized()
+                .expect("store")
+                .list_artifacts(&run_id)
+                .expect("artifacts");
+            assert_eq!(artifacts.len(), 6);
+            assert!(artifacts.iter().any(|artifact| {
+                artifact.artifact_type == "file"
+                    && fs::read(&artifact.path).ok().as_deref() == Some(b"{\"failed\":1}")
+            }));
+            assert!(artifacts.iter().any(|artifact| {
+                artifact.artifact_type == "file"
+                    && fs::read(&artifact.path)
+                        .ok()
+                        .is_some_and(|contents| contents.starts_with(b"PHPUnit 10.0"))
+            }));
+            let missing = artifacts
+                .iter()
+                .find(|artifact| artifact.artifact_type == "metadata-only")
+                .expect("missing provenance record");
+            assert_eq!(
+                missing.metadata_json["locator"],
+                "artifact://files/missing.log"
+            );
+            assert!(missing.metadata_json["unavailable_reason"]
+                .as_str()
+                .expect("reason")
+                .contains("unavailable"));
+            assert_eq!(
+                artifacts
+                    .iter()
+                    .filter(|artifact| artifact.artifact_type == "metadata-only")
+                    .count(),
+                4
+            );
+            assert!(artifacts.iter().any(|artifact| {
+                artifact.metadata_json["locator"] == "artifact://files/../outside.log"
+            }));
+            assert!(artifacts.iter().any(|artifact| {
+                artifact.metadata_json["locator"] == "artifact://files/symlink.log"
+            }));
+            assert!(artifacts.iter().any(|artifact| {
+                artifact.metadata_json["locator"] == "artifact://files/nested/escaped.log"
+            }));
+        });
+    }
+
+    #[test]
+    fn test_artifact_locator_requires_a_normal_relative_path() {
+        for locator in [
+            "artifact://files/../escape.log",
+            "artifact://files/./result.log",
+            "artifact://files//result.log",
+            "artifact://files/",
+        ] {
+            assert!(
+                artifact_locator_relative_path(locator).is_none(),
+                "{locator}"
+            );
+        }
+        assert!(artifact_locator_relative_path("artifact://files/result.log").is_some());
+    }
+
+    #[test]
+    fn rewritten_unavailable_artifact_locator_never_leaks_provider_reference() {
+        let mut workflow = extension_test::TestRunWorkflowResult {
+            status: "failed".to_string(),
+            component: "fixture".to_string(),
+            exit_code: 1,
+            test_counts: None,
+            findings: None,
+            failure_analysis_input: None,
+            coverage: None,
+            baseline_comparison: None,
+            analysis: None,
+            autofix: None,
+            hints: None,
+            test_scope: None,
+            summary: None,
+            raw_output: Some(extension_test::RawTestOutput {
+                stdout_tail: "artifact://files/missing.log".to_string(),
+                stderr_tail: String::new(),
+                truncated: false,
+                stdout_truncated: false,
+                stderr_truncated: false,
+                stdout_seen_bytes: 0,
+                stdout_retained_bytes: 0,
+                stderr_seen_bytes: 0,
+                stderr_retained_bytes: 0,
+                stdout_limit_bytes: 0,
+                stderr_limit_bytes: 0,
+            }),
+            extension_phase_timings: vec![homeboy_extension::ExtensionPhaseTiming {
+                name: "provider".to_string(),
+                duration_ms: 0,
+                status: None,
+                message: None,
+                artifacts: vec![serde_json::json!({
+                    "ref": "homeboy://run/run-1/artifact/artifact-1",
+                    "available": false,
+                    "unavailable_reason": "the declared controller-local artifact file is unavailable",
+                })],
+                metadata: Default::default(),
+            }],
+        };
+
+        rewrite_reported_artifact_locators(
+            &mut workflow,
+            &[ (
+                "artifact://files/missing.log".to_string(),
+                "homeboy://run/run-1/artifact/artifact-1 (evidence collection unavailable: the declared controller-local artifact file is unavailable)".to_string(),
+            )],
+        );
+        let output = workflow.raw_output.expect("raw output").stdout_tail;
+        assert!(!output.contains("artifact://"));
+        assert!(output.contains("homeboy://run/run-1/artifact/artifact-1"));
+        assert!(output.contains("evidence collection unavailable"));
     }
 
     #[test]

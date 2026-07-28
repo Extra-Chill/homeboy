@@ -810,6 +810,7 @@ dependencies = [
  "homeboy-upgrade",
  "libc",
  "reqwest",
+ "rusqlite",
  "semver",
  "serde",
  "serde_json",
@@ -819,6 +820,7 @@ dependencies = [
  "shellexpand",
  "tempfile",
  "uuid",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

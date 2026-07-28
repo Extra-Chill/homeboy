@@ -10,6 +10,10 @@ pub trait ReviewArtifactFindings {
     fn review_artifact_findings(&self) -> Vec<HomeboyFinding> {
         Vec::new()
     }
+
+    fn review_artifacts(&self) -> Vec<Value> {
+        Vec::new()
+    }
 }
 
 impl ReviewArtifactFindings for AuditCommandOutput {
@@ -57,6 +61,13 @@ impl ReviewArtifactFindings for LintCommandOutput {
 impl ReviewArtifactFindings for TestCommandOutput {
     fn review_artifact_findings(&self) -> Vec<HomeboyFinding> {
         self.findings.clone().unwrap_or_default()
+    }
+
+    fn review_artifacts(&self) -> Vec<Value> {
+        self.extension_phase_timings
+            .iter()
+            .flat_map(|timing| timing.artifacts.iter().cloned())
+            .collect()
     }
 }
 

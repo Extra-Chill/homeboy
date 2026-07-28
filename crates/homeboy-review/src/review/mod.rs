@@ -308,7 +308,11 @@ pub fn artifact_command<T: Serialize + ReviewArtifactFindings>(
             .as_ref()
             .map(ReviewArtifactFindings::review_artifact_findings)
             .unwrap_or_default(),
-        artifacts: Vec::new(),
+        artifacts: stage
+            .output
+            .as_ref()
+            .map(ReviewArtifactFindings::review_artifacts)
+            .unwrap_or_default(),
     }
 }
 
@@ -340,6 +344,7 @@ fn generated_at_now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy_extension::{test::TestCommandOutput, ExtensionPhaseTiming};
 
     #[test]
     fn stage_skipped_helper_marks_not_ran() {
@@ -376,6 +381,65 @@ mod tests {
         assert_eq!(failed_command.status, "failed");
         assert_eq!(failed_command.exit_code, 1);
         assert_eq!(failed_command.summary, "3 finding(s); failed");
+    }
+
+    #[test]
+    fn test_stage_artifact_keeps_child_run_and_controller_artifact_identity() {
+        let output = TestCommandOutput {
+            passed: false,
+            status: "failed".to_string(),
+            component: "fixture".to_string(),
+            exit_code: 1,
+            phase: None,
+            failure: None,
+            test_counts: None,
+            findings: None,
+            coverage: None,
+            baseline_comparison: None,
+            analysis: None,
+            autofix: None,
+            hints: None,
+            drift: None,
+            auto_fix_drift: None,
+            test_scope: None,
+            summary: None,
+            raw_output: None,
+            ci_context: None,
+            extension_phase_timings: vec![ExtensionPhaseTiming {
+                name: "provider".to_string(),
+                duration_ms: 1,
+                status: Some("failed".to_string()),
+                message: None,
+                artifacts: vec![serde_json::json!({
+                    "run_id": "child-test-run",
+                    "artifact_id": "result-artifact",
+                    "ref": "homeboy://run/child-test-run/artifact/result-artifact"
+                })],
+                metadata: Default::default(),
+            }],
+            actionable: Some(serde_json::json!({
+                "run": { "id": "child-test-run" }
+            })),
+        };
+        let stage = ReviewStage {
+            stage: "test".to_string(),
+            ran: true,
+            passed: false,
+            exit_code: 1,
+            finding_count: 0,
+            hint: "inspect".to_string(),
+            skipped_reason: None,
+            output: Some(output),
+        };
+
+        let command = artifact_command(&stage);
+
+        assert_eq!(command.artifacts[0]["run_id"], "child-test-run");
+        assert_eq!(command.artifacts[0]["artifact_id"], "result-artifact");
+        assert_eq!(
+            command.artifacts[0]["ref"],
+            "homeboy://run/child-test-run/artifact/result-artifact"
+        );
     }
 
     #[test]

@@ -245,6 +245,53 @@ impl ObservedWorkflowRunner {
         F: FnOnce(O, &T),
         E: FnOnce(O, &crate::Error),
     {
+        self.finish_with_scratch_outcome_inner(
+            observation,
+            workflow,
+            scratch_succeeded,
+            false,
+            finish_success,
+            finish_error,
+        )
+    }
+
+    /// Use only after the caller's error finalizer has durably recorded the
+    /// terminal observation. Ordinary finalization errors retain scratch.
+    pub fn finish_with_finalized_error_cleanup<O, T, F, E>(
+        self,
+        observation: Option<O>,
+        workflow: crate::Result<T>,
+        scratch_succeeded: bool,
+        finish_success: F,
+        finish_error: E,
+    ) -> crate::Result<T>
+    where
+        F: FnOnce(O, &T),
+        E: FnOnce(O, &crate::Error),
+    {
+        self.finish_with_scratch_outcome_inner(
+            observation,
+            workflow,
+            scratch_succeeded,
+            true,
+            finish_success,
+            finish_error,
+        )
+    }
+
+    fn finish_with_scratch_outcome_inner<O, T, F, E>(
+        self,
+        observation: Option<O>,
+        workflow: crate::Result<T>,
+        scratch_succeeded: bool,
+        finalized_error_cleanup: bool,
+        finish_success: F,
+        finish_error: E,
+    ) -> crate::Result<T>
+    where
+        F: FnOnce(O, &T),
+        E: FnOnce(O, &crate::Error),
+    {
         let result = match self.resource_run.write_to_run_dir(&self.run_dir) {
             Ok(_) => finish_observed_workflow(observation, workflow, finish_success, finish_error),
             Err(error) => {
@@ -254,7 +301,7 @@ impl ObservedWorkflowRunner {
                 Err(error)
             }
         };
-        if result.is_ok() && scratch_succeeded {
+        if scratch_succeeded && (result.is_ok() || finalized_error_cleanup) {
             self.run_dir.cleanup();
         }
         result
@@ -431,6 +478,22 @@ mod tests {
             resource_summary_path.is_file(),
             "completed but failed workflows retain evidence"
         );
+    }
+
+    #[test]
+    fn observed_workflow_runner_retains_scratch_for_unfinalized_errors() {
+        let runner = ObservedWorkflowRunner::create("test demo").expect("runner");
+        let resource_summary_path = runner.run_dir().step_file("resource-summary.json");
+        let result = runner.finish_with_scratch_outcome(
+            None::<()>,
+            Err::<i32, _>(crate::Error::internal_unexpected("finalization failed")),
+            true,
+            |_, _| {},
+            |_, _| {},
+        );
+
+        assert!(result.is_err());
+        assert!(resource_summary_path.is_file());
     }
 
     #[test]

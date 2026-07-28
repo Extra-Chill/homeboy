@@ -89,6 +89,159 @@ pub fn build_test_summary(
     }
 }
 
+pub fn test_failure_summary_items(failures: &[TestFailure]) -> Vec<TestFailureSummaryItem> {
+    failures
+        .iter()
+        .take(20)
+        .map(|failure| TestFailureSummaryItem {
+            test_name: failure.test_name.clone(),
+            message: failure.message.clone(),
+            file: (!failure.test_file.is_empty()).then(|| failure.test_file.clone()),
+            line: (failure.source_line != 0).then_some(failure.source_line),
+        })
+        .collect()
+}
+
+pub fn parse_test_failures_from_text(
+    text: &str,
+    counts: Option<&TestCounts>,
+) -> Option<TestAnalysisInput> {
+    let mut failures = Vec::new();
+    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(text) {
+        collect_nested_result_failures(&payload, &mut failures);
+    }
+    if failures.is_empty() {
+        failures = parse_phpunit_failure_blocks(text);
+    }
+    (!failures.is_empty()).then(|| TestAnalysisInput {
+        failures,
+        total: counts.map(|counts| counts.total).unwrap_or(0),
+        passed: counts.map(|counts| counts.passed).unwrap_or(0),
+    })
+}
+
+pub fn parse_test_results_failures_file(
+    path: &std::path::Path,
+    counts: Option<&TestCounts>,
+) -> Result<Option<TestAnalysisInput>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = local_files::read_file(path, "read test results failures")?;
+    Ok(parse_test_failures_from_text(&content, counts))
+}
+
+fn collect_nested_result_failures(value: &serde_json::Value, failures: &mut Vec<TestFailure>) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_nested_result_failures(item, failures);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            let status = object.get("status").and_then(serde_json::Value::as_str);
+            let failed = matches!(status, Some("failed" | "failure" | "error"));
+            let name = ["test_name", "testName", "name", "test_id"]
+                .into_iter()
+                .find_map(|key| object.get(key).and_then(serde_json::Value::as_str));
+            let message = ["message", "exception", "throwable"]
+                .into_iter()
+                .find_map(|key| object.get(key).and_then(serde_json::Value::as_str));
+            if failed {
+                if let (Some(test_name), Some(message)) = (name, message) {
+                    failures.push(TestFailure {
+                        test_name: test_name.to_string(),
+                        test_file: object
+                            .get("file")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        error_type: object
+                            .get("type")
+                            .or_else(|| object.get("class"))
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("test_failure")
+                            .to_string(),
+                        message: message.to_string(),
+                        source_file: object
+                            .get("source")
+                            .or_else(|| object.get("file"))
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        source_line: object
+                            .get("line")
+                            .and_then(serde_json::Value::as_u64)
+                            .and_then(|line| u32::try_from(line).ok())
+                            .unwrap_or(0),
+                    });
+                }
+            }
+            for child in object.values() {
+                collect_nested_result_failures(child, failures);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_phpunit_failure_blocks(text: &str) -> Vec<TestFailure> {
+    let header =
+        regex::Regex::new(r"^\d+\)\s+(.+)$").expect("PHPUnit failure header regex is valid");
+    let location =
+        regex::Regex::new(r"(?m)^(.+?):(\d+)$").expect("PHPUnit failure location regex is valid");
+    let mut failures = Vec::new();
+    let mut current: Option<(String, String)> = None;
+    for line in text.lines() {
+        if let Some(captures) = header.captures(line) {
+            if let Some((test_name, detail)) = current.take() {
+                append_phpunit_failure(&mut failures, &location, &test_name, &detail);
+            }
+            current = Some((captures[1].trim().to_string(), String::new()));
+        } else if let Some((_, detail)) = current.as_mut() {
+            detail.push_str(line);
+            detail.push('\n');
+        }
+    }
+    if let Some((test_name, detail)) = current {
+        append_phpunit_failure(&mut failures, &location, &test_name, &detail);
+    }
+    failures
+}
+
+fn append_phpunit_failure(
+    failures: &mut Vec<TestFailure>,
+    location: &regex::Regex,
+    test_name: &str,
+    detail: &str,
+) {
+    let Some(message) = detail
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("/"))
+    else {
+        return;
+    };
+    let (source_file, source_line) = location
+        .captures_iter(detail)
+        .last()
+        .map(|location| {
+            (
+                location[1].to_string(),
+                location[2].parse::<u32>().unwrap_or(0),
+            )
+        })
+        .unwrap_or_default();
+    failures.push(TestFailure {
+        test_name: test_name.to_string(),
+        test_file: source_file.clone(),
+        error_type: "phpunit_failure".to_string(),
+        message: message.to_string(),
+        source_file,
+        source_line,
+    });
+}
+
 pub fn parse_failures_file(path: &std::path::Path) -> Result<Option<TestAnalysisInput>> {
     if !path.exists() {
         return Ok(None);
@@ -579,6 +732,41 @@ mod tests {
         assert_eq!(counts.passed, 2);
         assert_eq!(counts.failed, 1);
         assert_eq!(counts.skipped, 0);
+    }
+
+    #[test]
+    fn nested_result_payload_preserves_concrete_failure_details() {
+        let counts = TestCounts::new(2, 1, 1, 0);
+        let parsed = parse_test_failures_from_text(
+            r#"{
+                "suites": [{
+                    "tests": [{
+                        "status": "failed",
+                        "testName": "Tests\\ExampleTest::test_it_fails",
+                        "message": "Failed asserting that false is true.",
+                        "file": "tests/ExampleTest.php",
+                        "line": 42,
+                        "type": "PHPUnit\\Framework\\AssertionFailedError"
+                    }]
+                }]
+            }"#,
+            Some(&counts),
+        )
+        .expect("nested failure payload");
+
+        assert_eq!(parsed.total, 2);
+        assert_eq!(parsed.passed, 1);
+        assert_eq!(parsed.failures.len(), 1);
+        assert_eq!(
+            parsed.failures[0].test_name,
+            "Tests\\ExampleTest::test_it_fails"
+        );
+        assert_eq!(
+            parsed.failures[0].message,
+            "Failed asserting that false is true."
+        );
+        assert_eq!(parsed.failures[0].source_file, "tests/ExampleTest.php");
+        assert_eq!(parsed.failures[0].source_line, 42);
     }
 
     #[test]
