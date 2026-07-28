@@ -19,9 +19,10 @@ pub use crate::{
     apply_change_artifact, apply_workspace_patch, broker_auth_store_path,
     broker_submit_token_for_runner, broker_token_from_env, close_reconnected_job_log_owner,
     connect, connect_with_live_lease_adoption, connect_with_orphan_adoption,
-    reconnect_job_log_owner, reverse_broker_artifact, reverse_broker_artifact_content,
-    reverse_broker_reconcile, runner_artifact_content, BrokerAuthGrant, BrokerAuthStore,
-    BrokerCredential, BrokerScope, MintedCredential, BROKER_TOKEN_ENV, BROKER_TOKEN_HEADER,
+    reconcile_terminal_jobs, reconnect_job_log_owner, reverse_broker_artifact,
+    reverse_broker_artifact_content, reverse_broker_reconcile, runner_artifact_content,
+    BrokerAuthGrant, BrokerAuthStore, BrokerCredential, BrokerScope, MintedCredential,
+    BROKER_TOKEN_ENV, BROKER_TOKEN_HEADER,
 };
 pub use crate::{
     connect_reverse, disconnect, download_remote_artifact,

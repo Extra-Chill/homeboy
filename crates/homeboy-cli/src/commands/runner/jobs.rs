@@ -53,7 +53,7 @@ fn job_reconcile(runner_id: &str) -> CmdResult<RunnerJobCommandOutput> {
             runner_id: runner_id.to_string(),
             job_id: None,
             artifact_id: None,
-            response: runner::reverse_broker_reconcile(runner_id)?,
+            response: runner::reconcile_terminal_jobs(runner_id)?,
         }),
         0,
     ))
