@@ -488,6 +488,112 @@ mod tests { const SAMPLE: &str = "florpstack"; }
     }
 
     #[test]
+    fn regex_terms_can_opt_out_of_rule_level_case_insensitivity() {
+        // Env-var-shaped terms are only meaningful in their SCREAMING_CASE form:
+        // a case-insensitive match also hits every `florp_token` identifier,
+        // parameter, and accessor, which is naming, not ecosystem coupling.
+        // `case_insensitive` is rule-level, so a single term opts out with an
+        // inline regex flag group rather than forcing a second rule.
+        let mut rule = rule();
+        rule.ignore_line_prefixes = Vec::new();
+        rule.rule = SourcePolicyRuleBody::ForbiddenTerms {
+            terms: vec![SourcePolicyTerm {
+                value: "(?-i:FLORP_TOKEN)".to_string(),
+                label: Some("FLORP_TOKEN".to_string()),
+                match_mode: Some(SourcePolicyMatchMode::Regex),
+            }],
+            default_match: SourcePolicyMatchMode::Token,
+            case_insensitive: true,
+        };
+        let env_read = rust_fp(
+            "src/core/env.rs",
+            r#"fn token() { std::env::var("FLORP_TOKEN").ok(); }"#,
+        );
+        let identifier = rust_fp("src/core/ident.rs", "fn florp_token() -> u8 { 0 }");
+
+        let findings = run(&[&env_read, &identifier], &[rule]);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].file, "src/core/env.rs");
+        assert!(findings[0].description.contains("FLORP_TOKEN"));
+    }
+
+    #[test]
+    fn regex_terms_match_toolchain_diagnostic_shapes() {
+        // Toolchain OUTPUT formats are the class no token match can see: a
+        // diagnostic-code prefix is punctuation-heavy, so it needs regex mode.
+        let mut rule = rule();
+        rule.ignore_line_prefixes = Vec::new();
+        rule.rule = SourcePolicyRuleBody::ForbiddenTerms {
+            terms: vec![SourcePolicyTerm {
+                value: r"florp\[E".to_string(),
+                label: Some("florp diagnostic code".to_string()),
+                match_mode: Some(SourcePolicyMatchMode::Regex),
+            }],
+            default_match: SourcePolicyMatchMode::Token,
+            case_insensitive: true,
+        };
+        let sniffer = rust_fp(
+            "src/core/triage.rs",
+            r#"fn classify(line: &str) -> bool { line.contains("florp[e") }"#,
+        );
+
+        let findings = run(&[&sniffer], &[rule]);
+
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].description.contains("florp diagnostic code"));
+    }
+
+    #[test]
+    fn allow_line_contains_suppresses_marker_lines_without_masking_code() {
+        // Lint-suppression attributes carry the linter's name but express no
+        // ecosystem behavior — they are an artifact of the language the tool
+        // happens to be written in. The path-scoped rule cannot exclude them
+        // (they sit beside real code), so they are suppressed line-scoped.
+        let mut rule = rule();
+        rule.ignore_line_prefixes = Vec::new();
+        rule.allow_line_contains = vec!["florpstack::".to_string()];
+        rule.rule = SourcePolicyRuleBody::ForbiddenTerms {
+            terms: vec![SourcePolicyTerm {
+                value: "florpstack".to_string(),
+                label: None,
+                match_mode: Some(SourcePolicyMatchMode::Token),
+            }],
+            default_match: SourcePolicyMatchMode::Token,
+            case_insensitive: true,
+        };
+        let fp = rust_fp(
+            "src/core/engine.rs",
+            r#"#[allow(florpstack::needless_borrow)]
+fn dispatch() {
+    let marker = "florpstack";
+}
+"#,
+        );
+
+        let findings = run(&[&fp], &[rule]);
+
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].description.contains("line 3"));
+        assert!(findings[0].description.contains("dispatch"));
+    }
+
+    #[test]
+    fn comment_lines_are_scanned_when_no_comment_prefix_is_configured() {
+        // `ignore_line_prefixes` is empty by default on a raw `SourcePolicyRule`
+        // (only the `CoreBoundaryLeakConfig` preset injects comment prefixes,
+        // #6857). A rule that leaves it empty therefore scans comments too —
+        // pin that, because term additions inherit whichever policy they join.
+        let mut rule = rule();
+        rule.ignore_line_prefixes = Vec::new();
+        let fp = rust_fp("src/core/comment.rs", "// florpstack example");
+
+        let findings = run(&[&fp], &[rule]);
+
+        assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
     fn can_express_core_to_command_layer_dependency_boundary() {
         let mut rule = rule();
         rule.id = "core-layer-boundary".to_string();
