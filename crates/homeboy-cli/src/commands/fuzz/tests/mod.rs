@@ -4,10 +4,10 @@ use super::super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, 
 use super::dispatch::run_list;
 use super::execution::{
     build_fuzz_execution_request, default_runner_contract, fuzz_artifact_ref_validation,
-    fuzz_campaign_contract, fuzz_evidence_followups, fuzz_expected_metric_error, fuzz_max_duration,
-    fuzz_postprocess_error, fuzz_run_artifact_validation_error, fuzz_run_outcome,
-    fuzz_runner_contract, fuzz_runner_env, persist_fuzz_run_evidence,
-    run_fuzz_artifact_postprocess, FuzzRunEvidenceInput,
+    fuzz_campaign_contract, fuzz_evidence_contract, fuzz_evidence_followups,
+    fuzz_expected_metric_error, fuzz_max_duration, fuzz_postprocess_error,
+    fuzz_run_artifact_validation_error, fuzz_run_outcome, fuzz_runner_contract, fuzz_runner_env,
+    persist_fuzz_run_evidence, run_fuzz_artifact_postprocess, FuzzRunEvidenceInput,
 };
 use super::planning::{
     build_campaign_plan, campaign_child_run_args, load_or_default_isolation_proof,

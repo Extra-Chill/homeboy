@@ -217,6 +217,91 @@ mod tests {
     }
 
     #[test]
+    fn proof_summary_surfaces_the_fuzz_projection() {
+        let payload = json!({
+            "variant": "proof",
+            "payload": {
+                "run_id": "studio-pr-4356-homeboy-v6",
+                "kind": "fuzz",
+                "status": "pass",
+                "passed": true,
+                "signals": { "success": true },
+                "fuzz": {
+                    "verdict": { "overall": true, "workload": "passed", "evidence": "complete" },
+                    "component": { "role": "component", "revision": "0bb440ed" },
+                    "rig": { "role": "rig", "revision": "7ccbe545" },
+                    "cases": { "total": 19, "passed": 19, "failed": 0, "skipped": 0 },
+                    "findings": { "total": 0, "open": 0 },
+                    "gates": { "total": 4, "passed": 4, "failed": 0 },
+                    "coverage": {
+                        "declared_targets": 4, "proven_targets": 4,
+                        "declared_operations": 6, "proven_operations": 6,
+                        "complete": true
+                    },
+                    "execution": { "seed": "4356" },
+                    "evidence": { "complete": true }
+                }
+            }
+        });
+
+        let summary = render_runs_proof_summary(&payload).expect("summary");
+
+        assert!(summary.contains("Fuzz proof:\n"));
+        assert!(summary.contains("  Workload: passed   Evidence: complete\n"));
+        assert!(summary.contains("  Component revision: 0bb440ed\n"));
+        assert!(summary.contains("  Rig revision: 7ccbe545\n"));
+        assert!(summary.contains("  Cases: 19/19 passed, 0 failed, 0 skipped\n"));
+        assert!(summary.contains("  Gates: 4/4 passed\n"));
+        assert!(summary.contains("  Coverage: targets 4/4, operations 6/6\n"));
+        assert!(summary.contains("  Seed: 4356\n"));
+        // A complete contract adds no violation noise.
+        assert!(!summary.contains("Evidence-contract violations"));
+    }
+
+    #[test]
+    fn proof_summary_separates_evidence_violations_from_product_findings() {
+        let payload = json!({
+            "variant": "proof",
+            "payload": {
+                "run_id": "studio-pr-4356-homeboy-v1",
+                "kind": "fuzz",
+                "status": "fail",
+                "passed": false,
+                "signals": {},
+                "fuzz": {
+                    "verdict": {
+                        "overall": false,
+                        "workload": "passed",
+                        "evidence": "incomplete",
+                        "failure_domain": "evidence_contract_failure"
+                    },
+                    "component": { "role": "component" },
+                    "gates": { "total": 4, "passed": 4, "failed": 0 },
+                    "execution": {},
+                    "evidence": {
+                        "complete": false,
+                        "violations": [{
+                            "code": "artifact_ref_missing",
+                            "message": "declared artifact is absent from the fuzz artifact root",
+                            "declared_ref": "results.json"
+                        }]
+                    },
+                    "gaps": ["no seed was recorded"]
+                }
+            }
+        });
+
+        let summary = render_runs_proof_summary(&payload).expect("summary");
+
+        assert!(summary.contains("  Workload: passed   Evidence: incomplete\n"));
+        assert!(summary.contains("  Failure domain: evidence_contract_failure\n"));
+        assert!(summary.contains("producer defects, not product findings"));
+        assert!(summary.contains("[artifact_ref_missing]"));
+        assert!(summary.contains("(ref: results.json)"));
+        assert!(summary.contains("  Not recorded (1):\n"));
+    }
+
+    #[test]
     fn proof_summary_reports_pending_and_no_signals() {
         let payload = json!({
             "variant": "proof",

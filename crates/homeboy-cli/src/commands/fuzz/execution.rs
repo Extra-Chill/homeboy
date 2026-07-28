@@ -1188,12 +1188,12 @@ fn collect_artifact_refs_value(
 
 /// How a declared artifact reference resolves against the artifact root.
 enum FuzzArtifactRefResolution {
-    /// Not a local path at all — a URI or an empty string. Not this
-    /// contract's business.
+    /// Not resolved against this base: a URI, an empty string, or an absolute
+    /// path outside the artifact root. Not this contract's business.
     NotLocal,
-    /// Local-looking but escaping the artifact root. Previously discarded
-    /// with the same code path as a legitimate remote URI, so a campaign
-    /// declaring `../outside.json` passed validation silently.
+    /// A relative reference that escapes the artifact root. Previously
+    /// discarded through the same branch as a legitimate remote URI, so a
+    /// campaign declaring `../outside.json` passed validation silently.
     Escapes,
     Local(PathBuf),
 }
@@ -1229,8 +1229,16 @@ fn collect_artifact_ref_violation(
                 format!("declared artifact could not be stat'd: {error}"),
             )),
             Ok(metadata) => {
-                let expects_directory = declared_type == Some("directory");
-                if expects_directory != metadata.is_dir() {
+                // Only hold a producer to a kind it actually declared. A bare
+                // string in `artifact_refs` declares no `artifact_type`, so
+                // there is no promise to check and inventing one would fail
+                // campaigns that legitimately point at a directory.
+                let declared_kind_mismatch = match declared_type {
+                    Some("directory") => !metadata.is_dir(),
+                    Some("file") => metadata.is_dir(),
+                    _ => false,
+                };
+                if declared_kind_mismatch {
                     violations.push(violation(
                         FuzzEvidenceViolationCode::ArtifactRefWrongKind,
                         format!(
@@ -1265,12 +1273,19 @@ fn resolve_local_fuzz_artifact_ref(path: &str, artifacts_dir: &Path) -> FuzzArti
     }
     let candidate = Path::new(trimmed);
     if candidate.is_absolute() {
+        // An absolute path outside the artifact root is not resolved against
+        // this base at all, so Homeboy holds no contract over it. Unchanged
+        // behavior: it stays out of the evidence verdict rather than becoming
+        // a new way for existing campaigns to fail.
         if candidate.starts_with(artifacts_dir) {
             FuzzArtifactRefResolution::Local(candidate.to_path_buf())
         } else {
-            FuzzArtifactRefResolution::Escapes
+            FuzzArtifactRefResolution::NotLocal
         }
     } else if trimmed.starts_with("..") {
+        // A relative ref is by contract relative to the artifact root, so
+        // escaping it is unambiguously a producer error. This was previously
+        // discarded through the same branch as a remote URI.
         FuzzArtifactRefResolution::Escapes
     } else {
         let joined = artifacts_dir.join(candidate);

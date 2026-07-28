@@ -820,6 +820,183 @@ mod tests {
         });
     }
 
+    /// #10513: a strict campaign whose cases all passed, whose gates all
+    /// passed, and one of whose declared artifacts was never written.
+    #[test]
+    fn inspect_blames_the_evidence_contract_not_a_passing_case() {
+        with_isolated_home(|home| {
+            let _artifact_root =
+                ArtifactRootOverrideGuard::new(home.path().join("agent-readable-artifacts"));
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run(
+                    "fuzz",
+                    serde_json::json!({
+                        "exit_code": 1,
+                        "success": false,
+                        "campaign_id": "sqlite-artifact-mask",
+                        "missing_artifact_refs": ["results.json"],
+                        "results_error": "fuzz campaign references artifact path(s) missing from HOMEBOY_FUZZ_ARTIFACTS_DIR: results.json",
+                        "gates": [
+                            { "gate_id": "no-open-findings", "status": "passed", "metric": "open_findings", "observed": 0.0, "expected": 0.0 },
+                            { "gate_id": "has-case-evidence", "status": "passed", "metric": "case_evidence", "observed": 1.0, "expected": 1.0 },
+                            { "gate_id": "target-coverage-complete", "status": "passed", "metric": "target_coverage", "observed": 1.0, "expected": 1.0 },
+                            { "gate_id": "operation-coverage-complete", "status": "passed", "metric": "operation_coverage", "observed": 1.0, "expected": 1.0 }
+                        ]
+                    }),
+                ))
+                .expect("run");
+            store
+                .finish_run(&run.id, RunStatus::Fail, None)
+                .expect("finish");
+            let result = serde_json::json!({
+                "campaign": {
+                    "id": "sqlite-artifact-mask",
+                    "status": "passed",
+                    "cases": [
+                        { "id": "sqlite-artifact-mask-1", "status": "passed",
+                          "observed": { "stdout": "imported 512 rows without error" } },
+                        { "id": "sqlite-artifact-mask-2", "status": "passed" }
+                    ],
+                    "findings": []
+                }
+            });
+            let path = home.path().join("passing-results.json");
+            std::fs::write(&path, serde_json::to_vec(&result).unwrap()).expect("write");
+            store
+                .record_artifact(&run.id, "fuzz_results", &path)
+                .expect("record");
+
+            let output = run_inspect(FuzzInspectArgs {
+                run_id: run.id.clone(),
+                raw: false,
+                full: false,
+            })
+            .expect("inspect");
+
+            let diagnostic = output.diagnostic.expect("diagnostic");
+            assert_eq!(diagnostic.classification, "evidence_contract_failure");
+            assert_eq!(diagnostic.failure_domain, "evidence_contract_failure");
+            // The workload verdict survives: every case passed.
+            assert_eq!(diagnostic.workload_verdict, "passed");
+            assert_eq!(diagnostic.evidence_verdict, "incomplete");
+            // No unrelated case id is assigned to a campaign-level failure.
+            assert!(diagnostic.case_id.is_none());
+            // Root cause leads with the missing artifact, its resolution base,
+            // and the owning producer contract — not with successful stdout.
+            let leading = diagnostic
+                .root_cause_chain
+                .first()
+                .expect("a root cause")
+                .clone();
+            assert!(leading.contains("artifact_ref_missing"), "{leading}");
+            assert!(leading.contains("results.json"), "{leading}");
+            assert!(
+                !leading.contains("imported 512 rows"),
+                "successful runner stdout must not lead: {leading}"
+            );
+            assert_eq!(diagnostic.evidence_violations.len(), 1);
+            assert_eq!(
+                diagnostic.evidence_violations[0].declared_ref.as_deref(),
+                Some("results.json")
+            );
+        });
+    }
+
+    #[test]
+    fn inspect_still_reports_a_workload_failure_when_a_case_actually_failed() {
+        with_isolated_home(|home| {
+            let _artifact_root =
+                ArtifactRootOverrideGuard::new(home.path().join("agent-readable-artifacts"));
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run(
+                    "fuzz",
+                    serde_json::json!({ "exit_code": 1, "campaign_id": "mixed" }),
+                ))
+                .expect("run");
+            store
+                .finish_run(&run.id, RunStatus::Fail, None)
+                .expect("finish");
+            let result = serde_json::json!({
+                "campaign": {
+                    "id": "mixed",
+                    "status": "failed",
+                    "cases": [
+                        { "id": "case-1", "status": "passed" },
+                        { "id": "case-2", "status": "failed",
+                          "observed": { "stderr": "assertion failed" } }
+                    ]
+                }
+            });
+            let path = home.path().join("mixed-results.json");
+            std::fs::write(&path, serde_json::to_vec(&result).unwrap()).expect("write");
+            store
+                .record_artifact(&run.id, "fuzz_results", &path)
+                .expect("record");
+
+            let output = run_inspect(FuzzInspectArgs {
+                run_id: run.id,
+                raw: false,
+                full: false,
+            })
+            .expect("inspect");
+
+            let diagnostic = output.diagnostic.expect("diagnostic");
+            assert_eq!(diagnostic.classification, "workload_execution_failure");
+            assert_eq!(diagnostic.failure_domain, "workload_failure");
+            assert_eq!(diagnostic.workload_verdict, "failed");
+            assert_eq!(diagnostic.evidence_verdict, "complete");
+            // The failing case is named, not the first case in the list.
+            assert_eq!(diagnostic.case_id.as_deref(), Some("case-2"));
+        });
+    }
+
+    #[test]
+    fn inspect_reports_a_gate_failure_separately_from_a_workload_failure() {
+        with_isolated_home(|home| {
+            let _artifact_root =
+                ArtifactRootOverrideGuard::new(home.path().join("agent-readable-artifacts"));
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run(
+                    "fuzz",
+                    serde_json::json!({
+                        "exit_code": 1,
+                        "campaign_id": "gated",
+                        "gates": [
+                            { "gate_id": "p95-budget", "status": "failed", "metric": "p95_ms", "observed": 900.0, "expected": 500.0 }
+                        ]
+                    }),
+                ))
+                .expect("run");
+            store
+                .finish_run(&run.id, RunStatus::Fail, None)
+                .expect("finish");
+            let path = home.path().join("gated-results.json");
+            std::fs::write(
+                &path,
+                br#"{"campaign":{"id":"gated","status":"passed","cases":[{"id":"c1","status":"passed"}]}}"#,
+            )
+            .expect("write");
+            store
+                .record_artifact(&run.id, "fuzz_results", &path)
+                .expect("record");
+
+            let output = run_inspect(FuzzInspectArgs {
+                run_id: run.id,
+                raw: false,
+                full: false,
+            })
+            .expect("inspect");
+
+            let diagnostic = output.diagnostic.expect("diagnostic");
+            assert_eq!(diagnostic.failure_domain, "gate_failure");
+            assert_eq!(diagnostic.workload_verdict, "passed");
+            assert_eq!(diagnostic.evidence_verdict, "complete");
+        });
+    }
+
     #[test]
     fn inspect_marks_eloop_as_pre_execution_with_zero_executions() {
         with_isolated_home(|home| {
