@@ -279,7 +279,12 @@ pub(crate) fn run_github_release(
             ));
         }
 
-        match existing_release_action(metadata.is_draft, has_artifacts, metadata.assets.len()) {
+        match existing_release_action(
+            metadata.is_draft,
+            has_artifacts,
+            metadata.assets.len(),
+            component.build_artifact.is_some(),
+        ) {
             ExistingReleaseAction::AlreadyPublished => {
                 homeboy_core::log_status!(
                     "release",
@@ -295,10 +300,8 @@ pub(crate) fn run_github_release(
                 ));
             }
             ExistingReleaseAction::EmptyDraft => {
-                // Publishing an assetless draft would make it `latest` and send
-                // every downloader (and the Homebrew formula) to a release with
-                // no binaries. That is worse than leaving the draft for the
-                // recovery path, which can still upload artifacts into it.
+                // The component declares a downloadable artifact, so publishing
+                // its empty draft would make an incomplete release `latest`.
                 let repair = repair_commands(None, None);
                 let detail = format!(
                     "GitHub Release {} for {} is an unpublished draft with no assets, and this run has no artifacts to attach. Refusing to publish an empty release over the pushed tag.",
