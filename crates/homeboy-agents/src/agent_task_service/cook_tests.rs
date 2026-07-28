@@ -2038,6 +2038,58 @@ fn retryable_pre_provider_retry_propagates_force_after_terminal_successor() {
 }
 
 #[test]
+fn retryable_pre_provider_retry_accepts_runner_rebound_workspace_identity() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-runner-rebound-retry";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.initial_run_id = format!("{cook_id}-attempt-1");
+        options.max_attempts = 3;
+        let controller_identity = serde_json::json!({
+            "canonical_path": "/controller/worktree",
+            "git_representation": "pointer_file",
+        });
+        options.initial_plan.tasks[0].metadata["cook_workspace_identity"] =
+            controller_identity.clone();
+        super::super::persist_initial_recipe(&options).expect("persist Cook recipe");
+        super::super::materialize_initial_cook_attempt(&options)
+            .expect("materialize first attempt");
+        agent_task_lifecycle::record_pre_execution_failure(
+            &options.initial_run_id,
+            &options.initial_plan,
+            "lab_handoff",
+            &Error::internal_io("projection failed", None).with_retryable(true),
+        )
+        .expect("fail first attempt");
+
+        let second = crate::agent_task_service::retry(&options.initial_run_id, None, false, false)
+            .expect("reserve second attempt");
+        let mut runner_plan = options.initial_plan.clone();
+        runner_plan.tasks[0].metadata["cook_workspace_identity"] = serde_json::json!({
+            "canonical_path": "/runner/worktree",
+            "git_representation": "directory",
+        });
+        runner_plan.tasks[0].metadata["cook_workspace_identity_predecessor"] = controller_identity;
+        agent_task_lifecycle::record_pre_execution_failure(
+            &second.record.run_id,
+            &runner_plan,
+            "lab_handoff",
+            &Error::internal_io("projection failed", None).with_retryable(true),
+        )
+        .expect("fail runner-bound second attempt");
+
+        let third = crate::agent_task_service::retry(&second.record.run_id, None, false, true)
+            .expect("runner-bound plan retains Cook retry ownership");
+        assert_eq!(third.record.metadata["cook_attempt"], 3);
+
+        runner_plan.tasks[0].executor.model = Some("different/model".to_string());
+        assert!(!super::super::execution::cook_retry_plans_match(
+            &options.initial_plan,
+            &runner_plan,
+        ));
+    });
+}
+
+#[test]
 fn retryable_pre_provider_retry_without_a_recipe_uses_legacy_lifecycle_retry() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let options = batch_cook_options(
