@@ -25,6 +25,7 @@ use super::types::{
     CodeAuditResult, ConventionReport, ScopedAuditExecution,
 };
 use super::{checks, conventions, discovery, duplication, fingerprint, impact, structural, walker};
+use homeboy_engine_primitives::measurement::Measurement;
 use homeboy_error::Result;
 
 /// Detectors run on the root-only fast path (no discovery/fingerprinting). The
@@ -129,10 +130,23 @@ pub(super) fn audit_internal(
     // `validate_configured_paths` contract one level up: configuration that
     // silently matches zero files is already an error, and a corpus that
     // silently contains zero files is the same defect with a wider blast radius.
+    //
+    // Restated through the shared `measurement_ok` predicate (#10685) without
+    // changing behaviour. The corpus size is the observation; the source files
+    // that exist on disk -- claimed-but-unfingerprinted plus unclaimed
+    // entirely -- are the independently-known population that says whether a
+    // zero corpus is honest. A non-empty population makes this `Contradicted`,
+    // the one outcome the predicate treats as a hard error rather than an
+    // `unknown`, which is exactly the judgement #10574 made here first. The two
+    // branch-specific messages below are kept verbatim: the predicate decides
+    // *whether* to refuse, the call site still says *what to do about it*.
     if discovery.policy_fingerprints.is_empty() {
         let unclaimed = walker::count_unclaimed_source_files(root);
         let total_skipped = files_skipped + unclaimed;
-        if unclaimed > 0 {
+        let corpus = Measurement::units(0)
+            .against_population((discovery.files_walked + unclaimed) as u64)
+            .assess();
+        if corpus.is_broken_instrument() && unclaimed > 0 {
             return Err(homeboy_error::Error::invalid_argument(
                 "audit.corpus",
                 format!(
@@ -145,7 +159,7 @@ pub(super) fn audit_internal(
                 ),
             ));
         }
-        if discovery.files_walked > 0 {
+        if corpus.is_broken_instrument() {
             return Err(homeboy_error::Error::invalid_argument(
                 "audit.corpus",
                 format!(
@@ -156,8 +170,9 @@ pub(super) fn audit_internal(
                 ),
             ));
         }
-        // Genuinely nothing to audit (docs-only or empty checkout). That is a
-        // real, honest zero — not a broken instrument.
+        // `MeasurementOutcome::EmptyPopulation`: the walk independently
+        // confirms there was nothing to audit (docs-only or empty checkout).
+        // That is a real, honest zero — not a broken instrument.
         log_status!("audit", "No source files found");
         timing.push_ok("discovery_fingerprinting", discovery_started.elapsed());
         return Ok(AuditWithAnalysis {

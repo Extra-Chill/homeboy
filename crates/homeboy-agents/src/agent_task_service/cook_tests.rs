@@ -2726,6 +2726,7 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
             UnusedExecutor,
             DefaultCookSideEffects::new(|_, _, _| Ok(serde_json::json!({}))),
             None,
+            false,
         )
         .expect("continuation repairs and dispatches recipe-bound retry");
         let repeated = run_cook_with_boundaries_observed_inner(
@@ -2733,6 +2734,7 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
             UnusedExecutor,
             DefaultCookSideEffects::new(|_, _, _| Ok(serde_json::json!({}))),
             None,
+            false,
         )
         .expect("repeated continuation remains idempotent");
 

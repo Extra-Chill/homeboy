@@ -1251,6 +1251,23 @@ pub fn consume_claimed_with_dispatcher(
     dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
     execute: impl FnOnce(AgentTaskCookServiceOptions) -> Result<i32>,
 ) -> Result<i32> {
+    consume_claimed_with_dispatcher_policy(claim, dispatcher, execute, false)
+}
+
+pub fn consume_claimed_terminal_with_dispatcher(
+    claim: ClaimedCookContinuation,
+    dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+    execute: impl FnOnce(AgentTaskCookServiceOptions) -> Result<i32>,
+) -> Result<i32> {
+    consume_claimed_with_dispatcher_policy(claim, dispatcher, execute, true)
+}
+
+fn consume_claimed_with_dispatcher_policy(
+    claim: ClaimedCookContinuation,
+    dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
+    execute: impl FnOnce(AgentTaskCookServiceOptions) -> Result<i32>,
+    allow_historical_terminal: bool,
+) -> Result<i32> {
     let recipe = match load_recipe(&claim.continuation().cook_id) {
         Ok(recipe) => recipe,
         Err(error) => {
@@ -1265,7 +1282,11 @@ pub fn consume_claimed_with_dispatcher(
             return Err(error);
         }
     };
-    let options = match reconstruct_options_with_dispatcher(&recipe, attempt_dispatcher) {
+    let options = match if allow_historical_terminal {
+        reconstruct_adoption_options_with_dispatcher(&recipe, attempt_dispatcher)
+    } else {
+        reconstruct_options_with_dispatcher(&recipe, attempt_dispatcher)
+    } {
         Ok(options) => options,
         Err(error) if error.retryable == Some(true) => {
             claim.retry()?;
@@ -1277,6 +1298,15 @@ pub fn consume_claimed_with_dispatcher(
         }
     };
     let mut options = options;
+    if allow_historical_terminal {
+        // A newer coordinator may finish an accepted terminal candidate, but it
+        // must never replay provider work under a different runtime generation.
+        options.max_attempts = recipe
+            .attempts
+            .last()
+            .map(|attempt| attempt.attempt)
+            .unwrap_or(0);
+    }
     if agent_task_lifecycle::run_record_exists(&claim.continuation().run_id)? {
         if let Err(error) =
             reconcile_recipe_attempt_for_continuation(&recipe, &claim.continuation().run_id)
@@ -1870,6 +1900,34 @@ mod tests {
         assert!(adoption.gates.verify.is_empty());
         assert!(adoption.no_finalize);
         assert!(adoption.attempt_dispatcher.is_none());
+    }
+
+    #[test]
+    fn terminal_continuation_accepts_historical_runtime_without_provider_replay() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut historical = recipe();
+            historical.runtime_generation = "homeboy 0.291.2+96820fe8cc53".to_string();
+            historical.retry_budget["max_attempts"] = serde_json::json!(3);
+            write_recipe(&historical).unwrap();
+            enqueue_terminal_continuation("cook", "run").unwrap();
+            let claim = claim_continuation_for("cook", "run").unwrap().unwrap();
+
+            let mut observed = None;
+            let exit_code = consume_claimed_terminal_with_dispatcher(
+                claim,
+                |_| Ok(None),
+                |options| {
+                    observed = Some(options);
+                    Ok(0)
+                },
+            )
+            .unwrap();
+
+            assert_eq!(exit_code, 0);
+            let options = observed.expect("terminal continuation reached normal cook boundary");
+            assert_eq!(options.max_attempts, 1);
+            assert_eq!(options.initial_run_id, "run");
+        });
     }
 
     #[test]

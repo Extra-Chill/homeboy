@@ -66,6 +66,8 @@ fn crashed_zero_finding_producer_remains_failure() {
 
 #[test]
 fn baseline_clean_override_honors_known_findings_but_not_infrastructure_errors() {
-    assert_eq!(effective_lint_exit_code(1, Some(0)), 0);
-    assert_eq!(effective_lint_exit_code(2, Some(0)), 2);
+    assert_eq!(effective_lint_exit_code(1, Some(0), false), 0);
+    assert_eq!(effective_lint_exit_code(2, Some(0), true), 2);
+    assert_eq!(effective_lint_exit_code(1, Some(0), true), 1);
+    assert_eq!(effective_lint_exit_code(0, Some(0), true), 1);
 }

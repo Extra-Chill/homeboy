@@ -1,8 +1,89 @@
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use homeboy::core::api_jobs::{JobEventKind, JobStatus};
 use homeboy_core::test_support::{HermeticTestContext, ReverseBrokerFixture, TestBinary};
+
+/// A live reverse worker republishes its controller session heartbeat while it
+/// is connected; the recorded `last_seen_at` is only as old as its last beat.
+/// The fixture used to fake that with a single timestamp five minutes in the
+/// future, which `reverse_controller_session_is_live` accepts because a
+/// negative age fails `Duration::try_from` and falls open. That gave the test a
+/// fixed ~390 s liveness window (300 s of future skew plus the 90 s heartbeat
+/// TTL) while the test itself runs 430–590 s, so whether it passed depended on
+/// where that wall-clock cliff landed. Beat the session honestly instead.
+struct ReverseSessionHeartbeat {
+    path: PathBuf,
+    session: serde_json::Value,
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ReverseSessionHeartbeat {
+    fn start(path: &Path, mut session: serde_json::Value) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        session["last_seen_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
+        Self::write(path, &session);
+        let handle = {
+            let path = path.to_path_buf();
+            let session = session.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(500));
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let mut beat = session.clone();
+                    beat["last_seen_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
+                    Self::write(&path, &beat);
+                }
+            })
+        };
+        Self {
+            path: path.to_path_buf(),
+            session,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    /// Stop beating and record the session a worker that has already exited
+    /// leaves behind: a real `last_seen_at` older than the reverse heartbeat
+    /// TTL. The controller must still project the terminal result the worker
+    /// published to the broker before it exited.
+    fn expire(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            handle.join().expect("reverse session heartbeat thread");
+        }
+        let mut expired = self.session.clone();
+        expired["last_seen_at"] =
+            serde_json::json!((chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339());
+        Self::write(&self.path, &expired);
+    }
+
+    /// Publish through a same-directory rename. A truncating rewrite would let
+    /// a controller read observe an empty session file mid-beat and report the
+    /// runner disconnected for reasons that have nothing to do with liveness.
+    fn write(path: &Path, session: &serde_json::Value) {
+        let staged = path.with_extension("beat");
+        std::fs::write(&staged, session.to_string()).expect("stage reverse controller session");
+        std::fs::rename(&staged, path).expect("publish reverse controller session");
+    }
+}
+
+impl Drop for ReverseSessionHeartbeat {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
 
 fn output(command: &mut Command) -> std::process::Output {
     let output = command.output().expect("run homeboy fixture command");
@@ -163,8 +244,10 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
         .join("runner-sessions/lab/fixture-controller.json");
     std::fs::create_dir_all(session_path.parent().expect("session parent"))
         .expect("create session directory");
-    std::fs::write(
-        session_path,
+    // Beat the session for as long as the fixture worker is "connected", the
+    // way `homeboy runner work` does, instead of pinning one future timestamp.
+    let mut session_heartbeat = ReverseSessionHeartbeat::start(
+        &session_path,
         serde_json::json!({
             "runner_id": "lab",
             "mode": "reverse",
@@ -179,15 +262,12 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
             "connected_at": "2026-01-01T00:00:00Z",
             "worker_identity": "fixture-worker",
             "worker_pid": 1,
-            "last_seen_at": (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339()
-        })
-        .to_string(),
-    )
-    .expect("write reverse controller session");
+        }),
+    );
 
     let mut cook_command = context.command(TestBinary::HomeboyFixture);
     cook_command
-        .env("PATH", path)
+        .env("PATH", &path)
         .env("HOMEBOY_CONTROLLER_ID", "fixture-controller")
         .args([
             "--runner",
@@ -249,6 +329,7 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
             let run_id = accepted["latest_run_id"].as_str().unwrap_or("unknown");
             let status = context
                 .command(TestBinary::HomeboyFixture)
+                .env("PATH", &path)
                 .args(["agent-task", "status", run_id])
                 .output()
                 .expect("inspect stalled controller parent");
@@ -366,6 +447,12 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
         })
         .expect("duplicate worker wake");
     assert_eq!(duplicate_code, 0);
+    // Both worker waves have returned, so the reverse worker is gone and its
+    // controller-session heartbeat stops. That is the steady state of a
+    // detached Cook, not an edge case: the worker exits the moment it publishes
+    // its terminal result. Record it explicitly so terminal projection is
+    // proven against a genuinely expired session instead of racing one.
+    session_heartbeat.expire();
     // The controller must project the broker result after the worker exits.
     // `daemon serve` is intentionally un-tokenized, so terminate the test-owned
     // foreground child only after that durable parent lifecycle is terminal.
@@ -374,6 +461,10 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
     let terminal = loop {
         let status = context
             .command(TestBinary::HomeboyFixture)
+            // A recorded-only reverse session makes `runner status` reach for
+            // its SSH recovery probe. Keep that on the fixture shim rather than
+            // letting a real `ssh` escape the hermetic context.
+            .env("PATH", &path)
             .args(["agent-task", "status", run_id])
             .output()
             .expect("read terminal parent status");

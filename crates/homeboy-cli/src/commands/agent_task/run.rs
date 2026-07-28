@@ -125,21 +125,29 @@ pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
             ));
         };
         let mut result = None;
-        let exit_code = agent_task_service::consume_claimed_with_dispatcher(
-            claim,
-            |dispatch_recipe| {
-                crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(dispatch_recipe)
-            },
-            |options| {
-                let cook = agent_task_service::run_cook(
-                    options,
-                    ExtensionProviderAgentTaskExecutor::discover(),
-                )?;
-                let exit_code = cook.exit_code;
-                result = Some(cook.value);
-                Ok(exit_code)
-            },
-        )?;
+        let historical_terminal =
+            recipe.runtime_generation != homeboy::core::build_identity::current().display;
+        let dispatcher = |dispatch_recipe: &Value| {
+            crate::commands::infra::route::reconstruct_cook_attempt_dispatcher(dispatch_recipe)
+        };
+        let execute = |options| {
+            let executor = ExtensionProviderAgentTaskExecutor::discover();
+            let cook = if historical_terminal {
+                agent_task_service::run_terminal_cook_continuation(options, executor)?
+            } else {
+                agent_task_service::run_cook(options, executor)?
+            };
+            let exit_code = cook.exit_code;
+            result = Some(cook.value);
+            Ok(exit_code)
+        };
+        let exit_code = if historical_terminal {
+            agent_task_service::consume_claimed_terminal_with_dispatcher(
+                claim, dispatcher, execute,
+            )?
+        } else {
+            agent_task_service::consume_claimed_with_dispatcher(claim, dispatcher, execute)?
+        };
         let value = cook_report_with_continuation(
             serde_json::to_value(result.ok_or_else(|| {
                 homeboy::core::Error::internal_unexpected(

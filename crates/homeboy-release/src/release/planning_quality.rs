@@ -1,9 +1,11 @@
 use homeboy_core::component::Component;
-use homeboy_core::engine::run_dir::{self, RunDir};
+use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::error::{CommandEvidence, Error, Result};
 use homeboy_extension as extension;
 use homeboy_extension::{self, ExtensionCapability};
 use std::path::Path;
+
+use super::scope::ReleaseScope;
 
 /// Maximum captured stdout/stderr bytes retained per stream in command
 /// evidence. Bounds the structured error payload while keeping the tail (where
@@ -51,29 +53,22 @@ fn command_evidence(
 
 /// Outcome of a release lint preflight.
 ///
-/// Distinguishes a genuine lint failure (real findings exist) from a harness /
-/// infrastructure failure (the lint wrapper exited non-zero while reporting
-/// zero findings). The latter must not hard-block a release — the underlying
-/// linter is clean and a broken runner harness should surface as a warning.
 #[derive(Debug)]
 pub(super) enum LintQualityOutcome {
     /// Lint ran and passed, or no lint runner is configured (`ran == false`).
     Passed { ran: bool },
-    /// Lint produced real findings — this is a genuine, hard-blocking failure.
+    /// Lint findings or a lint harness/tool/evidence failure blocked release.
     Failed(Error),
-    /// The lint harness exited non-zero while reporting zero findings.
-    ///
-    /// This is a harness/infra error, not a code-quality failure. The release
-    /// continues with a warning instead of aborting.
-    HarnessError { message: String },
 }
 
 /// Run release lint via the component's extension.
 ///
-/// Returns a [`LintQualityOutcome`] distinguishing real lint findings from a
-/// harness/infrastructure failure. Missing lint support is not a release
-/// blocker because not every extension provides it.
-pub(super) fn validate_lint_quality(component: &Component) -> LintQualityOutcome {
+/// Missing lint support is not a release blocker because not every extension
+/// provides it.
+pub(super) fn validate_lint_quality(
+    component: &Component,
+    component_id: &str,
+) -> LintQualityOutcome {
     // Shared mapping for a lint-runner construction/execution error into the
     // standard hard-blocking outcome, used by both the scripts.lint and the
     // extension-resolved lint paths below.
@@ -99,27 +94,21 @@ pub(super) fn validate_lint_quality(component: &Component) -> LintQualityOutcome
             return LintQualityOutcome::Passed { ran: true };
         }
 
-        // The lint harness exited non-zero. When the underlying linter is clean
-        // and the wrapper/harness itself failed (e.g. the long-standing missing
-        // `runner-steps.sh` environmental issue), surface a non-blocking warning
-        // rather than aborting the release.
-        if workflow.harness_error {
-            return LintQualityOutcome::HarnessError {
-                message: harness_failure_message("Lint", workflow.exit_code),
-            };
-        }
-
         return LintQualityOutcome::Failed(quality_error(
             "lint",
             format!("Lint failed (exit code {})", workflow.exit_code),
         ));
     }
 
-    let lint_context = extension::lint::resolve_lint_command(component);
-
-    let Ok(lint_context) = lint_context else {
-        return LintQualityOutcome::Passed { ran: false };
-    };
+    let lint_context =
+        match homeboy_core::extension_execution::resolve_execution_context_if_available(
+            component,
+            ExtensionCapability::Lint,
+        ) {
+            Ok(Some(context)) => context,
+            Ok(None) => return LintQualityOutcome::Passed { ran: false },
+            Err(error) => return runner_error(error),
+        };
 
     homeboy_core::log_status!("release", "Running lint ({})...", lint_context.extension_id);
 
@@ -127,82 +116,100 @@ pub(super) fn validate_lint_quality(component: &Component) -> LintQualityOutcome
         Ok(dir) => dir,
         Err(e) => return LintQualityOutcome::Failed(e),
     };
-    let lint_findings_file = release_run_dir.step_file(run_dir::files::LINT_FINDINGS);
-
-    let output = match extension::lint::build_lint_runner(
+    let changed_since =
+        match ReleaseScope::resolve(component, component_id).and_then(|scope| scope.latest_tag()) {
+            Ok(tag) => tag,
+            Err(e) => {
+                release_run_dir.finish(false);
+                return runner_error(e);
+            }
+        };
+    let workflow = extension::lint::run_main_lint_workflow(
         component,
-        None,
-        &[],
-        false,
-        None,
-        None,
-        false,
-        None,
-        None,
-        None,
-        None,
-        None,
+        Path::new(&component.local_path),
+        extension::lint::LintRunWorkflowArgs {
+            component_label: component_id.to_string(),
+            component_id: component_id.to_string(),
+            path_override: None,
+            settings: Vec::new(),
+            summary: false,
+            file: None,
+            glob: None,
+            changed_only: false,
+            changed_since,
+            precomputed_changed_files: None,
+            sniff_filters: extension::lint::LintSniffFilters::default(),
+            category: None,
+            ci_env: Vec::new(),
+            baseline_flags: Default::default(),
+            json_summary: true,
+        },
         &release_run_dir,
-    )
-    .map(|runner| {
-        // The release lint gate is blocking, so a validation dependency resolved
-        // from a stale local checkout must not silently determine the outcome —
-        // fail closed on a behind-upstream dependency (#9643).
-        runner.env(extension::STRICT_VALIDATION_DEPENDENCIES_ENV, "1")
-    })
-    .and_then(|runner| runner.run())
-    {
-        Ok(output) => output,
-        Err(e) => {
+    );
+    let workflow = match workflow {
+        Ok(workflow) => workflow,
+        Err(error) => {
             release_run_dir.finish(false);
-            return runner_error(e);
+            return runner_error(error);
         }
     };
 
-    if output.success {
+    if workflow.status == "passed" && workflow.exit_code == 0 {
         homeboy_core::log_status!("release", "Lint passed");
         release_run_dir.finish(true);
-        return LintQualityOutcome::Passed { ran: true };
-    }
-
-    let source_path = std::path::Path::new(&component.local_path);
-    let findings = homeboy_extension::lint::baseline::parse_findings_file(&lint_findings_file)
-        .unwrap_or_default();
-
-    // A non-zero exit with zero parsed findings is a harness/infra failure, not
-    // a real lint failure — the linter found nothing to report. The underlying
-    // linter is clean, so this must not hard-block the release.
-    if findings.is_empty() {
+        LintQualityOutcome::Passed { ran: true }
+    } else {
         release_run_dir.finish(false);
-        return LintQualityOutcome::HarnessError {
-            message: harness_failure_message("Lint", output.exit_code),
-        };
+        LintQualityOutcome::Failed(lint_workflow_failure(&workflow, &release_run_dir))
     }
+}
 
-    if let Some(baseline) = homeboy_extension::lint::baseline::load_baseline(source_path) {
-        let comparison = homeboy_extension::lint::baseline::compare(&findings, &baseline);
-        if comparison.drift_increased {
-            homeboy_core::log_status!(
-                "release",
-                "Lint baseline drift increased: {} new finding(s)",
-                comparison.new_items.len()
-            );
-        } else {
-            homeboy_core::log_status!(
-                "release",
-                "Lint has known findings but no new drift (baseline honored)"
-            );
-            homeboy_core::log_status!("release", "Lint passed");
-            release_run_dir.finish(true);
-            return LintQualityOutcome::Passed { ran: true };
-        }
+fn lint_workflow_failure(
+    workflow: &extension::lint::LintRunWorkflowResult,
+    run_dir: &RunDir,
+) -> Error {
+    let findings = workflow.findings.as_deref().unwrap_or_default();
+    let producer_errors = workflow
+        .producer_summaries
+        .iter()
+        .filter(|producer| producer.status == "error")
+        .count();
+    let baseline_new = workflow
+        .baseline_comparison
+        .as_ref()
+        .map(|comparison| comparison.new_items.len());
+    let baseline_known = baseline_new.map(|new| findings.len().saturating_sub(new));
+    let message = format!(
+        "Lint failed (exit code {}, {} finding(s), {} producer error(s){}{})",
+        workflow.exit_code,
+        findings.len(),
+        producer_errors,
+        baseline_new
+            .map(|count| format!(", {} baseline-new", count))
+            .unwrap_or_default(),
+        baseline_known
+            .map(|count| format!(", {} baseline-known", count))
+            .unwrap_or_default()
+    );
+    let mut error = quality_error("lint", message);
+    if let Some(details) = error.details.as_object_mut() {
+        details.insert(
+            "lint_workflow".to_string(),
+            serde_json::json!({
+                "exit_code": workflow.exit_code,
+                "finding_count": findings.len(),
+                "findings": findings.iter().take(20).collect::<Vec<_>>(),
+                "producer_error_count": producer_errors,
+                "producer_summaries": workflow.producer_summaries,
+                "baseline_new_count": baseline_new,
+                "baseline_known_count": baseline_known,
+                "harness_error": workflow.harness_error,
+                "hints": workflow.hints,
+                "run_dir": run_dir.path(),
+            }),
+        );
     }
-
-    release_run_dir.finish(false);
-    LintQualityOutcome::Failed(quality_error(
-        "lint",
-        code_quality_failure_message("Lint", &output),
-    ))
+    error
 }
 
 /// Run release tests via the component's extension.
@@ -298,20 +305,6 @@ pub(super) fn validate_test_quality(component: &Component) -> Result<bool> {
             evidence,
         ))
     }
-}
-
-/// Message for a lint/test harness failure (non-zero exit, zero findings).
-///
-/// This is distinct from a real code-quality failure: the underlying tool is
-/// clean and the wrapper/harness itself failed. The release continues with a
-/// warning carrying this message.
-fn harness_failure_message(check: &str, exit_code: i32) -> String {
-    format!(
-        "{} harness exited {} with zero findings — treating as a harness/infra error, not a code-quality failure. \
-Release continues; the underlying linter is clean. To re-run lint in isolation: homeboy lint <component>. \
-To skip only this gate: homeboy release <component> --skip-checks=lint",
-        check, exit_code
-    )
 }
 
 fn quality_error(field: &str, message: String) -> Error {
@@ -420,11 +413,12 @@ fn is_runner_infrastructure_failure(output: &extension::RunnerOutput) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        code_quality_failure_message, harness_failure_message, is_runner_infrastructure_failure,
-        validate_lint_quality, validate_test_quality, LintQualityOutcome,
+        code_quality_failure_message, is_runner_infrastructure_failure, validate_lint_quality,
+        validate_test_quality, LintQualityOutcome,
     };
-    use homeboy_core::component::{Component, ComponentScriptsConfig};
+    use homeboy_core::component::{Component, ComponentScriptsConfig, ScopedExtensionConfig};
     use homeboy_extension::RunnerOutput;
+    use std::collections::HashMap;
     use std::fs;
     use std::path::Path;
 
@@ -436,13 +430,6 @@ mod tests {
                     ran
                 }
                 other => panic!("expected Passed, got {:?}", other),
-            }
-        }
-
-        fn expect_harness_error(self) -> String {
-            match self {
-                LintQualityOutcome::HarnessError { message } => message,
-                other => panic!("expected HarnessError, got {:?}", other),
             }
         }
 
@@ -475,6 +462,87 @@ mod tests {
             scripts: Some(scripts),
             ..Default::default()
         }
+    }
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git command should run");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn extension_lint_component(
+        home: &Path,
+        source: &Path,
+        script: &str,
+        prior_tag: bool,
+    ) -> Component {
+        run_git(source, &["init", "-q"]);
+        run_git(source, &["config", "user.email", "homeboy@example.com"]);
+        run_git(source, &["config", "user.name", "Homeboy Test"]);
+        fs::write(source.join("legacy.php"), "<?php\n").expect("legacy source");
+        run_git(source, &["add", "legacy.php"]);
+        run_git(source, &["commit", "-q", "-m", "chore: initial"]);
+        if prior_tag {
+            run_git(source, &["tag", "v1.0.0"]);
+        }
+        fs::write(source.join("changed.php"), "<?php echo 'changed';\n").expect("changed source");
+        run_git(source, &["add", "changed.php"]);
+        run_git(source, &["commit", "-q", "-m", "fix: changed file"]);
+
+        let extension_dir = home.join(".config/homeboy/extensions/release-lint-fixture");
+        fs::create_dir_all(&extension_dir).expect("extension dir");
+        fs::write(
+            extension_dir.join("release-lint-fixture.json"),
+            r#"{"name":"Release lint fixture","version":"1.0.0","lint":{"extension_script":"lint.sh"}}"#,
+        )
+        .expect("extension manifest");
+        fs::write(extension_dir.join("lint.sh"), script).expect("extension script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(extension_dir.join("lint.sh"))
+                .expect("script metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(extension_dir.join("lint.sh"), permissions)
+                .expect("executable script");
+        }
+
+        Component {
+            id: "fixture".to_string(),
+            local_path: source.to_string_lossy().to_string(),
+            extensions: Some(HashMap::from([(
+                "release-lint-fixture".to_string(),
+                ScopedExtensionConfig::default(),
+            )])),
+            ..Default::default()
+        }
+    }
+
+    fn enable_split_lint_routes(home: &Path) {
+        fs::write(
+            home.join(".config/homeboy/extensions/release-lint-fixture/release-lint-fixture.json"),
+            r#"{
+                "name":"Release lint fixture",
+                "version":"1.0.0",
+                "lint":{
+                    "extension_script":"lint.sh",
+                    "changed_file_routes":[
+                        {"extensions":["php"],"step":"php"},
+                        {"extensions":["js"],"step":"js"}
+                    ]
+                }
+            }"#,
+        )
+        .expect("split route manifest");
     }
 
     fn runner_output(exit_code: i32, stdout: &str, stderr: &str) -> RunnerOutput {
@@ -512,8 +580,10 @@ mod tests {
 
     #[test]
     fn test_validate_lint_quality() {
-        assert!(!validate_lint_quality(&component_without_quality_runners())
-            .expect_passed_with_value(false));
+        assert!(
+            !validate_lint_quality(&component_without_quality_runners(), "fixture")
+                .expect_passed_with_value(false)
+        );
     }
 
     #[test]
@@ -539,7 +609,7 @@ mod tests {
             },
         );
 
-        assert!(validate_lint_quality(&component).expect_passed_with_value(true));
+        assert!(validate_lint_quality(&component, "fixture").expect_passed_with_value(true));
     }
 
     #[test]
@@ -668,17 +738,13 @@ mod tests {
             },
         );
 
-        let err = validate_lint_quality(&component).expect_failed();
+        let err = validate_lint_quality(&component, "fixture").expect_failed();
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.to_string().contains("Lint failed (exit code 1)"));
     }
 
     #[test]
-    fn validate_lint_quality_warns_on_missing_runner_steps_harness() {
-        // Reproduces issue #4586: the lint harness exits non-zero (1) while the
-        // underlying linter is clean. The missing runner-steps.sh marker in the
-        // output identifies this as a harness/infra failure that must NOT
-        // hard-block the release.
+    fn validate_lint_quality_blocks_missing_runner_steps_harness() {
         let dir = tempfile::tempdir().expect("temp dir");
         write_script(
             dir.path(),
@@ -694,23 +760,12 @@ mod tests {
             },
         );
 
-        let message = validate_lint_quality(&component).expect_harness_error();
-        assert!(
-            message.contains("harness exited 1 with zero findings"),
-            "harness error message should mention zero findings: {}",
-            message
-        );
-        assert!(
-            message.contains("--skip-checks=lint"),
-            "harness error message should mention granular skip: {}",
-            message
-        );
+        let error = validate_lint_quality(&component, "fixture").expect_failed();
+        assert!(error.to_string().contains("Lint failed (exit code 1)"));
     }
 
     #[test]
-    fn validate_lint_quality_warns_on_high_exit_code() {
-        // Exit codes >= 2 conventionally indicate tooling/internal errors, not
-        // real lint findings — treated as a harness failure (warning).
+    fn validate_lint_quality_blocks_high_exit_code() {
         let dir = tempfile::tempdir().expect("temp dir");
         write_script(dir.path(), "lint.sh", "exit 7\n");
 
@@ -722,16 +777,271 @@ mod tests {
             },
         );
 
-        let message = validate_lint_quality(&component).expect_harness_error();
-        assert!(message.contains("harness exited 7"));
+        let error = validate_lint_quality(&component, "fixture").expect_failed();
+        assert!(error.to_string().contains("Lint failed (exit code 7)"));
     }
 
     #[test]
-    fn harness_failure_message_mentions_granular_skip() {
-        let message = harness_failure_message("Lint", 1);
-        assert!(message.contains("harness exited 1 with zero findings"));
-        assert!(message.contains("homeboy lint <component>"));
-        assert!(message.contains("--skip-checks=lint"));
+    fn extension_release_lint_blocks_extension_bootstrap_failure() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let component = Component {
+                id: "fixture".to_string(),
+                local_path: "/tmp/fixture".to_string(),
+                extensions: Some(HashMap::from([(
+                    "missing-lint-extension".to_string(),
+                    ScopedExtensionConfig::default(),
+                )])),
+                ..Default::default()
+            };
+
+            let error = validate_lint_quality(&component, "fixture").expect_failed();
+            assert!(error.to_string().contains("Lint runner error"));
+        });
+    }
+
+    #[test]
+    fn extension_release_lint_rejects_invalid_explicit_lint_ownership() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let extension_dir = home.path().join(".config/homeboy/extensions/unsupported");
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(
+                extension_dir.join("unsupported.json"),
+                r#"{"name":"Unsupported","version":"1.0.0"}"#,
+            )
+            .expect("extension manifest");
+            let mut component = Component {
+                id: "fixture".to_string(),
+                local_path: "/tmp/fixture".to_string(),
+                extensions: Some(HashMap::from([(
+                    "unsupported".to_string(),
+                    ScopedExtensionConfig::default(),
+                )])),
+                ..Default::default()
+            };
+            assert!(!validate_lint_quality(&component, "fixture").expect_passed_with_value(false));
+            component
+                .capability_extensions
+                .insert("lint".to_string(), "unsupported".to_string());
+
+            let error = validate_lint_quality(&component, "fixture").expect_failed();
+            assert!(error.to_string().contains("Lint runner error"));
+        });
+    }
+
+    #[test]
+    fn extension_release_lint_blocks_finding_in_file_changed_since_prior_tag() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let source = tempfile::tempdir().expect("source dir");
+            let component = extension_lint_component(
+                home.path(),
+                source.path(),
+                r#"#!/bin/sh
+printf '[{"tool":"phpstan","message":"changed finding","fingerprint":"changed","file":"changed.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+exit 1
+"#,
+                true,
+            );
+
+            let error = validate_lint_quality(&component, "fixture").expect_failed();
+            assert!(error.to_string().contains("Lint failed (exit code 1,"));
+        });
+    }
+
+    #[test]
+    fn extension_release_lint_includes_later_route_finding_in_failure_details() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let source = tempfile::tempdir().expect("source dir");
+            let component = extension_lint_component(
+                home.path(),
+                source.path(),
+                r#"#!/bin/sh
+if [ "$HOMEBOY_STEP" = "php" ]; then
+  printf '[]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+  exit 0
+fi
+printf '[{"tool":"eslint","message":"second route release finding","fingerprint":"second","file":"assets/app.js"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+exit 1
+"#,
+                true,
+            );
+            enable_split_lint_routes(home.path());
+            fs::create_dir_all(source.path().join("assets")).expect("assets dir");
+            fs::write(source.path().join("assets/app.js"), "broken();\n").expect("js source");
+            run_git(source.path(), &["add", "assets/app.js"]);
+            run_git(source.path(), &["commit", "-q", "-m", "fix: js route"]);
+
+            let error = validate_lint_quality(&component, "fixture").expect_failed();
+            assert_eq!(
+                error.details["lint_workflow"]["finding_count"].as_u64(),
+                Some(1)
+            );
+            assert_eq!(
+                error.details["lint_workflow"]["findings"][0]["message"].as_str(),
+                Some("second route release finding")
+            );
+            assert!(error.details["lint_workflow"]["run_dir"].is_string());
+            assert!(error.details["lint_workflow"]["hints"].is_array());
+        });
+    }
+
+    #[test]
+    fn extension_release_lint_ignores_legacy_finding_outside_prior_tag_scope() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let source = tempfile::tempdir().expect("source dir");
+            let component = extension_lint_component(
+                home.path(),
+                source.path(),
+                r#"#!/bin/sh
+printf '[{"tool":"phpstan","message":"legacy finding","fingerprint":"legacy","file":"legacy.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+exit 1
+"#,
+                true,
+            );
+
+            assert!(validate_lint_quality(&component, "fixture").expect_passed_with_value(true));
+        });
+    }
+
+    #[test]
+    fn first_extension_release_retains_full_lint() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let source = tempfile::tempdir().expect("source dir");
+            let component = extension_lint_component(
+                home.path(),
+                source.path(),
+                r#"#!/bin/sh
+printf '[{"tool":"phpstan","message":"legacy finding","fingerprint":"legacy","file":"legacy.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+exit 1
+"#,
+                false,
+            );
+
+            let error = validate_lint_quality(&component, "fixture").expect_failed();
+            assert!(error.to_string().contains("Lint failed (exit code 1,"));
+        });
+    }
+
+    #[test]
+    fn extension_release_lint_uses_component_prefixed_release_tag() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let source = tempfile::tempdir().expect("source dir");
+            run_git(source.path(), &["init", "-q"]);
+            run_git(
+                source.path(),
+                &["config", "user.email", "homeboy@example.com"],
+            );
+            run_git(source.path(), &["config", "user.name", "Homeboy Test"]);
+            let component_path = source.path().join("packages/fixture");
+            fs::create_dir_all(&component_path).expect("component dir");
+            fs::write(component_path.join("legacy.php"), "<?php\n").expect("legacy source");
+            run_git(source.path(), &["add", "packages/fixture/legacy.php"]);
+            run_git(source.path(), &["commit", "-q", "-m", "chore: initial"]);
+            run_git(source.path(), &["tag", "fixture-v1.0.0"]);
+            fs::write(component_path.join("changed.php"), "<?php echo 1;\n")
+                .expect("changed source");
+            run_git(source.path(), &["add", "packages/fixture/changed.php"]);
+            run_git(source.path(), &["commit", "-q", "-m", "fix: package"]);
+
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions/release-lint-fixture");
+            fs::create_dir_all(&extension_dir).expect("extension dir");
+            fs::write(
+                extension_dir.join("release-lint-fixture.json"),
+                r#"{"name":"Release lint fixture","version":"1.0.0","lint":{"extension_script":"lint.sh"}}"#,
+            )
+            .expect("extension manifest");
+            fs::write(
+                extension_dir.join("lint.sh"),
+                r#"#!/bin/sh
+printf '[{"tool":"phpstan","message":"legacy","fingerprint":"legacy","file":"packages/fixture/legacy.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+exit 1
+"#,
+            )
+            .expect("lint script");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let script = extension_dir.join("lint.sh");
+                let mut permissions = fs::metadata(&script).expect("metadata").permissions();
+                permissions.set_mode(0o755);
+                fs::set_permissions(script, permissions).expect("executable script");
+            }
+            let component = Component {
+                id: "fixture".to_string(),
+                local_path: component_path.to_string_lossy().to_string(),
+                extensions: Some(HashMap::from([(
+                    "release-lint-fixture".to_string(),
+                    ScopedExtensionConfig::default(),
+                )])),
+                ..Default::default()
+            };
+
+            assert!(validate_lint_quality(&component, "fixture").expect_passed_with_value(true));
+        });
+    }
+
+    #[test]
+    fn extension_release_lint_blocks_malformed_missing_and_producer_error_evidence() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let malformed_source = tempfile::tempdir().expect("malformed source dir");
+            let malformed = extension_lint_component(
+                home.path(),
+                malformed_source.path(),
+                "#!/bin/sh\nprintf '{' > \"$HOMEBOY_LINT_FINDINGS_FILE\"\nexit 1\n",
+                true,
+            );
+            let malformed_error = validate_lint_quality(&malformed, "fixture").expect_failed();
+            assert!(malformed_error.to_string().contains("Lint runner error"));
+
+            let missing_source = tempfile::tempdir().expect("missing source dir");
+            let missing = extension_lint_component(
+                home.path(),
+                missing_source.path(),
+                "#!/bin/sh\nexit 0\n",
+                true,
+            );
+            let missing_error = validate_lint_quality(&missing, "fixture").expect_failed();
+            assert!(missing_error.to_string().contains("Lint runner error"));
+
+            let producer_source = tempfile::tempdir().expect("producer error source dir");
+            let producer_error = extension_lint_component(
+                home.path(),
+                producer_source.path(),
+                r#"#!/bin/sh
+printf '[{"tool":"phpstan","message":"known","fingerprint":"known","file":"changed.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+printf '[{"tool":"phpstan","status":"error","finding_count":1}]' > "$HOMEBOY_LINT_PRODUCERS_FILE"
+exit 0
+"#,
+                true,
+            );
+            let mut known = homeboy_core::finding::HomeboyFinding::builder("phpstan", "known")
+                .fingerprint("known")
+                .build();
+            known.location.file = Some("changed.php".to_string());
+            homeboy_extension::lint::baseline::save_baseline(
+                producer_source.path(),
+                "fixture",
+                &[known],
+            )
+            .expect("save accepted baseline");
+            let producer_error = validate_lint_quality(&producer_error, "fixture").expect_failed();
+            assert!(producer_error
+                .to_string()
+                .contains("Lint failed (exit code 1,"));
+            assert_eq!(
+                producer_error.details["lint_workflow"]["producer_error_count"].as_u64(),
+                Some(1)
+            );
+            assert_eq!(
+                producer_error.details["lint_workflow"]["baseline_new_count"].as_u64(),
+                Some(0)
+            );
+            assert_eq!(
+                producer_error.details["lint_workflow"]["baseline_known_count"].as_u64(),
+                Some(1)
+            );
+        });
     }
 
     #[test]
