@@ -23,7 +23,7 @@ Remove declared reconstructable artifacts from managed worktrees
 | Option | Value | Description |
 | --- | --- | --- |
 | `--apply` | flag | Apply cleanup across the selected categories. Omit for inventory dry-run output |
-| `--include` | `<INCLUDE>` | Include only these cleanup categories. Comma-separated or repeatable Values: `repo-artifacts`, `task-worktrees`, `worktree-providers`, `terminal-runs`, `persisted-run-artifacts`, `orphaned-artifact-bytes`, `runner-downloads`, `runner-binary-caches`, `remote-lab-workspaces`, `runtime-tmp`, `controller-scratch`, `shared-cargo-targets`, `controller-runtimes`. |
+| `--include` | `<INCLUDE>` | Include only these cleanup categories. Comma-separated or repeatable. `runner-downloads` is opt-in only: it holds artifacts an operator asked Homeboy to fetch, so a bare sweep never includes it Values: `repo-artifacts`, `task-worktrees`, `worktree-providers`, `terminal-runs`, `persisted-run-artifacts`, `orphaned-artifact-bytes`, `runner-downloads`, `runner-binary-caches`, `remote-lab-workspaces`, `runtime-tmp`, `controller-scratch`, `shared-cargo-targets`, `controller-runtimes`. |
 | `--exclude` | `<EXCLUDE>` | Exclude these cleanup categories. Comma-separated or repeatable Values: `repo-artifacts`, `task-worktrees`, `worktree-providers`, `terminal-runs`, `persisted-run-artifacts`, `orphaned-artifact-bytes`, `runner-downloads`, `runner-binary-caches`, `remote-lab-workspaces`, `runtime-tmp`, `controller-scratch`, `shared-cargo-targets`, `controller-runtimes`. |
 | `--older-than-days` | `<DAYS>` | Override the configured terminal-run retention window for this invocation |
 | `--limit` | `<N>` | Override the configured maximum number of persisted artifacts inspected |

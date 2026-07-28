@@ -420,10 +420,16 @@ fn directory_contains_html_inner(path: &Path, seen: usize) -> bool {
 }
 
 pub fn cleanup_downloads(args: RunsArtifactCleanupDownloadsArgs) -> CmdResult<RunsOutput> {
+    // Same resolver as `homeboy cleanup --include runner-downloads`. `--runner`
+    // and `--run-id` are the narrowing filters that keep this specialist alive;
+    // the inspection budget is not one of them, and the age floor is fixed and
+    // deliberately unexposed (#10564).
+    let policy = resolve_cleanup_policy(CleanupPolicyOverrides::default())?;
     let outcome = runs_service::cleanup_runner_downloads(RunnerDownloadCleanupOptions {
         apply: args.apply,
         runner: args.runner,
         run_id: args.run_id,
+        limit: policy.scan_limit(),
     })?;
 
     Ok((
@@ -434,12 +440,20 @@ pub fn cleanup_downloads(args: RunsArtifactCleanupDownloadsArgs) -> CmdResult<Ru
                 .canonical_cleanup_command(args.apply),
             specialist_cleanup_command: RUNNER_DOWNLOADS_METADATA.specialist_command(args.apply),
             dry_run: outcome.dry_run,
+            retention: policy,
             root: outcome.root.display().to_string(),
-            removed: outcome.removed,
+            min_age_seconds: outcome.min_age_seconds,
+            liveness: outcome.liveness,
+            inspected_count: outcome.inspected_count,
+            planned_count: outcome.planned_count,
+            removed_count: outcome.removed_count,
+            skipped_count: outcome.skipped_count,
             file_count: outcome.file_count,
             directory_count: outcome.directory_count,
-            size_bytes: outcome.size_bytes,
-            paths: outcome.paths,
+            planned_size_bytes: outcome.planned_size_bytes,
+            removed_size_bytes: outcome.removed_size_bytes,
+            truncated: outcome.truncated,
+            rows: outcome.rows,
         }),
         0,
     ))
@@ -955,12 +969,13 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_downloads_plans_and_removes_runner_cache() {
+    fn cleanup_downloads_retains_a_freshly_pulled_cache_and_stays_wired_to_the_aggregate() {
         let _guard = artifact_root_test_lock();
         with_isolated_home(|home| {
             let artifact_root = home.path().join("artifacts");
             homeboy::core::set_artifact_root_override(Some(artifact_root.clone()));
 
+            // Exactly what `homeboy runs artifacts <run> --pull` writes.
             let run_dir = artifact_root.join("runner").join("local").join("run-1");
             fs::create_dir_all(&run_dir).expect("run dir");
             fs::write(run_dir.join("trace.zip"), b"trace").expect("trace");
@@ -987,10 +1002,16 @@ mod tests {
                 dry.canonical_cleanup_command,
                 RUNNER_DOWNLOADS_METADATA.canonical_cleanup_command(false)
             );
-            assert!(!dry.removed);
-            assert_eq!(dry.file_count, 2);
-            assert_eq!(dry.directory_count, 0);
-            assert_eq!(dry.size_bytes, 7);
+            // #10564: the cache was written seconds ago, so it is a candidate
+            // the predicate inspects and retains — not bytes to plan away.
+            assert_eq!(dry.inspected_count, 1);
+            assert_eq!(dry.planned_count, 0);
+            assert_eq!(dry.skipped_count, 1);
+            assert_eq!(dry.min_age_seconds, 24 * 60 * 60);
+            assert_eq!(
+                dry.retention.schema,
+                homeboy::core::cleanup::CLEANUP_POLICY_SCHEMA
+            );
             assert!(run_dir.exists());
 
             let (inventory, _) =
@@ -1016,6 +1037,9 @@ mod tests {
                 dry.specialist_cleanup_command
             );
 
+            // An explicit `--apply` on the freshly pulled cache still removes
+            // nothing: the narrowing filter selects a candidate, it does not
+            // waive the age floor.
             let applied = cleanup_downloads(RunsArtifactCleanupDownloadsArgs {
                 apply: true,
                 runner: Some("local".to_string()),
@@ -1031,14 +1055,10 @@ mod tests {
                 applied.canonical_cleanup_command,
                 RUNNER_DOWNLOADS_METADATA.canonical_cleanup_command(true)
             );
-            assert_eq!(
-                applied.specialist_cleanup_command,
-                RUNNER_DOWNLOADS_METADATA.specialist_command(true)
-            );
-            assert!(applied.removed);
-            assert_eq!(applied.file_count, 2);
-            assert_eq!(applied.size_bytes, 7);
-            assert!(!run_dir.exists());
+            assert_eq!(applied.removed_count, 0);
+            assert_eq!(applied.skipped_count, 1);
+            assert!(run_dir.join("trace.zip").exists());
+            assert!(run_dir.join("report.json").exists());
         });
     }
 

@@ -35,6 +35,8 @@ pub struct CleanupArgs {
     pub apply: bool,
 
     /// Include only these cleanup categories. Comma-separated or repeatable.
+    /// `runner-downloads` is opt-in only: it holds artifacts an operator asked
+    /// Homeboy to fetch, so a bare sweep never includes it.
     #[arg(long, value_enum, value_delimiter = ',')]
     pub include: Vec<CleanupCategoryArg>,
 
@@ -535,25 +537,52 @@ fn artifact_root_records(
         });
     }
 
+    // The whole cache used to be reported as reclaimable, because the category
+    // deleted all of it unconditionally. It now reports the two halves its
+    // predicate actually produces (#10564): what a sweep would reclaim, and
+    // what it is holding on to.
     let downloads = runs_service::cleanup_runner_downloads(RunnerDownloadCleanupOptions {
         apply: false,
         runner: None,
         run_id: None,
+        limit: policy.scan_limit(),
     })?;
-    if downloads.size_bytes > 0 || downloads.file_count > 0 || downloads.directory_count > 0 {
+    let downloads_root = downloads.root.display().to_string();
+    if downloads.planned_count > 0 {
         records.push(RetainedStorageRecord {
             category: "runner_downloads".to_string(),
             reason: format!(
-                "cached runner artifact downloads ({} file(s), {} directory(ies))",
-                downloads.file_count, downloads.directory_count
+                "{} cached runner download(s) past the fixed {}s age floor with no non-terminal owning run ({} file(s), {} directory(ies))",
+                downloads.planned_count,
+                downloads.min_age_seconds,
+                downloads.file_count,
+                downloads.directory_count
             ),
             owner: "homeboy".to_string(),
             run_id: None,
             liveness: LIVENESS_RECLAIMABLE.to_string(),
+            age: age_bucket(downloads.min_age_seconds),
+            age_seconds: Some(downloads.min_age_seconds),
+            size_bytes: downloads.planned_size_bytes,
+            reference: downloads_root.clone(),
+        });
+    }
+    if downloads.skipped_count > 0 {
+        records.push(RetainedStorageRecord {
+            category: "runner_downloads".to_string(),
+            reason: format!(
+                "{} cached runner download(s) retained: younger than the age floor, claimed by a non-terminal run, or not the canonical <runner>/<run> shape; bytes not measured",
+                downloads.skipped_count
+            ),
+            owner: "homeboy".to_string(),
+            run_id: None,
+            liveness: "lifecycle_pinned".to_string(),
             age: "unknown".to_string(),
             age_seconds: None,
-            size_bytes: downloads.size_bytes,
-            reference: downloads.root.display().to_string(),
+            // Advisory-signal rule: retained entries are deliberately not
+            // measured, so a zero here is "not measured", never "empty".
+            size_bytes: 0,
+            reference: format!("{downloads_root} (retained runner downloads)"),
         });
     }
 
@@ -1009,15 +1038,16 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
             apply,
             runner: None,
             run_id: None,
+            limit: policy.scan_limit(),
         })?;
         categories.push(category_from_output(
             RUNNER_DOWNLOADS_METADATA,
             apply,
-            output.file_count + output.directory_count,
-            usize::from(output.removed),
-            0,
-            output.size_bytes,
-            if output.removed { output.size_bytes } else { 0 },
+            output.inspected_count,
+            output.removed_count,
+            output.skipped_count,
+            output.planned_size_bytes,
+            output.removed_size_bytes,
             output,
         )?);
     }
@@ -1180,14 +1210,37 @@ struct CleanupCategorySelection {
     exclude: Vec<CleanupCategoryArg>,
 }
 
+/// Categories a bare `homeboy cleanup` deliberately does not sweep.
+///
+/// Everything else in the aggregate reclaims bytes Homeboy produced as a
+/// byproduct of its own work — scratch, build targets, temp trees, crash
+/// residue, remote workspaces. `runner-downloads` is different in kind: every
+/// byte under `<artifact-root>/runner` is the result of a fetch an operator
+/// asked for, and `homeboy runs artifact get` hands that exact path back to
+/// them as the location of their file. The predicate in
+/// [`homeboy::core::observation::runs_service::cleanup_runner_downloads`] proves
+/// the bytes are old and unclaimed, but it cannot prove the operator is *done*
+/// with them, because the single writer emits the same name shape for an
+/// operator pull and for an internal auto-fetch (#10564).
+///
+/// Until the writer tags its output, an explicit `--include runner-downloads`
+/// is the honest contract: being absent from a default sweep is cheap and
+/// reversible, and a wrong delete is neither. The category stays fully visible
+/// in `homeboy cleanup retained-storage`, which names the reclaim command.
+const OPT_IN_ONLY_CATEGORIES: &[CleanupCategoryArg] = &[CleanupCategoryArg::RunnerDownloads];
+
 impl CleanupCategorySelection {
     fn new(include: Vec<CleanupCategoryArg>, exclude: Vec<CleanupCategoryArg>) -> Self {
         Self { include, exclude }
     }
 
     fn includes(&self, category: CleanupCategoryArg) -> bool {
-        (self.include.is_empty() || self.include.contains(&category))
-            && !self.exclude.contains(&category)
+        let selected = if self.include.is_empty() {
+            !OPT_IN_ONLY_CATEGORIES.contains(&category)
+        } else {
+            self.include.contains(&category)
+        };
+        selected && !self.exclude.contains(&category)
     }
 }
 
@@ -2261,6 +2314,22 @@ mod tests {
                 CleanupCategoryArg::RuntimeTmp,
                 false,
             ),
+            // #10564: opt-in-only categories are absent from a bare sweep,
+            // reachable by an explicit `--include`, and still suppressible by
+            // `--exclude`.
+            (vec![], vec![], CleanupCategoryArg::RunnerDownloads, false),
+            (
+                vec![CleanupCategoryArg::RunnerDownloads],
+                vec![],
+                CleanupCategoryArg::RunnerDownloads,
+                true,
+            ),
+            (
+                vec![CleanupCategoryArg::RunnerDownloads],
+                vec![CleanupCategoryArg::RunnerDownloads],
+                CleanupCategoryArg::RunnerDownloads,
+                false,
+            ),
         ];
 
         for (include, exclude, category, expected) in cases {
@@ -2269,6 +2338,40 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn only_runner_downloads_is_withheld_from_the_bare_sweep() {
+        // A bare `homeboy cleanup --apply` must keep sweeping everything that
+        // reclaims Homeboy's own byproducts. Only the operator-owned download
+        // cache is withheld, and the withheld set is asserted exactly so a
+        // future category cannot be quietly dropped from the default (#10564).
+        assert_eq!(
+            OPT_IN_ONLY_CATEGORIES.to_vec(),
+            vec![CleanupCategoryArg::RunnerDownloads]
+        );
+
+        let bare = CleanupCategorySelection::new(Vec::new(), Vec::new());
+        for category in [
+            CleanupCategoryArg::RepoArtifacts,
+            CleanupCategoryArg::TaskWorktrees,
+            CleanupCategoryArg::WorktreeProviders,
+            CleanupCategoryArg::TerminalRuns,
+            CleanupCategoryArg::PersistedRunArtifacts,
+            CleanupCategoryArg::OrphanedArtifactBytes,
+            CleanupCategoryArg::RunnerBinaryCaches,
+            CleanupCategoryArg::RemoteLabWorkspaces,
+            CleanupCategoryArg::RuntimeTmp,
+            CleanupCategoryArg::ControllerScratch,
+            CleanupCategoryArg::SharedCargoTargets,
+            CleanupCategoryArg::ControllerRuntimes,
+        ] {
+            assert!(
+                bare.includes(category),
+                "bare cleanup must still sweep {category:?}"
+            );
+        }
+        assert!(!bare.includes(CleanupCategoryArg::RunnerDownloads));
     }
 
     #[test]

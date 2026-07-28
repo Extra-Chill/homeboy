@@ -59,6 +59,66 @@ type, age, symlink-freedom, and root containment; a failed size measurement
 reports `size_measured: false` and does not change the verdict in either
 direction.
 
+## Runner Download Cache Retention
+
+```bash
+homeboy cleanup --include runner-downloads
+homeboy cleanup --include runner-downloads --apply
+```
+
+This category is **opt-in only**: a bare `homeboy cleanup --apply` does not
+sweep it.
+
+`<artifact-root>/runner` is produced by exactly one writer — the default output
+path of `homeboy_lab_runner::evidence::download::download_remote_artifact`,
+which lays bytes down as `<artifact-root>/runner/<runner-id>/<run-id>/<file>`.
+Every reachable caller of it is a fetch someone asked for (`runs artifact get`,
+`runs artifacts <run-id> --pull`, `lab apply`, evidence mirroring, the HTTP
+artifact endpoint), and `runs artifact get` reports that path back as the
+location of the operator's file. So this is not scratch; it is the operator's
+copy.
+
+Before #10564 the implementation was an unconditional `fs::remove_dir_all` of
+the whole root. Its only checks were path-containment ones — `--run-id` requires
+`--runner`, each filter must be a single normal path component, the root must be
+a real directory — which prove the deletion stays *inside* the cache and prove
+nothing about whether the bytes are dead. A bare sweep therefore deleted
+artifacts pulled seconds earlier.
+
+The predicate now requires all of:
+
+- **Ownership by name shape.** A candidate must be a real directory at exactly
+  `runner/<a>/<b>` with no symlink at either level — the only shape the single
+  writer emits. Loose files, symlinks, and non-canonical depths are reported and
+  never removed. As with orphaned artifact bytes, the database is deliberately
+  not joined: bytes here are written before, and usually without, any local
+  `artifacts` row, so row absence is the normal state of a download that is
+  succeeding.
+- **Age floor over the newest byte.** The newest modification time anywhere in
+  the cache directory must be at least 24 hours old (the shared
+  `cleanup::RUNNER_MIN_AGE_HOURS`). Taking the newest, not the oldest, is what
+  makes one fresh pull re-arm the whole cache directory. The floor is not
+  operator-overridable.
+- **Non-terminal-run veto.** The observation store is consulted only in the
+  *retain* direction. A running run matching the `<run-id>` component retains the
+  cache; a missing row never authorizes removal.
+- **Fail closed.** An unreadable or future-dated mtime, an unwalkable subtree, a
+  path that does not resolve inside the artifact root, an observation store that
+  cannot be opened, or a running-run scan that hit its bound all retain.
+
+Removal is per cache directory, so a stale cache and a fresh one under the same
+runner are decided independently; the cache root itself is never removed, and an
+emptied `<runner-id>` directory is pruned only by a non-recursive `remove_dir`
+that refuses a non-empty directory. Sizes are advisory: a failed measurement
+reports `size_measured: false` and moves the verdict in neither direction.
+`--runner` and `--run-id` narrow which candidates are considered; they never
+waive a check.
+
+The remaining gap, and the reason for opt-in: the writer emits the same name
+shape for an operator's deliberate pull and for an internal auto-fetch, so
+"reclaimable transient" and "the operator's copy" are not distinguishable by
+name. Making them distinguishable requires the writer to tag its output.
+
 ## Lab Failure Retention
 
 Lab offloads delete run-scoped workspaces on every known terminal outcome by
@@ -123,4 +183,11 @@ implemented by terminal-run retention:
   row join.
 - Controller-scratch index compaction for missing or deleted terminal tombstones.
 - Aging removed task-worktree records out of workspace registries.
+- Tagging runner artifact downloads at the writer so an operator's deliberate
+  pull is distinguishable from an internal auto-fetch. Until then
+  `runner-downloads` stays out of the bare sweep.
+- Sanitizing the path components `download_remote_artifact` joins. It
+  percent-decodes runner/run ids and accepts a remote-supplied `filename`
+  verbatim, so a `/` in any of them produces a non-canonical cache depth that
+  the liveness veto cannot key on.
 - Detecting collisions between task-worktree and adopted-workspace registry handles.
