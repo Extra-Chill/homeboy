@@ -2363,11 +2363,28 @@ impl ProductionLabStagingOperations {
                 events: observed.events,
             });
         }
+        let broker_url = Self::status_for_recipe_transport(request)?
+            .session
+            .and_then(|session| session.broker_url)
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "runner",
+                    "durable reverse Lab staging requires its accepted broker endpoint",
+                    Some(request.recipe.runner_id.clone()),
+                    None,
+                )
+            })?;
         loop {
             if cancellation.is_some_and(LabStagingCancellationToken::is_cancelled) {
                 return Err(Self::cancellation_error());
             }
-            match crate::runner_job_log_snapshot(&request.recipe.runner_id, runner_job_id) {
+            match crate::connection::reverse_broker_job_snapshot_at(
+                &broker_url,
+                &request.recipe.runner_id,
+                runner_job_id,
+            )
+            .map(|(job, events)| homeboy_core::api_jobs::RunnerJobLogSnapshot { job, events })
+            {
                 Ok(snapshot) if snapshot.job.status.is_terminal() => return Ok(snapshot),
                 Ok(_) => std::thread::sleep(Duration::from_millis(200)),
                 Err(mut error) => {
