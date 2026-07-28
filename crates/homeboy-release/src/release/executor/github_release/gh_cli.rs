@@ -424,19 +424,36 @@ pub(crate) fn gh_release_metadata(
     // tag made recovery impossible for the one case recovery exists to handle:
     // every retry 404'd, left the release a draft, and 404'd again forever.
     // Drafts are visible on the list endpoint, so fall back to resolving by id.
-    gh_draft_release_metadata(github, config, tag, repo_flag)
-        .ok_or_else(|| gh_failure_detail("gh api release metadata", &output))
+    //
+    // Report BOTH failures (issue #10441). The fallback is the path that
+    // matters for a stranded draft, so collapsing its failure into the
+    // primary call's generic "exited with status 1" makes the one failure
+    // that strands a release undiagnosable -- which is exactly what run
+    // 30313665269 left behind for v0.321.1: a step error naming only the
+    // expected 404, with no trace of why the draft lookup did not recover it.
+    gh_draft_release_metadata(github, config, tag, repo_flag).map_err(|draft_error| {
+        format!(
+            "{}; the draft fallback also failed: {}",
+            gh_failure_detail("gh api release metadata", &output),
+            draft_error
+        )
+    })
 }
 
 /// Resolve a draft release by scanning the list endpoint, which -- unlike
 /// `releases/tags/{tag}` -- includes drafts. Returns the REST shape, so the
 /// asset digests recovery depends on are preserved.
+///
+/// The error distinguishes the three ways this can fail -- the `gh` invocation
+/// itself failed, no release matched the tag, or the matched record was not
+/// parseable release metadata -- because they demand different responses and
+/// were previously indistinguishable (all collapsed into `None`).
 fn gh_draft_release_metadata(
     github: &GitHubRepo,
     config: &GithubConfig,
     tag: &str,
     repo_flag: &str,
-) -> Option<GitHubReleaseMetadata> {
+) -> Result<GitHubReleaseMetadata, String> {
     let endpoint = format!("repos/{repo_flag}/releases");
     let filter = format!(".[] | select(.tag_name == \"{tag}\")");
     let output = run_gh_command(
@@ -448,15 +465,29 @@ fn gh_draft_release_metadata(
         github_release_upload_timeout(),
     );
     if output.timed_out || output.exit_code != Some(0) {
-        return None;
+        let detail = gh_failure_detail("gh api releases list", &output);
+        let stderr = output.stderr.trim();
+        return Err(if stderr.is_empty() {
+            detail
+        } else {
+            format!("{detail}: {stderr}")
+        });
     }
-    parse_listed_release_metadata(&output.stdout)
+    parse_listed_release_metadata(&output.stdout).ok_or_else(|| {
+        if output.stdout.trim().is_empty() {
+            format!("no GitHub Release (published or draft) on {repo_flag} matched tag {tag}")
+        } else {
+            format!(
+                "the release list entry for {tag} on {repo_flag} was not valid release metadata"
+            )
+        }
+    })
 }
 
 /// `gh api --jq` streams one JSON object per match rather than an array, and
 /// `--paginate` concatenates pages. A tag resolves to at most one release, so
 /// take the first non-empty record.
-fn parse_listed_release_metadata(stdout: &str) -> Option<GitHubReleaseMetadata> {
+pub(crate) fn parse_listed_release_metadata(stdout: &str) -> Option<GitHubReleaseMetadata> {
     stdout
         .lines()
         .map(str::trim)
