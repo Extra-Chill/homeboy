@@ -219,6 +219,7 @@ fn release_reuses_or_awaits_an_exact_main_guard_qualification() {
     let qualification = job_section(workflow, "release-qualification");
 
     assert!(qualification.contains("CANDIDATE_SHA: ${{ github.sha }}"));
+    assert!(qualification.contains("GH_REPO: ${{ github.repository }}"));
     assert!(qualification.contains("gh run list --workflow audit-debt.yml"));
     assert!(qualification.contains("--commit \"$CANDIDATE_SHA\""));
     assert!(qualification.contains(
