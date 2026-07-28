@@ -315,7 +315,7 @@ fn normalize_key(key: &str) -> String {
 }
 
 fn redact_authorization_schemes(value: &str, replacement: &str) -> String {
-    let pattern = Regex::new(r"(?i)\b(bearer|basic)\s+[^\s,;]+")
+    let pattern = Regex::new(r"(?i)\b(bearer|basic|token)\s+[^\s,;]+")
         .expect("authorization redaction regex is valid");
     let value = pattern
         .replace_all(value, |captures: &Captures<'_>| {
@@ -376,6 +376,10 @@ mod tests {
         assert_eq!(
             policy.redact_string("proxy Basic dXNlcjpzZWNyZXQ="),
             "proxy Basic [REDACTED]"
+        );
+        assert_eq!(
+            policy.redact_string("Authorization: ToKeN ghp_secret"),
+            "Authorization: ToKeN [REDACTED]"
         );
     }
 

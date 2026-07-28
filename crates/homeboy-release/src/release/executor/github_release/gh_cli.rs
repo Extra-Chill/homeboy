@@ -4,6 +4,10 @@ use crate::release::types::ReleaseState;
 use homeboy_core::component::GithubConfig;
 use homeboy_core::engine::shell::quote_arg;
 use homeboy_core::git::release_download::GitHubRepo;
+use homeboy_core::redaction::RedactionPolicy;
+use homeboy_engine_primitives::command::{
+    isolate_process_tree, wait_with_bounded_output_supervised, SupervisedCommandTermination,
+};
 use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -19,6 +23,8 @@ const DEFAULT_GITHUB_RELEASE_UPLOAD_TIMEOUT_SECS: u64 = 30 * 60;
 const GITHUB_RELEASE_DOWNLOAD_DIAGNOSTIC_BYTES: usize = 8 * 1024;
 const GITHUB_RELEASE_DOWNLOAD_READER_CLEANUP_TIMEOUT: Duration = Duration::from_millis(500);
 const GITHUB_RELEASE_DOWNLOAD_PIPE_CHUNKS_PER_TURN: usize = 4;
+const GITHUB_COMMAND_DIAGNOSTIC_TEXT_LIMIT: usize = 4096;
+const GITHUB_COMMAND_OUTPUT_LIMIT: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GhCommandOutput {
@@ -27,6 +33,36 @@ pub(crate) struct GhCommandOutput {
     pub exit_code: Option<i32>,
     pub timed_out: bool,
 }
+
+/// Safe, bounded evidence from a failed `gh` invocation for persisted release
+/// step data. Command arguments are intentionally not retained because release
+/// notes and upload paths can contain credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct GitHubCommandFailureDiagnostic {
+    pub operation: String,
+    pub endpoint: String,
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    pub stdout: String,
+    pub stderr: String,
+    pub http_status: Option<u16>,
+    pub github_request_id: Option<String>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct GitHubReleaseMetadataError {
+    pub message: String,
+    pub diagnostics: Vec<GitHubCommandFailureDiagnostic>,
+}
+
+impl std::fmt::Display for GitHubReleaseMetadataError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for GitHubReleaseMetadataError {}
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub(crate) struct GitHubReleaseMetadata {
@@ -405,7 +441,7 @@ pub(crate) fn gh_release_metadata(
     config: &GithubConfig,
     tag: &str,
     repo_flag: &str,
-) -> Result<GitHubReleaseMetadata, String> {
+) -> Result<GitHubReleaseMetadata, GitHubReleaseMetadataError> {
     // `gh release view --json` uses GraphQL, whose release asset shape omits
     // the REST digest field. Recovery authority requires that digest, including
     // for drafts, so read the REST API directly.
@@ -415,11 +451,24 @@ pub(crate) fn gh_release_metadata(
         github_release_upload_timeout(),
     );
     if !output.timed_out && output.exit_code == Some(0) {
-        return serde_json::from_str(&output.stdout)
-            .map_err(|error| format!("GitHub REST release metadata was invalid: {error}"));
+        return serde_json::from_str(&output.stdout).map_err(|error| GitHubReleaseMetadataError {
+            message: format!("GitHub REST release metadata was invalid: {error}"),
+            diagnostics: vec![gh_failure_diagnostic(
+                "gh api release metadata",
+                &endpoint,
+                &output,
+            )],
+        });
     }
     if output.timed_out {
-        return Err(gh_failure_detail("gh api release metadata", &output));
+        return Err(GitHubReleaseMetadataError {
+            message: gh_failure_detail("gh api release metadata", &output),
+            diagnostics: vec![gh_failure_diagnostic(
+                "gh api release metadata",
+                &endpoint,
+                &output,
+            )],
+        });
     }
 
     // `releases/tags/{tag}` resolves published releases only -- GitHub returns
@@ -435,13 +484,29 @@ pub(crate) fn gh_release_metadata(
     // that strands a release undiagnosable -- which is exactly what run
     // 30313665269 left behind for v0.321.1: a step error naming only the
     // expected 404, with no trace of why the draft lookup did not recover it.
-    gh_draft_release_metadata(github, config, tag, repo_flag).map_err(|draft_error| {
-        format!(
+    gh_draft_release_metadata(github, config, tag, repo_flag)
+        .map_err(|draft_error| metadata_fallback_error(&endpoint, &output, draft_error))
+}
+
+fn metadata_fallback_error(
+    endpoint: &str,
+    output: &GhCommandOutput,
+    draft_error: GitHubReleaseMetadataError,
+) -> GitHubReleaseMetadataError {
+    let mut diagnostics = vec![gh_failure_diagnostic(
+        "gh api release metadata",
+        endpoint,
+        output,
+    )];
+    diagnostics.extend(draft_error.diagnostics);
+    GitHubReleaseMetadataError {
+        message: format!(
             "{}; the draft fallback also failed: {}",
-            gh_failure_detail("gh api release metadata", &output),
-            draft_error
-        )
-    })
+            gh_failure_detail("gh api release metadata", output),
+            draft_error.message
+        ),
+        diagnostics,
+    }
 }
 
 /// Resolve a draft release by scanning the list endpoint, which -- unlike
@@ -457,7 +522,7 @@ fn gh_draft_release_metadata(
     config: &GithubConfig,
     tag: &str,
     repo_flag: &str,
-) -> Result<GitHubReleaseMetadata, String> {
+) -> Result<GitHubReleaseMetadata, GitHubReleaseMetadataError> {
     let endpoint = format!("repos/{repo_flag}/releases");
     let filter = format!(".[] | select(.tag_name == \"{tag}\")");
     let output = run_gh_command(
@@ -469,21 +534,29 @@ fn gh_draft_release_metadata(
         github_release_upload_timeout(),
     );
     if output.timed_out || output.exit_code != Some(0) {
-        let detail = gh_failure_detail("gh api releases list", &output);
-        let stderr = output.stderr.trim();
-        return Err(if stderr.is_empty() {
-            detail
-        } else {
-            format!("{detail}: {stderr}")
+        return Err(GitHubReleaseMetadataError {
+            message: gh_failure_detail("gh api releases list", &output),
+            diagnostics: vec![gh_failure_diagnostic(
+                "gh api releases list",
+                &endpoint,
+                &output,
+            )],
         });
     }
     parse_listed_release_metadata(&output.stdout).ok_or_else(|| {
-        if output.stdout.trim().is_empty() {
-            format!("no GitHub Release (published or draft) on {repo_flag} matched tag {tag}")
-        } else {
-            format!(
-                "the release list entry for {tag} on {repo_flag} was not valid release metadata"
-            )
+        let malformed = !output.stdout.trim().is_empty();
+        GitHubReleaseMetadataError {
+            message: if malformed {
+                format!(
+                    "the release list entry for {tag} on {repo_flag} was not valid release metadata"
+                )
+            } else {
+                format!("no GitHub Release (published or draft) on {repo_flag} matched tag {tag}")
+            },
+            diagnostics: malformed
+                .then(|| gh_failure_diagnostic("gh api releases list", &endpoint, &output))
+                .into_iter()
+                .collect(),
         }
     })
 }
@@ -1098,44 +1171,162 @@ pub(crate) fn gh_failure_detail(command: &str, output: &GhCommandOutput) -> Stri
     }
 }
 
+pub(crate) fn gh_failure_diagnostic(
+    operation: &str,
+    endpoint: &str,
+    output: &GhCommandOutput,
+) -> GitHubCommandFailureDiagnostic {
+    let stdout = gh_diagnostic_text(&output.stdout);
+    let stderr = gh_diagnostic_text(&output.stderr);
+    let http_status = parse_http_status(&stderr).or_else(|| parse_http_status(&stdout));
+    let github_request_id =
+        parse_github_request_id(&stderr).or_else(|| parse_github_request_id(&stdout));
+    GitHubCommandFailureDiagnostic {
+        operation: gh_diagnostic_text(operation),
+        endpoint: gh_diagnostic_text(endpoint),
+        exit_code: output.exit_code,
+        timed_out: output.timed_out,
+        summary: gh_failure_summary(operation, output, http_status, github_request_id.as_deref()),
+        http_status,
+        github_request_id,
+        stdout,
+        stderr,
+    }
+}
+
+pub(crate) fn gh_diagnostic_text(value: &str) -> String {
+    let policy = RedactionPolicy::default()
+        .with_sensitive_key("signature")
+        .with_sensitive_key("sig");
+    let redacted = serde_json::from_str(value)
+        .map(|json| policy.redact_json(&json).to_string())
+        .unwrap_or_else(|_| policy.redact_env_value(value));
+    bound_diagnostic_text(&redacted)
+}
+
+fn gh_failure_summary(
+    operation: &str,
+    output: &GhCommandOutput,
+    http_status: Option<u16>,
+    github_request_id: Option<&str>,
+) -> String {
+    let mut evidence = Vec::new();
+    if let Some(status) = http_status {
+        evidence.push(format!("HTTP {status}"));
+    }
+    if let Some(request_id) = github_request_id {
+        evidence.push(format!("GitHub request ID {request_id}"));
+    }
+    let detail = gh_failure_detail(operation, output);
+    if evidence.is_empty() {
+        bound_diagnostic_text(&detail)
+    } else {
+        bound_diagnostic_text(&format!("{detail} ({})", evidence.join(", ")))
+    }
+}
+
+fn bound_diagnostic_text(value: &str) -> String {
+    bound_text(value, GITHUB_COMMAND_DIAGNOSTIC_TEXT_LIMIT)
+}
+
+fn bound_command_output(value: &str) -> String {
+    bound_text(value, GITHUB_COMMAND_OUTPUT_LIMIT)
+}
+
+fn bound_text(value: &str, limit: usize) -> String {
+    if value.len() <= limit {
+        return value.to_string();
+    }
+    let mut end = limit;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...[truncated]", &value[..end])
+}
+
+fn parse_http_status(value: &str) -> Option<u16> {
+    for marker in ["HTTP ", "HTTP/1.1 ", "HTTP/2 ", "\"status\":"] {
+        let mut start = 0;
+        while let Some(offset) = value[start..].find(marker) {
+            let code_start = start + offset + marker.len();
+            let code_start = code_start
+                + value[code_start..]
+                    .chars()
+                    .take_while(|character| character.is_whitespace())
+                    .map(char::len_utf8)
+                    .sum::<usize>();
+            if let Some(code) = value.get(code_start..code_start + 3) {
+                if let Ok(code) = code.parse() {
+                    return Some(code);
+                }
+            }
+            start = code_start;
+        }
+    }
+    None
+}
+
+fn parse_github_request_id(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    for marker in [
+        "x-github-request-id:",
+        "x-github-request-id=",
+        "\"request_id\":\"",
+    ] {
+        if let Some(offset) = lower.find(marker) {
+            let start = offset + marker.len();
+            let start = start
+                + value[start..]
+                    .chars()
+                    .take_while(|character| character.is_whitespace())
+                    .map(char::len_utf8)
+                    .sum::<usize>();
+            let end = value[start..]
+                .find(|character: char| matches!(character, '\n' | '\r' | ' ' | '"' | ','))
+                .map(|offset| start + offset)
+                .unwrap_or(value.len());
+            if start < end {
+                return Some(bound_diagnostic_text(&value[start..end]));
+            }
+        }
+    }
+    None
+}
+
 pub(crate) fn run_gh_command(mut command: Command, timeout: Duration) -> GhCommandOutput {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    isolate_process_tree(&mut command);
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
             return GhCommandOutput {
                 stdout: String::new(),
-                stderr: error.to_string(),
+                stderr: gh_diagnostic_text(&error.to_string()),
                 exit_code: None,
                 timed_out: false,
             }
         }
     };
-    let started = Instant::now();
-    let (status, timed_out) = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break (Some(status), false),
-            Ok(None) if started.elapsed() >= timeout => {
-                let _ = child.kill();
-                break (child.wait().ok(), true);
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            Err(_) => break (None, false),
-        }
-    };
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    if let Some(mut stream) = child.stdout.take() {
-        let _ = stream.read_to_end(&mut stdout);
-    }
-    if let Some(mut stream) = child.stderr.take() {
-        let _ = stream.read_to_end(&mut stderr);
-    }
-    GhCommandOutput {
-        stdout: String::from_utf8_lossy(&stdout).to_string(),
-        stderr: String::from_utf8_lossy(&stderr).to_string(),
-        exit_code: status.and_then(|status| status.code()),
-        timed_out,
+    match wait_with_bounded_output_supervised(
+        &mut child,
+        GITHUB_COMMAND_OUTPUT_LIMIT,
+        timeout,
+        timeout,
+        || false,
+        |_, _| Ok(()),
+    ) {
+        Ok(supervised) => GhCommandOutput {
+            stdout: bound_command_output(&String::from_utf8_lossy(&supervised.output.stdout)),
+            stderr: bound_command_output(&String::from_utf8_lossy(&supervised.output.stderr)),
+            exit_code: supervised.output.status.code(),
+            timed_out: supervised.termination == SupervisedCommandTermination::TimedOut,
+        },
+        Err(error) => GhCommandOutput {
+            stdout: String::new(),
+            stderr: gh_diagnostic_text(&format!("could not supervise gh command: {error}")),
+            exit_code: None,
+            timed_out: false,
+        },
     }
 }
 
@@ -1268,6 +1459,154 @@ mod tests {
         assert!(!metadata.is_draft);
         assert!(parse_listed_release_metadata("").is_none());
         assert!(parse_listed_release_metadata("not json").is_none());
+    }
+
+    fn failed_output(
+        stdout: &str,
+        stderr: &str,
+        exit_code: Option<i32>,
+        timed_out: bool,
+    ) -> GhCommandOutput {
+        GhCommandOutput {
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+            exit_code,
+            timed_out,
+        }
+    }
+
+    #[test]
+    fn metadata_fallback_retains_primary_404_and_draft_list_failure() {
+        let primary = failed_output("", "HTTP 404: Not Found", Some(1), false);
+        let draft = GitHubReleaseMetadataError {
+            message: "gh api releases list exited with status 1".to_string(),
+            diagnostics: vec![gh_failure_diagnostic(
+                "gh api releases list",
+                "repos/example/repo/releases",
+                &failed_output("", "HTTP 403: forbidden", Some(1), false),
+            )],
+        };
+
+        let error = metadata_fallback_error("repos/example/repo/releases/tags/v1", &primary, draft);
+
+        assert!(error.message.contains("draft fallback also failed"));
+        assert_eq!(error.diagnostics.len(), 2);
+        assert_eq!(error.diagnostics[0].http_status, Some(404));
+        assert_eq!(error.diagnostics[1].http_status, Some(403));
+    }
+
+    #[test]
+    fn failure_diagnostic_extracts_403_request_id_and_timeout_without_dangling_detail() {
+        let output = failed_output(
+            "",
+            "HTTP 403: forbidden\nX-GitHub-Request-Id: AB12:CD34\nAuthorization: Bearer secret",
+            Some(1),
+            false,
+        );
+        let diagnostic = gh_failure_diagnostic(
+            "gh api releases list",
+            "repos/example/repo/releases",
+            &output,
+        );
+        assert_eq!(diagnostic.http_status, Some(403));
+        assert_eq!(diagnostic.github_request_id.as_deref(), Some("AB12:CD34"));
+        assert_eq!(
+            diagnostic.summary,
+            "gh api releases list exited with status 1 (HTTP 403, GitHub request ID AB12:CD34)"
+        );
+        assert!(!diagnostic.stderr.contains("secret"));
+
+        let timeout = gh_failure_diagnostic(
+            "gh release upload",
+            "repos/example/repo/releases/v1/assets",
+            &failed_output("", "", Some(124), true),
+        );
+        assert_eq!(timeout.summary, "gh release upload timed out");
+        assert!(timeout.stderr.is_empty());
+    }
+
+    #[test]
+    fn failure_diagnostic_parses_whitespace_json_status_and_redacts_url_userinfo() {
+        let diagnostic = gh_failure_diagnostic(
+            "gh api",
+            "https://user:password@example.test/repos/example/repo",
+            &failed_output("{\"status\": 403}", "", Some(1), false),
+        );
+        assert_eq!(diagnostic.http_status, Some(403));
+        assert!(diagnostic.summary.contains("HTTP 403"));
+        assert!(!diagnostic.endpoint.contains("user:password"));
+        assert!(!diagnostic.endpoint.contains("password"));
+    }
+
+    #[test]
+    fn failure_diagnostic_redacts_signed_url_secrets_and_bounds_output() {
+        let output = failed_output(
+            &format!(
+                "{} https://example.test/file?X-Amz-Signature=secret&token=also-secret",
+                "x".repeat(5000)
+            ),
+            "",
+            Some(1),
+            false,
+        );
+        let diagnostic = gh_failure_diagnostic(
+            "gh api",
+            "repos/example/repo/releases?access_token=secret",
+            &output,
+        );
+        assert!(!diagnostic.stdout.contains("secret"));
+        assert!(!diagnostic.stdout.contains("also-secret"));
+        assert!(!diagnostic.endpoint.contains("secret"));
+        assert!(diagnostic.stdout.len() <= GITHUB_COMMAND_DIAGNOSTIC_TEXT_LIMIT + 16);
+        assert!(diagnostic.stdout.ends_with("...[truncated]"));
+    }
+
+    #[test]
+    fn diagnostic_text_redacts_json_secret_values() {
+        let redacted = gh_diagnostic_text(
+            r#"{"access_token":"secret","token": "escaped\\u0073ecret","secret":"another-secret"}"#,
+        );
+        assert!(redacted.contains(r#""access_token":"[REDACTED]""#));
+        assert!(redacted.contains(r#""token":"[REDACTED]""#));
+        assert!(redacted.contains(r#""secret":"[REDACTED]""#));
+        assert!(!redacted.contains("another-secret"));
+        assert!(!redacted.contains("escaped"));
+        assert!(redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn diagnostic_text_redacts_sensitive_headers_and_signed_urls() {
+        let redacted = gh_diagnostic_text(
+            "Cookie: session=secret\nSet-Cookie: sid=secret\nProxy-Authorization: Basic secret\nAuthorization: token ghp_secret\nX-Api-Key: secret\nhttps://user:password@example.test/path?X-Amz-Signature=secret&token=secret",
+        );
+        for secret in [
+            "session=secret",
+            "sid=secret",
+            "Basic secret",
+            "ghp_secret",
+            "password",
+            "token=secret",
+        ] {
+            assert!(!redacted.contains(secret), "leaked {secret}: {redacted}");
+        }
+        assert!(redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn gh_spawn_failure_is_bounded_and_diagnostic_ready() {
+        let output = run_gh_command(
+            Command::new("homeboy-gh-does-not-exist"),
+            Duration::from_secs(1),
+        );
+        let diagnostic = gh_failure_diagnostic(
+            "gh api releases list",
+            "repos/example/repo/releases",
+            &output,
+        );
+        assert_eq!(diagnostic.exit_code, None);
+        assert_eq!(diagnostic.operation, "gh api releases list");
+        assert_eq!(diagnostic.endpoint, "repos/example/repo/releases");
+        assert!(diagnostic.stderr.len() <= GITHUB_COMMAND_DIAGNOSTIC_TEXT_LIMIT);
     }
 
     fn remote_asset(name: &str, size: u64, digest: Option<String>) -> GitHubReleaseAsset {
@@ -1404,6 +1743,74 @@ mod tests {
         assert_eq!(output.exit_code, Some(7));
         assert!(output.stderr.is_empty());
         assert!(!output.timed_out);
+    }
+
+    #[test]
+    fn bounded_command_retains_large_release_metadata_but_diagnostics_stay_compact() {
+        let assets = (0..200)
+            .map(|index| {
+                serde_json::json!({
+                    "id": index,
+                    "name": format!("release-asset-{index:03}.tar.xz"),
+                    "size": 1,
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                })
+            })
+            .collect::<Vec<_>>();
+        let metadata = serde_json::json!({
+            "tag_name": "v1.2.3",
+            "draft": true,
+            "assets": assets,
+        })
+        .to_string();
+        assert!(metadata.len() > GITHUB_COMMAND_DIAGNOSTIC_TEXT_LIMIT);
+
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf '%s' \"$1\"", "sh", &metadata]);
+        let output = run_gh_command(command, Duration::from_secs(1));
+
+        assert_eq!(output.exit_code, Some(0));
+        assert!(output.stdout.len() > GITHUB_COMMAND_DIAGNOSTIC_TEXT_LIMIT);
+        assert!(output.stdout.len() <= GITHUB_COMMAND_OUTPUT_LIMIT);
+        assert_eq!(
+            serde_json::from_str::<GitHubReleaseMetadata>(&output.stdout)
+                .expect("large metadata remains parseable")
+                .assets
+                .len(),
+            200
+        );
+        assert_eq!(
+            parse_listed_release_metadata(&output.stdout)
+                .expect("large draft-list record remains parseable")
+                .assets
+                .len(),
+            200
+        );
+
+        let diagnostic =
+            gh_failure_diagnostic("gh api release metadata", "repos/example/repo", &output);
+        assert!(diagnostic.stdout.len() <= GITHUB_COMMAND_DIAGNOSTIC_TEXT_LIMIT + 16);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_command_times_out_with_continuous_output() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "(while :; do printf x; done) & wait"]);
+        let output = run_gh_command(command, Duration::from_millis(30));
+        assert!(output.timed_out);
+        assert!(output.stdout.len() <= GITHUB_COMMAND_OUTPUT_LIMIT);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_command_closes_inherited_descendant_pipes() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30 & printf done"]);
+        let started = Instant::now();
+        let output = run_gh_command(command, Duration::from_secs(1));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(output.stdout, "done");
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 use crate::release::types::ReleaseState;
 
+use super::super::gh_cli::GhCommandOutput;
 use super::super::{
     build_github_release_body, create_failed_result, fallback_release_notes, GitHubReleaseBody,
 };
@@ -131,11 +132,16 @@ fn create_failed_result_exposes_exact_release_body_and_persisted_file() {
         "v0.10.6",
         &test_repo(),
         "generated-notes-failed",
-        String::new(),
-        "HTTP 502".to_string(),
+        &GhCommandOutput {
+            stdout: String::new(),
+            stderr: "HTTP 502".to_string(),
+            exit_code: Some(1),
+            timed_out: false,
+        },
         test_repair(),
         &body,
         Some("build/v0.10.6-release-notes.md"),
+        &[],
     );
 
     assert_eq!(data_str(&result, "release_body"), Some(body.body.as_str()));

@@ -9,7 +9,9 @@ use homeboy_core::error::{Error, Result};
 use homeboy_core::git;
 use homeboy_core::git::release_download::GitHubRepo;
 
-use super::gh_cli::{gh_command, safe_filename};
+use super::gh_cli::{
+    gh_command, gh_failure_diagnostic, github_release_upload_timeout, run_gh_command, safe_filename,
+};
 
 /// The exact GitHub Release body Homeboy posts, with provenance.
 ///
@@ -227,21 +229,21 @@ fn github_generated_notes(
         args.extend_from_slice(&["-f", &previous_field]);
     }
 
-    let output = gh_command(github, config, &args).output().map_err(|e| {
-        Error::internal_io(
-            format!("Failed to invoke gh: {}", e),
-            Some("gh api releases/generate-notes".to_string()),
-        )
-    })?;
+    let output = run_gh_command(
+        gh_command(github, config, &args),
+        github_release_upload_timeout(),
+    );
 
-    if !output.status.success() {
+    if output.timed_out || output.exit_code != Some(0) {
+        let diagnostic =
+            gh_failure_diagnostic("gh api releases/generate-notes", &endpoint, &output);
         return Err(Error::internal_unexpected(format!(
-            "gh api releases/generate-notes failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            "{}",
+            diagnostic.summary
         )));
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(output.stdout.trim().to_string())
 }
 
 pub(crate) fn github_changelog_url(

@@ -21,7 +21,7 @@ use super::results::{
     upload_success_result_with_publications,
 };
 use super::{
-    download_small_release_asset, gh_failure_detail, gh_release_metadata,
+    download_small_release_asset, gh_failure_diagnostic, gh_release_metadata,
     github_release_upload_timeout, reconcile_release_publications, run_gh_command,
     validate_draft_adoption, verify_release_publications,
 };
@@ -174,6 +174,7 @@ pub(crate) fn run_github_release(
                     "release-state-unreadable",
                     &detail,
                     repair,
+                    &error.diagnostics,
                 ));
             }
         };
@@ -207,10 +208,26 @@ pub(crate) fn run_github_release(
                     Error::validation_invalid_argument("release assets", error, None, None)
                 })?;
             // Re-read immediately before un-drafting so a concurrent asset edit cannot race validation.
-            let current = gh_release_metadata(&github, &component.github, &tag, &repo_flag)
-                .map_err(|error| {
-                    Error::validation_invalid_argument("github.release", error, None, None)
-                })?;
+            let current = match gh_release_metadata(&github, &component.github, &tag, &repo_flag) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    let repair = repair_commands(None, None);
+                    let detail = format!(
+                        "GitHub Release {} exists for {} but its publication state could not be re-read before publishing: {}",
+                        tag, repo_flag, error
+                    );
+                    homeboy_core::log_status!("release", "✗ {}", detail);
+                    log_repair_commands(&repair);
+                    return Ok(unfinished_release_result(
+                        &tag,
+                        &github,
+                        "release-state-reread-failed",
+                        &detail,
+                        repair,
+                        &error.diagnostics,
+                    ));
+                }
+            };
             let current_sidecars = current
                 .assets
                 .iter()
@@ -236,11 +253,22 @@ pub(crate) fn run_github_release(
                 github_release_upload_timeout(),
             );
             if output.timed_out || output.exit_code != Some(0) {
-                return Err(Error::validation_invalid_argument(
-                    "github.release",
-                    gh_failure_detail("gh release edit --draft=false", &output),
-                    None,
-                    None,
+                let repair = repair_commands(None, None);
+                let diagnostic = gh_failure_diagnostic(
+                    "gh release edit --draft=false",
+                    &format!("repos/{repo_flag}/releases/{tag}"),
+                    &output,
+                );
+                let detail = diagnostic.summary.clone();
+                homeboy_core::log_status!("release", "✗ {}", diagnostic.summary);
+                log_repair_commands(&repair);
+                return Ok(unfinished_release_result(
+                    &tag,
+                    &github,
+                    "draft-adoption-publish-failed",
+                    &detail,
+                    repair,
+                    &[diagnostic],
                 ));
             }
             return Ok(published_existing_draft_result(
@@ -284,6 +312,7 @@ pub(crate) fn run_github_release(
                     "draft-release-has-no-assets",
                     &detail,
                     repair,
+                    &[],
                 ));
             }
             ExistingReleaseAction::PublishDraft => {
@@ -301,12 +330,13 @@ pub(crate) fn run_github_release(
                 );
                 if publish_output.timed_out || publish_output.exit_code != Some(0) {
                     let repair = repair_commands(None, None);
-                    let detail = format!(
-                        "{}: {}",
-                        gh_failure_detail("gh release edit --draft=false", &publish_output),
-                        publish_output.stderr.trim()
+                    let diagnostic = gh_failure_diagnostic(
+                        "gh release edit --draft=false",
+                        &format!("repos/{repo_flag}/releases/{tag}"),
+                        &publish_output,
                     );
-                    homeboy_core::log_status!("release", "✗ {}", detail);
+                    let detail = diagnostic.summary.clone();
+                    homeboy_core::log_status!("release", "✗ {}", diagnostic.summary);
                     log_repair_commands(&repair);
                     return Ok(unfinished_release_result(
                         &tag,
@@ -314,6 +344,7 @@ pub(crate) fn run_github_release(
                         "draft-publish-failed",
                         &detail,
                         repair,
+                        &[diagnostic],
                     ));
                 }
                 let url = published_release_url(&github, &tag, "", &publish_output.stdout);
@@ -374,37 +405,42 @@ pub(crate) fn run_github_release(
             .is_some_and(|output| output.timed_out || output.exit_code != Some(0))
         {
             let upload_output = upload_output.expect("checked upload output");
-            let detail = gh_failure_detail("gh release upload", &upload_output);
-            let stderr = upload_output.stderr;
-            let stdout = upload_output.stdout;
+            let diagnostic = gh_failure_diagnostic(
+                "gh release upload",
+                &format!("repos/{repo_flag}/releases/{tag}/assets"),
+                &upload_output,
+            );
             let repair = repair_commands(None, None);
-            homeboy_core::log_status!("release", "✗ {}: {}", detail, stderr.trim());
+            homeboy_core::log_status!("release", "✗ {}", diagnostic.summary);
             log_repair_commands(&repair);
             return Ok(upload_failed_result(
                 &tag,
                 &github,
-                stdout,
-                stderr,
+                upload_output.stdout,
+                upload_output.stderr,
                 upload_output.exit_code,
                 upload_output.timed_out,
                 artifact_paths.len(),
                 repair,
+                &[diagnostic],
             ));
         }
 
         let metadata = match gh_release_metadata(&github, &component.github, &tag, &repo_flag) {
             Ok(metadata) => metadata,
             Err(error) => {
+                let diagnostics = error.diagnostics;
                 return Ok(upload_failed_result(
                     &tag,
                     &github,
                     String::new(),
-                    error,
+                    error.message,
                     None,
                     false,
                     artifact_paths.len(),
                     repair_commands(None, None),
-                ))
+                    &diagnostics,
+                ));
             }
         };
         if let Err(error) = verify_release_publications(
@@ -423,6 +459,7 @@ pub(crate) fn run_github_release(
                 false,
                 artifact_paths.len(),
                 repair_commands(None, None),
+                &[],
             ));
         }
         if metadata.is_draft {
@@ -432,6 +469,11 @@ pub(crate) fn run_github_release(
                 github_release_upload_timeout(),
             );
             if publish_output.timed_out || publish_output.exit_code != Some(0) {
+                let diagnostic = gh_failure_diagnostic(
+                    "gh release edit --draft=false",
+                    &format!("repos/{repo_flag}/releases/{tag}"),
+                    &publish_output,
+                );
                 return Ok(upload_failed_result(
                     &tag,
                     &github,
@@ -441,6 +483,7 @@ pub(crate) fn run_github_release(
                     publish_output.timed_out,
                     artifact_paths.len(),
                     repair_commands(None, None),
+                    &[diagnostic],
                 ));
             }
         }
@@ -515,18 +558,12 @@ pub(crate) fn run_github_release(
         create_args.push(path);
     }
 
-    let output = gh_command(&github, &component.github, &create_args)
-        .output()
-        .map_err(|e| {
-            Error::internal_io(
-                format!("Failed to invoke gh: {}", e),
-                Some("gh release create".to_string()),
-            )
-        })?;
+    let output = run_gh_command(
+        gh_command(&github, &component.github, &create_args),
+        github_release_upload_timeout(),
+    );
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if output.timed_out || output.exit_code != Some(0) {
         let repair = repair_commands(notes_start_tag.as_deref(), persisted_notes_path.as_deref());
         // Distinguish the path that brought us here so operators (and tests)
         // can see whether the fallback-after-generated-notes-failure also
@@ -536,33 +573,40 @@ pub(crate) fn run_github_release(
         } else {
             "generated-notes-failed"
         };
-        homeboy_core::log_status!("release", "✗ `gh release create` failed: {}", stderr.trim());
+        let diagnostic = gh_failure_diagnostic(
+            "gh release create",
+            &format!("repos/{repo_flag}/releases"),
+            &output,
+        );
+        homeboy_core::log_status!("release", "✗ {}", diagnostic.summary);
         log_repair_commands(&repair);
         return Ok(create_failed_result(
             &tag,
             &github,
             reason,
-            stdout,
-            stderr,
+            &output,
             repair,
             &body,
             persisted_notes_path.as_deref(),
+            &[diagnostic],
         ));
     }
 
     let metadata = match gh_release_metadata(&github, &component.github, &tag, &repo_flag) {
         Ok(metadata) => metadata,
         Err(error) => {
+            let diagnostics = error.diagnostics;
             return Ok(upload_failed_result(
                 &tag,
                 &github,
                 String::new(),
-                error,
+                error.message,
                 None,
                 false,
                 artifact_paths.len(),
                 repair_commands(notes_start_tag.as_deref(), persisted_notes_path.as_deref()),
-            ))
+                &diagnostics,
+            ));
         }
     };
     if let Err(error) = verify_release_publications(
@@ -581,6 +625,7 @@ pub(crate) fn run_github_release(
             false,
             artifact_paths.len(),
             repair_commands(notes_start_tag.as_deref(), persisted_notes_path.as_deref()),
+            &[],
         ));
     }
     let publish_args = ["release", "edit", &tag, "--draft=false", "-R", &repo_flag];
@@ -589,6 +634,11 @@ pub(crate) fn run_github_release(
         github_release_upload_timeout(),
     );
     if publish_output.timed_out || publish_output.exit_code != Some(0) {
+        let diagnostic = gh_failure_diagnostic(
+            "gh release edit --draft=false",
+            &format!("repos/{repo_flag}/releases/{tag}"),
+            &publish_output,
+        );
         return Ok(upload_failed_result(
             &tag,
             &github,
@@ -598,11 +648,11 @@ pub(crate) fn run_github_release(
             publish_output.timed_out,
             artifact_paths.len(),
             repair_commands(notes_start_tag.as_deref(), persisted_notes_path.as_deref()),
+            &[diagnostic],
         ));
     }
 
-    let draft_response = String::from_utf8_lossy(&output.stdout);
-    let url = published_release_url(&github, &tag, &draft_response, &publish_output.stdout);
+    let url = published_release_url(&github, &tag, &output.stdout, &publish_output.stdout);
     homeboy_core::log_status!("release", "Published verified GitHub Release: {}", url);
     Ok(step_success(
         "github.release",
