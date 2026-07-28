@@ -43,9 +43,9 @@ def main() -> None:
         write_json(base / "audit.json", {"success": False, "data": {"summary": {"outliers_found": 5}}})
         write_json(current / "audit.json", {"success": False, "data": {"summary": {"outliers_found": 5}}})
         assert_equal(
-            {"audit": "pass"},
+            {"audit": "baseline_red"},
             run_gate({"audit": "fail"}, current, base),
-            "audit failure passes when outliers do not increase",
+            "audit failure that reproduces unchanged on the baseline is baseline_red",
         )
 
         write_json(current / "audit.json", {"success": False, "data": {"summary": {"outliers_found": 6}}})
@@ -74,9 +74,9 @@ def main() -> None:
         write_json(base / "test.json", {"success": False, "data": {"test_counts": {"failed": 2, "errors": 1}}})
         write_json(current / "test.json", {"success": False, "data": {"test_counts": {"failed": 2, "errors": 1}}})
         assert_equal(
-            {"test": "pass"},
+            {"test": "baseline_red"},
             run_gate({"test": "fail"}, current, base),
-            "test failure passes when failures do not increase",
+            "test failure that reproduces unchanged on the baseline is baseline_red",
         )
 
         write_json(current / "test.json", {"success": False, "data": {"test_counts": {"failed": 3, "errors": 1}}})

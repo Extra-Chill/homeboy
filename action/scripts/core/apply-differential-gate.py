@@ -122,19 +122,35 @@ def output_stem(command: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "._-" else "-" for ch in command).strip("-") or "homeboy-output"
 
 
-def metric_for(command: str, directory: str) -> int | None:
+# How a metric was derived. The distinction is load-bearing for the zero guard
+# in main(): zero means opposite things depending on provenance.
+#
+#   SCOPED -- `changed_since.introduced_{findings,failures}`. A deliberate
+#             measurement of what *this change* introduced. Zero is the
+#             success case: the repository may be red, but the candidate added
+#             nothing to it. This is the entire point of changed-scope gating.
+#   TOTAL  -- a raw count of everything the command found. Zero here, on a
+#             command that nonetheless failed or timed out, is not a
+#             measurement of success; it means the failure went uncounted.
+SCOPED = "scoped"
+TOTAL = "total"
+
+
+def metric_for(command: str, directory: str) -> tuple[int | None, str | None]:
     base_command = quality_base_command(command)
     payload = read_json(os.path.join(directory, f"{output_stem(command)}.json"))
     scoped_count = changed_scope_introduced_count(base_command, payload)
     if scoped_count is not None:
-        return scoped_count
+        return scoped_count, SCOPED
     if base_command == "audit":
-        return audit_count(payload)
-    if base_command == "lint":
-        return lint_count(payload)
-    if base_command == "test":
-        return test_count(payload)
-    return None
+        value = audit_count(payload)
+    elif base_command == "lint":
+        value = lint_count(payload)
+    elif base_command == "test":
+        value = test_count(payload)
+    else:
+        return None, None
+    return (value, TOTAL) if value is not None else (None, None)
 
 
 def base_command_status(command: str, base_dir: str) -> dict[str, Any]:
@@ -189,8 +205,8 @@ def main() -> int:
 
         timed_out = status == "timeout"
 
-        current = metric_for(command, current_dir)
-        base = metric_for(command, base_dir)
+        current, current_kind = metric_for(command, current_dir)
+        base, _base_kind = metric_for(command, base_dir)
         base_metadata = base_command_status(command, base_dir)
         base_failed = command_failed(base_metadata)
         base_structured = base_metadata.get("structured_output") is True
@@ -232,17 +248,60 @@ def main() -> int:
             )
             continue
 
-        if current <= base:
-            adjusted[command] = "pass"
-            print(
-                f"::notice::Differential gate accepted {command}: current={current} base={base}",
-                file=sys.stderr,
-            )
-        else:
+        if current > base:
             print(
                 f"::error::Differential gate rejected {command}: current={current} base={base}",
                 file=sys.stderr,
             )
+            continue
+
+        # `current == base` with something still red is not an improvement, and
+        # `pass` is an actively false statement about it: it renders a green
+        # check with no annotation anywhere, so a command that is red on the
+        # base branch stays red forever because no run ever reports it.
+        # `baseline_red` says the true thing -- this is pre-existing -- and
+        # still only warns in enforce-final-status.sh, so no PR that was
+        # previously mergeable becomes blocked. See Extra-Chill/homeboy#10657.
+        if current == base and base > 0:
+            adjusted[command] = "baseline_red"
+            print(
+                f"::warning::Differential gate marked {command} baseline_red: "
+                f"{current} failure(s) reproduce unchanged on the baseline "
+                f"(current={current} base={base}). Nothing regressed, but nothing "
+                f"improved either -- this command is red on the base branch.",
+                file=sys.stderr,
+            )
+            continue
+
+        # Zero total findings on a command that failed or timed out is not a
+        # clean result; it is an uncounted failure. A killed run is the concrete
+        # case: the child dies before writing its results sidecar, `test_counts`
+        # still carries `failed: 0`, and `0 <= base` would read a suite that
+        # never finished as a clean sweep. Compile errors and harness crashes
+        # land here too -- the command failed for a reason the counts do not
+        # describe, so the counts cannot license a pass.
+        #
+        # A genuine "fixed the last failure" run cannot reach this branch: it
+        # exits 0, is classified `pass` upstream, and never enters the gate.
+        #
+        # SCOPED is deliberately exempt -- there, zero is the measurement, not
+        # the absence of one. See Extra-Chill/homeboy#10685.
+        if current == 0 and current_kind != SCOPED:
+            adjusted[command] = "inconclusive"
+            print(
+                f"::warning::Differential gate marked {command} inconclusive: the command "
+                f"failed but reported 0 findings/failures (base={base}), so its own failure "
+                f"is uncounted. An incomplete, killed, or non-reporting run is never "
+                f"accepted as an improvement.",
+                file=sys.stderr,
+            )
+            continue
+
+        adjusted[command] = "pass"
+        print(
+            f"::notice::Differential gate accepted {command}: current={current} base={base}",
+            file=sys.stderr,
+        )
 
     print(json.dumps(adjusted, separators=(",", ":")))
     return 0

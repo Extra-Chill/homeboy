@@ -18,10 +18,15 @@ cd "${ROOT_DIR}"
 
 per_test_timeout="${HOMEBOY_ACTION_TEST_TIMEOUT_SECONDS:-600}"
 
-mapfile -t tests < <(find scripts -mindepth 2 -maxdepth 2 -name 'test-*.sh' -type f | sort)
+# Both suffixes are collected on purpose. `test-differential-gate.py` sat in
+# this tree unreferenced by any runner or workflow, so it never executed once;
+# its assertions had silently drifted to encode the exact `pass`-from-two-
+# failures behaviour that Extra-Chill/homeboy#10657 reports, and nothing caught
+# it. A test file that no runner picks up is indistinguishable from no test.
+mapfile -t tests < <(find scripts -mindepth 2 -maxdepth 2 \( -name 'test-*.sh' -o -name 'test-*.py' \) -type f | sort)
 
 if [ "${#tests[@]}" -eq 0 ]; then
-  echo "::error::No action test scripts found under scripts/*/test-*.sh"
+  echo "::error::No action test scripts found under scripts/*/test-*.{sh,py}"
   exit 1
 fi
 
@@ -31,7 +36,10 @@ failed_tests=()
 for test in "${tests[@]}"; do
   echo "::group::${test}"
   start="$(date +%s)"
-  timeout "${per_test_timeout}" bash "${test}"
+  case "${test}" in
+    *.py) timeout "${per_test_timeout}" python3 "${test}" ;;
+    *) timeout "${per_test_timeout}" bash "${test}" ;;
+  esac
   status=$?
   elapsed=$(( $(date +%s) - start ))
   echo "::endgroup::"
