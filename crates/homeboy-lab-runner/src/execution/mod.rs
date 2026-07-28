@@ -1365,8 +1365,14 @@ pub(super) fn fire_runner_direct_notification(
     if already_delivered {
         return;
     }
-    let event =
+    let mut event =
         homeboy_core::notify::NotifyEvent::run_completed_with_route(run_id, status, Some(route));
+    // The store is already open for the delivery guard; reuse it so the
+    // runner's direct delivery carries the same structured detail the
+    // controller's notifier does.
+    if let Ok(Some(run)) = store.get_run(run_id) {
+        event = event.with_payload(homeboy_core::notify::run_completed_payload(&run));
+    }
     let outcome = homeboy_core::notify::dispatch(&event);
     if outcome.delivered {
         let _ = store.mark_notification_delivered(run_id, "runner-direct");

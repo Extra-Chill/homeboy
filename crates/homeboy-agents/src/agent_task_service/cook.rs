@@ -1514,7 +1514,63 @@ where
     run_cook_with_boundaries_observed(options, executor, side_effects, None)
 }
 
+/// The component a cook is working on, for notification attribution.
+///
+/// Read from the plan's own component contract rather than parsed out of the
+/// worktree handle, so a renamed or detached worktree cannot mislabel it.
+fn cook_component(options: &AgentTaskCookServiceOptions) -> Option<String> {
+    options
+        .initial_plan
+        .component_contracts
+        .iter()
+        .chain(
+            options
+                .initial_plan
+                .tasks
+                .iter()
+                .flat_map(|task| task.component_contracts.iter()),
+        )
+        .find_map(|contract| contract.slug.clone())
+}
+
+/// Whether a reported cook status means the cook will not advance on its own.
+///
+/// The single definition, shared by the durable progress phase label and the
+/// terminal notification, so a new in-flight status cannot make one of them
+/// silently disagree with the other.
+fn cook_status_is_terminal(status: &str) -> bool {
+    !matches!(status, "queued" | "running" | "in_flight")
+}
+
 fn run_cook_with_boundaries_observed<E, S>(
+    options: AgentTaskCookServiceOptions,
+    executor: E,
+    side_effects: S,
+    durable_observer: Option<&CookProgressObserver<'_>>,
+) -> Result<AgentTaskRunResult<AgentTaskCookReport>>
+where
+    E: AgentTaskExecutorAdapter + Clone,
+    S: CookSideEffectService,
+{
+    // Every exit from the observed boundary funnels through one notification
+    // point — including the durable-failure report built from a controller
+    // error — so the failure path is not the one that stays silent.
+    let notification_options = options.clone();
+    let result =
+        run_cook_with_boundaries_reported(options, executor, side_effects, durable_observer);
+    if let Ok(result) = &result {
+        if cook_status_is_terminal(&result.value.status) {
+            crate::agent_task_notify::cook_terminal(
+                &result.value,
+                cook_component(&notification_options).as_deref(),
+                result.exit_code,
+            );
+        }
+    }
+    result
+}
+
+fn run_cook_with_boundaries_reported<E, S>(
     options: AgentTaskCookServiceOptions,
     executor: E,
     side_effects: S,
@@ -1541,9 +1597,10 @@ where
             .last()
             .map(|attempt| attempt.attempt)
             .unwrap_or(1);
-        let phase = match result.value.status.as_str() {
-            "queued" | "running" | "in_flight" => "in_flight",
-            _ => "terminal",
+        let phase = if cook_status_is_terminal(&result.value.status) {
+            "terminal"
+        } else {
+            "in_flight"
         };
         if let Err(error) = report_cook_progress(
             durable_observer,
@@ -1718,6 +1775,18 @@ where
         1,
         None,
     )?;
+    // The same boundary, delivered to the operator's destination: this is the
+    // first moment the cook can be watched, diagnosed, or cancelled by id.
+    let notify_component = cook_component(&options);
+    crate::agent_task_notify::cook_started(
+        &options.cook_id,
+        &options.initial_run_id,
+        &options.title,
+        notify_component.as_deref(),
+        &options.base,
+        options.max_attempts,
+        &options.ai_tool,
+    );
     let required_toolchains = options.gates.required_toolchains();
     let preflight = required_toolchains
         .is_empty()
@@ -1877,6 +1946,18 @@ where
                 attempt,
                 None,
             )?;
+            // Attempt boundaries only. The first attempt is already covered by
+            // the started event, and the fifteen-second heartbeat is internal
+            // liveness with no decision attached to it.
+            if attempt > 1 {
+                crate::agent_task_notify::cook_retrying(
+                    &cook_id,
+                    &run_id,
+                    notify_component.as_deref(),
+                    attempt,
+                    max_attempts,
+                );
+            }
             validate_cook_workspace(&options)?;
             // Claim the durable attempt before candidate baseline staging. That
             // staging can take longer than the foreground controller's timeout;

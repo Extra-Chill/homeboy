@@ -128,6 +128,7 @@ pub use homeboy_lifecycle_contract::lifecycle;
 pub mod loop_lifecycle;
 pub mod markdown;
 pub mod matrix_artifact_summary;
+pub use homeboy_lab_contract::notification_payload;
 pub use homeboy_lab_contract::notification_route;
 pub mod notify;
 pub mod observation;
