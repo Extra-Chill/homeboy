@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.8.26] - 2026-07-28
+
+### Fixed
+- report the classified release failure instead of "Unknown error"
+
 ## [2.8.25] - 2026-07-26
 
 ### Changed
