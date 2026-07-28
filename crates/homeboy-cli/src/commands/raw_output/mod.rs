@@ -1,5 +1,5 @@
 use crate::cli_surface::Commands;
-use crate::command_contract::{CommandRawOutputMode, CommandStdoutMode};
+use crate::command_contract::{CommandRawOutputMode, CommandResponseMode};
 
 use super::output_runtime::{CommandPresentation, CommandRun};
 use super::utils::{response as output, tty};
@@ -16,16 +16,16 @@ pub enum CommandRunPreparation {
     Raw(CommandRun),
 }
 
-pub fn prepare_command_run(command: Commands, mode: CommandStdoutMode) -> CommandRunPreparation {
+pub fn prepare_command_run(command: Commands, mode: CommandResponseMode) -> CommandRunPreparation {
     match mode {
-        CommandStdoutMode::JsonEnvelope => CommandRunPreparation::Json(Box::new(command)),
-        CommandStdoutMode::Raw(CommandRawOutputMode::InteractivePassthrough) => {
+        CommandResponseMode::Json => CommandRunPreparation::Json(Box::new(command)),
+        CommandResponseMode::Raw(CommandRawOutputMode::InteractivePassthrough) => {
             match validate_interactive_tty(command) {
                 RawExecution::Handled(exit_code) => CommandRunPreparation::Handled(exit_code),
                 RawExecution::Continue(command) => CommandRunPreparation::Json(command),
             }
         }
-        CommandStdoutMode::Raw(raw_mode) => {
+        CommandResponseMode::Raw(raw_mode) => {
             let raw_run = run(command, raw_mode)
                 .expect("markdown and plain-text modes should return raw output");
             CommandRunPreparation::Raw(raw_run)

@@ -10,11 +10,10 @@ use serde_json::{json, Value};
 use crate::command_contract::export::{write_contract_export_documents, ContractExportDocument};
 use crate::command_contract::{
     contract_constants, registered_contract, registered_contracts, ArtifactPostprocessPlan,
-    CommandDispatchFamily, CommandJsonFamily, CommandOutputContractKind, CommandOutputFileMode,
-    CommandRawOutputMode, CommandResponseMode, CommandStdoutMode, ContractConstantsOutput,
-    ContractRegistryEntry, ARTIFACT_POSTPROCESS_SCHEMA, COMMAND_SPECS,
-    LAB_RUNNER_HANDOFF_ENVELOPE_SCHEMA, LAB_RUNNER_WORKLOAD_SCHEMA,
-    PUBLIC_OUTPUT_VARIANT_CONTRACTS, RUNNER_ARTIFACT_MANIFEST_FILE,
+    CommandJsonFamily, CommandOutputContractKind, CommandOutputFileMode, CommandRawOutputMode,
+    CommandResponseMode, ContractConstantsOutput, ContractRegistryEntry,
+    ARTIFACT_POSTPROCESS_SCHEMA, COMMAND_SPECS, LAB_RUNNER_HANDOFF_ENVELOPE_SCHEMA,
+    LAB_RUNNER_WORKLOAD_SCHEMA, PUBLIC_OUTPUT_VARIANT_CONTRACTS, RUNNER_ARTIFACT_MANIFEST_FILE,
     RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA, RUNNER_ARTIFACT_MANIFEST_SCHEMA,
     RUNNER_ARTIFACT_ROOT_DIR_SUFFIX, RUN_LOCATION_INDEX_SCHEMA,
 };
@@ -778,7 +777,10 @@ fn command_registry_export() -> CommandRegistryExport {
             .map(|entry| CommandContractExport {
                 name: entry.name,
                 json_family: json_family(entry.json_family),
-                dispatch_family: dispatch_family(entry.dispatch_family()),
+                // Same value, same string: `dispatch_family` was a parallel enum
+                // produced by an identity conversion from `json_family`. The
+                // exported key is retained for wire compatibility.
+                dispatch_family: json_family(entry.json_family),
                 docs_path: entry.docs_path(),
                 safety: CommandSafetyExport {
                     mutates: entry.safety.mutates,
@@ -789,7 +791,7 @@ fn command_registry_export() -> CommandRegistryExport {
                 },
                 output: CommandOutputExport {
                     response_mode: response_mode(CommandResponseMode::Json),
-                    stdout_mode: stdout_mode(CommandStdoutMode::JsonEnvelope),
+                    stdout_mode: stdout_mode(CommandResponseMode::Json),
                     output_file_mode: output_file_mode(CommandOutputFileMode::GenericEnvelope),
                     json_family: json_family(entry.json_family),
                     output_contract: output_contract(CommandOutputContractKind::JsonEnvelope),
@@ -1181,14 +1183,6 @@ fn json_family(value: CommandJsonFamily) -> &'static str {
     }
 }
 
-fn dispatch_family(value: CommandDispatchFamily) -> &'static str {
-    match value {
-        CommandDispatchFamily::Quality => "quality",
-        CommandDispatchFamily::Workspace => "workspace",
-        CommandDispatchFamily::Ops => "ops",
-    }
-}
-
 fn response_mode(value: CommandResponseMode) -> &'static str {
     match value {
         CommandResponseMode::Json => "json",
@@ -1196,10 +1190,13 @@ fn response_mode(value: CommandResponseMode) -> &'static str {
     }
 }
 
-fn stdout_mode(value: CommandStdoutMode) -> &'static str {
+/// The exported `stdout_mode` string. Distinct from [`response_mode`] only in
+/// how the JSON case is named on the wire (`json_envelope` vs `json`); both are
+/// rendered from the same [`CommandResponseMode`] value.
+fn stdout_mode(value: CommandResponseMode) -> &'static str {
     match value {
-        CommandStdoutMode::JsonEnvelope => "json_envelope",
-        CommandStdoutMode::Raw(mode) => raw_output_mode(mode),
+        CommandResponseMode::Json => "json_envelope",
+        CommandResponseMode::Raw(mode) => raw_output_mode(mode),
     }
 }
 
@@ -1474,6 +1471,54 @@ mod tests {
         let path = dir.path().join(name);
         fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
         path
+    }
+
+    /// `json_family` and `dispatch_family` were two enums (`CommandJsonFamily`
+    /// and `CommandDispatchFamily`) joined by an identity `From` impl, so the
+    /// two exported strings were equal for every command by construction.
+    /// Collapsing to one enum makes that structural; this locks the exported
+    /// wire shape so a future divergence has to be a deliberate contract change
+    /// rather than a silent one.
+    #[test]
+    fn command_registry_export_reports_one_family_under_both_keys() {
+        let export = command_registry_export();
+
+        assert!(!export.commands.is_empty(), "command registry is populated");
+
+        for command in &export.commands {
+            assert_eq!(
+                command.json_family, command.dispatch_family,
+                "command `{}` must report the same family under both exported keys",
+                command.name
+            );
+            assert!(
+                matches!(command.json_family, "quality" | "workspace" | "ops"),
+                "command `{}` reported an unknown family `{}`",
+                command.name,
+                command.json_family
+            );
+        }
+    }
+
+    /// `response_mode` and `stdout_mode` are rendered from the same
+    /// `CommandResponseMode` since `CommandStdoutMode` was folded into it, but
+    /// they keep their distinct exported spellings for the JSON case.
+    #[test]
+    fn response_and_stdout_modes_keep_their_distinct_exported_spellings() {
+        assert_eq!(response_mode(CommandResponseMode::Json), "json");
+        assert_eq!(stdout_mode(CommandResponseMode::Json), "json_envelope");
+
+        for raw in [
+            CommandRawOutputMode::InteractivePassthrough,
+            CommandRawOutputMode::Markdown,
+            CommandRawOutputMode::PlainText,
+        ] {
+            assert_eq!(
+                response_mode(CommandResponseMode::Raw(raw)),
+                stdout_mode(CommandResponseMode::Raw(raw)),
+                "raw modes render identically under both keys"
+            );
+        }
     }
 
     fn validate_file(

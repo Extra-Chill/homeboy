@@ -1,8 +1,8 @@
 //! Output contract types and routing logic.
 //!
 //! This module owns the shapes that describe how a command emits output
-//! (`CommandResponseMode`, `CommandStdoutMode`, `CommandOutputFileMode`,
-//! `CommandJsonFamily`, `CommandOutputContractKind`) plus the output-only
+//! (`CommandResponseMode`, `CommandOutputFileMode`, `CommandJsonFamily`,
+//! `CommandOutputContractKind`) plus the output-only
 //! [`CommandOutputDescriptor`], aggregate [`CommandDescriptor`],
 //! [`CommandResponsePlan`], and the `Commands` impl that resolves a parsed CLI
 //! command into these contracts.
@@ -34,6 +34,14 @@ fn apply_lab_contract_to_descriptor(
     descriptor.lab_offload_mutation_flag = contract.and_then(|contract| contract.mutation_flag);
 }
 
+/// How a command emits its response, both as the descriptor's declared mode and
+/// as the resolved stdout plan.
+///
+/// One type, not two: the former `CommandStdoutMode` had the same shape and was
+/// produced only by an identity mapping from this enum (`Json` ->
+/// `JsonEnvelope`, `Raw(m)` -> `Raw(m)`). The two exported contract strings that
+/// distinguished them (`response_mode: "json"` vs `stdout_mode: "json_envelope"`)
+/// are unchanged and are now produced by two renderers over this one type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandResponseMode {
     Json,
@@ -47,12 +55,12 @@ pub enum CommandRawOutputMode {
     PlainText,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommandStdoutMode {
-    JsonEnvelope,
-    Raw(CommandRawOutputMode),
-}
-
+/// The output family a command belongs to.
+///
+/// Also the dispatch family: the former `CommandDispatchFamily` carried a
+/// byte-identical variant list and was only ever produced by an identity `From`
+/// impl over this enum, so every command's `json_family` and `dispatch_family`
+/// were the same value by construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandOutputFileMode {
     None,
@@ -66,23 +74,6 @@ pub enum CommandJsonFamily {
     Quality,
     Workspace,
     Ops,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommandDispatchFamily {
-    Quality,
-    Workspace,
-    Ops,
-}
-
-impl From<CommandJsonFamily> for CommandDispatchFamily {
-    fn from(json_family: CommandJsonFamily) -> Self {
-        match json_family {
-            CommandJsonFamily::Quality => CommandDispatchFamily::Quality,
-            CommandJsonFamily::Workspace => CommandDispatchFamily::Workspace,
-            CommandJsonFamily::Ops => CommandDispatchFamily::Ops,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +133,6 @@ impl CommandOutputDescriptor {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandResponsePlan {
-    pub stdout: CommandStdoutMode,
+    pub stdout: CommandResponseMode,
     pub output_file: CommandOutputFileMode,
 }
