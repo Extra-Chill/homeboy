@@ -75,3 +75,68 @@ homeboy cleanup --include runner-binary-caches --apply
 ```
 
 The aggregate emits one category per configured runner and uses direct local or SSH execution, so a disconnected runner daemon does not block cleanup. The specialist command is `homeboy runner cache-prune <runner> [--apply]`. Slots must be at least 24 hours old. The configured binary, process-owned slots, symlinks, malformed or interrupted layouts, and entries that change between inventory and apply are preserved.
+
+## One retention policy, many entry points
+
+Cleanup is reachable through the aggregate planner (`homeboy cleanup --include
+<category>`) and through a set of category specialists. Every one of them is a
+delete path, so every one of them resolves its retention window through a single
+policy — `homeboy_core::cleanup::resolve_cleanup_policy`. The resolved policy is
+echoed as `retention` in the JSON output of the aggregate and of each specialist
+that has one, so a report can never describe a window the deletion did not
+apply.
+
+| Category | Specialist | What it deletes | Ownership proof | Age / liveness rule |
+| --- | --- | --- | --- | --- |
+| `repo-artifacts` | `homeboy cleanup artifacts` | Declared reconstructable build/install trees in repo worktrees | Built-in path table plus repo/extension declarations, resolved only beside a matching install scope | `--min-age-days` composed with any declaration floor (stricter wins); Git-tracked or dirty trees and active task worktrees preserved |
+| `task-worktrees` | `homeboy worktree cleanup --cleanup-branches` | Registered task worktrees and their branches | Worktree registry membership | Unmerged branches preserved unless explicitly allowed |
+| `worktree-providers` | `homeboy cleanup worktrees --all-providers` | Provider-owned external worktrees | Delegated to each configured provider | Provider-owned; a timed-out provider yields a partial inventory and blocks nothing |
+| `terminal-runs` | — (aggregate only) | Terminal observation records, their artifact bytes, and lifecycle directories | Durable run row in a terminal state | `retention.terminal_run_days`; unsafe local artifact paths keep the run |
+| `persisted-run-artifacts` | `homeboy runs artifact cleanup-persisted` | Persisted artifact files/directories and their DB rows | `artifacts` row joined to a terminal run | `retention.terminal_run_days`; active/unknown run state, non-local bytes, out-of-root paths, and symlinks are skipped |
+| `orphaned-artifact-bytes` | — (aggregate only) | Two crash-residue name families under the artifact root | Name shape from a single private constructor plus a parsed UUID; the database is deliberately **not** consulted | Fixed 24h floor, not operator-overridable; a failed size measurement changes the verdict in neither direction |
+| `runner-downloads` | `homeboy runs artifact cleanup-downloads` | The local runner artifact download cache | Path containment under `<artifact-root>/runner` | Cache contents are reconstructable by re-pull; narrowed by `--runner`/`--run-id` |
+| `runner-binary-caches` | `homeboy runner cache-prune <runner>` | Unselected managed Homeboy binary slots on a runner | Canonical `homeboy-*` / `dev/<16-hex>` slot layout with a regular expected binary | 24h floor; configured binary, process-owned slots, symlinks, and malformed layouts preserved; selection revalidated immediately before removal |
+| `remote-lab-workspaces` | `homeboy runner workspace prune <runner>` | Orphaned runner-side Lab workspaces | `homeboy/runner-workspace/v1` metadata plus a resolvable `local_path`; never outside `_lab_workspaces` | 24h floor; pending apply-back or an unexpired lifecycle TTL preserves the workspace |
+| `runtime-tmp` | `homeboy self cleanup-runtime-tmp` | Orphaned Homeboy runtime temp entries | Owner id recorded in the entry | `retention.runtime_tmp_days` plus byte/count budgets; entries whose owner process is running are preserved |
+| `controller-scratch` | — (aggregate only) | Released controller scratch resources | Scratch index ownership with pid liveness | Per-resource retention window (P7D) unless `--older-than-days` is typed |
+| `shared-cargo-targets` | — (aggregate only) | Shared Cargo target stores | Store layout below Homeboy's data directory | `retention.shared_store_days` and byte budget; an unexpired lease preserves the store independently |
+| `controller-runtimes` | `homeboy runtime controller-prune` | Unreferenced immutable controller runtime identities | Content-addressed pin path not referenced by a nonterminal durable record or the active generation, under the admission lock | `retention.controller_runtime_days` and byte budget; `--ignore-retention` is the explicit destructive opt-out |
+
+### Why the specialists still exist
+
+A specialist survives only when it accepts a *narrowing* argument the aggregate
+cannot express, or when it is the operator escape hatch for a policy the
+aggregate deliberately never applies:
+
+- `cleanup artifacts` — `--path`, `--self`, `--temp-root`, `--sort`,
+  `--merged-only`, `--min-age-days`, `--include-active-worktrees`.
+- `cleanup worktrees` — `--provider` selection.
+- `runs artifact cleanup-persisted` — `--run-id`, `--kind`, `--type`,
+  `--run-kind`, `--component`.
+- `runs artifact cleanup-downloads` — `--runner`, `--run-id`.
+- `runner workspace prune` / `runner cache-prune` — per-runner targeting plus
+  `--passes`/`--cursor` pagination against a single remote host.
+- `self cleanup-runtime-tmp` — `--prefix`.
+- `runtime controller-prune` — `--ignore-retention`, the explicit destructive
+  purge the aggregate never offers.
+`homeboy runs retention` had nothing on that list — its `--apply`,
+`--older-than-days`, and `--limit` were exactly the aggregate's — so it was
+deleted. `homeboy cleanup --include terminal-runs` is the only surface for
+terminal observation-record retention.
+
+What is *not* a reason for a specialist to exist is a retention window. Those all
+resolve through the shared policy now.
+
+### Fail-closed rules
+
+- An unset flag means "use the configured value", never a command-local literal.
+- A negative window or non-positive limit is rejected on every entry point,
+  including when it arrives from configuration rather than from an argument.
+- A record budget that cannot be represented resolves to zero inspected records,
+  never to an unbounded sweep.
+- Sizes and liveness probes are advisory. They rank and explain; they never
+  prove ownership, and a failed measurement moves a verdict in neither
+  direction.
+- `terminal_only` on persisted-artifact cleanup is not operator-overridable:
+  releasing evidence for a run that is still executing, or whose state cannot be
+  read, is data loss rather than a retention preference.

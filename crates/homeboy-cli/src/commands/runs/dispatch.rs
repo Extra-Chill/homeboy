@@ -9,7 +9,7 @@ use super::types::{RunsArgs, RunsArtifactArgs, RunsArtifactCommand, RunsCommand,
 use super::CmdResult;
 use super::{
     bench, compare, distribution, dossier, drift, evidence, findings, fuzz_compare, handlers,
-    hotspots, latest, loop_sync, proof, query, reconcile, refs, resources, retention, watch,
+    hotspots, latest, loop_sync, proof, query, reconcile, refs, resources, watch,
 };
 
 impl RunsArgs {
@@ -172,7 +172,6 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
         RunsCommand::FuzzCompare(args) => fuzz_compare::fuzz_compare_from_args(args),
         RunsCommand::Hotspots(args) => hotspots::runs_hotspots(args),
         RunsCommand::Reconcile(args) => reconcile::reconcile_runs(args),
-        RunsCommand::Retention(args) => retention::retain_terminal_runs(args),
         RunsCommand::Watch(args) => watch::watch_run(args),
         RunsCommand::Cancel { run_id } => handlers::cancel_run(&run_id),
         RunsCommand::Show {

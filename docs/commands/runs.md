@@ -118,7 +118,9 @@ for generic runner, static HTML, and matrix examples.
 
 `homeboy runs artifact cleanup-downloads` plans cleanup for local runner artifact downloads under Homeboy's artifact root (`<artifact-root>/runner`). By default it is a dry run; pass `--apply` to remove the planned cache subtree. Use `--runner` and `--run-id` to narrow cleanup to a specific runner or run cache.
 
-`homeboy runs artifact cleanup-persisted` plans cleanup for persisted local run artifacts and their database records. By default it is a dry run; pass `--apply` to delete planned artifact files/directories and remove their database rows.
+`homeboy runs artifact cleanup-persisted` plans cleanup for persisted local run artifacts and their database records. By default it is a dry run; pass `--apply` to delete planned artifact files/directories and remove their database rows. `--older-than-days` and `--limit` default to the configured `retention.terminal_run_days` and `retention.limit` rather than to command-local literals, so this specialist and `homeboy cleanup --include persisted-run-artifacts` always apply the same window; the resolved policy is echoed as `retention` in the JSON output. Artifacts owned by a run that is still active or whose lifecycle state cannot be read are never released, and no flag widens that.
+
+`homeboy runs retention` was removed. It carried no argument the aggregate could not express, so `homeboy cleanup --include terminal-runs [--older-than-days <days>] [--limit <n>] [--apply]` is now the only surface for terminal observation-record retention. See [Cleanup Retention Scope](../cleanup-retention.md).
 
 `homeboy runs artifact postprocess <PLAN>` runs a generic artifact postprocess plan over declared persisted artifact roots and emits the artifact-postprocess result contract. The plan can be a JSON file, `@file` spec, or `-` for stdin. Use `--artifact-root-id` and `--input-root-id` to select named roots from the plan, and `--result <path>` to write the bare postprocess result contract to disk.
 

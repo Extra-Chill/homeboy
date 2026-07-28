@@ -77,10 +77,17 @@ homeboy self cleanup-runtime-tmp [--older-than-days <days>] [--prefix <prefix>] 
 Plans cleanup for orphaned Homeboy runtime temp entries. Without `--apply`, this
 is a dry run. Pass `--apply` to delete the planned entries.
 
-- `--older-than-days <days>`: only include entries older than this many days; defaults to `7`.
+- `--older-than-days <days>`: only include entries older than this many days; defaults to the configured `retention.runtime_tmp_days`.
 - `--prefix <prefix>`: only include entries whose file or directory name starts with the prefix.
-- `--limit <n>`: maximum temp entries to inspect; defaults to `1000`.
+- `--limit <n>`: maximum temp entries to inspect; defaults to the configured `retention.limit`.
+- `--run-max-bytes <bytes>`: maximum aggregate failed runtime-run evidence retained; defaults to the configured `retention.runtime_run_max_bytes`.
+- `--run-max-count <n>`: maximum failed runtime-run directories retained; defaults to the configured `retention.runtime_run_max_count`.
 - `--apply`: delete planned entries instead of only reporting the plan.
+
+Every unset flag resolves through the one shared cleanup policy, so this
+specialist and `homeboy cleanup --include runtime-tmp` always apply the same
+window. The resolved policy is echoed as `retention` in the JSON output. See
+[Cleanup Retention Scope](../cleanup-retention.md).
 
 ### `docs`
 
