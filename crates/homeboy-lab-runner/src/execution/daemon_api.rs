@@ -130,10 +130,36 @@ pub fn daemon_api_post(runner_id: &str, path: &str) -> Result<Value> {
     daemon_api_request(runner_id, path, "POST")
 }
 
+/// A reverse runner's broker is a controller-reachable durable rendezvous, not
+/// the runner machine. A detached Cook's worker exits as soon as it publishes
+/// its terminal result, so its controller-session heartbeat necessarily ages
+/// out past `REVERSE_RUNNER_HEARTBEAT_TTL` — but the result it already wrote to
+/// the broker stays readable and must stay projectable
+/// (Extra-Chill/homeboy#10659). Observation of durable broker state therefore
+/// requires only a recorded reverse session that names its broker endpoint.
+/// Mutations still assert an intent that a live worker has to honor, so they
+/// keep the liveness gate, as does every direct-daemon transport.
+fn reverse_broker_read_without_live_worker(session: Option<&RunnerSession>, method: &str) -> bool {
+    method == "GET"
+        && session.is_some_and(|session| {
+            session.mode == RunnerTunnelMode::Reverse
+                && session.local_url.is_none()
+                && session
+                    .broker_url
+                    .as_deref()
+                    .is_some_and(|url| !url.trim().is_empty())
+        })
+}
+
 pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> Result<Value> {
     let runner = load(runner_id)?;
     let connected = status(runner_id)?;
-    let Some(legacy_session) = connected.session.filter(|_| connected.connected) else {
+    let recorded_broker_read =
+        reverse_broker_read_without_live_worker(connected.session.as_ref(), method);
+    let Some(legacy_session) = connected
+        .session
+        .filter(|_| connected.connected || recorded_broker_read)
+    else {
         return Err(Error::validation_invalid_argument(
             "runner",
             "runner is not connected to a daemon; run `homeboy runner connect <runner-id>` first",
@@ -143,7 +169,14 @@ pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> R
             ]),
         ));
     };
-    let session = daemon_api_session_for_path(runner_id, path, legacy_session)?;
+    // Generation routing resolves which *live* direct-daemon endpoint owns a
+    // job. A recorded-only reverse session has no generation to reconcile, so
+    // read it through the broker endpoint it recorded.
+    let session = if connected.connected {
+        daemon_api_session_for_path(runner_id, path, legacy_session)?
+    } else {
+        legacy_session
+    };
     let client = Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(10))
@@ -288,6 +321,67 @@ mod tests {
         let data = reverse_broker_daemon_data(json!({ "job": { "id": "job-1" } }));
         let body = canonical_daemon_body(&data, "reverse broker job").expect("canonical body");
         assert_eq!(body["job"]["id"], "job-1");
+    }
+
+    fn reverse_session() -> RunnerSession {
+        let mut session = session("lease-reverse", "unused");
+        session.mode = RunnerTunnelMode::Reverse;
+        session.broker_url = Some("http://127.0.0.1:9000".to_string());
+        session.local_url = None;
+        session.local_port = None;
+        session.remote_daemon_address = None;
+        session
+    }
+
+    #[test]
+    fn recorded_reverse_session_still_serves_broker_reads_after_its_worker_exits() {
+        // A detached Cook's worker exits the moment it publishes its terminal
+        // result, so its session heartbeat is always stale by the time the
+        // controller projects. The broker is durable and controller-reachable,
+        // so the read must not depend on worker liveness
+        // (Extra-Chill/homeboy#10659).
+        assert!(reverse_broker_read_without_live_worker(
+            Some(&reverse_session()),
+            "GET"
+        ));
+    }
+
+    #[test]
+    fn recorded_reverse_session_still_gates_mutations_and_direct_transports() {
+        // A mutation asserts an intent a live worker has to honor.
+        assert!(!reverse_broker_read_without_live_worker(
+            Some(&reverse_session()),
+            "POST"
+        ));
+        // Direct-SSH transport reads the runner machine itself, so liveness
+        // remains the correct gate.
+        assert!(!reverse_broker_read_without_live_worker(
+            Some(&session("lease-a", "daemon-a")),
+            "GET"
+        ));
+        // A reverse session that never recorded a broker endpoint has nothing
+        // durable to read.
+        let mut without_broker = reverse_session();
+        without_broker.broker_url = None;
+        assert!(!reverse_broker_read_without_live_worker(
+            Some(&without_broker),
+            "GET"
+        ));
+        let mut blank_broker = reverse_session();
+        blank_broker.broker_url = Some("   ".to_string());
+        assert!(!reverse_broker_read_without_live_worker(
+            Some(&blank_broker),
+            "GET"
+        ));
+        // A reverse session pinned to a local daemon endpoint would route
+        // direct, and that endpoint really is dead once the worker exits.
+        let mut with_local = reverse_session();
+        with_local.local_url = Some("http://127.0.0.1:4100".to_string());
+        assert!(!reverse_broker_read_without_live_worker(
+            Some(&with_local),
+            "GET"
+        ));
+        assert!(!reverse_broker_read_without_live_worker(None, "GET"));
     }
 }
 
