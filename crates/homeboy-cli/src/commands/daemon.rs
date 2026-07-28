@@ -31,6 +31,9 @@ enum DaemonCommand {
     EnsureRunning {
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
+        /// Controller-generated idempotency key for a replacement operation.
+        #[arg(long)]
+        replacement_operation_id: Option<String>,
     },
     /// Explicitly replace one proven-dead daemon lease and reconcile its durable jobs
     AdoptOrphan {
@@ -105,6 +108,9 @@ enum DaemonCommand {
         confirm_no_daemon_owner: bool,
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
+        /// Controller-generated idempotency key for a replacement operation.
+        #[arg(long)]
+        replacement_operation_id: Option<String>,
     },
     /// Recover one exact lease after its daemon state record was lost
     RecoverMissingLeaseState {
@@ -128,6 +134,9 @@ enum DaemonCommand {
         confirm_control_plane_lost: bool,
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
+        /// Controller-generated idempotency key for a replacement operation.
+        #[arg(long)]
+        replacement_operation_id: Option<String>,
     },
     /// Run the local daemon in the foreground
     Serve {
@@ -228,8 +237,14 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
         DaemonCommand::Start { addr } => {
             Ok((DaemonOutput::Start(daemon::start_background(&addr)?), 0))
         }
-        DaemonCommand::EnsureRunning { addr } => Ok((
-            DaemonOutput::EnsureRunning(daemon::ensure_running(&addr)?),
+        DaemonCommand::EnsureRunning {
+            addr,
+            replacement_operation_id,
+        } => Ok((
+            DaemonOutput::EnsureRunning(daemon::ensure_running_with_replacement_operation(
+                &addr,
+                replacement_operation_id.as_deref(),
+            )?),
             0,
         )),
         DaemonCommand::AdoptOrphan {
@@ -290,8 +305,12 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
         DaemonCommand::ReconcileLeaselessOrphans {
             confirm_no_daemon_owner: _deprecated_confirm_no_daemon_owner,
             addr,
+            replacement_operation_id,
         } => Ok((
-            DaemonOutput::ReconcileLeaselessOrphans(daemon::reconcile_leaseless_orphans(&addr)?),
+            DaemonOutput::ReconcileLeaselessOrphans(daemon::reconcile_leaseless_orphans(
+                &addr,
+                replacement_operation_id.as_deref(),
+            )?),
             0,
         )),
         DaemonCommand::RecoverMissingLeaseState {
@@ -301,12 +320,14 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
             confirm_pid_dead: _deprecated_confirm_pid_dead,
             confirm_control_plane_lost: _deprecated_confirm_control_plane_lost,
             addr,
+            replacement_operation_id,
         } => Ok((
             DaemonOutput::RecoverMissingLeaseState(daemon::recover_missing_lease_state(
                 &lease_id,
                 recorded_pid,
                 &recorded_endpoint,
                 &addr,
+                replacement_operation_id.as_deref(),
             )?),
             0,
         )),

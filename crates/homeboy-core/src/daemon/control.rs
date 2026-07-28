@@ -212,15 +212,30 @@ pub fn recover_missing_lease_state(
     recorded_pid: u32,
     recorded_endpoint: &str,
     addr: &str,
+    replacement_operation_id: Option<&str>,
 ) -> Result<super::DaemonStateLossRecoveryResult> {
     parse_bind_addr(addr)?;
     let recorded_endpoint = parse_recorded_daemon_endpoint(recorded_endpoint)?;
     let _lock = acquire_daemon_operation_lock()?;
     let receipt_path = crate::paths::daemon_state_loss_recovery_receipt_file(lease_id)?;
     let status = read_status()?;
-    let existing = read_state_loss_receipt(&receipt_path)?;
-    if let Some(receipt) = existing.as_ref() {
-        validate_state_loss_receipt(receipt, lease_id, recorded_pid, recorded_endpoint)?;
+    let mut existing = read_state_loss_receipt(&receipt_path)?;
+    if let Some(receipt) = existing.as_mut() {
+        validate_state_loss_receipt(
+            receipt,
+            lease_id,
+            recorded_pid,
+            recorded_endpoint,
+            replacement_operation_id,
+        )?;
+        // Receipts created before operation IDs were introduced are safe to
+        // adopt only after the immutable recovery inputs above matched.
+        if receipt.replacement_operation_id.is_none() {
+            if let Some(operation_id) = replacement_operation_id {
+                receipt.replacement_operation_id = Some(operation_id.to_string());
+                write_state_loss_receipt(&receipt_path, receipt)?;
+            }
+        }
         if receipt.phase == StateLossRecoveryPhase::ReplacementStarted {
             return receipt.clone().into_result();
         }
@@ -305,6 +320,7 @@ pub fn recover_missing_lease_state(
             phase: StateLossRecoveryPhase::Prepared,
             replacement: None,
             replacement_startup_token: None,
+            replacement_operation_id: replacement_operation_id.map(str::to_string),
         };
         write_state_loss_receipt(&receipt_path, &receipt)?;
         let reconciled = store.reconcile_dead_daemon_lease_jobs(lease_id)?;
@@ -349,6 +365,8 @@ struct StateLossRecoveryReceipt {
     replacement: Option<super::DaemonStartResult>,
     #[serde(default)]
     replacement_startup_token: Option<String>,
+    #[serde(default)]
+    replacement_operation_id: Option<String>,
 }
 
 impl StateLossRecoveryReceipt {
@@ -395,6 +413,7 @@ fn validate_state_loss_receipt(
     lease_id: &str,
     recorded_pid: u32,
     recorded_endpoint: SocketAddr,
+    replacement_operation_id: Option<&str>,
 ) -> Result<()> {
     if receipt.lease_id != lease_id
         || receipt.recorded_pid != recorded_pid
@@ -406,6 +425,18 @@ fn validate_state_loss_receipt(
             Some(lease_id.to_string()),
             None,
         ));
+    }
+    if let Some(operation_id) = replacement_operation_id {
+        if receipt.replacement_operation_id.is_some()
+            && receipt.replacement_operation_id.as_deref() != Some(operation_id)
+        {
+            return Err(Error::validation_invalid_argument(
+                "replacement_operation_id",
+                "state-loss recovery receipt belongs to a different replacement operation",
+                Some(operation_id.to_string()),
+                None,
+            ));
+        }
     }
     Ok(())
 }
@@ -440,18 +471,35 @@ fn write_state_loss_receipt(path: &Path, receipt: &StateLossRecoveryReceipt) -> 
             Some("serialize state-loss receipt".to_string()),
         )
     })?;
-    std::fs::write(&temporary, body).map_err(|error| {
+    let mut file = std::fs::File::create(&temporary).map_err(|error| {
         Error::internal_io(
             error.to_string(),
-            Some(format!("write {}", temporary.display())),
+            Some(format!("create {}", temporary.display())),
         )
     })?;
+    use std::io::Write;
+    file.write_all(&body)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("write {}", temporary.display())),
+            )
+        })?;
     std::fs::rename(&temporary, path).map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some(format!("rename {}", path.display())),
         )
-    })
+    })?;
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("sync {}", parent.display())),
+            )
+        })
 }
 
 fn state_loss_replacement_error(
@@ -785,6 +833,8 @@ struct LeaselessRecoveryReceipt {
     phase: StateLossRecoveryPhase,
     replacement: Option<DaemonStartResult>,
     replacement_startup_token: Option<String>,
+    #[serde(default)]
+    replacement_operation_id: Option<String>,
 }
 
 impl LeaselessRecoveryReceipt {
@@ -808,11 +858,28 @@ impl LeaselessRecoveryReceipt {
 fn replay_leaseless_recovery(
     status: &super::DaemonStatus,
     addr: &str,
+    replacement_operation_id: Option<&str>,
 ) -> Result<Option<DaemonLeaselessRecoveryResult>> {
     let receipt_path = crate::paths::daemon_leaseless_recovery_receipt_file()?;
     let Some(mut receipt) = read_leaseless_recovery_receipt(&receipt_path)? else {
         return Ok(None);
     };
+    if let Some(operation_id) = replacement_operation_id {
+        if receipt.replacement_operation_id.is_some()
+            && receipt.replacement_operation_id.as_deref() != Some(operation_id)
+        {
+            return Err(Error::validation_invalid_argument(
+                "replacement_operation_id",
+                "lease-less recovery receipt belongs to a different replacement operation",
+                Some(operation_id.to_string()),
+                None,
+            ));
+        }
+        if receipt.replacement_operation_id.is_none() {
+            receipt.replacement_operation_id = Some(operation_id.to_string());
+            write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
+        }
+    }
     if receipt.phase == StateLossRecoveryPhase::Prepared {
         if status.freshness.active_jobs > 0 {
             return Ok(None);
@@ -824,7 +891,7 @@ fn replay_leaseless_recovery(
         receipt.phase = StateLossRecoveryPhase::ReplacementStarting;
         receipt.replacement_startup_token = Some(uuid::Uuid::new_v4().to_string());
         write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
-        return replay_leaseless_recovery(status, addr);
+        return replay_leaseless_recovery(status, addr, replacement_operation_id);
     }
     if receipt.phase == StateLossRecoveryPhase::ReplacementStarting {
         if let Some(state) = status.state.as_ref().filter(|_| status.running) {
@@ -923,18 +990,35 @@ fn write_leaseless_recovery_receipt(path: &Path, receipt: &LeaselessRecoveryRece
             Some("serialize lease-less recovery receipt".to_string()),
         )
     })?;
-    std::fs::write(&temporary, body).map_err(|error| {
+    let mut file = std::fs::File::create(&temporary).map_err(|error| {
         Error::internal_io(
             error.to_string(),
-            Some(format!("write {}", temporary.display())),
+            Some(format!("create {}", temporary.display())),
         )
     })?;
+    use std::io::Write;
+    file.write_all(&body)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("write {}", temporary.display())),
+            )
+        })?;
     std::fs::rename(&temporary, path).map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some(format!("rename {}", path.display())),
         )
-    })
+    })?;
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("sync {}", parent.display())),
+            )
+        })
 }
 
 /// Spawn the daemon in the background, then poll the state file until the new
@@ -949,6 +1033,37 @@ pub fn start_background(addr: &str) -> Result<DaemonStartResult> {
 /// is absent or its recorded PID is dead.
 pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
     ensure_running_with_wait(addr, Duration::from_secs(5))
+}
+
+/// The optional controller operation id is intentionally additive. Existing
+/// callers retain the historical ensure-running behavior; controller retries
+/// reuse the durable startup token so a lost response cannot create C.
+pub fn ensure_running_with_replacement_operation(
+    addr: &str,
+    replacement_operation_id: Option<&str>,
+) -> Result<DaemonStartResult> {
+    let Some(operation_id) = replacement_operation_id.filter(|id| !id.trim().is_empty()) else {
+        return ensure_running(addr);
+    };
+    parse_bind_addr(addr)?;
+    let _lock = acquire_daemon_operation_lock_for_ensure(Duration::from_secs(5))?;
+    let status = read_status()?;
+    if let Some(state) = status
+        .state
+        .filter(|state| state.startup_token == operation_id)
+    {
+        if pid_is_running(state.pid) {
+            return Ok(DaemonStartResult {
+                pid: state.pid,
+                address: state.address,
+                state_path: state.state_path,
+                lease_id: state.lease_id,
+            });
+        }
+    }
+    // The startup token is persisted in the daemon lease before the response is
+    // emitted, making response-loss replay converge on the same live daemon.
+    start_or_return_live_unlocked_with_startup_token(addr, operation_id)
 }
 
 /// Replace one explicitly identified, provably dead daemon lease. The operation
@@ -1302,11 +1417,14 @@ where
 /// then fails closed on any related daemon process candidate or any reachable
 /// listener at `addr`. The former `--confirm-no-daemon-owner` gate ran ahead of
 /// both probes.
-pub fn reconcile_leaseless_orphans(addr: &str) -> Result<DaemonLeaselessRecoveryResult> {
+pub fn reconcile_leaseless_orphans(
+    addr: &str,
+    replacement_operation_id: Option<&str>,
+) -> Result<DaemonLeaselessRecoveryResult> {
     parse_bind_addr(addr)?;
     let _lock = acquire_daemon_operation_lock()?;
     let status = read_status()?;
-    if let Some(result) = replay_leaseless_recovery(&status, addr)? {
+    if let Some(result) = replay_leaseless_recovery(&status, addr, replacement_operation_id)? {
         return Ok(result);
     }
     if status.freshness.active_jobs == 0
@@ -1349,6 +1467,7 @@ pub fn reconcile_leaseless_orphans(addr: &str) -> Result<DaemonLeaselessRecovery
         phase: StateLossRecoveryPhase::Prepared,
         replacement: None,
         replacement_startup_token: None,
+        replacement_operation_id: replacement_operation_id.map(str::to_string),
     };
     write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
     let reconciled = store.reconcile_leaseless_orphan_jobs()?;
@@ -1387,9 +1506,12 @@ pub fn reconcile_leaseless_orphans(addr: &str) -> Result<DaemonLeaselessRecovery
         phase: StateLossRecoveryPhase::Reconciled,
         replacement: None,
         replacement_startup_token: None,
+        replacement_operation_id: replacement_operation_id.map(str::to_string),
     };
     write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
-    let startup_token = uuid::Uuid::new_v4().to_string();
+    let startup_token = replacement_operation_id
+        .map(str::to_string)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     receipt.phase = StateLossRecoveryPhase::ReplacementStarting;
     receipt.replacement_startup_token = Some(startup_token.clone());
     write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
