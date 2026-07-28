@@ -81,6 +81,26 @@ pub fn public_artifact_url(artifact: &ArtifactRecord) -> Option<String> {
     ))
 }
 
+/// Return the controller's stable artifact route rather than a filesystem
+/// layout URL. Terminal handoffs use this route because it remains valid when
+/// the runner's artifact layout is unavailable after completion.
+pub fn controller_artifact_url(artifact: &ArtifactRecord) -> Option<String> {
+    if artifact.artifact_type != "file" {
+        return None;
+    }
+    let base = std::env::var(PUBLIC_ARTIFACT_BASE_URL_ENV).ok()?;
+    let base = base.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}/runs/{}/artifacts/{}",
+        base,
+        encode_uri_component(&artifact.run_id),
+        encode_uri_component(&artifact.id)
+    ))
+}
+
 pub fn public_artifact_path_url(root: &Path, base: &str, path: &Path) -> Option<String> {
     let base = base.trim().trim_end_matches('/');
     if base.is_empty() {

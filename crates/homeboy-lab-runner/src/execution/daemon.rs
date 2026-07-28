@@ -366,7 +366,7 @@ pub(super) fn exec_via_daemon(
     }
 
     let runner_job = RunnerJob::from_job(&runner.id, "daemon", &command, Some(cwd.clone()), &job);
-    let runner_result = runner_result(
+    let mut runner_result = runner_result(
         Some(&job),
         exit_code,
         &stdout,
@@ -374,6 +374,10 @@ pub(super) fn exec_via_daemon(
         mirror_run_id.as_deref(),
         mutation_artifacts.clone(),
     );
+    runner_result.artifact_refs = artifacts
+        .iter()
+        .map(crate::session::runner_artifact_ref_from_metadata)
+        .collect();
     let provenance_extensions = required_extensions_for_command(
         &command,
         &super::super::workload::merge_lab_runner_workload_required_extensions(

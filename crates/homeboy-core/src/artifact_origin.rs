@@ -678,6 +678,42 @@ mod tests {
     }
 
     #[test]
+    fn serves_nested_visual_compare_reviewer_paths_over_http() {
+        let root = tempfile::tempdir().expect("artifact root");
+        let fixture = [
+            ("source.png", b"source bytes".as_slice()),
+            ("candidate.png", b"candidate bytes".as_slice()),
+            ("diff.png", b"diff bytes".as_slice()),
+        ];
+        let path = root.path().join("visual-compare/37-art-gallery-exhibition");
+        std::fs::create_dir_all(&path).expect("artifact directory");
+        for (name, bytes) in fixture {
+            std::fs::write(path.join(name), bytes).expect("visual artifact");
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("listener address");
+        let root_path = root.path().to_path_buf();
+        let server = std::thread::spawn(move || {
+            for stream in listener.incoming().take(3) {
+                handle_stream(stream.expect("request stream"), &root_path).expect("serve request");
+            }
+        });
+        let client = reqwest::blocking::Client::new();
+        for (name, bytes) in fixture {
+            let response = client
+                .get(format!(
+                    "http://{address}/visual-compare/37-art-gallery-exhibition/{name}"
+                ))
+                .send()
+                .expect("reviewer request");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.bytes().expect("response bytes").as_ref(), bytes);
+        }
+        server.join().expect("origin server");
+    }
+
+    #[test]
     fn inspect_reports_404_for_missing_workflow_bench_bundle_path() {
         let temp = tempfile::tempdir().expect("tempdir");
 

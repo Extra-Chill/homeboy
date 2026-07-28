@@ -11,7 +11,7 @@ use homeboy_core::api_jobs::{
     RunnerJobLifecycleMetadata, RunnerJobProjection,
 };
 use homeboy_core::error::{Error, ErrorCode};
-use homeboy_core::observation::{ArtifactRecord, ObservationStore, RunRecord};
+use homeboy_core::observation::{ArtifactRecord, NewRunRecord, ObservationStore, RunRecord};
 use homeboy_core::server::{RunnerPolicy, RunnerSettings};
 
 use super::detail::{
@@ -19,8 +19,8 @@ use super::detail::{
 };
 use super::download::{content_disposition_filename, download_remote_artifact};
 use super::mirror::{
-    bounded_remote_events, import_mirrored_artifact_with_downloader, mirror_job_run,
-    mirror_remote_observation_runs_by_id_with,
+    bounded_remote_events, controller_artifact_metadata, import_mirrored_artifact_with_downloader,
+    mirror_job_run, mirror_remote_observation_runs_by_id_with,
     mirror_remote_observation_runs_by_id_with_downloader, mirror_reverse_broker_evidence,
     mirror_terminal_job_artifacts_with, mirrored_patch_result, primary_mirrored_run,
     refresh_mirrored_daemon_evidence_with, MIRRORED_REMOTE_EVENT_LIMIT,
@@ -72,6 +72,58 @@ fn terminal_runner_job() -> Job {
         artifacts: Vec::new(),
         runner_job_projection: None,
     }
+}
+
+#[test]
+fn controller_terminal_metadata_uses_exact_visual_artifact_shape_and_validates_bytes() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let run = store
+            .start_run(NewRunRecord::builder("runner-exec").build())
+            .expect("run");
+        let source_dir = home.path().join("visual-compare/37-art-gallery-exhibition");
+        fs::create_dir_all(&source_dir).expect("visual artifact directory");
+        for (id, name, bytes) in [
+            ("source", "source.png", b"source bytes".as_slice()),
+            ("candidate", "candidate.png", b"candidate bytes".as_slice()),
+            ("diff", "diff.png", b"diff bytes".as_slice()),
+        ] {
+            let path = source_dir.join(name);
+            fs::write(&path, bytes).expect("visual artifact");
+            store
+                .record_artifact_with_id(&run.id, "visual_compare", &path, id, json!({}))
+                .expect("controller artifact");
+        }
+
+        let metadata = controller_artifact_metadata(&[run.clone()]).expect("terminal metadata");
+        assert_eq!(
+            metadata
+                .iter()
+                .map(|artifact| artifact.id.as_str())
+                .collect::<Vec<_>>(),
+            ["source", "candidate", "diff"]
+        );
+        for artifact in &metadata {
+            assert!(artifact
+                .path
+                .as_deref()
+                .is_some_and(|path| path.contains(&run.id)));
+            assert_eq!(artifact.mime.as_deref(), Some("image/png"));
+            assert!(artifact.size_bytes.is_some());
+            assert!(artifact
+                .sha256
+                .as_deref()
+                .is_some_and(|sha| !sha.is_empty()));
+        }
+
+        let source = store
+            .get_artifact("source")
+            .expect("source lookup")
+            .expect("source");
+        fs::write(&source.path, b"corrupted").expect("corrupt controller bytes");
+        let error = controller_artifact_metadata(&[run]).expect_err("checksum mismatch");
+        assert_eq!(error.details["field"], "artifact.size_bytes");
+    });
 }
 
 #[test]
