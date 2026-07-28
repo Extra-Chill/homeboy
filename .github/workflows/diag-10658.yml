@@ -1,0 +1,73 @@
+# TEMPORARY diagnostic workflow for #10658.
+#
+# The seven red `homeboy-agents` lib tests have only ever been observed inside
+# Test phases that were killed at their budget, so libtest never reached the
+# trailing `failures:` block and no root-cause evidence exists anywhere in CI.
+# This workflow runs each named test in isolation with `--exact --nocapture` so
+# the actual panic/assertion is printed.
+#
+# It triggers only on `diag/**` branches and must be deleted before merge.
+name: Diag 10658
+
+on:
+  push:
+    branches: ['diag/**']
+
+jobs:
+  agents:
+    name: homeboy-agents named lib tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile test binary
+        run: cargo test --locked -p homeboy-agents --lib --no-run
+      - name: existing_gate_commands_are_automatic_toolchain_requirements
+        if: always()
+        run: |
+          timeout 300 cargo test --locked -p homeboy-agents --lib \
+            agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements \
+            -- --exact --nocapture --test-threads=1 || echo "EXIT=$?"
+      - name: bounded_baseline_gate_is_cancelled
+        if: always()
+        run: |
+          timeout 300 cargo test --locked -p homeboy-agents --lib \
+            agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled \
+            -- --exact --nocapture --test-threads=1 || echo "EXIT=$?"
+      - name: bounded_baseline_gate_reaps_background_descendants_before_reader_join
+        if: always()
+        run: |
+          timeout 300 cargo test --locked -p homeboy-agents --lib \
+            agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join \
+            -- --exact --nocapture --test-threads=1 || echo "EXIT=$?"
+      - name: probe_by_id_resolves_one_record_without_scanning_or_writing
+        if: always()
+        run: |
+          timeout 300 cargo test --locked -p homeboy-agents --lib \
+            agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing \
+            -- --exact --nocapture --test-threads=1 || echo "EXIT=$?"
+      - name: show_activity_resolves_an_agent_task_id_through_the_indexed_probe
+        if: always()
+        run: |
+          timeout 300 cargo test --locked -p homeboy-agents --lib \
+            agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe \
+            -- --exact --nocapture --test-threads=1 || echo "EXIT=$?"
+      - name: dispatch_plan_preflight_fails_on_unresolved_runtime_dependency
+        if: always()
+        run: |
+          timeout 300 cargo test --locked -p homeboy-agents --lib \
+            agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency \
+            -- --exact --nocapture --test-threads=1 || echo "EXIT=$?"
+      - name: durable_finalization_uses_promoted_files_for_clean_committed_candidate
+        if: always()
+        run: |
+          timeout 300 cargo test --locked -p homeboy-agents --lib \
+            agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate \
+            -- --exact --nocapture --test-threads=1 || echo "EXIT=$?"
+      - name: executor_evidence_and_handoff_neighbours
+        if: always()
+        run: |
+          timeout 600 cargo test --locked -p homeboy-agents --lib \
+            agent_task_executor_evidence::tests:: \
+            -- --nocapture --test-threads=1 || echo "EXIT=$?"
