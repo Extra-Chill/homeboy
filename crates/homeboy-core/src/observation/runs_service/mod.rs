@@ -57,24 +57,6 @@ pub enum ArtifactGetSource {
     Remote,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct RunnerDownloadCleanupOptions {
-    pub apply: bool,
-    pub runner: Option<String>,
-    pub run_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RunnerDownloadCleanupOutcome {
-    pub dry_run: bool,
-    pub root: PathBuf,
-    pub removed: bool,
-    pub file_count: usize,
-    pub directory_count: usize,
-    pub size_bytes: u64,
-    pub paths: Vec<String>,
-}
-
 #[derive(Debug, Clone)]
 pub struct PersistedArtifactCleanupOptions {
     pub apply: bool,
@@ -151,14 +133,6 @@ pub struct TerminalRunLifecycleDirectory {
     pub path: PathBuf,
     pub exists: bool,
     pub size_bytes: u64,
-}
-
-#[derive(Debug, Default)]
-struct RunnerDownloadCleanupPreview {
-    file_count: usize,
-    directory_count: usize,
-    size_bytes: u64,
-    paths: Vec<String>,
 }
 
 /// Storage classes recognized by [`classify_artifact_storage`].

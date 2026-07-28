@@ -726,12 +726,26 @@ pub struct RunsArtifactCleanupDownloadsOutput {
     pub canonical_cleanup_command: String,
     pub specialist_cleanup_command: &'static str,
     pub dry_run: bool,
+    /// The resolved policy this invocation applied.
+    pub retention: CleanupPolicy,
+    /// The cache scope inspected, narrowed by `--runner` / `--run-id`.
     pub root: String,
-    pub removed: bool,
+    /// Fixed age floor. Not overridable: see
+    /// `runs_service::RUNNER_DOWNLOAD_MIN_AGE`.
+    pub min_age_seconds: u64,
+    /// Whether the non-terminal-run veto could be evaluated. `unavailable`
+    /// means every candidate was retained.
+    pub liveness: runs_service::RunnerDownloadLiveness,
+    pub inspected_count: usize,
+    pub planned_count: usize,
+    pub removed_count: usize,
+    pub skipped_count: usize,
     pub file_count: usize,
     pub directory_count: usize,
-    pub size_bytes: u64,
-    pub paths: Vec<String>,
+    pub planned_size_bytes: u64,
+    pub removed_size_bytes: u64,
+    pub truncated: bool,
+    pub rows: Vec<runs_service::RunnerDownloadCleanupRow>,
 }
 
 #[derive(Args, Clone)]
