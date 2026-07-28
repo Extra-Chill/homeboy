@@ -3,6 +3,20 @@ use serde_json::{Map, Value};
 
 const DEFAULT_REPLACEMENT: &str = "[REDACTED]";
 
+/// Trailing key segments that describe *how* a credential is carried rather
+/// than naming a different thing. `session_id`, `token_value`, and
+/// `auth_header` are still credential keys; `proxy_auth_smoke` is not.
+const GENERIC_KEY_QUALIFIERS: &[&str] = &[
+    "b64", "base64", "data", "env", "hash", "header", "id", "ids", "plain", "raw", "str", "string",
+    "val", "value", "var",
+];
+
+/// Longest run of letters still treated as an ordinary English word when it
+/// follows a bare `bearer`/`basic`/`token` in free-form log text. Real bearer
+/// credentials and Basic base64 blobs are longer than this and are not pure
+/// letters.
+const PROSE_WORD_MAX_LEN: usize = 12;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedactionPolicy {
     sensitive_keys: Vec<String>,
@@ -106,6 +120,59 @@ impl RedactionPolicy {
         self.sensitive_headers
             .iter()
             .any(|sensitive| header == *sensitive || header.contains(sensitive))
+    }
+
+    /// Stricter sibling of [`RedactionPolicy::is_sensitive_key`] for keys that
+    /// were *inferred from free-form text* rather than read out of a real
+    /// key position.
+    ///
+    /// `is_sensitive_key` matches any key that merely **contains** a sensitive
+    /// token. That is the right fail-closed rule for structured positions —
+    /// JSON object keys, HTTP header names, query parameter names, env var
+    /// names, CLI flags — where the key genuinely names a value and a false
+    /// positive costs nothing but a redacted field.
+    ///
+    /// It is the wrong rule for prose. In console output, any word that
+    /// happens to contain `auth`, `key`, `sid`, or `session` becomes a
+    /// "sensitive key", and the token after the next `:` or `=` is destroyed.
+    /// That is how `=== http-client-proxy-auth-smoke: 3 FAIL of 15 ===` lost
+    /// its failure count: `http_client_proxy_auth_smoke` contains `auth`.
+    ///
+    /// Credential keys name the credential with their *head noun*, so this
+    /// predicate requires the sensitive token to be the final key segment
+    /// (optionally followed by one generic carrier qualifier). Structured
+    /// callers keep the broad rule; only inferred keys are held to this one.
+    pub fn is_credential_key_name(&self, key: &str) -> bool {
+        let segments = key_segments(key);
+        if segments.is_empty() {
+            return false;
+        }
+        if self.matches_credential_suffix(&segments) {
+            return true;
+        }
+        if segments.len() > 1
+            && GENERIC_KEY_QUALIFIERS.contains(&segments[segments.len() - 1].as_str())
+        {
+            return self.matches_credential_suffix(&segments[..segments.len() - 1]);
+        }
+        false
+    }
+
+    fn matches_credential_suffix(&self, segments: &[String]) -> bool {
+        if segments.is_empty() {
+            return false;
+        }
+        let joined = segments.join("_");
+        self.sensitive_keys
+            .iter()
+            .chain(self.sensitive_headers.iter())
+            .any(|sensitive| {
+                let sensitive = normalize_key(sensitive);
+                if sensitive.is_empty() {
+                    return false;
+                }
+                joined == sensitive || joined.ends_with(&format!("_{sensitive}"))
+            })
     }
 
     pub fn redact_string(&self, value: &str) -> String {
@@ -315,11 +382,44 @@ fn normalize_key(key: &str) -> String {
 }
 
 fn redact_authorization_schemes(value: &str, replacement: &str) -> String {
-    let pattern = Regex::new(r"(?i)\b(bearer|basic|token)\s+[^\s,;]+")
+    // An explicit authorization key is unambiguous provenance: whatever
+    // follows it is a credential no matter what it looks like. Redact it
+    // unconditionally, preserving any scheme name so the diagnostic still
+    // says *how* the request authenticated.
+    //
+    // This also closes a gap in the previous implementation, which only
+    // redacted after a recognized scheme word: `Authorization: opaquevalue`
+    // (no scheme) survived both this pass and the inline-assignment pass,
+    // because the latter deliberately skips `authorization` keys.
+    let header = Regex::new(
+        r"(?i)\b((?:proxy-)?authorization)(\s*[:=]\s*)((?:bearer|basic|token|digest|negotiate)\s+)?([^\s,;]+)",
+    )
+    .expect("authorization header redaction regex is valid");
+    let value = header
+        .replace_all(value, |captures: &Captures<'_>| {
+            format!(
+                "{}{}{}{replacement}",
+                &captures[1],
+                &captures[2],
+                captures.get(3).map_or("", |scheme| scheme.as_str())
+            )
+        })
+        .into_owned();
+    // A bare scheme word with no authorization key around it is a shape
+    // guess, and `bearer`/`basic`/`token` are also ordinary English words.
+    // "PASS: basic auth creates Authorization header" is a test name, not a
+    // credential; redacting the word after `basic` corrupted it. Only redact
+    // when the following token is not plain prose. Credentials reachable this
+    // way (JWTs, base64, `sk-`/`ghp_` tokens, hex) all fail the prose test.
+    let pattern = Regex::new(r"(?i)\b(bearer|basic|token)\s+([^\s,;]+)")
         .expect("authorization redaction regex is valid");
     let value = pattern
-        .replace_all(value, |captures: &Captures<'_>| {
-            format!("{} {replacement}", &captures[1])
+        .replace_all(&value, |captures: &Captures<'_>| {
+            if looks_like_prose_word(&captures[2]) {
+                captures[0].to_string()
+            } else {
+                format!("{} {replacement}", &captures[1])
+            }
         })
         .into_owned();
     let credentials = Regex::new(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^@/\s]+@")
@@ -337,16 +437,82 @@ fn redact_inline_assignments(value: &str, policy: &RedactionPolicy) -> String {
     pattern
         .replace_all(value, |captures: &Captures<'_>| {
             let key = &captures[1];
-            if normalize_key(key) == "authorization" {
+            // Authorization keys were already handled, scheme name intact.
+            if is_authorization_key(key) {
                 return captures[0].to_string();
             }
-            if policy.is_sensitive_key(key) || policy.is_sensitive_header(key) {
+            // The "key" here was inferred from arbitrary text, so it is held
+            // to the strict credential-key rule instead of the broad
+            // substring rule used for real key positions.
+            if policy.is_credential_key_name(key) {
                 format!("{}{}{}", key, &captures[2], policy.replacement)
             } else {
                 captures[0].to_string()
             }
         })
         .into_owned()
+}
+
+fn is_authorization_key(key: &str) -> bool {
+    let normalized = normalize_key(key);
+    normalized == "authorization" || normalized.ends_with("_authorization")
+}
+
+/// Split a key into lowercase segments, treating `_`, `-`, `.`, `/`, spaces,
+/// and camelCase transitions as boundaries. `X-Api-Key` and `apiKey` both
+/// become `["api", "key"]`.
+fn key_segments(key: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut previous_is_lower_or_digit = false;
+    for character in key.trim().chars() {
+        if matches!(character, '_' | '-' | '.' | '/' | ' ' | ':') {
+            if !current.is_empty() {
+                segments.push(std::mem::take(&mut current));
+            }
+            previous_is_lower_or_digit = false;
+            continue;
+        }
+        if character.is_ascii_uppercase() && previous_is_lower_or_digit && !current.is_empty() {
+            segments.push(std::mem::take(&mut current));
+        }
+        previous_is_lower_or_digit = character.is_ascii_lowercase() || character.is_ascii_digit();
+        current.push(character.to_ascii_lowercase());
+    }
+    if !current.is_empty() {
+        segments.push(current);
+    }
+    segments
+}
+
+/// Whether a token is shaped like an ordinary word rather than a credential.
+/// Deliberately conservative: anything with a digit, punctuation, mixed case,
+/// or more than [`PROSE_WORD_MAX_LEN`] letters is treated as a credential.
+fn looks_like_prose_word(value: &str) -> bool {
+    if value.is_empty() || value.len() > PROSE_WORD_MAX_LEN {
+        return false;
+    }
+    if !value
+        .chars()
+        .all(|character| character.is_ascii_alphabetic())
+    {
+        return false;
+    }
+    let all_lowercase = value
+        .chars()
+        .all(|character| character.is_ascii_lowercase());
+    let all_uppercase = value
+        .chars()
+        .all(|character| character.is_ascii_uppercase());
+    let capitalized = value
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_uppercase())
+        && value
+            .chars()
+            .skip(1)
+            .all(|character| character.is_ascii_lowercase());
+    all_lowercase || capitalized || (all_uppercase && value.len() <= 5)
 }
 
 fn split_once(value: &str, delimiter: char) -> (&str, Option<&str>) {
@@ -406,6 +572,120 @@ mod tests {
             policy.redact_string("token=abc password: hunter2 safe=value"),
             "token=[REDACTED] password: [REDACTED] safe=value"
         );
+    }
+
+    #[test]
+    fn preserves_low_entropy_diagnostic_text_and_failure_counts() {
+        // Verbatim console output from the reproduction in #10521. Every line
+        // here is test output, not a credential: `http-client-proxy-auth-smoke`
+        // merely contains `auth`, and `basic`/`Basic` are English words.
+        let policy = RedactionPolicy::default();
+        let diagnostics = "[1] Standard auth options\n\
+             PASS: basic auth creates Authorization header\n\
+             PASS: bearer auth creates Authorization header\n\
+             [2] Auth ref options\n\
+             FAIL: auth_ref resolves auth options\n\
+             FAIL: auth_ref resolves proxy URL\n\
+             FAIL: auth_ref resolved Basic header is applied\n\
+             === http-client-proxy-auth-smoke: 3 FAIL of 15 ===";
+
+        assert_eq!(policy.redact_string(diagnostics), diagnostics);
+    }
+
+    #[test]
+    fn inferred_keys_only_redact_when_the_head_noun_is_a_credential() {
+        let policy = RedactionPolicy::default();
+
+        for credential_key in [
+            "token",
+            "api_token",
+            "X-Api-Key",
+            "apiKey",
+            "clientSecret",
+            "refresh_token",
+            "session_id",
+            "auth_header",
+            "PASSWORD",
+        ] {
+            assert!(
+                policy.is_credential_key_name(credential_key),
+                "{credential_key} must stay redacted"
+            );
+        }
+
+        for diagnostic_key in [
+            "http-client-proxy-auth-smoke",
+            "auth_ref",
+            "PASS",
+            "monkey",
+            "keyboard",
+            "considered",
+        ] {
+            assert!(
+                !policy.is_credential_key_name(diagnostic_key),
+                "{diagnostic_key} is diagnostic text, not a credential key"
+            );
+        }
+    }
+
+    #[test]
+    fn structured_key_positions_keep_the_broad_fail_closed_rule() {
+        // Narrowing applies only to keys inferred from prose. Real key
+        // positions (env names, JSON keys, headers, query params) still match
+        // on substring so a novel credential name cannot slip through.
+        let policy = RedactionPolicy::default();
+
+        assert!(policy.is_sensitive_key("http-client-proxy-auth-smoke"));
+        assert_eq!(
+            policy.redact_json(&json!({ "proxy_auth_settings": "value" })),
+            json!({ "proxy_auth_settings": "[REDACTED]" })
+        );
+        assert_eq!(
+            policy.redact_url("/path?proxy_auth_settings=value&ok=1"),
+            "/path?proxy_auth_settings=[REDACTED]&ok=1"
+        );
+    }
+
+    #[test]
+    fn redacts_authorization_header_values_without_a_scheme_word() {
+        let policy = RedactionPolicy::default();
+
+        assert_eq!(
+            policy.redact_string("Authorization: opaquecredential"),
+            "Authorization: [REDACTED]"
+        );
+        assert_eq!(
+            policy.redact_string("Proxy-Authorization: Basic secretvalue"),
+            "Proxy-Authorization: Basic [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn bare_scheme_words_still_redact_credential_shaped_tokens() {
+        let policy = RedactionPolicy::default();
+
+        for credential in [
+            "abc.def.ghi",
+            "dXNlcjpzZWNyZXQ=",
+            "ghp_secret",
+            "sk-test-value",
+            "aBcDeFgHiJkL",
+            "0123456789abcdef",
+        ] {
+            let redacted = policy.redact_string(&format!("sent bearer {credential} upstream"));
+            assert_eq!(
+                redacted, "sent bearer [REDACTED] upstream",
+                "bearer {credential} must stay redacted"
+            );
+        }
+    }
+
+    #[test]
+    fn redaction_is_idempotent_over_already_redacted_text() {
+        let policy = RedactionPolicy::default();
+        let once = policy.redact_string("Authorization: Bearer abc.def.ghi token=secret-value");
+
+        assert_eq!(policy.redact_string(&once), once);
     }
 
     #[test]
