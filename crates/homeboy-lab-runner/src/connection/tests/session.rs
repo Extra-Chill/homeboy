@@ -875,6 +875,32 @@ fn terminal_phantom_reconciliation_is_fail_soft_for_an_unreachable_stale_session
 }
 
 #[test]
+fn terminal_reconciliation_routes_direct_sessions_to_the_daemon() {
+    let session = direct_ssh_session("lease-live");
+    let result = reconcile_terminal_jobs_for_session(
+        &session,
+        |url| Ok(format!("direct:{url}")),
+        || Ok("reverse".to_string()),
+    )
+    .expect("direct reconciliation route");
+
+    assert!(result.starts_with("direct:http://"));
+}
+
+#[test]
+fn terminal_reconciliation_routes_reverse_sessions_to_the_broker() {
+    let session = reverse_controller_session();
+    let result = reconcile_terminal_jobs_for_session(
+        &session,
+        |_| Ok("direct".to_string()),
+        || Ok("reverse".to_string()),
+    )
+    .expect("reverse reconciliation route");
+
+    assert_eq!(result, "reverse");
+}
+
+#[test]
 fn terminal_phantom_reconciliation_ignores_non_success_responses() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
     let address = listener.local_addr().expect("address");

@@ -114,6 +114,18 @@ pub(crate) fn daemon_api_get_for_session(session: &RunnerSession, path: &str) ->
     daemon_get(&client, local_url, path)
 }
 
+pub(crate) fn daemon_api_post_for_session(session: &RunnerSession, path: &str) -> Result<Value> {
+    let local_url = session.local_url.as_deref().ok_or_else(|| {
+        Error::internal_unexpected("known daemon generation has no direct local endpoint")
+    })?;
+    let client = Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|err| Error::internal_unexpected(format!("build daemon HTTP client: {err}")))?;
+    daemon_post(&client, local_url, path)
+}
+
 pub fn daemon_api_post(runner_id: &str, path: &str) -> Result<Value> {
     daemon_api_request(runner_id, path, "POST")
 }

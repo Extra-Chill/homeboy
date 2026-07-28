@@ -120,6 +120,7 @@ pub use artifact_promotion::{
     promote_runner_exec_summaries, promoted_output, runner_exec_structured_summary,
 };
 pub use daemon_api::daemon_api_post;
+pub(crate) use daemon_api::daemon_api_post_for_session;
 pub use failure::runner_exec_failure_error;
 pub use handoff::{runner_job_cancel, runner_job_cancel_projection};
 pub use recovery::reconcile_terminal_runner_exec_runs;
