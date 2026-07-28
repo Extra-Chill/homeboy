@@ -1,0 +1,1793 @@
+[
+ {
+  "run": 30382101662,
+  "job": 90352191183,
+  "conclusion": "failure",
+  "test_job_conclusion": "failure",
+  "sha": "e4d965dc65264a1d2991724cb5f235974f1bc5db",
+  "createdAt": "2026-07-28T17:15:55Z",
+  "title": "Fix read-only status creating deferred workload state",
+  "phases": [
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_dispatch_plan::tests::dispatch_plan_preserves_abstract_executor_requirements",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 472,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   },
+   {
+    "failed": [
+     "read_only_cli_commands_complete_while_runtime_promotion_is_held"
+    ],
+    "ok": 66,
+    "timeout": false,
+    "result_ok": 15,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30380078587,
+  "job": 90345508296,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "added4deaa8d727ea18a222e502e36dc836689f9",
+  "createdAt": "2026-07-28T16:49:49Z",
+  "title": "fix(diagnostics): stop collapsing signal kills into provider_empty_stdout and stop redacting log prose",
+  "phases": [
+   {
+    "failed": [
+     "read_only_cli_commands_complete_while_runtime_promotion_is_held"
+    ],
+    "ok": 66,
+    "timeout": false,
+    "result_ok": 15,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "read_only_cli_commands_complete_while_runtime_promotion_is_held"
+    ],
+    "ok": 66,
+    "timeout": false,
+    "result_ok": 15,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30379729381,
+  "job": 90344310807,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "6a149ffef615639ff0eda67daea23b0703e97afc",
+  "createdAt": "2026-07-28T16:45:16Z",
+  "title": "fix(release): bound recovery control-binary lineage to the release target",
+  "phases": [
+   {
+    "failed": [
+     "read_only_cli_commands_complete_while_runtime_promotion_is_held"
+    ],
+    "ok": 66,
+    "timeout": false,
+    "result_ok": 15,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "read_only_cli_commands_complete_while_runtime_promotion_is_held"
+    ],
+    "ok": 66,
+    "timeout": false,
+    "result_ok": 15,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30378579815,
+  "job": 90340514438,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "09976fbd85b8f5f834e5e5af55c288e41f7178d8",
+  "createdAt": "2026-07-28T16:30:34Z",
+  "title": "fix(agents): finalize and unregister ephemeral attempt Git worktrees",
+  "phases": [
+   {
+    "failed": [
+     "read_only_cli_commands_complete_while_runtime_promotion_is_held"
+    ],
+    "ok": 66,
+    "timeout": false,
+    "result_ok": 15,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "read_only_cli_commands_complete_while_runtime_promotion_is_held"
+    ],
+    "ok": 66,
+    "timeout": false,
+    "result_ok": 15,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30378396412,
+  "job": 90339812023,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "3a4555332c5e5cca32b6e286f1a55218829f9642",
+  "createdAt": "2026-07-28T16:28:16Z",
+  "title": "fix: accept runner-bound Cook retry plans",
+  "phases": [
+   {
+    "failed": [
+     "read_only_cli_commands_complete_while_runtime_promotion_is_held"
+    ],
+    "ok": 66,
+    "timeout": false,
+    "result_ok": 15,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "read_only_cli_commands_complete_while_runtime_promotion_is_held"
+    ],
+    "ok": 66,
+    "timeout": false,
+    "result_ok": 15,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30376771886,
+  "job": 90334340546,
+  "conclusion": "failure",
+  "test_job_conclusion": "failure",
+  "sha": "5ae1c244e98badd9c73f18ab86ff56d9a31646e9",
+  "createdAt": "2026-07-28T16:07:55Z",
+  "title": "fix: propagate force through Cook retry reservation",
+  "phases": [
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_dispatch_plan::tests::dispatch_plan_preserves_abstract_executor_requirements",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 470,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   },
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 475,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30376104118,
+  "job": 90332091272,
+  "conclusion": "failure",
+  "test_job_conclusion": "failure",
+  "sha": "36eba65c71b589a190ee98e1ccc53075a36599a3",
+  "createdAt": "2026-07-28T15:59:53Z",
+  "title": "Prune terminal-owned runner workspaces",
+  "phases": [
+   {
+    "failed": [
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 471,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   },
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 477,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30375555268,
+  "job": 90330192415,
+  "conclusion": "failure",
+  "test_job_conclusion": "failure",
+  "sha": "78d2880f174f1acdb4541fc6ea566cfe51576f93",
+  "createdAt": "2026-07-28T15:53:09Z",
+  "title": "fix: bound atomic artifact publication names",
+  "phases": [
+   {
+    "failed": [],
+    "ok": 295,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   },
+   {
+    "failed": [],
+    "ok": 297,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30374669252,
+  "job": 90327134241,
+  "conclusion": "failure",
+  "test_job_conclusion": "failure",
+  "sha": "210d5942328a7ebe72f56bcdd61ba0b0fe7b0c9b",
+  "createdAt": "2026-07-28T15:42:13Z",
+  "title": "fix(fuzz): separate evidence-contract failures from workload failures and make fuzz proof reviewer-ready",
+  "phases": [
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_executor_evidence::tests::links_executor_input_and_result_evidence_refs",
+     "agent_task_executor_evidence::tests::persisted_input_redacts_secrets_but_retains_contracts_paths_and_artifacts",
+     "agent_task_executor_evidence::tests::re_linking_does_not_duplicate_evidence_refs",
+     "agent_task_executor_evidence::tests::repeated_child_runs_with_same_task_id_keep_distinct_evidence_paths",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 466,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   },
+   {
+    "failed": [
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 479,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30374389708,
+  "job": 90326286619,
+  "conclusion": "failure",
+  "test_job_conclusion": "failure",
+  "sha": "f5bcb15473b8940ae9dab794bec9eda17ea15b92",
+  "createdAt": "2026-07-28T15:38:46Z",
+  "title": "fix(cli): three CLI-surface bugs \u2014 refresh-plan --output collision, git error leak, extension readiness gating (#10566, #10525, #10517)",
+  "phases": [
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 471,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   },
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 476,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30373589335,
+  "job": 90323451914,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "d8e8ddf3fb25a68c31326e10c2b12a20f74ba5cc",
+  "createdAt": "2026-07-28T15:29:07Z",
+  "title": "fix: route review tests through Lab",
+  "phases": [
+   {
+    "failed": [
+     "read_only_cli_commands_complete_while_runtime_promotion_is_held"
+    ],
+    "ok": 66,
+    "timeout": false,
+    "result_ok": 15,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 474,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [
+   "Differential gate marked review test baseline_red: baseline command `homeboy --output /tmp/tmp.mjTjOBC2Oj/review-test.json review test --placement local homeboy --path /home/runner/work/homeboy/homeboy` exited 124 before comparable counts were available"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30372989912,
+  "job": 90321396671,
+  "conclusion": "failure",
+  "test_job_conclusion": "failure",
+  "sha": "915093411f9f6945540b2e096b02f0728d049dcf",
+  "createdAt": "2026-07-28T15:21:49Z",
+  "title": "Fix mixed-runtime Cook continuation recovery",
+  "phases": [
+   {
+    "failed": [],
+    "ok": 292,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   },
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_dispatch_plan::tests::dispatch_plan_preserves_abstract_executor_requirements"
+    ],
+    "ok": 354,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30372503659,
+  "job": 90319725254,
+  "conclusion": "failure",
+  "test_job_conclusion": "failure",
+  "sha": "4488d6ca5dff6b3c60967b944279de6abdfb13ac",
+  "createdAt": "2026-07-28T15:15:57Z",
+  "title": "fix(release): adopt a complete draft without rebuilding, and name inventory mismatches",
+  "phases": [
+   {
+    "failed": [],
+    "ok": 295,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   },
+   {
+    "failed": [],
+    "ok": 320,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30371922583,
+  "job": 90317713999,
+  "conclusion": "failure",
+  "test_job_conclusion": "failure",
+  "sha": "0ed6d008e99f3f5b96ff50212c78dcba6fa67ad6",
+  "createdAt": "2026-07-28T15:08:56Z",
+  "title": "fix: separate worktree ensure timeout",
+  "phases": [
+   {
+    "failed": [],
+    "ok": 293,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   },
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency"
+    ],
+    "ok": 408,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30371789594,
+  "job": 90317246152,
+  "conclusion": "failure",
+  "test_job_conclusion": "failure",
+  "sha": "536187e3b8016f94a682587cfa961645052b14e4",
+  "createdAt": "2026-07-28T15:07:17Z",
+  "title": "fix(diagnostics): stop collapsing signal kills into provider_empty_stdout and stop redacting log prose",
+  "phases": [
+   {
+    "failed": [],
+    "ok": 293,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   },
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency"
+    ],
+    "ok": 352,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30370803719,
+  "job": 90313836342,
+  "conclusion": "failure",
+  "test_job_conclusion": "failure",
+  "sha": "383779900ec5180faff82fa6936451c8544958f1",
+  "createdAt": "2026-07-28T14:55:41Z",
+  "title": "fix(release): expect cargo-dist's full published asset inventory",
+  "phases": [
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::production_validator_accepts_only_the_exact_promoted_recovery_commit",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe",
+     "agent_task_lifecycle::tests::handoff_and_proxy::controller_proxy_is_queued_before_handoff_then_binds_runner_child",
+     "agent_task_lifecycle::tests::handoff_and_proxy::preacceptance_snapshot_binds_planned_runner_job_before_validation"
+    ],
+    "ok": 500,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   },
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_finalization::tests::production_validator_accepts_only_the_exact_promoted_recovery_commit",
+     "agent_task_finalization::tests::production_validator_normalizes_changed_file_order_and_duplicates",
+     "agent_task_gate::tests::toolchain_preflight_preserves_only_declared_homes_for_cargo_on_path",
+     "agent_task_gate::tests::toolchain_preflight_reports_generic_initialization_failures_without_code_feedback",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe",
+     "agent_task_lifecycle::tests::handoff_and_proxy::controller_proxy_is_queued_before_handoff_then_binds_runner_child",
+     "agent_task_lifecycle::tests::handoff_and_proxy::preacceptance_snapshot_binds_planned_runner_job_before_validation"
+    ],
+    "ok": 503,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30370783167,
+  "job": 90313763779,
+  "conclusion": "failure",
+  "test_job_conclusion": "failure",
+  "sha": "ba098a6b993a8e34e2fd06310b8a1f27eb8dec1d",
+  "createdAt": "2026-07-28T14:55:26Z",
+  "title": "fix(ci): make the audit-corpus and release-workflow gates assert effects",
+  "phases": [
+   {
+    "failed": [
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing"
+    ],
+    "ok": 454,
+    "timeout": true,
+    "result_ok": 28,
+    "result_failed": 0,
+    "harness_exit_124": true
+   },
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_dispatch_plan::tests::dispatch_plan_preserves_abstract_executor_requirements",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 461,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30370042298,
+  "job": 90311190337,
+  "conclusion": "failure",
+  "test_job_conclusion": "failure",
+  "sha": "f0283a4fa001831da87deccd35ed73ca2eeb4964",
+  "createdAt": "2026-07-28T14:46:38Z",
+  "title": "Fix legacy Lab Cook continuation runtime recovery",
+  "phases": [
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 456,
+    "timeout": true,
+    "result_ok": 28,
+    "result_failed": 0,
+    "harness_exit_124": true
+   },
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 464,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30369926639,
+  "job": 90310892650,
+  "conclusion": "failure",
+  "test_job_conclusion": "failure",
+  "sha": "525a234005da46c92c313a430619699827fc1510",
+  "createdAt": "2026-07-28T14:45:15Z",
+  "title": "fix(runner): contain and tag runner artifact downloads",
+  "phases": [
+   {
+    "failed": [],
+    "ok": 280,
+    "timeout": true,
+    "result_ok": 28,
+    "result_failed": 0,
+    "harness_exit_124": true
+   },
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency"
+    ],
+    "ok": 345,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30367940161,
+  "job": 90303951809,
+  "conclusion": "failure",
+  "test_job_conclusion": "failure",
+  "sha": "383779900ec5180faff82fa6936451c8544958f1",
+  "createdAt": "2026-07-28T14:21:19Z",
+  "title": "fix(release): expect cargo-dist's full published asset inventory",
+  "phases": [
+   {
+    "failed": [],
+    "ok": 285,
+    "timeout": true,
+    "result_ok": 29,
+    "result_failed": 0,
+    "harness_exit_124": true
+   },
+   {
+    "failed": [],
+    "ok": 307,
+    "timeout": true,
+    "result_ok": 28,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30365422702,
+  "job": 90295312040,
+  "conclusion": "failure",
+  "test_job_conclusion": "failure",
+  "sha": "dd1f1462485a49c460e3d9726c182bce5027762c",
+  "createdAt": "2026-07-28T13:50:46Z",
+  "title": "Recover detached Lab Cook candidates",
+  "phases": [
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::production_validator_accepts_only_the_exact_promoted_recovery_commit",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 497,
+    "timeout": true,
+    "result_ok": 27,
+    "result_failed": 0,
+    "harness_exit_124": true
+   },
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::production_validator_accepts_only_the_exact_promoted_recovery_commit",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe",
+     "agent_task_lifecycle::tests::handoff_and_proxy::controller_proxy_is_queued_before_handoff_then_binds_runner_child",
+     "agent_task_lifecycle::tests::handoff_and_proxy::preacceptance_snapshot_binds_planned_runner_job_before_validation"
+    ],
+    "ok": 500,
+    "timeout": true,
+    "result_ok": 28,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30364158677,
+  "job": 90291061000,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "9558979167225007f7c7136050184918899149cb",
+  "createdAt": "2026-07-28T13:34:59Z",
+  "title": "refactor: fold scaffolding-only crates and collapse duplicate enums",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 126,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 457,
+    "timeout": true,
+    "result_ok": 28,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [
+   "Differential gate marked review test baseline_red: baseline command `homeboy --output /tmp/tmp.LeS7LMcgsl/review-test.json review test --placement local homeboy --path /home/runner/work/homeboy/homeboy` exited 124 before comparable counts were available"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30363405960,
+  "job": 90288441101,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "ee5c573c2ba3b3a3ba392b88f7b6e1f7307073e2",
+  "createdAt": "2026-07-28T13:25:28Z",
+  "title": "fix: recover substantive Cook candidates",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 126,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 461,
+    "timeout": true,
+    "result_ok": 28,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [
+   "Differential gate marked review test baseline_red: baseline command `homeboy --output /tmp/tmp.amAG6g9SyK/review-test.json review test --placement local homeboy --path /home/runner/work/homeboy/homeboy` exited 124 before comparable counts were available"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30363393238,
+  "job": 90288398342,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "59087238bfd93f5aaddd5722908e464c6798ff50",
+  "createdAt": "2026-07-28T13:25:18Z",
+  "title": "Allow intentional assetless GitHub Releases",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 127,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_accepts_component_contracts_from_provider_config",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 463,
+    "timeout": true,
+    "result_ok": 28,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [
+   "Differential gate marked review test baseline_red: baseline command `homeboy --output /tmp/tmp.j6V9fpzt3j/review-test.json review test --placement local homeboy --path /home/runner/work/homeboy/homeboy` exited 124 before comparable counts were available"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30363000176,
+  "job": 90287079503,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "3faa4c51a86ce1577d11b72a81c8e81d74f7600b",
+  "createdAt": "2026-07-28T13:20:12Z",
+  "title": "refactor(lab-runner): convert the last provider singleton",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 126,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 459,
+    "timeout": true,
+    "result_ok": 28,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [
+   "Differential gate marked review test baseline_red: baseline command `homeboy --output /tmp/tmp.36GvLZAm4G/review-test.json review test --placement local homeboy --path /home/runner/work/homeboy/homeboy` exited 124 before comparable counts were available"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30362981416,
+  "job": 90287017406,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "1c21d5634b22a8194be75aaeba5e88d1afbbe8bd",
+  "createdAt": "2026-07-28T13:19:58Z",
+  "title": "refactor(cli): one watch loop, and pin the ScopeArgs boundary",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 126,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 459,
+    "timeout": true,
+    "result_ok": 28,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [
+   "Differential gate marked review test baseline_red: baseline command `homeboy --output /tmp/tmp.Iy9Y3CoqiQ/review-test.json review test --placement local homeboy --path /home/runner/work/homeboy/homeboy` exited 124 before comparable counts were available"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30362979347,
+  "job": 90287011092,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "112ad82b6e5aa75df59d3d75bb7b4ad33ff47878",
+  "createdAt": "2026-07-28T13:19:57Z",
+  "title": "refactor(artifacts): collapse structurally identical artifact-ref types",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 126,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 461,
+    "timeout": true,
+    "result_ok": 28,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [
+   "Differential gate marked review test baseline_red: baseline command `homeboy --output /tmp/tmp.H4NIWMP1sO/review-test.json review test --placement local homeboy --path /home/runner/work/homeboy/homeboy` exited 124 before comparable counts were available"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30362921567,
+  "job": 90286815509,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "822dce2801e319c1784bd941cf786b4b21117c9a",
+  "createdAt": "2026-07-28T13:19:10Z",
+  "title": "fix(cleanup): give runner-downloads an ownership, age, and liveness predicate",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 126,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 127,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30362805133,
+  "job": 90286424667,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "32c448c54d778824511d6d4b6ad4b5c3c60877d1",
+  "createdAt": "2026-07-28T13:17:37Z",
+  "title": "fix: unify canonical candidate status",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 127,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_dispatch_plan::tests::dispatch_plan_preserves_abstract_executor_requirements",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 457,
+    "timeout": true,
+    "result_ok": 28,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [
+   "Differential gate marked review test baseline_red: baseline command `homeboy --output /tmp/tmp.xRnSFfDBfH/review-test.json review test --placement local homeboy --path /home/runner/work/homeboy/homeboy` exited 124 before comparable counts were available"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30362804533,
+  "job": 90286423759,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "cdaa856dea0e79f9577174a2bc3e04c7640d3d05",
+  "createdAt": "2026-07-28T13:17:37Z",
+  "title": "fix: make runner reconnect recovery deterministic",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 126,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 458,
+    "timeout": true,
+    "result_ok": 28,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [
+   "Differential gate marked review test baseline_red: baseline command `homeboy --output /tmp/tmp.O3IlMj36BF/review-test.json review test --placement local homeboy --path /home/runner/work/homeboy/homeboy` exited 124 before comparable counts were available"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30362304898,
+  "job": 90284754366,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "7577e62789e1ccf216b1e25dee603bff1f0e3174",
+  "createdAt": "2026-07-28T13:11:04Z",
+  "title": "fix: make agent task retries idempotent",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 126,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 127,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30362303448,
+  "job": 90284746892,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "b94cf16e4de553b272e4ecd7b3d04e389dc50a80",
+  "createdAt": "2026-07-28T13:11:03Z",
+  "title": "fix: retain nested test evidence",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 126,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 127,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30362303416,
+  "job": 90284746937,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "a162e5e1f83df5acd6937edfdd47283ad07cd4c2",
+  "createdAt": "2026-07-28T13:11:03Z",
+  "title": "fix: compare deployed package contents",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 126,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 127,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30362018000,
+  "job": 90283802043,
+  "conclusion": "failure",
+  "test_job_conclusion": "failure",
+  "sha": "d5b527e9db6f53c65bd98c791dd58c00f9af85d1",
+  "createdAt": "2026-07-28T13:07:22Z",
+  "title": "fix(lab): poll reverse staging through broker",
+  "phases": [
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::durable_finalization_uses_promoted_files_for_clean_committed_candidate",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 454,
+    "timeout": true,
+    "result_ok": 27,
+    "result_failed": 0,
+    "harness_exit_124": true
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 127,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30359790734,
+  "job": 90276529937,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "1c21d5634b22a8194be75aaeba5e88d1afbbe8bd",
+  "createdAt": "2026-07-28T12:37:57Z",
+  "title": "refactor(cli): one watch loop, and pin the ScopeArgs boundary",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 126,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 127,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30359254985,
+  "job": 90274663799,
+  "conclusion": "failure",
+  "test_job_conclusion": "success",
+  "sha": "35634040e75df6b82672f4feed841262130120a5",
+  "createdAt": "2026-07-28T12:30:33Z",
+  "title": "fix(cleanup): give runner-downloads an ownership, age, and liveness predicate",
+  "phases": [
+   {
+    "failed": [],
+    "ok": 0,
+    "timeout": false,
+    "result_ok": 0,
+    "result_failed": 0,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 127,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate marked review test inconclusive: current=unavailable base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30359181283,
+  "job": 90274508005,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "112ad82b6e5aa75df59d3d75bb7b4ad33ff47878",
+  "createdAt": "2026-07-28T12:29:35Z",
+  "title": "Collapse five structurally identical artifact-ref types, and disambiguate the three named ArtifactRef",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 126,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 126,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30359070626,
+  "job": 90274062564,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "d356398551577229365e0d14eac88a46196cee3b",
+  "createdAt": "2026-07-28T12:28:02Z",
+  "title": "fix(audit): read nested review corpus summary",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 126,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 126,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30358753563,
+  "job": 90273038539,
+  "conclusion": "failure",
+  "test_job_conclusion": "failure",
+  "sha": "8bf1dbd6edbc23e6b24863453e69054fe5e5a9c9",
+  "createdAt": "2026-07-28T12:23:39Z",
+  "title": "fix(release): align finalizer runtime baseline",
+  "phases": [
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_accepts_component_contracts_from_provider_config",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::production_validator_accepts_only_the_exact_promoted_recovery_commit",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 500,
+    "timeout": true,
+    "result_ok": 27,
+    "result_failed": 0,
+    "harness_exit_124": true
+   },
+   {
+    "failed": [
+     "agent_task_dispatch_plan::tests::dispatch_plan_preflight_fails_on_unresolved_runtime_dependency",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_is_cancelled",
+     "agent_task_gate::baseline_tests::bounded_baseline_gate_reaps_background_descendants_before_reader_join",
+     "agent_task_gate::tests::existing_gate_commands_are_automatic_toolchain_requirements",
+     "agent_task_finalization::tests::production_validator_accepts_only_the_exact_promoted_recovery_commit",
+     "agent_task_lifecycle::activity_provider::tests::probe_by_id_resolves_one_record_without_scanning_or_writing",
+     "agent_task_lifecycle::activity_provider::tests::show_activity_resolves_an_agent_task_id_through_the_indexed_probe"
+    ],
+    "ok": 502,
+    "timeout": true,
+    "result_ok": 27,
+    "result_failed": 0,
+    "harness_exit_124": true
+   }
+  ],
+  "gate": [],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 124"
+  ]
+ },
+ {
+  "run": 30356759326,
+  "job": 90266639706,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "15c31818d63226f4108c9e3c31bc328ce9b292a3",
+  "createdAt": "2026-07-28T11:55:34Z",
+  "title": "fix(release): preserve GitHub failure diagnostics",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 124,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 126,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30355370976,
+  "job": 90262197970,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "76fec6201eb245d0625cf10b22b19ca91c15a665",
+  "createdAt": "2026-07-28T11:35:01Z",
+  "title": "Allow unmatched audit convention exceptions",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 126,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 126,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30353595744,
+  "job": 90256530833,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "ee1b32daf8a98bfc852ec18aef25e090a63c7c70",
+  "createdAt": "2026-07-28T11:08:37Z",
+  "title": "fix(audit): make the post-merge audit gate actually scan, and unblind the source-policy corpus",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 126,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 124,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30353488910,
+  "job": 90256186579,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "e008038849f3318786af66f9f4ed4fe77b989dce",
+  "createdAt": "2026-07-28T11:07:02Z",
+  "title": "fix: preserve reverse broker handoff transport",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 124,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 124,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30353207185,
+  "job": 90255395812,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "2b0b6dbb8269a427b357b2c22f9a119eafb32fd6",
+  "createdAt": "2026-07-28T11:03:03Z",
+  "title": "Generate the CLI reference from clap (#10324)",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 124,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 124,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30351665824,
+  "job": 90250329484,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "5db149d4850caac6b60364e723c43a1f01b52784",
+  "createdAt": "2026-07-28T10:40:07Z",
+  "title": "fix: close the two formatter blind spots that hid 34 files from cargo fmt",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 124,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 124,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ }
+]
