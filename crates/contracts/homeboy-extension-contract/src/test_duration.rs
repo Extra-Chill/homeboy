@@ -26,14 +26,44 @@ pub mod duration_source {
     pub const BINARY_SUMMARY: &str = "binary-summary";
     /// A per-test time reported by the runner (libtest `--report-time`).
     pub const REPORT_TIME: &str = "report-time";
-    /// A per-test time reported by cargo-nextest.
-    pub const NEXTEST: &str = "nextest";
+    /// A per-test time reported by a runner that times individual cases in
+    /// its normal output (cargo-nextest does this).
+    pub const RUNNER_CASE: &str = "runner-case-timing";
     /// A binary duration attributed to the single test it contains. Exact, not
     /// a guess: with one test in the binary the two are the same measurement.
     pub const SOLE_TEST: &str = "sole-test-attribution";
     /// libtest's built-in `has been running for over N seconds` notice. Names a
     /// slow test without giving its duration, so it yields a lower bound only.
     pub const LONG_RUNNING_NOTICE: &str = "long-running-notice";
+}
+
+/// Output markers of the test-runner formats Homeboy can time.
+///
+/// These literals live in the contract rather than in the parser because they
+/// are *data describing a runner's output shape*, not engine behaviour. Keeping
+/// them here is what lets the timing engine stay ecosystem-agnostic: it matches
+/// declared markers, and a new runner format is a new constant rather than a
+/// new branch of hardcoded strings.
+pub mod output_marker {
+    /// Precedes a test binary's aggregate result line.
+    pub const BINARY_SUMMARY: &str = "test result:";
+    /// Introduces the elapsed time inside a binary summary line.
+    pub const ELAPSED: &str = "finished in ";
+    /// Announces the test target about to execute.
+    pub const TARGET_START: &str = "Running ";
+    /// Announces a documentation-test target.
+    pub const DOC_TARGET_START: &str = "Doc-tests ";
+    /// Separates a case name from its outcome.
+    pub const CASE_OUTCOME: &str = " ... ";
+    /// Names a case that has exceeded the runner's own slow threshold. It
+    /// carries no duration, only a lower bound.
+    pub const LONG_RUNNING: &str = " has been running for over ";
+    /// Introduces a whole-suite aggregate with its elapsed time.
+    pub const SUITE_SUMMARY: &str = "Summary [";
+    /// Introduces a whole-suite elapsed time on its own line.
+    pub const SUITE_ELAPSED: &str = "Time: ";
+    /// Case outcome keywords that precede a bracketed per-case duration.
+    pub const CASE_OUTCOMES: &[&str] = &["PASS", "FAIL", "SLOW", "LEAK", "TIMEOUT"];
 }
 
 /// Rule identifiers for duration findings. Distinct from failure findings and
