@@ -6,18 +6,12 @@
   "author": "Extra Chill",
   "provides": {
     "file_extensions": ["swift", "xcodeproj", "xcworkspace", "yml"],
-    "capabilities": ["fingerprint", "validate"],
     "discovery_markers": [
       { "any": ["Package.swift", "project.yml", "*.xcodeproj", "*.xcworkspace"] }
     ]
   },
   "composition": {
-    "includes": [],
-    "optional": [],
-    "roles": {
-      "project": ["swift-package", "swift-xcode-project"]
-    },
-    "conflicts": []
+    "includes": []
   },
   "structured_sidecars": {
     "lint.findings": true,
@@ -27,8 +21,7 @@
     "annotations": false
   },
   "scripts": {
-    "fingerprint": "scripts/fingerprint.sh",
-    "validate": "scripts/validate.sh"
+    "fingerprint": "scripts/fingerprint.sh"
   },
   "platform": {
     "discovery": {

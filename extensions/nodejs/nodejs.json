@@ -6,19 +6,12 @@
   "author": "Extra Chill",
   "provides": {
     "file_extensions": ["js", "jsx", "ts", "tsx", "mjs", "cjs", "json"],
-    "capabilities": ["format", "validate", "fuzz", "playwright-browser"],
     "discovery_markers": [
       { "all": ["package.json"] }
     ]
   },
   "composition": {
-    "includes": [],
-    "optional": ["dependency-adapters/nodejs-package-managers"],
-    "roles": {
-      "project": ["node-package"],
-      "javascript": "nodejs"
-    },
-    "conflicts": []
+    "includes": []
   },
   "source_snapshot": {
     "sync_excludes": ["node_modules/", "node_modules/**"]
@@ -108,7 +101,6 @@
     }
   ],
   "scripts": {
-    "validate": "scripts/validate.sh",
     "format": "scripts/format.sh"
   },
   "deps": {

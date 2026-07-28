@@ -7,11 +7,7 @@
   "author": "Extra Chill",
   "homeboy_version_target": ">=0.281.20",
   "provides": {
-    "file_extensions": ["mjs"],
-    "capabilities": ["run-completion-notifications"]
-  },
-  "scripts": {
-    "validate": "scripts/validate.sh"
+    "file_extensions": ["mjs"]
   },
   "notification_transports": [
     {
