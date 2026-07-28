@@ -1491,3 +1491,8 @@ mod tests {
 
 #[cfg(test)]
 mod global_flag_surface_tests;
+
+#[cfg(test)]
+mod reference_docs;
+#[cfg(test)]
+mod reference_docs_tests;

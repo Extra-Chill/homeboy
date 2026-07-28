@@ -96,13 +96,13 @@ always authoritative across both retry paths.
 
 ```bash
 # Exactly one provider process: no retry and no rotation.
-homeboy agent-task dispatch --prompt @task.md --max-provider-executions 1
+homeboy agent-task cook --prompt @task.md --max-provider-executions 1
 
 # One retry on the same provider, with at most two executions total.
-homeboy agent-task dispatch --prompt @task.md --max-provider-executions 2 --max-same-provider-retries 1
+homeboy agent-task cook --prompt @task.md --max-provider-executions 2 --max-same-provider-retries 1
 
 # Rotate once after a provider failure, with no same-provider retry.
-homeboy agent-task dispatch --prompt @task.md --max-provider-executions 2 --max-provider-rotations 1
+homeboy agent-task cook --prompt @task.md --max-provider-executions 2 --max-provider-rotations 1
 ```
 
 `--attempts N` remains accepted as a legacy alias for `--max-provider-executions N`.

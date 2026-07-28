@@ -1,6 +1,5 @@
 # Commands index
 
-- [api](api.md)
 - [activity](activity.md) — unified active and recently finished Homeboy work
 - [agent-task](agent-task.md)
 - [api](api.md)
@@ -51,6 +50,10 @@ when installed. Extension command docs describe possible runtime-provided
 commands rather than guaranteed core subcommands.
 
 Agents and automation that need command safety metadata should read the recursive manifest with `homeboy contract manifest`.
+
+Every page above is hand-written narrative. The exhaustive, always-current
+synopsis/flag/subcommand surface for each command is generated from clap into
+[the CLI reference](../reference/cli/commands/index.md).
 
 Related:
 
