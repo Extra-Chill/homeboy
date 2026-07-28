@@ -41,6 +41,12 @@ pub struct MirroredDaemonEvidence {
     pub patch: Option<Value>,
 }
 
+#[derive(Debug)]
+enum TerminalResultAvailability {
+    Pending,
+    Present(homeboy_core::api_jobs::RemoteRunnerJobResult),
+}
+
 #[derive(Debug, Clone)]
 struct SyntheticRunOwnership {
     run_id: String,
@@ -180,6 +186,7 @@ pub fn mirror_daemon_evidence(
     run_id: Option<&str>,
     notification_route: Option<&NotificationRoute>,
 ) -> Result<Option<MirroredDaemonEvidence>> {
+    classify_terminal_result(job, result, "direct-daemon")?;
     let store = ObservationStore::open_initialized()?;
     let local_job_run = mirror_job_run(
         &store,
@@ -195,7 +202,7 @@ pub fn mirror_daemon_evidence(
     let result = (|| {
         let remote_runs =
             mirror_remote_observation_runs(&store, runner, job, result, notification_route)?;
-        if remote_runs.is_empty() || job.status == JobStatus::Failed {
+        if job.status.is_terminal() && (remote_runs.is_empty() || job.status == JobStatus::Failed) {
             mirror_terminal_job_artifacts(&store, runner, job, &local_job_run)?;
         }
         let patch = mirrored_patch_result(&store, runner, job, result.get("patch"))?;
@@ -251,18 +258,29 @@ pub fn mirror_reverse_broker_evidence(
         notification_route,
     )?;
     let result = (|| {
+        let terminal_result = classify_terminal_result(job, result, "reverse-broker")?;
+        if matches!(&terminal_result, TerminalResultAvailability::Pending) {
+            let run = record_reverse_broker_metadata(
+                &store,
+                local_job_run.run.clone(),
+                runner,
+                broker_url,
+                job,
+                events,
+                result,
+                Vec::new(),
+                None,
+            )?;
+            return Ok(Some(MirroredDaemonEvidence {
+                run: run.clone(),
+                runs: vec![run],
+                patch: None,
+            }));
+        }
+        let TerminalResultAvailability::Present(terminal_result) = terminal_result else {
+            unreachable!("pending result returned above");
+        };
         let declared_run_ids = explicit_observation_run_ids(result, job);
-        let terminal_result: homeboy_core::api_jobs::RemoteRunnerJobResult =
-            serde_json::from_value(result.clone()).map_err(|error| {
-                Error::validation_invalid_argument(
-                    "result.observation_run_details",
-                    format!(
-                        "reverse runner terminal result is not a valid typed observation detail contract: {error}"
-                    ),
-                    None,
-                    None,
-                )
-            })?;
         let runs;
         let local_artifacts = if job.status == JobStatus::Failed {
             Some(mirror_reverse_terminal_artifacts(
@@ -486,6 +504,7 @@ fn record_reverse_broker_metadata(
         "runner_id": runner.id.clone(), "job_id": job.id.to_string(), "broker_url": broker_url,
         "status": job.status, "events": bounded_remote_events(events), "event_count": events.len(),
         "result_summary": result_summary(result), "artifacts": artifacts,
+        "result_availability": result_availability_metadata(job),
         "observation_run_details": if unresolved_run_refs.is_some() { json!("unavailable_legacy") } else { Value::Null },
         "unresolved_run_refs": unresolved_run_refs,
     });
@@ -890,6 +909,7 @@ pub(super) fn mirror_job_run(
         "source_snapshot": source_snapshot_from_result(result),
         "run_label": inferred_label,
         "explicit_run_id": run_id,
+        "result_availability": result_availability_metadata(job),
     });
     if let Some(failure) = runner_failure_projection(runner, job, result) {
         lab["failure"] = failure;
@@ -974,9 +994,10 @@ pub(super) fn mirror_job_run(
     }
     let synthetic_ownership = if run_id.is_none() {
         let inserted = store.import_synthetic_run(&run, &synthetic_token)?;
-        if !inserted && job.status.is_terminal() {
-            // A progress mirror owns the same deterministic synthetic ID. Upsert
-            // its terminal result so restart/reconcile cannot leave it running.
+        if !inserted {
+            // A progress mirror owns the same deterministic synthetic ID. The
+            // terminal guard keeps a delayed pending poll from replacing a
+            // settled observation while recording the latest observed phase.
             store.upsert_imported_run_preserving_terminal(&run)?;
         }
         inserted.then(|| SyntheticRunOwnership {
@@ -999,6 +1020,56 @@ pub(super) fn mirror_job_run(
                 run.id
             ))
         })
+}
+
+fn classify_terminal_result(
+    job: &Job,
+    result: &Value,
+    transport: &str,
+) -> Result<TerminalResultAvailability> {
+    if !job.status.is_terminal() {
+        return Ok(TerminalResultAvailability::Pending);
+    }
+    serde_json::from_value(result.clone())
+        .map(TerminalResultAvailability::Present)
+        .map_err(|error| {
+            Error::validation_invalid_argument(
+                "result",
+                format!(
+                    "runner job `{}` has a malformed terminal result on {transport}; schema=RemoteRunnerJobResult; payload={}: {error}",
+                    job.id,
+                    bounded_result_payload(result),
+                ),
+                None,
+                None,
+            )
+        })
+}
+
+fn result_availability_metadata(job: &Job) -> Value {
+    if job.status.is_terminal() {
+        json!({ "state": "terminal" })
+    } else {
+        json!({
+            "state": "pending",
+            "last_observed_phase": job.status,
+            "next_poll_action": "refresh_mirrored_daemon_evidence",
+        })
+    }
+}
+
+fn bounded_result_payload(result: &Value) -> String {
+    let payload = homeboy_core::redaction::redact_json(result);
+    let payload =
+        serde_json::to_string(&payload).unwrap_or_else(|_| "<unserializable>".to_string());
+    const LIMIT: usize = 512;
+    let mut characters = payload.chars();
+    let bounded = characters.by_ref().take(LIMIT).collect::<String>();
+    if characters.next().is_some() {
+        format!("{bounded}...")
+    } else {
+        bounded
+    }
 }
 
 pub(super) fn bounded_remote_events(events: &[JobEvent]) -> Vec<Value> {
