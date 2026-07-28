@@ -876,3 +876,47 @@ fn release_fast_path_keeps_every_publication_verification() {
         "recovery evidence must record whether the published bytes were rebuilt or pre-existing"
     );
 }
+
+/// Recovery is allowed — required — to run a control binary NEWER than the tag
+/// it repairs; that is the bootstrap #10519 asks for, and #10560 built it by
+/// pinning `gate-build` to `github.sha`. The inverse was never bounded: a
+/// control binary from a tree that never contained the tag cannot be shown to
+/// carry the publisher fix recovery exists to apply, and would impose a release
+/// contract the tag was never planned under.
+///
+/// The workflow is the only place that relationship can be established, because
+/// only it holds both the control commit and the release target's git history.
+/// The publisher enforces it, so the manifest must carry it.
+#[test]
+fn release_recovery_records_control_binary_lineage_against_the_release_target() {
+    let workflow = release_workflow();
+    let host = job_section(workflow, "host");
+    let adoption = release_step_block(host, "name: Create remote draft adoption manifest");
+
+    assert!(
+        adoption.contains("CONTROL_SHA: ${{ github.sha }}"),
+        "the adoption manifest must record which commit the control binary was built from"
+    );
+    assert!(
+        adoption.contains("git merge-base --is-ancestor"),
+        "control lineage must be read out of git history, never assumed"
+    );
+    assert!(
+        adoption.contains("contains_target: $contains_target"),
+        "the publisher can only enforce the lineage boundary if the manifest carries it"
+    );
+
+    // Fail-safe direction. An already-stranded release must never become
+    // unrecoverable because ancestry could not be resolved, so only a
+    // definitive "not an ancestor" (git exit code 1) may produce `false`;
+    // every other path leaves the answer null, which the publisher treats as
+    // unverified-but-permitted.
+    assert!(
+        adoption.contains("CONTAINS_TARGET=null"),
+        "unresolvable ancestry must default to unverified, never to a blocking answer"
+    );
+    assert!(
+        adoption.contains("1) CONTAINS_TARGET=false ;;"),
+        "only git's definitive non-ancestor exit code may block a recovery"
+    );
+}
