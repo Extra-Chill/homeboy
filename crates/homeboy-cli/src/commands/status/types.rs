@@ -399,7 +399,10 @@ mod progress_tests {
         // In the (non-TTY) test environment progress is inactive; report/drop
         // must be safe no-ops that never panic or emit control characters.
         let progress = StatusProgress::new(10);
-        assert!(!progress.is_active(), "non-TTY stderr yields inactive progress");
+        assert!(
+            !progress.is_active(),
+            "non-TTY stderr yields inactive progress"
+        );
         progress.report(0, "component-a");
         progress.report(9, "component-b");
         drop(progress);

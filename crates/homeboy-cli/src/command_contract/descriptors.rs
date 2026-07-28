@@ -3,8 +3,16 @@
 /// Expands the Ops command descriptors into a consumer macro.
 ///
 /// Each row binds a command module to its parsed Clap variant and JSON handler.
-/// That is the whole descriptor: module registration and JSON dispatch are the
-/// only two things a `Commands` variant needs from this table.
+///
+/// This table does **not** declare the command modules. It used to: a
+/// `register_ops_command_modules!` consumer expanded `$(pub mod $module;)*`.
+/// rustfmt resolves the module tree by parsing and does not expand
+/// `macro_rules!`, so every module declared that way was invisible to
+/// `cargo fmt --all` -- fifteen subtrees, 33 files, drifting unformatted. The
+/// declarations now live as literal `pub mod` lines in `commands/mod.rs`.
+/// Removing them from here cost no safety: `$handler` names
+/// `crate::commands::<module>::run`, so a row without a declared module does
+/// not compile.
 ///
 /// Contract metadata (a `CommandSpec`) is deliberately **not** a column here. It
 /// lives once, in [`ops_command_spec`], because `spec.rs` splices the ops rows

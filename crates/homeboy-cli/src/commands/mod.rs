@@ -199,10 +199,30 @@ pub fn finalize_set_spec(
     Ok((json_string, replace_fields))
 }
 
+// Every command module is declared here with a literal `pub mod`, including the
+// fifteen ops-family modules that `ops_command_descriptors!` also enumerates.
+//
+// The ops declarations used to be emitted by a `register_ops_command_modules!`
+// consumer of that descriptor table. That saved fifteen lines and cost the
+// formatter: rustfmt resolves the module tree by *parsing*, and it does not
+// expand `macro_rules!`, so a `mod` declared inside a macro body is a module
+// rustfmt never learns exists. `cargo fmt --all` silently skipped these fifteen
+// subtrees -- 33 files, including four `#[path]`-mounted test files reachable
+// only through them -- and formatting drift accumulated there unchecked
+// (36 rustfmt diff blocks across 10 files by the time it was found).
+//
+// The descriptor table keeps its other two consumers (JSON dispatch and the
+// registration guard); only the module-declaration consumer is gone. Nothing
+// weakened: a descriptor row whose module is not declared here fails to
+// compile, because the row's `$handler` names `crate::commands::<module>::run`.
+//
+// `formatter_visibility::no_modules_are_declared_inside_macros` (below) fails
+// closed if a `mod` declaration is ever moved back inside a macro body.
 pub mod activity;
 pub mod agent_task;
 pub(crate) mod agent_task_dispatch;
 pub(crate) mod agent_task_summary;
+pub mod api;
 pub mod artifact_postprocess;
 pub mod audit;
 pub mod audit_baseline;
@@ -218,13 +238,20 @@ pub mod contract_lab_routing;
 #[cfg(test)]
 mod contract_lab_routing_tests;
 pub mod contract_output_routing;
+pub mod daemon;
+pub mod db;
+pub mod deploy;
 pub mod docs;
 pub mod extension;
+pub mod file;
 pub mod fleet;
 pub mod fuzz;
+pub mod git;
+pub mod harvest;
 pub mod issues;
 pub mod json_output;
 pub mod lint;
+pub mod logs;
 pub mod observe;
 pub mod project;
 pub mod raw_output;
@@ -239,21 +266,20 @@ pub mod runner;
 pub mod runs;
 pub(crate) mod runs_proof_summary;
 pub(crate) mod runs_summary;
+pub mod schedule;
+pub mod self_cmd;
+pub mod server;
+pub mod ssh;
 pub mod stack;
+pub mod status;
 pub mod test;
 pub mod trace;
+pub mod triage;
 pub mod tunnel;
 pub mod undo;
+pub mod upgrade;
 pub mod utils;
 pub mod worktree;
-
-macro_rules! register_ops_command_modules {
-    ($(($module:ident, $variant:ident, $handler:path),)*) => {
-        $(pub mod $module;)*
-    };
-}
-
-crate::ops_command_descriptors!(register_ops_command_modules);
 
 // Command-runtime infrastructure: the routing, adapter, output/response,
 // manifest, and summary plumbing that turns a parsed `Commands` value into a

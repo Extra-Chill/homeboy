@@ -33,7 +33,11 @@ pub struct UpgradeArgs {
     pub no_restart_services: bool,
 
     /// Select the configured runner to converge with the controller. Repeat to target multiple runners.
-    #[arg(long = "upgrade-runner", value_name = "RUNNER_ID", conflicts_with = "skip_runners")]
+    #[arg(
+        long = "upgrade-runner",
+        value_name = "RUNNER_ID",
+        conflicts_with = "skip_runners"
+    )]
     pub runners: Vec<String>,
 
     /// Refresh selected runners without promoting the controller.

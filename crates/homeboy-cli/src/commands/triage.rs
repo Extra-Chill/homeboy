@@ -1,9 +1,9 @@
 use clap::{Args, Subcommand};
+use homeboy::core::Error;
 use homeboy_triage::{
     self as triage, TriageCommandOutput, TriageLandingOptions, TriageOptions, TriageTarget,
     TriageWatchOptions,
 };
-use homeboy::core::Error;
 use std::path::PathBuf;
 
 use super::utils::args::ScopeArgs;
@@ -443,7 +443,13 @@ mod tests {
                 "100",
             ],
             vec![
-                "triage", "landing", "--repo", "Extra-Chill/homeboy", "--ordered", "2238", "2239",
+                "triage",
+                "landing",
+                "--repo",
+                "Extra-Chill/homeboy",
+                "--ordered",
+                "2238",
+                "2239",
                 "2240",
             ],
         ] {

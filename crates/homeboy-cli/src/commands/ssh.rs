@@ -1,9 +1,9 @@
 use clap::{Args, Subcommand};
-use std::io::IsTerminal;
 use homeboy::core::engine::shell;
 use homeboy::core::server::{self, Server};
 use homeboy::core::server::{resolve_context, SshClient, SshResolveArgs};
 use serde::Serialize;
+use std::io::IsTerminal;
 
 use super::CmdResult;
 
@@ -208,9 +208,7 @@ fn connect_output_from_execution(
 /// Execute a non-interactive remote command and return its raw stdout/stderr and
 /// exit code, for `--raw` mode. Resolution mirrors [`run`], but the caller emits
 /// the remote streams directly instead of a JSON envelope.
-pub(super) fn execute_raw_command(
-    args: &SshArgs,
-) -> homeboy::core::Result<(String, String, i32)> {
+pub(super) fn execute_raw_command(args: &SshArgs) -> homeboy::core::Result<(String, String, i32)> {
     let resolve_args = if args.as_server {
         SshResolveArgs {
             id: None,
