@@ -36,17 +36,6 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
                 },
             )? {
                 homeboy_core::process::terminate_isolated_process_group(process_group)?;
-                if homeboy_core::process::isolated_process_group_is_running(process_group).map_err(
-                    |error| {
-                        Error::internal_unexpected(format!(
-                            "verify adoption gate process group termination: {error}"
-                        ))
-                    },
-                )? {
-                    return Err(Error::internal_unexpected(format!(
-                        "adoption gate process group {process_group} remains alive after cancellation"
-                    )));
-                }
             }
         }
         let now = now_timestamp();
