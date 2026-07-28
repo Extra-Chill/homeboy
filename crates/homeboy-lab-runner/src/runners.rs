@@ -26,7 +26,7 @@ pub use crate::{
     BROKER_TOKEN_ENV, BROKER_TOKEN_HEADER,
 };
 pub use crate::{
-    connect_reverse, disconnect, download_remote_artifact,
+    connect_reverse, disconnect, disconnect_local_recovery, download_remote_artifact,
     evaluate_lab_runner_capabilities_for_runner, exec, execute_lab_offload,
     hydrate_prepared_workspace_source_snapshot, is_remote_runner_artifact_path,
     is_reportable_artifact_evidence_path, is_retrievable_runner_artifact,
