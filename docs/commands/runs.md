@@ -65,6 +65,44 @@ homeboy --output json runs refs --kind trace --component gutenberg --aggregate-a
 
 `homeboy runs evidence <run-id>` emits reviewer-facing evidence using generic artifact addresses. Local operator files are represented as non-reviewer-visible `homeboy://run/<run-id>/artifact/<artifact-id>` handles with a fetch command instead of absolute machine paths. Remote runner artifacts use `runner-artifact://...` refs, validated public HTTP(S) URLs are emitted as public evidence links, and metadata-only evidence remains non-public. Lab-specific publication or mirroring policy belongs in runner/extension enrichment, not in the generic evidence serializer.
 
+### Evidence manifest
+
+Every `runs evidence` report carries an `evidence_manifest`: the run's
+interpretation contract (`homeboy/evidence-manifest/v1`). It answers *what does
+this evidence mean* and *what is blocking* in one place, so an orchestrator does
+not have to re-derive that from status strings, gate failures, and artifact
+addresses.
+
+`evidence_manifest.source` says where the interpretation came from and is stamped
+by Homeboy, not by the producer:
+
+| `source` | Meaning |
+| --- | --- |
+| `run_metadata` | A producer attached a manifest at `metadata.evidence_manifest`. |
+| `artifact` | A producer attached a manifest as an artifact of kind `evidence_manifest`. |
+| `derived` | No producer attached one; Homeboy composed it from the run record. |
+
+An attached manifest always wins and is surfaced verbatim — Homeboy never
+overwrites a producer's judgement. A manifest that fails to parse or fails
+contract validation is reported in `evidence_manifest_errors` and a derived
+manifest is used instead, so a producer bug is visible rather than silent.
+
+A derived manifest is a mechanical reading, not a judgement. Treat it as such:
+gate it on `source == "derived"` if a decision needs an independent assertion.
+It maps run status to `status.state` conservatively — a status label Homeboy does
+not own becomes `unknown` rather than a guess, and a run recorded as passing that
+also recorded a critical blocker is reported as `blocked`. `interpretation.confidence`
+grades reviewability: `low` for a non-terminal run or one with no artifacts,
+`medium` when every artifact is operator-local, `high` when at least one
+reviewer-visible evidence link exists.
+
+Producers can validate a candidate manifest before attaching it:
+
+```bash
+homeboy contract show evidence-manifest
+homeboy contract validate homeboy/evidence-manifest/v1 --file manifest.json
+```
+
 When a run passed but `runs evidence` has zero artifacts, the command completed
 but did not produce reviewable evidence. Preserve the run id and output directory,
 then promote or attach artifacts through the command-specific surface when it is

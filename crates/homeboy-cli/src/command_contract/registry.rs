@@ -187,6 +187,14 @@ pub const CONTRACT_REGISTRY: &[ContractRegistryEntry] = &[
         rust_type: "homeboy::agents::agent_task_provider::ResolvedAgentRuntimeExecutionContract",
     },
     ContractRegistryEntry {
+        schema_id: crate::core::evidence_manifest::EVIDENCE_MANIFEST_SCHEMA,
+        name: "evidence-manifest",
+        title: "Evidence manifest",
+        owner: "homeboy-core",
+        summary: "Portable interpretation of a body of evidence: state, summary, confidence, blocking conditions, and tracker/pull-request/run/artifact references.",
+        rust_type: "homeboy::core::evidence_manifest::EvidenceManifest",
+    },
+    ContractRegistryEntry {
         schema_id: crate::core::artifact_ref::ARTIFACT_REF_SCHEMA,
         name: "reviewer-facing-artifact-ref",
         title: "Reviewer-facing artifact reference",

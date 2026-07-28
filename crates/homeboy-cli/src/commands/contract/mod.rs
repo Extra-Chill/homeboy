@@ -21,6 +21,7 @@ use crate::command_contract::{
 use crate::commands::{adapter, CmdResult};
 use crate::core::artifact_ref::{validate_reviewer_facing_artifact_ref, ArtifactReference};
 use crate::core::artifacts::{validate_artifact_postprocess_plan, ArtifactManifest};
+use crate::core::evidence_manifest::{EvidenceManifest, EVIDENCE_MANIFEST_SCHEMA};
 use crate::core::host_mutation_lifecycle::{
     HostMutationLifecycle, HostMutationRevertStrategy, HostMutationStatus,
     HOST_MUTATION_LIFECYCLE_SCHEMA,
@@ -1291,6 +1292,7 @@ static CONTRACT_SCHEMAS: &[ContractSchema] = &[
     contract_schema!(RUNNER_EXECUTION_RECORD_SCHEMA, RunnerExecutionRecord),
     contract_schema!(PATH_MATERIALIZATION_PLAN_SCHEMA, PathMaterializationPlan),
     contract_schema!(RUN_OUTCOME_ENVELOPE_SCHEMA, RunOutcomeEnvelope),
+    contract_schema!(EVIDENCE_MANIFEST_SCHEMA, EvidenceManifest),
 ];
 
 trait ContractValidation: DeserializeOwned {
@@ -1333,6 +1335,7 @@ impl_contract_validation! {
     ResourceCleanupIntentContract => RESOURCE_CLEANUP_INTENT_SCHEMA, |value| value.validate();
     ResourceLifecycleIndex => RESOURCE_LIFECYCLE_INDEX_SCHEMA, |value| value.validate();
     HostMutationLifecycle => HOST_MUTATION_LIFECYCLE_SCHEMA, |value| value.validate();
+    EvidenceManifest => EVIDENCE_MANIFEST_SCHEMA, |value| validate_evidence_manifest(&value);
     Value => FUZZ_WORKLOAD_SCHEMA, |value| {
         FuzzWorkload::from_value(value).map_err(|message| {
             homeboy::core::Error::new(
@@ -1347,6 +1350,24 @@ impl_contract_validation! {
         })?;
         Ok(())
     };
+}
+
+/// Bridge the evidence manifest's own structural validation into the shared
+/// contract-validation error envelope, so a producer can check a manifest with
+/// `homeboy contract validate` before attaching it to a run instead of finding
+/// out from `evidence_manifest_errors` after the fact.
+fn validate_evidence_manifest(manifest: &EvidenceManifest) -> homeboy::core::Result<()> {
+    manifest.validate().map_err(|message| {
+        homeboy::core::Error::new(
+            homeboy::core::ErrorCode::ValidationInvalidArgument,
+            "Contract validation failed",
+            serde_json::json!({
+                "schema": EVIDENCE_MANIFEST_SCHEMA,
+                "valid": false,
+                "error": message,
+            }),
+        )
+    })
 }
 
 fn deserialize_contract<T: DeserializeOwned>(
@@ -1463,6 +1484,63 @@ mod tests {
             schema_id: schema_id.to_string(),
             file,
         })
+    }
+
+    /// The evidence manifest is an inbound contract: a producer outside this
+    /// repository attaches one to a run. That is only usable if the producer can
+    /// discover the schema and check a candidate before attaching it.
+    #[test]
+    fn evidence_manifest_is_discoverable_and_validatable() {
+        let contract =
+            registered_contract("evidence-manifest").expect("evidence manifest registry entry");
+        assert_eq!(contract.schema_id, EVIDENCE_MANIFEST_SCHEMA);
+
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "manifest.json",
+            json!({
+                "schema": EVIDENCE_MANIFEST_SCHEMA,
+                "status": { "state": "blocked" },
+                "interpretation": {
+                    "summary": "One scenario regressed.",
+                    "confidence": "medium"
+                },
+                "blocking_conditions": [{
+                    "kind": "coverage_gap",
+                    "summary": "Missing scenario.",
+                    "severity": "warning"
+                }]
+            }),
+        );
+
+        let output = validate_file(EVIDENCE_MANIFEST_SCHEMA, file).expect("valid manifest");
+        assert!(output.valid);
+    }
+
+    #[test]
+    fn evidence_manifest_validation_rejects_an_empty_interpretation() {
+        let dir = TempDir::new().unwrap();
+        let file = write_json(
+            &dir,
+            "manifest.json",
+            json!({
+                "schema": EVIDENCE_MANIFEST_SCHEMA,
+                "status": { "state": "passed" },
+                "interpretation": { "summary": "" }
+            }),
+        );
+
+        let err = validate_file(EVIDENCE_MANIFEST_SCHEMA, file).expect_err("invalid manifest");
+        assert_eq!(err.details["valid"], json!(false));
+        assert!(
+            err.details["error"]
+                .as_str()
+                .expect("error detail")
+                .contains("interpretation.summary"),
+            "{:?}",
+            err.details
+        );
     }
 
     #[test]

@@ -356,6 +356,16 @@ mod tests {
             assert_eq!(manifest.schema, "homeboy/evidence-manifest/v1");
             assert_eq!(manifest.tracker_refs[0].id, "Extra-Chill/homeboy#123");
             assert_eq!(manifest.blocking_conditions[0].kind, "review_needed");
+            // An attached manifest is surfaced verbatim, stamped with where it
+            // was found rather than replaced by a derived reading.
+            assert_eq!(
+                manifest.source,
+                Some(homeboy::core::evidence_manifest::EvidenceManifestSource::RunMetadata)
+            );
+            assert_eq!(
+                manifest.interpretation.summary,
+                "Evidence is blocked on reviewer confirmation."
+            );
             assert!(output.evidence_manifest_errors.is_empty());
             let lifecycle_event = output
                 .agent_task_lifecycle_event
@@ -368,6 +378,65 @@ mod tests {
                 output.disk_budget.available_bytes.is_some()
                     || output.disk_budget.warning.is_some()
             );
+            homeboy::core::set_artifact_root_override(None);
+        });
+    }
+
+    /// Before this wiring the manifest member was structurally always absent:
+    /// nothing in the repository produced one, so `runs evidence` advertised an
+    /// interpretation layer it never populated. A run nobody attached a manifest
+    /// to must still carry one, marked as Homeboy's own reading.
+    #[test]
+    fn evidence_command_derives_a_manifest_when_no_producer_attached_one() {
+        with_isolated_home(|home| {
+            let _xdg = XdgGuard::unset();
+            let _public_artifact_base = EnvGuard::unset(PUBLIC_ARTIFACT_BASE_URL_ENV);
+            let artifact_root = home.path().join("agent-readable-artifacts");
+            homeboy::core::set_artifact_root_override(Some(artifact_root));
+            let store = ObservationStore::open_initialized().expect("store");
+            let run = store
+                .start_run(sample_run(
+                    "bench",
+                    "homeboy",
+                    "studio",
+                    serde_json::json!({ "gate_failures": ["p95_ms exceeded"] }),
+                ))
+                .expect("run");
+            store
+                .finish_run(&run.id, RunStatus::Fail, None)
+                .expect("finish run");
+
+            let (output, _) = evidence(&run.id).expect("evidence");
+            let RunsOutput::Evidence(output) = output else {
+                panic!("expected evidence output");
+            };
+
+            let manifest = output.evidence_manifest.expect("derived evidence manifest");
+            manifest
+                .validate()
+                .expect("derived manifest is contract-valid");
+            assert_eq!(
+                manifest.source,
+                Some(homeboy::core::evidence_manifest::EvidenceManifestSource::Derived)
+            );
+            assert_eq!(
+                manifest.status.state,
+                homeboy::core::evidence_manifest::EvidenceManifestState::Failed
+            );
+            assert_eq!(manifest.id.as_deref(), Some(run.id.as_str()));
+            assert_eq!(manifest.run_refs[0].id, run.id);
+            assert_eq!(manifest.run_refs[0].kind.as_deref(), Some("bench"));
+            assert_eq!(
+                manifest.run_refs[0].component_id.as_deref(),
+                Some("homeboy")
+            );
+            let gate = manifest
+                .blocking_conditions
+                .iter()
+                .find(|condition| condition.kind == "gate_failure")
+                .expect("gate failure blocker");
+            assert_eq!(gate.summary, "p95_ms exceeded");
+            assert!(output.evidence_manifest_errors.is_empty());
             homeboy::core::set_artifact_root_override(None);
         });
     }

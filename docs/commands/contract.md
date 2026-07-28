@@ -38,10 +38,18 @@ Accepted contract IDs include `all`, `artifact-manifest`, `loop`,
 ```sh
 homeboy contract list
 homeboy contract show secret-env-plan
+homeboy contract show evidence-manifest
 ```
 
 The registry is the central source for contract names, schema IDs, titles,
 owners, summaries, and Rust type anchors.
+
+Inbound contracts — ones a producer outside this repository attaches to a run,
+such as `evidence-manifest` — can be checked before they are attached:
+
+```sh
+homeboy contract validate homeboy/evidence-manifest/v1 --file manifest.json
+```
 
 ## Export
 
