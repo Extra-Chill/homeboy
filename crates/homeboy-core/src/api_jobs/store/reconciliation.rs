@@ -192,7 +192,7 @@ impl JobStore {
                 None,
             ));
         }
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        self.durable_transaction(|inner| {
         let active = inner
             .jobs
             .values()
@@ -275,12 +275,11 @@ impl JobStore {
             apply_event_retention(&mut stored.events, self.event_retention_limit());
             stored.job.event_count = stored.events.len();
         }
-        drop(inner);
-        self.persist()?;
         Ok(DaemonLeaseJobDiagnostics {
             expected_lease_id: expected_lease_id.to_string(),
             matching_job_ids: expected.into_iter().collect(),
             ..DaemonLeaseJobDiagnostics::default()
+        })
         })
     }
 
@@ -301,7 +300,7 @@ impl JobStore {
             ));
         };
         let now = timestamp_ms();
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        self.durable_transaction(|inner| {
         let active_job_ids = inner
             .jobs
             .values()
@@ -387,12 +386,11 @@ impl JobStore {
         }
         apply_event_retention(&mut stored.events, self.event_retention_limit());
         stored.job.event_count = stored.events.len();
-        drop(inner);
-        self.persist()?;
         Ok(DaemonLeaseJobDiagnostics {
             expected_lease_id: expected_lease_id.to_string(),
             matching_job_ids: vec![*job_id],
             ..DaemonLeaseJobDiagnostics::default()
+        })
         })
     }
 
@@ -425,25 +423,25 @@ impl JobStore {
         let mut reconciled = Vec::with_capacity(terminal.len());
         for (job_id, result) in terminal {
             let now = timestamp_ms();
-            let mut inner = self.inner.lock().expect("job store mutex poisoned");
-            let stored = inner.jobs.get_mut(&job_id).expect("terminal job exists");
-            stored.job.status = result.status;
-            stored.job.updated_at_ms = now;
-            stored.job.finished_at_ms = Some(now);
-            stored.job.stale_reason = None;
-            for artifact in result.artifacts {
-                if !stored
-                    .job
-                    .artifacts
-                    .iter()
-                    .any(|existing| existing.id == artifact.id)
-                {
-                    stored.job.artifacts.push(artifact);
+            self.durable_transaction(|inner| {
+                let stored = inner.jobs.get_mut(&job_id).expect("terminal job exists");
+                stored.job.status = result.status;
+                stored.job.updated_at_ms = now;
+                stored.job.finished_at_ms = Some(now);
+                stored.job.stale_reason = None;
+                for artifact in result.artifacts {
+                    if !stored
+                        .job
+                        .artifacts
+                        .iter()
+                        .any(|existing| existing.id == artifact.id)
+                    {
+                        stored.job.artifacts.push(artifact);
+                    }
                 }
-            }
-            drop(inner);
-            self.persist()?;
-            reconciled.push(job_id);
+                reconciled.push(job_id);
+                Ok(())
+            })?;
         }
         Ok(reconciled)
     }
@@ -549,13 +547,13 @@ impl JobStore {
         }
         for (job_id, resolution) in &matching {
             if let LinkedDurableRunResolution::Terminal(recovered) = resolution {
-                let mut inner = self.inner.lock().expect("job store mutex poisoned");
-                let stored = inner.jobs.get_mut(job_id).expect("job exists");
-                stored.job.status = recovered.status;
-                stored.job.finished_at_ms = Some(timestamp_ms());
-                stored.job.updated_at_ms = stored.job.finished_at_ms.expect("timestamp");
-                drop(inner);
-                self.persist()?;
+                self.durable_transaction(|inner| {
+                    let stored = inner.jobs.get_mut(job_id).expect("job exists");
+                    stored.job.status = recovered.status;
+                    stored.job.finished_at_ms = Some(timestamp_ms());
+                    stored.job.updated_at_ms = stored.job.finished_at_ms.expect("timestamp");
+                    Ok(())
+                })?;
             }
         }
         if matching
@@ -684,7 +682,7 @@ impl JobStore {
             ));
         }
 
-        let mut inner = self.inner.lock().expect("job store mutex poisoned");
+        self.durable_transaction(|inner| {
         let mut diagnostics = diagnostics;
         let mut dispositions = Vec::with_capacity(diagnostics.matching_job_ids.len());
         let mut ambiguous_job_ids = Vec::new();
@@ -885,9 +883,8 @@ impl JobStore {
         }
         diagnostics.protected_job_ids.sort();
         diagnostics.preserved_remote_job_ids.sort();
-        drop(inner);
-        self.persist()?;
         Ok(diagnostics)
+        })
     }
 
     /// Terminalize all active jobs after an operator has proved that no daemon

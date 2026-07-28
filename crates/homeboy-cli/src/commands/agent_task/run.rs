@@ -911,7 +911,12 @@ where
 }
 
 pub(super) fn retry(args: RetryArgs) -> CmdResult<Value> {
-    let result = agent_task_service::retry(&args.run_id, args.new_run_id.as_deref(), args.run)?;
+    let result = agent_task_service::retry(
+        &args.run_id,
+        args.new_run_id.as_deref(),
+        args.run,
+        args.force,
+    )?;
     if result.run {
         return run_submitted_with_executor(
             result.record.run_id,

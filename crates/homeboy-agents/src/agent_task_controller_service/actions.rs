@@ -618,7 +618,7 @@ pub(super) fn execute_retry_action(
     action: &AgentTaskLoopPolicyActionRecord,
     target_run_id: &str,
 ) -> Result<(Value, i32)> {
-    let retry = agent_task_service::retry(target_run_id, None, false)?;
+    let retry = agent_task_service::retry(target_run_id, None, false, false)?;
     let retry_run_id = retry.record.run_id.clone();
     if !record
         .task_lineage

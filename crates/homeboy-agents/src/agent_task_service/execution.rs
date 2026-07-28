@@ -386,6 +386,7 @@ pub fn retry(
     run_id: &str,
     new_run_id: Option<&str>,
     run: bool,
+    force: bool,
 ) -> Result<AgentTaskRetryServiceResult> {
     let source = agent_task_lifecycle::status(run_id)?;
     let cook_retry = retryable_cook_attempt(&source)?;
@@ -405,9 +406,11 @@ pub fn retry(
                 .map(str::to_string)
                 .or(discovered_run_id)
                 .unwrap_or_else(|| {
-                    agent_task_lifecycle::cook_attempt_run_id(
-                        &cook_retry.cook_id,
-                        cook_retry.attempt,
+                    // All concurrent retries of one Cook attempt must reserve
+                    // the same lifecycle successor before claim reconciliation.
+                    format!(
+                        "{}-attempt-{}-retry",
+                        cook_retry.cook_id, cook_retry.attempt
                     )
                 });
             let retry_exists = agent_task_lifecycle::run_record_exists(&retry_run_id)?;
@@ -450,7 +453,7 @@ pub fn retry(
             }
             record
         }
-        None => agent_task_lifecycle::retry(&source.run_id, new_run_id)?,
+        None => agent_task_lifecycle::retry_with_force(&source.run_id, new_run_id, force)?,
     };
     Ok(AgentTaskRetryServiceResult { record, run })
 }
@@ -467,12 +470,31 @@ fn reserve_cook_retry_lifecycle(
         Duration::from_secs(30),
     )? {
         agent_task_lifecycle::ClaimOutcome::Acquired => {
-            agent_task_lifecycle::retry(&source.run_id, Some(retry_run_id))?;
-            agent_task_lifecycle::complete_cook_operation(
+            // The Cook operation claim coordinates recipe/index binding; the
+            // lifecycle retry lock also makes the first durable successor
+            // idempotent across concurrent controllers and processes.
+            agent_task_lifecycle::retry_with_force(&source.run_id, Some(retry_run_id), false)?;
+            let result = json!({ "run_id": retry_run_id });
+            if let Err(error) = agent_task_lifecycle::complete_cook_operation(
                 &source.run_id,
                 &operation_key,
-                json!({ "run_id": retry_run_id }),
-            )?;
+                result.clone(),
+            ) {
+                let recovered = agent_task_lifecycle::find_unbound_cook_retry_successor(
+                    &source.run_id,
+                    &retry.cook_id,
+                    retry.attempt,
+                    &retry.plan,
+                )?;
+                if recovered.as_ref().map(|record| record.run_id.as_str()) != Some(retry_run_id) {
+                    return Err(error);
+                }
+                agent_task_lifecycle::recover_completed_cook_operation(
+                    &source.run_id,
+                    &operation_key,
+                    result,
+                )?;
+            }
             Ok(retry_run_id.to_string())
         }
         agent_task_lifecycle::ClaimOutcome::AlreadyCompleted(result) => {

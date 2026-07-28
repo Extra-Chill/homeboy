@@ -1862,13 +1862,62 @@ fn cook_persists_controller_admission_timeout_before_provider_execution() {
 }
 
 #[test]
+fn active_cooks_on_the_same_canonical_worktree_record_a_nonblocking_warning() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let workspace = workspace
+            .path()
+            .canonicalize()
+            .expect("canonical workspace");
+        let mut options = batch_cook_options(
+            "cook-worktree-warning",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.to_worktree = workspace.display().to_string();
+        options.source_worktree_path = Some(workspace.clone());
+        options.initial_plan.tasks[0].workspace.root = Some(workspace.display().to_string());
+        agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&options.initial_run_id))
+            .expect("submit current Cook");
+
+        for run_id in ["active-cook-z", "active-cook-a"] {
+            let mut plan = options.initial_plan.clone();
+            plan.plan_id = run_id.to_string();
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit active Cook");
+            agent_task_lifecycle::record_cook_attempt(run_id, 1, run_id).expect("mark active Cook");
+        }
+
+        super::record_active_cook_worktree_warning(&options)
+            .expect("active worktree warning must not block Cook");
+
+        let current = agent_task_lifecycle::status(&options.initial_run_id)
+            .expect("current Cook remains inspectable");
+        assert_eq!(
+            current.state,
+            agent_task_lifecycle::AgentTaskRunState::Queued
+        );
+        assert_eq!(
+            current.metadata["cook_active_worktree_warning"],
+            serde_json::json!({
+                "schema": "homeboy/cook-active-worktree-warning/v1",
+                "canonical_worktree": workspace,
+                "active_run_ids": ["active-cook-a", "active-cook-z"],
+                "status_commands": [
+                    "homeboy agent-task status active-cook-a",
+                    "homeboy agent-task status active-cook-z"
+                ],
+            })
+        );
+    });
+}
+
+#[test]
 fn retryable_pre_provider_retry_stays_attached_to_its_cook() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-pre-provider-retry";
         let options = retryable_pre_provider_cook(cook_id, 2);
         let first_run_id = options.initial_run_id.as_str();
 
-        let retry = crate::agent_task_service::retry(first_run_id, None, false)
+        let retry = crate::agent_task_service::retry(first_run_id, None, false, false)
             .expect("corrected environment retry remains Cook-owned");
         let retry_run_id = retry.record.run_id.clone();
         let completed = crate::agent_task_service::execution::run_submitted(
@@ -1920,7 +1969,7 @@ fn retryable_pre_provider_retry_without_a_recipe_uses_legacy_lifecycle_retry() {
         )
         .expect("record retryable legacy failure");
 
-        let retry = crate::agent_task_service::retry(run_id, Some("legacy-retry"), false)
+        let retry = crate::agent_task_service::retry(run_id, Some("legacy-retry"), false, false)
             .expect("legacy retry remains supported");
 
         assert_eq!(retry.record.run_id, "legacy-retry");
@@ -1961,9 +2010,13 @@ fn retryable_pre_provider_retry_rejects_a_lifecycle_reservation_collision_withou
         agent_task_lifecycle::submit_plan(&unrelated, Some(collision_id))
             .expect("submit unrelated run");
 
-        let error =
-            crate::agent_task_service::retry(&options.initial_run_id, Some(collision_id), false)
-                .expect_err("colliding lifecycle reservation is rejected before Cook mutation");
+        let error = crate::agent_task_service::retry(
+            &options.initial_run_id,
+            Some(collision_id),
+            false,
+            false,
+        )
+        .expect_err("colliding lifecycle reservation is rejected before Cook mutation");
 
         assert_eq!(error.details["field"], "new_run_id");
         assert_eq!(
@@ -1992,7 +2045,7 @@ fn retryable_pre_provider_retry_enforces_the_persisted_attempt_budget() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let options = retryable_pre_provider_cook("cook-retry-budget", 1);
 
-        let error = crate::agent_task_service::retry(&options.initial_run_id, None, false)
+        let error = crate::agent_task_service::retry(&options.initial_run_id, None, false, false)
             .expect_err("retry cannot exceed the persisted Cook budget");
 
         assert_eq!(
@@ -2026,8 +2079,9 @@ fn retryable_pre_provider_retry_repairs_lifecycle_reserved_attempts_idempotently
         agent_task_lifecycle::retry(&options.initial_run_id, Some(&submitted_run_id))
             .expect("submit retry before Cook metadata binding");
 
-        let repaired = crate::agent_task_service::retry(&options.initial_run_id, None, false)
-            .expect("repair submitted retry");
+        let repaired =
+            crate::agent_task_service::retry(&options.initial_run_id, None, false, false)
+                .expect("repair submitted retry");
         assert_eq!(repaired.record.run_id, submitted_run_id);
         assert_eq!(repaired.record.metadata["cook_id"], options.cook_id);
         assert_eq!(repaired.record.metadata["cook_attempt"], 2);
@@ -2066,7 +2120,7 @@ fn retryable_pre_provider_retry_concurrently_claims_one_successor() {
                 let run_id = options.initial_run_id.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    crate::agent_task_service::retry(&run_id, None, false)
+                    crate::agent_task_service::retry(&run_id, None, false, false)
                         .expect("concurrent retry converges")
                         .record
                         .run_id
@@ -2136,7 +2190,7 @@ fn retryable_pre_provider_retry_process_worker() {
     let Ok(run_id) = std::env::var("HOMEBOY_RETRY_PROCESS_WORKER") else {
         return;
     };
-    crate::agent_task_service::retry(&run_id, None, false).expect("process retry converges");
+    crate::agent_task_service::retry(&run_id, None, false, false).expect("process retry converges");
 }
 
 #[test]
@@ -2154,7 +2208,7 @@ fn retryable_pre_provider_retry_rejects_unowned_same_plan_collision_without_retr
         agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&pending_run_id))
             .expect("occupy pending attempt with same plan");
 
-        let error = crate::agent_task_service::retry(&options.initial_run_id, None, false)
+        let error = crate::agent_task_service::retry(&options.initial_run_id, None, false, false)
             .expect_err("unowned same-plan run is not repaired without retry proof");
 
         assert!(error
@@ -2187,7 +2241,7 @@ fn retryable_pre_provider_retry_returns_terminal_successor_without_reexecution()
         )
         .expect("complete successor successfully");
 
-        let retry = crate::agent_task_service::retry(&options.initial_run_id, None, true)
+        let retry = crate::agent_task_service::retry(&options.initial_run_id, None, true, false)
             .expect("terminal successor is authoritative");
 
         assert_eq!(retry.record.run_id, successor_run_id);
@@ -2223,7 +2277,7 @@ fn retryable_pre_provider_retry_rejects_pending_attempt_owned_by_another_cook() 
         agent_task_lifecycle::record_cook_attempt("another-cook", 1, &pending_run_id)
             .expect("mark conflicting Cook ownership");
 
-        let error = crate::agent_task_service::retry(&options.initial_run_id, None, false)
+        let error = crate::agent_task_service::retry(&options.initial_run_id, None, false, false)
             .expect_err("conflicting Cook owner must not be rebound");
 
         assert!(error

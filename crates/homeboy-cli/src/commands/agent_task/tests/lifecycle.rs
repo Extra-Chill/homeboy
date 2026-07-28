@@ -1874,6 +1874,7 @@ fn retry_command_submits_new_queued_run() {
             run_id: "run-retry-source".to_string(),
             new_run_id: Some("run-retry-cli".to_string()),
             run: false,
+            force: false,
         })
         .expect("retry queued");
         let record: AgentTaskRunRecord = serde_json::from_value(value).expect("record");
@@ -1883,6 +1884,25 @@ fn retry_command_submits_new_queued_run() {
         assert_eq!(record.state, AgentTaskRunState::Queued);
         assert_eq!(record.metadata["retry_of"], json!("run-retry-source"));
     });
+}
+
+#[test]
+fn retry_force_alias_parses_as_force() {
+    let cli = Cli::try_parse_from([
+        "homeboy",
+        "agent-task",
+        "retry",
+        "retry-source",
+        "--allow-duplicate",
+    ])
+    .expect("retry force alias parses");
+    let Commands::AgentTask(args) = cli.command else {
+        panic!("agent-task retry command");
+    };
+    let AgentTaskCommand::Retry(args) = args.command else {
+        panic!("retry command");
+    };
+    assert!(args.force);
 }
 
 #[test]

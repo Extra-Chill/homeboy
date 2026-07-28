@@ -45,6 +45,89 @@ fn retry_first_visible_record_always_has_indexed_predecessor_identity() {
 }
 
 #[test]
+fn retry_lineage_refuses_an_active_successor_and_requires_force_after_terminal_successors() {
+    with_isolated_home(|_| {
+        let source_id = "retry-lineage-source";
+        submit_plan(&test_plan(), Some(source_id)).expect("submit source");
+
+        let first = retry_with_force(source_id, Some("retry-lineage-first"), false)
+            .expect("first retry reserves successor");
+        let replayed = retry_with_force(source_id, Some("retry-lineage-first"), false)
+            .expect("exact active retry reservation is idempotent");
+        assert_eq!(replayed.run_id, first.run_id);
+        let active = retry_with_force(source_id, Some("retry-lineage-second"), false)
+            .expect_err("active successor prevents duplicate retry");
+        assert!(active.message.contains("retry-lineage-first"));
+        assert!(active
+            .message
+            .contains("homeboy agent-task status retry-lineage-first"));
+
+        let forced_active = retry_with_force(source_id, Some("retry-lineage-first"), true)
+            .expect("force creates a distinct successor beside the active retry");
+        assert_ne!(forced_active.run_id, first.run_id);
+        assert_eq!(forced_active.metadata["retried_from"], source_id);
+        assert_eq!(forced_active.metadata["retry_root"], source_id);
+
+        cancel_run(&first.run_id, Some("test terminal successor")).expect("terminalize successor");
+        cancel_run(
+            &forced_active.run_id,
+            Some("test terminal forced successor"),
+        )
+        .expect("terminalize forced successor");
+        let terminal = retry_with_force(source_id, Some("retry-lineage-second"), false)
+            .expect_err("terminal successor requires explicit force");
+        assert_eq!(terminal.details["field"], "force");
+
+        let forced = retry_with_force(source_id, Some("retry-lineage-second"), true)
+            .expect("force creates next retry");
+        assert_eq!(forced.metadata["retried_from"], source_id);
+        assert_eq!(forced.metadata["retry_root"], source_id);
+        let source = exact_record(source_id).expect("source record");
+        assert_eq!(
+            source.metadata["retries"],
+            json!([
+                "retry-lineage-first",
+                forced_active.run_id,
+                "retry-lineage-second"
+            ])
+        );
+    });
+}
+
+#[test]
+fn runner_resubmission_preserves_existing_retry_lineage_metadata() {
+    with_isolated_home(|_| {
+        let source_id = "retry-resubmission-source";
+        let first_retry_id = "retry-resubmission-first";
+        let second_retry_id = "retry-resubmission-second";
+        let plan = test_plan();
+        submit_plan(&plan, Some(source_id)).expect("submit source");
+        retry_with_force(source_id, Some(first_retry_id), false).expect("reserve first retry");
+        retry_with_force(first_retry_id, Some(second_retry_id), true)
+            .expect("record descendant retry");
+
+        let resubmitted = submit_plan_with_runtime_admission_on_runner(
+            &plan,
+            Some(first_retry_id),
+            Some("fixture-runner".to_string()),
+            |_| Ok(json!({ "runner": "fixture-runtime" })),
+        )
+        .expect("runner resubmits the existing retry record");
+
+        assert_eq!(resubmitted.metadata["retried_from"], source_id);
+        assert_eq!(resubmitted.metadata["retry_root"], source_id);
+        assert_eq!(resubmitted.metadata["retries"], json!([second_retry_id]));
+        assert_eq!(resubmitted.metadata["retry_of"], source_id);
+        assert_eq!(
+            exact_record(first_retry_id)
+                .expect("persisted resubmitted retry")
+                .metadata["retries"],
+            json!([second_retry_id])
+        );
+    });
+}
+
+#[test]
 fn cook_progress_is_durable_across_active_and_terminal_lifecycle_states() {
     with_isolated_home(|_| {
         let run_id = "cook-progress-lifecycle";
