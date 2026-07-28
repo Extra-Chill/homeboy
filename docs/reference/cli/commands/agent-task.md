@@ -38,6 +38,7 @@ Run generic agent task plans
 | `homeboy agent-task latest` | _no help text_ |
 | `homeboy agent-task logs` | _no help text_ |
 | `homeboy agent-task artifacts` | _no help text_ |
+| `homeboy agent-task retained-artifacts` | Discover or attach selected outputs retained in a terminal Lab Cook workspace |
 | `homeboy agent-task evidence` | _no help text_ |
 | `homeboy agent-task diagnose` | _no help text_ |
 | `homeboy agent-task runtime-recover` | Recover a missing or corrupted immutable controller runtime pin |
@@ -409,6 +410,48 @@ _This command declares no clap help text, so no description can be generated for
 | `--since-cursor` | `<CURSOR>` | _no help text_ |
 | `--full` | flag | _no help text_ |
 | `--no-runner-probe` | flag | Answer from durable controller state only, without reaching the runner |
+
+## `homeboy agent-task retained-artifacts`
+
+```sh
+homeboy agent-task retained-artifacts <COMMAND>
+```
+
+Discover or attach selected outputs retained in a terminal Lab Cook workspace
+
+| Subcommand | Summary |
+| --- | --- |
+| `homeboy agent-task retained-artifacts discover` | Resolve the retained workspace and print bounded, run-ID-only attach guidance |
+| `homeboy agent-task retained-artifacts attach` | Attach one repository-relative file or directory from the retained workspace |
+
+## `homeboy agent-task retained-artifacts discover`
+
+```sh
+homeboy agent-task retained-artifacts discover <RUN_ID>
+```
+
+Resolve the retained workspace and print bounded, run-ID-only attach guidance
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<RUN_ID>` | yes | _no help text_ |
+
+## `homeboy agent-task retained-artifacts attach`
+
+```sh
+homeboy agent-task retained-artifacts attach [OPTIONS] <RUN_ID>
+```
+
+Attach one repository-relative file or directory from the retained workspace
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<RUN_ID>` | yes | _no help text_ |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--path` | `<PATH>` | Repository-relative path below the retained workspace |
+| `--name` | `<NAME>` | Durable artifact name to record on the owning run |
 
 ## `homeboy agent-task evidence`
 

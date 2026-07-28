@@ -47,6 +47,24 @@ pub use dispatch::{global_runner_error, run, run_markdown};
 pub use handlers::list_runs;
 pub use types::{RunsArgs, RunsOutput, HOSTED_BLUEPRINT_VIEWER};
 
+/// Attach a runner artifact from another command surface without exposing the
+/// `runs artifact` clap types outside this module.
+pub(crate) fn attach_runner_artifact(
+    run_id: String,
+    runner: String,
+    path: String,
+    name: String,
+) -> homeboy::core::Result<serde_json::Value> {
+    let (output, _) = remote_artifact::attach(types::RunsArtifactAttachArgs {
+        run_id,
+        runner,
+        path,
+        name,
+    })?;
+    serde_json::to_value(output)
+        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))
+}
+
 // Intra-module re-exports so sibling submodules (and the test modules) can
 // reference shared items via `super::` without depending on each other's
 // internal module paths. `pub(super)` items are re-exported with a private
