@@ -329,6 +329,26 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
         terminal_result.get("exit_code").is_some(),
         "broker terminal result preserves the typed payload: {terminal_result}"
     );
+    let broker_events: serde_json::Value =
+        reqwest::blocking::get(format!("{}/jobs/{}/events", broker.url(), completed.id))
+            .expect("fetch broker events over HTTP")
+            .json()
+            .expect("parse broker events response");
+    let broker_terminal_result = broker_events
+        .pointer("/data/body/events")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|events| {
+            events.iter().rev().find_map(|event| {
+                (event["kind"] == serde_json::json!("result")).then(|| event["data"].clone())
+            })
+        })
+        .expect("broker HTTP response retains terminal result");
+    serde_json::from_value::<homeboy::core::api_jobs::RemoteRunnerJobResult>(
+        broker_terminal_result.clone(),
+    )
+    .unwrap_or_else(|error| {
+        panic!("broker HTTP terminal result must retain its typed contract: {error}\nresult={broker_terminal_result}")
+    });
 
     let (_, duplicate_code) =
         homeboy::runner::run_reverse_worker(homeboy::runner::ReverseRunnerWorkerOptions {
