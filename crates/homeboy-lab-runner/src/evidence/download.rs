@@ -9,6 +9,10 @@ use serde_json::Value;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::execution_contract::{encode_uri_component, EXECUTION_CONTRACT};
 use homeboy_core::paths;
+use homeboy_core::runner_download_cache::{
+    record_download_intent, resolve_runner_download_target, sanitize_artifact_file_name,
+    RunnerDownloadIntent,
+};
 
 use super::super::execution::{canonical_daemon_body, daemon_api_get};
 use super::super::{load, status, RunnerArtifactRef, RunnerTunnelMode};
@@ -23,12 +27,35 @@ pub struct RemoteArtifactDownload {
     pub artifact_ref: RunnerArtifactRef,
 }
 
+/// Fetch a runner artifact on an operator's behalf.
+///
+/// The default location is tagged [`RunnerDownloadIntent::OperatorPull`], which
+/// is the fail-closed reading of an untyped call: `runs artifact get`,
+/// `runs artifacts --pull`, the HTTP artifact endpoint, and every provider-trait
+/// consumer land here, and all of them hand the resulting path back to a human.
+/// Homeboy's own fetches must say so explicitly via
+/// [`download_remote_artifact_with_intent`].
 pub fn download_remote_artifact(
     path: &str,
     output: Option<PathBuf>,
 ) -> Result<RemoteArtifactDownload> {
+    download_remote_artifact_with_intent(path, output, RunnerDownloadIntent::OperatorPull)
+}
+
+/// Fetch a runner artifact and record why (#10585).
+///
+/// The intent is persisted beside the bytes so `cleanup --include
+/// runner-downloads` can tell an operator's review copy from a transient
+/// internal fetch. It is only recorded for the default cache layout: a caller
+/// supplying an explicit `output` owns that location and homeboy does not
+/// reclaim it.
+pub fn download_remote_artifact_with_intent(
+    path: &str,
+    output: Option<PathBuf>,
+    intent: RunnerDownloadIntent,
+) -> Result<RemoteArtifactDownload> {
     let token = RemoteArtifactToken::parse(path)?;
-    if let Some(download) = download_direct_runner_artifact(&token, output.clone())? {
+    if let Some(download) = download_direct_runner_artifact(&token, output.clone(), intent)? {
         return Ok(download);
     }
 
@@ -53,19 +80,15 @@ pub fn download_remote_artifact(
                 Some("decode runner artifact content".to_string()),
             )
         })?;
-    let file_name = body
+    let remote_file_name = body
         .get("filename")
         .and_then(Value::as_str)
-        .filter(|name| !name.is_empty())
-        .unwrap_or(&token.artifact_id);
-    let output_path = output.unwrap_or_else(|| {
-        paths::artifact_root()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join("runner")
-            .join(&token.runner_id)
-            .join(&token.run_id)
-            .join(file_name)
-    });
+        .filter(|name| !name.is_empty());
+    // The remote controls `filename` outright, and `token.runner_id` /
+    // `token.run_id` are percent-decoded copies of remote-supplied strings.
+    // Nothing below is joined until this has proven all three (#10586).
+    let placement = resolve_placement(&token, output, remote_file_name)?;
+    let output_path = placement.output_path;
     if let Some(parent) = output_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -83,6 +106,9 @@ pub fn download_remote_artifact(
             Some(format!("write runner artifact {}", output_path.display())),
         )
     })?;
+    if let Some(cache_dir) = &placement.cache_dir {
+        record_download_intent(cache_dir, intent, &token.artifact_id);
+    }
     Ok(RemoteArtifactDownload {
         output_path,
         content_type: body.get("mime").and_then(Value::as_str).map(str::to_string),
@@ -93,7 +119,7 @@ pub fn download_remote_artifact(
             .map(str::to_string),
         artifact_ref: RunnerArtifactRef {
             artifact_id: token.artifact_id.clone(),
-            name: Some(file_name.to_string()),
+            name: Some(placement.file_name.clone()),
             path: Some(EXECUTION_CONTRACT.artifacts.runner_artifact_ref(
                 &token.runner_id,
                 &token.run_id,
@@ -111,9 +137,64 @@ pub fn download_remote_artifact(
     })
 }
 
+/// Where one download's bytes may be written, and what to tag afterwards.
+///
+/// Produced only by [`resolve_placement`], so no transport can build an output
+/// path without going through the containment check.
+#[derive(Debug)]
+pub(super) struct DownloadPlacement {
+    pub(super) output_path: PathBuf,
+    /// The cache directory to tag with the caller's intent, or `None` when the
+    /// caller supplied an explicit `output` and owns that location itself.
+    pub(super) cache_dir: Option<PathBuf>,
+    /// The name actually written. Reported back as the artifact-ref name so
+    /// reported metadata can never disagree with the bytes on disk — a
+    /// downstream consumer that rebuilds a path from the name inherits the
+    /// sanitized form, not the remote's.
+    pub(super) file_name: String,
+}
+
+pub(super) fn resolve_placement(
+    token: &RemoteArtifactToken,
+    output: Option<PathBuf>,
+    remote_file_name: Option<&str>,
+) -> Result<DownloadPlacement> {
+    if let Some(output_path) = output {
+        // An explicit destination is the caller's own; it never enters the
+        // cache layout and is never tagged.
+        let file_name = output_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| sanitize_artifact_file_name(&token.artifact_id));
+        return Ok(DownloadPlacement {
+            output_path,
+            cache_dir: None,
+            file_name,
+        });
+    }
+    // Fail closed. This used to be `.unwrap_or_else(|_| PathBuf::from("."))`,
+    // which silently relocated the whole cache into the process working
+    // directory — neither contained nor predictable — whenever the artifact
+    // root could not be resolved.
+    let artifact_root = paths::artifact_root()?;
+    let target = resolve_runner_download_target(
+        &artifact_root,
+        &token.runner_id,
+        &token.run_id,
+        remote_file_name,
+        &token.artifact_id,
+    )?;
+    Ok(DownloadPlacement {
+        output_path: target.file_path,
+        cache_dir: Some(target.cache_dir),
+        file_name: target.file_name,
+    })
+}
+
 fn download_direct_runner_artifact(
     token: &RemoteArtifactToken,
     output: Option<PathBuf>,
+    intent: RunnerDownloadIntent,
 ) -> Result<Option<RemoteArtifactDownload>> {
     let runner = load(&token.runner_id)?;
     let connected = status(&token.runner_id)?;
@@ -168,17 +249,11 @@ fn download_direct_runner_artifact(
     let bytes = response.bytes().map_err(|err| {
         Error::internal_unexpected(format!("read runner artifact response: {err}"))
     })?;
-    let filename = content_disposition_filename(&headers)
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| token.artifact_id.clone());
-    let output_path = output.unwrap_or_else(|| {
-        paths::artifact_root()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join("runner")
-            .join(&token.runner_id)
-            .join(&token.run_id)
-            .join(&filename)
-    });
+    // `Content-Disposition` is parsed by splitting on `;` and trimming quotes,
+    // so the value reaching here is whatever the daemon sent, `../` included.
+    let remote_file_name = content_disposition_filename(&headers).filter(|name| !name.is_empty());
+    let placement = resolve_placement(token, output, remote_file_name.as_deref())?;
+    let output_path = placement.output_path;
     if let Some(parent) = output_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -197,6 +272,9 @@ fn download_direct_runner_artifact(
             Some(format!("write runner artifact {}", output_path.display())),
         )
     })?;
+    if let Some(cache_dir) = &placement.cache_dir {
+        record_download_intent(cache_dir, intent, &token.artifact_id);
+    }
 
     Ok(Some(RemoteArtifactDownload {
         output_path,
@@ -205,7 +283,7 @@ fn download_direct_runner_artifact(
         sha256: header_string(&headers, "x-homeboy-artifact-sha256"),
         artifact_ref: RunnerArtifactRef {
             artifact_id: token.artifact_id.clone(),
-            name: Some(filename),
+            name: Some(placement.file_name.clone()),
             path: Some(EXECUTION_CONTRACT.artifacts.runner_artifact_ref(
                 &token.runner_id,
                 &token.run_id,

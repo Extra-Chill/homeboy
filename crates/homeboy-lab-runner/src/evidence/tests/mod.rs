@@ -21,7 +21,7 @@ use homeboy_core::server::{RunnerPolicy, RunnerSettings};
 use super::detail::{
     explicit_observation_run_ids, remote_detail_artifacts, remote_detail_to_run_record,
 };
-use super::download::{content_disposition_filename, download_remote_artifact};
+use super::download::{content_disposition_filename, download_remote_artifact, resolve_placement};
 use super::mirror::{
     bounded_remote_events, controller_artifact_metadata, import_mirrored_artifact_with_downloader,
     mirror_daemon_evidence, mirror_job_run, mirror_remote_observation_runs_by_id_with,
@@ -269,6 +269,105 @@ fn test_runner_artifact_token_round_trips_escaped_segments() {
     assert_eq!(parsed.artifact_id, "artifact:c");
 }
 
+/// A traversal-shaped `filename` from the daemon body, on the relay transport.
+///
+/// #10586: `{"filename": "../../../../../../root/.ssh/authorized_keys"}` used
+/// to be joined straight onto the cache directory, `create_dir_all` made the
+/// intermediate directories, and `fs::write` put attacker-controlled bytes
+/// wherever the daemon asked. It is now reduced to one component in the cache.
+#[test]
+fn test_download_placement_sanitizes_a_traversal_filename() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let token = RemoteArtifactToken::parse("runner-artifact://lab/run-1/artifact-1")
+            .expect("parse token");
+        let artifact_root = homeboy_core::paths::artifact_root().expect("artifact root");
+        let cache = artifact_root.join("runner").join("lab").join("run-1");
+
+        for hostile in [
+            "../../../../../../root/.ssh/authorized_keys",
+            "/root/.ssh/authorized_keys",
+            "..",
+            "../../etc/passwd",
+        ] {
+            let placement =
+                resolve_placement(&token, None, Some(hostile)).expect("placement resolves");
+            assert_eq!(
+                placement.output_path.parent(),
+                Some(cache.as_path()),
+                "{hostile} escaped to {}",
+                placement.output_path.display()
+            );
+            assert_eq!(placement.cache_dir.as_deref(), Some(cache.as_path()));
+            assert!(!placement.file_name.contains('/'));
+            // The reported artifact-ref name is the name on disk, never the
+            // remote's, so no downstream consumer can rebuild the escape.
+            assert_eq!(
+                placement
+                    .output_path
+                    .file_name()
+                    .expect("file name")
+                    .to_string_lossy(),
+                placement.file_name.as_str()
+            );
+        }
+    });
+}
+
+/// The same defect through the token instead of the body.
+///
+/// #10586: `RemoteArtifactToken::parse` splits on `/` (which looks like a
+/// containment check) and *then* percent-decodes, so `%2E%2E%2F` becomes `../`
+/// after the only check. A containment check on the encoded form is no check.
+/// The decoded ids are now rejected outright — they are identifiers, and
+/// silently rewriting one would put bytes somewhere unpredictable.
+#[test]
+fn test_download_placement_rejects_a_percent_encoded_traversal_token() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let token = RemoteArtifactToken::parse(
+            "runner-artifact://lab/%2E%2E%2F%2E%2E%2F%2E%2E%2Froot%2F.ssh/authorized_keys",
+        )
+        .expect("token still parses; that is the point");
+        // The parser hands the writer an already-decoded traversal.
+        assert_eq!(token.run_id, "../../../root/.ssh");
+
+        let error = resolve_placement(&token, None, Some("authorized_keys"))
+            .expect_err("the writer must refuse it");
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+        assert!(
+            error.message.contains("single path component"),
+            "{}",
+            error.message
+        );
+
+        // And through the runner id, which reaches the same join.
+        let runner_token =
+            RemoteArtifactToken::parse("runner-artifact://%2E%2E%2F%2E%2E%2Fetc/run-1/artifact-1")
+                .expect("parse token");
+        assert_eq!(runner_token.runner_id, "../../etc");
+        let error = resolve_placement(&runner_token, None, Some("passwd"))
+            .expect_err("the writer must refuse it");
+        assert_eq!(error.code.as_str(), "validation.invalid_argument");
+    });
+}
+
+/// An explicit `--output` is the caller's own path and is not relocated into
+/// the cache — and it is not tagged, because homeboy does not reclaim it.
+#[test]
+fn test_download_placement_honours_an_explicit_output_without_tagging_it() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let token = RemoteArtifactToken::parse("runner-artifact://lab/run-1/artifact-1")
+            .expect("parse token");
+        let explicit = home.path().join("elsewhere").join("report.json");
+
+        let placement =
+            resolve_placement(&token, Some(explicit.clone()), Some("../../evil")).expect("resolve");
+
+        assert_eq!(placement.output_path, explicit);
+        assert!(placement.cache_dir.is_none());
+        assert_eq!(placement.file_name, "report.json");
+    });
+}
+
 #[test]
 fn test_content_disposition_filename_parses_quoted_attachment_name() {
     let mut headers = header::HeaderMap::new();
@@ -281,6 +380,34 @@ fn test_content_disposition_filename_parses_quoted_attachment_name() {
         content_disposition_filename(&headers).as_deref(),
         Some("report.json")
     );
+}
+
+/// The direct-SSH transport's file name comes from a header the daemon writes,
+/// and the header parser applies no shape check at all — it splits on `;`,
+/// strips `filename=`, and trims quotes. Containment therefore has to live in
+/// the writer, and this asserts both halves of that split (#10586).
+#[test]
+fn test_content_disposition_traversal_is_neutralized_by_the_writer() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::CONTENT_DISPOSITION,
+            header::HeaderValue::from_static("attachment; filename=\"../../../../etc/cron.d/x\""),
+        );
+        let parsed = content_disposition_filename(&headers).expect("filename");
+        assert_eq!(parsed, "../../../../etc/cron.d/x");
+
+        let token = RemoteArtifactToken::parse("runner-artifact://lab/run-1/artifact-1")
+            .expect("parse token");
+        let placement = resolve_placement(&token, None, Some(&parsed)).expect("resolve");
+        let cache = homeboy_core::paths::artifact_root()
+            .expect("artifact root")
+            .join("runner")
+            .join("lab")
+            .join("run-1");
+        assert_eq!(placement.output_path.parent(), Some(cache.as_path()));
+        assert_eq!(placement.file_name, "etc_cron.d_x");
+    });
 }
 
 #[test]

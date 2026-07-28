@@ -33,6 +33,14 @@
 //! A cache directory is reclaimable only when all of the following hold. Each
 //! is necessary; none is sufficient alone.
 //!
+//! 0. **Recorded intent.** The writer tags each cache directory it creates with
+//!    a [`crate::runner_download_cache::RUNNER_DOWNLOAD_MARKER_FILE`] sidecar
+//!    saying *why* the bytes were fetched (#10585). Only an explicit
+//!    `internal_fetch` is reclaimable. An `operator_pull` tag, an unreadable
+//!    tag, and — critically — **no tag at all** all retain, so every cache
+//!    directory written before intent tagging existed is retained rather than
+//!    swept. Age proves bytes are old; only the tag can prove they are
+//!    homeboy's rather than the operator's, and the two are independent.
 //! 1. **Ownership by name shape.** The candidate must be a real directory at
 //!    exactly `<artifact-root>/runner/<a>/<b>` — the only shape the single
 //!    writer above emits — with no symlink at either level. Anything else under
@@ -75,21 +83,30 @@
 //! never bypass a check. An operator naming a run id is asking "clean this
 //! one", not "skip the safety check".
 //!
-//! # Known limitation: non-canonical depth
+//! # Historical: non-canonical depth
 //!
-//! `RemoteArtifactToken::parse` percent-decodes its components, so a runner id
-//! or run id containing `/` produces a deeper tree than `<a>/<b>`, and a
-//! remote-supplied `filename` is joined unsanitized. Such a tree is still
-//! age-gated (the newest mtime is taken over the whole subtree), but its
-//! `<run-id>` component is not a real run id, so the liveness veto cannot
-//! apply. The durable fix belongs in the writer, which should reject or sanitize
-//! path separators before joining.
+//! `RemoteArtifactToken::parse` percent-decodes its components *after* its only
+//! containment check, so a runner id or run id containing an encoded `/` used
+//! to produce a deeper tree than `<a>/<b>`, and a remote-supplied `filename`
+//! was joined unsanitized (#10586). Such a tree was still age-gated, but its
+//! depth-2 component was not a real run id, so the liveness veto could not key
+//! on it. The writer now rejects any decoded id that is not a single path
+//! component and sanitizes the file name
+//! ([`crate::runner_download_cache::resolve_runner_download_target`]), so no
+//! new non-canonical tree can appear. Pre-existing ones are untagged, and
+//! untagged retains, so this category will never remove one.
 
 use std::time::{Duration, SystemTime};
 
 use super::persisted_cleanup::{path_is_within_root, symlink_metadata_if_exists};
 use super::run_lookup::run_matches_label;
 use super::*;
+// The cache layout and its intent marker are owned by the writer's module, not
+// restated here: the reclaimer and the writer must never drift onto two
+// different directories or two different marker names.
+use crate::runner_download_cache::{
+    read_download_ownership, RUNNER_DOWNLOAD_DIR, RUNNER_DOWNLOAD_MARKER_FILE,
+};
 
 /// Age floor before a cached runner artifact download is reclaimable.
 ///
@@ -113,9 +130,6 @@ const RUNNING_RUN_SCAN_LIMIT: usize = 1_000;
 /// Maximum directory depth walked inside one cache directory. A tree deeper
 /// than this cannot be proven old, so it is retained.
 const MAX_SCAN_DEPTH: usize = 64;
-
-/// Top-level artifact-root directory owned by the runner download cache.
-const RUNNER_DOWNLOAD_DIR: &str = "runner";
 
 #[derive(Debug, Clone)]
 pub struct RunnerDownloadCleanupOptions {
@@ -189,6 +203,10 @@ pub struct RunnerDownloadCleanupRow {
     pub runner_id: String,
     /// Empty for entries that are not the canonical `<runner>/<run>` shape.
     pub run_id: String,
+    /// What the intent marker says: `operator_pull`, `internal_fetch`,
+    /// `unrecorded` (no marker), or `unreadable`. Only `internal_fetch` is
+    /// reclaimable. Empty for entries that were never read for one.
+    pub intent: String,
     pub file_count: usize,
     pub directory_count: usize,
     /// Age of the *newest* byte in the subtree. Zero when it is unknown, in
@@ -433,6 +451,7 @@ fn record_unowned(
         relative,
         runner_id,
         "",
+        "",
         0,
         "not the canonical <runner-id>/<run-id> cache directory this category owns",
     );
@@ -469,11 +488,16 @@ fn sweep_candidate(
             relative,
             runner_id,
             run_id,
+            "",
             0,
             "path does not resolve inside the artifact root",
         );
         return;
     }
+
+    // Read before the age scan so every row can report it, including the rows
+    // the age floor decides.
+    let ownership = read_download_ownership(path);
 
     let scan = scan_subtree_from(path, metadata);
 
@@ -485,6 +509,7 @@ fn sweep_candidate(
             relative,
             runner_id,
             run_id,
+            ownership.as_str(),
             0,
             "modification time is unreadable, in the future, or the subtree could not be fully walked",
         );
@@ -497,8 +522,23 @@ fn sweep_candidate(
             relative,
             runner_id,
             run_id,
+            ownership.as_str(),
             age.as_secs(),
             "newer than the runner download age floor",
+        );
+        return;
+    }
+    // Age proves the bytes are old. Only the writer's tag can prove they are
+    // homeboy's rather than the operator's (#10585), and an absent tag is
+    // deliberately read as operator-owned.
+    if let Some(reason) = ownership.retain_reason() {
+        outcome.skip(
+            relative,
+            runner_id,
+            run_id,
+            ownership.as_str(),
+            age.as_secs(),
+            reason,
         );
         return;
     }
@@ -507,6 +547,7 @@ fn sweep_candidate(
             relative,
             runner_id,
             run_id,
+            ownership.as_str(),
             age.as_secs(),
             liveness.veto_reason(),
         );
@@ -517,14 +558,16 @@ fn sweep_candidate(
         path: relative.to_string(),
         runner_id: runner_id.to_string(),
         run_id: run_id.to_string(),
+        intent: ownership.as_str().to_string(),
         file_count: scan.file_count,
         directory_count: scan.directory_count,
         age_seconds: age.as_secs(),
         size_bytes: scan.size_bytes,
         size_measured: scan.size_measured,
         action: "remove".to_string(),
-        reason: "cached runner download past the age floor with no non-terminal owning run"
-            .to_string(),
+        reason:
+            "internal fetch past the age floor with no non-terminal owning run; not operator-owned"
+                .to_string(),
     };
     outcome.planned_count += 1;
     outcome.planned_size_bytes += scan.size_bytes;
@@ -573,12 +616,21 @@ fn prune_empty_runner_directory(run_path: &Path) {
 impl RunnerDownloadCleanupOutcome {
     /// Record a retained candidate. Size is not measured for skipped entries:
     /// it would report a number that no decision consumed.
-    fn skip(&mut self, path: &str, runner_id: &str, run_id: &str, age_seconds: u64, reason: &str) {
+    fn skip(
+        &mut self,
+        path: &str,
+        runner_id: &str,
+        run_id: &str,
+        intent: &str,
+        age_seconds: u64,
+        reason: &str,
+    ) {
         self.skipped_count += 1;
         self.rows.push(RunnerDownloadCleanupRow {
             path: path.to_string(),
             runner_id: runner_id.to_string(),
             run_id: run_id.to_string(),
+            intent: intent.to_string(),
             file_count: 0,
             directory_count: 0,
             age_seconds,
@@ -711,13 +763,25 @@ impl Default for SubtreeScan {
 
 fn scan_subtree_from(path: &Path, metadata: &fs::Metadata) -> SubtreeScan {
     let mut scan = SubtreeScan::default();
-    scan_subtree(path, metadata, MAX_SCAN_DEPTH, &mut scan);
+    scan_subtree(path, metadata, MAX_SCAN_DEPTH, &mut scan, true);
     // `scan_subtree` counted the cache directory itself; report its contents.
     scan.directory_count = scan.directory_count.saturating_sub(1);
     scan
 }
 
-fn scan_subtree(path: &Path, metadata: &fs::Metadata, depth: usize, scan: &mut SubtreeScan) {
+/// `skip_marker` excludes homeboy's own intent sidecar from the measurement,
+/// and only at the cache directory's own level where the writer puts it. It is
+/// bookkeeping, not artifact bytes: counting it would inflate every reported
+/// file count and size by one file that the operator did not download, and
+/// letting its mtime into the age would let a bookkeeping rewrite re-arm the
+/// floor on its own. It is still removed with the directory.
+fn scan_subtree(
+    path: &Path,
+    metadata: &fs::Metadata,
+    depth: usize,
+    scan: &mut SubtreeScan,
+    skip_marker: bool,
+) {
     scan.observe(metadata);
     if metadata.file_type().is_symlink() {
         // Never followed. A symlink contributes its own mtime and nothing else,
@@ -745,12 +809,17 @@ fn scan_subtree(path: &Path, metadata: &fs::Metadata, depth: usize, scan: &mut S
             scan.unreadable();
             continue;
         };
+        if skip_marker
+            && entry.file_name().as_os_str() == std::ffi::OsStr::new(RUNNER_DOWNLOAD_MARKER_FILE)
+        {
+            continue;
+        }
         let child = entry.path();
         let Ok(child_metadata) = fs::symlink_metadata(&child) else {
             scan.unreadable();
             continue;
         };
-        scan_subtree(&child, &child_metadata, depth - 1, scan);
+        scan_subtree(&child, &child_metadata, depth - 1, scan, false);
     }
 }
 

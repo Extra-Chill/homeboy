@@ -18,6 +18,7 @@ use homeboy_core::observation::{
     ArtifactPublication, ArtifactRecord, ObservationStore, RunRecord, RunStatus,
 };
 use homeboy_core::redaction::redact_argv_shell_display;
+use homeboy_core::runner_download_cache::RunnerDownloadIntent;
 
 use super::super::execution::{canonical_daemon_body, daemon_api_get, result_event_data};
 use super::super::{load, Runner};
@@ -1318,7 +1319,16 @@ where
         run_ids,
         notification_route,
         fetch_detail,
-        |path| Ok(super::download::download_remote_artifact(path, None)?.output_path),
+        |path| {
+            // Internal: mirroring reads these bytes once to build the local
+            // record and never returns the path to an operator (#10585).
+            Ok(super::download::download_remote_artifact_with_intent(
+                path,
+                None,
+                RunnerDownloadIntent::InternalFetch,
+            )?
+            .output_path)
+        },
     )
 }
 
@@ -1498,7 +1508,14 @@ fn import_artifact_if_absent(store: &ObservationStore, artifact: &ArtifactRecord
 /// store before terminal daemon-job retention can remove the remote lookup.
 fn import_mirrored_artifact(store: &ObservationStore, artifact: &ArtifactRecord) -> Result<()> {
     import_mirrored_artifact_with_downloader(store, artifact, |path| {
-        Ok(super::download::download_remote_artifact(path, None)?.output_path)
+        // Internal: materializing mirrored bytes for the controller store, not
+        // an operator pull (#10585).
+        Ok(super::download::download_remote_artifact_with_intent(
+            path,
+            None,
+            RunnerDownloadIntent::InternalFetch,
+        )?
+        .output_path)
     })
 }
 
