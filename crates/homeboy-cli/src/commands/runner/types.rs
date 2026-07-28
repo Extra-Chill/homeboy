@@ -350,6 +350,7 @@ pub enum RunnerCommandOutput {
     BrokerJob(RunnerBrokerJobOutput),
     RefreshHomeboy(homeboy::runner::runners::HomeboyBinaryRefreshOutput),
     DevSync(homeboy::runner::runners::RunnerDevSyncOutput),
+    CachePrune(homeboy::runner::runners::RunnerBinaryCachePruneOutput),
     Worker(ReverseRunnerWorkerOutput),
     Workspace(workspace::RunnerWorkspaceOutput),
     RefreshPlan(refresh_plan::LabRefreshPlanOutput),

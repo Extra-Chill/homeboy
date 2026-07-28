@@ -348,6 +348,19 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Inventory or remove stale managed Homeboy binary slots on a runner
+    CachePrune {
+        /// Runner ID
+        runner_id: String,
+
+        /// Delete eligible slots. Omit for inventory only.
+        #[arg(long)]
+        apply: bool,
+
+        /// Minimum slot age before an unselected slot is eligible.
+        #[arg(long, default_value_t = 24)]
+        min_age_hours: u64,
+    },
     /// Execute a command on a configured runner. Use `homeboy runner exec [HOMEBOY_OPTIONS] <RUNNER> -- <COMMAND>...`.
     #[command(
         after_help = "Use `homeboy runner exec [HOMEBOY_OPTIONS] <RUNNER> -- <COMMAND>...` to make the Homeboy/remote-command boundary explicit."

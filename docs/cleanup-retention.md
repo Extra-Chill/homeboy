@@ -72,6 +72,20 @@ Detached, in-flight, and otherwise uncertain daemon ownership always
 relinquishes the local cleanup handle. Those paths remain fail-closed and are
 never treated as terminal deletion or debug-retention outcomes.
 
+## Runner Binary Cache Retention
+
+`homeboy cleanup --include runner-binary-caches` composes the runner-owned
+binary cache lifecycle into the aggregate planner. Each configured runner is
+inventoried independently through direct local or SSH execution; an unavailable
+runner becomes a scoped skipped category and does not abort healthy runners.
+
+Only canonical refresh (`homeboy-*`) and dev-sync (`dev/<16-hex>`) slots with a
+regular expected binary are eligible after the fixed 24-hour age floor. The
+configured `homeboy_path`, slots with open files or process working directories,
+symlinks, malformed or partial layouts, and candidates that change identity are
+retained. Apply revalidates selection, inode identity, layout, symlink state,
+and process ownership immediately before removal.
+
 ## Remaining Scope
 
 The following Issue #8648 portions remain independently owned and are not

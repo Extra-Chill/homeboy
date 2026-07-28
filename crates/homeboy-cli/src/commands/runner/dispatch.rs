@@ -215,6 +215,17 @@ pub fn run(
             reconnect,
             dry_run,
         })),
+        RunnerCommand::CachePrune {
+            runner_id,
+            apply,
+            min_age_hours,
+        } => map_cache_prune(runner::prune_homeboy_binary_cache(
+            &runner_id,
+            runner::RunnerBinaryCachePruneOptions {
+                apply,
+                min_age_hours,
+            },
+        )),
         RunnerCommand::Exec {
             id,
             cwd,
@@ -863,6 +874,12 @@ fn map_dev_sync(
     result: homeboy::core::Result<(runner::RunnerDevSyncOutput, i32)>,
 ) -> CmdResult<RunnerCommandOutput> {
     result.map(|(output, exit_code)| (RunnerCommandOutput::DevSync(output), exit_code))
+}
+
+fn map_cache_prune(
+    result: homeboy::core::Result<(runner::RunnerBinaryCachePruneOutput, i32)>,
+) -> CmdResult<RunnerCommandOutput> {
+    result.map(|(output, exit_code)| (RunnerCommandOutput::CachePrune(output), exit_code))
 }
 
 fn map_env(result: CmdResult<RunnerEnvOutput>) -> CmdResult<RunnerCommandOutput> {

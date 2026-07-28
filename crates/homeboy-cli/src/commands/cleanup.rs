@@ -18,7 +18,8 @@ use homeboy::core::resource_cleanup_intent::ResourceCleanupIntent;
 use homeboy::core::worktree::{self, WorktreeCleanupOptions, WorktreeCleanupOutput};
 use homeboy::core::worktree_providers::WorktreeProviderCleanupOptions;
 use homeboy::runner::runners::{
-    self as runner, RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
+    self as runner, RunnerBinaryCachePruneOptions, RunnerBinaryCachePruneOutput,
+    RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -72,6 +73,7 @@ pub enum CleanupCategoryArg {
     PersistedRunArtifacts,
     OrphanedArtifactBytes,
     RunnerDownloads,
+    RunnerBinaryCaches,
     RemoteLabWorkspaces,
     RuntimeTmp,
     ControllerScratch,
@@ -677,6 +679,14 @@ const REMOTE_LAB_WORKSPACES_METADATA: CleanupInventoryCategoryMetadata =
         apply_command: "homeboy runner workspace prune <runner> --apply --passes 10",
     };
 
+const RUNNER_BINARY_CACHES_METADATA: CleanupInventoryCategoryMetadata =
+    CleanupInventoryCategoryMetadata {
+        category: "runner_binary_caches",
+        include_arg: "runner-binary-caches",
+        dry_run_command: "homeboy runner cache-prune <runner>",
+        apply_command: "homeboy runner cache-prune <runner> --apply",
+    };
+
 const CONTROLLER_SCRATCH_METADATA: CleanupInventoryCategoryMetadata =
     CleanupInventoryCategoryMetadata {
         category: "controller_scratch",
@@ -848,6 +858,10 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
 
     if selected.includes(CleanupCategoryArg::RemoteLabWorkspaces) {
         categories.extend(remote_lab_workspace_categories(apply)?);
+    }
+
+    if selected.includes(CleanupCategoryArg::RunnerBinaryCaches) {
+        categories.extend(runner_binary_cache_categories(apply)?);
     }
 
     if selected.includes(CleanupCategoryArg::RuntimeTmp) {
@@ -1399,6 +1413,71 @@ fn remote_workspace_category(
         output.skipped.len(),
         output.total_candidate_bytes,
         output.total_removed_bytes,
+        output,
+    )
+}
+
+fn runner_binary_cache_categories(
+    apply: bool,
+) -> homeboy::core::Result<Vec<CleanupInventoryCategory>> {
+    runner::list()?
+        .into_iter()
+        .map(|configured| runner_binary_cache_category(&configured.id, apply))
+        .collect()
+}
+
+fn runner_binary_cache_category(
+    runner_id: &str,
+    apply: bool,
+) -> homeboy::core::Result<CleanupInventoryCategory> {
+    let specialist_command = format!(
+        "homeboy runner cache-prune {}{}",
+        quote_arg(runner_id),
+        if apply { " --apply" } else { "" }
+    );
+    let output = match runner::prune_homeboy_binary_cache(
+        runner_id,
+        RunnerBinaryCachePruneOptions {
+            apply,
+            min_age_hours: 24,
+        },
+    ) {
+        Ok((output, _)) => output,
+        Err(error) => {
+            return Ok(CleanupInventoryCategory {
+                category: RUNNER_BINARY_CACHES_METADATA.category,
+                canonical_cleanup_command: RUNNER_BINARY_CACHES_METADATA
+                    .canonical_cleanup_command(apply),
+                specialist_command,
+                included: true,
+                skipped: true,
+                skip_reason: Some(error.message),
+                candidate_count: 0,
+                applied_count: 0,
+                skipped_count: 1,
+                estimated_bytes: 0,
+                reclaimed_bytes: 0,
+                output: serde_json::json!({ "runner_id": runner_id }),
+            });
+        }
+    };
+    runner_binary_cache_output_category(output, apply, specialist_command)
+}
+
+fn runner_binary_cache_output_category(
+    output: RunnerBinaryCachePruneOutput,
+    apply: bool,
+    specialist_command: String,
+) -> homeboy::core::Result<CleanupInventoryCategory> {
+    category_from_command(
+        RUNNER_BINARY_CACHES_METADATA.category,
+        RUNNER_BINARY_CACHES_METADATA.canonical_cleanup_command(apply),
+        specialist_command,
+        output.eligible.len(),
+        output.removed.len(),
+        output.skipped.len(),
+        output.eligible_bytes,
+        output.removed_bytes,
         output,
     )
 }
@@ -2087,6 +2166,13 @@ mod tests {
                 "runner-downloads",
                 "homeboy runs artifact cleanup-downloads",
                 "homeboy runs artifact cleanup-downloads --apply",
+            ),
+            (
+                RUNNER_BINARY_CACHES_METADATA,
+                "runner_binary_caches",
+                "runner-binary-caches",
+                "homeboy runner cache-prune <runner>",
+                "homeboy runner cache-prune <runner> --apply",
             ),
             (
                 RUNTIME_TMP_METADATA,

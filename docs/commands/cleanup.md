@@ -64,3 +64,14 @@ homeboy cleanup --include shared-cargo-targets --apply
 ```
 
 `retention.shared_store_days` defaults to `30`, `retention.shared_store_max_bytes` defaults to `21474836480` (20 GiB), and `retention.shared_store_lease_seconds` defaults to `21600` (6 hours). The age and size budgets select rebuildable stores; the lease window independently protects active workloads. Inventory output is bounded by `retention.limit`; when `next_command` is present, run it to continue from `next_cursor`.
+
+## Runner Binary Caches
+
+Runner refresh and dev-sync create managed Homeboy binary slots below each runner workspace root. Inventory or reclaim stale slots through the aggregate cleanup surface:
+
+```bash
+homeboy cleanup --include runner-binary-caches
+homeboy cleanup --include runner-binary-caches --apply
+```
+
+The aggregate emits one category per configured runner and uses direct local or SSH execution, so a disconnected runner daemon does not block cleanup. The specialist command is `homeboy runner cache-prune <runner> [--apply]`. Slots must be at least 24 hours old. The configured binary, process-owned slots, symlinks, malformed or interrupted layouts, and entries that change between inventory and apply are preserved.

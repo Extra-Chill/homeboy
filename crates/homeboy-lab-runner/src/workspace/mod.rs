@@ -16,6 +16,7 @@ mod snapshot_provider;
 mod sync;
 mod types;
 mod util;
+pub(crate) use util::ssh_client_for_runner;
 
 pub use pull::{plan_workspace_pull, pull_workspace};
 pub(crate) use sync::save_prepared_source_cache;
