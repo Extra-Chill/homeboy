@@ -94,7 +94,7 @@ def main():
             and r["conclusion"] in ("success", "failure")]
     limit = int(sys.argv[1]) if len(sys.argv) > 1 else 40
     out = []
-    for r in done[:limit]:
+    for r in done[45:limit]:
         rid = r["databaseId"]
         meta_path = os.path.join(JOBDIR, f"{rid}.jobs.json")
         if not os.path.exists(meta_path):

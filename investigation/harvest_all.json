@@ -1789,5 +1789,1337 @@
   "baseline_exit": [
    "Baseline homeboy review test exited 101"
   ]
+ },
+ {
+  "run": 30351383046,
+  "job": 90249446003,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "c17b2a7a30a746ebc4d3db85700d43b2739dc2f4",
+  "createdAt": "2026-07-28T10:35:50Z",
+  "title": "fix(cleanup): resolve every cleanup entry point through one retention policy",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 124,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 124,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30351106028,
+  "job": 90248560917,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "06ece0dfa4427d679280a3d398c5a647b010cda1",
+  "createdAt": "2026-07-28T10:31:46Z",
+  "title": "feat(evidence): produce the evidence manifest instead of only reading it",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 124,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 124,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30350397338,
+  "job": 90246248424,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "4c607d09749a2b99c72c29e6562aec57e21054fa",
+  "createdAt": "2026-07-28T10:20:56Z",
+  "title": "fix(release): adopt verified stranded drafts",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 116,
+    "timeout": false,
+    "result_ok": 22,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 124,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30336532627,
+  "job": 90214853228,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "e3993ebdadaf775b7e27abb8bbfff0e97824601a",
+  "createdAt": "2026-07-28T06:56:25Z",
+  "title": "refactor(cli): delete GlobalArgs and the dead ops descriptor spec column",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 116,
+    "timeout": false,
+    "result_ok": 22,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 116,
+    "timeout": false,
+    "result_ok": 22,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30335949799,
+  "job": 90200739282,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "4ab6a70e8ad3ebf39461890f4cd013cf0d199a1a",
+  "createdAt": "2026-07-28T06:46:35Z",
+  "title": "feat(audit): widen core-agnostic-source term coverage",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 124,
+    "timeout": false,
+    "result_ok": 23,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 116,
+    "timeout": false,
+    "result_ok": 22,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30334308015,
+  "job": 90195820752,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "7bc913edaf379bd04b4e6ea214946335812a5190",
+  "createdAt": "2026-07-28T06:17:19Z",
+  "title": "Strip AppleDouble metadata from Lab extension snapshots",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 116,
+    "timeout": false,
+    "result_ok": 22,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30332216318,
+  "job": 90189669069,
+  "conclusion": "failure",
+  "test_job_conclusion": "success",
+  "sha": "d4092b5653cbb7cab7fad48fc864815e96133b45",
+  "createdAt": "2026-07-28T05:37:58Z",
+  "title": "refactor(cli): delete GlobalArgs and the dead ops descriptor spec column",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 116,
+    "timeout": false,
+    "result_ok": 22,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 116,
+    "timeout": false,
+    "result_ok": 22,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30332109575,
+  "job": 90189368787,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "323d4af59c4530bf4d7ac208cd8267e832bac6cf",
+  "createdAt": "2026-07-28T05:35:51Z",
+  "title": "fix(rig): wire WorkloadSpec.lifecycle and report the lifecycle_snapshots drift class",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 116,
+    "timeout": false,
+    "result_ok": 22,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 116,
+    "timeout": false,
+    "result_ok": 22,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30331606973,
+  "job": 90187861346,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "f4a97dbab23f5dd26aac5f3776312d0e689b7618",
+  "createdAt": "2026-07-28T05:25:46Z",
+  "title": "fix(lab-runner): one currency verdict for materialization staleness, and two fail-open bugs it exposed",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 116,
+    "timeout": false,
+    "result_ok": 22,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 116,
+    "timeout": false,
+    "result_ok": 22,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30331411358,
+  "job": 90187182906,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "569a512857e2da4afd59044dae687a00dca38ab9",
+  "createdAt": "2026-07-28T05:21:46Z",
+  "title": "fix: include crates/contracts/* in the workspace (#10550)",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 116,
+    "timeout": false,
+    "result_ok": 22,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 116,
+    "timeout": false,
+    "result_ok": 22,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30330054108,
+  "job": 90183101198,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "e8ae31602c585208fe0744357445b98db42b0d79",
+  "createdAt": "2026-07-28T04:54:25Z",
+  "title": "test: handle removed hermetic environment values",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 116,
+    "timeout": false,
+    "result_ok": 22,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 116,
+    "timeout": false,
+    "result_ok": 22,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30329137413,
+  "job": 90180480755,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "b85807391c744f605c020c5afa79038761bd0bd2",
+  "createdAt": "2026-07-28T04:34:37Z",
+  "title": "fix: preserve runner failure evidence",
+  "phases": [
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 116,
+    "timeout": false,
+    "result_ok": 22,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once"
+    ],
+    "ok": 116,
+    "timeout": false,
+    "result_ok": 22,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30327058786,
+  "job": 90174541901,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "6ff7e3269ce8ebf4cfce5fa802a5663ca4ac60de",
+  "createdAt": "2026-07-28T03:50:54Z",
+  "title": "Reconcile runner jobs across transports",
+  "phases": [
+   {
+    "failed": [
+     "hermetic_fixture_command_cannot_use_operator_paths_or_installed_homeboy"
+    ],
+    "ok": 125,
+    "timeout": false,
+    "result_ok": 25,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "hermetic_fixture_command_cannot_use_operator_paths_or_installed_homeboy"
+    ],
+    "ok": 125,
+    "timeout": false,
+    "result_ok": 25,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30325651872,
+  "job": 90170409949,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "b4e2cd1a22f5ad71250dd5b0eb41797b9985bbe5",
+  "createdAt": "2026-07-28T03:20:24Z",
+  "title": "Align Windows release contract with current policy",
+  "phases": [
+   {
+    "failed": [
+     "hermetic_fixture_command_cannot_use_operator_paths_or_installed_homeboy"
+    ],
+    "ok": 125,
+    "timeout": false,
+    "result_ok": 25,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 78,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30324220280,
+  "job": 90166112288,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "c06c1f1dc475ff979cbc2944863d90cf4e1d3242",
+  "createdAt": "2026-07-28T02:49:54Z",
+  "title": "Prune managed runner binary caches",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 78,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30323038278,
+  "job": 90162682167,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "3579a3fb9cb2e2ee3d68a5af3842893f32e2f6b5",
+  "createdAt": "2026-07-28T02:25:01Z",
+  "title": "Keep raw agent tool dispatch controller-local",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30320505687,
+  "job": 90155203088,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "fe811c8bd946d9ec4b78b8682cb1ca72480415e5",
+  "createdAt": "2026-07-28T01:31:45Z",
+  "title": "feat(notify): give notifications a structured payload and make agent tasks emit",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30320213906,
+  "job": 90154333172,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "3f87ea11b2e2fe6e9345bf05eb1d0824cb563301",
+  "createdAt": "2026-07-28T01:25:38Z",
+  "title": "fix(observation): hoist retention store, reap artifact-root scratch (#10284, #10285)",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30320189346,
+  "job": 90154261397,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "c3abb80027bc22397cbe4dfd9ee98f16e1cf287e",
+  "createdAt": "2026-07-28T01:25:09Z",
+  "title": "feat(daemon): drop the confirmation flags the lifecycle controller already proves",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30320097835,
+  "job": 90153991482,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "49950b4fde4c89a3016190960f08ed75ee4d2e5a",
+  "createdAt": "2026-07-28T01:23:14Z",
+  "title": "fix(release): never report a tag as delivered over an unpublished draft",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30320011144,
+  "job": 90153735788,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "bdae997db45b8eb0b3b97dbf4c408d1b38839501",
+  "createdAt": "2026-07-28T01:21:23Z",
+  "title": "fix(core): unify deploy and harvest tree walks behind one scanner",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30319550511,
+  "job": 90152351537,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "918e7d4ce12b6d09fcfd1cfee076236507f52502",
+  "createdAt": "2026-07-28T01:11:35Z",
+  "title": "Migrate legacy shared Cargo targets into lifecycle cleanup",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30319312916,
+  "job": 90151650937,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "875fd7fc130c5b55d6c60b76e225e7161947c480",
+  "createdAt": "2026-07-28T01:06:39Z",
+  "title": "fix(lab): durably hand off detached bench runs",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30319312752,
+  "job": 90151650490,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "ab3364efeaea2b42b7eb4a0dabf9f7f42e014b8b",
+  "createdAt": "2026-07-28T01:06:38Z",
+  "title": "fix(artifacts): return exact controller reviewer references",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30319075444,
+  "job": 90150956420,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "1374a3eb7a6e67706e26d02975ad17ff5bde876c",
+  "createdAt": "2026-07-28T01:01:59Z",
+  "title": "Expose canonical result sidecar to extension tests",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30317069274,
+  "job": 90144801261,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "c8bade7d3b40a3a1af7dfea1ff30ddaeacee8189",
+  "createdAt": "2026-07-28T00:21:38Z",
+  "title": "fix: populate daemon repair_plan across the SSH boundary",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30316888962,
+  "job": 90144230335,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "a8309dbba1c7c453ea476ec5ed1fd831095eac35",
+  "createdAt": "2026-07-28T00:17:54Z",
+  "title": "refactor: promote Scope to a shared ScopeArgs clap group (triage, build, status)",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30316665743,
+  "job": 90143541292,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "8c314bed48d624c16d59fb20db507fc768dabf96",
+  "createdAt": "2026-07-28T00:13:27Z",
+  "title": "cleanup: delete dead extension-manifest surface",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30316627156,
+  "job": 90143433312,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "0d5127c041f65bb05435edf4c32feaf47581029b",
+  "createdAt": "2026-07-28T00:12:45Z",
+  "title": "cleanup: trim the artifacts.rs facade to symbols with real consumers",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30315746521,
+  "job": 90140772333,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "873bd3b6ebc54ca2eb79a2c1169324555bfdab5e",
+  "createdAt": "2026-07-27T23:56:07Z",
+  "title": "Fix cook continuation controller runtime identity",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30313354147,
+  "job": 90133593734,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "4ca3e5d3c1b70d019d8b632675186dce02232843",
+  "createdAt": "2026-07-27T23:11:59Z",
+  "title": "fix(observation): make migration 12 idempotent",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30308405445,
+  "job": 90118085768,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "21732359af92ed07493dcaa835d3493f8c553ec7",
+  "createdAt": "2026-07-27T21:49:25Z",
+  "title": "fix(runner): keep workspace prune below ARG_MAX",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30303288034,
+  "job": 90101230280,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "5fb25b49e862cff5bb41d4df540fb06209123f68",
+  "createdAt": "2026-07-27T20:36:13Z",
+  "title": "fix(lab): persist evidence before returning references",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30299512598,
+  "job": 90088712898,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "ee242044ee068461ebb4f40d7de3169df6ef73c4",
+  "createdAt": "2026-07-27T19:43:47Z",
+  "title": "fix(runtime): atomically refresh dependency generations",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30295994017,
+  "job": 90077058217,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "7534d4c3aa8e89278938f0f838a3afe64330d496",
+  "createdAt": "2026-07-27T18:56:01Z",
+  "title": "Reap stale synthetic materialized workspace leases",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
+ },
+ {
+  "run": 30295061952,
+  "job": 90073930325,
+  "conclusion": "success",
+  "test_job_conclusion": "success",
+  "sha": "65be2cb93948f034aea5e2cf0695f6d5347cdfe2",
+  "createdAt": "2026-07-27T18:43:41Z",
+  "title": "fix(cook): clarify Lab wait and detach observation",
+  "phases": [
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 77,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   },
+   {
+    "failed": [
+     "release_blocks_preparation_and_publication_on_a_native_windows_workspace_build"
+    ],
+    "ok": 76,
+    "timeout": false,
+    "result_ok": 17,
+    "result_failed": 2,
+    "harness_exit_124": false
+   }
+  ],
+  "gate": [
+   "Differential gate accepted review test: current=1 base=1"
+  ],
+  "baseline_exit": [
+   "Baseline homeboy review test exited 101"
+  ]
  }
 ]
