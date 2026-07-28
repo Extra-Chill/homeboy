@@ -119,15 +119,46 @@ fn fixture_workflow_args() -> AuditRunWorkflowArgs {
 }
 
 /// Run the fixture audit through the CI entry point and return the workflow
-/// result.
+/// result. Panics if the audit cannot run at all.
+///
+/// Only the `slow-tests` snapshot/determinism pair uses this strict form; the
+/// default-tier tests go through [`fixture_audit_or_skip`], so this is gated to
+/// avoid a dead-code warning in the default build.
+#[cfg(feature = "slow-tests")]
 fn run_fixture_audit() -> AuditRunWorkflowResult {
     // Audit resolves the component under audit (here, the portable fixture's
     // homeboy.json) through a provider the CLI registers at startup; a core lib
     // test never runs the CLI, so register the component-backed provider so the
     // fixture's audit config is discovered.
     homeboy_core::component::audit_provider::register();
-    run_main_audit_workflow(fixture_workflow_args())
-        .expect("audit workflow runs on the fixture tree")
+    run_main_audit_workflow(fixture_workflow_args()).expect(
+        "audit workflow runs on the fixture tree \
+         (requires an installed extension that fingerprints the fixture's source language)",
+    )
+}
+
+/// `Some(workflow)` when the audit had a corpus; `None` when no installed
+/// extension can fingerprint the fixture's source language.
+///
+/// Before #10557, that second case produced `files_scanned: 0, findings: [],
+/// passed: true` — so every finding assertion below passed VACUOUSLY on a
+/// machine with no extension installed. `review audit` now reports an empty
+/// corpus as a hard error instead, which is the honest answer, so tests that
+/// assert on findings have to distinguish "the audit ran and found nothing"
+/// from "the audit could not run". Skipping loudly is that distinction; it is
+/// not a weakening, because the vacuous pass was never evidence of anything.
+fn fixture_audit_or_skip() -> Option<AuditRunWorkflowResult> {
+    homeboy_core::component::audit_provider::register();
+    match run_main_audit_workflow(fixture_workflow_args()) {
+        Ok(workflow) => Some(workflow),
+        Err(error) if error.to_string().contains("audit scanned 0 files") => {
+            eprintln!(
+                "SKIP: no installed extension can fingerprint the audit_runtime fixture ({error})"
+            );
+            None
+        }
+        Err(error) => panic!("audit workflow failed on the fixture tree: {error}"),
+    }
 }
 
 /// Render a finding set into a deterministic, sorted list of compact,
@@ -157,11 +188,25 @@ fn finding_fingerprints(findings: &[Finding]) -> Vec<String> {
 const EXPECTED_FINDINGS: &[&str] = &[
     "core_boundary_leak::src/boundary_leak.rs",
     "high_item_count::src/god_file.rs",
+    // #10558: `src/commands/mod.rs` is an INDEX file and
+    // `src/commands/thick_adapter.rs` is the only non-index file in its
+    // directory (a singleton group). Both are excluded from convention
+    // discovery — correctly — and both must still be scanned by source
+    // policies. These two entries are the regression guard.
+    "source_policy_violation::src/commands/mod.rs",
+    "source_policy_violation::src/commands/thick_adapter.rs",
     "source_policy_violation::src/policy_violation.rs",
     "thin_command_adapter_violation::src/commands/thick_adapter.rs",
     "unreferenced_export::src/boundary_leak.rs",
     "unreferenced_export::src/god_file.rs",
     "unreferenced_export::src/policy_violation.rs",
+];
+
+/// The two corpus entries above, isolated so the #10558 property has a test of
+/// its own that does not require the slow tier.
+const SOURCE_POLICY_CORPUS_GUARDS: &[&str] = &[
+    "source_policy_violation::src/commands/mod.rs",
+    "source_policy_violation::src/commands/thick_adapter.rs",
 ];
 
 // Runs the full audit workflow against the fixture tree, which requires a
@@ -217,7 +262,9 @@ fn audit_runtime_regression_is_deterministic() {
 /// regression that leaks test-path files reproduces here.
 #[test]
 fn audit_runtime_regression_skips_test_paths() {
-    let workflow = run_fixture_audit();
+    let Some(workflow) = fixture_audit_or_skip() else {
+        return;
+    };
 
     let test_path_findings: Vec<String> = workflow
         .findings
@@ -240,10 +287,89 @@ fn audit_runtime_regression_uses_ci_workflow_entry_point() {
     // A trivial compile-time + runtime assertion that the workflow result type
     // is what we render from. Keeps the intent explicit: the snapshot above is
     // produced by the same function `src/commands/audit.rs::run` calls.
-    let workflow: AuditRunWorkflowResult = run_fixture_audit();
+    let Some(workflow) = fixture_audit_or_skip() else {
+        return;
+    };
+    let workflow: AuditRunWorkflowResult = workflow;
     let _: &Vec<crate::Finding> = &workflow.findings;
     assert!(
         workflow.exit_code == 0 || workflow.exit_code == 1,
         "workflow must produce a normal audit exit code"
     );
+}
+
+/// #10558 regression: source policies must see the files convention discovery
+/// legitimately drops.
+///
+/// Two filters exist for convention SIBLING detection and used to leak into the
+/// source-policy corpus because that corpus was built from `discovery.groups`:
+///
+///   1. index files (`mod.rs`, `lib.rs`, `main.rs`, `index.*`, `__init__.py`),
+///      excluded because they organize other files rather than being peers, and
+///   2. groups with fewer than two members, dropped because a convention needs
+///      peers to exist.
+///
+/// Neither has any meaning for a term scan. On homeboy itself the pair made 264
+/// of 1819 `.rs` files (14.5%) unscannable by ANY source policy — every
+/// `mod.rs`, `lib.rs`, `main.rs`, and every `build.rs` alone in a crate root.
+///
+/// The fixture exercises both in one directory: `src/commands/mod.rs` is an
+/// index file, `src/commands/thick_adapter.rs` is the sole non-index file in
+/// that directory (a singleton group). Both carry the fixture's configured
+/// forbidden term, so both must produce a `source_policy_violation`.
+///
+/// This lives in the default tier (not `slow-tests`) because it is the property
+/// #10558 is about, and it skips — loudly — rather than passing vacuously when
+/// no extension can fingerprint the fixture.
+#[test]
+fn source_policies_scan_index_files_and_singleton_directories() {
+    let Some(workflow) = fixture_audit_or_skip() else {
+        return;
+    };
+
+    let actual = finding_fingerprints(&workflow.findings);
+    for guard in SOURCE_POLICY_CORPUS_GUARDS {
+        assert!(
+            actual.iter().any(|finding| finding == guard),
+            "source-policy corpus regressed to the convention corpus: expected `{guard}`.\n\
+             `mod.rs` (index file) and the sole file in a directory (singleton group) are dropped \n\
+             by convention discovery for reasons that do not apply to a term scan (#10558).\n\
+             actual = {actual:#?}"
+        );
+    }
+}
+
+/// The corpus a source policy scans must be a strict superset of the convention
+/// corpus, never the other way round.
+///
+/// Stated as a property rather than a file list so a future filter added to
+/// convention discovery cannot silently narrow policy coverage again.
+#[test]
+fn source_policy_corpus_is_not_narrowed_by_convention_filters() {
+    let Some(workflow) = fixture_audit_or_skip() else {
+        return;
+    };
+
+    let scanned_by_policy: Vec<String> = workflow
+        .findings
+        .iter()
+        .filter(|finding| {
+            super::super::findings::finding_kind_key(&finding.kind) == "source_policy_violation"
+        })
+        .map(|finding| finding.file.replace('\\', "/"))
+        .collect();
+
+    // `src/policy_violation.rs` sits in a multi-file directory, so it is in the
+    // convention corpus too. The two guards above are NOT. Seeing all three
+    // proves the policy corpus is the union, not the intersection.
+    for expected in [
+        "src/policy_violation.rs",
+        "src/commands/mod.rs",
+        "src/commands/thick_adapter.rs",
+    ] {
+        assert!(
+            scanned_by_policy.iter().any(|file| file == expected),
+            "source policy did not reach {expected}; scanned = {scanned_by_policy:#?}"
+        );
+    }
 }

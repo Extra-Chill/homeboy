@@ -113,34 +113,52 @@ pub(super) fn audit_internal(
     let files_skipped = discovery
         .files_walked
         .saturating_sub(discovery.files_fingerprinted);
-    if discovery.groups.is_empty() {
-        let mut warnings = Vec::new();
+    // An audit whose corpus is empty has not passed — it has not run (#10557).
+    //
+    // The post-merge `full-audit-gate` invoked the raw binary, so
+    // `homeboy-action`'s extension-install step never ran, no extension declared
+    // `provides.file_extensions`, and `CodebaseSnapshot` yielded nothing. The
+    // audit then reported `files_scanned: 0, files_skipped: 1817, findings: [],
+    // passed: true` and the gate went green in 7 seconds on a 1800-file
+    // repository. Reporting success while measuring nothing is the failure the
+    // gate exists to prevent, so it is a hard error here — in the engine, for
+    // every consumer — rather than something each workflow has to remember to
+    // assert.
+    //
+    // This mirrors the existing `validate_source_roots` /
+    // `validate_configured_paths` contract one level up: configuration that
+    // silently matches zero files is already an error, and a corpus that
+    // silently contains zero files is the same defect with a wider blast radius.
+    if discovery.policy_fingerprints.is_empty() {
         let unclaimed = walker::count_unclaimed_source_files(root);
         let total_skipped = files_skipped + unclaimed;
         if unclaimed > 0 {
-            warnings.push(format!(
-                "Found {} source file(s) but no installed extension provides fingerprinting for these file types. \
-                 Install or update an extension with a `provides.file_extensions` and `scripts.fingerprint` config.",
-                unclaimed
+            return Err(homeboy_error::Error::invalid_argument(
+                "audit.corpus",
+                format!(
+                    "audit scanned 0 files: found {unclaimed} source file(s) that no installed extension \
+                     can fingerprint. An audit with an empty corpus cannot pass — it did not run. \
+                     Install or update an extension declaring `provides.file_extensions` and \
+                     `scripts.fingerprint` for these file types (CI: run the audit through \
+                     Extra-Chill/homeboy-action, whose `Install extension` step does this; \
+                     invoking the binary directly skips it)."
+                ),
             ));
-            log_status!(
-                "audit",
-                "WARNING: {} source files found but none could be fingerprinted (no extension claims these file types)",
-                unclaimed
-            );
-        } else if discovery.files_walked > 0 && discovery.files_fingerprinted == 0 {
-            warnings.push(format!(
-                "Found {} source file(s) but no extension could fingerprint them.",
-                discovery.files_walked
-            ));
-            log_status!(
-                "audit",
-                "WARNING: {} source files found but none could be fingerprinted",
-                discovery.files_walked
-            );
-        } else {
-            log_status!("audit", "No source files found");
         }
+        if discovery.files_walked > 0 {
+            return Err(homeboy_error::Error::invalid_argument(
+                "audit.corpus",
+                format!(
+                    "audit scanned 0 files: found {} extension-claimed source file(s) but the \
+                     extension's fingerprint script produced nothing for any of them. An audit with \
+                     an empty corpus cannot pass — it did not run.",
+                    discovery.files_walked
+                ),
+            ));
+        }
+        // Genuinely nothing to audit (docs-only or empty checkout). That is a
+        // real, honest zero — not a broken instrument.
+        log_status!("audit", "No source files found");
         timing.push_ok("discovery_fingerprinting", discovery_started.elapsed());
         return Ok(AuditWithAnalysis {
             result: CodeAuditResult {
@@ -152,7 +170,7 @@ pub(super) fn audit_internal(
                     outliers_found: 0,
                     alignment_score: None,
                     files_skipped: total_skipped,
-                    warnings,
+                    warnings: Vec::new(),
                 },
                 conventions: vec![],
                 directory_conventions: vec![],
@@ -189,20 +207,31 @@ pub(super) fn audit_internal(
     let detectors_started = std::time::Instant::now();
 
     // Phase 4c: Duplication detection (identical function bodies across files)
+    //
+    // `all_fingerprints` is the CONVENTION corpus: index files removed and
+    // single-file groups dropped. Convention, duplication, and dead-code
+    // detectors need exactly that shape.
     let all_fingerprints: Vec<&fingerprint::FileFingerprint> = discovery
         .groups
         .iter()
         .flat_map(|(_, _, fps)| fps.iter())
         .collect();
 
-    source_policy::validate_configured_paths(&all_fingerprints, &audit_config)?;
+    // `policy_fingerprints` is the SOURCE-POLICY corpus: every extension-claimed
+    // source file, index files included, no group-size filter (#10558). Path
+    // scoping is validated against it too, so a configured `include_path_contains`
+    // is checked against the files policies can actually reach.
+    let policy_fingerprints: Vec<&fingerprint::FileFingerprint> =
+        discovery.policy_fingerprints.iter().collect();
+
+    source_policy::validate_configured_paths(&policy_fingerprints, &audit_config)?;
 
     if plan.detector_enabled("core_boundary_leaks") {
         let rules = audit_config.core_boundary_leaks.to_source_policy_rules();
-        source_policy::validate_source_roots(&all_fingerprints, &rules)?;
+        source_policy::validate_source_roots(&policy_fingerprints, &rules)?;
     }
     if plan.detector_enabled("source_policy") {
-        source_policy::validate_source_roots(&all_fingerprints, &audit_config.source_policies)?;
+        source_policy::validate_source_roots(&policy_fingerprints, &audit_config.source_policies)?;
     }
 
     // Build convention method set ONCE — used by duplication, near-duplicate, and parallel detectors.
@@ -280,6 +309,26 @@ pub(super) fn audit_internal(
         .map(|(_, subset)| subset.as_slice())
         .unwrap_or(all_fingerprints.as_slice());
 
+    // Source policies get the same changed-scope narrowing, applied to THEIR
+    // corpus. Reusing the already-computed `scope_files` set keeps the two
+    // corpora scoped by one identical rule.
+    let scoped_policy_fingerprints: Option<Vec<&fingerprint::FileFingerprint>> =
+        scoped_fingerprints.as_ref().map(|(scope_files, _)| {
+            policy_fingerprints
+                .iter()
+                .copied()
+                .filter(|fp| {
+                    scope_files
+                        .iter()
+                        .any(|scope| fp.relative_path.contains(scope.as_str()))
+                })
+                .collect()
+        });
+    let policy_scan_fingerprints: &[&fingerprint::FileFingerprint] = scoped_policy_fingerprints
+        .as_ref()
+        .map(|subset| subset.as_slice())
+        .unwrap_or(policy_fingerprints.as_slice());
+
     let dead_code_references = dead_code_references.or_else(|| {
         plan.detector_enabled("dead_code")
             .then(|| DeadCodeReferenceAnalysis::build(root, reference_paths))
@@ -290,6 +339,7 @@ pub(super) fn audit_internal(
         audit_config: &audit_config,
         all_fingerprints: &all_fingerprints,
         per_file_fingerprints,
+        policy_fingerprints: policy_scan_fingerprints,
         source_snapshot: Some(&source_snapshot),
         dead_code_references: dead_code_references.as_ref(),
     };
@@ -572,9 +622,12 @@ pub(super) fn audit_internal(
     }
     timing.push_ok("report", report_started.elapsed());
 
-    // Release the scoped fingerprint subset (borrows from `all_fingerprints`)
-    // before dropping the owning corpus. `per_file_fingerprints` is just a
-    // borrowed view, so its borrow ends here via NLL.
+    // Release the scoped fingerprint subsets (they borrow from the two corpora)
+    // before dropping the owning corpora. `per_file_fingerprints` and
+    // `policy_scan_fingerprints` are just borrowed views, so their borrows end
+    // here via NLL.
+    drop(scoped_policy_fingerprints);
+    drop(policy_fingerprints);
     drop(scoped_fingerprints);
     drop(all_fingerprints);
     let analysis = AuditAnalysisContext {
@@ -651,6 +704,9 @@ fn audit_root_only(
         audit_config: &audit_config,
         all_fingerprints: &[],
         per_file_fingerprints: &[],
+        // The root-only fast path never builds a fingerprint corpus, and no
+        // source-policy detector is in `ROOT_ONLY_DETECTOR_IDS`.
+        policy_fingerprints: &[],
         source_snapshot: source_snapshot.as_ref(),
         dead_code_references: None,
     };
@@ -741,3 +797,7 @@ fn audit_root_only(
         duplicate_groups: vec![],
     }
 }
+
+#[cfg(test)]
+#[path = "engine_corpus_test.rs"]
+mod engine_corpus_test;

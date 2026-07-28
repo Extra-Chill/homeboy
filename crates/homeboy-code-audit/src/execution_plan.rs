@@ -36,6 +36,32 @@ impl AuditProfile {
         }
     }
 
+    /// Which detector families a profile runs.
+    ///
+    /// ── Why `source_policy` / `core_boundary_leaks` are NOT in `Pr` ──
+    ///
+    /// #10557 observed, correctly, that with the post-merge full-audit gate
+    /// broken these detectors were enforced in zero blocking contexts, and
+    /// suggested adding them to `Pr` as the remedy. They stay out, for three
+    /// reasons that are worth writing down so this is not re-litigated:
+    ///
+    ///  1. Both are `DetectorAccess::Discovery`, so adding either flips
+    ///     `AuditExecutionPlan::requires_discovery()` for `Pr`. That forces the
+    ///     whole-tree walk + fingerprint on EVERY pull request — the exact cost
+    ///     the profile split exists to avoid. It is an architecture change, not
+    ///     a list edit.
+    ///  2. `release.yml` runs `--profile=pr --changed-since <before>`. Widening
+    ///     `Pr` therefore widens the RELEASE gate, against a tree that carries
+    ///     ~1450 latent `core-agnostic-source` findings. Stranding releases on
+    ///     untriaged debt is precisely the failure `.github/workflows/audit-debt.yml`
+    ///     was created to prevent.
+    ///  3. Whole-tree detectors belong on the integrated tree, which is what the
+    ///     post-merge `--profile=full` gate audits. Fixing that gate (#10557) is
+    ///     the cheaper and more correct answer to "enforced nowhere".
+    ///
+    /// If these ever do need PR-time enforcement, the prerequisite is giving
+    /// them a `RootOnly` access mode backed by the source-policy corpus over the
+    /// changed files only — not moving a Discovery detector into `Pr`.
     fn includes_detector(self, family: &DetectorDescriptor) -> bool {
         match self {
             Self::Full => true,
@@ -667,8 +693,29 @@ mod tests {
         assert!(plan.detector_enabled("thin_command_adapter"));
         assert!(!plan.detector_enabled("duplication"));
         assert!(!plan.detector_enabled("dead_code"));
+        // Deliberate — see `AuditProfile::includes_detector`. Both source-policy
+        // families are Discovery detectors; enabling either in `Pr` forces the
+        // whole-tree walk on every PR *and* widens release.yml's
+        // `--profile=pr --changed-since` gate onto untriaged debt. They are
+        // enforced by the post-merge `--profile=full` gate instead (#10557).
         assert!(!plan.detector_enabled("source_policy"));
+        assert!(!plan.detector_enabled("core_boundary_leaks"));
         assert!(!plan.detector_enabled("compiler_warnings"));
+
+        // `requires_discovery()` above is the aggregate answer; this names the
+        // offender when a Discovery detector is added to `Pr`, so the failure
+        // says which one rather than just "the profile got expensive".
+        for descriptor in AuditExecutionPlan::descriptors() {
+            if plan.detector_enabled(descriptor.id) {
+                assert!(
+                    !descriptor.access.requires_discovery(),
+                    "detector `{}` is Discovery-access but enabled in the PR profile: \
+                     every pull request now pays for a whole-tree walk, and release.yml's \
+                     `--profile=pr --changed-since` gate widened with it",
+                    descriptor.id
+                );
+            }
+        }
     }
 
     #[test]
