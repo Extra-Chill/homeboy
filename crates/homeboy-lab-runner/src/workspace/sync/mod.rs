@@ -67,6 +67,7 @@ const WORKSPACE_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 const WORKSPACE_METADATA_OUTPUT_LIMIT: usize = 4 * 1024;
 const WORKSPACE_PRUNE_TIMEOUT: Duration = Duration::from_secs(30);
 const STALE_MATERIALIZED_WORKSPACE_REASON: &str = "stale_materialized_workspace_lifecycle";
+const TERMINAL_RESOURCE_LIFECYCLE_REASON: &str = "terminal_resource_lifecycle";
 // A page must leave time for its transport timeout and advance past a directory
 // whose size cannot be measured. Size is advisory, never a deletion proof.
 const WORKSPACE_PRUNE_SCAN_BUDGET: Duration = Duration::from_secs(20);
@@ -2662,6 +2663,9 @@ fn prune_candidate_reason(
     if !Path::new(source_path).exists() {
         return Ok(Some("source_path_missing".to_string()));
     }
+    if has_terminal_delete_on_success_lifecycle(metadata) {
+        return Ok(Some(TERMINAL_RESOURCE_LIFECYCLE_REASON.to_string()));
+    }
     if is_stale_materialized_workspace_lifecycle(metadata, path) {
         return Ok(Some(STALE_MATERIALIZED_WORKSPACE_REASON.to_string()));
     }
@@ -2684,7 +2688,10 @@ fn is_stale_materialized_workspace_lifecycle(metadata: &serde_json::Value, path:
 
     absent_owner("run_id")
         && absent_owner("job_id")
-        && metadata.get("sync_mode").and_then(|value| value.as_str()) == Some("snapshot")
+        && matches!(
+            metadata.get("sync_mode").and_then(|value| value.as_str()),
+            Some("snapshot" | "snapshot-git")
+        )
         && metadata
             .get("snapshot_identity")
             .and_then(|value| value.as_str())
@@ -2699,6 +2706,42 @@ fn is_stale_materialized_workspace_lifecycle(metadata: &serde_json::Value, path:
             == Some("delete_on_success")
         && resource.get("status").and_then(|value| value.as_str()) == Some("active")
         && resource.get("path").and_then(|value| value.as_str()) == path.to_str()
+}
+
+fn has_terminal_delete_on_success_lifecycle(metadata: &serde_json::Value) -> bool {
+    has_terminal_delete_on_success_lifecycle_with(metadata, |run_id| {
+        match homeboy_agents::agent_task_lifecycle::exact_record(run_id) {
+            Ok(record) if record.state.is_terminal() => RunAuthority::Terminal,
+            Ok(_) => RunAuthority::Active,
+            Err(_) => RunAuthority::Unavailable,
+        }
+    })
+}
+
+pub(crate) fn has_terminal_delete_on_success_lifecycle_with(
+    metadata: &serde_json::Value,
+    authority: impl FnOnce(&str) -> RunAuthority,
+) -> bool {
+    let Some(run_id) = metadata
+        .get("run_id")
+        .and_then(|value| value.as_str())
+        .filter(|run_id| !run_id.trim().is_empty())
+    else {
+        return false;
+    };
+    let Some(resource) = metadata
+        .get("resource_lifecycle")
+        .and_then(|value| value.as_object())
+    else {
+        return false;
+    };
+    resource.get("run_id").and_then(|value| value.as_str()) == Some(run_id)
+        && resource.get("status").and_then(|value| value.as_str()) == Some("active")
+        && resource
+            .get("cleanup_policy")
+            .and_then(|value| value.as_str())
+            == Some("delete_on_success")
+        && matches!(authority(run_id), RunAuthority::Terminal)
 }
 
 pub(crate) fn encoded_materialized_workspace_metadata_is_valid(encoded: &str, path: &Path) -> bool {
@@ -3207,6 +3250,9 @@ fn prune_candidate_reason_from_decoded_metadata(
         .and_then(|value| value.as_str())?;
     if !Path::new(source_path).exists() {
         return Some("source_path_missing".to_string());
+    }
+    if has_terminal_delete_on_success_lifecycle(metadata) {
+        return Some(TERMINAL_RESOURCE_LIFECYCLE_REASON.to_string());
     }
     is_stale_materialized_workspace_lifecycle(metadata, path)
         .then(|| STALE_MATERIALIZED_WORKSPACE_REASON.to_string())
