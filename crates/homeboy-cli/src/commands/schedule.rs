@@ -331,10 +331,7 @@ pub fn run(args: ScheduleArgs) -> CmdResult<ScheduleOutput> {
         ScheduleCommand::List => {
             let mut all: Vec<Schedule> = schedule::list()?;
             all.sort_by(|a, b| a.id.cmp(&b.id));
-            Ok((
-                ScheduleOutput::Many(all.into_iter().map(view).collect()),
-                0,
-            ))
+            Ok((ScheduleOutput::Many(all.into_iter().map(view).collect()), 0))
         }
         ScheduleCommand::Show { id } => {
             let declared = schedule::load(&id)?;
@@ -343,13 +340,7 @@ pub fn run(args: ScheduleArgs) -> CmdResult<ScheduleOutput> {
         ScheduleCommand::Remove { id } => {
             schedule::delete(&id)?;
             schedule::remove_state(&id);
-            Ok((
-                ScheduleOutput::Removed {
-                    id,
-                    removed: true,
-                },
-                0,
-            ))
+            Ok((ScheduleOutput::Removed { id, removed: true }, 0))
         }
         ScheduleCommand::Run { id } => {
             let declared = schedule::load(&id)?;

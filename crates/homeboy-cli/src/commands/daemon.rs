@@ -4,11 +4,12 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use homeboy::core::daemon::{
-    self, BrokerConfig, BrokerConfigOptions, DaemonExactOrphanRecoveryResult, DaemonLeaselessRecoveryResult, DaemonOrphanAdoptionResult, DaemonStartResult, DaemonStateLossRecoveryResult, DaemonStatus, DaemonStopResult,
-    ServiceIdentity,
+    self, BrokerConfig, BrokerConfigOptions, DaemonExactOrphanRecoveryResult,
+    DaemonLeaselessRecoveryResult, DaemonOrphanAdoptionResult, DaemonStartResult,
+    DaemonStateLossRecoveryResult, DaemonStatus, DaemonStopResult, ServiceIdentity,
 };
-use homeboy::core::Error;
 use homeboy::core::http_api::{AnalysisJobRunOutput, AnalysisJobRunner};
+use homeboy::core::Error;
 
 use super::CmdResult;
 
@@ -240,8 +241,7 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
             addr,
         } => {
             if recover_missing_child_identity {
-                return Err(legacy_child_recovery_migration_error(
-                ));
+                return Err(legacy_child_recovery_migration_error());
             }
             Ok((
                 DaemonOutput::AdoptOrphan(daemon::adopt_orphaned_lease(
@@ -254,33 +254,85 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
         }
         // `confirm_workload_processes_absent` stays load-bearing: no PID exists
         // for these jobs, so only the operator can attest workload absence.
-        DaemonCommand::ReconcileDeadLeaseOrphans { lease_id, job_ids, confirm_pid_dead: _deprecated_confirm_pid_dead, confirm_workload_processes_absent, addr } => Ok((
+        DaemonCommand::ReconcileDeadLeaseOrphans {
+            lease_id,
+            job_ids,
+            confirm_pid_dead: _deprecated_confirm_pid_dead,
+            confirm_workload_processes_absent,
+            addr,
+        } => Ok((
             DaemonOutput::ReconcileDeadLeaseOrphans(daemon::reconcile_dead_lease_orphans(
-                &lease_id, &job_ids, confirm_workload_processes_absent, &addr,
+                &lease_id,
+                &job_ids,
+                confirm_workload_processes_absent,
+                &addr,
             )?),
             0,
         )),
-        DaemonCommand::RecoverMissingChildIdentity { lease_id, recorded_daemon_pid, recorded_daemon_endpoint, job_id, child_pid, child_starttime_ticks } => Ok((
-            DaemonOutput::RecoverMissingChildIdentity(daemon::recover_missing_child_identity(&lease_id, recorded_daemon_pid, &recorded_daemon_endpoint, job_id, child_pid, child_starttime_ticks)?),
+        DaemonCommand::RecoverMissingChildIdentity {
+            lease_id,
+            recorded_daemon_pid,
+            recorded_daemon_endpoint,
+            job_id,
+            child_pid,
+            child_starttime_ticks,
+        } => Ok((
+            DaemonOutput::RecoverMissingChildIdentity(daemon::recover_missing_child_identity(
+                &lease_id,
+                recorded_daemon_pid,
+                &recorded_daemon_endpoint,
+                job_id,
+                child_pid,
+                child_starttime_ticks,
+            )?),
             0,
         )),
-        DaemonCommand::ReconcileLeaselessOrphans { confirm_no_daemon_owner: _deprecated_confirm_no_daemon_owner, addr } => Ok((
+        DaemonCommand::ReconcileLeaselessOrphans {
+            confirm_no_daemon_owner: _deprecated_confirm_no_daemon_owner,
+            addr,
+        } => Ok((
             DaemonOutput::ReconcileLeaselessOrphans(daemon::reconcile_leaseless_orphans(&addr)?),
             0,
         )),
-        DaemonCommand::RecoverMissingLeaseState { lease_id, recorded_pid, recorded_endpoint, confirm_pid_dead: _deprecated_confirm_pid_dead, confirm_control_plane_lost: _deprecated_confirm_control_plane_lost, addr } => Ok((
-            DaemonOutput::RecoverMissingLeaseState(daemon::recover_missing_lease_state(&lease_id, recorded_pid, &recorded_endpoint, &addr)?),
+        DaemonCommand::RecoverMissingLeaseState {
+            lease_id,
+            recorded_pid,
+            recorded_endpoint,
+            confirm_pid_dead: _deprecated_confirm_pid_dead,
+            confirm_control_plane_lost: _deprecated_confirm_control_plane_lost,
+            addr,
+        } => Ok((
+            DaemonOutput::RecoverMissingLeaseState(daemon::recover_missing_lease_state(
+                &lease_id,
+                recorded_pid,
+                &recorded_endpoint,
+                &addr,
+            )?),
             0,
         )),
-        DaemonCommand::Serve { addr, startup_token } => {
+        DaemonCommand::Serve {
+            addr,
+            startup_token,
+        } => {
             // Supervision supplies the token through the environment; the
             // hidden argument is retained as the portable ownership proof.
             let _ = startup_token;
             serve(&addr)
         }
-        DaemonCommand::Supervise { addr, startup_token } => {
+        DaemonCommand::Supervise {
+            addr,
+            startup_token,
+        } => {
             daemon::supervise(&addr, &startup_token)?;
-            Ok((DaemonOutput::Serve(DaemonStartResult { pid: std::process::id(), address: addr, state_path: String::new(), lease_id: String::new() }), 0))
+            Ok((
+                DaemonOutput::Serve(DaemonStartResult {
+                    pid: std::process::id(),
+                    address: addr,
+                    state_path: String::new(),
+                    lease_id: String::new(),
+                }),
+                0,
+            ))
         }
         DaemonCommand::Stop { lease_id, force } => {
             let lease_bound = lease_id.is_some();
@@ -416,17 +468,55 @@ mod tests {
 
     #[test]
     fn legacy_child_recovery_parser_requires_exact_evidence() {
-        assert!(Cli::try_parse_from(["homeboy", "daemon", "recover-missing-child-identity"])
-            .is_err());
+        assert!(
+            Cli::try_parse_from(["homeboy", "daemon", "recover-missing-child-identity"]).is_err()
+        );
         assert!(Cli::try_parse_from([
-            "homeboy", "daemon", "recover-missing-child-identity", "--lease-id", "lease", "--recorded-daemon-pid", "nope",
-        ]).is_err());
+            "homeboy",
+            "daemon",
+            "recover-missing-child-identity",
+            "--lease-id",
+            "lease",
+            "--recorded-daemon-pid",
+            "nope",
+        ])
+        .is_err());
         assert!(Cli::try_parse_from([
-            "homeboy", "daemon", "recover-missing-child-identity", "--lease-id", "lease", "--recorded-daemon-pid", "42", "--recorded-daemon-endpoint", "127.0.0.1:1", "--job-id", "not-a-uuid", "--child-pid", "43", "--child-starttime-ticks", "1",
-        ]).is_err());
+            "homeboy",
+            "daemon",
+            "recover-missing-child-identity",
+            "--lease-id",
+            "lease",
+            "--recorded-daemon-pid",
+            "42",
+            "--recorded-daemon-endpoint",
+            "127.0.0.1:1",
+            "--job-id",
+            "not-a-uuid",
+            "--child-pid",
+            "43",
+            "--child-starttime-ticks",
+            "1",
+        ])
+        .is_err());
         assert!(Cli::try_parse_from([
-            "homeboy", "daemon", "recover-missing-child-identity", "--lease-id", "lease", "--recorded-daemon-pid", "42", "--recorded-daemon-endpoint", "127.0.0.1:1", "--job-id", "00000000-0000-0000-0000-000000000001", "--child-pid", "43", "--child-starttime-ticks", "1",
-        ]).is_ok());
+            "homeboy",
+            "daemon",
+            "recover-missing-child-identity",
+            "--lease-id",
+            "lease",
+            "--recorded-daemon-pid",
+            "42",
+            "--recorded-daemon-endpoint",
+            "127.0.0.1:1",
+            "--job-id",
+            "00000000-0000-0000-0000-000000000001",
+            "--child-pid",
+            "43",
+            "--child-starttime-ticks",
+            "1",
+        ])
+        .is_ok());
     }
 
     /// `--confirm-workload-processes-absent` is the one confirmation on this
@@ -465,9 +555,7 @@ mod tests {
             let error = run(args)
                 .expect_err("missing operator attestation is rejected before state access");
             assert!(
-                error
-                    .message
-                    .contains("confirm-workload-processes-absent"),
+                error.message.contains("confirm-workload-processes-absent"),
                 "expected the workload attestation refusal, got {}",
                 error.message
             );
@@ -641,14 +729,9 @@ mod tests {
 
     #[test]
     fn stop_accepts_an_exact_lease_selector() {
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "daemon",
-            "stop",
-            "--lease-id",
-            "lease-live",
-        ])
-        .is_ok());
+        assert!(
+            Cli::try_parse_from(["homeboy", "daemon", "stop", "--lease-id", "lease-live",]).is_ok()
+        );
     }
 
     #[test]
@@ -686,9 +769,14 @@ mod tests {
             assert!(error.message.contains("migration-only"));
             let rendered = format!("{error:?}");
             for field in [
-                "recover-missing-child-identity", "expected-lease", "recorded-daemon-pid",
+                "recover-missing-child-identity",
+                "expected-lease",
+                "recorded-daemon-pid",
             ] {
-                assert!(rendered.contains(field), "missing remediation field {field}");
+                assert!(
+                    rendered.contains(field),
+                    "missing remediation field {field}"
+                );
             }
         });
     }
@@ -701,8 +789,8 @@ mod tests {
             "adopt-orphan",
             "--lease-id",
             "lease-dead",
-                "--confirm-untracked-child-dead",
-                "00000000-0000-0000-0000-000000000001",
+            "--confirm-untracked-child-dead",
+            "00000000-0000-0000-0000-000000000001",
         ])
         .expect("one released alias still parses");
         let Commands::Daemon(args) = cli.command else {

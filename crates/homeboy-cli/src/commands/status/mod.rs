@@ -11,9 +11,9 @@
 
 use homeboy::core::component;
 use homeboy::core::context;
+use homeboy::core::scope::{self, Scope};
 use homeboy_release::deploy::ReleaseStateStatus;
 use homeboy_release::release::version;
-use homeboy::core::scope::{self, Scope};
 use std::collections::HashMap;
 
 use super::CmdResult;
@@ -386,28 +386,28 @@ fn run_project_dashboard(project_id: &str, args: &StatusArgs) -> CmdResult<Statu
             ProjectComponentDashboardStatus::Degraded
         } else {
             match release_status {
-            ReleaseStateStatus::Uncommitted => ProjectComponentDashboardStatus::Uncommitted,
-            ReleaseStateStatus::NeedsRelease => ProjectComponentDashboardStatus::NeedsRelease,
-            ReleaseStateStatus::DocsOnly => ProjectComponentDashboardStatus::DocsOnly,
-            ReleaseStateStatus::Clean => {
-                // Check source freshness first. Deployment health is evaluated
-                // independently, so a newer target is not marked outdated when
-                // this configured checkout is stale.
-                if let Some(d) = drift {
-                    if d.is_behind() {
-                        ProjectComponentDashboardStatus::BehindUpstream
+                ReleaseStateStatus::Uncommitted => ProjectComponentDashboardStatus::Uncommitted,
+                ReleaseStateStatus::NeedsRelease => ProjectComponentDashboardStatus::NeedsRelease,
+                ReleaseStateStatus::DocsOnly => ProjectComponentDashboardStatus::DocsOnly,
+                ReleaseStateStatus::Clean => {
+                    // Check source freshness first. Deployment health is evaluated
+                    // independently, so a newer target is not marked outdated when
+                    // this configured checkout is stale.
+                    if let Some(d) = drift {
+                        if d.is_behind() {
+                            ProjectComponentDashboardStatus::BehindUpstream
+                        } else {
+                            deployed_version_dashboard_status(
+                                &local_ver,
+                                &remote_ver,
+                                d.latest_origin_tag.as_deref(),
+                            )
+                        }
                     } else {
-                        deployed_version_dashboard_status(
-                            &local_ver,
-                            &remote_ver,
-                            d.latest_origin_tag.as_deref(),
-                        )
+                        deployed_version_dashboard_status(&local_ver, &remote_ver, None)
                     }
-                } else {
-                    deployed_version_dashboard_status(&local_ver, &remote_ver, None)
                 }
-            }
-            ReleaseStateStatus::Unknown => ProjectComponentDashboardStatus::Unknown,
+                ReleaseStateStatus::Unknown => ProjectComponentDashboardStatus::Unknown,
             }
         };
 
@@ -495,9 +495,9 @@ fn deployed_version_dashboard_status(
             ProjectComponentDashboardStatus::Outdated
         }
         homeboy_release::deploy::ComponentStatus::UpToDate
-            if local_ver.as_deref().is_some_and(|local| {
-                origin_tag_is_newer_than_local(origin_tag, local)
-            }) =>
+            if local_ver
+                .as_deref()
+                .is_some_and(|local| origin_tag_is_newer_than_local(origin_tag, local)) =>
         {
             ProjectComponentDashboardStatus::PinnedCurrent
         }

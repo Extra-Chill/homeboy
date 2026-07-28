@@ -1,10 +1,10 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
+use homeboy::core::output::{OutputPresentation, OutputTruncation};
 use homeboy::core::project::logs::{
     self, LogContent, LogEntry, LogSearchResult, PinnedLogsContent,
 };
-use homeboy::core::output::{OutputPresentation, OutputTruncation};
 
 use crate::commands::CmdResult;
 

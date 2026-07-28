@@ -164,7 +164,8 @@ pub enum DeployCommandOutput {
 }
 
 pub fn run(mut args: DeployArgs) -> CmdResult<DeployCommandOutput> {
-    if args.release_set.is_some() && (args.projects.is_some() || args.fleet.is_some() || args.shared)
+    if args.release_set.is_some()
+        && (args.projects.is_some() || args.fleet.is_some() || args.shared)
     {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "release_set",
@@ -181,7 +182,11 @@ pub fn run(mut args: DeployArgs) -> CmdResult<DeployCommandOutput> {
             None,
         ));
     }
-    let release_set = args.release_set.as_deref().map(load_release_set).transpose()?;
+    let release_set = args
+        .release_set
+        .as_deref()
+        .map(load_release_set)
+        .transpose()?;
     validate_apply_boundary(&args)?;
     if let Some(release_set) = release_set.as_ref() {
         let (project_id, _) = resolve_single_deploy_target(&args)?;
@@ -193,7 +198,13 @@ pub fn run(mut args: DeployArgs) -> CmdResult<DeployCommandOutput> {
     if let Some(ref fleet_id) = args.fleet {
         let fl = homeboy::core::fleet::load(fleet_id)?;
         let (component_ids, config) = resolve_multi_args(&args)?;
-        return run_multi_output(&fl.project_ids, &component_ids, &config, &args, release_set.as_ref());
+        return run_multi_output(
+            &fl.project_ids,
+            &component_ids,
+            &config,
+            &args,
+            release_set.as_ref(),
+        );
     }
 
     // Shared component deploy (find all projects using the component)
@@ -203,13 +214,25 @@ pub fn run(mut args: DeployArgs) -> CmdResult<DeployCommandOutput> {
         args.component_ids = component_ids;
         args.target_id = None;
         let (component_ids, config) = resolve_multi_args(&args)?;
-        return run_multi_output(&project_ids, &component_ids, &config, &args, release_set.as_ref());
+        return run_multi_output(
+            &project_ids,
+            &component_ids,
+            &config,
+            &args,
+            release_set.as_ref(),
+        );
     }
 
     // Multi-project deploy
     if let Some(ref project_ids) = args.projects {
         let (component_ids, config) = resolve_multi_args(&args)?;
-        return run_multi_output(project_ids, &component_ids, &config, &args, release_set.as_ref());
+        return run_multi_output(
+            project_ids,
+            &component_ids,
+            &config,
+            &args,
+            release_set.as_ref(),
+        );
     }
 
     // Single-project deploy: resolve project and component IDs
@@ -268,10 +291,7 @@ fn validate_apply_boundary(args: &DeployArgs) -> homeboy::core::Result<()> {
     if args.apply
         || args.dry_run
         || args.check
-        || (!args.head
-            && args.requested_ref.is_none()
-            && args.release_set.is_none()
-            && !args.force)
+        || (!args.head && args.requested_ref.is_none() && args.release_set.is_none() && !args.force)
     {
         return Ok(());
     }
@@ -297,7 +317,9 @@ fn validate_apply_boundary(args: &DeployArgs) -> homeboy::core::Result<()> {
     ))
 }
 
-fn load_release_set(path: &str) -> homeboy::core::Result<homeboy_core::release_set::NormalizedReleaseSet> {
+fn load_release_set(
+    path: &str,
+) -> homeboy::core::Result<homeboy_core::release_set::NormalizedReleaseSet> {
     let input = std::fs::read_to_string(path).map_err(|error| {
         homeboy::core::Error::validation_invalid_argument(
             "release_set",
@@ -328,7 +350,10 @@ fn apply_release_set(
             Err(error) => {
                 return Err(homeboy::core::Error::validation_invalid_argument(
                     "release_set",
-                    format!("Required component '{}' is unavailable in project '{}': {}", entry.id, project_id, error.message),
+                    format!(
+                        "Required component '{}' is unavailable in project '{}': {}",
+                        entry.id, project_id, error.message
+                    ),
                     None,
                     None,
                 ));
@@ -394,10 +419,15 @@ fn apply_release_set(
             component
                 .canonical_attachment_identity()
                 .map(|identity| (entry.id.clone(), identity))
-                .map_err(|error| homeboy::core::Error::internal_io(
-                    format!("Failed to encode release-set component '{}': {error}", entry.id),
-                    None,
-                ))
+                .map_err(|error| {
+                    homeboy::core::Error::internal_io(
+                        format!(
+                            "Failed to encode release-set component '{}': {error}",
+                            entry.id
+                        ),
+                        None,
+                    )
+                })
         })
         .collect::<homeboy::core::Result<_>>()?;
     Ok(())
