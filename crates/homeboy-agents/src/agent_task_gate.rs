@@ -1955,6 +1955,24 @@ mod tests {
         );
     }
 
+    /// A gate command whose first token is a shell builtin or part of a
+    /// compound expression declares no toolchain at all. `c3462d472` made
+    /// preflight opt-in precisely because a gate command is a shell program,
+    /// so its first token is not necessarily an executable to probe.
+    #[test]
+    fn shell_gate_commands_contribute_no_inferred_toolchain() {
+        let options = VerifyGateOptions {
+            verify: vec![
+                "test -f Cargo.toml && cargo test --lib".to_string(),
+                "[ -d target ]".to_string(),
+            ],
+            private_verify: vec!["npm test".to_string()],
+            ..VerifyGateOptions::default()
+        };
+
+        assert!(options.required_toolchains().is_empty());
+    }
+
     #[cfg(unix)]
     #[test]
     fn toolchain_preflight_preserves_only_declared_homes_for_cargo_on_path() {
