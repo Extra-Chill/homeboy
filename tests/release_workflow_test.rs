@@ -445,6 +445,16 @@ fn release_host_checkout_fetches_full_history_for_finalizer_ancestry_validation(
 }
 
 #[test]
+fn release_shared_binary_uses_the_publication_host_runtime_baseline() {
+    let gate_build = job_section(release_workflow(), "gate-build");
+    let host = job_section(release_workflow(), "host");
+
+    assert!(gate_build.contains("runs-on: ubuntu-22.04"));
+    assert!(host.contains("runs-on: ubuntu-22.04"));
+    assert!(!gate_build.contains("runs-on: ubuntu-latest"));
+}
+
+#[test]
 fn release_recovery_bypasses_quality_gates_and_still_prepares() {
     let check = job_section(release_workflow(), "check");
     let gate_audit = job_section(release_workflow(), "gate-audit");

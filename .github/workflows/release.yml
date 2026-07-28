@@ -238,7 +238,9 @@ jobs:
     name: Build
     needs: check
     if: needs.check.outputs.should-release == 'true'
-    runs-on: ubuntu-latest
+    # This binary is executed by the ubuntu-22.04 publication jobs. Build on
+    # the oldest consumer runtime so recovery finalizers cannot require a newer GLIBC.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with:
