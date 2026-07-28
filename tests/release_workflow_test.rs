@@ -156,8 +156,8 @@ fn release_quality_policy_checks_out_event_commit_before_running_script() {
     );
 
     assert!(
-        policy.contains("ref: ${{ github.sha }}"),
-        "release-quality-policy must check out the exact workflow/event commit (github.sha)"
+        policy.contains("ref: ${{ env.RELEASE_CANDIDATE_SHA }}"),
+        "release-quality-policy must check out the proven release candidate"
     );
 }
 
@@ -214,16 +214,66 @@ fn release_concurrency_scopes_recovery_runs_to_the_requested_tag() {
 }
 
 #[test]
-fn release_is_a_direct_non_cancellable_rolling_main_pipeline() {
+fn automatic_release_consumes_the_triggering_main_guard_without_polling() {
+    let workflow = release_workflow();
+    let qualification = job_section(workflow, "release-qualification");
+    let proof = release_step_block(qualification, "name: Consume triggering Main Guard proof");
+    let check = job_section(workflow, "check");
+
+    assert!(workflow.contains(
+        "workflow_run:\n    workflows: [Main Guard]\n    types: [completed]\n    branches: [main]"
+    ));
+    assert!(!workflow.contains("push:\n    branches: [main]"));
+    assert!(workflow.contains(
+        "RELEASE_CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}"
+    ));
+    assert!(check.contains("github.event.workflow_run.event == 'push'"));
+    assert!(check.contains("github.event.workflow_run.conclusion == 'success'"));
+    assert!(proof.contains("CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha }}"));
+    assert!(proof.contains("github.event.workflow_run.id"));
+    assert!(proof.contains("proof-status=success"));
+    assert!(!proof.contains("gh run list"));
+    assert!(!proof.contains("gh workflow run"));
+    assert!(!proof.contains("sleep 30"));
+}
+
+#[test]
+fn manual_release_reuses_or_awaits_an_exact_main_guard_qualification() {
+    let workflow = release_workflow();
+    let qualification = job_section(workflow, "release-qualification");
+    let proof = release_step_block(qualification, "name: Qualify manually selected candidate");
+
+    assert!(proof.contains("if: github.event_name == 'workflow_dispatch'"));
+    assert!(proof.contains("CANDIDATE_SHA: ${{ env.RELEASE_CANDIDATE_SHA }}"));
+    assert!(proof.contains("GH_REPO: ${{ github.repository }}"));
+    assert!(proof.contains("gh run list --workflow audit-debt.yml"));
+    assert!(proof.contains("--commit \"$CANDIDATE_SHA\""));
+    assert!(proof.contains(
+        "gh workflow run audit-debt.yml --ref main -f qualification_sha=\"$CANDIDATE_SHA\""
+    ));
+    assert!(proof.contains("proof-status=${conclusion}"));
+    assert!(proof.contains("Selected SHA:"));
+    assert!(proof.contains("Exact gate proof run:"));
+    assert!(proof.contains("Proof source: ${action}"));
+    assert!(proof.contains("Dry run: release mutation remains disabled"));
+}
+
+#[test]
+fn terminal_green_qualification_skips_duplicate_release_gates() {
     let workflow = release_workflow();
 
-    assert!(workflow.contains("push:\n    branches: [main]"));
-    assert!(workflow.contains(
-        "concurrency:\n  group: release-${{ inputs.release_tag || github.ref }}\n  cancel-in-progress: false"
-    ));
-    assert!(!workflow.contains("workflow_run:"));
-    assert!(!workflow.contains("release-qualification:"));
-    assert!(!workflow.contains("Main Guard"));
+    for job in ["gate-build", "gate-audit", "gate-lint", "gate-test"] {
+        let section = job_section(workflow, job);
+        assert!(
+            section.contains("needs.release-qualification.outputs.proof-status != 'success'"),
+            "{job} must reuse exact terminal green Main Guard evidence"
+        );
+    }
+
+    let policy = job_section(workflow, "release-quality-policy");
+    assert!(policy
+        .contains("QUALIFICATION_RESULT: ${{ needs.release-qualification.outputs.proof-status }}"));
+    assert!(policy.contains("Exact Main Guard qualification finished with result"));
 }
 
 #[test]
@@ -869,7 +919,7 @@ fn release_fast_path_keeps_every_publication_verification() {
     );
 
     // The control binary that performs adoption is still the one built from the
-    // dispatching commit, not from the stranded tag (#10519's headline defect,
+    // proven candidate, not from the stranded tag (#10519's headline defect,
     // fixed in #10560 — keep it fixed).
     let host = job_section(workflow, "host");
     assert!(
@@ -877,8 +927,8 @@ fn release_fast_path_keeps_every_publication_verification() {
         "recovery must execute the freshly built control binary, never the stranded tag's"
     );
     assert!(
-        job_section(workflow, "gate-build").contains("ref: ${{ github.sha }}"),
-        "the control binary must be built from the dispatching commit"
+        job_section(workflow, "gate-build").contains("ref: ${{ env.RELEASE_CANDIDATE_SHA }}"),
+        "the control binary must be built from the proven release candidate"
     );
     assert!(
         host.contains("ref: ${{ needs.prepare.outputs['release-tag'] }}"),
@@ -892,7 +942,7 @@ fn release_fast_path_keeps_every_publication_verification() {
 
 /// Recovery is allowed — required — to run a control binary NEWER than the tag
 /// it repairs; that is the bootstrap #10519 asks for, and #10560 built it by
-/// pinning `gate-build` to `github.sha`. The inverse was never bounded: a
+/// pinning `gate-build` to the release candidate SHA. The inverse was never bounded: a
 /// control binary from a tree that never contained the tag cannot be shown to
 /// carry the publisher fix recovery exists to apply, and would impose a release
 /// contract the tag was never planned under.
@@ -907,7 +957,7 @@ fn release_recovery_records_control_binary_lineage_against_the_release_target() 
     let adoption = release_step_block(host, "name: Create remote draft adoption manifest");
 
     assert!(
-        adoption.contains("CONTROL_SHA: ${{ github.sha }}"),
+        adoption.contains("CONTROL_SHA: ${{ env.RELEASE_CANDIDATE_SHA }}"),
         "the adoption manifest must record which commit the control binary was built from"
     );
     assert!(

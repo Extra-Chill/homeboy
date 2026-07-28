@@ -1,7 +1,7 @@
 # Continuous release pipeline for Homeboy.
 #
-# Triggers on push to main (and manual dispatch). Checks for releasable
-# conventional commits since the last tag. If found:
+# Triggers after Main Guard validates main (or by manual dispatch). Checks for
+# releasable conventional commits since the last tag. If found:
 #   1. Quality gate (audit, lint, test)
 #   2. Version bump + changelog generation from conventional commits
 #   3. Cross-platform binary builds via cargo-dist
@@ -20,7 +20,9 @@ permissions:
   pull-requests: write
 
 on:
-  push:
+  workflow_run:
+    workflows: [Main Guard]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
     inputs:
@@ -41,11 +43,12 @@ env:
   RELEASE_BLOCKING_COMMANDS: ${{ inputs.release_blocking_commands || 'review lint,review test' }}
   HOMEBOY_NO_UPDATE_CHECK: '1'
   RELEASE_MIN_FREE_KB: '5242880'
+  RELEASE_CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
 
-# Only one release pipeline at a time. If a push arrives while a release
-# is already running, it queues (never cancels). The queued run starts
-# after the first finishes and its check job exits in seconds because
-# HEAD is already tagged — zero wasted work.
+# Only one release pipeline at a time. If Main Guard validates another SHA
+# while a release is already running, it queues (never cancels). The queued run
+# starts after the first finishes and its check job exits in seconds if the
+# candidate is already tagged.
 concurrency:
   group: release-${{ inputs.release_tag || github.ref }}
   cancel-in-progress: false
@@ -55,6 +58,7 @@ jobs:
   # Fast exit if nothing to release (e.g. chore-only commits).
   check:
     name: Check for releasable commits
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     outputs:
       should-release: ${{ steps.check.outputs.should-release }}
@@ -66,7 +70,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.release_tag || github.ref }}
+          ref: ${{ inputs.release_tag || env.RELEASE_CANDIDATE_SHA }}
           fetch-depth: 0
 
       - name: Restore failed release marker
@@ -75,7 +79,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/homeboy-release-last-failed
-          key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}
+          key: release-last-failed-${{ github.ref_name }}-${{ env.RELEASE_CANDIDATE_SHA }}
           restore-keys: |
             release-last-failed-${{ github.ref_name }}-
 
@@ -196,8 +200,8 @@ jobs:
             echo "::notice::Release recovery will publish ${RECOVERY_TAG}"
           elif [ -n "${STRANDED_TAG}" ]; then
             # Recovery PREEMPTS a fresh release, and preempts the failed-SHA
-            # marker too. The marker is keyed to github.sha and only means
-            # "do not re-prepare this HEAD"; finishing an already-prepared tag
+            # marker too. The marker is keyed to the release candidate SHA and
+            # only means "do not re-prepare this HEAD"; finishing an already-prepared tag
             # is a different, HEAD-independent action. Preemption is the whole
             # point: a fresh release prepared on top of a stranded tag buries
             # it under a newer published release, where the contiguous-window
@@ -231,7 +235,127 @@ jobs:
             echo "::notice::Release dry-run predicts v${RELEASE_VERSION} (${BUMP_TYPE})"
           fi
 
-  # ── Step 2: Build once ──
+  # ── Step 2: Exact-SHA release proof ──
+  #
+  # Automatic releases are downstream of a successful Main Guard and consume
+  # that run's immutable SHA directly. Manual releases have no triggering proof,
+  # so they retain the explicit lookup/dispatch qualification path.
+  release-qualification:
+    name: Bind release proof
+    needs: check
+    if: needs.check.outputs.should-release == 'true' && needs.check.outputs.recovery-release != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      candidate-sha: ${{ steps.main_guard.outputs['candidate-sha'] || steps.proof.outputs['candidate-sha'] }}
+      proof-sha: ${{ steps.main_guard.outputs['proof-sha'] || steps.proof.outputs['proof-sha'] }}
+      proof-run: ${{ steps.main_guard.outputs['proof-run'] || steps.proof.outputs['proof-run'] }}
+      proof-status: ${{ steps.main_guard.outputs['proof-status'] || steps.proof.outputs['proof-status'] }}
+      next-action: ${{ steps.main_guard.outputs['next-action'] || steps.proof.outputs['next-action'] }}
+    steps:
+      - name: Consume triggering Main Guard proof
+        id: main_guard
+        if: github.event_name == 'workflow_run'
+        env:
+          CANDIDATE_SHA: ${{ github.event.workflow_run.head_sha }}
+          PROOF_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}
+        run: |
+          {
+            echo "candidate-sha=${CANDIDATE_SHA}"
+            echo "proof-sha=${CANDIDATE_SHA}"
+            echo "proof-run=${PROOF_RUN}"
+            echo "proof-status=success"
+            echo "next-action=release immutable candidate"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Release qualification"
+            echo
+            echo "- Selected SHA: \`${CANDIDATE_SHA}\`"
+            echo "- Exact gate proof SHA: \`${CANDIDATE_SHA}\`"
+            echo "- Exact gate proof run: ${PROOF_RUN}"
+            echo "- Proof status: \`success\`"
+            echo "- Next action: release immutable candidate"
+            echo "- Proof source: triggering Main Guard workflow"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Qualify manually selected candidate
+        id: proof
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          CANDIDATE_SHA: ${{ env.RELEASE_CANDIDATE_SHA }}
+          DRY_RUN: ${{ inputs.dry-run || 'false' }}
+        run: |
+          set -euo pipefail
+
+          title="Release Qualification ${CANDIDATE_SHA}"
+          run_json="$(gh run list --workflow audit-debt.yml --limit 100 --json databaseId,displayTitle,status,conclusion,url | jq -c --arg title "$title" 'map(select(.displayTitle == $title)) | first // empty')"
+          action="reused exact terminal proof"
+
+          # A push-triggered Main Guard has the candidate as its workflow SHA,
+          # so it is equally valid evidence and avoids an unnecessary dispatch.
+          if [ -z "$run_json" ]; then
+            run_json="$(gh run list --workflow audit-debt.yml --commit "$CANDIDATE_SHA" --status completed --limit 100 --json databaseId,status,conclusion,url | jq -c 'map(select(.conclusion == "success")) | first // empty')"
+          fi
+
+          if [ -z "$run_json" ]; then
+            gh workflow run audit-debt.yml --ref main -f qualification_sha="$CANDIDATE_SHA"
+            action="started immutable qualification"
+            for _ in $(seq 1 30); do
+              run_json="$(gh run list --workflow audit-debt.yml --limit 100 --json databaseId,displayTitle,status,conclusion,url | jq -c --arg title "$title" 'map(select(.displayTitle == $title)) | first // empty')"
+              [ -n "$run_json" ] && break
+              sleep 2
+            done
+          fi
+
+          if [ -z "$run_json" ]; then
+            echo "::error::Main Guard qualification did not appear for ${CANDIDATE_SHA}"
+            exit 1
+          fi
+
+          run_id="$(jq -r '.databaseId' <<<"$run_json")"
+          while :; do
+            run_json="$(gh run view "$run_id" --json status,conclusion,url)"
+            status="$(jq -r '.status' <<<"$run_json")"
+            [ "$status" = "completed" ] && break
+            sleep 30
+          done
+
+          conclusion="$(jq -r '.conclusion // "cancelled"' <<<"$run_json")"
+          url="$(jq -r '.url' <<<"$run_json")"
+          if [ "$conclusion" = "success" ]; then
+            next_action="release immutable candidate"
+          else
+            next_action="repair or rerun the exact qualification"
+          fi
+
+          {
+            echo "candidate-sha=${CANDIDATE_SHA}"
+            echo "proof-sha=${CANDIDATE_SHA}"
+            echo "proof-run=${url}"
+            echo "proof-status=${conclusion}"
+            echo "next-action=${next_action}"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Release qualification"
+            echo
+            echo "- Selected SHA: \`${CANDIDATE_SHA}\`"
+            echo "- Exact gate proof SHA: \`${CANDIDATE_SHA}\`"
+            echo "- Exact gate proof run: ${url}"
+            echo "- Proof status: \`${conclusion}\`"
+            echo "- Next action: ${next_action}"
+            echo "- Proof source: ${action}"
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "- Dry run: release mutation remains disabled"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          [ "$conclusion" = "success" ]
+
+  # ── Step 3: Build once ──
   # Compile homeboy from source once and share the binary with all
   # quality gate jobs. Eliminates 3× redundant cargo builds.
   gate-build:
@@ -246,7 +370,7 @@ jobs:
         with:
           # Recovery checks out an older release tag downstream, but the
           # finalizer must include the current recovery contract from main.
-          ref: ${{ github.sha }}
+          ref: ${{ env.RELEASE_CANDIDATE_SHA }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -288,7 +412,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.release_tag || github.ref }}
+          ref: ${{ inputs.release_tag || env.RELEASE_CANDIDATE_SHA }}
           fetch-depth: 0
 
       - name: Download homeboy binary
@@ -335,7 +459,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.release_tag || github.ref }}
+          ref: ${{ inputs.release_tag || env.RELEASE_CANDIDATE_SHA }}
           fetch-depth: 0
 
       - name: Download homeboy binary
@@ -379,7 +503,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.release_tag || github.ref }}
+          ref: ${{ inputs.release_tag || env.RELEASE_CANDIDATE_SHA }}
           fetch-depth: 0
 
       - name: Download homeboy binary
@@ -440,7 +564,7 @@ jobs:
       - name: Checkout workflow event commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ env.RELEASE_CANDIDATE_SHA }}
 
       - name: Enforce release-blocking commands
         env:
@@ -475,12 +599,12 @@ jobs:
           app-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
-      # A push-triggered self-recovery has no `inputs.release_tag`, and main has
+      # An automatic self-recovery has no `inputs.release_tag`, and main has
       # normally moved well past the stranded tag by now. Check out the tag
       # being recovered so every job in the publish chain agrees on the tree.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.release_tag || (needs.check.outputs.recovery-release == 'true' && needs.check.outputs['release-tag']) || github.ref }}
+          ref: ${{ inputs.release_tag || (needs.check.outputs.recovery-release == 'true' && needs.check.outputs['release-tag']) || env.RELEASE_CANDIDATE_SHA }}
           fetch-depth: 0
           persist-credentials: true
           token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
@@ -986,7 +1110,7 @@ jobs:
           RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
           RELEASE_VERSION: ${{ needs.prepare.outputs['release-version'] }}
           EXPECTED_ASSETS: ${{ needs.plan.outputs.expected-assets }}
-          CONTROL_SHA: ${{ github.sha }}
+          CONTROL_SHA: ${{ env.RELEASE_CANDIDATE_SHA }}
         run: |
           set -euo pipefail
           mkdir -p draft-adoption
@@ -1050,7 +1174,7 @@ jobs:
         if: needs.prepare.outputs.recovery-release == 'true'
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
-          CONTROL_SHA: ${{ github.sha }}
+          CONTROL_SHA: ${{ env.RELEASE_CANDIDATE_SHA }}
           ADOPTION_SOURCE: ${{ needs.prepare.outputs.recovery-release == 'true' && 'draft-adoption' || 'artifacts' }}
           ARTIFACT_ORIGIN: ${{ needs.plan.outputs.draft-complete == 'true' && 'pre-existing draft assets (rebuild skipped)' || 'rebuilt and re-uploaded by this run' }}
         run: |
@@ -1151,6 +1275,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ env.RELEASE_CANDIDATE_SHA }}
           persist-credentials: false
           submodules: recursive
 
@@ -1170,10 +1295,12 @@ jobs:
       - host
       - verify-published
       - announce
-    if: ${{ always() && github.event_name == 'push' && needs.check.outputs.should-release == 'true' && contains(toJson(needs), '"result":"failure"') }}
+    if: ${{ always() && github.event_name == 'workflow_run' && needs.check.outputs.should-release == 'true' && contains(toJson(needs), '"result":"failure"') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_CANDIDATE_SHA }}
 
       # The SHA marker means "do not re-PREPARE this HEAD". A recovery run
       # never prepares anything — it finishes an already-prepared tag — so
@@ -1188,12 +1315,12 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/homeboy-release-last-failed
-          key: release-last-failed-${{ github.ref_name }}-${{ github.sha }}
+          key: release-last-failed-${{ github.ref_name }}-${{ env.RELEASE_CANDIDATE_SHA }}
 
       # A failed recovery is charged to the TAG, so a stranded tag that cannot
-      # be published gets a bounded retry budget instead of re-firing on every
-      # push forever. `detect-stranded-release.sh` refuses a tag once it hits
-      # MAX_RECOVERY_ATTEMPTS and falls through to a normal fresh release.
+      # be published gets a bounded retry budget instead of re-firing after
+      # every successful Main Guard. `detect-stranded-release.sh` refuses a tag
+      # once it hits MAX_RECOVERY_ATTEMPTS and falls through to a fresh release.
       - name: Restore recovery attempts
         if: needs.check.outputs.recovery-release == 'true' && needs.check.outputs['release-tag'] != ''
         uses: actions/cache/restore@v4
@@ -1241,7 +1368,7 @@ jobs:
       - host
       - verify-published
       - announce
-    if: ${{ always() && github.event_name == 'push' && needs.check.outputs.should-release == 'true' && !contains(toJson(needs), '"result":"failure"') && !contains(toJson(needs), '"result":"cancelled"') }}
+    if: ${{ always() && github.event_name == 'workflow_run' && needs.check.outputs.should-release == 'true' && !contains(toJson(needs), '"result":"failure"') && !contains(toJson(needs), '"result":"cancelled"') }}
     runs-on: ubuntu-latest
     steps:
       - name: Clear failed SHA cache
