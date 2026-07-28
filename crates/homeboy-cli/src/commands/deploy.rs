@@ -163,10 +163,7 @@ pub enum DeployCommandOutput {
     Multi(MultiProjectDeployOutput),
 }
 
-pub fn run(
-    mut args: DeployArgs,
-    _global: &crate::commands::GlobalArgs,
-) -> CmdResult<DeployCommandOutput> {
+pub fn run(mut args: DeployArgs) -> CmdResult<DeployCommandOutput> {
     if args.release_set.is_some() && (args.projects.is_some() || args.fleet.is_some() || args.shared)
     {
         return Err(homeboy::core::Error::validation_invalid_argument(

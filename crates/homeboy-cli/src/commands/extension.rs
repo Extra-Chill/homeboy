@@ -192,10 +192,7 @@ enum ExtensionCommand {
     },
 }
 
-pub fn run(
-    args: ExtensionArgs,
-    _global: &crate::commands::GlobalArgs,
-) -> CmdResult<ExtensionOutput> {
+pub fn run(args: ExtensionArgs) -> CmdResult<ExtensionOutput> {
     match args.command {
         ExtensionCommand::List { project } => list(project),
         ExtensionCommand::DiffInstalled {

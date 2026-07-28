@@ -457,7 +457,7 @@ impl PreviewIngressInstallArgs {
     }
 }
 
-pub fn run(args: TunnelArgs, _global: &super::GlobalArgs) -> CmdResult<TunnelOutput> {
+pub fn run(args: TunnelArgs) -> CmdResult<TunnelOutput> {
     match args.command {
         TunnelCommand::Service { command } => service::run_service(command),
         TunnelCommand::PreviewClient { command } => run_preview_client(command),

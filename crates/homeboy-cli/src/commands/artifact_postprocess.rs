@@ -6,7 +6,7 @@ use homeboy::core::artifacts::{
 };
 use serde::Serialize;
 
-use super::{CmdResult, GlobalArgs};
+use super::CmdResult;
 
 #[derive(Args, Clone)]
 pub struct ArtifactPostprocessArgs {
@@ -37,10 +37,7 @@ pub struct ArtifactPostprocessCommandOutput {
     pub result: homeboy::core::artifacts::ArtifactPostprocessResult,
 }
 
-pub fn run(
-    args: ArtifactPostprocessArgs,
-    _global: &GlobalArgs,
-) -> CmdResult<ArtifactPostprocessCommandOutput> {
+pub fn run(args: ArtifactPostprocessArgs) -> CmdResult<ArtifactPostprocessCommandOutput> {
     let raw = homeboy::core::config::read_json_spec_to_string(&args.plan)?;
     let plan: ArtifactPostprocessPlan = serde_json::from_str(&raw).map_err(|error| {
         homeboy::core::Error::validation_invalid_json(

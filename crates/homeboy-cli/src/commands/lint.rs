@@ -35,7 +35,7 @@ use super::utils::args::{
     BaselineArgs, ExtensionOverrideArgs, LintSniffArgs, PositionalComponentArgs, SettingArgs,
 };
 use super::utils::response::actionable_metadata_value_for_run_ref;
-use super::{CmdResult, GlobalArgs};
+use super::CmdResult;
 use crate::command_contract::{LabCommandContract, LINT_LAB_LABEL};
 use crate::core::observation::{ObservedWorkflowRunner, WorkflowObservationAdapter};
 
@@ -169,7 +169,7 @@ impl LintArgs {
     }
 }
 
-pub fn run(args: LintArgs, _global: &GlobalArgs) -> CmdResult<LintCommandOutput> {
+pub fn run(args: LintArgs) -> CmdResult<LintCommandOutput> {
     let source_ctx = resolve_source_context(
         &args.comp,
         &args.setting_args,

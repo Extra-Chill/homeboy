@@ -39,10 +39,7 @@ pub struct BuildArgs {
     pub changed_since: Option<String>,
 }
 
-pub fn run(
-    args: BuildArgs,
-    _global: &crate::commands::GlobalArgs,
-) -> CmdResult<build::BuildResult> {
+pub fn run(args: BuildArgs) -> CmdResult<build::BuildResult> {
     // Priority: --json > --all with project > positional args
 
     // Shared tail: every multi-component build path dispatches the resolved

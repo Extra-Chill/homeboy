@@ -6,10 +6,10 @@ use crate::command_contract::{
 
 use crate::cli_surface::Commands;
 
-use crate::commands::{contract, fleet, observe, GlobalArgs};
+use crate::commands::{contract, fleet, observe};
 
 pub(crate) type JsonHandlerResult = (homeboy::core::Result<Value>, i32);
-pub(crate) type JsonCommandExecutor<Args> = fn(Args, &GlobalArgs) -> JsonHandlerResult;
+pub(crate) type JsonCommandExecutor<Args> = fn(Args) -> JsonHandlerResult;
 pub(crate) type LabContractResolver<Args> = fn(&Args) -> Option<LabCommandContract>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +56,7 @@ pub(crate) struct TypedCommandAdapter<Args> {
 }
 
 pub(crate) struct BoundCommandAdapter {
-    run: Box<dyn FnOnce(&GlobalArgs) -> JsonHandlerResult>,
+    run: Box<dyn FnOnce() -> JsonHandlerResult>,
 }
 
 impl BoundCommandAdapter {
@@ -66,12 +66,12 @@ impl BoundCommandAdapter {
     /// no per-command dispatch arms here — only argument-to-executor pairing.
     fn bind<Args: 'static>(args: Args, executor: JsonCommandExecutor<Args>) -> Self {
         Self {
-            run: Box::new(move |global| executor(args, global)),
+            run: Box::new(move || executor(args)),
         }
     }
 
-    pub fn run(self, global: &GlobalArgs) -> JsonHandlerResult {
-        (self.run)(global)
+    pub fn run(self) -> JsonHandlerResult {
+        (self.run)()
     }
 }
 
@@ -170,7 +170,7 @@ mod tests {
         let adapter = TypedCommandAdapter::<()>::json_only(
             CommandJsonFamily::Workspace,
             CommandOutputFileMode::GenericEnvelope,
-            |_, _| (Ok(Value::Null), 0),
+            |_| (Ok(Value::Null), 0),
         );
 
         let descriptor = adapter.output_descriptor();

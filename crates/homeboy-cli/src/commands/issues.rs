@@ -252,7 +252,7 @@ struct ReconcileCommandRequest {
     path: Option<String>,
 }
 
-pub fn run(args: IssuesArgs, _global: &super::GlobalArgs) -> CmdResult<IssuesCommandOutput> {
+pub fn run(args: IssuesArgs) -> CmdResult<IssuesCommandOutput> {
     match args.command {
         IssuesCommand::Reconcile {
             component_id,

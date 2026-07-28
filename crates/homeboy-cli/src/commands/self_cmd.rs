@@ -7,7 +7,7 @@ use homeboy::runner::runners::{self as runner, Runner, RunnerKind, RunnerStatusR
 use homeboy_upgrade::self_status::{self, ControllerRuntimeInput, RunnerRuntimeInput};
 use serde_json::Value;
 
-use crate::commands::{docs, resources, CmdResult, GlobalArgs};
+use crate::commands::{docs, resources, CmdResult};
 
 #[derive(Args)]
 pub struct SelfArgs {
@@ -66,7 +66,7 @@ pub struct SelfCleanupRuntimeTmpArgs {
     pub cursor: Option<String>,
 }
 
-pub fn run(args: SelfArgs, _global: &GlobalArgs) -> CmdResult<Value> {
+pub fn run(args: SelfArgs) -> CmdResult<Value> {
     match args.command {
         SelfCommand::Status(_) => {
             let status = self_status::collect_status_read_only();
@@ -144,7 +144,7 @@ pub fn run(args: SelfArgs, _global: &GlobalArgs) -> CmdResult<Value> {
             Ok((json, 0))
         }
         SelfCommand::Docs(args) => {
-            let (output, exit_code) = docs::run(args, _global)?;
+            let (output, exit_code) = docs::run(args)?;
             let json = serde_json::to_value(output)
                 .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
             Ok((json, exit_code))

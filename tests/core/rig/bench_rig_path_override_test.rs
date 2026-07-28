@@ -24,8 +24,7 @@ fn rig_pinned_bench_with_path_override_records_effective_component_path() {
         );
         args.run.comp.path = Some(override_component_dir.path().to_string_lossy().into_owned());
 
-        let (output, exit_code) =
-            run(args, &GlobalArgs {}).expect("rig-pinned bench with --path should run");
+        let (output, exit_code) = run(args).expect("rig-pinned bench with --path should run");
 
         assert_eq!(exit_code, 0);
         match output {
@@ -58,14 +57,11 @@ fn rig_pinned_bench_without_path_override_keeps_rig_declared_path() {
         let rig_component_dir = tempfile::TempDir::new().expect("rig component dir");
         write_rig(home, "studio-bfb", "studio", rig_component_dir.path());
 
-        let (output, exit_code) = run(
-            run_args(
-                None,
-                vec!["studio-bfb".to_string()],
-                vec!["rig-slow".to_string()],
-            ),
-            &GlobalArgs {},
-        )
+        let (output, exit_code) = run(run_args(
+            None,
+            vec!["studio-bfb".to_string()],
+            vec!["rig-slow".to_string()],
+        ))
         .expect("rig-pinned bench without override should run");
 
         assert_eq!(exit_code, 0);

@@ -25,8 +25,7 @@ fn local_rig_workloads_receive_dotted_and_typed_bench_env_settings() {
         ] {
             let mut args = run_args(None, vec!["env-projection-rig".to_string()], Vec::new());
             args.run.setting_args = setting_args;
-            let (output, exit_code) =
-                run(args, &GlobalArgs {}).expect("local rig bench should run");
+            let (output, exit_code) = run(args).expect("local rig bench should run");
 
             assert_eq!(exit_code, 0);
             let BenchOutput::Single(output) = output else {
@@ -49,11 +48,8 @@ fn single_rig_run_records_installed_rig_package_evidence_in_metadata() {
         let component_dir = tempfile::TempDir::new().expect("component dir");
         let package_root = install_rig_package(home, "studio-bfb", "studio", component_dir.path());
 
-        let (output, exit_code) = run(
-            run_args(None, vec!["studio-bfb".to_string()], Vec::new()),
-            &GlobalArgs {},
-        )
-        .expect("rig bench should run");
+        let (output, exit_code) = run(run_args(None, vec!["studio-bfb".to_string()], Vec::new()))
+            .expect("rig bench should run");
 
         assert_eq!(exit_code, 0);
         match output {
@@ -82,11 +78,8 @@ fn local_git_rig_package_evidence_records_source_identity() {
         let (_package_root, revision) =
             install_git_rig_package(home, "studio-bfb", "studio", component_dir.path());
 
-        let (output, exit_code) = run(
-            run_args(None, vec!["studio-bfb".to_string()], Vec::new()),
-            &GlobalArgs {},
-        )
-        .expect("rig bench should run");
+        let (output, exit_code) = run(run_args(None, vec!["studio-bfb".to_string()], Vec::new()))
+            .expect("rig bench should run");
 
         assert_eq!(exit_code, 0);
         match output {
@@ -121,10 +114,11 @@ fn run_selects_single_scenario() {
         let component_dir = tempfile::TempDir::new().expect("component dir");
         write_registered_component(home, "studio", component_dir.path());
 
-        let (output, exit_code) = run(
-            run_args(Some("studio"), Vec::new(), vec!["slow".to_string()]),
-            &GlobalArgs {},
-        )
+        let (output, exit_code) = run(run_args(
+            Some("studio"),
+            Vec::new(),
+            vec!["slow".to_string()],
+        ))
         .expect("selected bench should run");
 
         assert_eq!(exit_code, 0);
@@ -146,10 +140,11 @@ fn selected_visual_scenario_emits_a_non_empty_comparison_directory() {
         let component_dir = tempfile::TempDir::new().expect("component dir");
         write_registered_component(home, "studio", component_dir.path());
 
-        let (output, exit_code) = run(
-            run_args(Some("studio"), Vec::new(), vec!["visual".to_string()]),
-            &GlobalArgs {},
-        )
+        let (output, exit_code) = run(run_args(
+            Some("studio"),
+            Vec::new(),
+            vec!["visual".to_string()],
+        ))
         .expect("selected visual bench should run");
 
         assert_eq!(exit_code, 0);
@@ -176,10 +171,11 @@ fn selected_non_visual_scenario_omits_optional_comparison_artifacts() {
         let component_dir = tempfile::TempDir::new().expect("component dir");
         write_registered_component(home, "studio", component_dir.path());
 
-        let (output, exit_code) = run(
-            run_args(Some("studio"), Vec::new(), vec!["slow".to_string()]),
-            &GlobalArgs {},
-        )
+        let (output, exit_code) = run(run_args(
+            Some("studio"),
+            Vec::new(),
+            vec!["slow".to_string()],
+        ))
         .expect("selected non-visual bench should run");
 
         assert_eq!(exit_code, 0);
@@ -204,14 +200,11 @@ fn selected_scenario_workload_failure_preserves_runner_error() {
             .expect("component dir");
         write_registered_component(home, "studio", component_dir.path());
 
-        let (output, exit_code) = run(
-            run_args(
-                Some("studio"),
-                Vec::new(),
-                vec!["studio-agent-site-build".to_string()],
-            ),
-            &GlobalArgs {},
-        )
+        let (output, exit_code) = run(run_args(
+            Some("studio"),
+            Vec::new(),
+            vec!["studio-agent-site-build".to_string()],
+        ))
         .expect("runner failure should return structured bench output");
 
         assert_eq!(exit_code, 7);
@@ -253,14 +246,11 @@ fn run_selects_multiple_scenarios() {
         let component_dir = tempfile::TempDir::new().expect("component dir");
         write_registered_component(home, "studio", component_dir.path());
 
-        let (output, exit_code) = run(
-            run_args(
-                Some("studio"),
-                Vec::new(),
-                vec!["in-tree".to_string(), "slow".to_string()],
-            ),
-            &GlobalArgs {},
-        )
+        let (output, exit_code) = run(run_args(
+            Some("studio"),
+            Vec::new(),
+            vec!["in-tree".to_string(), "slow".to_string()],
+        ))
         .expect("selected bench should run");
 
         assert_eq!(exit_code, 0);
@@ -290,10 +280,11 @@ fn unknown_scenario_reports_discovered_ids() {
         let component_dir = tempfile::TempDir::new().expect("component dir");
         write_registered_component(home, "studio", component_dir.path());
 
-        let err = match run(
-            run_args(Some("studio"), Vec::new(), vec!["missing".to_string()]),
-            &GlobalArgs {},
-        ) {
+        let err = match run(run_args(
+            Some("studio"),
+            Vec::new(),
+            vec!["missing".to_string()],
+        )) {
             Ok(_) => panic!("unknown scenario should fail"),
             Err(err) => err,
         };
@@ -312,14 +303,11 @@ fn single_rig_selector_filters_extra_workloads_before_execution() {
         let component_dir = tempfile::TempDir::new().expect("component dir");
         write_rig(home, "rig-a", "studio", component_dir.path());
 
-        let (output, exit_code) = run(
-            run_args(
-                None,
-                vec!["rig-a".to_string()],
-                vec!["rig-slow".to_string()],
-            ),
-            &GlobalArgs {},
-        )
+        let (output, exit_code) = run(run_args(
+            None,
+            vec!["rig-a".to_string()],
+            vec!["rig-slow".to_string()],
+        ))
         .expect("single-rig selected bench should run");
 
         assert_eq!(exit_code, 0);
@@ -398,11 +386,8 @@ fn run_prefers_rig_workloads_over_component_bench_script() {
         let component_dir = tempfile::TempDir::new().expect("component dir");
         write_rig_with_component_script(home, "studio-bfb", "studio", component_dir.path());
 
-        let (output, exit_code) = run(
-            run_args(None, vec!["studio-bfb".to_string()], Vec::new()),
-            &GlobalArgs {},
-        )
-        .expect("rig bench should use rig workloads");
+        let (output, exit_code) = run(run_args(None, vec!["studio-bfb".to_string()], Vec::new()))
+            .expect("rig bench should use rig workloads");
 
         assert_eq!(exit_code, 0);
         match output {
@@ -429,10 +414,11 @@ fn run_profile_selects_rig_profile_scenarios() {
             r#"{ "substrate": ["rig-extra"] }"#,
         );
 
-        let (output, exit_code) = run(
-            run_args_with_profile(None, vec!["studio-bfb".to_string()], "substrate"),
-            &GlobalArgs {},
-        )
+        let (output, exit_code) = run(run_args_with_profile(
+            None,
+            vec!["studio-bfb".to_string()],
+            "substrate",
+        ))
         .expect("profile bench should run");
 
         assert_eq!(exit_code, 0);
@@ -461,7 +447,7 @@ fn single_rig_runs_preserve_run_level_summaries_after_selection() {
         args.run.runs = 3;
 
         let (output, exit_code) =
-            run(args, &GlobalArgs {}).expect("single-rig selected bench should run multiple runs");
+            run(args).expect("single-rig selected bench should run multiple runs");
 
         assert_eq!(exit_code, 0);
         match output {
@@ -492,10 +478,11 @@ fn unknown_profile_lists_available_profiles() {
             r#"{ "substrate": ["rig-extra"], "smoke": ["rig-slow"] }"#,
         );
 
-        let err = match run(
-            run_args_with_profile(None, vec!["studio-bfb".to_string()], "agentic"),
-            &GlobalArgs {},
-        ) {
+        let err = match run(run_args_with_profile(
+            None,
+            vec!["studio-bfb".to_string()],
+            "agentic",
+        )) {
             Ok(_) => panic!("unknown profile should fail"),
             Err(err) => err,
         };
@@ -520,10 +507,11 @@ fn profile_with_unknown_scenario_lists_discovered_scenarios() {
             r#"{ "broken": ["missing-scenario"] }"#,
         );
 
-        let err = match run(
-            run_args_with_profile(None, vec!["studio-bfb".to_string()], "broken"),
-            &GlobalArgs {},
-        ) {
+        let err = match run(run_args_with_profile(
+            None,
+            vec!["studio-bfb".to_string()],
+            "broken",
+        )) {
             Ok(_) => panic!("unknown scenario in profile should fail"),
             Err(err) => err,
         };

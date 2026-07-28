@@ -372,7 +372,7 @@ struct RigRunArgs {
     args: Vec<String>,
 }
 
-pub fn run(args: RigArgs, _global: &super::GlobalArgs) -> CmdResult<RigCommandOutput> {
+pub fn run(args: RigArgs) -> CmdResult<RigCommandOutput> {
     match args.command {
         RigCommand::List => list(),
         RigCommand::Show { rig_id } => show(&rig_id),

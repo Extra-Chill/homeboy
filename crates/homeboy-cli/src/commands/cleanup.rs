@@ -169,7 +169,7 @@ pub struct CleanupWorktreesArgs {
     pub apply: bool,
 }
 
-pub fn run(args: CleanupArgs, _global: &super::GlobalArgs) -> CmdResult<Value> {
+pub fn run(args: CleanupArgs) -> CmdResult<Value> {
     match args.command {
         Some(CleanupCommand::Artifacts(args)) => cleanup::cleanup_resources_from_config(
             ResourceCleanupOptions {

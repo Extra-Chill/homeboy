@@ -46,10 +46,7 @@ pub enum ChangesCommandOutput {
     Bulk(BulkResult<ChangesOutput>),
 }
 
-pub fn run(
-    args: ChangesArgs,
-    _global: &crate::commands::GlobalArgs,
-) -> CmdResult<ChangesCommandOutput> {
+pub fn run(args: ChangesArgs) -> CmdResult<ChangesCommandOutput> {
     // Priority: --json > --project flag > positional args
     if let Some(json) = &args.json {
         reject_path_for_bulk(args.path.as_deref(), "--json")?;

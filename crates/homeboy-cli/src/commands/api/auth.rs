@@ -10,7 +10,7 @@ use homeboy::core::server::auth_profiles::{
 };
 
 use crate::commands::utils::tty::{prompt, prompt_password};
-use crate::commands::{CmdResult, GlobalArgs};
+use crate::commands::CmdResult;
 
 #[derive(Args)]
 pub struct AuthArgs {
@@ -146,7 +146,7 @@ pub enum AuthOutput {
     ProfileRemove(ProfileRemoveResult),
 }
 
-pub fn run(args: AuthArgs, _global: &GlobalArgs) -> CmdResult<AuthOutput> {
+pub fn run(args: AuthArgs) -> CmdResult<AuthOutput> {
     match args.command {
         AuthCommand::Login {
             project,

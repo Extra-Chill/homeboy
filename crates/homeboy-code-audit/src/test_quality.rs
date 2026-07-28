@@ -1296,14 +1296,14 @@ use homeboy::commands::test::{run as run_test, TestArgs};
 
 #[test]
 fn lint_runs_declared_self_check_without_extensions() {
-    let (output, exit_code) = run_lint(lint_args(dir.path()), &GlobalArgs {}).unwrap();
+    let (output, exit_code) = run_lint(lint_args(dir.path())).unwrap();
     assert_eq!(exit_code, 0);
     assert!(output.passed);
 }
 
 #[test]
 fn test_runs_declared_self_check_without_extensions() {
-    let (output, exit_code) = run_test(test_args(dir.path()), &GlobalArgs {}).unwrap();
+    let (output, exit_code) = run_test(test_args(dir.path())).unwrap();
     assert_eq!(exit_code, 0);
     assert!(output.passed);
 }

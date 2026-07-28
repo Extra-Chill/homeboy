@@ -123,7 +123,7 @@ pub fn run_markdown(args: ReportArgs) -> CmdResult<String> {
     }
 }
 
-pub fn run(args: ReportArgs, _global: &super::GlobalArgs) -> CmdResult<ReportOutput> {
+pub fn run(args: ReportArgs) -> CmdResult<ReportOutput> {
     match args.command {
         ReportCommand::FailureDigest(failure_args) => {
             let markdown = render_failure_digest_from_args(&failure_args)?;

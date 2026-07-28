@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 
 use homeboy::core::http_request::{self, HttpRequestInput, HttpRequestOutput};
 
-use crate::commands::{parse_key_val, CmdResult, GlobalArgs};
+use crate::commands::{parse_key_val, CmdResult};
 
 #[derive(Args)]
 pub struct HttpArgs {
@@ -54,7 +54,7 @@ pub(crate) struct RequestArgs {
     form: Vec<(String, String)>,
 }
 
-pub fn run(args: HttpArgs, _global: &GlobalArgs) -> CmdResult<HttpRequestOutput> {
+pub fn run(args: HttpArgs) -> CmdResult<HttpRequestOutput> {
     let input = match args.command {
         HttpCommand::Get(args) => build_input("GET", args),
         HttpCommand::Request {

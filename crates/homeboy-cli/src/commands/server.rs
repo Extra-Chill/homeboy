@@ -146,7 +146,7 @@ enum KeyCommand {
     },
 }
 
-pub fn run(args: ServerArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<ServerOutput> {
+pub fn run(args: ServerArgs) -> CmdResult<ServerOutput> {
     map_server_output(match args.command {
         ServerCommand::Create {
             json,

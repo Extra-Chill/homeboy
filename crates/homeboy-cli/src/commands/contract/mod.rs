@@ -18,7 +18,7 @@ use crate::command_contract::{
     RUNNER_ARTIFACT_MANIFEST_REF_SCHEMA, RUNNER_ARTIFACT_MANIFEST_SCHEMA,
     RUNNER_ARTIFACT_ROOT_DIR_SUFFIX, RUN_LOCATION_INDEX_SCHEMA,
 };
-use crate::commands::{adapter, CmdResult, GlobalArgs};
+use crate::commands::{adapter, CmdResult};
 use crate::core::artifact_ref::{validate_reviewer_facing_artifact_ref, ArtifactReference};
 use crate::core::artifacts::{validate_artifact_postprocess_plan, ArtifactManifest};
 use crate::core::host_mutation_lifecycle::{
@@ -387,7 +387,7 @@ struct FieldMetadata {
     required: bool,
 }
 
-pub fn run(args: ContractArgs, _global: &GlobalArgs) -> CmdResult<ContractOutput> {
+pub fn run(args: ContractArgs) -> CmdResult<ContractOutput> {
     match args.command {
         ContractCommand::List => Ok((
             ContractOutput::List(ContractListOutput {
@@ -428,7 +428,7 @@ pub fn run(args: ContractArgs, _global: &GlobalArgs) -> CmdResult<ContractOutput
         ContractCommand::Materialize(args) => {
             Ok((ContractOutput::Materialize(materialize(args)?), 0))
         }
-        ContractCommand::Manifest(args) => crate::commands::manifest::run(args, _global)
+        ContractCommand::Manifest(args) => crate::commands::manifest::run(args)
             .map(|(output, code)| (ContractOutput::Manifest(output), code)),
     }
 }
@@ -461,8 +461,8 @@ pub(crate) fn adapter(
     )
 }
 
-fn run_json(args: ContractArgs, global: &GlobalArgs) -> adapter::JsonHandlerResult {
-    crate::commands::utils::response::map_cmd_result_to_json(run(args, global))
+fn run_json(args: ContractArgs) -> adapter::JsonHandlerResult {
+    crate::commands::utils::response::map_cmd_result_to_json(run(args))
 }
 
 fn constants(contract_id: &str) -> CmdResult<ContractOutput> {
@@ -1485,7 +1485,7 @@ mod tests {
             }),
         };
 
-        let (output, exit_code) = run(args, &GlobalArgs {}).expect("contract export");
+        let (output, exit_code) = run(args).expect("contract export");
 
         assert_eq!(exit_code, 0);
         let ContractOutput::Export(output) = output else {
@@ -1573,12 +1573,9 @@ mod tests {
 
     #[test]
     fn list_returns_registered_contracts() {
-        let (output, exit_code) = run(
-            ContractArgs {
-                command: ContractCommand::List,
-            },
-            &GlobalArgs {},
-        )
+        let (output, exit_code) = run(ContractArgs {
+            command: ContractCommand::List,
+        })
         .expect("list contracts");
 
         assert_eq!(exit_code, 0);
@@ -1594,14 +1591,11 @@ mod tests {
 
     #[test]
     fn show_resolves_by_name() {
-        let (output, exit_code) = run(
-            ContractArgs {
-                command: ContractCommand::Show(ContractShowArgs {
-                    schema_id_or_name: "secret-env-plan".to_string(),
-                }),
-            },
-            &GlobalArgs {},
-        )
+        let (output, exit_code) = run(ContractArgs {
+            command: ContractCommand::Show(ContractShowArgs {
+                schema_id_or_name: "secret-env-plan".to_string(),
+            }),
+        })
         .expect("show contract");
 
         assert_eq!(exit_code, 0);
@@ -1617,14 +1611,11 @@ mod tests {
 
     #[test]
     fn show_resolves_artifact_postprocess_contract_by_schema_id() {
-        let (output, exit_code) = run(
-            ContractArgs {
-                command: ContractCommand::Show(ContractShowArgs {
-                    schema_id_or_name: ARTIFACT_POSTPROCESS_SCHEMA.to_string(),
-                }),
-            },
-            &GlobalArgs {},
-        )
+        let (output, exit_code) = run(ContractArgs {
+            command: ContractCommand::Show(ContractShowArgs {
+                schema_id_or_name: ARTIFACT_POSTPROCESS_SCHEMA.to_string(),
+            }),
+        })
         .expect("show artifact postprocess contract");
 
         assert_eq!(exit_code, 0);
@@ -1749,16 +1740,13 @@ mod tests {
             ]
         });
 
-        let (output, exit_code) = run(
-            ContractArgs {
-                command: ContractCommand::Normalize(ContractNormalizeArgs {
-                    kind: ContractNormalizeKind::PathMaterializationPlan,
-                    input: Some(input.to_string()),
-                    input_file: None,
-                }),
-            },
-            &GlobalArgs {},
-        )
+        let (output, exit_code) = run(ContractArgs {
+            command: ContractCommand::Normalize(ContractNormalizeArgs {
+                kind: ContractNormalizeKind::PathMaterializationPlan,
+                input: Some(input.to_string()),
+                input_file: None,
+            }),
+        })
         .expect("normalize path materialization plan");
 
         assert_eq!(exit_code, 0);

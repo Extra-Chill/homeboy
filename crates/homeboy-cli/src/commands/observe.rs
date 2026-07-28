@@ -22,7 +22,7 @@ use homeboy_extension::trace::{
 
 use super::utils::args::PositionalComponentArgs;
 use super::utils::response::actionable_metadata_value_for_run_ref;
-use super::{adapter, CmdResult, GlobalArgs};
+use super::{adapter, CmdResult};
 
 const DEFAULT_DURATION: &str = "30s";
 const DEFAULT_PROCESS_WATCH_INTERVAL: &str = "1s";
@@ -68,11 +68,11 @@ pub(crate) fn adapter(
     adapter::TypedCommandAdapter::json_only(CommandJsonFamily::Quality, output_file_mode, run_json)
 }
 
-fn run_json(args: ObserveArgs, global: &GlobalArgs) -> adapter::JsonHandlerResult {
-    crate::commands::utils::response::map_cmd_result_to_json(run(args, global))
+fn run_json(args: ObserveArgs) -> adapter::JsonHandlerResult {
+    crate::commands::utils::response::map_cmd_result_to_json(run(args))
 }
 
-pub fn run(args: ObserveArgs, _global: &GlobalArgs) -> CmdResult<ObserveOutput> {
+pub fn run(args: ObserveArgs) -> CmdResult<ObserveOutput> {
     let probes = trace_probes(&args)?;
     let ctx = execution_context::resolve(&ResolveOptions {
         component_id: args.comp.component.clone(),
@@ -333,7 +333,7 @@ mod tests {
                 watch_process_interval: Duration::from_millis(1),
                 probes: Vec::new(),
             };
-            let (output, code) = run(args, &GlobalArgs {}).expect("observe run");
+            let (output, code) = run(args).expect("observe run");
             assert_eq!(code, 0);
             let artifact = std::fs::read_to_string(&output.artifact_path).expect("trace artifact");
             assert!(artifact.contains("trace.passive"));

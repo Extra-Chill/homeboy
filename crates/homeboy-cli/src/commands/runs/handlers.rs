@@ -937,8 +937,7 @@ pub fn artifact_command(args: RunsArtifactArgs) -> CmdResult<RunsOutput> {
         RunsArtifactCommand::CleanupDownloads(args) => remote_artifact::cleanup_downloads(args),
         RunsArtifactCommand::CleanupPersisted(args) => remote_artifact::cleanup_persisted(args),
         RunsArtifactCommand::Postprocess(args) => {
-            let (output, exit_code) =
-                crate::commands::artifact_postprocess::run(args, &crate::commands::GlobalArgs {})?;
+            let (output, exit_code) = crate::commands::artifact_postprocess::run(args)?;
             Ok((RunsOutput::ArtifactPostprocess(output), exit_code))
         }
     }

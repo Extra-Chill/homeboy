@@ -17,7 +17,7 @@ use homeboy::refactor::auto::transaction::{
 };
 
 use super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs};
-use super::{CmdResult, CommandReport, GlobalArgs};
+use super::{CmdResult, CommandReport};
 
 #[derive(Args)]
 pub struct CiArgs {
@@ -275,22 +275,19 @@ pub struct CiRunCommandOutput {
     pub run: CiRunOutput,
 }
 
-pub fn run(args: CiArgs, global: &GlobalArgs) -> CmdResult<CiOutput> {
+pub fn run(args: CiArgs) -> CmdResult<CiOutput> {
     match args.command {
-        CiCommand::List(args) => run_list(args, global),
-        CiCommand::Plan(args) => run_plan(args, global),
-        CiCommand::Run(args) => run_ci(args, global),
-        CiCommand::Autofix(args) => run_autofix(args, global),
-        CiCommand::Scope(args) => run_scope(args, global),
-        CiCommand::DifferentialGate(args) => run_differential_gate(args, global),
-        CiCommand::Triage(args) => run_triage(args, global),
+        CiCommand::List(args) => run_list(args),
+        CiCommand::Plan(args) => run_plan(args),
+        CiCommand::Run(args) => run_ci(args),
+        CiCommand::Autofix(args) => run_autofix(args),
+        CiCommand::Scope(args) => run_scope(args),
+        CiCommand::DifferentialGate(args) => run_differential_gate(args),
+        CiCommand::Triage(args) => run_triage(args),
     }
 }
 
-fn run_differential_gate(
-    args: CiDifferentialGateArgs,
-    _global: &GlobalArgs,
-) -> CmdResult<CiOutput> {
+fn run_differential_gate(args: CiDifferentialGateArgs) -> CmdResult<CiOutput> {
     let decision = ci_gate::classify(DifferentialGateInput {
         baseline: DifferentialGateSide {
             command: args.baseline_command,
@@ -314,7 +311,7 @@ fn run_differential_gate(
     ))
 }
 
-fn run_triage(args: CiTriageArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
+fn run_triage(args: CiTriageArgs) -> CmdResult<CiOutput> {
     let output = ci_failure_log_triage::triage_pr_failures(CiFailureTriageRequest {
         reference: args.reference,
         repo: args.repo,
@@ -326,7 +323,7 @@ fn run_triage(args: CiTriageArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
     Ok((CiOutput::Triage(output), 0))
 }
 
-fn run_plan(args: CiPlanArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
+fn run_plan(args: CiPlanArgs) -> CmdResult<CiOutput> {
     let context = CiEventContext::parse(&args.context);
     let plan = ci_plan::plan(&args.commands, context);
 
@@ -339,7 +336,7 @@ fn run_plan(args: CiPlanArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
     ))
 }
 
-fn run_scope(args: CiScopeArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
+fn run_scope(args: CiScopeArgs) -> CmdResult<CiOutput> {
     // Build the GitHub Actions context: start from the environment when
     // `--github-actions` is set, then apply any explicit overrides.
     let mut ctx = if args.github_actions {
@@ -387,7 +384,7 @@ fn run_scope(args: CiScopeArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
     ))
 }
 
-fn run_list(args: CiListArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
+fn run_list(args: CiListArgs) -> CmdResult<CiOutput> {
     let ctx = execution_context::resolve(&ResolveOptions {
         component_id: args.comp.component.clone(),
         path_override: args.comp.path.clone(),
@@ -421,7 +418,7 @@ fn run_list(args: CiListArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
     ))
 }
 
-fn run_ci(args: CiRunArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
+fn run_ci(args: CiRunArgs) -> CmdResult<CiOutput> {
     let ctx = execution_context::resolve(&ResolveOptions {
         component_id: args.comp.component.clone(),
         path_override: args.comp.path.clone(),
@@ -457,7 +454,7 @@ fn run_ci(args: CiRunArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
     ))
 }
 
-fn run_autofix(args: CiAutofixArgs, _global: &GlobalArgs) -> CmdResult<CiOutput> {
+fn run_autofix(args: CiAutofixArgs) -> CmdResult<CiOutput> {
     let ctx = execution_context::resolve(&ResolveOptions {
         component_id: args.comp.component.clone(),
         path_override: args.comp.path.clone(),
@@ -700,7 +697,7 @@ mod tests {
             head_evidence: Vec::new(),
         };
 
-        let (output, exit) = run_differential_gate(args, &GlobalArgs {}).expect("gate classifies");
+        let (output, exit) = run_differential_gate(args).expect("gate classifies");
 
         assert_eq!(exit, 0);
         let CiOutput::DifferentialGate(output) = output else {
@@ -722,7 +719,7 @@ mod tests {
             head_evidence: vec!["homeboy-ci-results/test.log".to_string()],
         };
 
-        let (output, exit) = run_differential_gate(args, &GlobalArgs {}).expect("gate classifies");
+        let (output, exit) = run_differential_gate(args).expect("gate classifies");
 
         assert_eq!(exit, 1);
         let CiOutput::DifferentialGate(output) = output else {
@@ -744,7 +741,7 @@ mod tests {
             for_commands: vec!["lint".to_string()],
         };
 
-        let (output, exit) = run_scope(args, &GlobalArgs {}).expect("scope resolves");
+        let (output, exit) = run_scope(args).expect("scope resolves");
         assert_eq!(exit, 0);
         let CiOutput::Scope(scope) = output else {
             panic!("expected scope output");

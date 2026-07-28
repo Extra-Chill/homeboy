@@ -1488,3 +1488,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod global_flag_surface_tests;

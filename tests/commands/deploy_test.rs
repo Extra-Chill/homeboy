@@ -1,19 +1,15 @@
 use super::{resolve_multi_args, run, DeployArgs};
 use crate::cli_surface::{Cli, Commands};
-use crate::commands::GlobalArgs;
 use clap::Parser;
 use std::collections::BTreeMap;
 
 #[test]
 fn deploy_head_requires_apply_for_real_deploy() {
-    let result = run(
-        deploy_args(|args| {
-            args.target_id = Some("project-a".to_string());
-            args.component_ids = vec!["component-a".to_string()];
-            args.head = true;
-        }),
-        &GlobalArgs {},
-    );
+    let result = run(deploy_args(|args| {
+        args.target_id = Some("project-a".to_string());
+        args.component_ids = vec!["component-a".to_string()];
+        args.head = true;
+    }));
 
     let err = match result {
         Ok(_) => panic!("--head real deploy should require --apply"),
@@ -26,14 +22,11 @@ fn deploy_head_requires_apply_for_real_deploy() {
 
 #[test]
 fn deploy_force_requires_apply_for_real_deploy() {
-    let result = run(
-        deploy_args(|args| {
-            args.target_id = Some("project-a".to_string());
-            args.component_ids = vec!["component-a".to_string()];
-            args.force = true;
-        }),
-        &GlobalArgs {},
-    );
+    let result = run(deploy_args(|args| {
+        args.target_id = Some("project-a".to_string());
+        args.component_ids = vec!["component-a".to_string()];
+        args.force = true;
+    }));
 
     let err = match result {
         Ok(_) => panic!("--force real deploy should require --apply"),
@@ -46,15 +39,12 @@ fn deploy_force_requires_apply_for_real_deploy() {
 
 #[test]
 fn deploy_head_dry_run_does_not_require_apply() {
-    let result = run(
-        deploy_args(|args| {
-            args.target_id = Some("missing-project".to_string());
-            args.component_ids = vec!["component-a".to_string()];
-            args.head = true;
-            args.dry_run = true;
-        }),
-        &GlobalArgs {},
-    );
+    let result = run(deploy_args(|args| {
+        args.target_id = Some("missing-project".to_string());
+        args.component_ids = vec!["component-a".to_string()];
+        args.head = true;
+        args.dry_run = true;
+    }));
 
     let err = match result {
         Ok(_) => panic!("dry-run should pass apply boundary before project lookup"),
@@ -65,14 +55,11 @@ fn deploy_head_dry_run_does_not_require_apply() {
 
 #[test]
 fn deploy_ref_requires_apply_for_real_deploy() {
-    let result = run(
-        deploy_args(|args| {
-            args.target_id = Some("project-a".to_string());
-            args.component_ids = vec!["component-a".to_string()];
-            args.requested_ref = Some("accepted-commit".to_string());
-        }),
-        &GlobalArgs {},
-    );
+    let result = run(deploy_args(|args| {
+        args.target_id = Some("project-a".to_string());
+        args.component_ids = vec!["component-a".to_string()];
+        args.requested_ref = Some("accepted-commit".to_string());
+    }));
 
     let err = match result {
         Ok(_) => panic!("--ref real deploy should require --apply"),
@@ -142,14 +129,19 @@ fn release_set_rejects_conflicting_source_selectors() {
 
 #[test]
 fn release_set_rejects_multi_target_modes() {
-    for target in [vec!["--projects", "project-a,project-b"], vec!["--fleet", "fleet-a"], vec!["--shared"]] {
+    for target in [
+        vec!["--projects", "project-a,project-b"],
+        vec!["--fleet", "fleet-a"],
+        vec!["--shared"],
+    ] {
         let mut argv = vec!["homeboy", "deploy", "--release-set", "release-set.json"];
         argv.extend(target.iter().copied());
-        let cli = Cli::try_parse_from(argv).expect("multi-target selector should parse for diagnostic");
+        let cli =
+            Cli::try_parse_from(argv).expect("multi-target selector should parse for diagnostic");
         let Commands::Deploy(args) = cli.command else {
             panic!("expected deploy command");
         };
-        let error = match run(args, &GlobalArgs {}) {
+        let error = match run(args) {
             Ok(_) => panic!("release-set multi-target deploy must be rejected"),
             Err(error) => error,
         };
@@ -169,28 +161,31 @@ fn release_set_requires_apply_before_preflight() {
         args.release_set = Some(manifest.path().display().to_string());
     });
 
-    let error = match run(args, &GlobalArgs {}) {
+    let error = match run(args) {
         Ok(_) => panic!("release set must require --apply"),
         Err(error) => error,
     };
-    assert!(error.message.contains("--release-set require explicit --apply"));
+    assert!(error
+        .message
+        .contains("--release-set require explicit --apply"));
 }
 
 #[test]
 fn release_set_check_is_rejected_before_ref_resolution_or_materialization() {
-    let result = run(
-        deploy_args(|args| {
-            args.release_set = Some("not-read.json".to_string());
-            args.check = true;
-        }),
-        &GlobalArgs {},
-    );
+    let result = run(deploy_args(|args| {
+        args.release_set = Some("not-read.json".to_string());
+        args.check = true;
+    }));
     let error = match result {
-        Ok(_) => panic!("release-set check must be rejected before it reads or mutates a source checkout"),
+        Ok(_) => panic!(
+            "release-set check must be rejected before it reads or mutates a source checkout"
+        ),
         Err(error) => error,
     };
 
-    assert!(error.message.contains("--check cannot be combined with --release-set"));
+    assert!(error
+        .message
+        .contains("--check cannot be combined with --release-set"));
 }
 
 #[test]
@@ -237,14 +232,8 @@ fn skip_deps_hydration_cli_flag_propagates_to_deploy_config() {
 
 #[test]
 fn deploy_apply_does_not_grant_stale_or_downgrade_consent() {
-    let cli = Cli::try_parse_from([
-        "homeboy",
-        "deploy",
-        "project-a",
-        "component-a",
-        "--apply",
-    ])
-    .expect("--apply should parse");
+    let cli = Cli::try_parse_from(["homeboy", "deploy", "project-a", "component-a", "--apply"])
+        .expect("--apply should parse");
 
     let Commands::Deploy(args) = cli.command else {
         panic!("expected deploy command");

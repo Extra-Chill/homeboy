@@ -34,7 +34,7 @@ pub struct HarvestOutput {
     pub result: homeboy::core::harvest::HarvestResult,
 }
 
-pub fn run(args: HarvestArgs, _global: &super::GlobalArgs) -> CmdResult<HarvestOutput> {
+pub fn run(args: HarvestArgs) -> CmdResult<HarvestOutput> {
     let (project_id, component_ids) =
         resolve_project_components(&args.target_id, &args.component_ids)?;
     let result = homeboy::core::harvest::run(

@@ -45,14 +45,11 @@ fn default_baseline_expansion_records_metadata_on_comparison_output() {
             "studio-agent-sdk",
         );
 
-        let (output, exit_code) = run(
-            run_args(
-                None,
-                vec!["studio-bfb".to_string()],
-                vec!["rig-slow".to_string()],
-            ),
-            &GlobalArgs {},
-        )
+        let (output, exit_code) = run(run_args(
+            None,
+            vec!["studio-bfb".to_string()],
+            vec!["rig-slow".to_string()],
+        ))
         .expect("default baseline expansion should run as comparison");
 
         assert_eq!(exit_code, 0);
@@ -100,8 +97,7 @@ fn default_baseline_expansion_metadata_survives_json_summary() {
             vec!["rig-slow".to_string()],
         );
         args.run.json_summary = true;
-        let (output, exit_code) =
-            run(args, &GlobalArgs {}).expect("default baseline summary should run");
+        let (output, exit_code) = run(args).expect("default baseline summary should run");
 
         assert_eq!(exit_code, 0);
         match output {

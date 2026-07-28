@@ -11,7 +11,7 @@ use homeboy::core::engine::command::run_in_optional;
 
 use super::source_command::resolve_source_context;
 use super::utils::args::{ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs};
-use super::{CmdResult, GlobalArgs};
+use super::CmdResult;
 
 #[derive(Args)]
 pub struct AuditBaselineArgs {
@@ -80,18 +80,15 @@ pub struct AuditBaselineRefreshOutput {
     pub resolved_fingerprints: Vec<String>,
 }
 
-pub fn run(args: AuditBaselineArgs, global: &GlobalArgs) -> CmdResult<AuditBaselineRefreshOutput> {
+pub fn run(args: AuditBaselineArgs) -> CmdResult<AuditBaselineRefreshOutput> {
     match args.command {
-        AuditBaselineCommand::Refresh(args) => refresh(args, global),
-        AuditBaselineCommand::Merge(args) => merge(args, global),
-        AuditBaselineCommand::Prune(args) => prune(args, global),
+        AuditBaselineCommand::Refresh(args) => refresh(args),
+        AuditBaselineCommand::Merge(args) => merge(args),
+        AuditBaselineCommand::Prune(args) => prune(args),
     }
 }
 
-fn prune(
-    args: AuditBaselinePruneArgs,
-    _global: &GlobalArgs,
-) -> CmdResult<AuditBaselineRefreshOutput> {
+fn prune(args: AuditBaselinePruneArgs) -> CmdResult<AuditBaselineRefreshOutput> {
     let source_ctx = resolve_source_context(
         &args.comp,
         &SettingArgs::default(),
@@ -149,10 +146,7 @@ fn prune(
     Ok((output, exit_code))
 }
 
-fn refresh(
-    args: AuditBaselineRefreshArgs,
-    _global: &GlobalArgs,
-) -> CmdResult<AuditBaselineRefreshOutput> {
+fn refresh(args: AuditBaselineRefreshArgs) -> CmdResult<AuditBaselineRefreshOutput> {
     let source_ctx = resolve_source_context(
         &args.comp,
         &SettingArgs::default(),
@@ -230,10 +224,7 @@ fn refresh(
     Ok((output, workflow.exit_code))
 }
 
-fn merge(
-    args: AuditBaselineMergeArgs,
-    _global: &GlobalArgs,
-) -> CmdResult<AuditBaselineRefreshOutput> {
+fn merge(args: AuditBaselineMergeArgs) -> CmdResult<AuditBaselineRefreshOutput> {
     let source_ctx = resolve_source_context(
         &args.comp,
         &SettingArgs::default(),

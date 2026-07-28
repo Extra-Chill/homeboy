@@ -17,8 +17,8 @@ pub(crate) fn normalize_signature(sig: &str) -> String {
         .replace_all(&normalized, ")")
         .to_string();
 
-    // Normalize extension paths to final segment: crate::commands::GlobalArgs → GlobalArgs
-    // Also handles super::GlobalArgs → GlobalArgs
+    // Normalize extension paths to final segment: crate::commands::CmdResult → CmdResult
+    // Also handles super::CmdResult → CmdResult
     // This is generic: any sequence of word::word::...::Word keeps only the last part
     let normalized = Regex::new(r"\b(?:\w+::)+(\w+)")
         .unwrap()
@@ -259,8 +259,8 @@ fn strip_return_type(sig: &str) -> String {
 /// punctuation as separate tokens. This is language-agnostic — it works
 /// on any signature string regardless of language.
 ///
-/// Example: `pub fn run(args: FooArgs, _global: &GlobalArgs) -> CmdResult<FooOutput>`
-/// becomes: `["pub", "fn", "run", "(", "args", ":", "FooArgs", ",", "_global", ":", "&", "GlobalArgs", ")", "->", "CmdResult", "<", "FooOutput", ">"]`
+/// Example: `pub fn run(args: FooArgs) -> CmdResult<FooOutput>`
+/// becomes: `["pub", "fn", "run", "(", "args", ":", "FooArgs", ")", "->", "CmdResult", "<", "FooOutput", ">"]`
 pub(crate) fn tokenize_signature(sig: &str) -> Vec<String> {
     let sig = normalize_signature(sig);
     let mut tokens = Vec::new();

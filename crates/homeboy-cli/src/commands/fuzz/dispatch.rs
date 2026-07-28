@@ -8,7 +8,7 @@ use homeboy::fuzz::{
 };
 use homeboy_extension::ExtensionCapability;
 
-use super::super::{CmdResult, GlobalArgs};
+use super::super::CmdResult;
 use super::compare::run_compare;
 use super::doctor::run_doctor;
 use super::execution::run_run;
@@ -24,7 +24,7 @@ use super::types::{
 };
 use super::workloads::{fuzz_workloads, load_rig, resolve_component_id, resolve_fuzz_context};
 
-pub fn run(args: FuzzArgs, _global: &GlobalArgs) -> CmdResult<FuzzOutput> {
+pub fn run(args: FuzzArgs) -> CmdResult<FuzzOutput> {
     match args.command {
         Some(FuzzCommand::Contract) => Ok((FuzzOutput::Contract(run_contract()), 0)),
         Some(FuzzCommand::Doctor(doctor_args)) => {

@@ -6,11 +6,11 @@
 use homeboy::core::Error;
 
 use super::types::{RunsArgs, RunsArtifactArgs, RunsArtifactCommand, RunsCommand, RunsOutput};
+use super::CmdResult;
 use super::{
     bench, compare, distribution, dossier, drift, evidence, findings, fuzz_compare, handlers,
     hotspots, latest, loop_sync, proof, query, reconcile, refs, resources, retention, watch,
 };
-use super::{CmdResult, GlobalArgs};
 
 impl RunsArgs {
     /// Whether this is a `runs show <id>` invocation eligible for the
@@ -160,7 +160,7 @@ impl RunsArgs {
     }
 }
 
-pub fn run(args: RunsArgs, _global: &GlobalArgs) -> CmdResult<RunsOutput> {
+pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
     match args.command {
         RunsCommand::List(args) => handlers::list_runs(args, "runs.list"),
         RunsCommand::Distribution(args) => {
@@ -212,7 +212,7 @@ pub fn global_runner_error(args: &RunsArgs, runner_id: &str) -> Error {
     Error::validation_invalid_argument("runner", message, Some(runner_id.to_string()), Some(hints))
 }
 
-pub fn run_markdown(args: RunsArgs, _global: &GlobalArgs) -> CmdResult<String> {
+pub fn run_markdown(args: RunsArgs) -> CmdResult<String> {
     match args.command {
         RunsCommand::Compare(args) => compare::run_markdown(args),
         _ => Err(Error::validation_invalid_argument(

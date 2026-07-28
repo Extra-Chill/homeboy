@@ -211,7 +211,7 @@ enum ProjectPinType {
 
 pub type ProjectOutput = homeboy::core::project::ProjectReportOutput;
 
-pub fn run(args: ProjectArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<ProjectOutput> {
+pub fn run(args: ProjectArgs) -> CmdResult<ProjectOutput> {
     match args.command {
         ProjectCommand::List => list(),
         ProjectCommand::Show { project_id } => show(&project_id),

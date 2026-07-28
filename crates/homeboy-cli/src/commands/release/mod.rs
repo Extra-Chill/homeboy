@@ -377,23 +377,17 @@ impl ReleaseExecuteArgs {
     }
 }
 
-pub fn run(
-    args: ReleaseArgs,
-    global: &crate::commands::GlobalArgs,
-) -> CmdResult<ReleaseCommandOutput> {
+pub fn run(args: ReleaseArgs) -> CmdResult<ReleaseCommandOutput> {
     match args.command {
         Some(ReleaseSubcommand::Changes(args)) => {
-            return map_nested(changes::run(args, global), ReleaseCommandOutput::Changes);
+            return map_nested(changes::run(args), ReleaseCommandOutput::Changes);
         }
         Some(ReleaseSubcommand::Changelog(args)) => {
-            return map_nested(
-                changelog::run(args, global),
-                ReleaseCommandOutput::Changelog,
-            );
+            return map_nested(changelog::run(args), ReleaseCommandOutput::Changelog);
         }
         Some(ReleaseSubcommand::Version(args)) => {
             return map_nested(
-                version::run_command(args.command, global),
+                version::run_command(args.command),
                 ReleaseCommandOutput::Version,
             );
         }

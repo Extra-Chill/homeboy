@@ -279,7 +279,7 @@ fn split_command(raw: &str) -> Result<Vec<String>> {
     Ok(args)
 }
 
-pub fn run(args: ScheduleArgs, _global: &super::GlobalArgs) -> CmdResult<ScheduleOutput> {
+pub fn run(args: ScheduleArgs) -> CmdResult<ScheduleOutput> {
     match args.command {
         ScheduleCommand::Add(add) => {
             if schedule::exists(&add.id) && !add.force {

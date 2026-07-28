@@ -41,10 +41,7 @@ fn run_single_rig_bench_fails_fast_on_active_resource_lease() {
             .expect("acquire active lease")
             .expect("resourceful rig leases");
 
-        let error = match run(
-            run_args(None, vec!["studio-bfb".to_string()], Vec::new()),
-            &GlobalArgs {},
-        ) {
+        let error = match run(run_args(None, vec!["studio-bfb".to_string()], Vec::new())) {
             Ok(_) => panic!("bench should fail before running with conflicting rig resources"),
             Err(error) => error,
         };
@@ -64,11 +61,8 @@ fn run_single_rig_bench_without_resources_does_not_create_lease() {
         let component_dir = tempfile::TempDir::new().expect("component dir");
         write_rig(home, "studio-lite", "studio", component_dir.path());
 
-        let (_output, exit_code) = run(
-            run_args(None, vec!["studio-lite".to_string()], Vec::new()),
-            &GlobalArgs {},
-        )
-        .expect("non-resourceful rig bench should run");
+        let (_output, exit_code) = run(run_args(None, vec!["studio-lite".to_string()], Vec::new()))
+            .expect("non-resourceful rig bench should run");
 
         assert_eq!(exit_code, 0);
         assert!(crate::rig::lease::active_run_leases()

@@ -34,7 +34,7 @@ use std::path::Path;
 use super::parse_key_val;
 use super::utils::args::{BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs};
 use super::utils::response::actionable_metadata_value_for_run_ref;
-use super::{audit, audit_baseline, build, ci, lint, test, CmdResult, GlobalArgs};
+use super::{audit, audit_baseline, build, ci, lint, test, CmdResult};
 use crate::command_contract::{LabCommandContract, REVIEW_LAB_LABEL};
 use crate::core::io::output_file::{write_output_file_atomically, OutputWriteOptions};
 
@@ -218,7 +218,7 @@ struct ReviewStageDescriptor<Args, Output: Serialize + ReviewArtifactFindings> {
     name: &'static str,
     include_changed_only_scope: bool,
     build_args: fn(&ReviewArgs, &ReviewExecutionContext) -> Args,
-    run: fn(Args, &GlobalArgs) -> CmdResult<Output>,
+    run: fn(Args) -> CmdResult<Output>,
     finding_count: fn(&Output) -> usize,
 }
 
@@ -244,12 +244,10 @@ impl<Args, Output: Serialize + ReviewArtifactFindings> ReviewStageDescriptor<Arg
     fn execute(
         &self,
         review_args: &ReviewArgs,
-        global: &GlobalArgs,
         component_label: &str,
         review_context: &ReviewExecutionContext,
     ) -> CmdResult<ReviewStage<Output>> {
-        let (output, exit_code) =
-            (self.run)((self.build_args)(review_args, review_context), global)?;
+        let (output, exit_code) = (self.run)((self.build_args)(review_args, review_context))?;
         let finding_count = (self.finding_count)(&output);
 
         let mut hint = format!(
@@ -283,7 +281,6 @@ fn dispatch_review_plan_step(
     // homeboy-audit: allow-thin-command-adapter
     step: &PlanStep,
     args: &ReviewArgs,
-    global: &GlobalArgs,
     component_label: &str,
     review_context: &ReviewExecutionContext,
 ) -> homeboy::core::Result<Option<ReviewStageRun>> {
@@ -296,7 +293,7 @@ fn dispatch_review_plan_step(
                 run: audit::run,
                 finding_count: audit_finding_count,
             };
-            let (stage, _) = descriptor.execute(args, global, component_label, review_context)?;
+            let (stage, _) = descriptor.execute(args, component_label, review_context)?;
             Ok(Some(ReviewStageRun::Audit(Box::new(stage))))
         }
         "review.lint" => {
@@ -307,7 +304,7 @@ fn dispatch_review_plan_step(
                 run: lint::run,
                 finding_count: lint_finding_count,
             };
-            let (stage, _) = descriptor.execute(args, global, component_label, review_context)?;
+            let (stage, _) = descriptor.execute(args, component_label, review_context)?;
             Ok(Some(ReviewStageRun::Lint(Box::new(stage))))
         }
         "review.test" => {
@@ -318,7 +315,7 @@ fn dispatch_review_plan_step(
                 run: test::run,
                 finding_count: test_finding_count,
             };
-            let (stage, _) = descriptor.execute(args, global, component_label, review_context)?;
+            let (stage, _) = descriptor.execute(args, component_label, review_context)?;
             Ok(Some(ReviewStageRun::Test(Box::new(stage))))
         }
         other => Err(homeboy::core::Error::internal_unexpected(format!(
@@ -327,15 +324,15 @@ fn dispatch_review_plan_step(
     }
 }
 
-pub fn run(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<Value> {
+pub fn run(args: ReviewArgs) -> CmdResult<Value> {
     match args.command {
-        Some(ReviewCommand::Audit(args)) => to_value(audit::run(args.audit, global)),
-        Some(ReviewCommand::AuditBaseline(args)) => to_value(audit_baseline::run(args, global)),
-        Some(ReviewCommand::Lint(args)) => to_value(lint::run(review_lint_args(args), global)),
-        Some(ReviewCommand::Test(args)) => to_value(test::run(args, global)),
-        Some(ReviewCommand::Build(args)) => to_value(build::run(args, global)),
-        Some(ReviewCommand::Ci(args)) => to_value(ci::run(args, global)),
-        None => to_value(run_umbrella(args, global)),
+        Some(ReviewCommand::Audit(args)) => to_value(audit::run(args.audit)),
+        Some(ReviewCommand::AuditBaseline(args)) => to_value(audit_baseline::run(args)),
+        Some(ReviewCommand::Lint(args)) => to_value(lint::run(review_lint_args(args))),
+        Some(ReviewCommand::Test(args)) => to_value(test::run(args)),
+        Some(ReviewCommand::Build(args)) => to_value(build::run(args)),
+        Some(ReviewCommand::Ci(args)) => to_value(ci::run(args)),
+        None => to_value(run_umbrella(args)),
     }
 }
 
@@ -354,7 +351,7 @@ fn review_lint_args(mut args: lint::LintArgs) -> lint::LintArgs {
     args
 }
 
-pub fn run_umbrella(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCommandOutput> {
+pub fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
     if let Some(run_id) = args.run_id.as_deref() {
         return attach_to_persisted_review(run_id);
     }
@@ -458,7 +455,7 @@ pub fn run_umbrella(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<ReviewCo
             ));
         }
         // homeboy-audit: allow-thin-command-adapter
-        dispatch_review_plan_step(step, &args, global, &component_label, &review_context)
+        dispatch_review_plan_step(step, &args, &component_label, &review_context)
         // homeboy-audit: allow-thin-command-adapter
     }) {
         Ok(run) => run,
@@ -759,9 +756,9 @@ fn preflight_review_scope(
 /// envelope into a PR-comment section. The body is just the section content;
 /// the consumer (`homeboy git pr comment --header`) owns the wrapping
 /// section header.
-pub fn run_markdown(args: ReviewArgs, global: &GlobalArgs) -> CmdResult<String> {
+pub fn run_markdown(args: ReviewArgs) -> CmdResult<String> {
     let banners = args.banner.clone();
-    let (output, exit_code) = run_umbrella(args, global)?;
+    let (output, exit_code) = run_umbrella(args)?;
     let md = if banners.is_empty() {
         review::render::render_pr_comment(&output)
     } else {

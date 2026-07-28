@@ -14,7 +14,6 @@ use crate::commands;
 use crate::commands::cli;
 use crate::commands::output_runtime;
 use crate::commands::utils::{args, entity_suggest, resource_policy, response as output};
-use crate::commands::GlobalArgs;
 use homeboy::extension::{
     list_summaries, load_all_extensions, CliConfig,
     ExtensionManifest as InstalledExtensionManifest, ExtensionSummary,
@@ -359,7 +358,6 @@ impl CliRuntime {
     }
 
     fn run_matches(&self, matches: ArgMatches, normalized: Vec<String>) -> std::process::ExitCode {
-        let global = GlobalArgs {};
         let command_identity = command_identity_from_matches(&matches);
 
         // Extract --output early so it's available for all code paths (including
@@ -389,7 +387,7 @@ impl CliRuntime {
                 identifier: extension_cmd.project_id,
                 args: extension_cmd.args,
             };
-            let result = cli::run(cli_args, &global);
+            let result = cli::run(cli_args);
 
             let (json_result, exit_code) = output::map_cmd_result_to_json(result);
             output_runtime::emit_json_result_for_identity(
@@ -567,7 +565,6 @@ impl CliRuntime {
             commands::output_runtime::run_command(
                 cli.command,
                 command_spec,
-                &global,
                 output_file.as_deref(),
                 &command_identity,
             )

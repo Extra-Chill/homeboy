@@ -188,10 +188,7 @@ pub struct ComponentExtra {
 
 pub type ComponentOutput = EntityCrudOutput<Value, ComponentExtra>;
 
-pub fn run(
-    args: ComponentArgs,
-    _global: &crate::commands::GlobalArgs,
-) -> CmdResult<ComponentOutput> {
+pub fn run(args: ComponentArgs) -> CmdResult<ComponentOutput> {
     match args.command {
         ComponentCommand::Create {
             local_path,

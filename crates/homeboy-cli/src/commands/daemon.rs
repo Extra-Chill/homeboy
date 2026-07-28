@@ -222,7 +222,7 @@ pub struct DaemonArtifactGetOutput {
     pub sha256: Option<String>,
 }
 
-pub fn run(args: DaemonArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<DaemonOutput> {
+pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
     match args.command {
         DaemonCommand::Start { addr } => {
             Ok((DaemonOutput::Start(daemon::start_background(&addr)?), 0))
@@ -395,8 +395,7 @@ impl AnalysisJobRunner for CommandAnalysisJobRunner {
             })?;
         let (cli, spec) = crate::cli_surface::Cli::from_registered_arg_matches(&matches)
             .expect("validated arguments should produce a typed CLI");
-        let global = crate::commands::GlobalArgs {};
-        let (result, exit_code) = crate::commands::json_output::run(cli.command, spec, &global);
+        let (result, exit_code) = crate::commands::json_output::run(cli.command, spec);
         Ok(AnalysisJobRunOutput {
             exit_code,
             output: result?,
@@ -463,7 +462,7 @@ mod tests {
             let Commands::Daemon(args) = cli.command else {
                 panic!("expected daemon command");
             };
-            let error = run(args, &crate::commands::GlobalArgs {})
+            let error = run(args)
                 .expect_err("missing operator attestation is rejected before state access");
             assert!(
                 error
@@ -522,8 +521,8 @@ mod tests {
                 let Commands::Daemon(args) = cli.command else {
                     panic!("expected daemon command");
                 };
-                let error = run(args, &crate::commands::GlobalArgs {})
-                    .expect_err("an isolated home has no recoverable daemon state");
+                let error =
+                    run(args).expect_err("an isolated home has no recoverable daemon state");
                 assert!(
                     !error.message.contains(refused_flag),
                     "{refused_flag} must no longer gate recovery, got {}",
@@ -683,8 +682,7 @@ mod tests {
                 panic!("expected daemon command");
             };
 
-            let error = run(args, &crate::commands::GlobalArgs {})
-                .expect_err("legacy alias must not mutate");
+            let error = run(args).expect_err("legacy alias must not mutate");
             assert!(error.message.contains("migration-only"));
             let rendered = format!("{error:?}");
             for field in [
@@ -711,8 +709,7 @@ mod tests {
             panic!("expected daemon command");
         };
 
-        let error = run(args, &crate::commands::GlobalArgs {})
-            .expect_err("absent daemon lease fails before recovery");
+        let error = run(args).expect_err("absent daemon lease fails before recovery");
         assert!(!error.message.contains("migration-only"));
     }
 
@@ -731,8 +728,7 @@ mod tests {
             panic!("expected daemon command");
         };
 
-        let error = run(args, &crate::commands::GlobalArgs {})
-            .expect_err("invalid daemon address should reach handler validation");
+        let error = run(args).expect_err("invalid daemon address should reach handler validation");
 
         assert!(error.message.contains("Invalid daemon bind address"));
     }

@@ -74,8 +74,6 @@ pub fn parse_runs_count(s: &str) -> Result<u64, String> {
 static SKIP_DEPS_HYDRATION: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-pub struct GlobalArgs {}
-
 pub(crate) fn set_skip_deps_hydration(value: bool) {
     SKIP_DEPS_HYDRATION.store(value, std::sync::atomic::Ordering::Relaxed);
 }
@@ -250,7 +248,7 @@ pub mod utils;
 pub mod worktree;
 
 macro_rules! register_ops_command_modules {
-    ($(($module:ident, $variant:ident, $args:path, $spec:expr, $handler:path),)*) => {
+    ($(($module:ident, $variant:ident, $handler:path),)*) => {
         $(pub mod $module;)*
     };
 }

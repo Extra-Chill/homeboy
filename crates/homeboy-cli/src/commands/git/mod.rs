@@ -244,7 +244,7 @@ enum GitCommand {
     Pr(PrArgs),
 }
 
-pub fn run(args: GitArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<GitCommandOutput> {
+pub fn run(args: GitArgs) -> CmdResult<GitCommandOutput> {
     match args.command {
         GitCommand::Status {
             json,

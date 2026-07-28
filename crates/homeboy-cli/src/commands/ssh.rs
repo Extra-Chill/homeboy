@@ -84,7 +84,7 @@ pub struct SshListOutput {
     pub servers: Vec<Server>,
 }
 
-pub fn run(args: SshArgs, _global: &crate::commands::GlobalArgs) -> CmdResult<SshOutput> {
+pub fn run(args: SshArgs) -> CmdResult<SshOutput> {
     match args.subcommand {
         Some(SshSubcommand::List) => {
             let servers = server::list()?;

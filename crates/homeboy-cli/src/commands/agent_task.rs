@@ -7,7 +7,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{CmdResult, GlobalArgs};
+use super::CmdResult;
 
 pub mod args;
 pub mod auth;
@@ -44,7 +44,7 @@ pub use args::{
 };
 pub(crate) use status::diagnostic_summary_from_aggregate;
 
-pub fn run(args: AgentTaskArgs, _global: &GlobalArgs) -> CmdResult<Value> {
+pub fn run(args: AgentTaskArgs) -> CmdResult<Value> {
     // Announce durable identity exactly once, on the first progress event that
     // carries a run id, and do it outside the TTY gate. Phase chatter stays
     // TTY-gated so non-interactive logs are not spammed, but the operator

@@ -1,6 +1,5 @@
 use super::args::{EditArgs, FileModifications, LineOperations, PatternOperations};
 use super::{run, FileArgs, FileCommand, FileCommandOutput};
-use crate::commands::GlobalArgs;
 use crate::test_support::with_isolated_home;
 use std::path::Path;
 
@@ -32,16 +31,13 @@ fn file_read_json_includes_size_metadata() {
     let result = with_isolated_home(|home| {
         write_project_config(home.path(), project_id, project_root.path());
 
-        run(
-            FileArgs {
-                command: FileCommand::Read {
-                    project_id: project_id.to_string(),
-                    path: "sample.txt".to_string(),
-                    raw: false,
-                },
+        run(FileArgs {
+            command: FileCommand::Read {
+                project_id: project_id.to_string(),
+                path: "sample.txt".to_string(),
+                raw: false,
             },
-            &GlobalArgs {},
-        )
+        })
     });
 
     let (output, code) = result.expect("run homeboy file read");
@@ -71,17 +67,14 @@ fn file_delete_without_apply_returns_plan_and_preserves_file() {
     let result = with_isolated_home(|home| {
         write_project_config(home.path(), project_id, project_root.path());
 
-        run(
-            FileArgs {
-                command: FileCommand::Delete {
-                    project_id: project_id.to_string(),
-                    path: "sample.txt".to_string(),
-                    recursive: false,
-                    apply: false,
-                },
+        run(FileArgs {
+            command: FileCommand::Delete {
+                project_id: project_id.to_string(),
+                path: "sample.txt".to_string(),
+                recursive: false,
+                apply: false,
             },
-            &GlobalArgs {},
-        )
+        })
     });
 
     let (output, code) = result.expect("run homeboy file delete");
@@ -108,16 +101,13 @@ fn file_mkdir_without_apply_returns_plan_and_preserves_filesystem() {
     let result = with_isolated_home(|home| {
         write_project_config(home.path(), project_id, project_root.path());
 
-        run(
-            FileArgs {
-                command: FileCommand::Mkdir {
-                    project_id: project_id.to_string(),
-                    path: "new-dir".to_string(),
-                    apply: false,
-                },
+        run(FileArgs {
+            command: FileCommand::Mkdir {
+                project_id: project_id.to_string(),
+                path: "new-dir".to_string(),
+                apply: false,
             },
-            &GlobalArgs {},
-        )
+        })
     });
 
     let (output, code) = result.expect("run homeboy file mkdir");
@@ -146,17 +136,14 @@ fn file_rename_without_apply_returns_plan_and_preserves_filesystem() {
     let result = with_isolated_home(|home| {
         write_project_config(home.path(), project_id, project_root.path());
 
-        run(
-            FileArgs {
-                command: FileCommand::Rename {
-                    project_id: project_id.to_string(),
-                    old_path: "old.txt".to_string(),
-                    new_path: "new.txt".to_string(),
-                    apply: false,
-                },
+        run(FileArgs {
+            command: FileCommand::Rename {
+                project_id: project_id.to_string(),
+                old_path: "old.txt".to_string(),
+                new_path: "new.txt".to_string(),
+                apply: false,
             },
-            &GlobalArgs {},
-        )
+        })
     });
 
     let (output, code) = result.expect("run homeboy file rename");
@@ -185,24 +172,21 @@ fn file_edit_dry_run_returns_preview_and_preserves_file() {
     let result = with_isolated_home(|home| {
         write_project_config(home.path(), project_id, project_root.path());
 
-        run(
-            FileArgs {
-                command: FileCommand::Edit(EditArgs {
-                    project_id: project_id.to_string(),
-                    file_path: "sample.txt".to_string(),
-                    dry_run: true,
-                    force: false,
-                    line_ops: LineOperations {
-                        replace_line: Some(2),
-                        replace_line_content: Some("TWO".to_string()),
-                        ..Default::default()
-                    },
-                    pattern_ops: PatternOperations::default(),
-                    file_mods: FileModifications::default(),
-                }),
-            },
-            &GlobalArgs {},
-        )
+        run(FileArgs {
+            command: FileCommand::Edit(EditArgs {
+                project_id: project_id.to_string(),
+                file_path: "sample.txt".to_string(),
+                dry_run: true,
+                force: false,
+                line_ops: LineOperations {
+                    replace_line: Some(2),
+                    replace_line_content: Some("TWO".to_string()),
+                    ..Default::default()
+                },
+                pattern_ops: PatternOperations::default(),
+                file_mods: FileModifications::default(),
+            }),
+        })
     });
 
     let (output, code) = result.expect("run homeboy file edit dry-run");
@@ -233,24 +217,21 @@ fn file_edit_without_dry_run_writes_file() {
     let result = with_isolated_home(|home| {
         write_project_config(home.path(), project_id, project_root.path());
 
-        run(
-            FileArgs {
-                command: FileCommand::Edit(EditArgs {
-                    project_id: project_id.to_string(),
-                    file_path: "sample.txt".to_string(),
-                    dry_run: false,
-                    force: false,
-                    line_ops: LineOperations {
-                        replace_line: Some(2),
-                        replace_line_content: Some("TWO".to_string()),
-                        ..Default::default()
-                    },
-                    pattern_ops: PatternOperations::default(),
-                    file_mods: FileModifications::default(),
-                }),
-            },
-            &GlobalArgs {},
-        )
+        run(FileArgs {
+            command: FileCommand::Edit(EditArgs {
+                project_id: project_id.to_string(),
+                file_path: "sample.txt".to_string(),
+                dry_run: false,
+                force: false,
+                line_ops: LineOperations {
+                    replace_line: Some(2),
+                    replace_line_content: Some("TWO".to_string()),
+                    ..Default::default()
+                },
+                pattern_ops: PatternOperations::default(),
+                file_mods: FileModifications::default(),
+            }),
+        })
     });
 
     let (output, code) = result.expect("run homeboy file edit");
@@ -277,24 +258,21 @@ fn file_edit_force_allows_first_replacement_when_pattern_has_multiple_matches() 
     let result = with_isolated_home(|home| {
         write_project_config(home.path(), project_id, project_root.path());
 
-        run(
-            FileArgs {
-                command: FileCommand::Edit(EditArgs {
-                    project_id: project_id.to_string(),
-                    file_path: "sample.txt".to_string(),
-                    dry_run: false,
-                    force: true,
-                    line_ops: LineOperations::default(),
-                    pattern_ops: PatternOperations {
-                        replace_pattern: Some("needle".to_string()),
-                        replace_pattern_content: Some("thread".to_string()),
-                        ..Default::default()
-                    },
-                    file_mods: FileModifications::default(),
-                }),
-            },
-            &GlobalArgs {},
-        )
+        run(FileArgs {
+            command: FileCommand::Edit(EditArgs {
+                project_id: project_id.to_string(),
+                file_path: "sample.txt".to_string(),
+                dry_run: false,
+                force: true,
+                line_ops: LineOperations::default(),
+                pattern_ops: PatternOperations {
+                    replace_pattern: Some("needle".to_string()),
+                    replace_pattern_content: Some("thread".to_string()),
+                    ..Default::default()
+                },
+                file_mods: FileModifications::default(),
+            }),
+        })
     });
 
     let (_output, code) = result.expect("run forced homeboy file edit");

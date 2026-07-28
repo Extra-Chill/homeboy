@@ -72,10 +72,7 @@ pub struct RunsFindingOutput {
 
 pub fn findings(args: RunsFindingsArgs) -> CmdResult<RunsOutput> {
     if let Some(command) = args.command {
-        let (output, exit_code) = issues::run(
-            issues::IssuesArgs { command },
-            &crate::commands::GlobalArgs {},
-        )?;
+        let (output, exit_code) = issues::run(issues::IssuesArgs { command })?;
         return Ok((RunsOutput::FindingsReconcile(output), exit_code));
     }
 

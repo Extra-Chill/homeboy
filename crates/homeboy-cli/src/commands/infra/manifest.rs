@@ -4,7 +4,7 @@ use serde::Serialize;
 use crate::cli_runtime::current_augmented_command_safety_manifest;
 use crate::cli_surface::CommandSafetyManifest;
 
-use crate::commands::{CmdResult, GlobalArgs};
+use crate::commands::CmdResult;
 
 #[derive(Args, Debug, Clone)]
 pub struct ManifestArgs {}
@@ -16,7 +16,7 @@ pub struct ManifestOutput {
     pub manifest: CommandSafetyManifest,
 }
 
-pub fn run(_args: ManifestArgs, _global: &GlobalArgs) -> CmdResult<ManifestOutput> {
+pub fn run(_args: ManifestArgs) -> CmdResult<ManifestOutput> {
     Ok((
         ManifestOutput {
             command: "contract.manifest".to_string(),

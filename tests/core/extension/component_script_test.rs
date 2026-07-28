@@ -8,7 +8,6 @@ use crate::commands::test::{run as run_test, TestArgs};
 use crate::commands::utils::args::{
     BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
 };
-use crate::commands::GlobalArgs;
 use homeboy_core::component::{Component, ComponentScriptsConfig, ScopedExtensionConfig};
 use homeboy_core::engine::run_dir::RunDir;
 use homeboy_core::test_support::with_isolated_home;
@@ -324,7 +323,7 @@ fn command_dispatch_runs_component_script_before_extension_resolution() {
     );
 
     let (output, exit_code) =
-        run_test(test_command_args(dir.path()), &GlobalArgs {}).expect("test script should run");
+        run_test(test_command_args(dir.path())).expect("test script should run");
 
     assert_eq!(exit_code, 0);
     assert!(output.passed);
@@ -373,8 +372,8 @@ fn command_dispatch_falls_back_to_extension_when_component_script_is_absent() {
         fs::set_permissions(&extension_script, perms)
             .expect("extension script should be executable");
 
-        let (output, exit_code) = run_test(test_command_args(dir.path()), &GlobalArgs {})
-            .expect("extension test should run");
+        let (output, exit_code) =
+            run_test(test_command_args(dir.path())).expect("extension test should run");
 
         assert_eq!(exit_code, 0);
         assert!(output.passed);
@@ -444,8 +443,8 @@ homeboy_write_test_results 2 2 0 0
             fs::set_permissions(script, perms).expect("script should be executable");
         }
 
-        let (output, exit_code) = run_test(test_command_args(dir.path()), &GlobalArgs {})
-            .expect("extension test should run");
+        let (output, exit_code) =
+            run_test(test_command_args(dir.path())).expect("extension test should run");
 
         assert_eq!(exit_code, 0);
         assert!(output.passed);
@@ -513,8 +512,7 @@ fn changed_wordpress_php_smoke_test_executes_with_generic_result_adapter() {
             "src/patterns.php".to_string(),
             "tests/patterns/patterns-ability-smoke.php".to_string(),
         ]);
-        let (output, exit_code) =
-            run_test(args, &GlobalArgs {}).expect("extension test should run");
+        let (output, exit_code) = run_test(args).expect("extension test should run");
 
         assert_eq!(exit_code, 0);
         assert!(output.passed);
@@ -596,8 +594,7 @@ fn changed_nested_extension_js_smokes_use_component_relative_exclusive_route() {
             "wordpress/tests/wp-codebox-phpunit-aggregate-smoke.mjs".to_string(),
             "wordpress/tests/wp-codebox-phpunit-multisite-smoke.mjs".to_string(),
         ]);
-        let (output, exit_code) =
-            run_test(args, &GlobalArgs {}).expect("JS smoke route should run");
+        let (output, exit_code) = run_test(args).expect("JS smoke route should run");
 
         assert_eq!(exit_code, 0);
         assert!(output.passed);
@@ -658,8 +655,7 @@ fn successful_selected_test_without_result_evidence_fails_closed() {
         let mut args = test_command_args(dir.path());
         args.changed_since = Some("origin/main".to_string());
         args.precomputed_changed_files = Some(vec!["tests/generic-smoke.php".to_string()]);
-        let (output, exit_code) =
-            run_test(args, &GlobalArgs {}).expect("extension test should run");
+        let (output, exit_code) = run_test(args).expect("extension test should run");
 
         assert_eq!(exit_code, 1);
         assert!(!output.passed);
@@ -700,8 +696,7 @@ fn selected_filter_that_skips_every_test_fails_closed() {
         permissions.set_mode(0o755);
         fs::set_permissions(&script, permissions).expect("script executable");
 
-        let (output, exit_code) =
-            run_test(test_command_args(dir.path()), &GlobalArgs {}).expect("test run");
+        let (output, exit_code) = run_test(test_command_args(dir.path())).expect("test run");
         assert_eq!(exit_code, 1);
         assert_eq!(output.test_counts.expect("counts").skipped, 1);
         assert_eq!(output.status, "failed");
@@ -735,8 +730,7 @@ fn extension_policy_with_evidence_allows_a_neutral_no_test_scope() {
         permissions.set_mode(0o755);
         fs::set_permissions(&script, permissions).expect("script executable");
 
-        let (output, exit_code) =
-            run_test(test_command_args(dir.path()), &GlobalArgs {}).expect("test run");
+        let (output, exit_code) = run_test(test_command_args(dir.path())).expect("test run");
         assert_eq!(exit_code, 0);
         assert!(output.passed);
         assert_eq!(output.status, "skipped");
@@ -774,8 +768,7 @@ fn extension_no_test_policy_requires_its_evidence_in_runner_output() {
         permissions.set_mode(0o755);
         fs::set_permissions(&script, permissions).expect("script executable");
 
-        let (output, exit_code) =
-            run_test(test_command_args(dir.path()), &GlobalArgs {}).expect("test run");
+        let (output, exit_code) = run_test(test_command_args(dir.path())).expect("test run");
         assert_eq!(exit_code, 1);
         assert!(!output.passed);
         assert_eq!(output.status, "failed");

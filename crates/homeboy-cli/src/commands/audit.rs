@@ -15,7 +15,7 @@ use super::utils::args::{
     BaselineArgs, ExtensionOverrideArgs, PositionalComponentArgs, SettingArgs,
 };
 use super::utils::response::actionable_metadata_value_for_run_ref;
-use super::{CmdResult, GlobalArgs};
+use super::CmdResult;
 use crate::command_contract::{LabCommandContract, AUDIT_LAB_LABEL};
 use crate::core::observation::WorkflowObservationAdapter;
 
@@ -112,7 +112,7 @@ fn parse_audit_profile(value: &str) -> homeboy::core::Result<code_audit::AuditPr
     })
 }
 
-pub fn run(args: AuditArgs, _global: &GlobalArgs) -> CmdResult<AuditCommandOutput> {
+pub fn run(args: AuditArgs) -> CmdResult<AuditCommandOutput> {
     let only_kinds = parse_finding_kinds(&args.only, "only")?;
     let exclude_kinds = parse_finding_kinds(&args.exclude, "exclude")?;
     let profile = parse_audit_profile(&args.profile)?;
@@ -975,8 +975,7 @@ mod tests {
                 fixability: false,
             };
 
-            let (output, code) =
-                run(args, &crate::commands::GlobalArgs {}).expect("audit should run");
+            let (output, code) = run(args).expect("audit should run");
 
             // Audit should detect the outlier and return findings
             // Summary or other modes are also valid.
