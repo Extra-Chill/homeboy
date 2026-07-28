@@ -46,6 +46,32 @@ pub struct ControllerScratchResource {
     pub terminal_evidence: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interrupted_at: Option<String>,
+    /// Git registration identity of a linked worktree materialized inside this
+    /// lease, recorded when the worktree is created.
+    ///
+    /// The live path does not need it — a linked worktree's own `.git` pointer
+    /// file names its registration, and reading that is stronger evidence than
+    /// anything we could remember. This field exists for the case the pointer
+    /// file is already gone: a registration whose directory was deleted behind
+    /// Git is exactly the leak #10568 describes, and pruning it requires
+    /// knowing which repository holds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_worktree: Option<ControllerScratchGitWorktree>,
+}
+
+/// Where a linked Git worktree is registered.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ControllerScratchGitWorktree {
+    /// Absolute path of the linked worktree itself.
+    pub path: String,
+    /// Absolute path of the repository the worktree is registered against.
+    pub source_root: String,
+    /// Absolute path of the registration directory Git keeps for this worktree
+    /// (`<repo>/.git/worktrees/<id>`). Recorded so a stranded registration can
+    /// be removed by identity instead of by a repository-wide
+    /// `git worktree prune`, which would also reap registrations Homeboy does
+    /// not own.
+    pub registration: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +176,7 @@ fn allocate_attempt_at_index(
             terminal_reason: None,
             terminal_evidence: None,
             interrupted_at: None,
+            git_worktree: None,
         });
         write_index_at_unlocked(&index_path, &index)
     })?;
@@ -220,6 +247,197 @@ pub fn mark_attempt_ephemeral(allocation: &ControllerScratchAllocation) -> Resul
     })
 }
 
+/// Record that a linked Git worktree has been materialized inside an allocated
+/// scratch lease, binding the worktree's Git registration to the durable run
+/// that owns the lease (#10568).
+///
+/// The registration is read back out of Git rather than taken from the caller:
+/// the worktree's own `.git` pointer file is the only authority on which
+/// repository holds its registration, and a caller-supplied source root that
+/// disagrees with it would let cleanup prune the wrong repository. A path that
+/// is not a linked worktree records nothing and is not an error — providers may
+/// materialize plain directories.
+pub fn record_attempt_git_worktree(
+    allocation: &ControllerScratchAllocation,
+    worktree: &Path,
+) -> Result<()> {
+    let Some(registration) = linked_worktree_registration(worktree) else {
+        return Ok(());
+    };
+    with_index_lock(&allocation.index_path, || {
+        let mut index = read_index_at_unlocked(&allocation.index_path)?;
+        let resource = index
+            .resources
+            .iter_mut()
+            .find(|resource| {
+                resource.lease_id == allocation.lease_id
+                    && Path::new(&resource.path) == allocation.path.as_path()
+            })
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "controller_scratch.lease_id",
+                    "allocated scratch lease is not registered",
+                    Some(allocation.lease_id.clone()),
+                    None,
+                )
+            })?;
+        resource.git_worktree = Some(registration);
+        write_index_at_unlocked(&allocation.index_path, &index)
+    })
+}
+
+/// Resolve the Git registration of a *linked* worktree from its own on-disk
+/// pointer file.
+///
+/// A linked worktree's `.git` is a regular file containing
+/// `gitdir: <repo>/.git/worktrees/<id>`. That file is written by Git, names the
+/// exact registration directory, and is unambiguous — ownership by recorded
+/// metadata, not by a database join. A normal checkout (`.git` is a directory)
+/// has no registration to prune and answers `None`, as does any pointer we
+/// cannot parse or resolve. Fail closed: an unreadable pointer must never be
+/// guessed at, because the consequence of guessing is `git worktree remove`
+/// against the wrong repository.
+fn linked_worktree_registration(worktree: &Path) -> Option<ControllerScratchGitWorktree> {
+    let pointer = worktree.join(".git");
+    if !fs::symlink_metadata(&pointer).ok()?.is_file() {
+        return None;
+    }
+    let contents = fs::read_to_string(&pointer).ok()?;
+    let gitdir = contents.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("gitdir:")
+            .map(|value| PathBuf::from(value.trim()))
+    })?;
+    // `<repo>/.git/worktrees/<id>` -> `<repo>`. Anything shallower is not a
+    // linked-worktree registration and is refused rather than reinterpreted.
+    let registrations = gitdir.parent()?;
+    if registrations.file_name()? != "worktrees" {
+        return None;
+    }
+    let git_dir = registrations.parent()?;
+    let source_root = git_dir.parent()?;
+    if !source_root.is_dir() {
+        return None;
+    }
+    Some(ControllerScratchGitWorktree {
+        path: worktree.canonicalize().ok()?.display().to_string(),
+        source_root: source_root.canonicalize().ok()?.display().to_string(),
+        registration: gitdir.display().to_string(),
+    })
+}
+
+/// Remove one stranded Git worktree registration whose directory is already
+/// gone, by identity.
+///
+/// Repository-wide `git worktree prune` would also reap registrations Homeboy
+/// never created, so this removes exactly the recorded registration and only
+/// when the registration itself still agrees that it belongs to this path:
+///
+/// * the worktree path must really be absent — an existing worktree is live;
+/// * `<registration>/gitdir` must still name exactly `<worktree>/.git`, so a
+///   reused registration id can never be mistaken for ours;
+/// * a `locked` marker retains, exactly as Git's own prune does.
+///
+/// Every failure retains. Nothing here consults the run database.
+fn prune_stranded_worktree_registration(registration: &ControllerScratchGitWorktree) -> bool {
+    let worktree = Path::new(&registration.path);
+    if worktree.exists() {
+        return false;
+    }
+    let directory = Path::new(&registration.registration);
+    if directory.join("locked").exists() {
+        return false;
+    }
+    let Ok(recorded) = fs::read_to_string(directory.join("gitdir")) else {
+        return false;
+    };
+    if Path::new(recorded.trim()) != worktree.join(".git") {
+        return false;
+    }
+    fs::remove_dir_all(directory).is_ok()
+}
+
+/// Unregister every linked Git worktree inside a scratch lease using Git's own
+/// lifecycle operation, before the lease's bytes are removed.
+///
+/// This is the #10568 defect in one line: cleanup used to `remove_dir_all` the
+/// lease, which deletes a *registered* worktree behind Git's back and leaves
+/// `<repo>/.git/worktrees/<id>` alive in a shared repository, inflating every
+/// worktree inventory for months (Git only expires registrations during `gc`,
+/// after `gc.worktreePruneExpire`).
+///
+/// `Some(reason)` means nothing was deleted and the lease is retained for
+/// reporting. There is deliberately no fall-back to deleting the directory: a
+/// retained lease is recoverable, a stranded registration in someone else's
+/// repository is not.
+///
+/// `--force` is required rather than optional here: the recovery path
+/// intentionally admits a workspace whose contents were bundled and verified
+/// while still dirty. Every guard `--force` would skip has already been proved
+/// by `cleanup_block_reason` with stronger evidence.
+fn unregister_scratch_git_worktrees(path: &Path) -> Option<String> {
+    for worktree in [path.to_path_buf(), path.join("workspace")] {
+        let Some(registration) = linked_worktree_registration(&worktree) else {
+            continue;
+        };
+        if git::run_git(
+            Path::new(&registration.source_root),
+            &["worktree", "remove", "--force", registration.path.as_str()],
+            "git worktree remove",
+        )
+        .is_err()
+        {
+            return Some(format!(
+                "linked Git worktree `{}` could not be unregistered from `{}`; retained so its registration is not stranded",
+                registration.path, registration.source_root
+            ));
+        }
+    }
+    None
+}
+
+/// Proof that unregistering a linked worktree cannot destroy committed work.
+///
+/// `git worktree remove` deletes the worktree and its registration; it never
+/// deletes objects. What it does remove is the worktree's detached HEAD as a
+/// reachability root, so a commit only that HEAD referenced becomes unreachable
+/// and eventually collectable. The work is therefore preserved exactly when
+/// every commit reachable from the worktree's HEAD is already reachable from a
+/// branch, a tag, or a remote-tracking ref in the owning repository — refs that
+/// outlive the worktree.
+///
+/// This is strictly stronger than the `@{upstream}` test it replaces for this
+/// shape. `@{upstream}..HEAD == 0` means the commits are reachable from a
+/// remote-tracking ref, which `--remotes` already covers; it is never weaker.
+/// Another attempt worktree's detached HEAD deliberately does not count as an
+/// anchor — it is exactly as ephemeral as this one.
+///
+/// Every failure answers "not preserved".
+fn attempt_worktree_commits_are_preserved(worktree: &Path, source_root: &Path) -> bool {
+    let Ok(head) = git::run_git(worktree, &["rev-parse", "HEAD"], "git rev-parse HEAD") else {
+        return false;
+    };
+    let head = head.trim().to_string();
+    if head.is_empty() {
+        return false;
+    }
+    git::run_git(
+        source_root,
+        &[
+            "rev-list",
+            "--count",
+            head.as_str(),
+            "--not",
+            "--branches",
+            "--tags",
+            "--remotes",
+        ],
+        "git rev-list unanchored attempt commits",
+    )
+    .map(|count| count.trim() == "0")
+    .unwrap_or(false)
+}
+
 #[cfg(test)]
 pub(crate) fn abandon_attempt_for_test(allocation: &ControllerScratchAllocation) -> Result<()> {
     with_index_lock(&allocation.index_path, || {
@@ -246,6 +464,15 @@ struct ControllerScratchIndex {
 pub struct ControllerScratchCleanupOutput {
     pub command: &'static str,
     pub mode: &'static str,
+    /// Registered attempt Git worktrees still present on disk. Aggregate
+    /// visibility for #10568: these inflate every repository's worktree
+    /// inventory until their lease converges.
+    pub registered_worktree_count: usize,
+    /// Leases whose directory is already gone. Each may hold a Git registration
+    /// stranded in a shared repository, and an index row nothing else reaps.
+    pub stale_registration_count: usize,
+    /// Stranded registrations removed by identity during this apply.
+    pub stale_registrations_pruned: usize,
     pub candidate_count: usize,
     pub applied_count: usize,
     pub skipped_count: usize,
@@ -488,6 +715,7 @@ fn register_outcome_resources_unlocked(run_id: &str, outcomes: &[AgentTaskOutcom
                 terminal_reason: None,
                 terminal_evidence: None,
                 interrupted_at: None,
+                git_worktree: None,
             };
             index
                 .resources
@@ -574,10 +802,25 @@ fn cleanup_unlocked(
     let now = chrono::Utc::now();
     let mut eligible = Vec::new();
     let mut reconciled = false;
-    for resource in &mut index.resources {
+    // Leases whose bytes are already gone but whose Git registration is not.
+    // Nothing else in this function can see them: the loop below skips a
+    // missing path entirely, so a registration deleted behind Git stayed
+    // stranded in its source repository indefinitely (#10568).
+    let mut stranded: Vec<usize> = Vec::new();
+    let mut registered_worktree_count = 0;
+    for (position, resource) in index.resources.iter_mut().enumerate() {
         let path = PathBuf::from(&resource.path);
         if !path.exists() {
+            // Only a finalized lease is a converged one. An unfinalized row
+            // whose directory is missing may still belong to a dispatch that
+            // has not materialized its scratch yet.
+            if resource.finalized_at.is_some() && resource.git_worktree.is_some() {
+                stranded.push(position);
+            }
             continue;
+        }
+        if resource.git_worktree.is_some() {
+            registered_worktree_count += 1;
         }
         let lifecycle_state = resource.lifecycle_state.clone();
         let interrupted_at = resource.interrupted_at.clone();
@@ -625,6 +868,23 @@ fn cleanup_unlocked(
             source_ref: resource.source_ref.clone(),
         });
     }
+    let stale_registration_count = stranded.len();
+    let mut stale_registrations_pruned = 0;
+    if options.apply {
+        for position in stranded {
+            let resource = &mut index.resources[position];
+            let Some(registration) = resource.git_worktree.as_ref() else {
+                continue;
+            };
+            if prune_stranded_worktree_registration(registration) {
+                // Converged. Clearing the record keeps the lifecycle row as
+                // evidence without re-reporting a registration that is gone.
+                resource.git_worktree = None;
+                stale_registrations_pruned += 1;
+                reconciled = true;
+            }
+        }
+    }
     if reconciled {
         write_index_unlocked(&index)?;
     }
@@ -644,12 +904,11 @@ fn cleanup_unlocked(
     for candidate in &mutation_candidates {
         if options.apply {
             match remove_candidate(&candidate, now, options.retention_override_seconds)? {
-                Some(bytes) => {
+                ScratchRemoval::Removed(bytes) => {
                     applied_count += 1;
                     reclaimed_bytes += bytes;
                 }
-                None => {
-                    let reason = "resource changed or disappeared before deletion".to_string();
+                ScratchRemoval::Skipped(reason) => {
                     all_skips.push((reason.clone(), Some(candidate.run_id.clone())));
                     append_skipped_detail(
                         &mut skipped,
@@ -685,6 +944,9 @@ fn cleanup_unlocked(
     Ok(ControllerScratchCleanupOutput {
         command: "cleanup.controller-scratch",
         mode: if options.apply { "apply" } else { "dry_run" },
+        registered_worktree_count,
+        stale_registration_count,
+        stale_registrations_pruned,
         candidate_count,
         applied_count,
         skipped_count,
@@ -1042,38 +1304,69 @@ fn retention_expired(
     reference.is_some_and(|time| now.signed_duration_since(time).num_seconds() >= seconds)
 }
 
+/// Outcome of one destructive-boundary attempt. A skip carries its exact reason
+/// so a lease retained for an unregisterable Git worktree is reported as such
+/// rather than as an anonymous "changed or disappeared".
+enum ScratchRemoval {
+    Removed(u64),
+    Skipped(String),
+}
+
+const REMOVAL_RACE_REASON: &str = "resource changed or disappeared before deletion";
+
 fn remove_candidate(
     candidate: &ControllerScratchCandidate,
     now: chrono::DateTime<chrono::Utc>,
     retention_override_seconds: Option<i64>,
-) -> Result<Option<u64>> {
+) -> Result<ScratchRemoval> {
     let mut index = read_index_unlocked()?;
-    let Some(resource) = index.resources.iter_mut().find(|resource| {
+    let Some(position) = index.resources.iter().position(|resource| {
         resource.lease_id == candidate.lease_id
             && resource.path == candidate.path
             && resource.owner_pid == candidate.owner_pid
     }) else {
-        return Ok(None);
+        return Ok(ScratchRemoval::Skipped(REMOVAL_RACE_REASON.to_string()));
     };
-    let path = PathBuf::from(&resource.path);
+    let path = PathBuf::from(&index.resources[position].path);
     // Re-validate with the SAME retention override used for eligibility, so a
     // candidate that qualified under `--older-than-days` is not spuriously
     // re-blocked here (which would leave it un-deleted forever).
     if !path.exists()
-        || cleanup_block_reason(resource, &path, now, retention_override_seconds)?.is_some()
+        || cleanup_block_reason(
+            &mut index.resources[position],
+            &path,
+            now,
+            retention_override_seconds,
+        )?
+        .is_some()
     {
         write_index_unlocked(&index)?;
-        return Ok(None);
+        return Ok(ScratchRemoval::Skipped(REMOVAL_RACE_REASON.to_string()));
     }
     let bytes = path_size(&path)?;
-    fs::remove_dir_all(&path).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("remove {}", path.display())),
-        )
-    })?;
+    // Git first. A registered worktree deleted behind Git leaves a live
+    // registration in a shared repository that nothing reaps (#10568).
+    if let Some(reason) = unregister_scratch_git_worktrees(&path) {
+        write_index_unlocked(&index)?;
+        return Ok(ScratchRemoval::Skipped(reason));
+    }
+    // `git worktree remove` already deleted the worktree; the enclosing lease
+    // directory can still hold provider scratch beside it.
+    if path.exists() {
+        fs::remove_dir_all(&path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("remove {}", path.display())),
+            )
+        })?;
+    }
+    // The row itself is deliberately retained as terminal lifecycle evidence.
+    // Its Git registration is not: that registration no longer exists, and
+    // leaving the record behind would keep re-reporting a stranded registration
+    // that has already converged.
+    index.resources[position].git_worktree = None;
     write_index_unlocked(&index)?;
-    Ok(Some(bytes))
+    Ok(ScratchRemoval::Removed(bytes))
 }
 
 fn cleanup_command(options: ControllerScratchCleanupOptions) -> String {
@@ -1105,6 +1398,15 @@ fn git_dirty_or_unpushed(path: &Path) -> bool {
     };
     if !status.trim().is_empty() {
         return true;
+    }
+    // A linked attempt worktree is created with `git worktree add --detach`, so
+    // it has no upstream *by construction*: `@{upstream}..HEAD` can never
+    // resolve, the error branch below answered "unpushed", and every attempt
+    // worktree was therefore retained forever. That is the non-convergence
+    // behind #10568's 174 surviving attempt worktrees. Reachability is the
+    // question that actually applies to a detached checkout.
+    if let Some(registration) = linked_worktree_registration(path) {
+        return !attempt_worktree_commits_are_preserved(path, Path::new(&registration.source_root));
     }
     git::run_git(
         path,
@@ -1643,6 +1945,7 @@ mod tests {
             terminal_reason: None,
             terminal_evidence: None,
             interrupted_at: None,
+            git_worktree: None,
         }
     }
 
@@ -2716,10 +3019,10 @@ mod tests {
             })
             .expect("live index");
 
-            assert_eq!(
+            assert!(matches!(
                 remove_candidate(&candidate, chrono::Utc::now(), None).expect("remove"),
-                None
-            );
+                ScratchRemoval::Skipped(reason) if reason == REMOVAL_RACE_REASON
+            ));
             assert!(scratch.exists());
         });
     }

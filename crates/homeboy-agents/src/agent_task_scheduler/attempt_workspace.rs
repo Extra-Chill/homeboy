@@ -120,6 +120,13 @@ impl AttemptWorkspace {
         &self.base_sha
     }
 
+    /// The linked Git worktree this attempt runs in. Its Git registration
+    /// outlives the directory unless it is unregistered, so the scratch
+    /// lifecycle has to know about it (#10568).
+    pub(super) fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub(super) fn cleanup(&self) -> Result<(), String> {
         // The provider has returned and this exact detached checkout is no
         // longer leased. Remove only declared rebuildable output before the

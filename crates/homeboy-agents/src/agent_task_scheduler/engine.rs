@@ -502,6 +502,18 @@ where
                         continue;
                     }
                 };
+                // Bind the attempt's Git registration to this durable lease.
+                // Recorded here, at the producer, so a registration whose
+                // directory later disappears can still be pruned by identity
+                // (#10568). A failure to record is not fatal: cleanup reads the
+                // live worktree's own `.git` pointer first, and only the
+                // already-deleted case depends on this row.
+                if let Some(workspace) = attempt_workspace.as_ref() {
+                    let _ = crate::controller_scratch::record_attempt_git_worktree(
+                        &scratch,
+                        workspace.root(),
+                    );
+                }
                 let task_base_sha = attempt_workspace
                     .as_ref()
                     .map(|workspace| workspace.base_sha().to_string())
