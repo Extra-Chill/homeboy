@@ -598,7 +598,10 @@ fn retryable_cook_attempt(
                 None,
             ));
         }
-        if agent_task_lifecycle::load_plan(&recipe_attempt.run_id)? != recipe_attempt.plan {
+        if !cook_retry_plans_match(
+            &recipe_attempt.plan,
+            &agent_task_lifecycle::load_plan(&recipe_attempt.run_id)?,
+        ) {
             return Err(Error::validation_invalid_argument(
                 "cook_recipe.attempts",
                 "pending Cook retry run does not match its durable plan",
@@ -690,7 +693,43 @@ fn is_exact_retry_reservation(
 ) -> Result<bool> {
     let record = agent_task_lifecycle::exact_record(run_id)?;
     Ok(record.metadata["retry_of"] == source.run_id
-        && agent_task_lifecycle::load_plan(run_id)? == *plan)
+        && cook_retry_plans_match(plan, &agent_task_lifecycle::load_plan(run_id)?))
+}
+
+pub(super) fn cook_retry_plans_match(expected: &AgentTaskPlan, observed: &AgentTaskPlan) -> bool {
+    if expected == observed {
+        return true;
+    }
+    if expected.tasks.len() != observed.tasks.len() {
+        return false;
+    }
+
+    let mut normalized = observed.clone();
+    for (expected_task, observed_task) in expected.tasks.iter().zip(&mut normalized.tasks) {
+        let expected_identity = expected_task.metadata.get("cook_workspace_identity");
+        if observed_task.metadata.get("cook_workspace_identity") == expected_identity {
+            continue;
+        }
+        if observed_task
+            .metadata
+            .get("cook_workspace_identity_predecessor")
+            != expected_identity
+        {
+            return false;
+        }
+        let Some(expected_identity) = expected_identity else {
+            return false;
+        };
+        let Some(metadata) = observed_task.metadata.as_object_mut() else {
+            return false;
+        };
+        metadata.insert(
+            "cook_workspace_identity".to_string(),
+            expected_identity.clone(),
+        );
+        metadata.remove("cook_workspace_identity_predecessor");
+    }
+    normalized == *expected
 }
 
 struct CookRetryAttempt {
