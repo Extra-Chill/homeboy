@@ -227,6 +227,20 @@ fn release_is_a_direct_non_cancellable_rolling_main_pipeline() {
 }
 
 #[test]
+fn automatic_release_uses_the_immutable_push_sha_for_every_preparation_checkout() {
+    let workflow = release_workflow();
+
+    assert!(workflow.contains("ref: ${{ inputs.release_tag || github.sha }}"));
+    assert!(workflow.contains(
+        "ref: ${{ inputs.release_tag || (needs.check.outputs.recovery-release == 'true' && needs.check.outputs['release-tag']) || github.sha }}"
+    ));
+    assert!(
+        !workflow.contains("ref: ${{ inputs.release_tag || github.ref }}"),
+        "a rolling main branch must not replace the push event's release candidate"
+    );
+}
+
+#[test]
 fn release_test_gate_does_not_repeat_separate_lint_gate() {
     let gate_test = job_section(release_workflow(), "gate-test");
 
