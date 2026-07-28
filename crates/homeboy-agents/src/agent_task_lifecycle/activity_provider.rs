@@ -178,14 +178,6 @@ mod tests {
             .run_id
     }
 
-    fn controller_admission_stamped(run_id: &str) -> bool {
-        agent_task_lifecycle::exact_record(run_id)
-            .expect("durable record")
-            .metadata
-            .get("controller_admission")
-            .is_some()
-    }
-
     #[test]
     fn runner_backed_actions_execute_on_the_owning_runner() {
         let actions = actions_for_agent_task("run-1", Some("lab-a"), ActivityState::Stale);
@@ -199,15 +191,14 @@ mod tests {
     #[test]
     fn probe_by_id_resolves_one_record_without_scanning_or_writing() {
         // #10308: resolving a single agent-task id must be an indexed read, not
-        // a full-corpus refresh. The scanning path refreshes every record
-        // through `status()`, which stamps `controller_admission` on each one —
-        // so the absence of that stamp is durable evidence that neither the
-        // probed record nor its siblings were scanned or written.
+        // a full-corpus refresh. Preserve the exact durable records to prove
+        // that neither the target nor its sibling was scanned or rewritten.
         with_isolated_home(|_| {
             let target = seed_record("run-probe-target");
             let sibling = seed_record("run-probe-sibling");
-            assert!(!controller_admission_stamped(&target));
-            assert!(!controller_admission_stamped(&sibling));
+            let target_before = agent_task_lifecycle::exact_record(&target).expect("target record");
+            let sibling_before =
+                agent_task_lifecycle::exact_record(&sibling).expect("sibling record");
 
             let item = AgentTaskActivityProvider
                 .probe_by_id(&target)
@@ -221,14 +212,14 @@ mod tests {
                 item.refs.agent_task_run_id.as_deref(),
                 Some(target.as_str())
             );
-            assert!(!controller_admission_stamped(&target));
-            assert!(!controller_admission_stamped(&sibling));
-
-            // Control: the scanning path the probe replaces does refresh — and
-            // therefore write — every record, which is the cost being avoided.
-            agent_task_lifecycle::list_records().expect("records listed");
-            assert!(controller_admission_stamped(&target));
-            assert!(controller_admission_stamped(&sibling));
+            assert_eq!(
+                agent_task_lifecycle::exact_record(&target).expect("target remains readable"),
+                target_before
+            );
+            assert_eq!(
+                agent_task_lifecycle::exact_record(&sibling).expect("sibling remains readable"),
+                sibling_before
+            );
         });
     }
 
@@ -284,13 +275,17 @@ mod tests {
         with_isolated_home(|_| {
             register();
             let run_id = seed_record("run-show-probe");
+            let before = agent_task_lifecycle::exact_record(&run_id).expect("record before show");
 
             let report = homeboy_core::activity::show_activity(&run_id).expect("show activity");
 
             assert_eq!(report.items.len(), 1);
             assert_eq!(report.items[0].id, run_id);
             assert_eq!(report.items[0].source_store, "agent-task.lifecycle");
-            assert!(!controller_admission_stamped(&run_id));
+            assert_eq!(
+                agent_task_lifecycle::exact_record(&run_id).expect("record after show"),
+                before
+            );
         });
     }
 }
