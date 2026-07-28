@@ -434,6 +434,14 @@ pub(super) enum PrCommand {
         /// Retry merge after this many base-branch-modified races.
         #[arg(long, default_value_t = 1)]
         max_base_retries: usize,
+
+        /// Maximum seconds to wait for all checks on the exact PR head to become terminal.
+        #[arg(long, default_value_t = 900)]
+        max_check_wait_seconds: u64,
+
+        /// Waive one non-required failed check as HEAD_SHA|CHECK_NAME|APPROVER.
+        #[arg(long = "check-waiver", value_name = "HEAD_SHA|CHECK_NAME|APPROVER")]
+        check_waivers: Vec<String>,
     },
 }
 

@@ -565,4 +565,5 @@ Land a train of ready PRs sequentially, pausing on the first blocker
 | `--refresh-helper` | `<PROGRAM>` | Safe helper program used to refresh a dirty dependent PR. Not run through a shell. Combine with --refresh-helper-arg |
 | `--refresh-helper-arg` | `<ARG>` | Argument for --refresh-helper. Supports {repo}, {number}, {url}, {head_sha} |
 | `--max-base-retries` | `<MAX_BASE_RETRIES>` | Retry merge after this many base-branch-modified races |
-
+| `--max-check-wait-seconds` | `<MAX_CHECK_WAIT_SECONDS>` | Maximum seconds to wait for all checks on the exact PR head to become terminal |
+| `--check-waiver` | `<HEAD_SHA|CHECK_NAME|APPROVER>` | Waive one non-required failed check bound to an exact head SHA |
