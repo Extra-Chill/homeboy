@@ -452,12 +452,12 @@ pub fn run(args: RefactorArgs) -> CmdResult<RefactorOutput> {
         }) => operations_command::run_decompose(&file, &strategy, &target, write_mode.write),
 
         Some(RefactorCommand::Refs(args)) => {
-            let (output, exit_code) = crate::commands::refs::run(args, _global)?;
+            let (output, exit_code) = crate::commands::refs::run(args)?;
             Ok((RefactorOutput::Refs(output), exit_code))
         }
 
         Some(RefactorCommand::Undo(args)) => {
-            let (output, exit_code) = crate::commands::undo::run(args, _global)?;
+            let (output, exit_code) = crate::commands::undo::run(args)?;
             Ok((RefactorOutput::Undo(output), exit_code))
         }
     }

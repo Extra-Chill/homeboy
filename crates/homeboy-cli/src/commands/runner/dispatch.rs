@@ -461,10 +461,9 @@ pub fn run_command_output(args: RunnerArgs) -> CommandRun {
         ),
         command => {
             let (stdout_result, exit_code) =
-                crate::commands::utils::response::map_cmd_result_to_json(run(
-                    RunnerArgs { command },
-                    _global,
-                ));
+                crate::commands::utils::response::map_cmd_result_to_json(run(RunnerArgs {
+                    command,
+                }));
             CommandRun::from_stdout_result(stdout_result, exit_code)
         }
     }

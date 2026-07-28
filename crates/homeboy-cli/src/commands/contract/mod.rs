@@ -428,7 +428,7 @@ pub fn run(args: ContractArgs) -> CmdResult<ContractOutput> {
         ContractCommand::Materialize(args) => {
             Ok((ContractOutput::Materialize(materialize(args)?), 0))
         }
-        ContractCommand::Manifest(args) => crate::commands::manifest::run(args, _global)
+        ContractCommand::Manifest(args) => crate::commands::manifest::run(args)
             .map(|(output, code)| (ContractOutput::Manifest(output), code)),
     }
 }

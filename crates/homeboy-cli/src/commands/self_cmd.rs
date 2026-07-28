@@ -144,7 +144,7 @@ pub fn run(args: SelfArgs) -> CmdResult<Value> {
             Ok((json, 0))
         }
         SelfCommand::Docs(args) => {
-            let (output, exit_code) = docs::run(args, _global)?;
+            let (output, exit_code) = docs::run(args)?;
             let json = serde_json::to_value(output)
                 .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
             Ok((json, exit_code))
