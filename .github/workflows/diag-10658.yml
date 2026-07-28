@@ -1,0 +1,24 @@
+# TEMPORARY verification workflow for #10658. Delete before merge.
+name: Diag 10658
+
+on:
+  push:
+    branches: ['diag/**']
+
+jobs:
+  verify:
+    name: fixed homeboy-agents lib tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: gate toolchain requirement tests
+        run: |
+          cargo test --locked -p homeboy-agents --lib \
+            agent_task_gate::tests:: -- --nocapture --test-threads=1 || echo "EXIT=$?"
+      - name: activity provider tests
+        if: always()
+        run: |
+          cargo test --locked -p homeboy-agents --lib \
+            agent_task_lifecycle::activity_provider:: -- --nocapture --test-threads=1 || echo "EXIT=$?"
