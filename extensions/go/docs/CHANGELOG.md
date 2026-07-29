@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.8.2] - 2026-07-29
+
+### Fixed
+- seed the declared lint.findings sidecar on clean runs
+
 ## [1.8.1] - 2026-07-28
 
 ### Changed
