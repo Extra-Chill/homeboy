@@ -16,12 +16,40 @@
 //! the author to answer, in reviewable prose, the exact question all four
 //! incidents failed to ask: *how does this path know it measured anything?*
 //!
+//! # The gate layer is not written in Rust (#10741)
+//!
+//! The paragraph above described this registry's original scope — `crates/`,
+//! `.rs` — and that scope was itself the next instance of the bug.
+//!
+//! #10706 merged roughly ninety minutes after this guard landed. It fixed a
+//! textbook instance of the invariant: `git rev-parse --abbrev-ref HEAD`
+//! returns the literal string `HEAD` in a detached checkout, the release
+//! wrapper read that as "not on main" and exited before evaluating anything,
+//! and the workflow laundered the resulting empty `release-version` into
+//! `No releasable commits` — skipping every job, concluding green, over 131
+//! pending commits. It touched `.github/workflows/release.yml` and
+//! `tests/release_workflow_test.rs`. **Zero files under `crates/`.** The guard
+//! could not have seen it.
+//!
+//! So the registry now has two layers, in one file and one vocabulary:
+//!
+//! * [`VERDICT_SITES`] — Rust, `crates/**/*.rs`, keyed by file.
+//! * [`GATE_LAYER_SITES`] — shell and YAML, `.github/**/*.{yml,sh}`, keyed by
+//!   **decision** rather than by file, and additionally requiring an executable
+//!   fixture. See [`GATE_LAYER_SITES`] for why both of those differ.
+//!
+//! Keeping them together is deliberate. #10690 exists because four independent
+//! local implementations of this invariant had grown up and disagreed with each
+//! other; answering the same question a fifth time in a second registry file
+//! would be more of the same disease.
+//!
 //! # What it catches, and what it honestly does not
 //!
 //! It catches: a new verdict-producing path landing without that question being
 //! asked; a migrated site silently dropping its call to the shared predicate
 //! (see [`MeasurementBasis::SharedPredicate`]); a registered site being deleted
-//! or renamed out from under its registration.
+//! or renamed out from under its registration; and, in the gate layer, a
+//! skip-rendering decision that has no test executing its actual shell.
 //!
 //! It does not catch: a registered site whose declared basis is *wrong*. No
 //! source scan can. What it buys is that the claim is written down, attached to
@@ -30,13 +58,23 @@
 //! # Assert the effect, not the command string
 //!
 //! The post-merge audit gate passed for weeks because its test asserted the
-//! command it invoked rather than what that command produced. This file is
-//! deliberately the *registration* half of the guard. The *effect* half —
-//! feeding recorded no-measurement fixtures through real gates and asserting
-//! they do not come out green — lives next to each gate:
+//! command it invoked rather than what that command produced. The Rust half of
+//! this file is deliberately only the *registration* half of the guard. The
+//! *effect* half — feeding recorded no-measurement fixtures through real gates
+//! and asserting they do not come out green — lives next to each gate:
 //! `homeboy-extension/src/test/run.rs` and
 //! `homeboy-extension/src/test/report.rs`. Both halves are required; neither is
 //! sufficient.
+//!
+//! The gate layer does not get that choice. Registration alone provably would
+//! not have caught #10706 — `should-release=false` already existed in
+//! `release.yml`, so a file-keyed or even decision-keyed registration would have
+//! been sitting there, green, while the laundering happened inside it. What was
+//! actually missing was any test that *ran* the decide step; `run_decide_step`
+//! in `tests/release_workflow_test.rs` was added **by** #10706, not before it.
+//! So a gate-layer site that renders a skip must name a fixture, and
+//! [`every_skip_rendering_gate_layer_decision_is_executed_by_a_fixture`]
+//! requires that fixture to exist and to actually spawn a shell.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -253,6 +291,215 @@ const GREEN_VERDICT_LITERALS: &[&str] = &[
 /// Substring the [`MeasurementBasis::SharedPredicate`] sites must still contain.
 const SHARED_PREDICATE_MARKER: &str = "measurement::";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// The shell/YAML gate layer (#10741)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A verdict-producing decision in the shell/YAML gate layer.
+///
+/// Keyed by `(file, decision)` rather than by file, unlike [`VerdictSite`].
+/// `release.yml` is 1,377 lines and contains nine distinct boolean gating
+/// decisions; one registry row covering the whole file would be a row that says
+/// nothing, which is the failure mode this registry exists to prevent.
+struct GateLayerSite {
+    /// Workspace-relative path, `/`-separated.
+    file: &'static str,
+    /// The exact literal the scan matches: a boolean `$GITHUB_OUTPUT` write, or
+    /// a shell script's terminal `exit`.
+    decision: &'static str,
+    basis: MeasurementBasis,
+    /// `true` when this decision renders a **skip** — a value that causes
+    /// downstream jobs not to run while the workflow still concludes green.
+    ///
+    /// This is the #10706 shape, and it is the field that carries the fixture
+    /// obligation. It is keyed on the decision's *value*, not on `basis`, so it
+    /// cannot be dodged by relabelling a site `Projection`.
+    renders_skip: bool,
+    /// A test function that executes this decision's real shell and asserts what
+    /// it produced. `None` is permitted only with a `NO FIXTURE:` note.
+    fixture: Option<&'static str>,
+    note: &'static str,
+}
+
+/// Every boolean gating decision in `.github/`, plus every gate script's exit.
+///
+/// Sorted by `(file, decision)`. Keep it that way.
+const GATE_LAYER_SITES: &[GateLayerSite] = &[
+    GateLayerSite {
+        file: ".github/detect-stranded-release.sh",
+        decision: "exit 0",
+        basis: MeasurementBasis::ExplicitlySkipped,
+        renders_skip: false,
+        fixture: None,
+        note: "NO FIXTURE: `finish` is the script's single exit and it always writes all four \
+               outputs, so a crash leaves them unset and release.yml's fallback supplies inert \
+               defaults. The one genuine no-measurement path -- `gh release list` failing -- \
+               already refuses to read its own failure as `nothing is published`, warns, and \
+               finishes empty (line 114). Its remaining soft spot is the empty `git tag --list` \
+               case: a shallow or tagless checkout is indistinguishable from a repo with no \
+               stranded tags, and both render `stranded-tag=`. That degrades to `no recovery`, \
+               never to a false release, so it is recorded rather than patched. Exercising it \
+               needs a fixture git repo plus a `gh` stub, which is why there is no fixture yet.",
+    },
+    GateLayerSite {
+        file: ".github/release-quality-policy.sh",
+        decision: "exit \"${failed}\"",
+        basis: MeasurementBasis::SharedPredicate,
+        renders_skip: false,
+        fixture: Some("release_quality_policy_refuses_a_blocking_set_that_matches_nothing"),
+        note: "#10741, the sixth instance. Three `check_command` calls each fell through to the \
+               non-blocking branch when nothing matched, leaving `failed` at 0, so the policy \
+               exited green having enforced nothing. `assess_measurement` now ports \
+               Measurement::assess to bash: units>0 measured, units==0 with an empty configured \
+               population is an honest zero (warn, pass), units==0 against a non-empty population \
+               is Contradicted and a hard error.",
+    },
+    GateLayerSite {
+        file: ".github/workflows/release.yml",
+        decision: "blocked=false",
+        basis: MeasurementBasis::EmptyPopulation,
+        renders_skip: false,
+        fixture: None,
+        note: "NO FIXTURE: the marker file was read and did not name this HEAD. The filesystem is \
+               the independent population source and a missing marker is a real, honest zero -- \
+               there is no prior failure to find. This is the permissive direction (it lets the \
+               release proceed to real gates), so a defect here cannot manufacture a green skip.",
+    },
+    GateLayerSite {
+        file: ".github/workflows/release.yml",
+        decision: "blocked=true",
+        basis: MeasurementBasis::ExplicitlySkipped,
+        renders_skip: true,
+        fixture: None,
+        note: "NO FIXTURE: skips because the restored cache marker holds this exact HEAD SHA. The \
+               evidence is a positive string equality against a file this job read, not an \
+               absence, so there is no emptiness to launder -- an unreadable or missing marker \
+               falls through to `blocked=false`. Debt: no test executes this step; it needs a \
+               RUNNER_TEMP fixture.",
+    },
+    GateLayerSite {
+        file: ".github/workflows/release.yml",
+        decision: "prepared=true",
+        basis: MeasurementBasis::Projection,
+        renders_skip: false,
+        fixture: None,
+        note: "NO FIXTURE: projects the outcome of the `homeboy release` invocation that ran in \
+               the same step. The measurement obligation belongs to core's release planner, not \
+               to this echo.",
+    },
+    GateLayerSite {
+        file: ".github/workflows/release.yml",
+        decision: "recovery-release=false",
+        basis: MeasurementBasis::Projection,
+        renders_skip: false,
+        fixture: None,
+        note: "NO FIXTURE: a mode flag, not a verdict. It records that the bump type core \
+               reported was not `recovery`; the release still proceeds through every gate.",
+    },
+    GateLayerSite {
+        file: ".github/workflows/release.yml",
+        decision: "recovery-release=true",
+        basis: MeasurementBasis::Projection,
+        renders_skip: true,
+        fixture: None,
+        note: "NO FIXTURE: recovery legitimately bypasses the quality gates, so this genuinely is \
+               a skip-rendering decision. It is a projection of an already-established fact -- an \
+               explicit dispatch `release_tag`, a stranded tag the detector selected, or core \
+               reporting `bump-type=recovery` -- and each of those three is a positive finding \
+               rather than an absence. Debt: the branch selection is covered by \
+               `release_check_*` string assertions, not by an executing fixture.",
+    },
+    GateLayerSite {
+        file: ".github/workflows/release.yml",
+        decision: "released=true",
+        basis: MeasurementBasis::Projection,
+        renders_skip: false,
+        fixture: None,
+        note:
+            "NO FIXTURE: projects the result of the release step that just ran in this job. Same \
+               reasoning as `prepared=true`.",
+    },
+    GateLayerSite {
+        file: ".github/workflows/release.yml",
+        decision: "should-release=false",
+        basis: MeasurementBasis::EmptyPopulation,
+        renders_skip: true,
+        fixture: Some("release_check_never_reports_nothing_to_release_without_measuring"),
+        note: "**The #10706 site, and the reason this layer exists.** An empty release-version \
+               used to render this unconditionally, collapsing a measured negative (core \
+               evaluated the commit range and declined) with an unmeasured one (the wrapper bailed \
+               before core ran). #10706 split them: only the three reasons core emits from \
+               planning_policy.rs may skip, plus a supersession this job proved itself; anything \
+               else is UNKNOWN and fails loudly. The population is core's own commit-range \
+               evaluation, which is independent of this step.",
+    },
+    GateLayerSite {
+        file: ".github/workflows/release.yml",
+        decision: "should-release=true",
+        basis: MeasurementBasis::Projection,
+        renders_skip: false,
+        fixture: Some("release_check_never_reports_nothing_to_release_without_measuring"),
+        note: "Projects a release core already planned, or a tag the recovery/stranded paths \
+               already validated. Registered with a fixture anyway because it shares the decide \
+               step's branch ladder with `should-release=false`: a fixture that only pinned the \
+               skip branch could be satisfied by a step that never releases at all.",
+    },
+    GateLayerSite {
+        file: ".github/workflows/release.yml",
+        decision: "superseded=true",
+        basis: MeasurementBasis::EmptyPopulation,
+        renders_skip: true,
+        fixture: None,
+        note:
+            "NO FIXTURE: the attach step compared HEAD against origin/<release-branch> and found \
+               a newer tip, naming the commit whose own run owns the release. That is a positive \
+               measurement made in this step, which is precisely why the decide step is allowed \
+               to accept `wrong-branch` only when this flag is set -- the narrow exemption that \
+               keeps #10706's hard failure intact. Debt: exercising it needs a fixture git repo \
+               with an origin remote.",
+    },
+];
+
+/// Extensions under `.github/` that can carry verdict logic.
+///
+/// # Why the scan stops at `.github/`
+///
+/// `crates/homeboy-extension/src/runtime/*.sh` is the other body of shell in
+/// this repository, and it was swept for this issue rather than assumed
+/// harmless. Those files are evidence *producers*, not verdict renderers: they
+/// write the counts and findings sidecars that Rust gates then read. Registering
+/// them would add thirteen rows that all say `NotAGate`, burying the eleven that
+/// mean something.
+///
+/// One of them is worth recording anyway. `write-test-results.sh` reads its
+/// counts as `local passed="${2:-0}"`, so an *absent* argument is written to the
+/// sidecar as a measured `0` — the exact measured-zero/no-measurement collapse
+/// this registry is about, at the point where the evidence is created. It does
+/// not become a green: `test_run_status` maps `Some(counts)` to
+/// `Measurement::units(passed + failed)`, and `units(0)` with no population is
+/// `Unmeasured(ZeroUnits)`, which forbids a pass. The consequence is narrower
+/// than a false verdict and real — an operator reading the sidecar cannot tell
+/// "the runner reported zero tests" from "the runner reported nothing" — so it
+/// is recorded here rather than patched under a gate-layer issue.
+const GATE_LAYER_EXTENSIONS: &[&str] = &["yml", "yaml", "sh"];
+
+/// Substring the shell [`MeasurementBasis::SharedPredicate`] sites must still
+/// contain — the bash counterpart of [`SHARED_PREDICATE_MARKER`].
+///
+/// A shell script cannot `use` the Rust predicate, so the migration is pinned to
+/// the name of the function that ports it. Same anti-silent-revert property:
+/// deleting the port while keeping the registration fails.
+const SHELL_PREDICATE_MARKER: &str = "assess_measurement";
+
+/// The test file that owns gate-layer fixtures.
+const GATE_LAYER_FIXTURE_FILE: &str = "tests/release_workflow_test.rs";
+
+/// Proof that the fixture file executes shells rather than string-matching YAML.
+///
+/// Without this, "has a fixture" degrades into "has a test that greps the
+/// workflow" — which is the exact failure the audit gate shipped for weeks.
+const GATE_LAYER_FIXTURE_EXECUTES_SHELL: &str = "Command::new(\"bash\")";
+
 fn workspace_root() -> PathBuf {
     // crates/homeboy-engine-primitives -> crates -> <root>
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -344,6 +591,126 @@ fn discovered_verdict_files(root: &Path) -> BTreeSet<String> {
                 .any(|line| line_constructs_a_green_verdict(line))
         })
         .map(|(relative, _)| relative)
+        .collect()
+}
+
+// ── Gate-layer scan ──────────────────────────────────────────────────────────
+
+/// Every `.yml`/`.sh` file under `.github/`, workspace-relative.
+fn gate_layer_sources(root: &Path) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.join(".github")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let is_gate_layer = path.extension().is_some_and(|extension| {
+                GATE_LAYER_EXTENSIONS
+                    .iter()
+                    .any(|candidate| extension == *candidate)
+            });
+            if !is_gate_layer {
+                continue;
+            }
+            let Ok(relative) = path.strip_prefix(root) else {
+                continue;
+            };
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            let Ok(contents) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            found.push((relative, contents));
+        }
+    }
+    found
+}
+
+/// The gate-layer decision a line makes, if any.
+///
+/// Two rules, both mechanical:
+///
+/// 1. **A boolean `$GITHUB_OUTPUT` write.** `name=true` / `name=false` is a
+///    verdict a downstream `if:` reads; `release-version=0.3.2` is data. Keying
+///    on the boolean-ness is what separates the two without a hand-curated list
+///    of blessed output names, so a *newly invented* gating output is caught.
+/// 2. **A shell script's terminal `exit`.** A `.github/*.sh` file is invoked as
+///    a gate, so its exit status is its verdict.
+///
+/// A step's `exit 0` inside a workflow `run:` block is deliberately *not* a
+/// decision on its own: in YAML the step's verdict is carried by the outputs it
+/// wrote, and every such early exit in this repo is paired with one. Counting
+/// both would double-register the same decision.
+///
+/// **Known blind spot, stated rather than hidden:** a brace group redirected
+/// wholesale (`{ echo "x=true"; } >> "$GITHUB_OUTPUT"`) writes a boolean gating
+/// output on a line that never mentions `$GITHUB_OUTPUT`, so rule 1 misses it.
+/// The one such block in this repo (`release.yml`'s stranded-detector fallback)
+/// writes only empty strings, so nothing is missed today.
+/// [`the_gate_layer_scan_has_no_unseen_boolean_output_blocks`] fails if a
+/// boolean ever appears inside one.
+fn gate_layer_decision(relative: &str, line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.starts_with('#') {
+        return None;
+    }
+
+    if trimmed.contains("$GITHUB_OUTPUT") {
+        for value in ["true", "false"] {
+            let needle = format!("={value}\"");
+            if let Some(end) = trimmed.find(&needle) {
+                let head = &trimmed[..end];
+                // `continue`, not `?`: a bare `?` here would abandon the whole
+                // line the moment one of the two values failed to parse, which
+                // would silently stop the scan seeing the other.
+                let Some(name_start) = head.rfind('"').map(|index| index + 1) else {
+                    continue;
+                };
+                let name = &head[name_start..];
+                if !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|character| character.is_ascii_lowercase() || character == '-')
+                {
+                    return Some(format!("{name}={value}"));
+                }
+            }
+        }
+        return None;
+    }
+
+    // Rule 2 applies to gate scripts only. Indentation is not consulted: the
+    // single exit in `detect-stranded-release.sh` lives inside its `finish`
+    // helper, and that is still the script's verdict.
+    if relative.ends_with(".sh") && trimmed.starts_with("exit ") {
+        return Some(trimmed.trim_end_matches(';').to_string());
+    }
+
+    None
+}
+
+/// Discovered `(file, decision)` pairs across the whole gate layer.
+fn discovered_gate_layer_decisions(root: &Path) -> BTreeSet<(String, String)> {
+    let mut found = BTreeSet::new();
+    for (relative, contents) in gate_layer_sources(root) {
+        for line in contents.lines() {
+            if let Some(decision) = gate_layer_decision(&relative, line) {
+                found.insert((relative.clone(), decision));
+            }
+        }
+    }
+    found
+}
+
+fn registered_gate_layer_decisions() -> BTreeSet<(String, String)> {
+    GATE_LAYER_SITES
+        .iter()
+        .map(|site| (site.file.to_string(), site.decision.to_string()))
         .collect()
 }
 
@@ -514,4 +881,375 @@ fn production_lines_stop_at_the_test_module() {
     let lines = production_lines(source);
     assert_eq!(lines.len(), 3);
     assert!(!lines.iter().any(|line| line.contains("passed: true")));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The shell/YAML gate layer (#10741)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn every_gate_layer_decision_declares_how_it_established_measurement() {
+    let root = workspace_root();
+    let discovered = discovered_gate_layer_decisions(&root);
+    let registered = registered_gate_layer_decisions();
+
+    let unregistered: Vec<String> = discovered
+        .difference(&registered)
+        .map(|(file, decision)| format!("{file}  ->  {decision}"))
+        .collect();
+
+    assert!(
+        unregistered.is_empty(),
+        "these gate-layer decisions render a verdict but do not declare how they established a \
+         measurement:\n  {}\n\n\
+         Add an entry to GATE_LAYER_SITES in \
+         crates/homeboy-engine-primitives/src/measurement_registry_test.rs stating the \
+         MeasurementBasis, whether it renders a skip, and a reason.\n\n\
+         A boolean written to $GITHUB_OUTPUT is a verdict: a downstream `if:` reads it and \
+         decides whether an entire job runs. #10706 is what happens when one of those is rendered \
+         from an emptiness nobody checked -- `should-release=false` from an empty release-version \
+         that the release wrapper never actually computed, skipping every job over 131 commits \
+         while the run concluded green (#10703).\n\n\
+         If this decision only projects something already decided elsewhere, say so with \
+         MeasurementBasis::Projection. If it renders a skip, set renders_skip: true and name a \
+         fixture that EXECUTES its shell -- a test that greps the YAML does not count.",
+        unregistered.join("\n  ")
+    );
+}
+
+#[test]
+fn no_gate_layer_registration_outlives_the_decision_it_describes() {
+    let root = workspace_root();
+    let discovered = discovered_gate_layer_decisions(&root);
+
+    let stale: Vec<String> = registered_gate_layer_decisions()
+        .difference(&discovered)
+        .map(|(file, decision)| format!("{file}  ->  {decision}"))
+        .collect();
+
+    assert!(
+        stale.is_empty(),
+        "these GATE_LAYER_SITES entries no longer match a decision in the tree:\n  {}\n\nThe \
+         workflow step or script was renamed, deleted, or stopped rendering that value. Remove or \
+         update the entry -- a registry that has drifted is a registry that is not being read.",
+        stale.join("\n  ")
+    );
+}
+
+/// **The acceptance bar for #10741.**
+///
+/// Registration on its own provably would not have caught #10706:
+/// `should-release=false` already existed in `release.yml`, so a registry row
+/// for it would have been sitting there, green, while the laundering happened
+/// inside the branch that wrote it. What was actually absent was any test that
+/// *ran* the decide step — `run_decide_step` was added **by** #10706.
+///
+/// So this is the clause with teeth. Every decision that renders a skip must
+/// name a fixture, that fixture must exist, and the file holding it must
+/// actually spawn a shell. Run against the tree as it stood the hour before
+/// #10706, this test fails on `should-release=false`.
+///
+/// `renders_skip` is keyed on the decision's value, not on `basis`, so the
+/// obligation cannot be shed by relabelling a site `Projection`.
+#[test]
+fn every_skip_rendering_gate_layer_decision_is_executed_by_a_fixture() {
+    let root = workspace_root();
+    let fixtures = std::fs::read_to_string(root.join(GATE_LAYER_FIXTURE_FILE))
+        .unwrap_or_else(|error| panic!("{GATE_LAYER_FIXTURE_FILE} is unreadable: {error}"));
+
+    assert!(
+        fixtures.contains(GATE_LAYER_FIXTURE_EXECUTES_SHELL),
+        "{GATE_LAYER_FIXTURE_FILE} no longer spawns a shell ({GATE_LAYER_FIXTURE_EXECUTES_SHELL}), \
+         so every fixture it holds has degraded into a string match against YAML. That is the \
+         precise failure the post-merge audit gate shipped for weeks: it asserted the command it \
+         ran instead of what that command produced."
+    );
+
+    // A skip-rendering decision must either name a fixture or carry the debt
+    // marker. `renders_skip` is the obligation; the marker is the escape hatch,
+    // and it is greppable on purpose.
+    for site in GATE_LAYER_SITES
+        .iter()
+        .filter(|site| site.renders_skip && site.fixture.is_none())
+    {
+        assert!(
+            site.note.starts_with("NO FIXTURE:"),
+            "{} -> {} renders a skip with no fixture, and its note does not open with \
+             `NO FIXTURE:`.\n\nA skip-rendering decision without an executing test is exactly the \
+             state `should-release=false` was in when #10706 laundered a detached HEAD into \
+             `No releasable commits`. If it genuinely cannot be fixtured yet, say so explicitly \
+             so the debt is greppable rather than invisible.",
+            site.file,
+            site.decision
+        );
+    }
+
+    // Every *claimed* fixture must exist. Counted across all sites, not only
+    // the skip-rendering ones: an aspirational fixture name is a false claim
+    // wherever it appears.
+    let mut executed = 0;
+    for site in GATE_LAYER_SITES {
+        let Some(fixture) = site.fixture else {
+            continue;
+        };
+        assert!(
+            fixtures.contains(&format!("fn {fixture}(")),
+            "{} -> {} names fixture `{fixture}`, but no such test exists in \
+             {GATE_LAYER_FIXTURE_FILE}.\n\nEither the test was renamed and the registration was \
+             not, or the registration was aspirational. Both leave a decision unexercised while \
+             claiming otherwise.",
+            site.file,
+            site.decision
+        );
+        executed += 1;
+    }
+
+    assert!(
+        executed >= 2,
+        "only {executed} gate-layer decision(s) resolved to a real fixture, so this assertion is \
+         close to passing vacuously -- the same absence-of-evidence failure it exists to prevent."
+    );
+
+    // And the acceptance case specifically. A general floor can drift until it
+    // no longer covers the incident that motivated it; recorded incidents get
+    // replayed by name.
+    let incident = GATE_LAYER_SITES
+        .iter()
+        .find(|site| {
+            site.file == ".github/workflows/release.yml" && site.decision == "should-release=false"
+        })
+        .expect("the #10706 decision must stay registered");
+    let fixture = incident.fixture.expect(
+        "`should-release=false` must keep an executing fixture -- it is the acceptance case",
+    );
+    assert!(
+        fixtures.contains(&format!("fn {fixture}(")),
+        "the #10706 acceptance case names fixture `{fixture}`, which does not exist"
+    );
+}
+
+/// The bash port of the shared predicate must still be there.
+///
+/// A shell script cannot `use` the Rust `measurement` module, so the migration
+/// is pinned to the name of the function that ports it. Same property as
+/// [`a_site_claiming_the_shared_predicate_must_still_call_it`]: silently
+/// dropping the guard while keeping the claim is the regression shape itself.
+#[test]
+fn a_gate_layer_site_claiming_the_shared_predicate_must_still_port_it() {
+    let root = workspace_root();
+
+    let mut checked = 0;
+    for site in GATE_LAYER_SITES
+        .iter()
+        .filter(|site| site.basis == MeasurementBasis::SharedPredicate)
+    {
+        let contents = std::fs::read_to_string(root.join(site.file))
+            .unwrap_or_else(|error| panic!("registered site {} is unreadable: {error}", site.file));
+        assert!(
+            contents.contains(SHELL_PREDICATE_MARKER),
+            "{} is registered as a shared-predicate site but no longer defines \
+             `{SHELL_PREDICATE_MARKER}`.\n\nRestore the port, or change the registration and say \
+             what replaced it.",
+            site.file
+        );
+        // The port is worthless if it never classifies an empty population.
+        for outcome in ["empty-population", "contradicted"] {
+            assert!(
+                contents.contains(outcome),
+                "{} ports the shared predicate but never renders `{outcome}`. The whole point is \
+                 that a measured zero and a broken instrument stop being indistinguishable.",
+                site.file
+            );
+        }
+        checked += 1;
+    }
+
+    assert_eq!(
+        checked, 1,
+        "expected exactly one shell shared-predicate site (release-quality-policy.sh); found \
+         {checked}. If another script ported the predicate, register it; if this one stopped, \
+         this assertion has gone vacuous."
+    );
+}
+
+#[test]
+fn every_registered_gate_layer_site_records_a_reason() {
+    for site in GATE_LAYER_SITES {
+        assert!(
+            site.note.len() > 40,
+            "{} -> {} is registered with a note too short to be a reason: {:?}",
+            site.file,
+            site.decision,
+            site.note
+        );
+        assert!(
+            site.file.starts_with(".github/"),
+            "GATE_LAYER_SITES paths are workspace-relative under .github/: {:?}",
+            site.file
+        );
+        assert!(
+            site.fixture.is_some() || site.note.starts_with("NO FIXTURE:"),
+            "{} -> {} has no fixture and does not open its note with `NO FIXTURE:`, so the debt is \
+             invisible to a reader grepping for it",
+            site.file,
+            site.decision
+        );
+    }
+}
+
+#[test]
+fn the_gate_layer_registry_is_sorted() {
+    let keys: Vec<(&str, &str)> = GATE_LAYER_SITES
+        .iter()
+        .map(|site| (site.file, site.decision))
+        .collect();
+    let mut sorted = keys.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        keys, sorted,
+        "keep GATE_LAYER_SITES sorted by (file, decision) so failure messages stay easy to act on"
+    );
+}
+
+/// The gate-layer scan is load-bearing, so prove it works rather than assuming
+/// it. A scan that silently matches nothing renders every assertion above
+/// vacuous — the same defect class the whole registry guards against.
+#[test]
+fn the_gate_layer_scan_itself_measures_something() {
+    let root = workspace_root();
+
+    let sources = gate_layer_sources(&root);
+    assert!(
+        sources.len() >= 4,
+        "the gate-layer walk found only {} .yml/.sh files under .github/, which cannot be right",
+        sources.len()
+    );
+    assert!(
+        sources
+            .iter()
+            .any(|(relative, _)| relative == ".github/workflows/release.yml"),
+        "the gate-layer walk did not find release.yml, so it is not walking what it claims to"
+    );
+
+    let discovered = discovered_gate_layer_decisions(&root);
+    assert!(
+        discovered.len() >= 8,
+        "the gate-layer scan found only {} decision(s); the tree is known to contain more",
+        discovered.len()
+    );
+
+    // The #10706 site specifically. Recorded incidents get replayed rather than
+    // trusted to a general rule that could quietly stop covering them.
+    assert!(
+        discovered.contains(&(
+            ".github/workflows/release.yml".to_string(),
+            "should-release=false".to_string()
+        )),
+        "the scan no longer sees release.yml's `should-release=false` -- the decision #10706 was \
+         about. Either it was renamed (update the registry) or the matcher regressed."
+    );
+    let incident = GATE_LAYER_SITES
+        .iter()
+        .find(|site| {
+            site.file == ".github/workflows/release.yml" && site.decision == "should-release=false"
+        })
+        .expect("the #10706 decision must stay registered");
+    assert!(
+        incident.renders_skip,
+        "`should-release=false` skips every downstream job; recording it as anything else \
+         releases it from the fixture obligation that is the whole point of this layer"
+    );
+    assert!(
+        incident.fixture.is_some(),
+        "`should-release=false` must keep an executing fixture -- it is the acceptance case"
+    );
+}
+
+#[test]
+fn the_gate_layer_matcher_distinguishes_a_verdict_from_data() {
+    // Boolean gating outputs are verdicts.
+    assert_eq!(
+        gate_layer_decision(
+            ".github/workflows/release.yml",
+            "            echo \"should-release=false\" >> \"$GITHUB_OUTPUT\""
+        )
+        .as_deref(),
+        Some("should-release=false")
+    );
+    assert_eq!(
+        gate_layer_decision(
+            ".github/workflows/release.yml",
+            "          echo \"superseded=true\" >> \"$GITHUB_OUTPUT\""
+        )
+        .as_deref(),
+        Some("superseded=true")
+    );
+
+    // Non-boolean outputs are data, not verdicts. Registering them would bury
+    // the verdicts in noise.
+    assert!(gate_layer_decision(
+        ".github/workflows/release.yml",
+        "            echo \"release-version=${RELEASE_VERSION}\" >> \"$GITHUB_OUTPUT\""
+    )
+    .is_none());
+    assert!(gate_layer_decision(
+        ".github/workflows/release.yml",
+        "              echo \"stranded-attempts=0\" >> \"$GITHUB_OUTPUT\""
+    )
+    .is_none());
+
+    // Prose describing a decision is not the decision.
+    assert!(gate_layer_decision(
+        ".github/workflows/release.yml",
+        "          # used to write should-release=false into \"$GITHUB_OUTPUT\" unconditionally"
+    )
+    .is_none());
+
+    // Gate scripts declare a verdict by exiting.
+    assert_eq!(
+        gate_layer_decision(".github/release-quality-policy.sh", "exit \"${failed}\"").as_deref(),
+        Some("exit \"${failed}\"")
+    );
+    assert_eq!(
+        gate_layer_decision(".github/detect-stranded-release.sh", "  exit 0").as_deref(),
+        Some("exit 0")
+    );
+    // A workflow step's early exit is carried by the outputs it wrote.
+    assert!(gate_layer_decision(".github/workflows/release.yml", "            exit 0").is_none());
+    // `return` is a function's control flow, not the script's verdict.
+    assert!(gate_layer_decision(".github/release-quality-policy.sh", "  return 0").is_none());
+}
+
+/// The documented blind spot, pinned so it stays a blind spot in theory only.
+///
+/// A brace group redirected wholesale writes gating outputs on lines that never
+/// mention `$GITHUB_OUTPUT`, so the line-oriented matcher cannot see them. The
+/// repo has exactly one such block and it writes only empty strings. If a
+/// boolean ever appears inside one, this fails and the matcher must grow.
+#[test]
+fn the_gate_layer_scan_has_no_unseen_boolean_output_blocks() {
+    let root = workspace_root();
+
+    for (relative, contents) in gate_layer_sources(&root) {
+        let lines: Vec<&str> = contents.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
+            if !line.trim().starts_with('}') || !line.contains("$GITHUB_OUTPUT") {
+                continue;
+            }
+            let start = lines[..index]
+                .iter()
+                .rposition(|candidate| candidate.trim() == "{")
+                .unwrap_or(0);
+            for hidden in &lines[start..index] {
+                assert!(
+                    !hidden.contains("=true\"") && !hidden.contains("=false\""),
+                    "{relative} writes a boolean gating output inside a redirected brace group \
+                     ({}), which the line-oriented gate-layer matcher cannot see. Teach \
+                     gate_layer_decision about brace groups, or write the output with its own \
+                     `>> \"$GITHUB_OUTPUT\"`.",
+                    hidden.trim()
+                );
+            }
+        }
+    }
 }
