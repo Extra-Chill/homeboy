@@ -48,6 +48,7 @@ pub(super) fn exec_local(plan: PreparedRunnerProcess) -> Result<(RunnerExecOutpu
 pub(super) fn exec_diagnostic_ssh(
     runner: &Runner,
     cwd: String,
+    run_id: Option<&str>,
     command: Vec<String>,
     env: HashMap<String, String>,
     secret_env_names: &[String],
@@ -82,6 +83,11 @@ pub(super) fn exec_diagnostic_ssh(
             .map(|arg| shell::quote_arg(arg))
             .collect::<Vec<_>>()
             .join(" ")
+    );
+    let command_line = homeboy_core::engine::temp::RuntimeTempOwner::remote_shell_command(
+        &command_line,
+        "runner_execution",
+        run_id,
     );
     let output = timeout
         .map(|timeout| {
