@@ -1,4 +1,5 @@
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::{Component as PathComponent, Path, PathBuf};
 use std::time::Duration;
 
 use crate::{ExtensionCapability, ExtensionPhaseTiming};
@@ -332,7 +333,15 @@ impl ExtensionRunner {
         if let (Some(run_dir_path), Some(invocation)) = (&self.run_dir_path, invocation.as_ref()) {
             let run_dir =
                 homeboy_core::engine::run_dir::RunDir::from_existing(run_dir_path.clone())?;
-            invocation.preserve_artifacts(&run_dir)?;
+            if let Some(artifacts) = invocation.preserve_artifacts(&run_dir)? {
+                materialize_reported_test_artifacts(
+                    self.execution_context.capability,
+                    &artifacts,
+                    &run_dir,
+                    &output.stdout,
+                    &output.stderr,
+                )?;
+            }
         }
 
         Ok(RunnerOutput {
@@ -435,6 +444,145 @@ impl ExtensionRunner {
         }
         command
     }
+}
+
+fn materialize_reported_test_artifacts(
+    capability: ExtensionCapability,
+    artifact_root: &Path,
+    run_dir: &RunDir,
+    stdout: &str,
+    stderr: &str,
+) -> Result<()> {
+    if capability != ExtensionCapability::Test {
+        return Ok(());
+    }
+
+    let manifest = homeboy_core::artifact_manifest::read_manifest_from_root(artifact_root)?;
+    let locator = regex::Regex::new(r"artifact://files/[A-Za-z0-9._/-]+")
+        .expect("artifact locator regex is valid");
+    let mut reported = std::collections::BTreeSet::new();
+    for value in [stdout, stderr] {
+        for candidate in locator.find_iter(value).map(|matched| matched.as_str()) {
+            let relative = candidate.trim_start_matches("artifact://files/");
+            let path = Path::new(relative);
+            if !path.as_os_str().is_empty()
+                && !path.is_absolute()
+                && path
+                    .components()
+                    .all(|component| matches!(component, PathComponent::Normal(_)))
+            {
+                reported.insert(path.to_path_buf());
+            }
+        }
+    }
+
+    for relative in reported.into_iter().take(32) {
+        let manifest_suffix = Path::new("files").join(&relative);
+        let suffix_matches = manifest
+            .artifacts
+            .iter()
+            .filter(|entry| Path::new(&entry.path).ends_with(&manifest_suffix))
+            .collect::<Vec<_>>();
+        let relative_id = relative.to_string_lossy();
+        let id_matches = suffix_matches
+            .iter()
+            .filter(|entry| entry.id.as_deref() == Some(relative_id.as_ref()))
+            .copied()
+            .collect::<Vec<_>>();
+        let entry = match (id_matches.as_slice(), suffix_matches.as_slice()) {
+            ([entry], _) => *entry,
+            ([], [entry]) => *entry,
+            ([], []) => continue,
+            _ => {
+                return Err(Error::validation_invalid_argument(
+                    "artifact",
+                    "reported test artifact matches multiple registered invocation artifacts",
+                    Some(format!("artifact://files/{}", relative.display())),
+                    None,
+                ));
+            }
+        };
+
+        let source = artifact_root.join(&entry.path);
+        let destination = run_dir.path().join("files").join(&relative);
+        if destination.exists() {
+            continue;
+        }
+        let parent = destination
+            .parent()
+            .expect("artifact destination has parent");
+        std::fs::create_dir_all(parent).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "create test artifact directory {}",
+                    parent.display()
+                )),
+            )
+        })?;
+        let canonical_run_dir = std::fs::canonicalize(run_dir.path()).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("resolve test run directory".to_string()),
+            )
+        })?;
+        let canonical_parent = std::fs::canonicalize(parent).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "resolve test artifact directory {}",
+                    parent.display()
+                )),
+            )
+        })?;
+        if !canonical_parent.starts_with(&canonical_run_dir) {
+            return Err(Error::validation_invalid_argument(
+                "artifact",
+                "test artifact destination escapes its run directory",
+                Some(destination.display().to_string()),
+                None,
+            ));
+        }
+
+        let temporary = parent.join(format!(".homeboy-artifact-{}.tmp", uuid::Uuid::new_v4()));
+        let mut input = std::fs::File::open(&source).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "open registered test artifact {}",
+                    source.display()
+                )),
+            )
+        })?;
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some(format!("create test artifact {}", temporary.display())),
+                )
+            })?;
+        if let Err(error) = io::copy(&mut input, &mut output) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "copy registered test artifact {}",
+                    source.display()
+                )),
+            ));
+        }
+        std::fs::rename(&temporary, &destination).map_err(|error| {
+            let _ = std::fs::remove_file(&temporary);
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("publish test artifact {}", destination.display())),
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn redact_runner_output(

@@ -926,6 +926,9 @@ mod status_serialization_tests {
             current_homeboy_version: "0.299.2".to_string(),
             session_homeboy_build_identity: None,
             current_homeboy_build_identity: None,
+            controller_homeboy_version: None,
+            controller_homeboy_build_identity: None,
+            compatibility_reason: None,
             active_daemon_control_plane_version: "0.299.0".to_string(),
             job_command_binary_version: "0.299.0".to_string(),
             active_daemon_control_plane_build_identity: None,
@@ -995,6 +998,12 @@ pub struct RunnerStaleDaemonWarning {
     pub session_homeboy_build_identity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_homeboy_build_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub controller_homeboy_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub controller_homeboy_build_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compatibility_reason: Option<&'static str>,
     pub active_daemon_control_plane_version: String,
     pub job_command_binary_version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1067,12 +1076,52 @@ impl RunnerStaleDaemonWarning {
             current_homeboy_version,
             session_homeboy_build_identity,
             current_homeboy_build_identity,
+            controller_homeboy_version: None,
+            controller_homeboy_build_identity: None,
+            compatibility_reason: None,
             refresh_command: recovery_commands.join(" && "),
             message,
             stale_runtime_paths: Vec::new(),
             changed_runtime_paths: Vec::new(),
             recovery_commands,
         }
+    }
+
+    pub fn with_controller_compatibility(
+        mut self,
+        controller_version: String,
+        controller_build_identity: String,
+        controller_version_matches: bool,
+        daemon_matches_configured: bool,
+        controller_dirty: bool,
+    ) -> Self {
+        self.controller_homeboy_version = Some(controller_version.clone());
+        self.controller_homeboy_build_identity = Some(controller_build_identity.clone());
+        if controller_dirty {
+            self.compatibility_reason = Some("controller_dirty");
+            self.message = format!(
+                "controller `{controller_build_identity}` is dirty and cannot prove compatibility with runner `{}`; rebuild or upgrade the controller first, then converge the runner daemon/configured binary with the subsequent recovery command",
+                self.job_command_binary_build_identity
+                    .as_deref()
+                    .unwrap_or(&self.job_command_binary_version),
+            );
+            self.recovery_commands
+                .insert(0, "homeboy upgrade --force".to_string());
+            self.refresh_command = self.recovery_commands.join(" && ");
+        } else if daemon_matches_configured {
+            self.compatibility_reason = Some(if controller_version_matches {
+                "controller_configured_identity_skew"
+            } else {
+                "controller_configured_version_skew"
+            });
+            self.message = format!(
+                "connected runner configured job command binary `{}` is incompatible with controller `{controller_build_identity}`; the daemon matches the configured binary, but controller compatibility requires convergence before admission",
+                self.job_command_binary_build_identity
+                    .as_deref()
+                    .unwrap_or(&self.job_command_binary_version),
+            );
+        }
+        self
     }
 
     pub fn with_identity_unverifiable(

@@ -3,6 +3,7 @@
 //! Walks source line-by-line tracking brace depth and whether the cursor is
 //! inside comments or strings. Consumers filter lines by depth/region.
 
+use super::strings::code_before_line_comment;
 use super::types::{BlockSyntax, CommentSyntax, Grammar, StringSyntax};
 use super::{
     find_unclosed_raw_string_on_line, line_closes_regular_string, unclosed_regular_string_quote,
@@ -170,12 +171,17 @@ pub(crate) fn walk_lines<'a>(content: &'a str, grammar: &Grammar) -> Vec<Context
             if in_block_comment {
                 Region::BlockComment
             } else {
+                // Scan only the code portion: a trailing `// the post's title`
+                // must not open a single-quoted string that swallows every
+                // following line (#10362).
+                let code =
+                    code_before_line_comment(line, &grammar.comments.line, &quote_chars, escape);
                 // Check for multi-line raw string opening.
-                if let Some(close) = find_unclosed_raw_string_on_line(line) {
+                if let Some(close) = find_unclosed_raw_string_on_line(code) {
                     in_raw_string = true;
                     raw_string_close = close;
                 } else if let Some(quote) =
-                    unclosed_regular_string_quote(line, &quote_chars, escape)
+                    unclosed_regular_string_quote(code, &quote_chars, escape)
                 {
                     regular_string_quote = Some(quote);
                 }
@@ -185,9 +191,11 @@ pub(crate) fn walk_lines<'a>(content: &'a str, grammar: &Grammar) -> Vec<Context
             }
         };
 
-        // Track brace depth for code lines
+        // Track brace depth for code lines. Braces inside a trailing comment
+        // are prose, not structure (#10362).
         if region == Region::Code {
-            update_depth(line, &grammar.blocks, &grammar.strings, &mut ctx);
+            let code = code_before_line_comment(line, &grammar.comments.line, &quote_chars, escape);
+            update_depth(code, &grammar.blocks, &grammar.strings, &mut ctx);
         }
 
         result.push(ContextualLine {

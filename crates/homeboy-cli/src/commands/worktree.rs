@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
@@ -5,10 +7,10 @@ use homeboy::core::cleanup::{
     self as artifact_cleanup, ArtifactCleanupOptions, ArtifactCleanupOutput, ArtifactCleanupSort,
 };
 use homeboy::core::worktree::{
-    self, CleanupPolicy, WorktreeAdoptOptions, WorktreeAdoptOutput, WorktreeCleanupOptions,
-    WorktreeCleanupOutput, WorktreeCreateOptions, WorktreeCreateOutput, WorktreeListOutput,
-    WorktreeQueueCreateOptions, WorktreeQueueCreateOutput, WorktreeRemoveOptions,
-    WorktreeRemoveOutput, WorktreeStatusOutput,
+    self, CleanupPolicy, TaskWorktreeRegistryQuarantine, WorktreeAdoptOptions, WorktreeAdoptOutput,
+    WorktreeCleanupOptions, WorktreeCleanupOutput, WorktreeCreateOptions, WorktreeCreateOutput,
+    WorktreeListOutput, WorktreeQueueCreateOptions, WorktreeQueueCreateOutput,
+    WorktreeRemoveOptions, WorktreeRemoveOutput, WorktreeStatusOutput,
 };
 
 use crate::command_contract::{LabCommandContract, WORKTREE_CLEANUP_LAB_LABEL};
@@ -132,6 +134,25 @@ enum WorktreeCommand {
         #[arg(long, requires = "cleanup_branches")]
         allow_unmerged_branches: bool,
     },
+    /// Inspect or explicitly reconcile quarantined malformed task-worktree records
+    Quarantine {
+        #[command(subcommand)]
+        command: WorktreeQuarantineCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorktreeQuarantineCommand {
+    /// List quarantined records still protecting Cargo targets
+    List,
+    /// Mark one quarantined record terminally reconciled while retaining its original evidence
+    Clear {
+        /// Provenance sidecar reported by cleanup or `worktree quarantine list`
+        provenance_path: PathBuf,
+        /// Confirms terminal state was independently verified before clearing protection
+        #[arg(long)]
+        verified_terminal: bool,
+    },
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -159,6 +180,8 @@ pub enum WorktreeOutput {
     Status(WorktreeStatusOutput),
     Remove(WorktreeRemoveOutput),
     Cleanup(WorktreeCleanupCommandOutput),
+    QuarantineList(Vec<TaskWorktreeRegistryQuarantine>),
+    QuarantineClear(TaskWorktreeRegistryQuarantine),
 }
 
 #[derive(Serialize)]
@@ -278,6 +301,20 @@ pub fn run(args: WorktreeArgs) -> CmdResult<WorktreeOutput> {
                 deprecated_flag: deprecated_dry_run.then_some("--dry-run"),
             })
         }
+        WorktreeCommand::Quarantine { command } => match command {
+            WorktreeQuarantineCommand::List => {
+                WorktreeOutput::QuarantineList(worktree::list_task_worktree_registry_quarantines()?)
+            }
+            WorktreeQuarantineCommand::Clear {
+                provenance_path,
+                verified_terminal,
+            } => {
+                WorktreeOutput::QuarantineClear(worktree::clear_task_worktree_registry_quarantine(
+                    &provenance_path,
+                    verified_terminal,
+                )?)
+            }
+        },
     };
     Ok((output, 0))
 }
