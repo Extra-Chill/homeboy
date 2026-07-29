@@ -2359,6 +2359,57 @@ mod tests {
         );
     }
 
+    /// One compact-output convention must work across the `review` umbrella and
+    /// every phase subcommand. Before #10428 `review lint --summary` parsed while
+    /// `review test --summary` failed and clap suggested `-- --summary`, which
+    /// would have forwarded the flag to the underlying test runner instead.
+    ///
+    /// `--summary` is the umbrella's own compact-output selector, and
+    /// `review/mod.rs` already maps it onto `json_summary` for the test and audit
+    /// phases and onto `summary` for lint — so accepting it directly on each
+    /// phase makes the phase surface agree with the umbrella that drives it.
+    #[test]
+    fn summary_is_accepted_across_the_review_umbrella_and_every_phase() {
+        let phases: &[&[&str]] = &[
+            &["homeboy", "review", "lint", "homeboy", "--summary"],
+            &["homeboy", "review", "test", "homeboy", "--summary"],
+            &["homeboy", "review", "audit", "homeboy", "--summary"],
+            &["homeboy", "review", "lint", "homeboy", "--json-summary"],
+            &["homeboy", "review", "test", "homeboy", "--json-summary"],
+            &["homeboy", "review", "audit", "homeboy", "--json-summary"],
+        ];
+
+        for args in phases {
+            Cli::try_parse_from(*args)
+                .unwrap_or_else(|err| panic!("{args:?} must parse, got: {err}"));
+        }
+
+        // The umbrella's own canonical spelling keeps working unchanged.
+        Cli::try_parse_from(["homeboy", "review", "homeboy", "--summary"])
+            .expect("review --summary must parse");
+    }
+
+    /// The alias must select Homeboy output formatting, never leak into the
+    /// runner passthrough after `--`.
+    #[test]
+    fn summary_alias_sets_the_same_field_as_json_summary() {
+        for spelling in ["--summary", "--json-summary"] {
+            let cli = Cli::try_parse_from(["homeboy", "review", "test", "homeboy", spelling])
+                .expect("parse review test summary flag");
+            let Commands::Review(review) = cli.command else {
+                panic!("expected a review command");
+            };
+            let Some(crate::commands::review::ReviewCommand::Test(args)) = review.command else {
+                panic!("expected a review test subcommand");
+            };
+            assert!(args.json_summary, "{spelling} must set json_summary");
+            assert!(
+                args.args.is_empty(),
+                "{spelling} must not leak into runner passthrough args"
+            );
+        }
+    }
+
     #[test]
     fn explicit_runner_preserves_lab_routing_for_hot_cook_and_review_commands() {
         let cases: &[(&[&str], &str)] = &[

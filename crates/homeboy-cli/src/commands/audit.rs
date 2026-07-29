@@ -56,8 +56,12 @@ pub struct AuditArgs {
     #[arg(skip)]
     pub precomputed_changed_files: Option<Vec<String>>,
 
-    /// Include compact machine-readable summary for CI wrappers
-    #[arg(long)]
+    // The `--summary` alias keeps one compact-output convention working across
+    // the `review` umbrella and every phase subcommand. `review/mod.rs` already
+    // maps its own `--summary` onto this field for the audit phase (#10428).
+    /// Include compact machine-readable summary for CI wrappers.
+    /// Also accepts `--summary`.
+    #[arg(long, alias = "summary")]
     pub json_summary: bool,
 
     /// Include automated-fixability metadata. This can be expensive because it
