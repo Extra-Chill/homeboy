@@ -145,6 +145,8 @@ pub struct ArtifactCleanupOutput {
     pub applied: Vec<ArtifactCleanupApplied>,
     pub failed: Vec<ArtifactCleanupFailed>,
     pub registry_quarantines: Vec<crate::worktree::TaskWorktreeRegistryQuarantine>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup_run_ref: Option<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -342,7 +344,8 @@ fn canonical_or_owned(path: &Path) -> PathBuf {
 }
 
 pub fn cleanup_artifacts(options: ArtifactCleanupOptions) -> Result<ArtifactCleanupOutput> {
-    let registry_quarantines = crate::worktree::quarantine_malformed_task_worktree_records()?;
+    let registry_quarantines =
+        crate::worktree::reconcile_malformed_task_worktree_records(options.apply)?;
     crate::worktree::with_task_worktree_registry_read_lock(|| {
         let root = resolve_root(&options)?;
         let worktrees = discover_worktrees(&root)?;
@@ -375,7 +378,7 @@ fn artifact_cleanup_run_status(failure_count: usize) -> crate::observation::RunS
 /// Remove declared rebuildable artifacts from one completed worktree without
 /// inspecting sibling worktrees that may still be owned by active tasks.
 pub fn cleanup_worktree_artifacts(worktree: &Path) -> Result<ArtifactCleanupOutput> {
-    let registry_quarantines = crate::worktree::quarantine_malformed_task_worktree_records()?;
+    let registry_quarantines = crate::worktree::reconcile_malformed_task_worktree_records(true)?;
     crate::worktree::with_task_worktree_registry_read_lock(|| {
         let root = git_root(worktree)?;
         let worktree = root.clone();
@@ -619,6 +622,9 @@ fn cleanup_artifacts_in_worktrees(
         .apply
         .then(|| start_artifact_cleanup_run(&root))
         .transpose()?;
+    let cleanup_run_ref = cleanup_run
+        .as_ref()
+        .map(|(_, run_id)| format!("homeboy://run/{run_id}"));
     let (applied, failed) = if options.apply {
         let run_ref = cleanup_run
             .as_ref()
@@ -692,6 +698,7 @@ fn cleanup_artifacts_in_worktrees(
         applied,
         failed,
         registry_quarantines,
+        cleanup_run_ref,
     };
     if let Some((store, run_id)) = cleanup_run {
         store.finish_run(
@@ -704,6 +711,7 @@ fn cleanup_artifacts_in_worktrees(
                     "policy": "reconstructable artifact passed Git, age, and worktree activity gates",
                     "applied": output.applied,
                     "failed": output.failed,
+                    "registry_quarantines": output.registry_quarantines,
                 }
             })),
         )?;
@@ -3347,28 +3355,76 @@ mod tests {
             fs::create_dir_all(&store).expect("create task worktree registry");
             fs::write(store.join("corrupt.json"), "{").expect("write corrupt registry record");
 
+            let preview = cleanup_artifacts(ArtifactCleanupOptions {
+                apply: false,
+                ..dry_run_options(repo.path())
+            })
+            .expect("preview with unreadable registry");
+
+            assert!(repo.path().join("target/release/homeboy").exists());
+            assert!(preview.skipped.iter().any(|row| {
+                row.relative_path == "target" && row.reason.contains("registry could not be read")
+            }));
+            assert_eq!(preview.worktrees[0].liveness, LIVENESS_UNKNOWN);
+            assert_eq!(preview.registry_quarantines.len(), 1);
+            assert!(preview.registry_quarantines[0].planned);
+            assert!(std::path::Path::new(&preview.registry_quarantines[0].record_path).exists());
+            assert!(
+                !std::path::Path::new(&preview.registry_quarantines[0].quarantine_path).exists()
+            );
+
             let output = cleanup_artifacts(ArtifactCleanupOptions {
                 apply: true,
                 ..dry_run_options(repo.path())
             })
-            .expect("cleanup with unreadable registry");
-
-            assert!(repo.path().join("target/release/homeboy").exists());
-            assert!(output.skipped.iter().any(|row| {
-                row.relative_path == "target" && row.reason.contains("registry could not be read")
-            }));
-            assert_eq!(output.worktrees[0].liveness, LIVENESS_UNKNOWN);
+            .expect("apply with unreadable registry");
             assert_eq!(output.registry_quarantines.len(), 1);
             let quarantine = &output.registry_quarantines[0];
+            assert!(!quarantine.planned);
             assert!(!std::path::Path::new(&quarantine.record_path).exists());
             assert!(std::path::Path::new(&quarantine.quarantine_path).exists());
             assert!(std::path::Path::new(&quarantine.provenance_path).exists());
 
+            let persistent = cleanup_artifacts(ArtifactCleanupOptions {
+                apply: true,
+                ..dry_run_options(repo.path())
+            })
+            .expect("cleanup retains unresolved quarantine");
+            assert!(persistent.applied.is_empty());
+            assert_eq!(persistent.registry_quarantines.len(), 1);
+            assert!(repo.path().join("target").exists());
+
+            let run_id = output
+                .cleanup_run_ref
+                .as_deref()
+                .expect("apply cleanup run reference")
+                .strip_prefix("homeboy://run/")
+                .expect("run reference format");
+            let run = crate::observation::ObservationStore::open_readonly()
+                .expect("open cleanup provenance store")
+                .get_run(run_id)
+                .expect("read cleanup run")
+                .expect("cleanup run exists");
+            assert_eq!(
+                run.metadata_json["cleanup"]["registry_quarantines"][0]["provenance_path"],
+                quarantine.provenance_path
+            );
+
+            assert!(crate::worktree::clear_task_worktree_registry_quarantine(
+                std::path::Path::new(&quarantine.provenance_path),
+                false,
+            )
+            .is_err());
+            crate::worktree::clear_task_worktree_registry_quarantine(
+                std::path::Path::new(&quarantine.provenance_path),
+                true,
+            )
+            .expect("verified terminal reconciliation");
             let repaired = cleanup_artifacts(ArtifactCleanupOptions {
                 apply: true,
                 ..dry_run_options(repo.path())
             })
-            .expect("cleanup after registry repair");
+            .expect("cleanup after verified reconciliation");
             assert!(repaired.registry_quarantines.is_empty());
             assert!(repaired
                 .applied
