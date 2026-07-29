@@ -21,6 +21,7 @@ source "${SHARED_LIB_DIR}/runner-harness.sh"
 # shellcheck source=/dev/null
 source "${SHARED_LIB_DIR}/lint-findings-adapter.sh"
 homeboy_runner_harness_init --bash 4 --steps --sidecar-writer --component-alias PLUGIN_PATH
+homeboy_lint_findings_init
 
 FIX_RESULTS_HELPER="${HOMEBOY_RUNTIME_FIX_RESULTS:-${SHARED_LIB_DIR}/fix-results.sh}"
 # shellcheck source=../../../scripts/lib/fix-results.sh

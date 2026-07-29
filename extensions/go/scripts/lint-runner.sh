@@ -12,6 +12,7 @@ source "${SHARED_LIB_DIR}/runner-harness.sh"
 # shellcheck source=/dev/null
 source "${SHARED_LIB_DIR}/lint-findings-adapter.sh"
 homeboy_runner_harness_init --sidecar-writer
+homeboy_lint_findings_init
 
 write_lint_findings() {
     local gofmt_file="$1"
