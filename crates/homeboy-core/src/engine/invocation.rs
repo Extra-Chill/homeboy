@@ -67,11 +67,12 @@ pub struct InvocationGuard {
     env: InvocationEnv,
     lease_id: Option<String>,
     named_leases: Vec<String>,
-    /// Sibling invocation directories (state, artifact, tmp) under
-    /// [`invocation_runtime_root`]. All three are removed on `Drop` so
-    /// concurrent invocations do not accumulate stale state on disk.
-    /// Decoupled from any caller-provided `RunDir` cleanup.
-    cleanup_paths: [PathBuf; 3],
+    /// State and artifact directories remain short-lived siblings beneath the
+    /// socket-safe invocation root. Workload temp is instead a managed runtime
+    /// entry so cleanup can resolve its durable owner after this guard exits.
+    cleanup_paths: [PathBuf; 2],
+    runtime_tmp_dir: PathBuf,
+    runtime_tmp_pin: Option<super::temp::RuntimeTempPin>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,13 +118,11 @@ impl InvocationGuard {
 
     /// Acquire an isolated invocation environment.
     ///
-    /// `run_dir` is retained for API compatibility and pipeline context,
-    /// but the invocation's state/artifact/tmp directories are placed under
-    /// a short, platform-aware root (see [`invocation_runtime_root`]) rather
-    /// than nested beneath the run dir. This keeps `HOMEBOY_INVOCATION_*`
-    /// paths within the platform `sockaddr_un` budget so downstream
-    /// workloads can place UNIX sockets under them without bespoke
-    /// path-length defense.
+    /// State and artifact directories live under a short, platform-aware root
+    /// (see [`invocation_runtime_root`]) so downstream workloads can place
+    /// UNIX sockets under them without bespoke path-length defense. The
+    /// temporary directory instead lives under managed runtime temp, is bound
+    /// to this invocation lease, and is exported as `TMPDIR` for child tools.
     pub fn acquire(run_dir: &RunDir, requirements: &InvocationRequirements) -> Result<Self> {
         let _ = run_dir; // retained for API compatibility (see doc comment)
         cleanup_stale_child_records()?;
@@ -136,27 +135,24 @@ impl InvocationGuard {
         let id = format!("inv-{}", short);
         let runtime_root = invocation_runtime_root()?;
         // STATE_DIR is the leaf the workload owns: the invocation root
-        // itself. ARTIFACT_DIR and TMP_DIR are siblings with `.a` / `.t`
-        // suffixes so they cannot collide with workload-created subdirs
-        // under STATE_DIR. Removing the `s/a/t` subdir layer used in the
-        // initial PR #2312 reclaims 2 bytes of `sockaddr_un` budget per
+        // itself. ARTIFACT_DIR is its `.a` sibling so it cannot collide with
+        // workload-created subdirs under STATE_DIR. Removing the `s/a` subdir
+        // layer reclaims 2 bytes of `sockaddr_un` budget per
         // invocation and — more importantly — gives downstream workloads
         // exclusive ownership of the leaf they bind sockets under, so
         // no extra workload-id segment is needed under STATE_DIR.
         let state_dir = runtime_root.join(&short);
         let artifact_dir = runtime_root.join(format!("{short}.a"));
-        let tmp_dir = runtime_root.join(format!("{short}.t"));
-
         // Enforce the sockaddr_un budget before creating anything on disk
         // so callers fail fast with a clear error instead of much later in
         // a downstream workload's UDS bind. STATE_DIR is the leaf
         // workloads will append socket names to, so its budget is the one
-        // that matters most; check all three for completeness.
-        for dir in [&state_dir, &artifact_dir, &tmp_dir] {
+        // that matters most; check both socket-capable directories.
+        for dir in [&state_dir, &artifact_dir] {
             enforce_path_budget(dir)?;
         }
 
-        for dir in [&state_dir, &artifact_dir, &tmp_dir] {
+        for dir in [&state_dir, &artifact_dir] {
             fs::create_dir_all(dir)
                 .map_err(|e| errors::invocation_dir_create_error(dir, &runtime_root, e))?;
         }
@@ -198,19 +194,41 @@ impl InvocationGuard {
             return Err(error);
         }
 
-        let cleanup_paths = [state_dir.clone(), artifact_dir.clone(), tmp_dir.clone()];
+        let (runtime_tmp_dir, runtime_tmp_pin) =
+            match super::temp::managed_run_temp_dir_for_producer(
+                "homeboy-invocation-tmp",
+                Some("invocation"),
+            ) {
+                Ok(temp) => temp,
+                Err(error) => {
+                    let _ = fs::remove_file(lease_path(&id)?);
+                    let _ = fs::remove_dir_all(&state_dir);
+                    let _ = fs::remove_dir_all(&artifact_dir);
+                    return Err(error);
+                }
+            };
+        if let Err(error) = super::temp::bind_run_dir_owner(&runtime_tmp_dir, None, Some(&id)) {
+            let _ = fs::remove_dir_all(&runtime_tmp_dir);
+            let _ = fs::remove_file(lease_path(&id)?);
+            let _ = fs::remove_dir_all(&state_dir);
+            let _ = fs::remove_dir_all(&artifact_dir);
+            return Err(error);
+        }
+        let cleanup_paths = [state_dir.clone(), artifact_dir.clone()];
         Ok(Self {
             env: InvocationEnv {
                 id: id.clone(),
                 state_dir,
                 artifact_dir,
-                tmp_dir,
+                tmp_dir: runtime_tmp_dir.clone(),
                 port_base,
                 port_max,
             },
             lease_id: Some(id),
             named_leases: requirements.named_leases.clone(),
             cleanup_paths,
+            runtime_tmp_dir,
+            runtime_tmp_pin: Some(runtime_tmp_pin),
         })
     }
 
@@ -228,6 +246,13 @@ impl InvocationGuard {
             ),
             (
                 "HOMEBOY_INVOCATION_TMP_DIR".to_string(),
+                self.env.tmp_dir.to_string_lossy().to_string(),
+            ),
+            // Toolchains conventionally honor TMPDIR, unlike the Homeboy
+            // invocation-specific name. Exporting both makes their temporary
+            // bytes land under the same durable owner record.
+            (
+                "TMPDIR".to_string(),
                 self.env.tmp_dir.to_string_lossy().to_string(),
             ),
             (
@@ -315,6 +340,11 @@ impl Drop for InvocationGuard {
         for path in &self.cleanup_paths {
             let _ = fs::remove_dir_all(path);
         }
+        // The temp tree is intentionally retained as terminal managed storage.
+        // A killed parent leaves its active metadata/pin behind; a normal
+        // teardown releases the pin and records a reclaimable terminal state.
+        super::temp::mark_run_dir_succeeded(&self.runtime_tmp_dir);
+        self.runtime_tmp_pin.take();
 
         let Some(id) = &self.lease_id else {
             return;

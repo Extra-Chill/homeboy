@@ -15,6 +15,10 @@ fn test_env_vars() {
         assert!(Path::new(&value_for(&env, "HOMEBOY_INVOCATION_STATE_DIR")).is_dir());
         assert!(Path::new(&value_for(&env, "HOMEBOY_INVOCATION_ARTIFACT_DIR")).is_dir());
         assert!(Path::new(&value_for(&env, "HOMEBOY_INVOCATION_TMP_DIR")).is_dir());
+        assert_eq!(
+            value_for(&env, "TMPDIR"),
+            value_for(&env, "HOMEBOY_INVOCATION_TMP_DIR")
+        );
         assert!(value_for_optional(&env, "HOMEBOY_INVOCATION_PORT_BASE").is_none());
         assert!(value_for_optional(&env, "HOMEBOY_INVOCATION_CONTEXT_JSON").is_some());
 
@@ -289,7 +293,7 @@ fn invocation_state_dir_lives_under_runtime_root_not_run_dir() {
 }
 
 #[test]
-fn invocation_state_dir_fits_under_sockaddr_un_budget() {
+fn invocation_socket_dirs_fit_under_sockaddr_un_budget() {
     with_isolated_home(|_| {
         let run_dir = RunDir::create().expect("run dir");
         let guard = InvocationGuard::acquire(&run_dir, &InvocationRequirements::default())
@@ -299,7 +303,6 @@ fn invocation_state_dir_fits_under_sockaddr_un_budget() {
         for key in [
             "HOMEBOY_INVOCATION_STATE_DIR",
             "HOMEBOY_INVOCATION_ARTIFACT_DIR",
-            "HOMEBOY_INVOCATION_TMP_DIR",
         ] {
             let dir = value_for(&env, key);
             // budget = path bytes + 1 separator + 32-byte filename headroom
@@ -406,7 +409,7 @@ fn invocation_dir_permission_error_names_runtime_root_and_remediation() {
 }
 
 #[test]
-fn invocation_drop_cleans_up_root_directory() {
+fn invocation_drop_retains_managed_temp_directory() {
     with_isolated_home(|_| {
         let run_dir = RunDir::create().expect("run dir");
         let (state_dir, artifact_dir, tmp_dir) = {
@@ -419,13 +422,28 @@ fn invocation_drop_cleans_up_root_directory() {
                 std::path::PathBuf::from(value_for(&env, "HOMEBOY_INVOCATION_TMP_DIR")),
             )
         };
-        for path in [&state_dir, &artifact_dir, &tmp_dir] {
+        for path in [&state_dir, &artifact_dir] {
             assert!(
                 !path.exists(),
                 "invocation dir should be removed on Drop: {}",
                 path.display()
             );
         }
+        assert!(
+            tmp_dir.is_dir(),
+            "managed temp survives for lifecycle cleanup"
+        );
+        let owner: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(tmp_dir.join(".homeboy-run-owner-v1.json")).expect("owner record"),
+        )
+        .expect("owner json");
+        assert_eq!(owner["producer"], "invocation");
+        assert_eq!(owner["state"], "succeeded");
+        assert!(owner["invocation_ids"]
+            .as_array()
+            .is_some_and(|ids| !ids.is_empty()));
+
+        std::fs::remove_dir_all(&tmp_dir).expect("remove managed temp fixture");
 
         run_dir.cleanup();
     });
@@ -517,7 +535,7 @@ fn preserve_artifacts_normalizes_existing_manifest() {
 // --- followup: STATE_DIR is the leaf the workload owns ---------------------
 
 #[test]
-fn state_dir_is_the_invocation_leaf_with_artifact_and_tmp_as_siblings() {
+fn state_dir_is_the_invocation_leaf_with_artifact_as_a_sibling() {
     with_isolated_home(|_| {
         let run_dir = RunDir::create().expect("run dir");
         let guard = InvocationGuard::acquire(&run_dir, &InvocationRequirements::default())
@@ -526,23 +544,20 @@ fn state_dir_is_the_invocation_leaf_with_artifact_and_tmp_as_siblings() {
 
         let state = std::path::PathBuf::from(value_for(&env, "HOMEBOY_INVOCATION_STATE_DIR"));
         let artifact = std::path::PathBuf::from(value_for(&env, "HOMEBOY_INVOCATION_ARTIFACT_DIR"));
-        let tmp = std::path::PathBuf::from(value_for(&env, "HOMEBOY_INVOCATION_TMP_DIR"));
 
         // STATE_DIR is the invocation leaf — workloads bind sockets directly
         // under it without any extra Homeboy-injected segment. ARTIFACT_DIR
-        // and TMP_DIR live alongside as siblings under the runtime root, so
-        // they cannot collide with workload-created subdirs under STATE_DIR.
+        // lives alongside it under the runtime root, so it cannot collide with
+        // workload-created subdirs under STATE_DIR. TMP_DIR is a separate
+        // metadata-backed runtime-temp entry so its bytes have a durable owner.
         assert_eq!(
             state.parent(),
             artifact.parent(),
             "siblings under same root"
         );
-        assert_eq!(state.parent(), tmp.parent(), "siblings under same root");
 
         // Distinct leaves (no two env vars pointing at the same dir).
         assert_ne!(state, artifact);
-        assert_ne!(state, tmp);
-        assert_ne!(artifact, tmp);
 
         // No `s/a/t` subdir layer — STATE_DIR's basename is the short id
         // (10 hex chars), not `s`.
