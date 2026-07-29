@@ -157,9 +157,10 @@ pub fn attach_component_paths_report(
     for (index, input) in inputs.into_iter().enumerate() {
         let attempted_command = format!(
             "homeboy project components attach-path {} {}",
-            project_id, input.path
+            crate::engine::shell::quote_arg(project_id),
+            crate::engine::shell::quote_arg(&input.path)
         );
-        let evidence_ref = format!("#/batch/items/{index}");
+        let evidence_ref = format!("#/data/components/batch/items/{index}");
         let (status, component_id, skip_reason, error) = if stopped {
             (
                 BatchComponentAttachmentItemStatus::Skipped,
@@ -168,7 +169,7 @@ pub fn attach_component_paths_report(
                 None,
             )
         } else if worktree_policy == BatchComponentAttachmentWorktreePolicy::Skip
-            && Path::new(&input.path).join(".git").is_file()
+            && is_registered_linked_worktree(Path::new(&input.path))
         {
             (
                 BatchComponentAttachmentItemStatus::Skipped,
@@ -288,6 +289,55 @@ pub fn attach_component_paths_report(
     })
 }
 
+/// Git linked worktrees have a `.git` pointer to `<repo>/.git/worktrees/<id>`
+/// and Git's registration directory points back to that exact `.git` file.
+/// Submodules also use `.git` pointer files, so requiring both registrations
+/// avoids classifying a submodule as a worktree.
+fn is_registered_linked_worktree(path: &Path) -> bool {
+    let pointer = path.join(".git");
+    if !std::fs::symlink_metadata(&pointer)
+        .ok()
+        .is_some_and(|metadata| metadata.is_file())
+    {
+        return false;
+    }
+    let Ok(contents) = std::fs::read_to_string(&pointer) else {
+        return false;
+    };
+    let Some(gitdir) = contents.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("gitdir:")
+            .map(|value| value.trim())
+    }) else {
+        return false;
+    };
+    let registration = Path::new(gitdir);
+    let registration = if registration.is_absolute() {
+        registration.to_path_buf()
+    } else {
+        pointer.parent().unwrap_or(path).join(registration)
+    };
+    let Some(worktrees) = registration.parent() else {
+        return false;
+    };
+    if worktrees.file_name().is_none_or(|name| name != "worktrees")
+        || !registration.is_dir()
+        || !worktrees.parent().is_some_and(Path::is_dir)
+    {
+        return false;
+    }
+    let Ok(back_pointer) = std::fs::read_to_string(registration.join("gitdir")) else {
+        return false;
+    };
+    let recorded_pointer = Path::new(back_pointer.trim());
+    let recorded_pointer = if recorded_pointer.is_absolute() {
+        recorded_pointer.to_path_buf()
+    } else {
+        registration.join(recorded_pointer)
+    };
+    pointer.canonicalize().ok() == recorded_pointer.canonicalize().ok()
+}
+
 pub fn remove_components_report(
     project_id: &str,
     component_ids: Vec<String>,
@@ -350,7 +400,9 @@ mod tests {
         BatchComponentAttachmentFailurePolicy, BatchComponentAttachmentInput,
         BatchComponentAttachmentItemStatus, BatchComponentAttachmentWorktreePolicy,
     };
-    use crate::project::{load, save, Project, ProjectComponentAttachment};
+    use crate::project::{
+        build_components_output, load, save, Project, ProjectComponentAttachment,
+    };
     use crate::test_support::with_isolated_home;
     use std::fs;
 
@@ -365,6 +417,21 @@ mod tests {
         fs::create_dir_all(path).expect("component directory");
         fs::write(path.join("homeboy.json"), format!(r#"{{"id":"{id}"}}"#))
             .expect("component config");
+    }
+
+    fn register_linked_worktree(source: &std::path::Path, worktree: &std::path::Path, id: &str) {
+        let registration = source.join(".git/worktrees").join(id);
+        fs::create_dir_all(&registration).expect("worktree registration");
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", registration.display()),
+        )
+        .expect("worktree pointer");
+        fs::write(
+            registration.join("gitdir"),
+            worktree.join(".git").display().to_string(),
+        )
+        .expect("worktree back pointer");
     }
 
     #[test]
@@ -467,32 +534,45 @@ mod tests {
                 BatchComponentAttachmentWorktreePolicy::Include,
             )
             .expect("batch output");
-            let batch = output.batch.expect("batch details");
+            let evidence_ref = {
+                let batch = output.batch.as_ref().expect("batch details");
 
-            assert_eq!(batch.attached_count, 2);
-            assert_eq!(batch.failed_count, 1);
-            assert_eq!(batch.skipped_count, 0);
-            assert_eq!(batch.exit_code, 1);
-            assert!(matches!(
-                batch.items[0].status,
-                BatchComponentAttachmentItemStatus::Attached
-            ));
-            assert_eq!(batch.items[0].reference.as_deref(), Some("primary:first"));
-            assert!(matches!(
-                batch.items[1].status,
-                BatchComponentAttachmentItemStatus::Failed
-            ));
-            let error = batch.items[1].error.as_ref().expect("retained error");
-            assert!(!error.code.is_empty());
-            assert!(!error.action.is_empty());
-            assert!(batch.items[1]
-                .attempted_command
-                .contains("attach-path site"));
-            assert_eq!(batch.items[1].evidence_ref, "#/batch/items/1");
-            assert!(matches!(
-                batch.items[2].status,
-                BatchComponentAttachmentItemStatus::Attached
-            ));
+                assert_eq!(batch.attached_count, 2);
+                assert_eq!(batch.failed_count, 1);
+                assert_eq!(batch.skipped_count, 0);
+                assert_eq!(batch.exit_code, 1);
+                assert!(matches!(
+                    batch.items[0].status,
+                    BatchComponentAttachmentItemStatus::Attached
+                ));
+                assert_eq!(batch.items[0].reference.as_deref(), Some("primary:first"));
+                assert!(matches!(
+                    batch.items[1].status,
+                    BatchComponentAttachmentItemStatus::Failed
+                ));
+                let error = batch.items[1].error.as_ref().expect("retained error");
+                assert!(!error.code.is_empty());
+                assert!(!error.action.is_empty());
+                assert!(batch.items[1]
+                    .attempted_command
+                    .contains("attach-path site"));
+                assert!(matches!(
+                    batch.items[2].status,
+                    BatchComponentAttachmentItemStatus::Attached
+                ));
+                batch.items[1].evidence_ref.clone()
+            };
+            let response = serde_json::json!({
+                "data": build_components_output("site", "attach_paths", output),
+            });
+            let pointer = evidence_ref.trim_start_matches('#');
+            assert_eq!(
+                response
+                    .pointer(pointer)
+                    .and_then(|item| item.get("path"))
+                    .and_then(|path| path.as_str()),
+                Some(missing.to_string_lossy().as_ref())
+            );
         });
     }
 
@@ -542,11 +622,9 @@ mod tests {
             .expect("save project");
             let worktree = home.path().join("component-worktree");
             write_component(&worktree, "component-worktree");
-            fs::write(
-                worktree.join(".git"),
-                "gitdir: /tmp/component/.git/worktrees/test\n",
-            )
-            .expect("worktree marker");
+            let source = home.path().join("source");
+            fs::create_dir_all(source.join(".git")).expect("source git directory");
+            register_linked_worktree(&source, &worktree, "test");
 
             let output = attach_component_paths_report(
                 "site",
@@ -567,6 +645,73 @@ mod tests {
                 batch.items[0].skip_reason.as_deref(),
                 Some("git worktree skipped by worktree_policy")
             );
+        });
+    }
+
+    #[test]
+    fn batch_attachment_does_not_skip_submodule_pointer() {
+        with_isolated_home(|home| {
+            save(&Project {
+                id: "site".to_string(),
+                ..Default::default()
+            })
+            .expect("save project");
+            let submodule = home.path().join("submodule");
+            write_component(&submodule, "submodule");
+            fs::write(
+                submodule.join(".git"),
+                "gitdir: ../.git/modules/submodule\n",
+            )
+            .expect("submodule pointer");
+
+            let output = attach_component_paths_report(
+                "site",
+                vec![batch_input(submodule.to_string_lossy())],
+                BatchComponentAttachmentFailurePolicy::Continue,
+                BatchComponentAttachmentWorktreePolicy::Skip,
+            )
+            .expect("batch output");
+            let batch = output.batch.expect("batch details");
+
+            assert_eq!(batch.attached_count, 1);
+            assert_eq!(batch.skipped_count, 0);
+            assert!(matches!(
+                batch.items[0].status,
+                BatchComponentAttachmentItemStatus::Attached
+            ));
+        });
+    }
+
+    #[test]
+    fn batch_attachment_shell_quotes_attempted_command() {
+        with_isolated_home(|home| {
+            let project_id = "site with spaces";
+            save(&Project {
+                id: project_id.to_string(),
+                ..Default::default()
+            })
+            .expect("save project");
+            let component = home.path().join("component 'quoted';$HOME");
+            write_component(&component, "quoted-component");
+
+            let output = attach_component_paths_report(
+                project_id,
+                vec![batch_input(component.to_string_lossy())],
+                BatchComponentAttachmentFailurePolicy::Continue,
+                BatchComponentAttachmentWorktreePolicy::Include,
+            )
+            .expect("batch output");
+            let command = &output.batch.expect("batch details").items[0].attempted_command;
+
+            assert_eq!(
+                command.as_str(),
+                format!(
+                    "homeboy project components attach-path 'site with spaces' {}",
+                    crate::engine::shell::quote_arg(&component.to_string_lossy())
+                )
+            );
+            assert!(command.contains("'\\''"));
+            assert!(command.contains(";$HOME'"));
         });
     }
 
@@ -602,7 +747,10 @@ mod tests {
             assert!(batch.summary_truncated);
             assert_eq!(batch.items.len(), 9);
             assert!(batch.items.iter().all(|item| item.error.is_some()));
-            assert_eq!(batch.items[8].evidence_ref, "#/batch/items/8");
+            assert_eq!(
+                batch.items[8].evidence_ref,
+                "#/data/components/batch/items/8"
+            );
         });
     }
 }
