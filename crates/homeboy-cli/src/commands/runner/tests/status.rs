@@ -688,7 +688,7 @@ fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
 }
 
 #[test]
-fn compact_status_marks_dirty_controller_same_commit_degraded_with_convergent_action() {
+fn compact_status_prioritizes_dirty_controller_before_runner_convergence() {
     let report = RunnerStatusReport {
         runner_id: "homeboy-lab".to_string(),
         connected: true,
@@ -706,8 +706,8 @@ fn compact_status_marks_dirty_controller_same_commit_degraded_with_convergent_ac
             tunnel_pid: Some(123),
             remote_daemon_pid: Some(456),
             remote_daemon_lease_id: Some("lease-456".to_string()),
-            homeboy_version: "0.321.1".to_string(),
-            homeboy_build_identity: Some("homeboy 0.321.1+daemon".to_string()),
+            homeboy_version: "0.321.0".to_string(),
+            homeboy_build_identity: Some("homeboy 0.321.0+daemon".to_string()),
             connected_at: "2026-07-29T00:00:00Z".to_string(),
             worker_identity: None,
             worker_pid: None,
@@ -717,15 +717,15 @@ fn compact_status_marks_dirty_controller_same_commit_degraded_with_convergent_ac
         stale_daemon: Some(
             homeboy::runner::runners::RunnerStaleDaemonWarning::new(
                 "homeboy-lab",
+                "0.321.0".to_string(),
                 "0.321.1".to_string(),
-                "0.321.1".to_string(),
-                Some("homeboy 0.321.1+daemon".to_string()),
+                Some("homeboy 0.321.0+daemon".to_string()),
                 Some("homeboy 0.321.1+configured".to_string()),
             )
             .with_controller_compatibility(
                 "0.321.1".to_string(),
                 "homeboy 0.321.1+configured-dirty".to_string(),
-                true,
+                false,
                 true,
                 true,
             ),
@@ -740,8 +740,8 @@ fn compact_status_marks_dirty_controller_same_commit_degraded_with_convergent_ac
             ownership_evidence: None,
             adoption_command: None,
             binary_hash: None,
-            daemon_version: Some("0.321.1".to_string()),
-            daemon_build_identity: Some("homeboy 0.321.1+daemon".to_string()),
+            daemon_version: Some("0.321.0".to_string()),
+            daemon_build_identity: Some("homeboy 0.321.0+daemon".to_string()),
             runtime_paths: None,
             active_jobs: 0,
             termination_evidence: None,
@@ -774,7 +774,8 @@ fn compact_status_marks_dirty_controller_same_commit_degraded_with_convergent_ac
         .risk
         .iter()
         .any(|risk| risk.contains("homeboy 0.321.1+configured-dirty")));
-    assert_eq!(summary.next_action, "homeboy upgrade --force");
+    assert!(summary.next_action.starts_with("homeboy upgrade --force"));
+    assert!(summary.next_action.contains("refresh-homeboy homeboy-lab"));
     assert!(
         report.connected,
         "liveness remains independently observable"

@@ -1097,10 +1097,19 @@ impl RunnerStaleDaemonWarning {
     ) -> Self {
         self.controller_homeboy_version = Some(controller_version.clone());
         self.controller_homeboy_build_identity = Some(controller_build_identity.clone());
-        if daemon_matches_configured {
-            self.compatibility_reason = Some(if controller_dirty {
-                "controller_dirty"
-            } else if controller_version_matches {
+        if controller_dirty {
+            self.compatibility_reason = Some("controller_dirty");
+            self.message = format!(
+                "controller `{controller_build_identity}` is dirty and cannot prove compatibility with runner `{}`; rebuild or upgrade the controller first, then converge the runner daemon/configured binary with the subsequent recovery command",
+                self.job_command_binary_build_identity
+                    .as_deref()
+                    .unwrap_or(&self.job_command_binary_version),
+            );
+            self.recovery_commands
+                .insert(0, "homeboy upgrade --force".to_string());
+            self.refresh_command = self.recovery_commands.join(" && ");
+        } else if daemon_matches_configured {
+            self.compatibility_reason = Some(if controller_version_matches {
                 "controller_configured_identity_skew"
             } else {
                 "controller_configured_version_skew"
@@ -1111,10 +1120,6 @@ impl RunnerStaleDaemonWarning {
                     .as_deref()
                     .unwrap_or(&self.job_command_binary_version),
             );
-            if controller_dirty {
-                self.recovery_commands = vec!["homeboy upgrade --force".to_string()];
-                self.refresh_command = self.recovery_commands.join(" && ");
-            }
         }
         self
     }
