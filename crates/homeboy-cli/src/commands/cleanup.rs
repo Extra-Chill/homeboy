@@ -1046,9 +1046,18 @@ pub struct CleanupInventoryOutput {
     pub command: &'static str,
     pub mode: &'static str,
     pub category_count: usize,
+    /// Resources selected for removal, summed across categories.
+    ///
+    /// `candidate_count`, `applied_count` and `skipped_count` all count
+    /// *resources*. Category-level execution success is reported separately as
+    /// `applied_category_count`, so an atomic directory-level cleanup can no
+    /// longer be mistaken for a partial one (#9483).
     pub candidate_count: usize,
     pub applied_count: usize,
     pub skipped_count: usize,
+    /// Categories that executed and removed at least one resource. Counted in
+    /// categories, never in resources.
+    pub applied_category_count: usize,
     pub estimated_bytes: u64,
     pub reclaimed_bytes: u64,
     pub retention: CleanupRetentionManifest,
@@ -1487,7 +1496,13 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
         categories.push(category_from_output(
             RUNNER_DOWNLOADS_METADATA,
             apply,
-            output.inspected_count,
+            // `planned_count`, not `inspected_count`: a candidate is a resource
+            // selected for removal, not every entry the sweep walked past. Using
+            // the inspected total reported `candidate_count: 588, applied_count: 1`
+            // for a sweep that removed everything it selected, which reads as a
+            // 587-resource failure (#9483). The full inspected total remains
+            // visible in this category's nested `output`.
+            output.planned_count,
             output.removed_count,
             output.skipped_count,
             output.planned_size_bytes,
@@ -1639,6 +1654,7 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
         .iter()
         .map(|category| category.reclaimed_bytes)
         .sum();
+    let applied_category_count = applied_category_count(&categories);
     let actionable = cleanup_actionable(&categories, apply);
     serde_json::to_value(CleanupInventoryOutput {
         command: "cleanup.inventory",
@@ -1647,6 +1663,7 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
         candidate_count,
         applied_count,
         skipped_count,
+        applied_category_count,
         estimated_bytes,
         reclaimed_bytes,
         retention: policy,
@@ -1877,6 +1894,18 @@ fn repo_artifact_roots(
         ));
     }
     collection
+}
+
+/// Categories that executed and removed at least one resource.
+///
+/// Counted in categories, deliberately not in resources: a directory-level
+/// atomic cleanup removes many resources in one operation, and folding that into
+/// a resource-unit field made a complete sweep read as a partial one (#9483).
+fn applied_category_count(categories: &[CleanupInventoryCategory]) -> usize {
+    categories
+        .iter()
+        .filter(|category| category.applied_count > 0)
+        .count()
 }
 
 fn category_from_output<T: Serialize>(
@@ -2473,6 +2502,73 @@ fn format_bytes(bytes: u64) -> String {
         _ if (bytes as f64) < MIB => format!("{:.1} KiB", bytes as f64 / KIB),
         _ if (bytes as f64) < GIB => format!("{:.1} MiB", bytes as f64 / MIB),
         _ => format!("{:.1} GiB", bytes as f64 / GIB),
+    }
+}
+
+#[cfg(test)]
+mod count_unit_tests {
+    use super::*;
+
+    fn category(name: &'static str, candidates: usize, applied: usize) -> CleanupInventoryCategory {
+        category_from_command(
+            name,
+            format!("homeboy cleanup --include {name} --apply"),
+            format!("homeboy {name} --apply"),
+            candidates,
+            applied,
+            0,
+            0,
+            0,
+            serde_json::json!({}),
+        )
+        .expect("category fixture")
+    }
+
+    /// A directory-level atomic sweep removes every resource it selected. That
+    /// must read as complete, not as 1-of-588 (#9483).
+    #[test]
+    fn runner_downloads_style_atomic_cleanup_reports_matching_resource_counts() {
+        let categories = vec![category("runner-downloads", 588, 588)];
+
+        assert_eq!(categories[0].candidate_count, 588);
+        assert_eq!(categories[0].applied_count, 588);
+        assert_eq!(
+            applied_category_count(&categories),
+            1,
+            "one category executed, regardless of how many resources it removed"
+        );
+    }
+
+    /// Category-level success and resource-level counts stay in separate units
+    /// across runner downloads, runtime temp, and terminal runs.
+    #[test]
+    fn category_success_is_counted_in_categories_not_resources() {
+        let categories = vec![
+            category("runner-downloads", 588, 588),
+            category("runtime-temp", 12, 12),
+            category("terminal-runs", 4, 0),
+        ];
+
+        let candidate_total: usize = categories.iter().map(|c| c.candidate_count).sum();
+        let applied_total: usize = categories.iter().map(|c| c.applied_count).sum();
+
+        assert_eq!(candidate_total, 604);
+        assert_eq!(applied_total, 600);
+        assert_eq!(
+            applied_category_count(&categories),
+            2,
+            "terminal-runs removed nothing, so only two categories executed"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_with_candidates_has_no_applied_categories() {
+        let categories = vec![
+            category("runner-downloads", 588, 0),
+            category("runtime-temp", 12, 0),
+        ];
+
+        assert_eq!(applied_category_count(&categories), 0);
     }
 }
 
