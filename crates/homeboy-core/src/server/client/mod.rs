@@ -17,6 +17,7 @@ pub use host::is_transient_ssh_error;
 pub use local_exec::{
     execute_local_command, execute_local_command_in_dir, execute_local_command_in_dir_with_timeout,
     execute_local_command_interactive, execute_local_command_passthrough,
+    CHILD_SECRET_ENV_NAMES_ENV,
 };
 pub use local_exec::{
     execute_local_command_passthrough_with_timeout, execute_local_command_stderr_passthrough,

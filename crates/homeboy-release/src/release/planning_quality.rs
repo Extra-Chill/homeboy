@@ -338,8 +338,7 @@ pub(super) fn validate_test_quality(component: &Component) -> Result<bool> {
         None,
         &test_run_dir,
     )
-    .and_then(|runner| runner.run())
-    .map_err(|e| quality_error("test", format!("Test runner error: {}", e)))?;
+    .and_then(|runner| runner.run())?;
 
     if output.success {
         homeboy_core::log_status!("release", "Tests passed");
@@ -583,6 +582,44 @@ mod tests {
         }
     }
 
+    fn extension_test_component(home: &Path, source: &Path, script: &str) -> Component {
+        let extension_dir = home.join(".config/homeboy/extensions/release-test-fixture");
+        fs::create_dir_all(&extension_dir).expect("extension dir");
+        fs::write(
+            extension_dir.join("release-test-fixture.json"),
+            r#"{
+                "name":"Release test fixture",
+                "version":"1.0.0",
+                "test":{
+                    "extension_script":"test.sh",
+                    "secret_env":{"DECLARED_RELEASE_SECRET":"DECLARED_RELEASE_SECRET"}
+                }
+            }"#,
+        )
+        .expect("extension manifest");
+        fs::write(extension_dir.join("test.sh"), script).expect("extension script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script_path = extension_dir.join("test.sh");
+            let mut permissions = fs::metadata(&script_path)
+                .expect("script metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(script_path, permissions).expect("executable script");
+        }
+
+        Component {
+            id: "fixture".to_string(),
+            local_path: source.to_string_lossy().to_string(),
+            extensions: Some(HashMap::from([(
+                "release-test-fixture".to_string(),
+                ScopedExtensionConfig::default(),
+            )])),
+            ..Default::default()
+        }
+    }
+
     fn enable_split_lint_routes(home: &Path) {
         fs::write(
             home.join(".config/homeboy/extensions/release-lint-fixture/release-lint-fixture.json"),
@@ -740,6 +777,57 @@ mod tests {
         );
 
         assert!(validate_test_quality(&component).expect("test script should pass"));
+    }
+
+    #[test]
+    fn validate_test_quality_fails_before_child_when_declared_secret_is_missing() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let source = tempfile::tempdir().expect("source dir");
+            let marker = source.path().join("child-ran");
+            let component = extension_test_component(
+                home.path(),
+                source.path(),
+                &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+            );
+            std::env::remove_var("DECLARED_RELEASE_SECRET");
+
+            let error = validate_test_quality(&component)
+                .expect_err("release preflight must reject missing secret before spawn");
+
+            assert!(error.message.contains("DECLARED_RELEASE_SECRET"));
+            assert!(error.details.to_string().contains("agent-task auth map-env"));
+            assert!(!marker.exists(), "release test child must not start");
+        });
+    }
+
+    #[test]
+    fn validate_test_quality_redacts_injected_secret_from_release_evidence() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let source = tempfile::tempdir().expect("source dir");
+            let marker = source.path().join("child-ran");
+            let component = extension_test_component(
+                home.path(),
+                source.path(),
+                &format!(
+                    "#!/bin/sh\ntouch '{}'\nprintf 'received=%s\\n' \"$DECLARED_RELEASE_SECRET\" >&2\nexit 1\n",
+                    marker.display()
+                ),
+            );
+            std::env::set_var("DECLARED_RELEASE_SECRET", "release-fixture-secret");
+
+            let error = validate_test_quality(&component)
+                .expect_err("fixture child intentionally fails after injection");
+            std::env::remove_var("DECLARED_RELEASE_SECRET");
+
+            assert!(marker.exists(), "release test child received declared env");
+            let rendered = format!("{}\n{}", error, error.details);
+            assert!(rendered.contains("[REDACTED]"));
+            assert!(!rendered.contains("release-fixture-secret"));
+            assert!(!error.details["command_evidence"]["command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("release-fixture-secret"));
+        });
     }
 
     #[test]
