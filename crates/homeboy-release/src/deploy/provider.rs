@@ -55,33 +55,24 @@ fn run_component(
         .as_ref()
         .expect("checked by caller");
     let contract = repository_contract(component, &attachment.contract)?;
-    if config.dry_run || config.check {
-        // A provider command is allowed to mutate even when its contract has a
-        // preflight capability. Until its manifest declares a separate dry-run
-        // command, Homeboy fails closed rather than treating a preview as safe.
-        return Err(Error::validation_invalid_argument(
-            "deployment_provider",
-            format!("Provider '{}' requires an extension-owned dry-run command", attachment.provider),
-            None,
-            Some(vec![format!(
-                "Add a dry-run command to provider '{}' and rerun homeboy deploy {} --project {} --dry-run",
-                attachment.provider, component.id, project_id
-            )]),
-        ));
-    }
     let run = homeboy_extension::run_deployment_provider(
         &attachment.extension,
         &attachment.provider,
         project_id,
         &component.id,
         &contract,
+        config.dry_run || config.check,
     )?;
     let evidence = run.output.unwrap_or_default();
     let output = format!("{}{}", evidence.stdout, evidence.stderr);
     let provider_result = serde_json::from_str::<serde_json::Value>(&evidence.stdout)
         .unwrap_or_else(|_| serde_json::json!({ "status": "unstructured", "output": output }));
     let status = if run.exit_code == 0 {
-        "deployed"
+        if config.dry_run || config.check {
+            "validated"
+        } else {
+            "deployed"
+        }
     } else {
         "failed"
     };

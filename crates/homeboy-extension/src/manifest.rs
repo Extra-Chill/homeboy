@@ -76,6 +76,8 @@ pub use homeboy_extension_contract::ExtensionManifest;
 pub struct DeploymentProviderManifest {
     pub id: String,
     pub command: String,
+    #[serde(default)]
+    pub dry_run_command: Option<String>,
 }
 
 /// Extension manifests retain provider descriptors as extension-owned data until
@@ -99,7 +101,7 @@ mod deployment_provider_tests {
             "name": "fixture", "version": "1.0.0",
             "deployment_providers": [
                 { "id": "fixture.alpha", "command": "fixture-alpha --contract {{payload.contract}}" },
-                { "id": "fixture.beta", "command": "fixture-beta --contract {{payload.contract}}" }
+                { "id": "fixture.beta", "command": "fixture-beta --contract {{payload.contract}}", "dry_run_command": "fixture-beta --dry-run --contract {{payload.contract}}" }
             ]
         }))
         .expect("fixture manifest");
@@ -108,6 +110,11 @@ mod deployment_provider_tests {
         assert_eq!(providers.len(), 2);
         assert_eq!(providers[0].id, "fixture.alpha");
         assert_eq!(providers[1].id, "fixture.beta");
+        assert!(providers[0].dry_run_command.is_none());
+        assert_eq!(
+            providers[1].dry_run_command.as_deref(),
+            Some("fixture-beta --dry-run --contract {{payload.contract}}")
+        );
     }
 }
 
