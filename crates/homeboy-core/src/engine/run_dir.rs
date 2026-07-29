@@ -398,6 +398,7 @@ mod tests {
             super::super::temp::RuntimeTempCleanupOptions {
                 apply: true,
                 older_than_days: 7,
+                managed_older_than_days: None,
                 prefix: Some("homeboy-run"),
                 limit: 10,
                 run_max_bytes: 1024 * 1024,

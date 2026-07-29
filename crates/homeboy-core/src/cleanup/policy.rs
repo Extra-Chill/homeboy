@@ -88,6 +88,8 @@ pub struct CleanupPolicyOverrides {
     pub limit: Option<i64>,
     /// Operator `--older-than-days` for runtime temp entries.
     pub runtime_tmp_days: Option<u64>,
+    /// Operator age override for metadata-backed runtime temp entries only.
+    pub runtime_tmp_managed_days: Option<u64>,
     /// Operator `--run-max-bytes` for retained failed runtime-run evidence.
     pub runtime_run_max_bytes: Option<u64>,
     /// Operator `--run-max-count` for retained failed runtime-run directories.
@@ -104,6 +106,7 @@ pub struct CleanupPolicy {
     pub schema: &'static str,
     pub terminal_run_days: i64,
     pub runtime_tmp_days: u64,
+    pub runtime_tmp_managed_days: u64,
     pub runtime_run_max_bytes: u64,
     pub runtime_run_max_count: usize,
     pub shared_store_days: u64,
@@ -213,12 +216,16 @@ pub fn cleanup_policy_from_retention(
             None,
         ));
     }
+    let runtime_tmp_days = overrides
+        .runtime_tmp_days
+        .unwrap_or(retention.runtime_tmp_days);
     Ok(CleanupPolicy {
         schema: CLEANUP_POLICY_SCHEMA,
         terminal_run_days,
-        runtime_tmp_days: overrides
-            .runtime_tmp_days
-            .unwrap_or(retention.runtime_tmp_days),
+        runtime_tmp_days,
+        runtime_tmp_managed_days: overrides
+            .runtime_tmp_managed_days
+            .unwrap_or(runtime_tmp_days),
         runtime_run_max_bytes: overrides
             .runtime_run_max_bytes
             .unwrap_or(retention.runtime_run_max_bytes),
@@ -263,8 +270,29 @@ mod tests {
         // honored by the aggregate and silently ignored by the specialist.
         assert_eq!(policy.terminal_run_days, 90);
         assert_eq!(policy.runtime_tmp_days, 30);
+        assert_eq!(policy.runtime_tmp_managed_days, 30);
         assert_eq!(policy.runtime_run_max_count, 5);
         assert_eq!(policy.limit, 7);
+    }
+
+    #[test]
+    fn managed_runtime_tmp_override_preserves_unmanaged_floor() {
+        let configured = RetentionConfig {
+            runtime_tmp_days: 30,
+            ..retention()
+        };
+
+        let policy = cleanup_policy_from_retention(
+            &configured,
+            CleanupPolicyOverrides {
+                runtime_tmp_managed_days: Some(0),
+                ..CleanupPolicyOverrides::default()
+            },
+        )
+        .expect("resolve policy");
+
+        assert_eq!(policy.runtime_tmp_days, 30);
+        assert_eq!(policy.runtime_tmp_managed_days, 0);
     }
 
     #[test]

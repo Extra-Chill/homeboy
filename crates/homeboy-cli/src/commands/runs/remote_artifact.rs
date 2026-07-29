@@ -1020,6 +1020,7 @@ mod tests {
                     include: vec![crate::commands::cleanup::CleanupCategoryArg::RunnerDownloads],
                     exclude: Vec::new(),
                     older_than_days: None,
+                    runtime_tmp_managed_older_than_days: None,
                     limit: None,
                     full: false,
                     cursor: None,
