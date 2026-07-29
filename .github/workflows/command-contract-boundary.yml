@@ -1,0 +1,35 @@
+# Keeps command-surface parser and rendering tests outside execution stacks.
+#
+# The complete binary and workspace compile gates remain in ci.yml. This is the
+# focused local/CI path for contracts that only need clap and serializable data.
+
+name: Command Contract Boundary
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/contracts/homeboy-command-contract/**'
+      - 'crates/homeboy-cli/src/commands/cleanup.rs'
+      - 'crates/homeboy-cli/Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/command-contract-boundary.yml'
+  workflow_dispatch:
+
+jobs:
+  command-contract-boundary:
+    name: homeboy / Command Contract Boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify the focused command-contract dependency budget
+        run: |
+          cargo tree --locked -p homeboy-command-contract -e normal --prefix none > command-contract.tree
+          if grep -E '^homeboy-(agents|release|rig|lab-runner|extension|core) ' command-contract.tree; then
+            echo 'homeboy-command-contract must remain outside execution stacks' >&2
+            exit 1
+          fi
+          cargo test --locked -p homeboy-command-contract cleanup::tests

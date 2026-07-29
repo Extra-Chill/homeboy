@@ -5,6 +5,7 @@
 //! They depend only on serde, which keeps this a leaf crate other crates can
 //! depend on without pulling in core.
 
+pub mod cleanup;
 pub mod command_invocation;
 
 pub use command_invocation::{
