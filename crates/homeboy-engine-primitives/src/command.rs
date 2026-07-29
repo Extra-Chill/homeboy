@@ -1,6 +1,8 @@
 //! Command execution primitives with consistent error handling.
 
 use std::io::{self, Read};
+#[cfg(unix)]
+use std::os::fd::RawFd;
 use std::process::{Child, Command, ExitStatus, Output};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -26,6 +28,178 @@ pub type StdoutLineObserver = Arc<dyn Fn(&str) + Send + Sync + 'static>;
 /// this before spawning.
 pub const fn supports_process_tree_isolation() -> bool {
     cfg!(unix)
+}
+
+/// Keeps an isolated child tree owned by the controller that spawned it.
+///
+/// On Unix, a small guard process watches a pipe whose write end is held only
+/// by the controller. Controller exit closes the pipe and the guard kills the
+/// complete child process group, including descendants which ignore SIGTERM.
+pub struct ControllerChildGuard {
+    #[cfg(unix)]
+    controller_liveness_read_fd: RawFd,
+    #[cfg(unix)]
+    controller_liveness_fd: RawFd,
+    #[cfg(windows)]
+    job: Mutex<windows_sys::Win32::Foundation::HANDLE>,
+}
+
+impl ControllerChildGuard {
+    /// Configure a command so its complete process tree dies if this guard's
+    /// controller process exits, then retain the returned guard while waiting.
+    pub fn prepare(command: &mut Command) -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            let mut fds = [-1; 2];
+            if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            for fd in fds {
+                if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+                    unsafe {
+                        libc::close(fds[0]);
+                        libc::close(fds[1]);
+                    }
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            isolate_process_tree(command);
+            return Ok(Self {
+                controller_liveness_read_fd: fds[0],
+                controller_liveness_fd: fds[1],
+            });
+        }
+
+        #[cfg(not(unix))]
+        {
+            isolate_process_tree(command);
+            Ok(Self {
+                #[cfg(windows)]
+                job: Mutex::new(std::ptr::null_mut()),
+            })
+        }
+    }
+
+    /// Start the guard after the command is spawned so it cannot inherit the
+    /// standard library's private spawn error pipe.
+    pub fn attach(&self, child: &Child) -> io::Result<()> {
+        #[cfg(unix)]
+        match unsafe { libc::fork() } {
+            -1 => Err(io::Error::last_os_error()),
+            0 => controller_death_guard_loop(
+                self.controller_liveness_read_fd,
+                self.controller_liveness_fd,
+                child.id(),
+            ),
+            _ => Ok(()),
+        }
+
+        #[cfg(not(unix))]
+        {
+            #[cfg(windows)]
+            return assign_windows_kill_on_close_job(child, &self.job);
+
+            #[cfg(not(windows))]
+            {
+                let _ = child;
+                Ok(())
+            }
+        }
+    }
+}
+
+impl Drop for ControllerChildGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            libc::close(self.controller_liveness_read_fd);
+            libc::close(self.controller_liveness_fd);
+        }
+        #[cfg(windows)]
+        if let Ok(mut job) = self.job.lock() {
+            if !job.is_null() {
+                unsafe {
+                    windows_sys::Win32::Foundation::CloseHandle(*job);
+                }
+                *job = std::ptr::null_mut();
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn controller_death_guard_loop(read_fd: RawFd, write_fd: RawFd, process_group: u32) -> ! {
+    unsafe {
+        libc::close(write_fd);
+    }
+    if unsafe { libc::setpgid(0, process_group as libc::pid_t) } != 0 {
+        unsafe {
+            libc::_exit(1);
+        }
+    }
+    let mut byte = 0_u8;
+    loop {
+        let read = unsafe { libc::read(read_fd, (&mut byte as *mut u8).cast(), 1) };
+        if read == 0 {
+            unsafe {
+                libc::kill(-(process_group as libc::pid_t), libc::SIGKILL);
+                libc::_exit(0);
+            }
+        }
+        if read < 0 && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            unsafe {
+                libc::_exit(1);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn assign_windows_kill_on_close_job(
+    child: &Child,
+    job_slot: &Mutex<windows_sys::Win32::Foundation::HANDLE>,
+) -> io::Result<()> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+    };
+
+    let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if job.is_null() || job == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    let configured = unsafe {
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            std::mem::size_of_val(&limits) as u32,
+        )
+    };
+    let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, child.id()) };
+    let assigned = !process.is_null() && unsafe { AssignProcessToJobObject(job, process) } != 0;
+    if !process.is_null() {
+        unsafe {
+            CloseHandle(process);
+        }
+    }
+    if configured == 0 || !assigned {
+        unsafe {
+            CloseHandle(job);
+        }
+        return Err(io::Error::last_os_error());
+    }
+    *job_slot
+        .lock()
+        .map_err(|_| io::Error::other("controller job handle lock poisoned"))? = job;
+    Ok(())
 }
 
 pub fn run(program: &str, args: &[&str], context: &str) -> Result<String> {
@@ -787,6 +961,60 @@ mod tests {
             .parse::<libc::pid_t>()
             .expect("numeric descendant pid");
         assert_ne!(unsafe { libc::kill(descendant_pid, 0) }, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn controller_loss_reaps_the_release_mutation_process_group() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let pid_file = temp.path().join("upload-child.pid");
+        let script = format!(
+            "trap '' TERM; sh -c 'trap \"\" TERM; while :; do :; done' & echo $! > {}; wait",
+            shell_quote_path(&pid_file)
+        );
+        let mut command = Command::new("sh");
+        command.args(["-c", &script]);
+        let guard = ControllerChildGuard::prepare(&mut command).expect("prepare controller guard");
+        let mut child = command.spawn().expect("spawn upload fixture");
+        guard.attach(&child).expect("attach controller guard");
+
+        for _ in 0..100 {
+            if pid_file.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(pid_file.exists(), "upload fixture should start its child");
+        let descendant_pid = std::fs::read_to_string(&pid_file)
+            .expect("descendant pid")
+            .trim()
+            .parse::<libc::pid_t>()
+            .expect("numeric descendant pid");
+
+        drop(guard);
+        let root_exited = (0..100).any(|_| {
+            if child.try_wait().expect("monitor release fixture").is_some() {
+                true
+            } else {
+                thread::sleep(Duration::from_millis(10));
+                false
+            }
+        });
+        if !root_exited {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "release mutation root {} survived controller loss",
+                child.id()
+            );
+        }
+        for _ in 0..100 {
+            if unsafe { libc::kill(descendant_pid, 0) } != 0 {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("release mutation descendant {descendant_pid} survived controller loss");
     }
 
     #[cfg(unix)]
