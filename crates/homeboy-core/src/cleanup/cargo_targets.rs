@@ -25,6 +25,9 @@ pub struct CargoTargetCleanupOptions {
     pub limit: usize,
     pub cursor: Option<String>,
     pub now: SystemTime,
+    /// Cooperative deadline checked between stores. A current store's safe
+    /// revalidation/removal is never interrupted mid-mutation.
+    pub deadline: Option<SystemTime>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -34,11 +37,13 @@ pub struct CargoTargetCleanupOutput {
     pub root: String,
     pub inventory_bytes: u64,
     pub inventory_count: usize,
+    pub inspected_count: usize,
     pub candidate_count: usize,
     pub applied_count: usize,
     pub skipped_count: usize,
     pub reclaimed_bytes: u64,
     pub continuation_required: bool,
+    pub time_budget_exhausted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -86,7 +91,7 @@ pub fn acquire_shared_cargo_target(owner: &str) -> Result<SharedCargoTargetLease
     acquire_shared_cargo_target_in(&root, owner, SystemTime::now())
 }
 
-fn acquire_shared_cargo_target_in(
+pub(crate) fn acquire_shared_cargo_target_in(
     root: &Path,
     owner: &str,
     now: SystemTime,
@@ -135,8 +140,25 @@ pub fn cleanup_shared_cargo_targets(
     let mut candidates = Vec::new();
     let mut remaining = inventory_bytes;
     let mut has_more = false;
+    let mut time_budget_exhausted = false;
+    let mut inspected_count = 0;
+    let mut last_inspected = None;
 
     for store in stores.iter().skip(start) {
+        if options
+            .deadline
+            .is_some_and(|deadline| SystemTime::now() >= deadline)
+        {
+            has_more = true;
+            time_budget_exhausted = true;
+            break;
+        }
+        if inspected_count == options.limit {
+            has_more = true;
+            break;
+        }
+        inspected_count += 1;
+        last_inspected = Some(store.path.clone());
         if let Some(reason) = store
             .reasons
             .iter()
@@ -161,10 +183,6 @@ pub fn cleanup_shared_cargo_targets(
                 .entry("within age and size budget".to_string())
                 .or_default() += 1;
             continue;
-        }
-        if candidates.len() == options.limit {
-            has_more = true;
-            break;
         }
         remaining = remaining.saturating_sub(store.size_bytes);
         candidates.push(store.clone());
@@ -194,9 +212,7 @@ pub fn cleanup_shared_cargo_targets(
             }
         }
     }
-    let next_cursor = has_more
-        .then(|| candidates.last().map(|store| store.path.clone()))
-        .flatten();
+    let next_cursor = has_more.then_some(last_inspected).flatten();
     let next_command = next_cursor.as_ref().map(|cursor| {
         let apply = if options.apply { " --apply" } else { "" };
         format!(
@@ -211,11 +227,13 @@ pub fn cleanup_shared_cargo_targets(
         root: root.to_string_lossy().to_string(),
         inventory_bytes,
         inventory_count: stores.len(),
+        inspected_count,
         candidate_count: candidates.len(),
         applied_count,
         skipped_count,
         reclaimed_bytes,
         continuation_required: has_more,
+        time_budget_exhausted,
         next_cursor,
         next_command,
         retained_by_reason,
@@ -546,6 +564,7 @@ mod tests {
             limit: 10,
             cursor: None,
             now,
+            deadline: None,
         }
     }
     fn store(root: &Path, owner: &str, bytes: usize, age: Duration, now: SystemTime) -> PathBuf {

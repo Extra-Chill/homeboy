@@ -93,6 +93,17 @@ pub enum CleanupCommand {
 
     /// Explain retained Homeboy storage without deleting or reconciling resources.
     RetainedStorage(CleanupRetainedStorageArgs),
+
+    /// Run one configured, bounded automatic retention pass. Invoke this from a
+    /// scheduler at the configured cadence; it is disabled until explicitly enabled.
+    AutomaticRetention(CleanupAutomaticRetentionArgs),
+}
+
+#[derive(Args)]
+pub struct CleanupAutomaticRetentionArgs {
+    /// Run despite the configured cadence. The explicit enablement gate remains in force.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Args)]
@@ -234,6 +245,18 @@ pub fn run(args: CleanupArgs) -> CmdResult<Value> {
                 })
             })
             .map(|output| (output, 0)),
+        Some(CleanupCommand::AutomaticRetention(args)) => {
+            cleanup::run_automatic_cargo_retention(args.force)
+                .and_then(|output| {
+                    serde_json::to_value(output).map_err(|err| {
+                        homeboy::core::Error::internal_json(
+                            err.to_string(),
+                            Some("serialize automatic retention output".to_string()),
+                        )
+                    })
+                })
+                .map(|output| (output, 0))
+        }
         None => cleanup_inventory(args).map(|output| (output, 0)),
     }
 }
@@ -1153,6 +1176,7 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
             cursor: args.cursor.clone(),
             now: std::time::SystemTime::now(),
             lease_ttl: policy.shared_store_lease_ttl(),
+            deadline: None,
         })?;
         categories.push(category_from_output(
             SHARED_CARGO_TARGETS_METADATA,

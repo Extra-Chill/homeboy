@@ -77,6 +77,9 @@ own arguments.
 - `shared_store_days` — Age threshold for shared Cargo target stores.
 - `shared_store_max_bytes` — Byte budget for shared Cargo target stores.
 - `shared_store_lease_seconds` — Lease TTL that keeps an in-use shared Cargo target store alive.
+- `automatic_retention_enabled` — Explicitly permits `homeboy cleanup automatic-retention` to mutate the first automatic category. Defaults to `false`.
+- `automatic_retention_interval_seconds` — Minimum scheduler cadence between automatic passes (default: 3600).
+- `automatic_retention_max_run_seconds` — Cooperative wall-clock budget for one automatic pass (default: 60). The executor yields between stores; a category never interrupts an in-progress safe mutation.
 
 Runner-side age floors are deliberately *not* configuration keys. Both the
 runner Lab-workspace and managed-binary-cache floors live on a remote host whose

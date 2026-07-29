@@ -65,6 +65,16 @@ homeboy cleanup --include shared-cargo-targets --apply
 
 `retention.shared_store_days` defaults to `30`, `retention.shared_store_max_bytes` defaults to `21474836480` (20 GiB), and `retention.shared_store_lease_seconds` defaults to `21600` (6 hours). The age and size budgets select rebuildable stores; the lease window independently protects active workloads. Inventory output is bounded by `retention.limit`; when `next_command` is present, run it to continue from `next_cursor`.
 
+## Automatic Retention
+
+An external scheduler can invoke one bounded Cargo-target retention pass:
+
+```bash
+homeboy cleanup automatic-retention
+```
+
+Set `retention.automatic_retention_enabled` to `true` to admit mutation. The hook remains disabled by default. `retention.automatic_retention_interval_seconds` controls cadence, `retention.limit` caps inspected stores per pass, and the existing Cargo byte budget and active-lease predicate remain authoritative. State, continuation cursor, and the exact forced resume command are written under the Homeboy data directory. Use `--force` only to resume a reported partial or no-progress pass before its next cadence.
+
 ## Runner Binary Caches
 
 Runner refresh and dev-sync create managed Homeboy binary slots below each runner workspace root. Inventory or reclaim stale slots through the aggregate cleanup surface:
