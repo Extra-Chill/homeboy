@@ -13,6 +13,7 @@ mod planning;
 mod policy;
 pub(crate) mod preparation;
 pub(crate) mod provenance;
+mod provider;
 mod receipt;
 mod safety_and_artifact;
 mod smoke;
@@ -81,6 +82,9 @@ fn run_with_release_artifacts(
     release_artifacts: &mut homeboy_core::git::release_download::ReleaseArtifactStore,
 ) -> Result<DeployOrchestrationResult> {
     let project = project::load(project_id)?;
+    if let Some(result) = provider::run_if_configured(project_id, &project, config)? {
+        return Ok(result);
+    }
     // A version-pinned release asset is resolved remotely before orchestration;
     // requiring its configured checkout to exist would reintroduce a mutable
     // source gate. Other modes retain the existing early local-path validation.
@@ -558,6 +562,7 @@ mod tests {
                     id: "plugin".to_string(),
                     local_path: "/tmp/homeboy-missing-component-path".to_string(),
                     remote_path: Some("wp-content/plugins/plugin".to_string()),
+                    deployment_provider: None,
                 }],
                 ..Project::default()
             })

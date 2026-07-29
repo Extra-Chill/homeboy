@@ -432,6 +432,14 @@ pub struct ComponentDeployConfig<'a> {
     pub cleanup_artifacts: &'a [CleanupArtifactDeclaration],
 }
 
+/// A repository-owned contract executed by an extension-declared deployment provider.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeploymentProviderAttachment {
+    pub extension: String,
+    pub provider: String,
+    pub contract: String,
+}
+
 impl ComponentDeployConfig<'_> {
     pub fn is_git_deploy(&self) -> bool {
         self.deploy_strategy == Some("git")

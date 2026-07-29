@@ -145,6 +145,7 @@ fn attach_component_path_unlocked(
             id: component_id.to_string(),
             local_path: local_path.to_string(),
             remote_path: None,
+            deployment_provider: None,
         });
     }
 
