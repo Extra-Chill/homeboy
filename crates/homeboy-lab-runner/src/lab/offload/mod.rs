@@ -55,6 +55,7 @@ use homeboy_core::runner_execution_envelope::PathMaterializationPlan;
 use homeboy_core::source_snapshot::SourceSnapshot;
 use homeboy_core::{Error, ErrorCode, Result};
 
+use super::super::capabilities::preflight_runner_toolchain_readiness;
 use super::super::command_path::{
     preflight_remote_argv_path_translation, preflight_remote_path_bearing_surfaces,
 };
@@ -76,7 +77,9 @@ use super::super::lab_args::{
     remap_provider_config_with_materialization_plan_in_args, rewrite_lab_offload_args,
     rewrite_runner_resident_lab_offload_args, LabAtFileSpec, LabPathRemap,
 };
-use super::super::lab_capabilities::lab_runner_capability_contract;
+use super::super::lab_capabilities::{
+    lab_runner_capability_contract, toolchain_readiness_preflight,
+};
 use super::super::lab_command::lab_offload_command_prefix;
 use super::super::lab_env::{
     build_lab_offload_env_with_passthroughs, forward_declared_dependency_paths_env,

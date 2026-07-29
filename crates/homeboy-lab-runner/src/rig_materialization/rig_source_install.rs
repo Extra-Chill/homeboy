@@ -24,6 +24,7 @@ use super::super::{
 /// remote run that would otherwise error mid-dispatch (#5285).
 pub(super) fn rig_install_capability_preflight() -> RunnerCapabilityPreflight {
     RunnerCapabilityPreflight {
+        required_toolchain_probes: Vec::new(),
         command: "rig.install".to_string(),
         required_tools: vec![RunnerRequiredTool::homeboy()],
         required_commands: Vec::new(),

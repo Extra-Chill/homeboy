@@ -51,6 +51,7 @@ Extension identity is path-derived: Homeboy derives the extension `id` from the 
 - **`notification_transports`** (array): Declares versioned, extension-owned completion notification transports
 - **`materialization_source`** (object): Declares runner-resolvable source metadata for materializing this extension away from controller-local paths
 - **`contract_producers`** (array): Declares generic producer invocations Homeboy can call at explicit lifecycle phases
+- **`toolchain_readiness`** (array): Declares executable usability probes for portable Lab admission
 - **`fuzz`** (object): Declares fuzz workload metadata, optional runner script, and optional campaign portability metadata
 - **`commands`** (object): Additional CLI commands provided by extension
 - **`actions`** (array): Action definitions for `homeboy extension action`; release actions are normal actions whose IDs start with `release.`
@@ -563,6 +564,29 @@ The CLI contract intentionally omits Desktop-only runtime metadata such as runti
   - Example: `{"MY_VAR": "{{extensionPath}}/data"}`
 
 ## Runtime Requirements
+
+## Toolchain Readiness
+
+Extensions can reject a portable Lab operation before workspace materialization
+when a command is present but not usable in the runner environment.
+
+```json
+{
+  "toolchain_readiness": [{
+    "id": "formatter-toolchain",
+    "capabilities": ["lint"],
+    "command": "tool --verify-toolchain",
+    "repair_command": "toolchain-manager install stable",
+    "diagnostic_env": ["PATH", "TOOLCHAIN_HOME"]
+  }]
+}
+```
+
+`id` is extension-local, `capabilities` contains generic operation labels, and
+`command` runs in the runner's configured environment. A non-zero result fails
+admission before source transfer. `repair_command` and non-secret
+`diagnostic_env` values are returned to the operator. Omitted
+`toolchain_readiness` preserves existing manifests and behavior.
 
 Extension manifests and `component_env.detect_script` output can declare runtime requirements with a generic `runtimes` map:
 

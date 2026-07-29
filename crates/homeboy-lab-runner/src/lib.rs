@@ -130,6 +130,7 @@ pub use capabilities::{
     runner_capability_inventory, LabRunnerCapabilityContract, LabRunnerGateDecision,
     LabRunnerGateMode, PreparedLabRunnerCapability, RunnerCapabilityInventory,
     RunnerCapabilityPreflight, RunnerRequiredTool, RunnerToolCapabilityRequirement,
+    RunnerToolchainReadinessProbe,
 };
 pub(crate) use command_path::normalize_runner_command_env_for_homeboy_path;
 pub use command_path::preflight_remote_argv_path_translation;

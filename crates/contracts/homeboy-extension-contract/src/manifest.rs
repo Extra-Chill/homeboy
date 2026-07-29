@@ -95,6 +95,10 @@ pub struct ExtensionManifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<RuntimeRequirementsConfig>,
 
+    /// Extension-owned executable/toolchain probes for Lab admission.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub toolchain_readiness: Vec<ToolchainReadinessProbe>,
+
     // Standalone capabilities (already self-contained structs)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cli: Option<CliConfig>,

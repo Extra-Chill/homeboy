@@ -21,6 +21,7 @@ pub use homeboy_lab_runner_contract::RunnerCapabilityPreflight;
 // RunnerToolCapabilityRequirement now lives in the shared runner-contract crate
 // (behavior-free data). Re-exported so existing call sites resolve unchanged.
 pub use homeboy_lab_runner_contract::RunnerToolCapabilityRequirement;
+pub use homeboy_lab_runner_contract::RunnerToolchainReadinessProbe;
 
 pub use homeboy_lab_runner_contract::{
     LabRunnerCapabilityContract, LabRunnerGateDecision, LabRunnerGateMode,
@@ -112,6 +113,8 @@ pub(crate) fn validate_runner_capability_preflight(
         .iter()
         .filter_map(|requirement| missing_tool_capability(requirement, capabilities, request_env))
         .collect::<Vec<_>>();
+    let failed_toolchain_probes =
+        capabilities.failed_toolchain_probes(&preflight.required_toolchain_probes);
     let missing_env = preflight
         .required_env
         .iter()
@@ -127,6 +130,7 @@ pub(crate) fn validate_runner_capability_preflight(
         && missing_components.is_empty()
         && missing_commands.is_empty()
         && missing_tool_capabilities.is_empty()
+        && failed_toolchain_probes.is_empty()
         && missing_env.is_empty()
     {
         return Ok(());
@@ -155,6 +159,12 @@ pub(crate) fn validate_runner_capability_preflight(
             missing_tool_capabilities.join(", ")
         ));
     }
+    if !failed_toolchain_probes.is_empty() {
+        missing.push(format!(
+            "toolchain probes: {}",
+            failed_toolchain_probes.join(", ")
+        ));
+    }
     if !missing_env.is_empty() {
         missing.push(format!("environment: {}", missing_env.join(", ")));
     }
@@ -181,6 +191,24 @@ pub(crate) fn validate_runner_capability_preflight(
             "Refresh or configure the runner tool that provides '{capability}', then retry the evidence run."
         )
     }));
+    remediation.extend(
+        preflight
+            .required_toolchain_probes
+            .iter()
+            .filter_map(|probe| {
+                failed_toolchain_probes
+                    .iter()
+                    .any(|failed| failed.starts_with(&format!("{}:", probe.id)))
+                    .then(|| {
+                        probe.repair_command.clone().unwrap_or_else(|| {
+                            format!(
+                                "Repair extension `{}` toolchain probe `{}` and retry.",
+                                probe.extension_id, probe.id
+                            )
+                        })
+                    })
+            }),
+    );
     remediation.extend(missing_env.iter().map(|name| {
         format!("Set required environment variable '{name}' on the runner or pass it with the runner exec request.")
     }));
@@ -200,11 +228,25 @@ pub(crate) fn validate_runner_capability_preflight(
     ))
 }
 
+/// Run arbitrary extension-owned readiness probes during controller admission,
+/// before source or runtime materialization reserves a Lab slot.
+pub(crate) fn preflight_runner_toolchain_readiness(
+    runner: &Runner,
+    preflight: &RunnerCapabilityPreflight,
+) -> Result<()> {
+    if preflight.required_toolchain_probes.is_empty() {
+        return Ok(());
+    }
+    let capabilities = RunnerCapabilitySnapshot::from_runner_probe(runner, preflight)?;
+    validate_runner_capability_preflight(&runner.id, preflight, &capabilities, &HashMap::new())
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RunnerCapabilitySnapshot {
     tools: BTreeSet<RunnerRequiredTool>,
     commands: BTreeSet<String>,
     tool_capabilities: BTreeSet<String>,
+    failed_toolchain_probes: HashMap<String, String>,
     components: BTreeSet<String>,
 }
 
@@ -246,6 +288,7 @@ impl RunnerCapabilitySnapshot {
                 tools: probe.tools,
                 commands: probe.commands,
                 tool_capabilities: probe.tool_capabilities,
+                failed_toolchain_probes: probe.failed_toolchain_probes,
                 components: configured_runner_components(runner),
             });
         }
@@ -257,6 +300,7 @@ impl RunnerCapabilitySnapshot {
             tools: probe.tools,
             commands: probe.commands,
             tool_capabilities: probe.tool_capabilities,
+            failed_toolchain_probes: probe.failed_toolchain_probes,
             components: configured_runner_components(runner),
         })
     }
@@ -271,6 +315,17 @@ impl RunnerCapabilitySnapshot {
 
     fn has_tool_capability(&self, capability: &str) -> bool {
         self.tool_capabilities.contains(capability.trim())
+    }
+
+    fn failed_toolchain_probes(&self, probes: &[RunnerToolchainReadinessProbe]) -> Vec<String> {
+        probes
+            .iter()
+            .filter_map(|probe| {
+                self.failed_toolchain_probes
+                    .get(&probe.id)
+                    .map(|detail| format!("{}: {detail}", probe.id))
+            })
+            .collect()
     }
 
     fn batch_probe(
@@ -293,7 +348,12 @@ impl RunnerCapabilitySnapshot {
             .collect::<Result<Vec<_>>>()?;
         let command_names = normalized_command_names(&preflight.required_commands);
         let capability_probes = normalized_tool_capability_probes(preflight);
-        let script = batch_probe_script(&tool_commands, &command_names, &capability_probes);
+        let script = batch_probe_script(
+            &tool_commands,
+            &command_names,
+            &capability_probes,
+            &preflight.required_toolchain_probes,
+        );
         let output = preflight
             .timeout
             .map(|timeout| client.execute_with_timeout(&script, timeout))
@@ -303,6 +363,7 @@ impl RunnerCapabilitySnapshot {
             &tool_commands,
             &command_names,
             &capability_probes,
+            &preflight.required_toolchain_probes,
         ))
     }
 
@@ -329,7 +390,12 @@ impl RunnerCapabilitySnapshot {
             .collect::<Vec<_>>();
         let command_names = normalized_command_names(&preflight.required_commands);
         let capability_probes = normalized_tool_capability_probes(preflight);
-        let script = batch_probe_script(&tool_commands, &command_names, &capability_probes);
+        let script = batch_probe_script(
+            &tool_commands,
+            &command_names,
+            &capability_probes,
+            &preflight.required_toolchain_probes,
+        );
         let env = runner
             .env
             .iter()
@@ -347,6 +413,7 @@ impl RunnerCapabilitySnapshot {
             &tool_commands,
             &command_names,
             &capability_probes,
+            &preflight.required_toolchain_probes,
         ))
     }
 
@@ -371,6 +438,7 @@ struct RunnerCapabilityProbeResult {
     tools: BTreeSet<RunnerRequiredTool>,
     commands: BTreeSet<String>,
     tool_capabilities: BTreeSet<String>,
+    failed_toolchain_probes: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,6 +453,7 @@ fn batch_probe_script(
     tool_commands: &[(RunnerRequiredTool, String)],
     command_names: &[String],
     capability_probes: &[RunnerToolCapabilityProbe],
+    toolchain_probes: &[RunnerToolchainReadinessProbe],
 ) -> String {
     let mut lines = Vec::new();
     lines.push("set +e".to_string());
@@ -402,6 +471,15 @@ fn batch_probe_script(
     }
     for (index, probe) in capability_probes.iter().enumerate() {
         lines.push(tool_capability_probe_script(index, probe));
+    }
+    for (index, probe) in toolchain_probes.iter().enumerate() {
+        let environment = probe
+            .diagnostic_env
+            .iter()
+            .map(|name| format!("{name}=${{{name}:-}}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        lines.push(format!("if ({}) >/dev/null 2>&1; then printf 'R\\t{index}\\t1\\n'; else printf 'R\\t{index}\\t0\\t{}\\n'; fi", probe.command, shell::quote_arg(&environment)));
     }
     lines.push("exit 0".to_string());
     lines.join("\n")
@@ -425,6 +503,7 @@ fn parse_batch_probe_output(
     tool_commands: &[(RunnerRequiredTool, String)],
     command_names: &[String],
     capability_probes: &[RunnerToolCapabilityProbe],
+    toolchain_probes: &[RunnerToolchainReadinessProbe],
 ) -> RunnerCapabilityProbeResult {
     let mut result = RunnerCapabilityProbeResult::default();
     for line in stdout.lines() {
@@ -435,7 +514,8 @@ fn parse_batch_probe_output(
         let Some(index) = fields.next().and_then(|value| value.parse::<usize>().ok()) else {
             continue;
         };
-        if fields.next() != Some("1") {
+        let succeeded = fields.next() == Some("1");
+        if !succeeded && kind != "R" {
             continue;
         }
         match kind {
@@ -452,6 +532,14 @@ fn parse_batch_probe_output(
             "P" => {
                 if let Some(probe) = capability_probes.get(index) {
                     result.tool_capabilities.insert(probe.id.clone());
+                }
+            }
+            "R" if !succeeded => {
+                if let Some(probe) = toolchain_probes.get(index) {
+                    result.failed_toolchain_probes.insert(
+                        probe.id.clone(),
+                        fields.next().unwrap_or("probe failed").to_string(),
+                    );
                 }
             }
             _ => {}
@@ -812,6 +900,7 @@ mod tests {
             .collect(),
             commands: BTreeSet::new(),
             tool_capabilities: BTreeSet::new(),
+            failed_toolchain_probes: HashMap::new(),
             components: BTreeSet::new(),
         };
 
@@ -840,6 +929,7 @@ mod tests {
             tools: [RunnerRequiredTool::git()].into_iter().collect(),
             commands: BTreeSet::new(),
             tool_capabilities: BTreeSet::new(),
+            failed_toolchain_probes: HashMap::new(),
             components: BTreeSet::new(),
         };
 
@@ -919,6 +1009,7 @@ mod tests {
             tools: [RunnerRequiredTool::git()].into_iter().collect(),
             commands: BTreeSet::new(),
             tool_capabilities: BTreeSet::new(),
+            failed_toolchain_probes: HashMap::new(),
             components: BTreeSet::new(),
         };
 
@@ -952,6 +1043,7 @@ mod tests {
             ],
             required_commands: vec!["zip".to_string()],
             required_tool_capabilities: Vec::new(),
+            required_toolchain_probes: Vec::new(),
             required_components: vec!["fixture-a".to_string(), "fixture-b".to_string()],
             required_env: vec!["HOMEBOY_TOKEN".to_string()],
             timeout: None,
@@ -960,6 +1052,7 @@ mod tests {
             tools: [RunnerRequiredTool::git()].into_iter().collect(),
             commands: BTreeSet::new(),
             tool_capabilities: BTreeSet::new(),
+            failed_toolchain_probes: HashMap::new(),
             components: ["fixture-a".to_string()].into_iter().collect(),
         };
 
@@ -1035,6 +1128,7 @@ mod tests {
                 .collect(),
             commands: BTreeSet::new(),
             tool_capabilities: BTreeSet::new(),
+            failed_toolchain_probes: HashMap::new(),
             components: BTreeSet::new(),
         };
         validate_runner_capability_preflight("lab", &preflight, &capable, &HashMap::new())
@@ -1062,6 +1156,7 @@ mod tests {
             ],
             required_commands: vec!["zip".to_string()],
             required_tool_capabilities: Vec::new(),
+            required_toolchain_probes: Vec::new(),
             required_components: vec!["fixture-a".to_string()],
             required_env: vec!["HOMEBOY_TOKEN".to_string()],
             timeout: None,
@@ -1075,6 +1170,7 @@ mod tests {
             .collect(),
             commands: ["zip".to_string()].into_iter().collect(),
             tool_capabilities: BTreeSet::new(),
+            failed_toolchain_probes: HashMap::new(),
             components: ["fixture-a".to_string()].into_iter().collect(),
         };
         let mut env = HashMap::new();
@@ -1146,6 +1242,51 @@ mod tests {
         assert!(tried.iter().any(|hint| hint
             .as_str()
             .is_some_and(|hint| { hint.contains("Remote execution was not started") })));
+    }
+
+    #[test]
+    fn toolchain_probe_rejects_a_present_command_when_its_usable_probe_fails() {
+        let runner = Runner {
+            id: "local".to_string(),
+            kind: RunnerKind::Local,
+            server_id: None,
+            workspace_root: None,
+            settings: RunnerSettings::default(),
+            env: HashMap::new(),
+            secret_env: Default::default(),
+            resources: Default::default(),
+            policy: RunnerPolicy::default(),
+        };
+        let preflight = RunnerCapabilityPreflight {
+            command: "lint".to_string(),
+            required_commands: vec!["sh".to_string()],
+            required_toolchain_probes: vec![RunnerToolchainReadinessProbe {
+                extension_id: "fixture".to_string(),
+                id: "fixture:usable-toolchain".to_string(),
+                command: "command -v sh >/dev/null && false".to_string(),
+                repair_command: Some("repair-fixture-toolchain".to_string()),
+                diagnostic_env: vec!["PATH".to_string()],
+            }],
+            ..Default::default()
+        };
+
+        let capabilities = runner_capability_snapshot_for_preflight(&runner, &preflight)
+            .expect("snapshot completes even when a readiness probe fails");
+        let error = validate_runner_capability_preflight(
+            "local",
+            &preflight,
+            &capabilities,
+            &HashMap::new(),
+        )
+        .expect_err("a present command without a usable toolchain is rejected");
+
+        assert!(error.message.contains("fixture:usable-toolchain"));
+        assert!(error.message.contains("PATH="));
+        assert!(error.details["tried"]
+            .as_array()
+            .expect("remediation")
+            .iter()
+            .any(|hint| hint.as_str() == Some("repair-fixture-toolchain")));
     }
 
     #[cfg(unix)]
