@@ -69,6 +69,13 @@ jobs:
           ref: ${{ inputs.release_tag || github.sha }}
           fetch-depth: 0
 
+      - name: Attach verified immutable release branch
+        if: inputs.release_tag == ''
+        env:
+          EVENT_BRANCH: ${{ github.ref_name }}
+          EVENT_SHA: ${{ github.sha }}
+        run: bash .github/attach-release-branch.sh "${EVENT_BRANCH}" "${EVENT_SHA}"
+
       - name: Restore failed release marker
         id: failure-cache
         if: inputs.release_tag == ''

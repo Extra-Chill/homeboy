@@ -34,6 +34,26 @@ fn release_quality_policy(
         .expect("release quality policy should run")
 }
 
+fn git(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git should run")
+}
+
+fn release_branch_script(dir: &std::path::Path, branch: &str, sha: &str) -> std::process::Output {
+    std::process::Command::new("bash")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/.github/attach-release-branch.sh"
+        ))
+        .args([branch, sha])
+        .current_dir(dir)
+        .output()
+        .expect("release branch script should run")
+}
+
 fn job_section<'a>(workflow: &'a str, job: &str) -> &'a str {
     let marker = format!("  {job}:\n");
     let start = workflow
@@ -234,9 +254,62 @@ fn automatic_release_uses_the_immutable_push_sha_for_every_preparation_checkout(
     assert!(workflow.contains(
         "ref: ${{ inputs.release_tag || (needs.check.outputs.recovery-release == 'true' && needs.check.outputs['release-tag']) || github.sha }}"
     ));
+    let check = job_section(workflow, "check");
+    assert!(check.contains("name: Attach verified immutable release branch"));
+    assert!(check.contains(
+        "run: bash .github/attach-release-branch.sh \"${EVENT_BRANCH}\" \"${EVENT_SHA}\""
+    ));
     assert!(
         !workflow.contains("ref: ${{ inputs.release_tag || github.ref }}"),
         "a rolling main branch must not replace the push event's release candidate"
+    );
+}
+
+#[test]
+fn immutable_release_branch_attachment_verifies_identity_before_attaching_main() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo = temp.path();
+    assert!(git(repo, &["init", "-q", "--initial-branch", "main"])
+        .status
+        .success());
+    assert!(git(repo, &["config", "user.email", "test@example.com"])
+        .status
+        .success());
+    assert!(git(repo, &["config", "user.name", "Test"]).status.success());
+    std::fs::write(repo.join("README.md"), "fixture\n").expect("write fixture");
+    assert!(git(repo, &["add", "."]).status.success());
+    assert!(git(repo, &["commit", "-q", "-m", "fixture"])
+        .status
+        .success());
+    let sha =
+        String::from_utf8(git(repo, &["rev-parse", "HEAD"]).stdout).expect("SHA should be utf-8");
+    let sha = sha.trim();
+    assert!(git(repo, &["checkout", "-q", "--detach", sha])
+        .status
+        .success());
+
+    assert!(release_branch_script(repo, "main", sha).status.success());
+    assert_eq!(
+        String::from_utf8(git(repo, &["branch", "--show-current"]).stdout)
+            .expect("branch should be utf-8")
+            .trim(),
+        "main"
+    );
+
+    assert!(git(repo, &["checkout", "-q", "--detach", sha])
+        .status
+        .success());
+    assert!(!release_branch_script(repo, "feature", sha).status.success());
+    assert!(
+        !release_branch_script(repo, "main", "0000000000000000000000000000000000000000")
+            .status
+            .success()
+    );
+    assert!(
+        String::from_utf8(git(repo, &["branch", "--show-current"]).stdout)
+            .expect("branch should be utf-8")
+            .trim()
+            .is_empty()
     );
 }
 
