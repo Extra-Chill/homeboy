@@ -471,9 +471,10 @@ fn inventory_directory_files(
                 Some(path.display().to_string()),
             )
         })?;
+        let canonical = canonical.display().to_string();
         artifacts.push(ReleaseArtifact {
-            path: canonical.display().to_string(),
-            durable_path: None,
+            path: canonical.clone(),
+            durable_path: Some(canonical),
             artifact_type: None,
             platform: None,
             phase: "recovery".to_string(),
@@ -690,6 +691,15 @@ mod tests {
                 .expect("canonical artifact")
                 .display()
                 .to_string()
+        );
+        assert_eq!(
+            state.artifacts[0].durable_path,
+            Some(
+                std::fs::canonicalize(&artifact_path)
+                    .expect("canonical durable artifact")
+                    .display()
+                    .to_string()
+            )
         );
     }
 
