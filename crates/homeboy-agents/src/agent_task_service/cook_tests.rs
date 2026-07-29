@@ -5738,6 +5738,11 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
         );
         record_tracked_promotion_continuation(&options, &target);
 
+        let continuation = tracked_promotion_continuation(&options)
+            .unwrap()
+            .expect("tracked promotion continuation");
+        assert_eq!(continuation.baseline["patch_artifact"]["id"], "patch");
+
         validate_cook_workspace(&options).expect("exact tracked promotion resumes");
 
         std::fs::write(target.join("extra.txt"), "unattributed\n").unwrap();

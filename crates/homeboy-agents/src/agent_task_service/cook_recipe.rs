@@ -999,6 +999,131 @@ pub fn claim_continuation_for(
     }))
 }
 
+/// Atomically claim one exact continuation for explicit operator recovery.
+/// Unlike the generic queue path, this never exposes the selected work as
+/// pending for a background consumer to steal between rearm and claim.
+pub fn claim_continuation_for_recovery(
+    cook_id: &str,
+    run_id: &str,
+) -> Result<Option<ClaimedCookContinuation>> {
+    let recipe = load_recipe(cook_id)?;
+    if !recipe
+        .attempts
+        .iter()
+        .any(|attempt| attempt.run_id == run_id)
+    {
+        return Err(Error::validation_invalid_argument(
+            "cook_recipe.attempts",
+            "terminal run is not declared by the durable cook recipe",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
+    let continuation = AgentTaskCookContinuation {
+        schema: CONTINUATION_SCHEMA.to_string(),
+        key: format!("{cook_id}:{run_id}"),
+        cook_id: cook_id.to_string(),
+        run_id: run_id.to_string(),
+        retries: 0,
+    };
+    let hash = content_hash::sha256_hex(continuation.key.as_bytes());
+    let root = queue_root()?;
+    fs::create_dir_all(&root)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?;
+    reclaim_dead_claims(&root)?;
+    if fs::read_dir(&root)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(root.display().to_string())))?
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .any(|name| name.starts_with(&format!("{hash}.claimed.")))
+    {
+        return Ok(None);
+    }
+
+    let claimed = root.join(format!("{hash}.claimed.{}", std::process::id()));
+    for state in ["pending", "failed"] {
+        let source = root.join(format!("{hash}.{state}"));
+        match fs::rename(&source, &claimed) {
+            Ok(()) => {
+                fs::write(
+                    &claimed,
+                    serde_json::to_vec(&continuation)
+                        .map_err(|error| Error::internal_json(error.to_string(), None))?,
+                )
+                .map_err(|error| {
+                    Error::internal_io(error.to_string(), Some(claimed.display().to_string()))
+                })?;
+                return Ok(Some(ClaimedCookContinuation {
+                    continuation,
+                    path: claimed,
+                }));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some(source.display().to_string()),
+                ))
+            }
+        }
+    }
+
+    let completed = root.join(format!("{hash}.completed"));
+    if completed.exists() {
+        let record = agent_task_lifecycle::status(run_id)?;
+        if record
+            .metadata
+            .pointer("/latest_promotion/status")
+            .and_then(Value::as_str)
+            != Some("verification_pending")
+        {
+            return Ok(None);
+        }
+        fs::rename(&completed, &claimed).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(completed.display().to_string()))
+        })?;
+        fs::write(
+            &claimed,
+            serde_json::to_vec(&continuation)
+                .map_err(|error| Error::internal_json(error.to_string(), None))?,
+        )
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some(claimed.display().to_string()))
+        })?;
+        return Ok(Some(ClaimedCookContinuation {
+            continuation,
+            path: claimed,
+        }));
+    }
+
+    let mut file = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&claimed)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(None),
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(claimed.display().to_string()),
+            ))
+        }
+    };
+    file.write_all(
+        &serde_json::to_vec(&continuation)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+    )
+    .map_err(|error| Error::internal_io(error.to_string(), Some(claimed.display().to_string())))?;
+    file.sync_all().map_err(|error| {
+        Error::internal_io(error.to_string(), Some(claimed.display().to_string()))
+    })?;
+    Ok(Some(ClaimedCookContinuation {
+        continuation,
+        path: claimed,
+    }))
+}
+
 pub fn reconstruct_options(recipe: &AgentTaskCookRecipe) -> Result<AgentTaskCookServiceOptions> {
     reconstruct_options_with_dispatcher(recipe, None)
 }
@@ -1337,8 +1462,14 @@ fn consume_claimed_with_dispatcher_policy(
         return Err(error);
     }
     match execute(options) {
-        Ok(exit_code) => {
+        Ok(0) => {
             claim.complete()?;
+            Ok(0)
+        }
+        Ok(exit_code) => {
+            claim.fail(&format!(
+                "Cook continuation exited unsuccessfully with status {exit_code}"
+            ))?;
             Ok(exit_code)
         }
         Err(error) if error.retryable == Some(true) => {
@@ -2094,6 +2225,66 @@ mod tests {
             claim.complete().unwrap();
 
             assert!(!rearm_failed_terminal_continuation("cook", "run").unwrap());
+        });
+    }
+
+    #[test]
+    fn targeted_recovery_claim_never_exposes_fresh_work_to_generic_consumers() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            write_recipe(&recipe()).unwrap();
+
+            let claim = claim_continuation_for_recovery("cook", "run")
+                .unwrap()
+                .expect("operator owns exact continuation");
+
+            assert_eq!(claim.continuation().key, "cook:run");
+            assert!(claim_continuation().unwrap().is_none());
+            claim.complete().unwrap();
+        });
+    }
+
+    #[test]
+    fn targeted_recovery_reclaims_completed_but_still_unverified_work() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            persist_recipe_run();
+            enqueue_terminal_continuation("cook", "run").unwrap();
+            claim_continuation_for("cook", "run")
+                .unwrap()
+                .unwrap()
+                .complete()
+                .unwrap();
+            crate::agent_task_lifecycle::rewrite_record_for_test("run", |record| {
+                record.metadata["latest_promotion"] =
+                    serde_json::json!({ "status": "verification_pending" });
+            })
+            .unwrap();
+
+            let claim = claim_continuation_for_recovery("cook", "run")
+                .unwrap()
+                .expect("unverified completed claim is recoverable");
+
+            assert_eq!(claim.continuation().key, "cook:run");
+            claim.complete().unwrap();
+        });
+    }
+
+    #[test]
+    fn nonzero_cook_exit_fails_the_claim_instead_of_completing_it() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            write_recipe(&recipe()).unwrap();
+            enqueue_terminal_continuation("cook", "run").unwrap();
+            let claim = claim_continuation_for("cook", "run").unwrap().unwrap();
+
+            assert_eq!(consume_claimed_with(claim, |_| Ok(7)).unwrap(), 7);
+
+            let root = queue_root().unwrap();
+            let hash = content_hash::sha256_hex(b"cook:run");
+            assert!(root.join(format!("{hash}.failed")).exists());
+            assert!(!root.join(format!("{hash}.completed")).exists());
+            assert!(fs::read_to_string(root.join(format!("{hash}.diagnostic")))
+                .unwrap()
+                .contains("status 7"));
+            assert!(rearm_failed_terminal_continuation("cook", "run").unwrap());
         });
     }
 

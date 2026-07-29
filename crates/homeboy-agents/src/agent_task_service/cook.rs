@@ -2960,7 +2960,7 @@ fn tracked_promotion_continuation(
             None,
         )
     })?;
-    let baseline = promotion
+    let mut baseline = promotion
         .provenance
         .get("gate_feedback_baseline")
         .filter(|baseline| {
@@ -2974,6 +2974,13 @@ fn tracked_promotion_continuation(
                 "Cook continuation requires the tracked post-apply candidate baseline",
                 Some(options.initial_run_id.clone()),
                 None,
+            )
+        })?;
+    baseline["patch_artifact"] =
+        serde_json::to_value(&promotion.patch_artifact).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize persisted promotion artifact baseline".to_string()),
             )
         })?;
     Ok(Some(TrackedPromotionContinuation {
