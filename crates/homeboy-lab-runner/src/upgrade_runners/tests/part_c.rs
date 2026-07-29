@@ -414,6 +414,79 @@ fn snapshot_recovery_selects_the_verified_materialized_binary() {
 }
 
 #[test]
+fn filesystem_origin_recovery_selects_the_verified_materialized_binary() {
+    assert!(!source_url_is_runner_reachable(
+        "/Users/chubes/Developer/homeboy"
+    ));
+    let commands = runner_recovery_commands(
+        "lab",
+        "/home/user/Developer/_homeboy_binaries/homeboy-stale/target/release/homeboy",
+        Some(&"identity mismatch".to_string()),
+        Some("0.228.4"),
+        Some("0.228.5"),
+        Some("aabbccddeeff"),
+        Some("/Users/chubes/Developer/homeboy"),
+        Some("/srv/homeboy/target/release/homeboy"),
+    );
+
+    assert_eq!(
+        commands[0],
+        "homeboy runner refresh-homeboy lab --select /srv/homeboy/target/release/homeboy --reconnect"
+    );
+}
+
+#[test]
+fn file_origin_recovery_selects_the_verified_materialized_binary() {
+    assert!(!source_url_is_runner_reachable(
+        "file:///Users/chubes/Developer/homeboy"
+    ));
+    let commands = runner_recovery_commands(
+        "lab",
+        "/home/user/Developer/_homeboy_binaries/homeboy-stale/target/release/homeboy",
+        Some(&"identity mismatch".to_string()),
+        Some("0.228.4"),
+        Some("0.228.5"),
+        Some("aabbccddeeff"),
+        Some("file:///Users/chubes/Developer/homeboy"),
+        Some("/srv/homeboy/target/release/homeboy"),
+    );
+
+    assert_eq!(
+        commands[0],
+        "homeboy runner refresh-homeboy lab --select /srv/homeboy/target/release/homeboy --reconnect"
+    );
+}
+
+#[test]
+fn remote_origin_recovery_preserves_reachable_source_provenance() {
+    let revision = "aabbccddeeff";
+    for source in [
+        "https://github.com/Extra-Chill/homeboy.git",
+        "ssh://git@github.com/Extra-Chill/homeboy.git",
+        "git@github.com:Extra-Chill/homeboy.git",
+    ] {
+        assert!(source_url_is_runner_reachable(source));
+        let commands = runner_recovery_commands(
+            "lab",
+            "/home/user/Developer/_homeboy_binaries/homeboy-stale/target/release/homeboy",
+            Some(&"identity mismatch".to_string()),
+            Some("0.228.4"),
+            Some("0.228.5"),
+            Some(revision),
+            Some(source),
+            None,
+        );
+
+        assert_eq!(
+            commands[0],
+            format!(
+                "homeboy runner refresh-homeboy lab --source {source} --ref {revision} --reconnect"
+            )
+        );
+    }
+}
+
+#[test]
 fn realigns_stale_source_checkout_homeboy_path_after_upgrade_failure() {
     let _local_version = pin_local_version_for_fixtures();
     let stale_path = "/home/user/Developer/homeboy@upgrade-bootstrap/target/release/homeboy";

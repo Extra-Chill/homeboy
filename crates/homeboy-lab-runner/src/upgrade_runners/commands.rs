@@ -118,18 +118,44 @@ fn runner_refresh_homeboy_command(
             shell_arg(binary)
         );
     }
-    let source = selected_source_url
+    let source = selected_source_url.filter(|source| source_url_is_runner_reachable(source));
+    let source_arg = source
         .map(|source| format!(" --source {}", shell_arg(source)))
         .unwrap_or_default();
-    let revision = selected_source_revision
+    let revision = source
+        .and(selected_source_revision)
         .map(|revision| format!(" --ref {}", shell_arg(revision)))
         .unwrap_or_default();
     format!(
         "homeboy runner refresh-homeboy {}{}{} --reconnect",
         shell_arg(runner_id),
-        source,
+        source_arg,
         revision
     )
+}
+
+/// Whether a Git origin can be resolved from a runner rather than only from
+/// the controller filesystem. Local paths and `file://` URLs must be selected
+/// from an already materialized runner binary instead.
+pub fn source_url_is_runner_reachable(source: &str) -> bool {
+    let source = source.trim();
+    if source.is_empty() || source.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        return false;
+    }
+
+    for scheme in ["https://", "ssh://", "git://"] {
+        if let Some(authority) = source.strip_prefix(scheme) {
+            return authority
+                .split('/')
+                .next()
+                .is_some_and(|host| !host.is_empty());
+        }
+    }
+
+    let Some((host, path)) = source.split_once(':') else {
+        return false;
+    };
+    host.contains('@') && !host.ends_with('@') && !path.is_empty()
 }
 
 pub fn runner_inspect_bare_homeboy_command(runner_id: &str) -> String {

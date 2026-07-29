@@ -120,17 +120,17 @@ pub fn recover_and_retry_failed_upgrade(
             failure.detail,
         )),
         Err(recovery_detail) => {
-            let selected_materialized_binary = selected_source_url
-                .is_none()
-                .then(|| {
-                    verified_materialized_source_binary(
-                        runner,
-                        command_source_path,
-                        expected_build_identity,
-                        exec,
-                    )
-                })
-                .flatten();
+            let selected_materialized_binary = (!selected_source_url
+                .is_some_and(source_url_is_runner_reachable))
+            .then(|| {
+                verified_materialized_source_binary(
+                    runner,
+                    command_source_path,
+                    expected_build_identity,
+                    exec,
+                )
+            })
+            .flatten();
             let mut entry = runner_upgrade_failure_entry(
                 &runner.id,
                 original_homeboy_path.to_string(),
