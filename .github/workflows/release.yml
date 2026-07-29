@@ -1091,8 +1091,27 @@ jobs:
         run: |
           rm -f artifacts/*-dist-manifest.json
 
+      - name: Create authoritative recovery manifest
+        if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete != 'true'
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs['release-version'] }}
+          EXPECTED_ASSETS: ${{ needs.plan.outputs.expected-assets }}
+        run: |
+          set -euo pipefail
+          COMMIT="$(git rev-parse "${RELEASE_TAG}^{}")"
+          jq -n \
+            --arg schema homeboy.package-recovery \
+            --argjson schema_version 1 \
+            --arg component_id homeboy \
+            --arg tag "${RELEASE_TAG}" \
+            --arg version "${RELEASE_VERSION}" \
+            --arg commit "${COMMIT}" \
+            --argjson expected_assets "${EXPECTED_ASSETS}" \
+            '{schema: $schema, schema_version: $schema_version, component_id: $component_id, tag: $tag, version: $version, commit: $commit, artifacts: [$expected_assets[] | {path: ("artifacts/" + .)}]}' > artifacts/manifest.json
+
       - name: Create remote draft adoption manifest
-        if: needs.prepare.outputs.recovery-release == 'true'
+        if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete == 'true'
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
           RELEASE_VERSION: ${{ needs.prepare.outputs['release-version'] }}
@@ -1162,7 +1181,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
           CONTROL_SHA: ${{ github.sha }}
-          ADOPTION_SOURCE: ${{ needs.prepare.outputs.recovery-release == 'true' && 'draft-adoption' || 'artifacts' }}
+          ADOPTION_SOURCE: ${{ needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete == 'true' && 'draft-adoption' || 'artifacts' }}
           ARTIFACT_ORIGIN: ${{ needs.plan.outputs.draft-complete == 'true' && 'pre-existing draft assets (rebuild skipped)' || 'rebuilt and re-uploaded by this run' }}
         run: |
           set -euo pipefail
@@ -1199,7 +1218,7 @@ jobs:
           commands: release
           binary-path: ${{ needs.prepare.outputs.recovery-release == 'true' && '.homeboy-bin/homeboy' || '' }}
           release-head: 'true'
-          release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && 'draft-adoption' || 'artifacts' }}
+          release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete == 'true' && 'draft-adoption' || 'artifacts' }}
           release-skip-publish: 'true'
 
   # ── Step 5b: Fail loudly if a prepared release did not publish ──
