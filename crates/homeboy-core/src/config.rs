@@ -8,8 +8,10 @@ use crate::output::{
 use crate::paths;
 use crate::Result;
 use serde::{de::DeserializeOwned, Serialize};
+use std::cell::Cell;
 use std::fs::{self, File, OpenOptions};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 mod json_io;
 mod json_ops;
@@ -25,7 +27,99 @@ pub use json_ops::{merge_config, remove_config};
 pub use json_pointer::value_type_name;
 pub use json_pointer::{remove_json_pointer, set_json_pointer};
 
+/// Bound on how long a thread will wait for the config lock before failing with
+/// an attributable error. `0` restores the historical unbounded wait.
+pub const CONFIG_LOCK_TIMEOUT_ENV: &str = "HOMEBOY_CONFIG_LOCK_TIMEOUT_SECS";
+
+/// When set to a truthy value, a nested acquisition returns an error naming the
+/// re-entry instead of transparently joining the enclosing critical section.
+/// Off by default: nesting is safe, but this lets us drive it to zero
+/// deliberately rather than discovering it as a production hang.
+pub const CONFIG_LOCK_STRICT_ENV: &str = "HOMEBOY_CONFIG_LOCK_STRICT";
+
+/// Generous enough that no legitimate config operation can reach it (the lock
+/// guards small JSON writes and, at worst, a runtime-package refresh), while
+/// staying far below the CI test-phase budget so a wedged holder surfaces as a
+/// named failure rather than consuming the whole phase.
+const DEFAULT_CONFIG_LOCK_TIMEOUT_SECS: u64 = 600;
+
+thread_local! {
+    /// Depth of nested `with_config_lock` sections on the current thread.
+    ///
+    /// `flock(2)` locks are owned by the *open file description*, not by the
+    /// process or the thread: "If a process uses open(2) ... to obtain more
+    /// than one file descriptor for the same file, these file descriptors are
+    /// treated independently by flock(). An attempt to lock the file using one
+    /// of these file descriptors may be denied by a lock that the calling
+    /// process has already placed via another file descriptor."
+    ///
+    /// Every `with_config_lock` call opens the lock file afresh, so a nested
+    /// acquisition on one thread asks for a lock that same thread already
+    /// holds through a different description, and `LOCK_EX` blocks in the
+    /// kernel forever. Tracking depth per thread makes the enclosing section
+    /// visible so re-entry can pass through instead of self-deadlocking.
+    static CONFIG_LOCK_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Nesting depth of config-lock sections held by the current thread.
+pub fn config_lock_depth() -> u32 {
+    CONFIG_LOCK_DEPTH.with(Cell::get)
+}
+
+struct ConfigLockDepthGuard;
+
+impl ConfigLockDepthGuard {
+    fn enter() -> Self {
+        CONFIG_LOCK_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+        Self
+    }
+}
+
+impl Drop for ConfigLockDepthGuard {
+    fn drop(&mut self) {
+        CONFIG_LOCK_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+fn config_lock_timeout() -> Option<Duration> {
+    let seconds = std::env::var(CONFIG_LOCK_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_CONFIG_LOCK_TIMEOUT_SECS);
+
+    (seconds > 0).then(|| Duration::from_secs(seconds))
+}
+
+fn config_lock_strict() -> bool {
+    std::env::var(CONFIG_LOCK_STRICT_ENV)
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes"))
+}
+
+/// Run `operation` while holding the exclusive Homeboy config lock.
+///
+/// Exclusion is preserved across processes and across threads. Re-entry on a
+/// thread that already holds the lock is a pass-through: the enclosing critical
+/// section already provides exactly the exclusion the inner one is asking for,
+/// so joining it is a no-op on lock semantics, whereas acquiring again is an
+/// unrecoverable self-deadlock (see `CONFIG_LOCK_DEPTH`).
 pub fn with_config_lock<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    if config_lock_depth() > 0 {
+        if config_lock_strict() {
+            return Err(Error::internal_io(
+                format!(
+                    "config lock re-entered at depth {} on a thread that already holds it; \
+                     the enclosing critical section should own this write, or the inner \
+                     acquisition should be hoisted out of it",
+                    config_lock_depth() + 1
+                ),
+                Some("lock config".to_string()),
+            ));
+        }
+        let _depth = ConfigLockDepthGuard::enter();
+        return operation();
+    }
+
     let lock_path = paths::homeboy()?.join("config.lock");
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -45,7 +139,8 @@ pub fn with_config_lock<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
             Error::internal_io(error.to_string(), Some("open config lock".to_string()))
         })?;
 
-    let _guard = ConfigLockGuard::lock(lock_file)?;
+    let _guard = ConfigLockGuard::lock(lock_file, &lock_path)?;
+    let _depth = ConfigLockDepthGuard::enter();
     operation()
 }
 
@@ -55,23 +150,63 @@ struct ConfigLockGuard {
 }
 
 impl ConfigLockGuard {
+    /// Acquire the lock under a deadline.
+    ///
+    /// `LOCK_EX` alone blocks in the kernel indefinitely, so any holder that
+    /// wedges takes every other waiter with it — one stuck thread silently
+    /// consumes an entire CI phase and reports nothing. Polling `LOCK_EX |
+    /// LOCK_NB` against a deadline converts that into a single attributable
+    /// error naming the lock file.
     #[cfg(unix)]
-    fn lock(file: File) -> Result<Self> {
+    fn lock(file: File, lock_path: &Path) -> Result<Self> {
         use std::os::fd::AsRawFd;
 
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-        if result != 0 {
-            return Err(Error::internal_io(
-                std::io::Error::last_os_error().to_string(),
-                Some("lock config".to_string()),
-            ));
-        }
+        let timeout = config_lock_timeout();
+        let started = Instant::now();
+        let mut backoff = Duration::from_millis(1);
 
-        Ok(Self { file })
+        loop {
+            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if result == 0 {
+                return Ok(Self { file });
+            }
+
+            let error = std::io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::EINTR) => continue,
+                Some(libc::EWOULDBLOCK) => {}
+                _ => {
+                    return Err(Error::internal_io(
+                        error.to_string(),
+                        Some("lock config".to_string()),
+                    ))
+                }
+            }
+
+            if let Some(timeout) = timeout {
+                let waited = started.elapsed();
+                if waited >= timeout {
+                    return Err(Error::internal_io(
+                        format!(
+                            "timed out after {}s waiting for the Homeboy config lock at {}; \
+                             another thread or process has held it far longer than any config \
+                             operation should take. Set {} to change or disable the bound.",
+                            waited.as_secs(),
+                            lock_path.display(),
+                            CONFIG_LOCK_TIMEOUT_ENV
+                        ),
+                        Some("lock config".to_string()),
+                    ));
+                }
+            }
+
+            std::thread::sleep(backoff);
+            backoff = (backoff * 2).min(Duration::from_millis(50));
+        }
     }
 
     #[cfg(not(unix))]
-    fn lock(file: File) -> Result<Self> {
+    fn lock(file: File, _lock_path: &Path) -> Result<Self> {
         Ok(Self { file })
     }
 }
