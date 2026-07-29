@@ -165,10 +165,37 @@ fn render_sync_script(path: &str, remote_url: Option<&str>, git_ref: Option<&str
             script.push_str("if [ -n \"$upstream\" ]; then\n");
             script.push_str("  git -C \"$dir\" merge --ff-only \"@{u}\"\n");
             script.push_str("else\n");
-            script.push_str("  target=$(git -C \"$dir\" rev-parse --verify --quiet origin/HEAD || git -C \"$dir\" rev-parse --verify --quiet origin/main)\n");
+            // Resolve the remote's ACTUAL default branch. The previous
+            // `|| origin/main` fallback silently materialized the wrong HEAD on
+            // a trunk-default repository with no `main`, which then failed the
+            // release reachability guard with "latest release tag is not
+            // reachable from HEAD" — the tag was fine, the HEAD was wrong.
+            // Fetching tags cannot fix that, because fetching never moves HEAD
+            // (#6916).
+            script.push_str(
+                "  target=$(git -C \"$dir\" rev-parse --verify --quiet origin/HEAD || true)\n",
+            );
+            // A fresh clone or a mirror fetch may not have origin/HEAD set.
+            script.push_str("  if [ -z \"$target\" ]; then\n");
+            script.push_str(
+                "    git -C \"$dir\" remote set-head origin --auto >/dev/null 2>&1 || true\n",
+            );
+            script.push_str(
+                "    target=$(git -C \"$dir\" rev-parse --verify --quiet origin/HEAD || true)\n",
+            );
+            script.push_str("  fi\n");
+            // Last resort: ask the remote directly for its default branch.
+            script.push_str("  if [ -z \"$target\" ]; then\n");
+            script.push_str("    default_ref=$(git -C \"$dir\" ls-remote --symref origin HEAD 2>/dev/null | awk '/^ref:/ {print $2; exit}')\n");
+            script.push_str("    if [ -n \"$default_ref\" ]; then\n");
+            script.push_str("      target=$(git -C \"$dir\" rev-parse --verify --quiet \"origin/${default_ref#refs/heads/}\" || true)\n");
+            script.push_str("    fi\n");
+            script.push_str("  fi\n");
+            // Fail closed rather than guessing a branch name. Materializing the
+            // wrong HEAD produces a confusing downstream failure far from here.
             script.push_str("  if [ -z \"$target\" ]; then\n");
             script
-                .push_str("    echo \"managed runner source remote default ref not found\" >&2\n");
+                .push_str("    echo \"managed runner source remote default ref not found; set origin/HEAD or declare an explicit ref for this source\" >&2\n");
             script.push_str("    exit 1\n");
             script.push_str("  fi\n");
             script.push_str("  git -C \"$dir\" checkout --quiet --force --detach \"$target\"\n");
@@ -307,6 +334,106 @@ mod tests {
         assert!(plan.script.contains("reset --hard \"$target\""));
     }
 
+    /// The blind `origin/main` fallback is gone: guessing a branch name
+    /// materialized the wrong HEAD on a trunk-default repository and surfaced
+    /// far away as a release reachability refusal (#6916).
+    #[test]
+    fn script_never_falls_back_to_a_guessed_main_branch() {
+        let mut decl = source("src", "/home/r/.cache/src");
+        decl.remote_url = Some("https://example.test/repo.git".to_string());
+        let plan = plan_managed_runner_source_sync(&decl).expect("plan");
+
+        assert!(
+            !plan.script.contains("origin/main"),
+            "default-branch resolution must not guess `main`:\n{}",
+            plan.script
+        );
+        assert!(plan.script.contains("remote set-head origin --auto"));
+        assert!(plan.script.contains("ls-remote --symref origin HEAD"));
+        assert!(plan
+            .script
+            .contains("managed runner source remote default ref not found"));
+    }
+
+    /// End-to-end against a real trunk-default repository with no `main`: the
+    /// generated script must land on `trunk`, where release tags are reachable.
+    /// No network and no release are involved.
+    #[test]
+    fn generated_script_materializes_a_trunk_default_repository_onto_trunk() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let origin = fixture.path().join("origin");
+        let clone = fixture.path().join("clone");
+        std::fs::create_dir_all(&origin).expect("origin dir");
+
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("git");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+
+        // A repository whose default branch is `trunk`, with no `main` at all.
+        git(&origin, &["init", "--quiet", "-b", "trunk"]);
+        git(&origin, &["config", "user.email", "test@example.test"]);
+        git(&origin, &["config", "user.name", "Homeboy Test"]);
+        std::fs::write(origin.join("README.md"), "trunk\n").expect("write");
+        git(&origin, &["add", "."]);
+        git(&origin, &["commit", "--quiet", "-m", "release: v0.1.18"]);
+        git(&origin, &["tag", "component-v0.1.18"]);
+        let tagged = git(&origin, &["rev-parse", "HEAD"]);
+
+        git(
+            fixture.path(),
+            &[
+                "clone",
+                "--quiet",
+                origin.to_str().expect("origin path"),
+                clone.to_str().expect("clone path"),
+            ],
+        );
+        // Reproduce the failing shape: a detached checkout with no upstream, and
+        // no local origin/HEAD to read.
+        git(&clone, &["checkout", "--quiet", "--detach", "HEAD"]);
+        let _ = std::process::Command::new("git")
+            .args(["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"])
+            .current_dir(&clone)
+            .output();
+
+        let mut decl = source("src", clone.to_str().expect("clone path"));
+        decl.remote_url = Some(origin.to_string_lossy().to_string());
+        let plan = plan_managed_runner_source_sync(&decl).expect("plan");
+
+        let output = std::process::Command::new("bash")
+            .args(["-c", &plan.script])
+            .output()
+            .expect("run managed source sync script");
+        assert!(
+            output.status.success(),
+            "sync script failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // HEAD must be the trunk commit, so the release tag is reachable.
+        assert_eq!(git(&clone, &["rev-parse", "HEAD"]), tagged);
+        let reachable = std::process::Command::new("git")
+            .args(["merge-base", "--is-ancestor", "component-v0.1.18", "HEAD"])
+            .current_dir(&clone)
+            .status()
+            .expect("ancestry check");
+        assert!(
+            reachable.success(),
+            "release tag must be reachable from the materialized HEAD"
+        );
+    }
+
     #[test]
     fn script_repairs_detached_dirty_checkout_when_no_ref_declared() {
         let mut decl = source("src", "/home/r/.cache/src");
@@ -316,7 +443,10 @@ mod tests {
         assert!(plan.script.contains("if [ -n \"$upstream\" ]; then"));
         assert!(plan.script.contains("else"));
         assert!(plan.script.contains("origin/HEAD"));
-        assert!(plan.script.contains("origin/main"));
+        // Previously asserted `origin/main` here. That fallback was the #6916
+        // defect: it materialized a wrong HEAD on a trunk-default repository.
+        // Default-branch resolution is now remote-derived, never guessed.
+        assert!(plan.script.contains("ls-remote --symref origin HEAD"));
         assert!(plan
             .script
             .contains("git -C \"$dir\" reset --hard \"$target\""));
