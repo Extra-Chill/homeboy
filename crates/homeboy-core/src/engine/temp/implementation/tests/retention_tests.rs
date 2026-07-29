@@ -29,6 +29,7 @@ fn active_invocation_lease_survives_transient_pin_loss() {
     env::remove_var(runtime_tmpdir_env());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn reused_pid_without_matching_starttime_does_not_protect_run() {
     let _guard = home_env_guard();
@@ -40,7 +41,7 @@ fn reused_pid_without_matching_starttime_does_not_protect_run() {
     owner.linux_starttime_ticks = Some(
         crate::process::linux_process_starttime_ticks(std::process::id())
             .expect("process identity")
-            .unwrap_or(0)
+            .expect("live process has Linux starttime identity")
             .saturating_add(1),
     );
     owner.created_at = "2000-01-01T00:00:00Z".to_string();
@@ -55,11 +56,30 @@ fn reused_pid_without_matching_starttime_does_not_protect_run() {
     env::remove_var(runtime_tmpdir_env());
 }
 
-#[cfg(unix)]
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn persisted_linux_starttime_fails_closed_without_proc_identity() {
+    let _guard = home_env_guard();
+    let root = tempfile::tempdir().expect("tempdir");
+    env::set_var(runtime_tmpdir_env(), root.path());
+    let (path, pin) = managed_run_temp_dir("homeboy-run-pid-reuse").expect("managed run");
+    let mut owner = read_run_owner(&path).expect("owner");
+    owner.owner_pid = std::process::id();
+    owner.linux_starttime_ticks = Some(1);
+    owner.created_at = "2000-01-01T00:00:00Z".to_string();
+    write_run_owner(&path, &owner).expect("write owner");
+    drop(pin);
+    let mut options = bounded_options(true, Some("homeboy-run-pid-reuse"));
+    options.older_than_days = 0;
+
+    let output = cleanup_runtime_tmp_bounded(options).expect("cleanup");
+    assert_eq!(output.removed_count, 1);
+    assert!(!path.exists());
+    env::remove_var(runtime_tmpdir_env());
+}
+
 #[test]
 fn corrupt_owner_metadata_is_quarantined_then_reclaimed() {
-    use std::process::Command;
-
     let _guard = home_env_guard();
     let root = tempfile::tempdir().expect("tempdir");
     env::set_var(runtime_tmpdir_env(), root.path());
@@ -72,12 +92,10 @@ fn corrupt_owner_metadata_is_quarantined_then_reclaimed() {
     assert_eq!(recent.removed_count, 0);
     assert!(recent.rows[0].reason.contains("quarantine grace"));
 
-    let status = Command::new("touch")
-        .args(["-d", "2 days ago"])
-        .arg(&path)
-        .status()
-        .expect("touch directory age");
-    assert!(status.success());
+    fs::File::open(&path)
+        .expect("open directory age")
+        .set_modified(SystemTime::now() - CORRUPT_OWNER_GRACE - Duration::from_secs(1))
+        .expect("backdate directory age");
     let stale = cleanup_runtime_tmp_bounded(bounded_options(true, Some("homeboy-run-corrupt")))
         .expect("stale quarantine");
     assert_eq!(stale.removed_count, 1);
