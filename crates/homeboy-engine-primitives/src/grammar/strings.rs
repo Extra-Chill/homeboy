@@ -114,3 +114,45 @@ fn is_escaped_with(bytes: &[u8], pos: usize, escape: u8) -> bool {
 
     backslashes % 2 == 1
 }
+
+/// Return the code portion of a line, excluding any trailing line comment.
+///
+/// String-aware: a comment marker inside a string literal (`"http://x"`,
+/// `['#fff']`) does not start a comment.
+///
+/// This exists because quote and brace scanning must not read comment prose as
+/// code. A trailing `// the post's title` otherwise opens a single-quoted string
+/// that never closes, and every following line is misclassified as string
+/// content — silently dropping every symbol after it (#10362).
+pub(crate) fn code_before_line_comment<'a>(
+    line: &'a str,
+    line_comment_markers: &[String],
+    quote_chars: &[char],
+    escape: char,
+) -> &'a str {
+    if line_comment_markers.is_empty() {
+        return line;
+    }
+    let bytes = line.as_bytes();
+    let mut active_quote: Option<char> = None;
+
+    for (index, ch) in line.char_indices() {
+        if quote_chars.contains(&ch) && !is_escaped_with(bytes, index, escape as u8) {
+            match active_quote {
+                Some(open) if open == ch => active_quote = None,
+                None => active_quote = Some(ch),
+                Some(_) => {}
+            }
+            continue;
+        }
+        if active_quote.is_none()
+            && line_comment_markers
+                .iter()
+                .any(|marker| line[index..].starts_with(marker.as_str()))
+        {
+            return &line[..index];
+        }
+    }
+
+    line
+}
