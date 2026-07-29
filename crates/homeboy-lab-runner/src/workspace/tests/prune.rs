@@ -962,12 +962,37 @@ fn prune_workspaces_apply_passes_drain_until_empty() {
 #[test]
 fn prune_convergence_resumes_durable_receipts_across_more_than_twenty_pages() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        const WORKSPACE_COUNT: usize = 25;
+        const REMOVABLE_COUNT: usize = 23;
+        const WORKSPACE_COUNT: usize = REMOVABLE_COUNT + 2;
         let runner_root = tempfile::tempdir().expect("runner root");
         let workspaces_root = runner_root.path().join("_lab_workspaces");
-        for index in 0..WORKSPACE_COUNT {
-            write_orphan_workspace(&workspaces_root.join(format!("orphan-{index:02}")));
+        for index in 0..REMOVABLE_COUNT {
+            write_orphan_workspace(&workspaces_root.join(format!("removable-{index:02}")));
         }
+        let active = workspaces_root.join("active-process");
+        write_orphan_workspace(&active);
+        let unknown = workspaces_root.join("unknown-authority");
+        write_orphan_workspace(&unknown);
+        let metadata_path = unknown.join(WORKSPACE_METADATA_FILE);
+        let mut metadata: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&metadata_path).expect("metadata"))
+                .expect("metadata JSON");
+        metadata["run_id"] = serde_json::json!("authority-unavailable");
+        metadata["resource_lifecycle"] = serde_json::json!({
+            "owner": "runner.workspace",
+            "run_id": "authority-unavailable",
+            "runner_id": null,
+            "path": unknown.display().to_string(),
+            "root_bound": workspaces_root.display().to_string(),
+            "kind": "runner_workspace",
+            "ttl": null,
+            "status": "active",
+            "cleanup_policy": "delete_on_success",
+            "evidence_retention": "metadata",
+            "cleanup_intent": "dry_run",
+            "cleanup_command": null,
+        });
+        fs::write(&metadata_path, metadata.to_string()).expect("write unknown metadata");
         crate::create(
             &format!(
                 r#"{{"id":"lab-local-prune-convergence","kind":"local","workspace_root":"{}"}}"#,
@@ -976,6 +1001,12 @@ fn prune_convergence_resumes_durable_receipts_across_more_than_twenty_pages() {
             false,
         )
         .expect("create runner");
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .current_dir(&active)
+            .spawn()
+            .expect("hold active workspace cwd");
 
         let (interrupted, _) = prune_workspaces(
             "lab-local-prune-convergence",
@@ -989,11 +1020,13 @@ fn prune_convergence_resumes_durable_receipts_across_more_than_twenty_pages() {
             },
         )
         .expect("bounded convergence");
+        assert_eq!(interrupted.skipped_live_count, 1);
         let interrupted = interrupted.convergence.expect("convergence evidence");
         assert_eq!(interrupted.pass_count, 7);
         assert_eq!(interrupted.terminal_reason, "max_passes");
         assert!(interrupted.resume_command.is_some());
         assert!(Path::new(&interrupted.receipt_path).is_file());
+        assert_eq!(interrupted.cursor_history.len(), interrupted.pass_count * 2);
 
         let (resumed, _) = prune_workspaces(
             "lab-local-prune-convergence",
@@ -1008,17 +1041,34 @@ fn prune_convergence_resumes_durable_receipts_across_more_than_twenty_pages() {
             },
         )
         .expect("resume convergence");
+        assert_eq!(resumed.skipped_unknown_count, 1);
         let resumed = resumed.convergence.expect("resumed convergence evidence");
         assert_eq!(resumed.pass_count, WORKSPACE_COUNT);
-        assert_eq!(resumed.applied_count, WORKSPACE_COUNT);
+        assert_eq!(resumed.inspected_count, WORKSPACE_COUNT);
+        assert_eq!(resumed.applied_count, REMOVABLE_COUNT);
+        assert_eq!(resumed.skipped_count, 2);
         assert_eq!(resumed.terminal_reason, "scan_complete");
         assert!(resumed.resume_command.is_none());
+        assert_eq!(resumed.cursor_history.len(), resumed.pass_count * 2);
+        assert_eq!(
+            resumed.verified_reclaimed_bytes,
+            resumed
+                .page_receipts
+                .iter()
+                .map(|receipt| receipt.reclaimed_bytes)
+                .sum::<u64>()
+        );
+        assert!(resumed.verified_reclaimed_bytes > 0);
+        assert!(active.exists());
+        assert!(unknown.exists());
         assert_eq!(
             fs::read_dir(workspaces_root)
                 .expect("remaining workspaces")
                 .count(),
-            0
+            2
         );
+        child.kill().expect("stop active workspace holder");
+        child.wait().expect("reap active workspace holder");
     });
 }
 
