@@ -2,6 +2,12 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.9.2] - 2026-07-29
+
+### Fixed
+- resolve the release branch on a detached HEAD instead of skipping green
+- assert a release published, instead of that it exists
+
 ## [2.9.1] - 2026-07-28
 
 ### Fixed
