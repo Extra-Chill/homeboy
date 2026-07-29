@@ -58,3 +58,9 @@ pub(crate) fn existing_release_action(
     }
     ExistingReleaseAction::PublishDraft
 }
+
+/// Adoption revalidates the remote inventory immediately before this decision.
+/// A concurrent publisher may have completed the same release in that window.
+pub(crate) fn adopted_release_needs_publish(is_draft: bool) -> bool {
+    is_draft
+}

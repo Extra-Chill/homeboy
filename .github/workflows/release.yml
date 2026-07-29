@@ -1092,7 +1092,7 @@ jobs:
           rm -f artifacts/*-dist-manifest.json
 
       - name: Create remote draft adoption manifest
-        if: needs.prepare.outputs.recovery-release == 'true'
+        if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete == 'true'
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
           RELEASE_VERSION: ${{ needs.prepare.outputs['release-version'] }}
@@ -1162,7 +1162,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
           CONTROL_SHA: ${{ github.sha }}
-          ADOPTION_SOURCE: ${{ needs.prepare.outputs.recovery-release == 'true' && 'draft-adoption' || 'artifacts' }}
+          ADOPTION_SOURCE: ${{ needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete == 'true' && 'draft-adoption' || 'artifacts' }}
           ARTIFACT_ORIGIN: ${{ needs.plan.outputs.draft-complete == 'true' && 'pre-existing draft assets (rebuild skipped)' || 'rebuilt and re-uploaded by this run' }}
         run: |
           set -euo pipefail
@@ -1199,7 +1199,7 @@ jobs:
           commands: release
           binary-path: ${{ needs.prepare.outputs.recovery-release == 'true' && '.homeboy-bin/homeboy' || '' }}
           release-head: 'true'
-          release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && 'draft-adoption' || 'artifacts' }}
+          release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete == 'true' && 'draft-adoption' || 'artifacts' }}
           release-skip-publish: 'true'
 
   # ── Step 5b: Fail loudly if a prepared release did not publish ──
@@ -1233,6 +1233,16 @@ jobs:
           fi
 
           gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" > release.json
+          if ! jq -e '.draft == false' release.json >/dev/null; then
+            echo "::error::Release ${RELEASE_TAG} still resolves to an unpublished draft."
+            exit 1
+          fi
+          expected_inventory="$(jq -c 'sort' <<< "${EXPECTED_ASSETS}")"
+          actual_inventory="$(jq -c '[.assets[].name] | sort' release.json)"
+          if [ "${actual_inventory}" != "${expected_inventory}" ]; then
+            echo "::error::Release ${RELEASE_TAG} asset inventory is not exactly authoritative. Expected ${expected_inventory}; found ${actual_inventory}."
+            exit 1
+          fi
           missing=()
           invalid=()
           while IFS= read -r asset; do

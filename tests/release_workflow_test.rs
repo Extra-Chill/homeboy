@@ -637,7 +637,7 @@ fn release_finish_head_pipeline_uses_homeboy_action_head_inputs() {
     assert!(host.contains("expected_assets: $expected_assets"));
     assert!(host.contains("Download current Homeboy finalizer"));
     assert!(host.contains("binary-path: ${{ needs.prepare.outputs.recovery-release == 'true' && '.homeboy-bin/homeboy' || '' }}"));
-    assert!(host.contains("release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && 'draft-adoption' || 'artifacts' }}"));
+    assert!(host.contains("release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete == 'true' && 'draft-adoption' || 'artifacts' }}"));
 }
 
 #[test]
@@ -846,17 +846,15 @@ fn release_recovery_skips_the_artifact_rebuild_when_the_draft_is_already_complet
         );
     }
 
-    // ...and the adoption phase is not, or the fast path would publish nothing.
-    let adoption = &host[host
-        .find("- name: Create remote draft adoption manifest")
-        .expect("host must build the draft adoption manifest")..];
+    // ...and remote-only adoption is reserved for that complete fast path.
+    let adoption = release_step_block(host, "name: Create remote draft adoption manifest");
     assert!(
-        !adoption.contains("draft-complete != 'true'"),
-        "verified draft adoption must run on the fast path — it is the whole point of taking it"
+        adoption.contains("needs.plan.outputs.draft-complete == 'true'"),
+        "verified draft adoption must run only on the complete remote fast path"
     );
     assert!(
-        adoption.contains("release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && 'draft-adoption' || 'artifacts' }}"),
-        "the fast path must still hand the finalizer the remote-adoption manifest"
+        host.contains("release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete == 'true' && 'draft-adoption' || 'artifacts' }}"),
+        "only the complete fast path may hand the finalizer the remote-adoption manifest; rebuilt recovery must retain local artifact authority"
     );
 }
 
@@ -880,6 +878,15 @@ fn release_fast_path_keeps_every_publication_verification() {
     assert!(
         verify.contains("HOST_RESULT: ${{ needs.host.result }}"),
         "verification must still require the publishing job to have succeeded"
+    );
+    assert!(
+        verify.contains("jq -e '.draft == false' release.json"),
+        "verification must require the final release to be published"
+    );
+    assert!(
+        verify.contains("[.assets[].name] | sort")
+            && verify.contains("jq -c 'sort' <<< \"${EXPECTED_ASSETS}\""),
+        "verification must require the remote inventory to exactly match the authoritative plan"
     );
 
     // The control binary that performs adoption is still the one built from the

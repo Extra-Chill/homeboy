@@ -15,6 +15,7 @@
 //! them whenever the run carried no artifacts of its own, so the pipeline
 //! reported a delivered release over an undeliverable tag.
 
+use super::super::delivery::adopted_release_needs_publish;
 use super::super::{existing_release_action, ExistingReleaseAction};
 
 #[test]
@@ -23,6 +24,12 @@ fn published_release_with_nothing_to_attach_is_an_idempotent_no_op() {
         existing_release_action(false, false, 13, true),
         ExistingReleaseAction::AlreadyPublished
     );
+}
+
+#[test]
+fn adoption_does_not_republish_after_the_release_becomes_published() {
+    assert!(adopted_release_needs_publish(true));
+    assert!(!adopted_release_needs_publish(false));
 }
 
 #[test]

@@ -297,6 +297,7 @@ fn reconcile_release_publications_with(
     remote_assets: &[GitHubReleaseAsset],
     verify_digestless: &mut impl FnMut(&GitHubReleaseAsset, u64) -> Result<(u64, String), String>,
 ) -> Result<(Vec<ReleaseAssetPublication>, Vec<ReleaseAssetPublication>), String> {
+    validate_remote_publication_inventory(publications, remote_assets)?;
     let mut upload = Vec::new();
     let mut existing = Vec::new();
     for publication in publications {
@@ -317,9 +318,11 @@ fn reconcile_release_publications_with(
         if verify_release_publication(publication, remote, verify_digestless)? {
             existing.push(publication.clone());
         } else {
+            let remote_digest = canonical_remote_digest(remote)?
+                .unwrap_or_else(|| "unavailable (downloaded bytes differed)".to_string());
             return Err(format!(
-                "GitHub Release asset '{}' conflicts with the canonical publication bytes",
-                publication.target_name
+                "GitHub Release asset '{}' conflicts with the canonical publication bytes (remote digest: {}; authoritative digest: sha256:{})",
+                publication.target_name, remote_digest, publication.sha256
             ));
         }
     }
@@ -626,6 +629,7 @@ fn verify_release_publications_with(
     assets: &[GitHubReleaseAsset],
     verify_digestless: &mut impl FnMut(&GitHubReleaseAsset, u64) -> Result<(u64, String), String>,
 ) -> Result<(), String> {
+    validate_remote_publication_inventory(publications, assets)?;
     for publication in publications {
         let matches = assets
             .iter()
@@ -649,6 +653,40 @@ fn verify_release_publications_with(
                 publication.target_name
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_remote_publication_inventory(
+    publications: &[ReleaseAssetPublication],
+    assets: &[GitHubReleaseAsset],
+) -> Result<(), String> {
+    let expected = publications
+        .iter()
+        .map(|publication| publication.target_name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let actual = assets
+        .iter()
+        .map(|asset| asset.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut seen = std::collections::BTreeSet::new();
+    let duplicated = assets
+        .iter()
+        .filter(|asset| !seen.insert(asset.name.as_str()))
+        .map(|asset| asset.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if !duplicated.is_empty() {
+        return Err(format!(
+            "GitHub Release has multiple assets named {}; canonical publication ownership is ambiguous",
+            duplicated.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    let unexpected = actual.difference(&expected).copied().collect::<Vec<_>>();
+    if !unexpected.is_empty() {
+        return Err(format!(
+            "GitHub Release has assets outside the authoritative publication inventory: {}",
+            unexpected.join(", ")
+        ));
     }
     Ok(())
 }
@@ -1074,8 +1112,8 @@ pub(crate) fn validate_draft_adoption(
     metadata: &GitHubReleaseMetadata,
     sidecars: &BTreeMap<String, String>,
 ) -> Result<(), String> {
-    if !metadata.is_draft || metadata.tag_name != tag {
-        return Err("draft adoption requires the matching unpublished GitHub Release".to_string());
+    if metadata.tag_name != tag {
+        return Err("draft adoption requires the matching GitHub Release".to_string());
     }
     let expected = expected_names
         .iter()
@@ -1673,6 +1711,11 @@ mod tests {
         let mut sidecars = BTreeMap::new();
         sidecars.insert("app.zip.sha256".to_string(), format!("{digest}  app.zip\n"));
         validate_draft_adoption("v1.2.3", &expected, &metadata, &sidecars).expect("valid adoption");
+
+        let mut published = metadata.clone();
+        published.is_draft = false;
+        validate_draft_adoption("v1.2.3", &expected, &published, &sidecars)
+            .expect("the same verified release may become published before finalization");
 
         let mut extra = metadata.clone();
         extra
@@ -2453,7 +2496,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_reupload_reuses_verified_asset_and_uploads_only_missing_asset() {
+    fn draft_to_published_recovery_reuses_verified_asset_and_uploads_only_missing_asset() {
         let dir = tempfile::tempdir().expect("tempdir");
         let first = dir.path().join("first.zip");
         let second = dir.path().join("second.zip");
@@ -2465,16 +2508,23 @@ mod tests {
         ]))
         .expect("publication identities");
 
-        let (uploads, existing) = reconcile_release_publications_with(
-            &publications,
-            &[remote_asset(
+        let mut metadata = GitHubReleaseMetadata {
+            tag_name: "v1.2.3".to_string(),
+            is_draft: true,
+            assets: vec![remote_asset(
                 "first.zip",
                 publications[0].size,
                 Some(format!("sha256:{}", publications[0].sha256)),
             )],
+        };
+        metadata.is_draft = false;
+
+        let (uploads, existing) = reconcile_release_publications_with(
+            &publications,
+            &metadata.assets,
             &mut unexpected_download,
         )
-        .expect("partial recovery");
+        .expect("reconcile after publication");
 
         assert_eq!(existing, vec![publications[0].clone()]);
         assert_eq!(uploads, vec![publications[1].clone()]);
@@ -2516,7 +2566,7 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_preexisting_canonical_asset_is_rejected() {
+    fn draft_to_published_recovery_rejects_conflicting_existing_asset() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("component.zip");
         std::fs::write(&path, b"component bytes").expect("write zip");
@@ -2524,17 +2574,30 @@ mod tests {
             github_release_publications(&release_state_with_artifacts(vec![artifact(&path, None)]))
                 .expect("publication identity");
 
-        let error = reconcile_release_publications_with(
-            &publications,
-            &[remote_asset(
+        let remote_digest = format!("sha256:{}", "f".repeat(64));
+        let mut metadata = GitHubReleaseMetadata {
+            tag_name: "v1.2.3".to_string(),
+            is_draft: true,
+            assets: vec![remote_asset(
                 "component.zip",
                 publications[0].size,
-                Some(format!("sha256:{}", "f".repeat(64))),
+                Some(remote_digest.clone()),
             )],
+        };
+        metadata.is_draft = false;
+
+        let error = reconcile_release_publications_with(
+            &publications,
+            &metadata.assets,
             &mut unexpected_download,
         )
         .expect_err("conflicting bytes must fail");
-        assert!(error.contains("conflicts with the canonical publication bytes"));
+        assert!(error.contains("asset 'component.zip' conflicts"));
+        assert!(error.contains(&format!("remote digest: {remote_digest}")));
+        assert!(error.contains(&format!(
+            "authoritative digest: sha256:{}",
+            publications[0].sha256
+        )));
     }
 
     #[test]
@@ -2616,6 +2679,29 @@ mod tests {
         .expect_err("duplicate canonical names must fail closed");
 
         assert!(error.contains("canonical publication ownership is ambiguous"));
+    }
+
+    #[test]
+    fn remote_asset_outside_authoritative_inventory_is_rejected() {
+        let publication = ReleaseAssetPublication {
+            target_name: "component.zip".to_string(),
+            sha256: "a".repeat(64),
+            size: 15,
+            source_path: "component.zip".to_string(),
+        };
+        let error = reconcile_release_publications_with(
+            &[publication],
+            &[remote_asset(
+                "unrelated.zip",
+                15,
+                Some(format!("sha256:{}", "b".repeat(64))),
+            )],
+            &mut unexpected_download,
+        )
+        .expect_err("unrelated remote asset must fail closed");
+
+        assert!(error.contains("outside the authoritative publication inventory"));
+        assert!(error.contains("unrelated.zip"));
     }
 
     #[test]

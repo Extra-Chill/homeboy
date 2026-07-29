@@ -5,7 +5,9 @@ use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
 
 use super::super::step_success;
-use super::delivery::{existing_release_action, ExistingReleaseAction};
+use super::delivery::{
+    adopted_release_needs_publish, existing_release_action, ExistingReleaseAction,
+};
 use super::gh_cli::{
     gh_command, gh_is_authenticated, gh_is_available, gh_release_exists,
     github_release_publications,
@@ -244,6 +246,20 @@ pub(crate) fn run_github_release(
                 .map_err(|error| {
                 Error::validation_invalid_argument("release assets", error, None, None)
             })?;
+            if !adopted_release_needs_publish(current.is_draft) {
+                homeboy_core::log_status!(
+                    "release",
+                    "GitHub Release {} became published for {} after adoption planning — skipping publish (idempotent)",
+                    tag,
+                    repo_flag
+                );
+                return Ok(skipped_result(
+                    &tag,
+                    &github,
+                    "release-already-published",
+                    None,
+                ));
+            }
             let output = run_gh_command(
                 gh_command(
                     &github,
