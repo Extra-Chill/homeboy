@@ -844,6 +844,21 @@ mod tests {
         }
     }
 
+    /// Install the real release provider for this test binary.
+    ///
+    /// `detect_tag_gap` resolves the latest component tag through the release
+    /// provider registry, and that registry is only populated by the CLI at
+    /// startup. In a `homeboy-release` lib test the `NoopProvider` returns
+    /// `None`, so no tag gap is ever detected and every deploy guard passes
+    /// vacuously — the negative assertions below could not fail for the right
+    /// reason, and the positive one passed for the wrong one (#10126).
+    ///
+    /// Registration overwrites a mutex slot, so calling this from each test is
+    /// safe under any thread count or ordering.
+    fn with_release_provider() {
+        crate::release::provider_impl::register();
+    }
+
     fn init_repo_with_tag_gap(path: &Path) {
         let run = |args: &[&str]| {
             std::process::Command::new("git")
@@ -1442,6 +1457,7 @@ mod tests {
 
     #[test]
     fn default_tagged_release_guard_still_blocks_unreleased_head() {
+        with_release_provider();
         let dir = TempDir::new().expect("temp dir");
         init_repo_with_tag_gap(dir.path());
 
@@ -1459,6 +1475,7 @@ mod tests {
 
     #[test]
     fn default_release_guard_accepts_component_prefixed_tag_at_head() {
+        with_release_provider();
         let dir = TempDir::new().expect("temp dir");
         let root = dir.path();
         let plugin_path = root.join("plugins/host/studio-native");
@@ -1489,6 +1506,7 @@ mod tests {
 
     #[test]
     fn default_release_guard_rejects_commits_after_component_prefixed_tag() {
+        with_release_provider();
         let dir = TempDir::new().expect("temp dir");
         let root = dir.path();
         let plugin_path = root.join("plugins/host/studio-native");
