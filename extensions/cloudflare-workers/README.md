@@ -2,6 +2,8 @@
 
 `cloudflare-workers` is Homeboy Extensions' provider-owned deployment command for a generic Cloudflare Worker. It takes one immutable contract file, verifies the clean checkout and Wrangler target, applies declared secrets through stdin, deploys, runs HTTP gates, and rolls back to the deployment recorded before the attempt when secret provisioning, deployment, or a gate fails.
 
+`homeboy deploy --dry-run` uses the manifest's separate non-mutating provider command. It validates the immutable revision and clean worktree, Wrangler config/account/bindings, authentication, Wrangler's own dry-run, declared secret descriptor availability, and gate declarations. It emits the normal structured result with `mode: "dry_run"` and `status: "validated"`; it does not run predeploy commands or HTTP gates, read secret values, write a result file, provision secrets, deploy, or roll back.
+
 ## Contract
 
 Start from [`examples/deploy-contract.json`](examples/deploy-contract.json):
@@ -35,7 +37,7 @@ Gates run once by default. To opt into bounded readiness retries, declare all re
 
 The retry budget includes the first request. Listed unexpected HTTP statuses, timeouts, and network errors use the remaining budget. Text, response-body-limit, and all other status mismatches fail immediately and retain rollback behavior. Gate evidence records each attempt's ordinal, status (HTTP status, `timeout`, or `network_error`), and elapsed milliseconds; it omits response bodies, URLs, headers, and secrets.
 
-The `cli` manifest exposes the generic CLI-compatible surface. Current Homeboy also requires an `executable.runtime.run_command` to run an extension, so this extension supplies that runtime adapter for the same command. The `deployment_providers` descriptor is retained as declarative metadata for a future Homeboy deployment-provider lowering; it is not invoked by current Homeboy releases.
+The `cli` manifest exposes the generic CLI-compatible surface. Current Homeboy also requires an `executable.runtime.run_command` to run an extension, so this extension supplies that runtime adapter for the same command. `deployment_providers` declares the generic apply and dry-run commands that Homeboy lowers through its normal deploy lifecycle.
 
 Set `durability.redeploy_same_revision` to redeploy the same checked-out revision after the first successful gate sequence and run the same gates again. Secrets are provisioned once before the first deploy; set `durability.rotate_secrets: true` only when the durability proof explicitly requires a second secret write. This proves the declared external behavior survives a runtime replacement; it does not prove durability of state that the declared gates do not exercise.
 
