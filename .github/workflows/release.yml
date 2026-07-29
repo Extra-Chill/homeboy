@@ -41,6 +41,9 @@ env:
   RELEASE_BLOCKING_COMMANDS: ${{ inputs.release_blocking_commands || 'review lint,review test' }}
   HOMEBOY_NO_UPDATE_CHECK: '1'
   RELEASE_MIN_FREE_KB: '5242880'
+  # Must match homeboy-action's `release-branch` input default. The check job
+  # re-attaches HEAD to this branch so the action's branch guard can resolve it.
+  RELEASE_BRANCH: main
 
 # Only one release pipeline at a time. If a push arrives while a release
 # is already running, it queues (never cancels). The queued run starts
@@ -68,6 +71,46 @@ jobs:
         with:
           ref: ${{ inputs.release_tag || github.sha }}
           fetch-depth: 0
+
+      # `actions/checkout` with `ref: <sha>` leaves HEAD DETACHED, so
+      # `git rev-parse --abbrev-ref HEAD` — which is how homeboy-action's
+      # release wrapper identifies the current branch — returns the literal
+      # string "HEAD". Its guard then reads that as "not on main", exits 0
+      # before `homeboy release` ever runs, and writes no release-version.
+      # The decide step below used to read that emptiness as "no releasable
+      # commits", so the pipeline reported success while skipping every job
+      # for 131 commits (#10703).
+      #
+      # Re-attaching HEAD is the honest fix. `--head` (via the action's
+      # `release-head` input) is NOT — that flag means "finish an
+      # already-versioned, already-tagged HEAD" and skips the version and
+      # changelog computation that is the entire purpose of the dry run.
+      #
+      # Attach ONLY when the checked-out commit genuinely IS the release
+      # branch tip, which is the property the guard is actually there to
+      # enforce. If a commit landed between trigger and checkout, or the
+      # workflow was dispatched at an arbitrary SHA, HEAD stays detached,
+      # the guard fires, and the decide step turns that into a hard failure
+      # rather than a silent green.
+      - name: Attach HEAD to the release branch
+        if: inputs.release_tag == ''
+        run: |
+          HEAD_SHA="$(git rev-parse HEAD)"
+          BRANCH_SHA="$(git rev-parse -q --verify "refs/remotes/origin/${RELEASE_BRANCH}" || true)"
+
+          if [ -z "${BRANCH_SHA}" ]; then
+            echo "::warning::No refs/remotes/origin/${RELEASE_BRANCH} in this checkout - leaving HEAD detached"
+            exit 0
+          fi
+
+          if [ "${HEAD_SHA}" != "${BRANCH_SHA}" ]; then
+            echo "::warning::HEAD ${HEAD_SHA:0:8} is not the ${RELEASE_BRANCH} tip ${BRANCH_SHA:0:8} - leaving HEAD detached"
+            exit 0
+          fi
+
+          git checkout -q -B "${RELEASE_BRANCH}" "${HEAD_SHA}"
+          git branch --quiet --set-upstream-to "origin/${RELEASE_BRANCH}" "${RELEASE_BRANCH}" 2>/dev/null || true
+          echo "::notice::HEAD attached to ${RELEASE_BRANCH} at ${HEAD_SHA:0:8}"
 
       - name: Restore failed release marker
         id: failure-cache
@@ -183,8 +226,36 @@ jobs:
           RELEASE_VERSION="${{ steps.recovery.outputs['release-version'] || steps.release-check.outputs['release-version'] }}"
           RELEASE_TAG="${{ steps.recovery.outputs['release-tag'] || steps.release-check.outputs['release-tag'] }}"
           BUMP_TYPE="${{ steps.recovery.outputs['release-bump-type'] || steps.release-check.outputs['release-bump-type'] }}"
+          DRY_RUN_OUTCOME="${{ steps.release-check.outcome }}"
+          SKIPPED_REASON="${{ steps.release-check.outputs['skipped-reason'] }}"
 
           echo "recovery-attempts=${STRANDED_ATTEMPTS:-0}" >> "$GITHUB_OUTPUT"
+
+          # #10685: absence of evidence must never be evidence of success.
+          # An empty release-version has two very different causes, and this
+          # step used to collapse both into "No releasable commits":
+          #
+          #   MEASURED   - `homeboy release --dry-run` evaluated the commit
+          #                range and declined. Core emits exactly three such
+          #                reasons from planning_policy.rs.
+          #   UNMEASURED - the action's wrapper bailed before invoking core,
+          #                so nothing was ever evaluated. `wrong-branch` is
+          #                the one that silently ate 131 commits (#10703);
+          #                `release-output-missing` is the other.
+          #
+          # Only a measured negative may render "nothing to release". Anything
+          # else is UNKNOWN and fails the job loudly, because a release
+          # pipeline that cannot tell whether it has work to do must not
+          # report success while skipping every downstream job.
+          if [ "${DRY_RUN_OUTCOME}" = "success" ] && [ -z "${RELEASE_VERSION}" ]; then
+            case "${SKIPPED_REASON}" in
+              no-releasable-commits|release-already-at-head|major-requires-flag) ;;
+              *)
+                echo "::error::Release check could not determine whether there is anything to release at ${HEAD_SHA:0:8}. The dry run produced no release-version and no measured skip reason (skipped-reason='${SKIPPED_REASON:-<empty>}'). This is an UNKNOWN result, not 'nothing to release', so the pipeline is failing instead of skipping every job and reporting success. If skipped-reason is 'wrong-branch', HEAD was detached and the branch guard fired before any commit range was evaluated — see the 'Attach HEAD to the release branch' step above and issue #10703."
+                exit 1
+                ;;
+            esac
+          fi
 
           if [ -n "${RECOVERY_TAG}" ]; then
             # Explicit workflow_dispatch recovery always wins.
@@ -215,8 +286,12 @@ jobs:
           elif [ "${{ steps.failed-release.outputs.blocked }}" = "true" ]; then
             echo "should-release=false" >> "$GITHUB_OUTPUT"
           elif [ -z "${RELEASE_VERSION}" ]; then
+            # Reached only after the measurement check above accepted the
+            # skip reason, so this really is a measured negative. Report the
+            # reason by name — "no releasable commits" is a lie when core
+            # actually said `major-requires-flag` or `release-already-at-head`.
             echo "should-release=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No releasable commits at HEAD ${HEAD_SHA:0:8}"
+            echo "::notice::Not releasing at HEAD ${HEAD_SHA:0:8} — ${SKIPPED_REASON:-no-releasable-commits}"
           else
             echo "should-release=true" >> "$GITHUB_OUTPUT"
             echo "release-bump-type=${BUMP_TYPE}" >> "$GITHUB_OUTPUT"
