@@ -4,6 +4,127 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.322.0] - 2026-07-29
+
+### Added
+- a shared measurement_ok invariant, so a gate cannot report success without proving it measured
+- make a slow test a first-class finding
+- produce the evidence manifest instead of only reading it
+- widen core-agnostic-source term coverage
+- prune managed binary caches
+- give notifications a structured payload and make cooks emit
+- drop confirmation flags the lifecycle controller already proves
+- add shared ScopeArgs clap group for entity selection
+
+### Changed
+- isolate cook handoff CLI subprocesses
+- Add automatic bounded Cargo retention
+- Preserve failed Cook continuation claims
+- restore continuous rolling releases
+- Resume exact tracked promotion candidates
+- pin that shell gate commands infer no toolchain
+- Finish terminal Cook candidates across runtime generations
+- Configure worktree provider lookup bounds
+- Recover detached Lab Cook candidates
+- one watch loop, and pin the ScopeArgs boundary
+- collapse structurally identical artifact-ref types
+- fold scaffolding-only crates and collapse duplicate enums
+- convert the last provider singleton to provider_registry_arc!
+- Collapse five structurally identical artifact-ref types, and disambiguate the three named ArtifactRef
+- Generate the CLI reference from clap
+- delete GlobalArgs and the dead ops descriptor spec column
+- handle removed hermetic environment values
+- hoist retention store and reap artifact-root scratch
+- split platform mode read into cfg-gated helpers
+- flatten ScopeArgs into status
+- flatten ScopeArgs into build
+- flatten ScopeArgs into triage landing
+- trim artifacts facade to symbols with real consumers
+- delete dead extension-manifest surface
+
+### Fixed
+- prefer stale materialized workspace cleanup
+- keep gate feedback out of mutation startup
+- stop the release check laundering a detached HEAD into "nothing to release"
+- converge adoption gate cancellation
+- complete adoption cancellation after process kill
+- preserve declared base through promotion recovery
+- normalize daemon health envelopes
+- hand off successful Main Guard proof
+- verify failed release rollback head
+- reconcile draining generations over SSH
+- align agent tests with durable contracts
+- project a terminal reverse result after the worker exits
+- make release lint baseline-aware
+- bind qualification repository context
+- block landing until exact-head checks settle
+- discover retained Cook artifacts by task id
+- bound runner disconnect recovery
+- model pending reverse runner results
+- qualify immutable Main Guard candidates
+- queue all runner execs at capacity
+- route nested singular test directories
+- keep explicit local cook continuation on controller
+- retain workspace authority through cleanup
+- report an exhausted test budget as a timeout, not a harness failure
+- preserve finalized artifact media types
+- keep deferred workload reads side-effect free
+- bound recovery control-binary lineage to the release target
+- stop collapsing signal kills into provider_empty_stdout and stop redacting log prose
+- finalize and unregister ephemeral attempt Git worktrees
+- accept runner-bound Cook retry plans
+- propagate force through Cook retry reservation
+- bound atomic artifact publication names
+- separate evidence-contract failures from workload failures and make fuzz proof reviewer-ready
+- route review tests through Lab
+- three CLI-surface bugs — refresh-plan --output collision, git error leak, extension readiness gating
+- prune terminal lifecycle workspaces
+- preserve mixed-runtime Cook continuation
+- adopt a complete draft without rebuilding, and name inventory mismatches
+- separate worktree ensure timeout
+- expect cargo-dist's full published asset inventory
+- make the audit-corpus and release-workflow gates assert effects
+- contain and tag runner artifact downloads
+- recover Lab Cook continuation runtime pins
+- make runner reconnect recovery deterministic
+- give runner-downloads an ownership, age, and liveness predicate
+- unify canonical candidate status
+- publish intentional assetless drafts
+- recover substantive Cook candidates
+- retain nested test evidence
+- compare deployed package contents
+- make agent task retries idempotent
+- poll reverse staging through broker
+- read nested review corpus summary
+- align finalizer runtime baseline
+- preserve GitHub failure diagnostics
+- allow unmatched convention exceptions
+- make the post-merge audit gate actually scan, and unblind the source-policy corpus
+- preserve reverse broker handoff transport
+- close the two formatter blind spots that hid 34 files from cargo fmt
+- resolve every cleanup entry point through one retention policy
+- adopt verified stranded drafts
+- strip AppleDouble extension metadata
+- one currency verdict for materialization staleness, and two fail-open bugs it exposed
+- wire WorkloadSpec.lifecycle and report the lifecycle_snapshots drift class
+- include crates/contracts/* in the workspace
+- preserve runner failure evidence
+- reconcile jobs across transports
+- align Windows release contract
+- keep raw agent tool dispatch local
+- never report a tag as delivered over an unpublished draft
+- unify deploy and harvest tree walks behind one scanner
+- migrate legacy shared cargo targets
+- initialize staging adapter once
+- configure controller reviewer origin
+- admit generic detached command recipes
+- require exact reviewer routes
+- durably hand off detached bench runs
+- return controller artifact references
+- expose extension test result sidecar
+- populate daemon repair_plan across the SSH boundary
+- retain controller runtime for cook continuation
+
 ## [0.321.1] - 2026-07-27
 
 ### Changed
