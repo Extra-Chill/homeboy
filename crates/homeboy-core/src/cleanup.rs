@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::defaults::HomeboyConfig;
 use crate::resource_cleanup_intent::ResourceCleanupIntent;
@@ -221,6 +222,17 @@ pub struct ArtifactCleanupApplied {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rehydrate_command: Option<String>,
     pub removed: bool,
+    pub provenance: ArtifactCleanupDeletionProvenance,
+}
+
+/// Durable identity and decision facts for a reconstructable artifact removal.
+/// `run_ref` resolves through `homeboy runs show <id>`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ArtifactCleanupDeletionProvenance {
+    pub run_ref: String,
+    pub deleted_at: String,
+    pub policy: String,
+    pub protection_decision: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -313,6 +325,20 @@ pub fn cleanup_artifacts(options: ArtifactCleanupOptions) -> Result<ArtifactClea
     let root = resolve_root(&options)?;
     let worktrees = discover_worktrees(&root)?;
     cleanup_artifacts_in_worktrees(root, worktrees, &options, true)
+}
+
+fn start_artifact_cleanup_run(
+    root: &Path,
+) -> Result<(crate::observation::ObservationStore, String)> {
+    let store = crate::observation::ObservationStore::open_initialized()?;
+    let run = store.start_run(
+        crate::observation::NewRunRecord::builder("cleanup.artifacts")
+            .command("homeboy cleanup artifacts")
+            .cwd_path(root)
+            .metadata(json!({ "cleanup": { "command": "cleanup.artifacts" } }))
+            .build(),
+    )?;
+    Ok((store, run.id))
 }
 
 /// Remove declared rebuildable artifacts from one completed worktree without
@@ -420,8 +446,8 @@ fn collect_worktree_candidates(
             continue;
         }
         if declaration.liveness_protected
-            && !options.include_active_worktrees
             && liveness == LIVENESS_ACTIVE
+            && (!options.include_active_worktrees || declaration.kind == "rust_target")
         {
             skipped.push(skip_row(
                 worktree,
@@ -542,10 +568,39 @@ fn cleanup_artifacts_in_worktrees(
 
     order_and_limit_candidates(&mut candidates, options.sort, options.limit);
 
+    let cleanup_run = options
+        .apply
+        .then(|| start_artifact_cleanup_run(&root))
+        .transpose()?;
     let (applied, failed) = if options.apply {
+        let run_ref = cleanup_run
+            .as_ref()
+            .expect("apply cleanup has a provenance run")
+            .1
+            .clone();
         apply_artifact_candidates(&candidates, |candidate| {
+            // Re-read durable worktree activity immediately before mutation so a
+            // task admitted after planning cannot lose its local Cargo output.
+            if candidate.kind == "rust_target"
+                && ActiveWorktrees::resolve().liveness(Path::new(&candidate.worktree))
+                    == LIVENESS_ACTIVE
+            {
+                return None;
+            }
             let path = Path::new(&candidate.path);
-            path.exists().then(|| remove_artifact_path(path))
+            path.exists().then(|| {
+                remove_artifact_path(path).map(|()| {
+                    applied_row(
+                        candidate,
+                        ArtifactCleanupDeletionProvenance {
+                            run_ref: format!("homeboy://run/{run_ref}"),
+                            deleted_at: chrono::Utc::now().to_rfc3339(),
+                            policy: "reconstructable artifact passed Git, age, and worktree activity gates".to_string(),
+                            protection_decision: "no registered active task worktree".to_string(),
+                        },
+                    )
+                })
+            })
         })
     } else {
         (Vec::new(), Vec::new())
@@ -568,7 +623,7 @@ fn cleanup_artifacts_in_worktrees(
         remaining_candidate_bytes,
     );
 
-    Ok(ArtifactCleanupOutput {
+    let output = ArtifactCleanupOutput {
         command: "cleanup.artifacts",
         mode: if options.apply { "apply" } else { "dry_run" },
         root: root.to_string_lossy().to_string(),
@@ -590,7 +645,23 @@ fn cleanup_artifacts_in_worktrees(
         skipped,
         applied,
         failed,
-    })
+    };
+    if let Some((store, run_id)) = cleanup_run {
+        store.finish_run(
+            &run_id,
+            crate::observation::RunStatus::Pass,
+            Some(json!({
+                "cleanup": {
+                    "command": output.command,
+                    "mode": output.mode,
+                    "policy": "reconstructable artifact passed Git, age, and worktree activity gates",
+                    "applied": output.applied,
+                    "failed": output.failed,
+                }
+            })),
+        )?;
+    }
+    Ok(output)
 }
 
 fn artifact_cleanup_apply_command(options: &ArtifactCleanupOptions) -> String {
@@ -847,13 +918,13 @@ fn apply_artifact_candidates<Remove>(
     mut remove: Remove,
 ) -> (Vec<ArtifactCleanupApplied>, Vec<ArtifactCleanupFailed>)
 where
-    Remove: FnMut(&ArtifactCleanupCandidate) -> Option<Result<()>>,
+    Remove: FnMut(&ArtifactCleanupCandidate) -> Option<Result<ArtifactCleanupApplied>>,
 {
     let mut applied = Vec::new();
     let mut failed = Vec::new();
     for candidate in candidates {
         match remove(candidate) {
-            Some(Ok(())) => applied.push(applied_row(candidate)),
+            Some(Ok(row)) => applied.push(row),
             Some(Err(error)) => failed.push(failed_row(candidate, error.message)),
             None => {}
         }
@@ -914,7 +985,7 @@ pub fn artifact_declarations(worktree: &Path) -> Result<Vec<ArtifactDeclaration>
             reconstructable: true,
             rehydrate_command: None,
             min_age_days: None,
-            liveness_protected: false,
+            liveness_protected: true,
         })
         .collect();
 
@@ -1130,7 +1201,10 @@ fn has_untracked_work_at(untracked_paths: &[String], relative_path: &str) -> boo
     })
 }
 
-fn applied_row(candidate: &ArtifactCleanupCandidate) -> ArtifactCleanupApplied {
+fn applied_row(
+    candidate: &ArtifactCleanupCandidate,
+    provenance: ArtifactCleanupDeletionProvenance,
+) -> ArtifactCleanupApplied {
     ArtifactCleanupApplied {
         worktree: candidate.worktree.clone(),
         path: candidate.path.clone(),
@@ -1141,6 +1215,7 @@ fn applied_row(candidate: &ArtifactCleanupCandidate) -> ArtifactCleanupApplied {
         allocated_bytes: candidate.allocated_bytes,
         rehydrate_command: candidate.rehydrate_command.clone(),
         removed: true,
+        provenance,
     }
 }
 
@@ -1503,7 +1578,7 @@ mod tests {
             );
             assert_eq!(declarations[0].category, LEGACY_ARTIFACT_CATEGORY);
             assert!(declarations[0].reconstructable);
-            assert!(!declarations[0].liveness_protected);
+            assert!(declarations[0].liveness_protected);
         });
     }
 
@@ -2328,7 +2403,15 @@ mod tests {
             .relative_path
             .as_str()
         {
-            "target" => Some(Ok(())),
+            "target" => Some(Ok(applied_row(
+                candidate,
+                ArtifactCleanupDeletionProvenance {
+                    run_ref: "homeboy://run/test".to_string(),
+                    deleted_at: "2026-01-01T00:00:00Z".to_string(),
+                    policy: "test".to_string(),
+                    protection_decision: "test".to_string(),
+                },
+            ))),
             "dist" => Some(Err(Error::internal_unexpected("remove failed"))),
             _ => None,
         });
@@ -3107,8 +3190,46 @@ mod tests {
                 "liveness state is reported for the checkout"
             );
             assert!(
-                !repo.path().join("target").exists(),
-                "built-in declarations keep their existing behavior on active checkouts"
+                repo.path().join("target").exists(),
+                "active worktrees protect built-in Cargo targets"
+            );
+
+            crate::worktree::remove_record_for_test("fixture-active");
+            let output = cleanup_artifacts(ArtifactCleanupOptions {
+                apply: true,
+                ..dry_run_options(repo.path())
+            })
+            .expect("cleanup after task worktree activity ends");
+            let target = output
+                .applied
+                .iter()
+                .find(|row| row.relative_path == "target")
+                .expect("target becomes eligible after activity ends");
+            assert!(!repo.path().join("target").exists());
+            assert!(target.provenance.run_ref.starts_with("homeboy://run/"));
+            assert_eq!(
+                target.provenance.protection_decision,
+                "no registered active task worktree"
+            );
+
+            let run_id = target
+                .provenance
+                .run_ref
+                .strip_prefix("homeboy://run/")
+                .expect("run reference format");
+            let run = crate::observation::ObservationStore::open_readonly()
+                .expect("open cleanup provenance store")
+                .get_run(run_id)
+                .expect("read cleanup run")
+                .expect("cleanup run exists");
+            assert_eq!(run.kind, "cleanup.artifacts");
+            assert_eq!(
+                run.metadata_json["cleanup"]["applied"][0]["path"],
+                target.path
+            );
+            assert_eq!(
+                run.metadata_json["cleanup"]["applied"][0]["provenance"]["run_ref"],
+                target.provenance.run_ref
             );
         });
     }

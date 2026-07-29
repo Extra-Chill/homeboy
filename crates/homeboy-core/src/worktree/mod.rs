@@ -119,6 +119,12 @@ pub(crate) fn record_active_for_test(id: &str, worktree_path: &Path) {
     write_record(&store, &record).expect("write task worktree record");
 }
 
+#[cfg(test)]
+pub(crate) fn remove_record_for_test(id: &str) {
+    let store = metadata_dir().expect("task worktree store");
+    fs::remove_file(record_path(&store, id)).expect("remove task worktree record");
+}
+
 use store_ops::*;
 
 pub fn queue_create(options: WorktreeQueueCreateOptions) -> Result<WorktreeQueueCreateOutput> {
