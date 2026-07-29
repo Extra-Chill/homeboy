@@ -791,9 +791,8 @@ impl GenerationEndpointOperations for HttpGenerationEndpointOperations {
             .get(format!("{}/health", local_url.trim_end_matches('/')))
             .send()
             .ok()?;
-        health
-            .json::<serde_json::Value>()
-            .ok()?
+        let health = health.json::<serde_json::Value>().ok()?;
+        daemon_health_data(&health)
             .pointer("/freshness/active_jobs")
             .and_then(serde_json::Value::as_u64)
             .and_then(|count| usize::try_from(count).ok())
@@ -862,7 +861,8 @@ impl SshGenerationEndpointOperations<'_> {
     fn authenticated_health(&self, session: &RunnerSession) -> Option<serde_json::Value> {
         let output = self.request("GET", session, "/health", None)?;
         let health = serde_json::from_str::<serde_json::Value>(&output).ok()?;
-        Self::health_matches_session(session, &health).then_some(health)
+        let health = daemon_health_data(&health);
+        Self::health_matches_session(session, health).then(|| health.clone())
     }
 
     fn health_matches_session(session: &RunnerSession, health: &serde_json::Value) -> bool {
@@ -872,12 +872,21 @@ impl SshGenerationEndpointOperations<'_> {
         let Some(expected_pid) = session.remote_daemon_pid.map(u64::from) else {
             return false;
         };
-        health
+        let observed_lease = health
             .pointer("/lease/lease_id")
             .and_then(serde_json::Value::as_str)
-            == Some(expected_lease)
+            .or_else(|| {
+                health
+                    .pointer("/freshness/lease_id")
+                    .and_then(serde_json::Value::as_str)
+            });
+        observed_lease == Some(expected_lease)
             && health.get("pid").and_then(serde_json::Value::as_u64) == Some(expected_pid)
     }
+}
+
+fn daemon_health_data(health: &serde_json::Value) -> &serde_json::Value {
+    health.get("data").unwrap_or(health)
 }
 
 impl GenerationEndpointOperations for SshGenerationEndpointOperations<'_> {
@@ -1560,6 +1569,22 @@ mod tests {
             &expected,
             &json!({ "pid": 43, "lease": { "lease_id": "lease-a" } }),
         ));
+        let wrapped = json!({
+            "success": true,
+            "data": {
+                "pid": 42,
+                "lease": null,
+                "freshness": { "lease_id": "lease-a", "active_jobs": 0 },
+            },
+        });
+        assert!(SshGenerationEndpointOperations::health_matches_session(
+            &expected,
+            daemon_health_data(&wrapped),
+        ));
+        assert_eq!(
+            daemon_health_data(&wrapped).pointer("/freshness/active_jobs"),
+            Some(&json!(0)),
+        );
     }
 
     fn persisted_registry(runner_id: &str) -> serde_json::Value {
