@@ -546,6 +546,16 @@ fn retained_storage_report(
 
 fn retained_storage_filesystem_inventory() -> homeboy::core::Result<RetainedStorageFilesystem> {
     let root = homeboy::core::paths::homeboy_data()?;
+    let artifact_root = homeboy::core::artifacts::root()?;
+    let cargo_target_root = cleanup::shared_cargo_target_root()?;
+    retained_storage_filesystem_inventory_for(root, artifact_root, cargo_target_root)
+}
+
+fn retained_storage_filesystem_inventory_for(
+    root: PathBuf,
+    artifact_root: PathBuf,
+    cargo_target_root: PathBuf,
+) -> homeboy::core::Result<RetainedStorageFilesystem> {
     let root_usage = filesystem_usage(&root)?;
     let mut top_level = Vec::new();
     if root.exists() {
@@ -567,13 +577,20 @@ fn retained_storage_filesystem_inventory() -> homeboy::core::Result<RetainedStor
 
     // An explicit artifact root can live on a separate volume. It is still a
     // Homeboy store, but cannot be reconciled into the data-root totals.
-    let artifact_root = homeboy::core::artifacts::root()?;
     if !artifact_root.starts_with(&root) {
         top_level.push(filesystem_entry_with_category(
             artifact_root,
             "artifacts",
             "managed/external",
             "homeboy cleanup --include persisted-run-artifacts",
+        )?);
+    }
+    if !cargo_target_root.starts_with(&root) {
+        top_level.push(filesystem_entry_with_category(
+            cargo_target_root,
+            "shared_cargo_targets",
+            "managed/external",
+            "homeboy cleanup --include shared-cargo-targets",
         )?);
     }
     top_level.sort_by_key(|entry| std::cmp::Reverse(entry.physical_bytes));
@@ -2692,6 +2709,33 @@ mod tests {
         assert_eq!(
             unknown_entry.cleanup_or_status_command,
             "inspect path ownership before removal"
+        );
+    }
+
+    #[test]
+    fn retained_storage_filesystem_inventory_reports_configured_external_cargo_root() {
+        let data = TempDir::new().expect("data root");
+        let cargo_root = TempDir::new().expect("cargo root");
+        std::fs::write(cargo_root.path().join("artifact"), b"cargo output")
+            .expect("cargo artifact");
+
+        let inventory = retained_storage_filesystem_inventory_for(
+            data.path().to_path_buf(),
+            data.path().join("artifacts"),
+            cargo_root.path().to_path_buf(),
+        )
+        .expect("filesystem inventory");
+
+        let cargo = inventory
+            .top_level
+            .iter()
+            .find(|entry| entry.category == "shared_cargo_targets")
+            .expect("configured Cargo root");
+        assert_eq!(cargo.path, cargo_root.path().display().to_string());
+        assert_eq!(cargo.classification, "managed/external");
+        assert_eq!(
+            cargo.cleanup_or_status_command,
+            "homeboy cleanup --include shared-cargo-targets"
         );
     }
 

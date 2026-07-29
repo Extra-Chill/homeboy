@@ -17,7 +17,8 @@ use crate::{git, Error, Result};
 mod cargo_targets;
 pub use cargo_targets::{
     acquire_shared_cargo_target, cleanup_shared_cargo_targets, shared_cargo_target_inventory,
-    CargoTargetCleanupOptions, CargoTargetCleanupOutput, SharedCargoTargetLease,
+    shared_cargo_target_root, shared_cargo_target_storage_status, CargoTargetCleanupOptions,
+    CargoTargetCleanupOutput, CargoTargetStorageStatus, SharedCargoTargetLease,
 };
 mod automatic_retention;
 pub use automatic_retention::{run_automatic_cargo_retention, AutomaticRetentionOutput};

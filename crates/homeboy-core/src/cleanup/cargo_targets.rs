@@ -6,9 +6,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use fs4::fs_std::FileExt;
 use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
+use serde_json::json;
 
 use crate::{Error, Result};
 
+pub const HOMEBOY_CARGO_TARGET_ROOT_ENV: &str = "HOMEBOY_CARGO_TARGET_ROOT";
 const LOCK_FILE: &str = ".homeboy-lock";
 const LEASE_FILE: &str = ".homeboy-lease";
 const OWNER_FILE: &str = ".homeboy-owner";
@@ -34,6 +36,7 @@ pub struct CargoTargetCleanupOutput {
     pub command: &'static str,
     pub mode: &'static str,
     pub root: String,
+    pub storage: CargoTargetStorageStatus,
     pub inventory_bytes: u64,
     pub inventory_count: usize,
     pub inspected_count: usize,
@@ -58,6 +61,23 @@ pub struct CargoTargetStore {
     pub size_bytes: u64,
     pub last_used_unix_ms: u64,
     pub reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct CargoTargetStorageStatus {
+    pub root: String,
+    pub filesystem: String,
+    pub available_bytes: u64,
+    pub available_inodes: u64,
+    pub reserve_bytes: u64,
+    pub reserve_inodes: u64,
+    pub managed_bytes: u64,
+    pub protected_bytes: u64,
+    pub cleanup_command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legacy_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legacy_discovery_command: Option<String>,
 }
 
 /// A live, shared Cargo target-store lease. The shared advisory lock makes the
@@ -86,8 +106,36 @@ impl Drop for SharedCargoTargetLease {
 }
 
 pub fn acquire_shared_cargo_target(owner: &str) -> Result<SharedCargoTargetLease> {
-    let root = homeboy_paths::cargo_targets_store()?;
+    let root = shared_cargo_target_root()?;
+    admit_shared_cargo_target(&root)?;
     acquire_shared_cargo_target_in(&root, owner, SystemTime::now())
+}
+
+/// Resolve the one shared Cargo store used by producers, cleanup, and reports.
+/// The environment is useful for one process; the persisted setting is for the
+/// host. The historical data-root location remains the compatibility default.
+pub fn shared_cargo_target_root() -> Result<PathBuf> {
+    let configured = crate::defaults::load_config().cargo_target_root;
+    resolve_shared_cargo_target_root(
+        std::env::var(HOMEBOY_CARGO_TARGET_ROOT_ENV).ok().as_deref(),
+        configured.as_deref(),
+    )
+}
+
+fn resolve_shared_cargo_target_root(
+    env: Option<&str>,
+    configured: Option<&str>,
+) -> Result<PathBuf> {
+    for path in [env, configured].into_iter().flatten() {
+        if !path.trim().is_empty() {
+            return Ok(homeboy_paths::expand_tilde_path(path));
+        }
+    }
+    legacy_shared_cargo_target_root()
+}
+
+fn legacy_shared_cargo_target_root() -> Result<PathBuf> {
+    homeboy_paths::cargo_targets_store()
 }
 
 pub(crate) fn acquire_shared_cargo_target_in(
@@ -119,9 +167,7 @@ pub(crate) fn acquire_shared_cargo_target_in(
 pub fn cleanup_shared_cargo_targets(
     options: CargoTargetCleanupOptions,
 ) -> Result<CargoTargetCleanupOutput> {
-    let root = options
-        .root
-        .unwrap_or(homeboy_paths::cargo_targets_store()?);
+    let root = options.root.unwrap_or(shared_cargo_target_root()?);
     let mut stores = inventory(&root, options.now, options.older_than, options.lease_ttl)?;
     let inventory_bytes: u64 = stores.iter().map(|store| store.size_bytes).sum();
     stores.sort_by(order_stores);
@@ -224,6 +270,7 @@ pub fn cleanup_shared_cargo_targets(
         command: "cleanup.shared_cargo_targets",
         mode: if options.apply { "apply" } else { "dry_run" },
         root: root.to_string_lossy().to_string(),
+        storage: storage_status(&root, options.now, options.older_than, options.lease_ttl)?,
         inventory_bytes,
         inventory_count: stores.len(),
         inspected_count,
@@ -248,10 +295,160 @@ pub fn shared_cargo_target_inventory(
     older_than: Duration,
     lease_ttl: Duration,
 ) -> Result<Vec<CargoTargetStore>> {
-    let root = root.unwrap_or(homeboy_paths::cargo_targets_store()?);
+    let root = root.unwrap_or(shared_cargo_target_root()?);
     let mut stores = inventory(&root, now, older_than, lease_ttl)?;
     stores.sort_by(order_stores);
     Ok(stores)
+}
+
+/// Capacity and lifecycle facts for status and retained-storage reporting.
+pub fn shared_cargo_target_storage_status(
+    now: SystemTime,
+    older_than: Duration,
+    lease_ttl: Duration,
+) -> Result<CargoTargetStorageStatus> {
+    let root = shared_cargo_target_root()?;
+    storage_status(&root, now, older_than, lease_ttl)
+}
+
+fn storage_status(
+    root: &Path,
+    now: SystemTime,
+    older_than: Duration,
+    lease_ttl: Duration,
+) -> Result<CargoTargetStorageStatus> {
+    let retention = crate::defaults::load_config().retention;
+    let capacity = filesystem_capacity(root)?;
+    let stores = inventory(root, now, older_than, lease_ttl)?;
+    let managed_bytes = stores.iter().map(|store| store.size_bytes).sum();
+    let protected_bytes = stores
+        .iter()
+        .filter(|store| store.reasons.iter().any(|reason| reason == "active_lease"))
+        .map(|store| store.size_bytes)
+        .sum();
+    let legacy_root = legacy_shared_cargo_target_root()?;
+    let moved = legacy_root != root && legacy_root.exists();
+    Ok(CargoTargetStorageStatus {
+        root: root.display().to_string(),
+        filesystem: capacity.filesystem,
+        available_bytes: capacity.available_bytes,
+        available_inodes: capacity.available_inodes,
+        reserve_bytes: retention.shared_store_reserve_bytes,
+        reserve_inodes: retention.shared_store_reserve_inodes,
+        managed_bytes,
+        protected_bytes,
+        cleanup_command: "homeboy cleanup --include shared-cargo-targets --apply".to_string(),
+        legacy_root: moved.then(|| legacy_root.display().to_string()),
+        legacy_discovery_command: moved.then(|| {
+            format!(
+                "HOMEBOY_CARGO_TARGET_ROOT={} homeboy cleanup --include shared-cargo-targets",
+                shell_quote(&legacy_root.display().to_string())
+            )
+        }),
+    })
+}
+
+fn admit_shared_cargo_target(root: &Path) -> Result<()> {
+    fs::create_dir_all(root).map_err(|error| io_error(error, "create shared Cargo target root"))?;
+    let retention = crate::defaults::load_config().retention;
+    let capacity = filesystem_capacity(root)?;
+    admit_shared_cargo_target_with_capacity(root, &retention, capacity)
+}
+
+fn admit_shared_cargo_target_with_capacity(
+    root: &Path,
+    retention: &crate::defaults::RetentionConfig,
+    capacity: FilesystemCapacity,
+) -> Result<()> {
+    if capacity.available_bytes >= retention.shared_store_reserve_bytes
+        && capacity.available_inodes >= retention.shared_store_reserve_inodes
+    {
+        return Ok(());
+    }
+    let stores = inventory(
+        root,
+        SystemTime::now(),
+        Duration::from_secs(retention.shared_store_days.saturating_mul(86_400)),
+        Duration::from_secs(retention.shared_store_lease_seconds),
+    )?;
+    let mut reclaimable: Vec<_> = stores
+        .iter()
+        .filter(|store| !store.reasons.iter().any(|reason| reason == "active_lease"))
+        .collect();
+    reclaimable.sort_by_key(|store| std::cmp::Reverse(store.size_bytes));
+    let protected_bytes: u64 = stores
+        .iter()
+        .filter(|store| store.reasons.iter().any(|reason| reason == "active_lease"))
+        .map(|store| store.size_bytes)
+        .sum();
+    let mut error = Error::validation_invalid_argument(
+        "shared_cargo_target",
+        "target filesystem does not satisfy the configured free-space reserve",
+        Some(root.display().to_string()),
+        Some(vec![
+            "homeboy cleanup --include shared-cargo-targets --apply".to_string(),
+        ]),
+    );
+    error.details["filesystem"] = json!(capacity.filesystem);
+    error.details["available_bytes"] = json!(capacity.available_bytes);
+    error.details["available_inodes"] = json!(capacity.available_inodes);
+    error.details["reserve_bytes"] = json!(retention.shared_store_reserve_bytes);
+    error.details["reserve_inodes"] = json!(retention.shared_store_reserve_inodes);
+    error.details["protected_bytes"] = json!(protected_bytes);
+    error.details["largest_reclaimable_stores"] = json!(reclaimable
+        .into_iter()
+        .take(5)
+        .map(|store| json!({ "path": store.path, "size_bytes": store.size_bytes }))
+        .collect::<Vec<_>>());
+    error.details["cleanup_command"] =
+        json!("homeboy cleanup --include shared-cargo-targets --apply");
+    Err(error)
+}
+
+struct FilesystemCapacity {
+    filesystem: String,
+    available_bytes: u64,
+    available_inodes: u64,
+}
+
+#[cfg(unix)]
+fn filesystem_capacity(path: &Path) -> Result<FilesystemCapacity> {
+    use std::ffi::CString;
+
+    let probe = existing_ancestor(path);
+    let path = CString::new(probe.as_os_str().as_encoded_bytes())
+        .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return Err(io_error(
+            std::io::Error::last_os_error(),
+            "probe shared Cargo target filesystem",
+        ));
+    }
+    let stat = unsafe { stat.assume_init() };
+    Ok(FilesystemCapacity {
+        filesystem: format!("device:{}", stat.f_fsid),
+        available_bytes: u64::try_from(
+            u128::from(stat.f_bavail).saturating_mul(u128::from(stat.f_frsize)),
+        )
+        .unwrap_or(u64::MAX),
+        available_inodes: u64::from(stat.f_favail),
+    })
+}
+
+fn existing_ancestor(path: &Path) -> &Path {
+    path.ancestors()
+        .find(|candidate| candidate.exists())
+        .unwrap_or(path)
+}
+
+#[cfg(not(unix))]
+fn filesystem_capacity(path: &Path) -> Result<FilesystemCapacity> {
+    Ok(FilesystemCapacity {
+        filesystem: path.display().to_string(),
+        available_bytes: u64::MAX,
+        available_inodes: u64::MAX,
+    })
 }
 
 #[derive(PartialEq, Eq)]
@@ -583,6 +780,70 @@ mod tests {
         set_modified(&artifact, stale);
         set_modified(&path, stale);
         path
+    }
+
+    #[test]
+    fn admission_rejects_before_build_and_reports_capacity_and_reclaimable_stores() {
+        let root = TempDir::new().unwrap();
+        let now = SystemTime::now();
+        let reclaimable = store(root.path(), "reclaimable", 12, Duration::ZERO, now);
+        let protected = acquire_shared_cargo_target_in(root.path(), "protected", now).unwrap();
+        fs::write(protected.target_dir().join("artifact"), vec![b'x'; 7]).unwrap();
+        let retention = crate::defaults::RetentionConfig {
+            shared_store_reserve_bytes: 100,
+            shared_store_reserve_inodes: 10,
+            ..crate::defaults::RetentionConfig::default()
+        };
+
+        let error = admit_shared_cargo_target_with_capacity(
+            root.path(),
+            &retention,
+            FilesystemCapacity {
+                filesystem: "constrained-test-volume".to_string(),
+                available_bytes: 99,
+                available_inodes: 9,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.details["filesystem"], "constrained-test-volume");
+        assert_eq!(error.details["reserve_bytes"], 100);
+        assert_eq!(error.details["reserve_inodes"], 10);
+        assert_eq!(error.details["protected_bytes"], 7);
+        assert_eq!(
+            error.details["largest_reclaimable_stores"][0]["path"],
+            reclaimable.display().to_string()
+        );
+        assert_eq!(
+            error.details["cleanup_command"],
+            "homeboy cleanup --include shared-cargo-targets --apply"
+        );
+        assert!(protected.target_dir().exists());
+    }
+
+    #[test]
+    fn configured_root_is_the_root_used_for_admission() {
+        let configured = TempDir::new().unwrap();
+        let root = resolve_shared_cargo_target_root(None, configured.path().to_str()).unwrap();
+        let retention = crate::defaults::RetentionConfig {
+            shared_store_reserve_bytes: 1,
+            ..crate::defaults::RetentionConfig::default()
+        };
+
+        let error = admit_shared_cargo_target_with_capacity(
+            &root,
+            &retention,
+            FilesystemCapacity {
+                filesystem: "configured-volume".to_string(),
+                available_bytes: 0,
+                available_inodes: u64::MAX,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(root, configured.path());
+        assert_eq!(error.details["id"], configured.path().display().to_string());
+        assert_eq!(error.details["filesystem"], "configured-volume");
     }
     fn set_modified(path: &Path, modified: SystemTime) {
         File::open(path)
