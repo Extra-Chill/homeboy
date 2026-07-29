@@ -635,6 +635,9 @@ Preview or remove orphaned runner-side Lab workspaces
 | `--min-age-hours` | `<MIN_AGE_HOURS>` | Minimum workspace age before it can be considered orphaned. Defaults to the shared runner age floor (`cleanup::RUNNER_MIN_AGE_HOURS`) |
 | `--limit` | `<LIMIT>` | Maximum number of orphan candidates to report or remove per pass. Defaults to the shared page size (`cleanup::RUNNER_WORKSPACE_PAGE_LIMIT`) |
 | `--passes` | `<PASSES>` | Maximum apply passes to run. Each pass re-scans and removes at most --limit candidates |
+| `--converge` | flag | Persist each apply page and converge through the bounded pass budget |
+| `--resume` | flag | Resume the durable convergence receipt for this runner and policy |
+| `--max-wall-time-seconds` | `<MAX_WALL_TIME_SECONDS>` | Stop convergence after this many seconds, preserving an exact resume receipt |
 | `--cursor` | `<CURSOR>` | Opaque continuation cursor returned by an incomplete workspace-prune scan |
 
 ## `homeboy runner refresh-plan`
