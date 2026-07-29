@@ -1,6 +1,6 @@
 {
   "name": "Rust",
-  "version": "1.29.5",
+  "version": "1.30.0",
   "icon": "gearshape.2.fill",
   "description": "Cargo CLI integration for Rust components",
   "author": "Extra Chill",
@@ -68,6 +68,15 @@
   "env_provider": {
     "script": "scripts/env-provider.sh"
   },
+  "toolchain_readiness": [
+    {
+      "id": "cargo-lint-toolchain",
+      "capabilities": ["lint"],
+      "command": "cargo --version && cargo fmt --version",
+      "repair_command": "rustup default stable",
+      "diagnostic_env": ["PATH", "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"]
+    }
+  ],
   "lint": {
     "extension_script": "scripts/lint-runner.sh"
   },
