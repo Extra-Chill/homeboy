@@ -158,11 +158,17 @@ fn parse_daemon_process_candidate(
         .collect::<Vec<_>>()
         .windows(2)
         .find_map(|pair| (pair[0] == "--addr").then(|| pair[1].to_string()));
+    let state_dir = cmdline
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix(crate::paths::DAEMON_STATE_DIR_ENV))
+        .and_then(|value| value.strip_prefix('='))
+        .filter(|value| !value.trim().is_empty());
     let home = cmdline
         .split_whitespace()
         .find_map(|part| part.strip_prefix("HOME="));
-    let durable_store_path =
-        home.map(|home| Path::new(home).join(".config/homeboy/daemon/jobs.json"));
+    let durable_store_path = state_dir
+        .map(|state_dir| Path::new(state_dir).join("jobs.json"))
+        .or_else(|| home.map(|home| Path::new(home).join(".config/homeboy/daemon/jobs.json")));
     let executable_matches = current_exe.is_some_and(|current| {
         Path::new(&executable).canonicalize().ok().as_deref() == Some(current)
     });
