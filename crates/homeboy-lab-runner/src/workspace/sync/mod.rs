@@ -2789,18 +2789,29 @@ fn prune_candidate_reason(
         }
     }
 
+    Ok(prune_candidate_reason_after_ttl(
+        runner,
+        metadata,
+        path,
+        source_path,
+    ))
+}
+
+fn prune_candidate_reason_after_ttl(
+    runner: &super::super::Runner,
+    metadata: &serde_json::Value,
+    path: &Path,
+    source_path: &str,
+) -> Option<String> {
     if has_terminal_delete_on_success_lifecycle_with(metadata, |run_id| {
         workspace_run_authority(runner, metadata, path, run_id)
     }) {
-        return Ok(Some(TERMINAL_RESOURCE_LIFECYCLE_REASON.to_string()));
+        return Some(TERMINAL_RESOURCE_LIFECYCLE_REASON.to_string());
     }
     if is_stale_materialized_workspace_lifecycle(metadata, path) {
-        return Ok(Some(STALE_MATERIALIZED_WORKSPACE_REASON.to_string()));
+        return Some(STALE_MATERIALIZED_WORKSPACE_REASON.to_string());
     }
-    if !Path::new(source_path).exists() {
-        return Ok(Some("source_path_missing".to_string()));
-    }
-    Ok(None)
+    (!Path::new(source_path).exists()).then(|| "source_path_missing".to_string())
 }
 
 fn is_stale_materialized_workspace_lifecycle(metadata: &serde_json::Value, path: &Path) -> bool {
@@ -3445,16 +3456,7 @@ fn prune_candidate_reason_from_decoded_metadata(
     let source_path = metadata
         .get("local_path")
         .and_then(|value| value.as_str())?;
-    if !Path::new(source_path).exists() {
-        return Some("source_path_missing".to_string());
-    }
-    if has_terminal_delete_on_success_lifecycle_with(metadata, |run_id| {
-        workspace_run_authority(runner, metadata, path, run_id)
-    }) {
-        return Some(TERMINAL_RESOURCE_LIFECYCLE_REASON.to_string());
-    }
-    is_stale_materialized_workspace_lifecycle(metadata, path)
-        .then(|| STALE_MATERIALIZED_WORKSPACE_REASON.to_string())
+    prune_candidate_reason_after_ttl(runner, metadata, path, source_path)
 }
 
 pub(crate) fn prune_scan_command(
