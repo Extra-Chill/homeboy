@@ -93,6 +93,9 @@ pub enum CleanupCommand {
 
     /// Explain retained Homeboy storage without deleting or reconciling resources.
     RetainedStorage(CleanupRetainedStorageArgs),
+
+    /// Run one configured, bounded retention pass
+    AutomaticRetention,
 }
 
 #[derive(Args)]
@@ -230,6 +233,16 @@ pub fn run(args: CleanupArgs) -> CmdResult<Value> {
                     homeboy::core::Error::internal_json(
                         err.to_string(),
                         Some("serialize retained storage report".to_string()),
+                    )
+                })
+            })
+            .map(|output| (output, 0)),
+        Some(CleanupCommand::AutomaticRetention) => cleanup::run_automatic_cargo_retention()
+            .and_then(|output| {
+                serde_json::to_value(output).map_err(|err| {
+                    homeboy::core::Error::internal_json(
+                        err.to_string(),
+                        Some("serialize automatic retention output".to_string()),
                     )
                 })
             })
@@ -1153,6 +1166,7 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
             cursor: args.cursor.clone(),
             now: std::time::SystemTime::now(),
             lease_ttl: policy.shared_store_lease_ttl(),
+            deadline: None,
         })?;
         categories.push(category_from_output(
             SHARED_CARGO_TARGETS_METADATA,

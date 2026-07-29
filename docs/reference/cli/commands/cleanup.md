@@ -35,6 +35,7 @@ Remove declared reconstructable artifacts from managed worktrees
 | `homeboy cleanup artifacts` | Inspect or remove declared reconstructable artifacts across repo worktrees |
 | `homeboy cleanup worktrees` | Aggregate cleanup across configured external worktree providers |
 | `homeboy cleanup retained-storage` | Explain retained Homeboy storage without deleting or reconciling resources |
+| `homeboy cleanup automatic-retention` | Run one configured, bounded retention pass |
 
 ## `homeboy cleanup artifacts`
 
@@ -82,4 +83,12 @@ Explain retained Homeboy storage without deleting or reconciling resources
 | --- | --- | --- |
 | `--limit` | `<LIMIT>` | Maximum largest-byte examples to return. The report always aggregates all inspected sources |
 | `--cursor` | `<CURSOR>` | Continue largest-byte examples after this deterministic reference token |
+
+## `homeboy cleanup automatic-retention`
+
+```sh
+homeboy cleanup automatic-retention
+```
+
+Run one configured, bounded retention pass
 

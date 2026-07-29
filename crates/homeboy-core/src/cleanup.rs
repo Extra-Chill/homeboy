@@ -19,6 +19,8 @@ pub use cargo_targets::{
     acquire_shared_cargo_target, cleanup_shared_cargo_targets, shared_cargo_target_inventory,
     CargoTargetCleanupOptions, CargoTargetCleanupOutput, SharedCargoTargetLease,
 };
+mod automatic_retention;
+pub use automatic_retention::{run_automatic_cargo_retention, AutomaticRetentionOutput};
 mod extension_declarations;
 mod policy;
 pub use policy::{
