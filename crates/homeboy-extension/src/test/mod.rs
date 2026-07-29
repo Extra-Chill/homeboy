@@ -131,6 +131,10 @@ pub fn build_test_runner(
 ) -> homeboy_core::Result<ExtensionRunner> {
     let resolved = resolve_test_command(component)?;
     let extension_id = resolved.extension_id.clone();
+    let secret_env_names = crate::load_extension(&extension_id)?
+        .test
+        .map(|test| test.secret_env.into_keys().collect::<Vec<_>>())
+        .unwrap_or_default();
 
     let mut runner = ExtensionRunner::for_context(resolved)
         .component(component.clone())
@@ -138,6 +142,7 @@ pub fn build_test_runner(
         .settings(settings)
         .settings_json(settings_json)
         .with_run_dir(run_dir)
+        .secret_env_names(secret_env_names)
         .env_if(skip_lint, "HOMEBOY_SKIP_LINT", "1")
         .env_if(coverage_enabled, "HOMEBOY_COVERAGE", "1");
 

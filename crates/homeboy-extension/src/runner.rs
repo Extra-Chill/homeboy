@@ -45,6 +45,7 @@ pub struct ExtensionRunner {
     /// conflict — strictly more expressive). See SettingArgs docstring.
     settings_json_overrides: Vec<(String, serde_json::Value)>,
     env_vars: Vec<(String, String)>,
+    secret_env_names: Vec<String>,
     env_provider_extensions: Vec<String>,
     script_args: Vec<String>,
     path_override: Option<String>,
@@ -84,6 +85,7 @@ impl ExtensionRunner {
             settings_overrides: Vec::new(),
             settings_json_overrides: Vec::new(),
             env_vars: Vec::new(),
+            secret_env_names: Vec::new(),
             env_provider_extensions: Vec::new(),
             script_args: Vec::new(),
             path_override: None,
@@ -125,6 +127,15 @@ impl ExtensionRunner {
     /// Add an environment variable.
     pub fn env(mut self, key: &str, value: &str) -> Self {
         self.env_vars.push((key.to_string(), value.to_string()));
+        self
+    }
+
+    /// Declare secret identities that Homeboy must resolve for this local
+    /// child. Values are never stored in the runner or command string.
+    pub fn secret_env_names(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.secret_env_names.extend(names);
+        self.secret_env_names.sort();
+        self.secret_env_names.dedup();
         self
     }
 
@@ -248,9 +259,25 @@ impl ExtensionRunner {
 
         let project_path = PathBuf::from(&prepared.execution.component.local_path);
         let invocation = self.acquire_invocation_guard()?;
+        let secret_env = homeboy_core::secret_env::resolve_local_required(
+            self.secret_env_names.clone(),
+            "test.secret_env",
+            "extension child",
+        )?;
         let mut extra_env_vars =
             super::component_script::component_env_vars(&prepared.execution.component);
         extra_env_vars.extend(self.env_vars.clone());
+        extra_env_vars.extend(secret_env.iter().cloned());
+        if !secret_env.is_empty() {
+            extra_env_vars.push((
+                homeboy_core::server::CHILD_SECRET_ENV_NAMES_ENV.to_string(),
+                secret_env
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ));
+        }
         if let Some(invocation) = invocation.as_ref() {
             extra_env_vars.extend(invocation.env_vars());
         }
@@ -262,7 +289,12 @@ impl ExtensionRunner {
             &extra_env_vars,
         )?;
 
-        let output = self.execute_script(&prepared.execution.extension_path, &env_vars)?;
+        let output = self.execute_script(
+            &prepared.execution.extension_path,
+            &env_vars,
+            !secret_env.is_empty(),
+        )?;
+        let output = redact_runner_output(output, &secret_env);
         if !output.success {
             if let Some(run_dir_path) = &self.run_dir_path {
                 let command = self.command_string(&prepared.execution.extension_path);
@@ -366,6 +398,7 @@ impl ExtensionRunner {
         &self,
         extension_path: &Path,
         env_vars: &[(String, String)],
+        contains_secrets: bool,
     ) -> Result<CommandOutput> {
         super::execution::execute_capability_script(
             extension_path,
@@ -375,8 +408,11 @@ impl ExtensionRunner {
             self.working_dir.as_deref(),
             self.command_override.as_deref(),
             super::execution::CapabilityScriptOptions {
-                passthrough: self.passthrough,
-                stderr_passthrough: self.stderr_passthrough,
+                // Streaming an arbitrary child stream cannot guarantee exact
+                // value redaction. Secret-bearing children are captured first,
+                // then redacted before any Homeboy evidence is produced.
+                passthrough: self.passthrough && !contains_secrets,
+                stderr_passthrough: self.stderr_passthrough && !contains_secrets,
                 timeout: self.timeout,
             },
         )
@@ -395,6 +431,32 @@ impl ExtensionRunner {
         }
         command
     }
+}
+
+fn redact_runner_output(
+    mut output: CommandOutput,
+    secret_env: &[(String, String)],
+) -> CommandOutput {
+    output.stdout = redact_resolved_secret_values(&output.stdout, secret_env);
+    output.stderr = redact_resolved_secret_values(&output.stderr, secret_env);
+    output
+}
+
+fn redact_resolved_secret_values(value: &str, secret_env: &[(String, String)]) -> String {
+    let mut secrets = secret_env
+        .iter()
+        .map(|(_, value)| value.as_str())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    secrets.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    secrets.dedup();
+
+    let redacted = secrets
+        .into_iter()
+        .fold(value.to_string(), |output, secret| {
+            output.replace(secret, "[REDACTED]")
+        });
+    homeboy_core::redaction::redact_string(&redacted)
 }
 
 fn write_structured_failure_sidecar(

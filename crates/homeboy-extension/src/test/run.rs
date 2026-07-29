@@ -345,6 +345,7 @@ fn run_main_test_workflow_inner(
         .is_some();
     let no_tests_evidence_file = run_dir.step_file(run_dir::files::NO_TESTS_APPLICABLE);
     let no_tests_nonce = uuid::Uuid::new_v4().to_string();
+    let write_results_helper = write_test_results_helper(run_dir)?;
 
     let runner = build_test_runner(
         component,
@@ -365,6 +366,10 @@ fn run_main_test_workflow_inner(
         .env(
             "HOMEBOY_TEST_RESULTS_FILE",
             results_file.to_string_lossy().as_ref(),
+        )
+        .env(
+            crate::runtime_helper::WRITE_TEST_RESULTS_ENV,
+            write_results_helper.to_string_lossy().as_ref(),
         )
         .env_if(
             no_tests_policy_enabled,
@@ -1013,14 +1018,9 @@ fn run_declared_result_parser(
         settings_json,
         &run_dir.legacy_env_vars(),
     )?;
-    let write_results_helper = run_dir.path().join("write-test-results.sh");
-    local_files::write_file_atomic(
-        &write_results_helper,
-        include_str!("../runtime/write-test-results.sh"),
-        "write parser runtime helper",
-    )?;
+    let write_results_helper = write_test_results_helper(run_dir)?;
     env_vars.push((
-        "HOMEBOY_RUNTIME_WRITE_TEST_RESULTS".to_string(),
+        crate::runtime_helper::WRITE_TEST_RESULTS_ENV.to_string(),
         write_results_helper.to_string_lossy().to_string(),
     ));
     env_vars.push((
@@ -1100,6 +1100,16 @@ fn run_declared_result_parser(
     }
 
     Ok(())
+}
+
+fn write_test_results_helper(run_dir: &RunDir) -> homeboy_core::Result<std::path::PathBuf> {
+    let helper = run_dir.path().join("write-test-results.sh");
+    local_files::write_file_atomic(
+        &helper,
+        include_str!("../runtime/write-test-results.sh"),
+        "write test results runtime helper",
+    )?;
+    Ok(helper)
 }
 
 fn declared_result_parser_error(
@@ -1314,7 +1324,112 @@ fn merge_reported_test_artifact_locators(
 mod tests {
     use super::*;
     use crate::test::TestFailure;
-    use homeboy_core::component::ComponentScriptsConfig;
+    use homeboy_core::component::{ComponentScriptsConfig, ScopedExtensionConfig};
+    use std::collections::HashMap;
+
+    fn assert_artifact_tree_excludes(root: &Path, needle: &str) {
+        for entry in std::fs::read_dir(root).expect("read artifact directory") {
+            let path = entry.expect("artifact entry").path();
+            if path.is_dir() {
+                assert_artifact_tree_excludes(&path, needle);
+            } else if let Ok(contents) = std::fs::read_to_string(&path) {
+                assert!(
+                    !contents.contains(needle),
+                    "artifact {} leaked declared secret",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn review_test_injects_declared_secret_and_redacts_child_evidence() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let source = tempfile::tempdir().expect("source dir");
+            let extension_dir = home
+                .path()
+                .join(".config/homeboy/extensions/secret-test-fixture");
+            std::fs::create_dir_all(&extension_dir).expect("extension dir");
+            std::fs::write(
+                extension_dir.join("secret-test-fixture.json"),
+                r#"{
+                    "name":"Secret test fixture",
+                    "version":"1.0.0",
+                    "test":{
+                        "extension_script":"test.sh",
+                        "secret_env":{"DECLARED_TEST_SECRET":"DECLARED_TEST_SECRET"}
+                    }
+                }"#,
+            )
+            .expect("extension manifest");
+            std::fs::write(
+                extension_dir.join("test.sh"),
+                "#!/bin/sh\nprintf 'received=%s\\n' \"$DECLARED_TEST_SECRET\"\nexit 1\n",
+            )
+            .expect("extension script");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let script = extension_dir.join("test.sh");
+                let mut permissions = std::fs::metadata(&script)
+                    .expect("script metadata")
+                    .permissions();
+                permissions.set_mode(0o755);
+                std::fs::set_permissions(script, permissions).expect("executable script");
+            }
+
+            let component = Component {
+                id: "secret-consumer".to_string(),
+                local_path: source.path().to_string_lossy().to_string(),
+                extensions: Some(HashMap::from([(
+                    "secret-test-fixture".to_string(),
+                    ScopedExtensionConfig::default(),
+                )])),
+                ..Default::default()
+            };
+            let run_dir = RunDir::create().expect("run dir");
+            std::env::set_var("DECLARED_TEST_SECRET", "review-fixture-secret");
+            let result = run_main_test_workflow(
+                &component,
+                source.path(),
+                TestRunWorkflowArgs {
+                    component_label: component.id.clone(),
+                    component_id: component.id.clone(),
+                    path_override: None,
+                    settings: Vec::new(),
+                    settings_json: Vec::new(),
+                    skip_lint: true,
+                    coverage: false,
+                    coverage_min: None,
+                    analyze: false,
+                    baseline_flags: Default::default(),
+                    changed_since: None,
+                    precomputed_changed_files: None,
+                    json_summary: true,
+                    restore_checkout: false,
+                    ci_env: Vec::new(),
+                    passthrough_args: Vec::new(),
+                },
+                &run_dir,
+            )
+            .expect("review workflow reaches secret-bearing child");
+            std::env::remove_var("DECLARED_TEST_SECRET");
+
+            assert_eq!(result.exit_code, 1, "child ran after secret injection");
+            let rendered = serde_json::to_string(&result).expect("review result JSON");
+            assert!(rendered.contains("[REDACTED]"));
+            assert!(!rendered.contains("review-fixture-secret"));
+            let artifact = std::fs::read_to_string(
+                run_dir
+                    .path()
+                    .join("validation-progress/command-1-stdout.log"),
+            )
+            .expect("review stdout artifact");
+            assert!(artifact.contains("[REDACTED]"));
+            assert!(!artifact.contains("review-fixture-secret"));
+            assert_artifact_tree_excludes(run_dir.path(), "review-fixture-secret");
+        });
+    }
 
     /// Two lines of a real cargo test run: one binary that finished and
     /// reported its time, and one that started and never did.

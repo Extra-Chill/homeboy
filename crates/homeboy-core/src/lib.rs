@@ -178,6 +178,7 @@ pub mod schedule;
 pub mod scope;
 pub mod stack_provider;
 pub use homeboy_lab_contract::secret_env_plan;
+pub mod secret_env;
 
 /// Flattened re-export of the lab-contract crate's Lab types (workload, handoff,
 /// typed identifiers, labels). Core consumers import these from here rather than

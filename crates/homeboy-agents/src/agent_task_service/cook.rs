@@ -2898,6 +2898,9 @@ struct TrackedPromotionContinuation {
 fn tracked_promotion_continuation(
     options: &AgentTaskCookServiceOptions,
 ) -> Result<Option<TrackedPromotionContinuation>> {
+    if !agent_task_lifecycle::run_record_exists(&options.initial_run_id)? {
+        return Ok(None);
+    }
     let Some(promotion) = persisted_promotion_for_attempt(&options.initial_run_id)? else {
         return Ok(None);
     };

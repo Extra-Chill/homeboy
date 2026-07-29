@@ -5691,6 +5691,21 @@ fn record_tracked_promotion_continuation(
 }
 
 #[test]
+fn fresh_cook_has_no_tracked_promotion_before_lifecycle_materialization() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let target = tempfile::tempdir().expect("tempdir");
+        let options = tracked_promotion_continuation_options(
+            "cook-fresh-promotion",
+            "run-fresh-promotion",
+            target.path(),
+        );
+
+        assert!(!agent_task_lifecycle::run_record_exists(&options.initial_run_id).unwrap());
+        assert!(tracked_promotion_continuation(&options).unwrap().is_none());
+    });
+}
+
+#[test]
 fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("tempdir");

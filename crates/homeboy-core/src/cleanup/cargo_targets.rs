@@ -10,7 +10,6 @@ use serde_json::json;
 
 use crate::{Error, Result};
 
-const STORE_ROOT: &str = "cargo-targets";
 pub const HOMEBOY_CARGO_TARGET_ROOT_ENV: &str = "HOMEBOY_CARGO_TARGET_ROOT";
 const LOCK_FILE: &str = ".homeboy-lock";
 const LEASE_FILE: &str = ".homeboy-lease";
@@ -116,12 +115,18 @@ pub fn acquire_shared_cargo_target(owner: &str) -> Result<SharedCargoTargetLease
 /// The environment is useful for one process; the persisted setting is for the
 /// host. The historical data-root location remains the compatibility default.
 pub fn shared_cargo_target_root() -> Result<PathBuf> {
-    if let Ok(path) = std::env::var(HOMEBOY_CARGO_TARGET_ROOT_ENV) {
-        if !path.trim().is_empty() {
-            return Ok(homeboy_paths::expand_tilde_path(path));
-        }
-    }
-    if let Some(path) = crate::defaults::load_config().cargo_target_root {
+    let configured = crate::defaults::load_config().cargo_target_root;
+    resolve_shared_cargo_target_root(
+        std::env::var(HOMEBOY_CARGO_TARGET_ROOT_ENV).ok().as_deref(),
+        configured.as_deref(),
+    )
+}
+
+fn resolve_shared_cargo_target_root(
+    env: Option<&str>,
+    configured: Option<&str>,
+) -> Result<PathBuf> {
+    for path in [env, configured].into_iter().flatten() {
         if !path.trim().is_empty() {
             return Ok(homeboy_paths::expand_tilde_path(path));
         }
@@ -130,7 +135,7 @@ pub fn shared_cargo_target_root() -> Result<PathBuf> {
 }
 
 fn legacy_shared_cargo_target_root() -> Result<PathBuf> {
-    Ok(homeboy_paths::homeboy_data()?.join(STORE_ROOT))
+    homeboy_paths::cargo_targets_store()
 }
 
 pub(crate) fn acquire_shared_cargo_target_in(
@@ -814,6 +819,31 @@ mod tests {
             "homeboy cleanup --include shared-cargo-targets --apply"
         );
         assert!(protected.target_dir().exists());
+    }
+
+    #[test]
+    fn configured_root_is_the_root_used_for_admission() {
+        let configured = TempDir::new().unwrap();
+        let root = resolve_shared_cargo_target_root(None, configured.path().to_str()).unwrap();
+        let retention = crate::defaults::RetentionConfig {
+            shared_store_reserve_bytes: 1,
+            ..crate::defaults::RetentionConfig::default()
+        };
+
+        let error = admit_shared_cargo_target_with_capacity(
+            &root,
+            &retention,
+            FilesystemCapacity {
+                filesystem: "configured-volume".to_string(),
+                available_bytes: 0,
+                available_inodes: u64::MAX,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(root, configured.path());
+        assert_eq!(error.details["id"], configured.path().display().to_string());
+        assert_eq!(error.details["filesystem"], "configured-volume");
     }
     fn set_modified(path: &Path, modified: SystemTime) {
         File::open(path)

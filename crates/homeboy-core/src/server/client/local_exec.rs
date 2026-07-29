@@ -749,6 +749,7 @@ fn wait_for_child_or_delegated_failure(
 
 const CHILD_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const CHILD_OUTPUT_TAIL_BYTES: usize = 16 * 1024;
+pub const CHILD_SECRET_ENV_NAMES_ENV: &str = "HOMEBOY_CHILD_SECRET_ENV_NAMES";
 static CHILD_SUPERVISION_TEMP_SEQUENCE: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
@@ -772,6 +773,7 @@ struct ChildSupervisionRecord {
 struct ChildSupervision {
     path: PathBuf,
     record: ChildSupervisionRecord,
+    redaction_values: Vec<String>,
     last_heartbeat: Instant,
 }
 
@@ -781,13 +783,14 @@ impl ChildSupervision {
             (*key == crate::engine::run_dir::run_dir_env()).then_some(*value)
         })?;
         let now = Utc::now().to_rfc3339();
+        let redaction_values = child_secret_values(env);
         let supervision = Self {
             path: PathBuf::from(run_dir).join(crate::engine::run_dir::files::CHILD_SUPERVISION),
             record: ChildSupervisionRecord {
                 schema: "homeboy.child_supervision.v1",
                 status: "running".to_string(),
                 phase: "child",
-                command: crate::redaction::redact_string(command),
+                command: redact_child_secret_values(command, &redaction_values),
                 child_pid,
                 started_at: now.clone(),
                 heartbeat_at: now,
@@ -798,6 +801,7 @@ impl ChildSupervision {
                 stdout_tail: String::new(),
                 stderr_tail: String::new(),
             },
+            redaction_values,
             last_heartbeat: Instant::now(),
         };
         supervision.persist();
@@ -835,8 +839,8 @@ impl ChildSupervision {
             signal.map(|signal| format!("signal:{signal}"))
         };
         self.record.exit_code = Some(output.exit_code);
-        self.record.stdout_tail = bounded_redacted_tail(&output.stdout);
-        self.record.stderr_tail = bounded_redacted_tail(&output.stderr);
+        self.record.stdout_tail = bounded_redacted_tail(&output.stdout, &self.redaction_values);
+        self.record.stderr_tail = bounded_redacted_tail(&output.stderr, &self.redaction_values);
         self.persist();
     }
 
@@ -870,13 +874,43 @@ impl ChildSupervision {
     }
 }
 
-fn bounded_redacted_tail(output: &str) -> String {
+fn child_secret_values(env: Option<&[(&str, &str)]>) -> Vec<String> {
+    let Some(env) = env else {
+        return Vec::new();
+    };
+    let declared_names = env
+        .iter()
+        .find_map(|(name, value)| (*name == CHILD_SECRET_ENV_NAMES_ENV).then_some(*value))
+        .unwrap_or_default();
+    let mut values = declared_names
+        .lines()
+        .filter_map(|declared| {
+            env.iter()
+                .find_map(|(name, value)| (*name == declared).then_some((*value).to_string()))
+        })
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    values.dedup();
+    values
+}
+
+fn redact_child_secret_values(output: &str, redaction_values: &[String]) -> String {
+    let redacted = redaction_values
+        .iter()
+        .fold(output.to_string(), |output, secret| {
+            output.replace(secret, "[REDACTED]")
+        });
+    crate::redaction::redact_string(&redacted)
+}
+
+fn bounded_redacted_tail(output: &str, redaction_values: &[String]) -> String {
     let start = output.len().saturating_sub(CHILD_OUTPUT_TAIL_BYTES);
     let start = output
         .char_indices()
         .find_map(|(index, _)| (index >= start).then_some(index))
         .unwrap_or_default();
-    crate::redaction::redact_string(&output[start..])
+    redact_child_secret_values(&output[start..], redaction_values)
 }
 
 #[cfg(test)]
@@ -927,6 +961,29 @@ mod tests {
                 Some(libc::ESRCH)
             );
         }
+    }
+
+    #[test]
+    fn supervision_redacts_values_from_declared_child_secret_env() {
+        let run_dir = tempfile::tempdir().expect("run dir");
+        let run_dir_key = crate::engine::run_dir::run_dir_env();
+        let run_dir_value = run_dir.path().to_string_lossy().to_string();
+        let env = [
+            (run_dir_key.as_str(), run_dir_value.as_str()),
+            (CHILD_SECRET_ENV_NAMES_ENV, "FIXTURE_SECRET"),
+            ("FIXTURE_SECRET", "supervision-fixture-secret"),
+        ];
+
+        let output = execute_local_command_in_dir(
+            "printf 'received=%s\\n' \"$FIXTURE_SECRET\"",
+            None,
+            Some(&env),
+        );
+
+        assert!(output.success, "{}", output.stderr);
+        let supervision = supervision_output(&run_dir).to_string();
+        assert!(supervision.contains("[REDACTED]"));
+        assert!(!supervision.contains("supervision-fixture-secret"));
     }
 
     #[cfg(unix)]

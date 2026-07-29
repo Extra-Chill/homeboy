@@ -637,7 +637,7 @@ fn release_finish_head_pipeline_uses_homeboy_action_head_inputs() {
     assert!(host.contains("expected_assets: $expected_assets"));
     assert!(host.contains("Download current Homeboy finalizer"));
     assert!(host.contains("binary-path: ${{ needs.prepare.outputs.recovery-release == 'true' && '.homeboy-bin/homeboy' || '' }}"));
-    assert!(host.contains("release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && 'draft-adoption' || 'artifacts' }}"));
+    assert!(host.contains("release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete == 'true' && 'draft-adoption' || 'artifacts' }}"));
 }
 
 #[test]
@@ -855,9 +855,42 @@ fn release_recovery_skips_the_artifact_rebuild_when_the_draft_is_already_complet
         "verified draft adoption must run on the fast path — it is the whole point of taking it"
     );
     assert!(
-        adoption.contains("release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && 'draft-adoption' || 'artifacts' }}"),
+        adoption.contains("release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete == 'true' && 'draft-adoption' || 'artifacts' }}"),
         "the fast path must still hand the finalizer the remote-adoption manifest"
     );
+}
+
+/// Issue #10733: the release can become published while the artifact matrix is
+/// still building. cargo-dist then reports a successful upload without filling
+/// the published release, so finalization must retain the rebuilt byte authority
+/// instead of replacing it with the remote-only draft-adoption contract.
+#[test]
+fn incomplete_recovery_delivers_identity_bound_artifacts_to_the_finalizer() {
+    let host = job_section(release_workflow(), "host");
+    let preserve = release_step_block(host, "name: Preserve existing published asset bytes");
+    let recovery = release_step_block(host, "name: Create authoritative recovery manifest");
+    let adoption = release_step_block(host, "name: Create remote draft adoption manifest");
+
+    assert!(preserve.contains(
+        "if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete != 'true'"
+    ));
+    assert!(preserve.contains(".isDraft' existing-release.json)\" != \"false\""));
+    assert!(preserve.contains("done < <(jq -r '.[]' <<< \"${EXPECTED_ASSETS}\")"));
+    assert!(preserve.contains("actual_digest=\"sha256:$(sha256sum"));
+    assert!(preserve.contains("cp \"${path}\" \"artifacts/${name}\""));
+    assert!(recovery.contains(
+        "if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete != 'true'"
+    ));
+    assert!(recovery.contains("--arg schema homeboy.package-recovery"));
+    assert!(recovery.contains("--arg tag \"${RELEASE_TAG}\""));
+    assert!(recovery.contains("--arg commit \"${COMMIT}\""));
+    assert!(recovery.contains("artifacts: [$expected_assets[] | {path: (\"artifacts/\" + .)}]"));
+    assert!(adoption.contains(
+        "if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete == 'true'"
+    ));
+    assert!(host.contains(
+        "needs.plan.outputs.draft-complete == 'true' && 'draft-adoption' || 'artifacts'"
+    ));
 }
 
 /// The fast path is an optimisation, never a relaxation. Skipping the rebuild

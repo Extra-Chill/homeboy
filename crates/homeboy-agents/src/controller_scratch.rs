@@ -114,7 +114,7 @@ fn allocate_attempt_at_index(
     attempt: u32,
     index_path: PathBuf,
 ) -> Result<ControllerScratchAllocation> {
-    let root = paths::homeboy_data()?.join("controller-scratch/attempts");
+    let root = paths::controller_scratch_store()?.join("attempts");
     fs::create_dir_all(&root).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -1697,7 +1697,7 @@ fn path_size(path: &Path) -> Result<u64> {
 }
 
 fn index_path() -> Result<PathBuf> {
-    Ok(paths::homeboy_data()?.join("controller-scratch/resources.json"))
+    Ok(paths::controller_scratch_store()?.join("resources.json"))
 }
 
 fn with_index_lock<T>(index_path: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
