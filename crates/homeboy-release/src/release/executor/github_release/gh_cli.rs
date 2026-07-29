@@ -2431,6 +2431,36 @@ mod tests {
     }
 
     #[test]
+    fn canonical_recovery_with_ordinal_durable_path_is_idempotent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let canonical = dir.path().join("component.zip");
+        let ordinal = dir.path().join("01-component.zip");
+        std::fs::write(&ordinal, b"component bytes").expect("write durable zip");
+        let publications =
+            github_release_publications(&release_state_with_artifacts(vec![artifact(
+                &canonical,
+                Some(&ordinal),
+            )]))
+            .expect("publication identity");
+        let remote = remote_asset(
+            "component.zip",
+            publications[0].size,
+            Some(format!("sha256:{}", publications[0].sha256)),
+        );
+
+        for _ in 0..2 {
+            let (uploads, existing) = reconcile_release_publications_with(
+                &publications,
+                std::slice::from_ref(&remote),
+                &mut unexpected_download,
+            )
+            .expect("existing canonical asset is reusable");
+            assert!(uploads.is_empty());
+            assert_eq!(existing, publications);
+        }
+    }
+
+    #[test]
     fn rest_release_metadata_preserves_digest_for_draft_and_published_releases() {
         for draft in [true, false] {
             let metadata: GitHubReleaseMetadata = serde_json::from_value(serde_json::json!({
@@ -2647,6 +2677,35 @@ mod tests {
         .expect_err("different downloaded bytes must fail closed");
 
         assert!(error.contains("conflicts with the canonical publication bytes"));
+    }
+
+    #[test]
+    fn missing_or_mismatched_remote_digest_cannot_adopt_canonical_bytes() {
+        let publication = ReleaseAssetPublication {
+            target_name: "component.zip".to_string(),
+            sha256: "a".repeat(64),
+            size: 15,
+            source_path: "component.zip".to_string(),
+        };
+        let missing_digest = reconcile_release_publications_with(
+            &[publication.clone()],
+            &[remote_asset("component.zip", 15, None)],
+            &mut |_, _| Ok((15, "b".repeat(64))),
+        )
+        .expect_err("digestless assets require matching downloaded bytes");
+        assert!(missing_digest.contains("conflicts with the canonical publication bytes"));
+
+        let mismatched_digest = reconcile_release_publications_with(
+            &[publication],
+            &[remote_asset(
+                "component.zip",
+                15,
+                Some(format!("sha256:{}", "b".repeat(64))),
+            )],
+            &mut unexpected_download,
+        )
+        .expect_err("mismatched GitHub digest must fail closed");
+        assert!(mismatched_digest.contains("conflicts with the canonical publication bytes"));
     }
 
     #[test]
