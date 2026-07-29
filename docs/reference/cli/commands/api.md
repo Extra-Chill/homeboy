@@ -349,4 +349,3 @@ Make a DELETE request
 | Option | Value | Description |
 | --- | --- | --- |
 | `--apply` | flag | Confirm the mutating request should be sent |
-

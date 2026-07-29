@@ -382,4 +382,3 @@ Show live server health and component versions for a project
 | Option | Value | Description |
 | --- | --- | --- |
 | `--health-only` | flag | Show only server health metrics, skip component versions |
-

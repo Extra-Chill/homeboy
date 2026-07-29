@@ -32,4 +32,3 @@ Upgrade Homeboy to the latest version
 | `--runner-only` | flag | Refresh selected runners without promoting the controller |
 | `--method` | `<METHOD>` | Override install method detection (homebrew\|cargo\|source\|binary) |
 | `--source-path` | `<PATH>` | Homeboy source checkout to use with --method source |
-

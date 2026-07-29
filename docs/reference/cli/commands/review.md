@@ -320,4 +320,3 @@ Summarize failed GitHub Actions runs for a pull request without dumping raw logs
 | `--max-runs` | `<MAX_RUNS>` | Maximum failed workflow runs to inspect. Use 0 for the default |
 | `--max-snippets-per-job` | `<MAX_SNIPPETS_PER_JOB>` | Maximum relevant log snippet lines to retain per failed job. Use 0 for the default |
 | `--context-lines` | `<CONTEXT_LINES>` | Context lines around relevant log matches. Use 0 for the default |
-

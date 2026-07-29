@@ -42,4 +42,3 @@ Actionable component status overview
 | `--timings` | flag | Emit status phase progress to stderr and include phase timings in JSON |
 | `--refresh` | flag | Refresh remote Git refs before calculating drift and release state |
 | `--unreleased` | flag | Show only components carrying merged-but-unreleased work (commits on origin/<default-branch> that are past the latest release tag) |
-

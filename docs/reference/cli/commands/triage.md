@@ -115,4 +115,3 @@ Summarize mergeability and check blockers for a PR landing fleet
 | `--rig` | `<ID>` | Scope: local rig id |
 | `--path` | `<PATH>` | Scope: checkout path, bypassing the registry |
 | `--workspace` | flag | Scope: every configured workspace repo |
-

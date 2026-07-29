@@ -137,4 +137,3 @@ Run every schedule that is currently due
 | Option | Value | Description |
 | --- | --- | --- |
 | `--dry-run` | flag | Report what is due without running anything |
-

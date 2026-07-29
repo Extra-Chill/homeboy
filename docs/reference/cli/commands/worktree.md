@@ -181,4 +181,3 @@ Mark one quarantined record terminally reconciled while retaining its original e
 | Option | Value | Description |
 | --- | --- | --- |
 | `--verified-terminal` | flag | Confirms terminal state was independently verified before clearing protection |
-

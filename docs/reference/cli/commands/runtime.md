@@ -92,4 +92,3 @@ Plan or apply pruning for unreferenced immutable controller runtimes
 | --- | --- | --- |
 | `--apply` | flag | Delete pins not retained by nonterminal durable runs or the active generation |
 | `--ignore-retention` | flag | Purge every unreferenced pin, ignoring the configured controller runtime retention window. Destructive: prefer the configured window |
-

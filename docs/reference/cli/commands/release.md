@@ -146,4 +146,3 @@ Write a source-authority manifest for assembled release artifacts
 | `--dir` | `<DIR>` | Directory containing the assembled publication files |
 | `--tag` | `<TAG>` | Prepared release tag |
 | `--commit` | `<COMMIT>` | Exact commit the prepared tag resolves to |
-
