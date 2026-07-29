@@ -188,6 +188,85 @@ pub(super) fn remap_paths_in_value(value: &mut Value, mappings: &[&LabPathRemap]
     }
 }
 
+/// Translate runner-materialized path references in a result back to the
+/// controller source paths recorded by the workspace materialization plan.
+///
+/// Results can include both direct source fields and shell-rendered repair
+/// commands. Rewriting every matched reference makes the result usable after a
+/// delete-on-terminal runner workspace cleanup without making command-specific
+/// assumptions in the Lab transport.
+pub(crate) fn remap_remote_path_references_in_value(value: &mut Value, mappings: &[LabPathRemap]) {
+    let ordered = order_remote_mappings_by_specificity(mappings);
+    remap_remote_path_references(value, &ordered);
+}
+
+fn order_remote_mappings_by_specificity(mappings: &[LabPathRemap]) -> Vec<&LabPathRemap> {
+    let mut ordered: Vec<&LabPathRemap> = mappings.iter().collect();
+    ordered.sort_by_key(|mapping| {
+        (
+            std::cmp::Reverse(mapping.remote.len()),
+            std::cmp::Reverse(mapping.local.len()),
+        )
+    });
+    ordered
+}
+
+fn remap_remote_path_references(value: &mut Value, mappings: &[&LabPathRemap]) {
+    match value {
+        Value::String(text) => {
+            *text = remap_remote_path_references_in_text(text, mappings);
+        }
+        Value::Array(items) => {
+            for item in items {
+                remap_remote_path_references(item, mappings);
+            }
+        }
+        Value::Object(map) => {
+            for item in map.values_mut() {
+                remap_remote_path_references(item, mappings);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn remap_remote_path_references_in_text(text: &str, mappings: &[&LabPathRemap]) -> String {
+    let mut remapped = text.to_string();
+    for mapping in mappings {
+        let remote = mapping.remote.trim_end_matches('/');
+        if remote.is_empty() {
+            continue;
+        }
+        let mut cursor = 0;
+        while let Some(relative_start) = remapped[cursor..].find(remote) {
+            let start = cursor + relative_start;
+            let end = start + remote.len();
+            let preceding_boundary = start == 0
+                || !remapped[..start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(is_path_character);
+            let following_boundary = end == remapped.len()
+                || remapped[end..].starts_with('/')
+                || !remapped[end..]
+                    .chars()
+                    .next()
+                    .is_some_and(is_path_character);
+            if preceding_boundary && following_boundary {
+                remapped.replace_range(start..end, &mapping.local);
+                cursor = start + mapping.local.len();
+            } else {
+                cursor = end;
+            }
+        }
+    }
+    remapped
+}
+
+fn is_path_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | '/')
+}
+
 /// Replace a leading known local path with its remote equivalent. Matches whole
 /// path or path-prefix boundaries (so `/a/b` does not match `/a/bc`).
 pub(super) fn remap_local_path(text: &str, mappings: &[&LabPathRemap]) -> Option<String> {
