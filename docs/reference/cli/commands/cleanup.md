@@ -77,10 +77,9 @@ Aggregate cleanup across configured external worktree providers
 homeboy cleanup retained-storage [OPTIONS]
 ```
 
-Explain retained Homeboy storage without deleting or reconciling resources. The
-output preserves the existing lifecycle aggregates and adds a `filesystem`
-reconciliation view with root apparent/physical totals, every top-level store,
-largest child examples, ownership classification, and cleanup/status guidance.
+Explain retained Homeboy storage without deleting or reconciling resources.
+
+Reports lifecycle aggregates alongside root filesystem accounting, top-level stores, largest child paths, ownership classification, and cleanup guidance.
 
 | Option | Value | Description |
 | --- | --- | --- |
@@ -94,3 +93,4 @@ homeboy cleanup automatic-retention
 ```
 
 Run one configured, bounded retention pass
+
