@@ -72,6 +72,8 @@ Finish an already-tagged release from artifacts:
 homeboy release <component-id> --head --from-artifacts ./artifacts --skip-checks --apply
 ```
 
+For artifacts produced outside Homeboy, write `./artifacts/manifest.json` before finalization. It must use `homeboy.artifact-source-authority` schema version `1` and declare the active component, tag, version, commit, and SHA-256 for every artifact. Bare directories are intentionally rejected so bytes built for an older commit cannot be finalized under a newer tag.
+
 Use these intentionally. They are recovery/operator paths, not the default release flow.
 
 ## Code Factory Context
