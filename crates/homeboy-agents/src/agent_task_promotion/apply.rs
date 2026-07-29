@@ -36,10 +36,7 @@ const PROMOTION_CAPTURE_LIMIT_BYTES: usize = 65_536;
 const PROMOTION_PROVIDER_RESPONSE_LIMIT_BYTES: usize = 1_048_576;
 /// A provider is a control-plane dependency. Bound a silent command so a Cook
 /// can persist its failure and release its exactly-once claim for recovery.
-#[cfg(not(test))]
 const PROMOTION_PROVIDER_TIMEOUT: Duration = Duration::from_secs(30);
-#[cfg(test)]
-const PROMOTION_PROVIDER_TIMEOUT: Duration = Duration::from_millis(100);
 
 struct ProviderCapturedStream {
     response: Vec<u8>,
@@ -602,6 +599,14 @@ pub(crate) fn run_provider_command(
     invocation: &CommandInvocation,
     request: &AgentTaskPromotionApplyRequest,
 ) -> Result<AgentTaskPromotionWorkspace> {
+    run_provider_command_with_timeout(invocation, request, PROMOTION_PROVIDER_TIMEOUT)
+}
+
+pub(super) fn run_provider_command_with_timeout(
+    invocation: &CommandInvocation,
+    request: &AgentTaskPromotionApplyRequest,
+    timeout: Duration,
+) -> Result<AgentTaskPromotionWorkspace> {
     let (program, args) = invocation_program_and_args(invocation).ok_or_else(|| {
         Error::validation_invalid_argument(
             "promotion_provider.argv",
@@ -714,7 +719,7 @@ pub(crate) fn run_provider_command(
         })? {
             break status;
         }
-        if started_at.elapsed() >= PROMOTION_PROVIDER_TIMEOUT {
+        if started_at.elapsed() >= timeout {
             timed_out = true;
             process.kill().map_err(|error| {
                 Error::internal_io(
@@ -792,8 +797,8 @@ pub(crate) fn run_provider_command(
         return Err(Error::validation_invalid_argument_with_evidence(
             "promotion_provider.command",
             format!(
-                "promotion provider command timed out after {} seconds: {}",
-                PROMOTION_PROVIDER_TIMEOUT.as_secs(),
+                "promotion provider command timed out after {}: {}",
+                format_timeout(timeout),
                 display
             ),
             None,
@@ -935,6 +940,14 @@ pub(crate) fn run_provider_command(
         path: workspace_path,
         command_evidence,
     })
+}
+
+fn format_timeout(timeout: Duration) -> String {
+    if timeout.subsec_millis() == 0 {
+        format!("{} seconds", timeout.as_secs())
+    } else {
+        format!("{} ms", timeout.as_millis())
+    }
 }
 
 fn validate_provider_workspace_path(path: &Path) -> Result<()> {
