@@ -97,18 +97,6 @@ Release execution:
 4. Stops on failure and returns structured step results.
 5. Leaves plan-only steps visible for review without executing them.
 
-## CI Qualification
-
-The release workflow selects its triggering commit as an immutable candidate. It
-reuses a terminal green Main Guard run for that exact SHA when one exists. Without
-one, it dispatches a SHA-pinned Main Guard qualification and waits for its terminal
-result. This qualification has its own non-cancellable concurrency key, while push
-triggered Main Guard monitoring remains latest-wins.
-
-Workflow dry runs report the selected SHA, exact proof SHA and run, proof status,
-and one next action in the job summary. The selected candidate remains valid when
-new commits arrive; releasing only the latest tip is not inferred from PR state.
-
 Release requires a clean working tree except for files the release process owns,
 such as version targets and changelog targets.
 
