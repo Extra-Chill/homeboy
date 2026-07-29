@@ -163,26 +163,12 @@ fn terminate_exact_supervised_daemon(
     let supervisor_signal = match supervisor {
         Some(pid) if wait_for_pid_exit(pid, TERM_GRACE) => "exited after child",
         Some(pid) => {
-            if !pid_has_ownership_token(pid, DAEMON_STARTUP_TOKEN_ENV, &state.startup_token)? {
-                return Err(Error::validation_invalid_argument(
-                    "daemon_lease",
-                    format!("supervisor pid {pid} no longer owns the daemon startup token"),
-                    Some(pid.to_string()),
-                    None,
-                ));
-            }
+            revalidate_exact_supervisor_termination_target(path, identity, state, pid)?;
             signal_pid(pid, SIGNAL_TERMINATE)?;
             if wait_for_pid_exit(pid, TERM_GRACE) {
                 "SIGTERM"
             } else {
-                if !pid_has_ownership_token(pid, DAEMON_STARTUP_TOKEN_ENV, &state.startup_token)? {
-                    return Err(Error::validation_invalid_argument(
-                        "daemon_lease",
-                        format!("supervisor pid {pid} changed identity before SIGKILL"),
-                        Some(pid.to_string()),
-                        None,
-                    ));
-                }
+                revalidate_exact_supervisor_termination_target(path, identity, state, pid)?;
                 signal_pid(pid, SIGNAL_KILL)?;
                 if !wait_for_pid_exit(pid, KILL_GRACE) {
                     return Err(Error::internal_unexpected(format!(
@@ -222,6 +208,40 @@ fn revalidate_exact_termination_target(
                 state.pid
             ),
             Some(state.pid.to_string()),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// The child is already absent when this runs, so the supervisor's token is the
+/// remaining exact process proof. The lease and job gates still have to be
+/// rechecked before each supervisor signal because they can change while the
+/// child is being terminated.
+fn revalidate_exact_supervisor_termination_target(
+    path: &std::path::Path,
+    identity: &DaemonLeaseIdentity,
+    state: &DaemonState,
+    supervisor_pid: u32,
+) -> Result<()> {
+    let current = read_lease_if_identity_matches(path, identity)?;
+    if current.pid != state.pid || !active_daemon_job_ids()?.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "daemon_stop",
+            "daemon lease or active durable jobs changed before supervisor termination; refusing to signal",
+            Some(state.lease_id.clone()),
+            None,
+        ));
+    }
+    if !pid_has_ownership_token(
+        supervisor_pid,
+        DAEMON_STARTUP_TOKEN_ENV,
+        &state.startup_token,
+    )? {
+        return Err(Error::validation_invalid_argument(
+            "daemon_lease",
+            format!("supervisor pid {supervisor_pid} no longer owns the daemon startup token"),
+            Some(supervisor_pid.to_string()),
             None,
         ));
     }
