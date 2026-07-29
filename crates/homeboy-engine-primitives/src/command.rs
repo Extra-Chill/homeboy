@@ -632,6 +632,37 @@ fn process_group_is_running(root_pid: u32) -> bool {
     unsafe { libc::kill(-(root_pid as libc::pid_t), 0) == 0 }
 }
 
+/// Reap any of our own already-exited children that belong to `root_pid`'s
+/// process group.
+///
+/// `process_group_is_running` asks `kill(-pgid, 0)`, which succeeds for a
+/// **zombie**. The controller death guard installed by `ControllerChildGuard`
+/// is a `fork()` child of this process that deliberately joins the supervised
+/// group (`setpgid(0, process_group)`), so terminating the group leaves the
+/// guard as an unreaped zombie inside it. The group then looks alive forever and
+/// termination reports "process group N remained alive after SIGKILL" instead of
+/// a timeout.
+///
+/// `waitpid(-pgid, ...)` is scoped to children in that one process group, so
+/// this cannot reap an unrelated child of the same process.
+#[cfg(unix)]
+fn reap_exited_process_group_children(root_pid: u32) {
+    loop {
+        let mut status = 0;
+        let reaped = unsafe {
+            libc::waitpid(
+                -(root_pid as libc::pid_t),
+                &mut status,
+                libc::WNOHANG | libc::WUNTRACED,
+            )
+        };
+        // 0 = children remain but none have exited; -1 = no such children left.
+        if reaped <= 0 {
+            return;
+        }
+    }
+}
+
 #[cfg(unix)]
 fn wait_for_process_group_exit(
     child: &mut Child,
@@ -643,6 +674,10 @@ fn wait_for_process_group_exit(
     while process_group_is_running(root_pid) {
         if status.is_none() {
             *status = child.try_wait()?;
+        }
+        reap_exited_process_group_children(root_pid);
+        if !process_group_is_running(root_pid) {
+            break;
         }
         if std::time::Instant::now() >= deadline {
             return Ok(false);
@@ -656,12 +691,98 @@ fn wait_for_process_group_exit(
 fn wait_for_process_group_exit_without_child(root_pid: u32, grace: Duration) -> bool {
     let deadline = std::time::Instant::now() + grace;
     while process_group_is_running(root_pid) {
+        reap_exited_process_group_children(root_pid);
+        if !process_group_is_running(root_pid) {
+            return true;
+        }
         if std::time::Instant::now() >= deadline {
             return false;
         }
         thread::sleep(PROCESS_TREE_POLL_INTERVAL);
     }
     true
+}
+
+#[cfg(all(test, unix))]
+mod supervisor_zombie_guard_tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    /// A supervised command that must be terminated has to report a *timeout*,
+    /// not an internal supervision failure.
+    ///
+    /// The controller death guard is a `fork()` child that joins the supervised
+    /// process group. Killing the group left it as an unreaped zombie there, and
+    /// because `kill(-pgid, 0)` succeeds for zombies the group looked alive
+    /// forever — so termination returned
+    /// `process group N remained alive after SIGKILL` and the caller saw
+    /// `timed_out: false` with no exit code (#10356).
+    #[test]
+    fn timing_out_a_guarded_child_reports_a_timeout_not_a_supervision_error() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 5"]);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let guard = ControllerChildGuard::prepare(&mut command).expect("prepare guard");
+        let mut child = command.spawn().expect("spawn child");
+        guard.attach(&child).expect("attach guard");
+
+        let started = Instant::now();
+        let supervised = wait_with_bounded_output_supervised(
+            &mut child,
+            4096,
+            Duration::from_millis(50),
+            Duration::from_millis(50),
+            || false,
+            |_, _| Ok(()),
+        )
+        .expect("supervision must succeed and report a timeout");
+
+        assert_eq!(
+            supervised.termination,
+            SupervisedCommandTermination::TimedOut
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "termination must not wait out the child"
+        );
+    }
+
+    /// The reaper is scoped to one process group, so a sibling child of this
+    /// process in a different group must survive untouched.
+    #[test]
+    fn reaping_is_scoped_to_the_target_process_group() {
+        let mut sibling = Command::new("sh")
+            .args(["-c", "sleep 3"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn sibling");
+
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 5"]);
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let guard = ControllerChildGuard::prepare(&mut command).expect("prepare guard");
+        let mut child = command.spawn().expect("spawn child");
+        guard.attach(&child).expect("attach guard");
+
+        wait_with_bounded_output_supervised(
+            &mut child,
+            4096,
+            Duration::from_millis(50),
+            Duration::from_millis(50),
+            || false,
+            |_, _| Ok(()),
+        )
+        .expect("supervision succeeds");
+
+        assert!(
+            sibling.try_wait().expect("sibling status").is_none(),
+            "a child outside the supervised process group must not be reaped"
+        );
+        let _ = sibling.kill();
+        let _ = sibling.wait();
+    }
 }
 
 /// Terminate an isolated child process tree and reap its direct child process.
