@@ -779,6 +779,7 @@ dependencies = [
  "fs4",
  "glob",
  "homeboy-agents",
+ "homeboy-command-contract",
  "homeboy-core",
  "homeboy-engine-primitives",
  "homeboy-extension",
@@ -841,6 +842,7 @@ dependencies = [
 name = "homeboy-command-contract"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "serde",
  "serde_json",
 ]
