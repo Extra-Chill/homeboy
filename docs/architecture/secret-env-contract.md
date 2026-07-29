@@ -10,6 +10,7 @@ The contract is intentionally small:
 - Status metadata records only `name`, `configured`, and `source`; it never includes resolved values.
 - Missing required names produce a structured error with normalized missing names and redacted status metadata.
 - Provider command execution receives `HOMEBOY_AGENT_TASK_SECRET_ENV_PLAN_JSON`, a serialized `SecretEnvPlan` containing normalized env names, env-name mappings, and redacted configured/missing status metadata. It never contains resolved secret values.
+- Local extension test children resolve only identities declared by `test.secret_env`, using process environment before configured Homeboy secret mappings. Missing identities fail before child execution. Secret-bearing child streams are captured and exact values are redacted before Homeboy creates output, logs, or artifacts.
 
 Value providers remain domain-owned. Core does not know where a secret comes from beyond the provider's source label. Current consumers can provide process env, config, keychain, remote runner, or extension-specific providers without adding domain semantics to the shared contract.
 
