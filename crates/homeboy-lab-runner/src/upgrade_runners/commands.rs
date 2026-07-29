@@ -74,9 +74,13 @@ pub fn runner_recovery_commands(
     selected_materialized_binary: Option<&str>,
     expected_build_identity: Option<&str>,
 ) -> Vec<String> {
-    let requires_non_mutating_recovery = selected_source_url
-        .is_some_and(|source| !source_url_is_runner_reachable(source))
-        && selected_materialized_binary.is_none();
+    let requires_non_mutating_recovery = selected_materialized_binary.is_none()
+        && match selected_source_url {
+            Some(source) => !source_url_is_runner_reachable(source),
+            // A selected revision or identity without an origin describes a
+            // controller-local snapshot, not the runner's default source.
+            None => selected_source_revision.is_some() || expected_build_identity.is_some(),
+        };
     let mut commands = if path_drift.is_some() {
         // The attempted upgrade left the same selected identity in place. Rotate
         // through the runner's managed materialization path instead of suggesting
@@ -138,7 +142,7 @@ fn runner_inspect_unreachable_source_command(
     };
     format!(
         "{inspect} # controller-local source {}; selected revision {}; expected identity {}",
-        shell_arg(selected_source_url.unwrap_or("unavailable")),
+        shell_arg(selected_source_url.unwrap_or("local snapshot without remote URL")),
         shell_arg(selected_source_revision.unwrap_or("unavailable")),
         shell_arg(expected_build_identity.unwrap_or("unavailable")),
     )
