@@ -926,6 +926,64 @@ mod tests {
     }
 
     #[test]
+    fn release_deploy_config_projects_each_targets_remote_path() {
+        with_isolated_home(|_| {
+            for (id, remote_path) in [
+                ("first", "wp-content/plugins/demo"),
+                ("second", "/srv/wp-content/plugins/demo"),
+            ] {
+                project::save(&Project {
+                    id: id.to_string(),
+                    components: vec![ProjectComponentAttachment {
+                        id: "demo".to_string(),
+                        local_path: "/stale/demo".to_string(),
+                        remote_path: Some(remote_path.to_string()),
+                        deployment_provider: None,
+                    }],
+                    ..Default::default()
+                })
+                .expect("save target project");
+            }
+
+            let artifact = crate::deploy::PreparedDeployArtifact {
+                component_id: "demo".to_string(),
+                path: "/source/demo.zip".to_string(),
+                durable_path: "/durable/demo.zip".to_string(),
+                size_bytes: 7,
+                sha256: "hash".to_string(),
+                version: "1.2.3".to_string(),
+                tag: "v1.2.3".to_string(),
+                source_commit: "commit".to_string(),
+            };
+            let config = super::release_deployment_config(
+                &Component {
+                    id: "demo".to_string(),
+                    local_path: "/release/demo".to_string(),
+                    remote_path: "../wp-content/plugins/demo".to_string(),
+                    ..Default::default()
+                },
+                Some("1.2.3"),
+                artifact,
+                &["first".to_string(), "second".to_string()],
+            )
+            .expect("release deploy config");
+            let projection = config.prepared_projection.as_ref().expect("projection");
+
+            for (id, remote_path) in [
+                ("first", "wp-content/plugins/demo"),
+                ("second", "/srv/wp-content/plugins/demo"),
+            ] {
+                let component = projection
+                    .components
+                    .get(&format!("{id}:demo"))
+                    .expect("target projection");
+                assert_eq!(component.remote_path, remote_path);
+                assert_eq!(component.local_path, "/release/demo");
+            }
+        });
+    }
+
+    #[test]
     fn failed_release_deployment_retains_artifact_for_resume() {
         let deployment = ReleaseDeploymentResult {
             projects: vec![],
