@@ -1323,9 +1323,9 @@ mod tests {
                 "context": "read lint evidence /tmp/run/findings.json",
                 "_homeboy_actions": [{
                     "id": "release.lint.fresh_diagnostic",
-                    "label": "run a fresh local lint diagnostic with the release lint scope",
+                    "label": "run a fresh lint diagnostic with the release lint scope",
                     "program": "homeboy",
-                    "args": ["--placement", "local", "lint", "fixture", "--path", "/workspace/fixture", "--extension", "rust", "--changed-since", "v1.2.3"],
+                    "args": ["--placement", "auto", "review", "lint", "fixture", "--path", "/workspace/fixture", "--extension", "rust", "--changed-since", "v1.2.3"],
                     "safety": "read_only",
                     "evidence": {
                         "kind": "fresh_diagnostic",
@@ -1342,11 +1342,11 @@ mod tests {
         let action = digest.next_actions.first().expect("explicit action");
         assert_eq!(
             action.label,
-            "run a fresh local lint diagnostic with the release lint scope"
+            "run a fresh lint diagnostic with the release lint scope"
         );
         assert_eq!(
             action.command,
-            "homeboy --placement local lint fixture --path /workspace/fixture --extension rust --changed-since v1.2.3"
+            "homeboy --placement auto review lint fixture --path /workspace/fixture --extension rust --changed-since v1.2.3"
         );
         assert_eq!(
             action
