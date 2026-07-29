@@ -159,6 +159,20 @@ function validateComposition(extensionId, composition) {
   }
 }
 
+function validateRustToolchainReadiness(manifest) {
+  const expected = [{
+    id: 'cargo-lint-toolchain',
+    capabilities: ['lint'],
+    command: 'cargo --version && cargo fmt --version',
+    repair_command: 'rustup default stable',
+    diagnostic_env: ['PATH', 'CARGO_HOME', 'RUSTUP_HOME', 'RUSTUP_TOOLCHAIN'],
+  }];
+
+  if (JSON.stringify(manifest.toolchain_readiness) !== JSON.stringify(expected)) {
+    fail('rust: toolchain_readiness must declare the Cargo lint toolchain probe');
+  }
+}
+
 function validateExtension(extensionId) {
   const extensionDir = path.join(rootDir, extensionId);
   const manifestPath = path.join(extensionDir, `${extensionId}.json`);
@@ -198,6 +212,10 @@ function validateExtension(extensionId) {
 
   if (Object.hasOwn(standardDiscoveryMarkers, extensionId)) {
     validateComposition(extensionId, manifest.composition);
+  }
+
+  if (extensionId === 'rust') {
+    validateRustToolchainReadiness(manifest);
   }
 
   if (manifest.provides?.capabilities !== undefined) {
