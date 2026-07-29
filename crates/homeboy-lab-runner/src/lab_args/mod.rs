@@ -40,7 +40,9 @@ pub(super) use at_files::{lab_at_file_specs, remap_lab_at_file_args, LabAtFileSp
 pub(super) use offload::{
     lab_offload_source_path, rewrite_lab_offload_args, rewrite_runner_resident_lab_offload_args,
 };
-pub(super) use path_remap::{remap_path_settings_in_args, LabPathRemap};
+pub(crate) use path_remap::{
+    remap_path_settings_in_args, remap_remote_path_references_in_value, LabPathRemap,
+};
 #[cfg(test)]
 pub(super) use provider_config::remap_provider_config_in_args;
 pub(super) use provider_config::{

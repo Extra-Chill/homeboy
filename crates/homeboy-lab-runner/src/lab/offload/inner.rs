@@ -886,7 +886,10 @@ pub(crate) fn exec_lab_context(
         &exec_output,
         lab_offload_structured_result_available(&exec_output, output_file_content.as_deref()),
     )?;
-    let mut stdout = exec_output.stdout.clone();
+    let mut stdout = portable_lab_result(&exec_output.stdout, &context.path_remaps);
+    if let Some(content) = output_file_content.as_mut() {
+        *content = portable_lab_result(content, &context.path_remaps);
+    }
     if !applied_mutation_files.is_empty() {
         stdout = reconcile_lab_mutation_output(&stdout, &applied_mutation_files);
         if let Some(content) = output_file_content.as_mut() {
@@ -925,17 +928,16 @@ pub(crate) fn exec_lab_context(
         );
         append_runner_failure_context_summary(&mut stderr, &exec_output);
         if let Some(run_id) = context.agent_task_run_id.as_deref() {
-            if let Some(handoff) = parse_offloaded_agent_task_handoff_from_outputs(
-                &exec_output.stdout,
-                &exec_output.stderr,
-            )? {
+            if let Some(handoff) =
+                parse_offloaded_agent_task_handoff_from_outputs(&stdout, &exec_output.stderr)?
+            {
                 if let Some(record) = agent_task_lifecycle::record_remote_dispatch_failure(
                     agent_task_lifecycle::AgentTaskRemoteDispatchFailure {
                         identity: agent_task_lifecycle::RunDispatchIdentity { run_id, runner_id },
                         local_command: redact_argv(request.normalized_args),
                         remote_command: redact_argv(&context.remote_command),
                         remote_workspace: &remote_cwd,
-                        stdout: &exec_output.stdout,
+                        stdout: &stdout,
                         stderr: &exec_output.stderr,
                         exit_code,
                     },
@@ -947,7 +949,7 @@ pub(crate) fn exec_lab_context(
                     ));
                     return Ok(LabOffloadOutcome::Offloaded {
                         plan: context.plan,
-                        stdout: exec_output.stdout,
+                        stdout,
                         stderr,
                         exit_code,
                         output_file_content,
@@ -955,7 +957,7 @@ pub(crate) fn exec_lab_context(
                 }
             }
             let failure_message = lab_pre_dispatch_failure_message(&exec_output.stderr)
-                .or_else(|| lab_pre_dispatch_failure_message(&exec_output.stdout))
+                .or_else(|| lab_pre_dispatch_failure_message(&stdout))
                 .unwrap_or_else(|| format!("offloaded agent-task command exited with {exit_code}"));
             stderr.push_str(&format!("Lab pre-dispatch failure: {failure_message}\n"));
             let record = agent_task_lifecycle::record_pre_dispatch_failure(
@@ -965,7 +967,7 @@ pub(crate) fn exec_lab_context(
                     remote_command: redact_argv(&context.remote_command),
                     remote_workspace: &remote_cwd,
                     failure_message: &failure_message,
-                    stdout: &exec_output.stdout,
+                    stdout: &stdout,
                     stderr: &exec_output.stderr,
                     exit_code,
                 },
@@ -2325,6 +2327,18 @@ fn reconcile_lab_mutation_output(output: &str, changed_files: &[String]) -> Stri
     serde_json::to_string_pretty(&value).unwrap_or_else(|_| output.to_string())
 }
 
+/// Return controller-facing structured output with runner workspace references
+/// translated through the recorded materialization mapping. Runner cleanup is
+/// terminal, so no returned action may require the materialized path to remain.
+fn portable_lab_result(output: &str, path_remaps: &[LabPathRemap]) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(output) else {
+        return output.to_string();
+    };
+
+    super::super::super::lab_args::remap_remote_path_references_in_value(&mut value, path_remaps);
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| output.to_string())
+}
+
 fn rewrite_refactor_sources_result(
     value: &mut serde_json::Value,
     changed_files: &[String],
@@ -2852,6 +2866,91 @@ mod tests {
             reconcile_lab_mutation_output(output, &["src/lib.rs".to_string()]),
             output
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn portable_result_keeps_repair_actions_and_sidecars_valid_after_runner_cleanup() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let controller_source = fixture.path().join("controller-source");
+        let runner_source = fixture.path().join("runner-workspace/source");
+        let tools = fixture.path().join("tools");
+        std::fs::create_dir_all(&controller_source).expect("controller source");
+        std::fs::create_dir_all(&runner_source).expect("runner source");
+        std::fs::create_dir_all(&tools).expect("tools");
+        std::fs::write(controller_source.join("lint-target"), "repair surface")
+            .expect("controller repair surface");
+        write_executable(
+            &tools.join("homeboy"),
+            "#!/bin/sh\n[ \"$1\" = lint ] && [ \"$2\" = fixture ] && [ \"$3\" = --path ] && [ -f \"$4/lint-target\" ] && [ \"$5\" = --fix ]\n",
+        );
+
+        let remote = runner_source.display().to_string();
+        let local = controller_source.display().to_string();
+        let output = serde_json::json!({
+            "success": false,
+            "hints": [format!("Auto-fix: homeboy lint fixture --path {remote} --fix")],
+            "next_actions": [{
+                "command": format!("homeboy lint fixture --path {remote} --fix")
+            }],
+            "data": {
+                "source_sidecar_path": format!("{remote}/lint-findings.json"),
+                "findings": [{ "source": { "path": format!("{remote}/src/lib.rs") } }]
+            }
+        })
+        .to_string();
+
+        let portable = portable_lab_result(
+            &output,
+            &[LabPathRemap {
+                local: local.clone(),
+                remote,
+            }],
+        );
+        std::fs::remove_dir_all(runner_source.parent().expect("runner workspace parent"))
+            .expect("delete-on-terminal cleanup");
+
+        let result: serde_json::Value = serde_json::from_str(&portable).expect("portable JSON");
+        let action = result["next_actions"][0]["command"]
+            .as_str()
+            .expect("repair action");
+        assert_eq!(action, format!("homeboy lint fixture --path {local} --fix"));
+        assert!(
+            std::path::Path::new(&local).join("lint-target").is_file(),
+            "the translated action still targets the controller repair surface after cleanup"
+        );
+        let path = format!(
+            "{}:{}",
+            tools.display(),
+            std::env::var("PATH").expect("PATH")
+        );
+        assert!(
+            std::process::Command::new("sh")
+                .args(["-c", action])
+                .env("PATH", path)
+                .status()
+                .expect("execute advertised repair action")
+                .success(),
+            "the advertised action must execute against the controller source after cleanup"
+        );
+        assert_eq!(
+            result["data"]["source_sidecar_path"],
+            format!("{local}/lint-findings.json")
+        );
+        assert_eq!(
+            result["data"]["findings"][0]["source"]["path"],
+            format!("{local}/src/lib.rs")
+        );
+        assert!(!portable.contains("runner-workspace"), "{portable}");
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &std::path::Path, contents: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(path, contents).expect("write executable");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("set executable permissions");
     }
 
     #[test]
