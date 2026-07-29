@@ -25,6 +25,7 @@
       "id": "cloudflare-workers.deploy",
       "label": "Deploy a Cloudflare Worker from an immutable source revision",
       "command": "node {{extension_path}}/scripts/cloudflare-worker-deploy.mjs --contract {{payload.contract}}",
+      "dry_run_command": "node {{extension_path}}/scripts/cloudflare-worker-deploy.mjs --dry-run --contract {{payload.contract}}",
       "contract": {
         "input_schema": "homeboy/cloudflare-worker-deploy-contract/v1",
         "result_schema": "homeboy/cloudflare-worker-deploy-result/v1",
