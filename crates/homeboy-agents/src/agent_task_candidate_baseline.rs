@@ -121,7 +121,76 @@ pub(crate) fn validate_gate_feedback_candidate_baseline(
             "recorded current diff does not match the promoted candidate worktree state",
         ));
     }
+    validate_tracked_promotion(root, cook_loop)?;
     Ok(current_diff)
+}
+
+/// A Cook continuation supplies this claim to core's provider preflight. Keep
+/// the integration-specific proof here while core remains responsible for the
+/// generic dirty-worktree admission decision.
+fn validate_tracked_promotion(root: &Path, baseline: &Value) -> Result<()> {
+    let Some(tracked) = baseline.get("tracked_promotion") else {
+        return Ok(());
+    };
+    let expected_path = tracked
+        .get("target_path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| invalid("tracked promotion has no destination path"))?;
+    let expected_path = std::fs::canonicalize(expected_path).map_err(|error| {
+        invalid(&format!(
+            "tracked promotion destination is unavailable: {error}"
+        ))
+    })?;
+    let actual_path = std::fs::canonicalize(root)
+        .map_err(|error| invalid(&format!("candidate worktree is unavailable: {error}")))?;
+    if actual_path != expected_path {
+        return Err(invalid(
+            "tracked promotion destination differs from the provider-resolved worktree",
+        ));
+    }
+    let expected_branch = tracked
+        .get("branch")
+        .and_then(Value::as_str)
+        .filter(|branch| !branch.is_empty())
+        .ok_or_else(|| invalid("tracked promotion has no destination branch"))?;
+    if git(root, &["branch", "--show-current"])? != expected_branch {
+        return Err(invalid(
+            "tracked promotion destination branch differs from the recorded branch",
+        ));
+    }
+    let expected_candidate = tracked
+        .get("candidate")
+        .cloned()
+        .ok_or_else(|| invalid("tracked promotion has no candidate fingerprint"))?;
+    let expected_candidate = serde_json::from_value(expected_candidate)
+        .map_err(|_| invalid("tracked promotion candidate fingerprint is invalid"))?;
+    let actual_candidate =
+        crate::agent_task_promotion::candidate_fingerprint(actual_path.to_string_lossy().as_ref())?;
+    if actual_candidate != expected_candidate {
+        return Err(invalid(
+            "tracked promotion destination differs from the exact candidate fingerprint",
+        ));
+    }
+    let expected_paths = tracked
+        .get("changed_files")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("tracked promotion has no changed-file list"))?
+        .iter()
+        .map(Value::as_str)
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| invalid("tracked promotion changed-file list is invalid"))?;
+    let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } =
+        actual_candidate
+    else {
+        return Err(invalid("tracked promotion candidate is not a Git worktree"));
+    };
+    if fingerprint.changed_files != expected_paths {
+        return Err(invalid(
+            "tracked promotion changed-file list differs from the exact candidate",
+        ));
+    }
+    Ok(())
 }
 
 /// Validate a committed adoption candidate when an interrupted pre-provider
