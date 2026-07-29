@@ -688,7 +688,7 @@ fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
 }
 
 #[test]
-fn compact_status_marks_live_runner_with_controller_skew_degraded_and_actionable() {
+fn compact_status_marks_dirty_controller_same_commit_degraded_with_convergent_action() {
     let report = RunnerStatusReport {
         runner_id: "homeboy-lab".to_string(),
         connected: true,
@@ -724,7 +724,8 @@ fn compact_status_marks_live_runner_with_controller_skew_degraded_and_actionable
             )
             .with_controller_compatibility(
                 "0.321.1".to_string(),
-                "homeboy 0.321.1+controller".to_string(),
+                "homeboy 0.321.1+configured-dirty".to_string(),
+                true,
                 true,
                 true,
             ),
@@ -768,13 +769,12 @@ fn compact_status_marks_live_runner_with_controller_skew_degraded_and_actionable
     assert!(summary
         .risk
         .iter()
-        .any(|risk| risk.contains("controller_configured_identity_skew")));
+        .any(|risk| risk.contains("controller_dirty")));
     assert!(summary
         .risk
         .iter()
-        .any(|risk| risk.contains("homeboy 0.321.1+controller")));
-    assert!(summary.next_action.contains("refresh-homeboy homeboy-lab"));
-    assert!(summary.next_action.contains("--ref"));
+        .any(|risk| risk.contains("homeboy 0.321.1+configured-dirty")));
+    assert_eq!(summary.next_action, "homeboy upgrade --force");
     assert!(
         report.connected,
         "liveness remains independently observable"

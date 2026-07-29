@@ -1093,11 +1093,14 @@ impl RunnerStaleDaemonWarning {
         controller_build_identity: String,
         controller_version_matches: bool,
         daemon_matches_configured: bool,
+        controller_dirty: bool,
     ) -> Self {
         self.controller_homeboy_version = Some(controller_version.clone());
         self.controller_homeboy_build_identity = Some(controller_build_identity.clone());
         if daemon_matches_configured {
-            self.compatibility_reason = Some(if controller_version_matches {
+            self.compatibility_reason = Some(if controller_dirty {
+                "controller_dirty"
+            } else if controller_version_matches {
                 "controller_configured_identity_skew"
             } else {
                 "controller_configured_version_skew"
@@ -1108,6 +1111,10 @@ impl RunnerStaleDaemonWarning {
                     .as_deref()
                     .unwrap_or(&self.job_command_binary_version),
             );
+            if controller_dirty {
+                self.recovery_commands = vec!["homeboy upgrade --force".to_string()];
+                self.refresh_command = self.recovery_commands.join(" && ");
+            }
         }
         self
     }

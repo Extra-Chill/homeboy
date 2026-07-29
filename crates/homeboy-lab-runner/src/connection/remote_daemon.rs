@@ -218,6 +218,25 @@ pub(super) fn compare_identities(left: Option<&str>, right: Option<&str>) -> Ide
     }
 }
 
+pub(super) fn compare_build_commits(left: Option<&str>, right: Option<&str>) -> IdentityComparison {
+    match (left.and_then(build_commit), right.and_then(build_commit)) {
+        (Some(left), Some(right)) if left == right => IdentityComparison::Match,
+        (Some(_), Some(_)) => IdentityComparison::Mismatch,
+        _ => IdentityComparison::Unverifiable,
+    }
+}
+
+fn build_commit(identity: &str) -> Option<String> {
+    immutable_build_identity(identity)
+        .then(|| normalize_homeboy_version_owned(identity))
+        .and_then(|identity| {
+            identity
+                .split_once('+')
+                .map(|(_, commit)| commit.to_string())
+        })
+        .map(|commit| commit.strip_suffix("-dirty").unwrap_or(&commit).to_string())
+}
+
 pub(super) struct SshTunnelOutput {
     pub(super) pid: Option<u32>,
     pub(super) stderr: String,

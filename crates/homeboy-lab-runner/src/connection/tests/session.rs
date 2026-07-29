@@ -555,6 +555,7 @@ fn same_version_different_controller_build_is_incompatible_and_truthful() {
         "homeboy 0.321.1+controller".to_string(),
         true,
         true,
+        false,
     );
 
     assert_eq!(
@@ -563,6 +564,13 @@ fn same_version_different_controller_build_is_incompatible_and_truthful() {
             Some("homeboy 0.321.1+controller"),
         ),
         IdentityComparison::Mismatch
+    );
+    assert_eq!(
+        compare_build_commits(
+            Some("homeboy 0.321.1+configured"),
+            Some("homeboy 0.321.1+configured-dirty"),
+        ),
+        IdentityComparison::Match
     );
     assert_eq!(
         warning.compatibility_reason,

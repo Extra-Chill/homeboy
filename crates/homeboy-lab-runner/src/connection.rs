@@ -2495,7 +2495,7 @@ fn stale_daemon_warning(
         session_identity.as_deref(),
         current_identity.build_identity.as_deref(),
     );
-    let controller_identity_comparison = compare_identities(
+    let controller_commit_comparison = compare_build_commits(
         current_identity.build_identity.as_deref(),
         Some(&controller_identity.display),
     );
@@ -2520,7 +2520,8 @@ fn stale_daemon_warning(
     );
     let controller_matches_configured =
         versions_match(&current_version, &controller_identity.version)
-            && controller_identity_comparison == IdentityComparison::Match;
+            && controller_commit_comparison == IdentityComparison::Match
+            && controller_identity.git_dirty != Some(true);
     let controller_version_matches = versions_match(&current_version, &controller_identity.version);
     if daemon_matches_configured && controller_matches_configured {
         return Ok(None);
@@ -2543,6 +2544,7 @@ fn stale_daemon_warning(
             controller_identity.display,
             controller_version_matches,
             daemon_matches_configured,
+            controller_identity.git_dirty == Some(true),
         )
         .with_runtime_paths(&runner.id, stale_runtime_paths, changed_runtime_paths),
     ))
