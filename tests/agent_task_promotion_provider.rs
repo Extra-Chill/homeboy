@@ -153,7 +153,8 @@ fn promotion_gate_binds_a_socket_in_the_short_invocation_tmpdir_for_a_long_run_i
 
     assert_eq!(
         report.status,
-        homeboy::agents::agent_task_promotion::AgentTaskPromotionStatus::Applied
+        homeboy::agents::agent_task_promotion::AgentTaskPromotionStatus::Applied,
+        "promotion report: {report:#?}"
     );
     let socket_path = report.deterministic_gates[0].stdout.trim();
     assert!(socket_path.ends_with("gate.sock"));
