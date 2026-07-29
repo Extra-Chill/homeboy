@@ -1,0 +1,85 @@
+name: Required Gates Ruleset
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Inspect, apply the versioned policy, or temporarily bypass it for a recorded incident.
+        required: true
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - apply
+          - emergency-bypass
+      confirmation:
+        description: APPLY_REQUIRED_GATES for apply; EMERGENCY_BYPASS_REQUIRED_GATES for emergency-bypass.
+        required: false
+        type: string
+      emergency_issue:
+        description: 'Open issue number titled "Emergency CI bypass: ..."; required for emergency-bypass.'
+        required: false
+        type: string
+
+concurrency:
+  group: required-gates-ruleset-Extra-Chill-homeboy
+  cancel-in-progress: false
+
+# The default token is read-only. The mutating job receives a separate,
+# environment-scoped administration token only after environment approval.
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the canonical repository and main ref
+        run: |
+          test "${GITHUB_REPOSITORY}" = 'Extra-Chill/homeboy'
+          test "${GITHUB_REF}" = 'refs/heads/main'
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+      - name: Record current state and requested contract
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash .github/manage-required-gates-ruleset.sh \
+            --operation '${{ inputs.operation }}' \
+            --dry-run \
+            --confirmation '${{ inputs.confirmation }}' \
+            --emergency-issue '${{ inputs.emergency_issue }}' \
+            --evidence required-gates-preflight.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: required-gates-preflight
+          path: required-gates-preflight.json
+          if-no-files-found: error
+
+  apply:
+    if: inputs.operation != 'dry-run'
+    needs: preflight
+    runs-on: ubuntu-latest
+    environment: main-ruleset-administration
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+      - name: Apply approved ruleset operation and record resulting state
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBOY_RULESET_ADMIN_TOKEN }}
+        run: |
+          test -n "${GH_TOKEN}"
+          bash .github/manage-required-gates-ruleset.sh \
+            --operation '${{ inputs.operation }}' \
+            --apply \
+            --confirmation '${{ inputs.confirmation }}' \
+            --emergency-issue '${{ inputs.emergency_issue }}' \
+            --evidence required-gates-apply.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: required-gates-apply
+          path: required-gates-apply.json
+          if-no-files-found: warn

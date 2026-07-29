@@ -29,7 +29,9 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Validate required check contexts
-        run: bash .github/validate-required-gates.sh --local
+        run: |
+          bash .github/validate-required-gates.sh --local
+          bash .github/test-manage-required-gates-ruleset.sh
 
   # Non-differential safety net for crate-topology changes. The `review test`
   # gate below is differentially scoped, so a crate extraction that orphans a

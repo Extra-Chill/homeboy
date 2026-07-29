@@ -10,33 +10,55 @@ declared contract.
 ## Apply And Verify
 
 The GitHub ruleset is repository state, so it cannot be changed by a pull
-request. After this change merges, a repository administrator applies the
-versioned payload to the existing `main` ruleset and verifies the result:
+request. After this change merges, a repository administrator configures the
+`main-ruleset-administration` GitHub environment with required reviewers and an
+environment secret named `HOMEBOY_RULESET_ADMIN_TOKEN`. That token is a
+repository-scoped GitHub App installation token or fine-grained token with only
+repository-administration read/write access. The dispatch workflow has only
+`contents: read`; the administration token is available solely to its approved
+apply job.
+
+Run the unprivileged preflight first, inspect its `required-gates-preflight`
+artifact, then dispatch the approved apply operation from `main`:
 
 ```bash
-gh api --method PUT repos/Extra-Chill/homeboy/rulesets/13680120 \
-  --input .github/required-gates-ruleset.json
-bash .github/validate-required-gates.sh --github
-gh api repos/Extra-Chill/homeboy/rulesets/13680120
+gh workflow run required-gates-ruleset.yml --repo Extra-Chill/homeboy --ref main \
+  -f operation=dry-run
+gh workflow run required-gates-ruleset.yml --repo Extra-Chill/homeboy --ref main \
+  -f operation=apply \
+  -f confirmation=APPLY_REQUIRED_GATES
 ```
 
-The final command is review evidence. Its `required_status_checks` rule must
-contain exactly the eight contexts in the payload and set
-`strict_required_status_checks_policy` to `true`. Test the installation with a
-PR that leaves `homeboy / Test`, `homeboy / Lint`, or `homeboy / Audit` pending;
-GitHub must report the PR as blocked until the check succeeds.
+The `required-gates-apply` artifact records the immutable workflow inputs and
+the before, desired, and after ruleset documents. The workflow fails unless the
+after document exactly matches the checked-in policy. Its
+`required_status_checks` rule contains exactly the eight contexts in the payload
+and sets `strict_required_status_checks_policy` to `true`. Test the installation
+with a PR that leaves `homeboy / Test`, `homeboy / Lint`, or `homeboy / Audit`
+pending; GitHub must report the PR as blocked until the check succeeds.
 
 ## Emergency Path
 
 Normal emergency work still uses a PR and waits for this gate set. If an active
 incident requires a merge before a gate can finish, the repository owner records
-an issue titled `Emergency CI bypass: <PR number>` before changing the ruleset.
-The issue includes the PR URL, immutable head SHA, incident and rollback plan,
-each outstanding check with its URL and state, and the owner approving the
-bypass. The owner changes the rule only through the GitHub ruleset UI, performs
-the merge, then restores the checked-in payload with the apply command above.
+an open issue titled `Emergency CI bypass: <PR number>` before dispatching the
+approved bypass. The issue includes the PR URL, immutable head SHA, incident and
+rollback plan, each outstanding check with its URL and state, and the owner
+approving the bypass.
 
-The owner attaches the `--github` verification output and post-merge check
-outcomes to the issue, then closes it. The current ruleset has no bypass actors;
-keeping bypass access out of the standing policy makes every exception a visible,
-time-bounded repository-admin action in GitHub's audit trail.
+```bash
+gh workflow run required-gates-ruleset.yml --repo Extra-Chill/homeboy --ref main \
+  -f operation=emergency-bypass \
+  -f confirmation=EMERGENCY_BYPASS_REQUIRED_GATES \
+  -f emergency_issue=<issue-number>
+```
+
+The workflow requires the open issue and exact confirmation, removes only the
+versioned required-status-check rule, and records the before/desired/after state
+in `required-gates-apply`. Restore the normal policy through the approved
+`operation=apply` dispatch immediately after the incident merge.
+
+The owner attaches the workflow artifact URLs and post-merge check outcomes to
+the issue, then closes it. The current ruleset has no bypass actors; the required
+environment approval makes every exception a visible, time-bounded
+repository-admin action in GitHub's audit trail.
