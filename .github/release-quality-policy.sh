@@ -39,9 +39,10 @@
 #                input string, not from asking the matcher what it found.
 #   units      - checked commands that the matcher claimed.
 #
-#   units > 0                    -> measured        -> enforce, exit `failed`
-#   units == 0, population == 0  -> empty-population-> honest zero, warn, exit 0
-#   units == 0, population > 0   -> contradicted    -> broken instrument, exit 1
+#   population == 0              -> empty-population -> honest zero, warn, exit 0
+#   units == 0 (population > 0)  -> contradicted     -> broken instrument, exit 1
+#   any entry uncheckable        -> unenforceable    -> silently unenforced, exit 1
+#   otherwise                    -> measured         -> enforce, exit `failed`
 #
 # `unknown` is deliberately NOT collapsed into `fail` here, and `contradicted`
 # deliberately IS a hard error — the same split `engine.rs` makes. See
@@ -124,24 +125,39 @@ check_command() {
   fi
 }
 
-# The predicate. Classifies the matched population BEFORE the exit code is read,
-# and emits one machine-readable provenance line in every branch so a log reader
-# can tell a *measured zero* from *no measurement* without inferring it from the
-# exit code. Absence of this line means the script died before assessing, which
-# is a third state again and is also not a pass.
+# The predicate. ONE function, deliberately.
+#
+# The first draft of this fix had two — `assess_measurement` for the empty
+# matched population and `assess_configuration` for an entry naming an
+# uncheckable command — and mutation testing showed why that was wrong:
+# reverting the `contradicted` branch to a pass changed no observable
+# behaviour, because zero matches against a non-empty population means *every*
+# entry is unmatched, so the second guard always fired first. The load-bearing
+# check was one of the two and the other was decoration that could rot
+# untested. Two functions answering one question is the shape #10690 exists to
+# stop; it does not become acceptable because both of them are mine.
+#
+# Classifies BEFORE the exit code is read, and emits one machine-readable
+# provenance line in every branch so a log reader can tell a *measured zero*
+# from *no measurement* without inferring it from the exit code. Absence of the
+# line means the script died before assessing — a third state again, and also
+# not a pass.
 assess_measurement() {
   local population="${#configured_tokens[@]}"
+  local unmatched="${#unmatched_tokens[@]}"
   local outcome
 
-  if [ "${measured_units}" -gt 0 ]; then
-    outcome='measured'
-  elif [ "${population}" -eq 0 ]; then
+  if [ "${population}" -eq 0 ]; then
     outcome='empty-population'
-  else
+  elif [ "${measured_units}" -eq 0 ]; then
     outcome='contradicted'
+  elif [ "${unmatched}" -gt 0 ]; then
+    outcome='unenforceable'
+  else
+    outcome='measured'
   fi
 
-  echo "::notice::measurement basis=release-quality-policy population=${population} units=${measured_units} outcome=${outcome}"
+  echo "::notice::measurement basis=release-quality-policy population=${population} units=${measured_units} unmatched=${unmatched} outcome=${outcome}"
 
   case "${outcome}" in
     measured)
@@ -165,26 +181,22 @@ assess_measurement() {
       # independently non-empty population. The matcher is provably broken, not
       # the gates, so neither `pass` nor `unknown` is honest — this is the one
       # outcome the shared predicate makes a hard error rather than a verdict.
+      # This is the #10741 defect exactly.
       echo "::error::Release-blocking policy matched none of its ${population} configured command(s) (BLOCKING_COMMANDS='${BLOCKING_COMMANDS}'). Every gate fell through to the non-blocking branch, so this policy would have exited 0 while enforcing nothing. Checkable commands are: ${CHECKABLE_COMMANDS}."
       return 1
       ;;
+    unenforceable)
+      # The partial form of the same defect, and the subtler one: a single typo
+      # in "review lint,review tests" leaves `units` non-zero, so the emptiness
+      # check alone reads it as a healthy measurement while the test gate
+      # silently stops blocking. Refused rather than warned because the remedy
+      # is a one-character edit to a `workflow_dispatch` input, and because the
+      # automated push path — whose set is the well-formed default — cannot
+      # reach it.
+      echo "::error::Release-blocking policy cannot check: ${unmatched_tokens[*]}. These entries of BLOCKING_COMMANDS='${BLOCKING_COMMANDS}' name no command this policy measures, so they declare a release-blocking requirement that is silently never enforced. Checkable commands are: ${CHECKABLE_COMMANDS}."
+      return 1
+      ;;
   esac
-}
-
-# A configured entry naming an uncheckable command is a declared blocking
-# requirement no measurement can satisfy. Refused rather than ignored: it is the
-# partial form of the same defect (one typo in "review lint,review tests"
-# silently stops the test gate blocking while the policy still reports
-# `outcome=measured`), and the remedy is a one-character edit to a
-# `workflow_dispatch` input. It cannot fire on the automated push path, whose
-# set is the well-formed default.
-assess_configuration() {
-  if [ "${#unmatched_tokens[@]}" -eq 0 ]; then
-    return 0
-  fi
-
-  echo "::error::Release-blocking policy cannot check: ${unmatched_tokens[*]}. These entries of BLOCKING_COMMANDS='${BLOCKING_COMMANDS}' name no command this policy measures, so they declare a release-blocking requirement that is silently never enforced. Checkable commands are: ${CHECKABLE_COMMANDS}."
-  return 1
 }
 
 read_configured_tokens
@@ -196,6 +208,5 @@ check_command test "${TEST_RESULT}"
 # The measurement is assessed before the gate verdict is returned, so a broken
 # matcher can never be reported as a clean run.
 assess_measurement || failed=1
-assess_configuration || failed=1
 
 exit "${failed}"

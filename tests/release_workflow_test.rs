@@ -267,7 +267,7 @@ fn release_quality_policy_refuses_a_blocking_set_that_matches_nothing() {
         "the default release path must be unaffected: {normal_output}"
     );
     assert!(
-        normal_output.contains("population=2 units=2 outcome=measured"),
+        normal_output.contains("population=2 units=2 unmatched=0 outcome=measured"),
         "the default path must record that it actually measured both blocking gates: \
          {normal_output}"
     );

@@ -460,8 +460,27 @@ const GATE_LAYER_SITES: &[GateLayerSite] = &[
     },
 ];
 
-/// Directories under `.github/` are the gate layer. Extensions that can carry
-/// verdict logic.
+/// Extensions under `.github/` that can carry verdict logic.
+///
+/// # Why the scan stops at `.github/`
+///
+/// `crates/homeboy-extension/src/runtime/*.sh` is the other body of shell in
+/// this repository, and it was swept for this issue rather than assumed
+/// harmless. Those files are evidence *producers*, not verdict renderers: they
+/// write the counts and findings sidecars that Rust gates then read. Registering
+/// them would add thirteen rows that all say `NotAGate`, burying the eleven that
+/// mean something.
+///
+/// One of them is worth recording anyway. `write-test-results.sh` reads its
+/// counts as `local passed="${2:-0}"`, so an *absent* argument is written to the
+/// sidecar as a measured `0` — the exact measured-zero/no-measurement collapse
+/// this registry is about, at the point where the evidence is created. It does
+/// not become a green: `test_run_status` maps `Some(counts)` to
+/// `Measurement::units(passed + failed)`, and `units(0)` with no population is
+/// `Unmeasured(ZeroUnits)`, which forbids a pass. The consequence is narrower
+/// than a false verdict and real — an operator reading the sidecar cannot tell
+/// "the runner reported zero tests" from "the runner reported nothing" — so it
+/// is recorded here rather than patched under a gate-layer issue.
 const GATE_LAYER_EXTENSIONS: &[&str] = &["yml", "yaml", "sh"];
 
 /// Substring the shell [`MeasurementBasis::SharedPredicate`] sites must still
@@ -646,7 +665,12 @@ fn gate_layer_decision(relative: &str, line: &str) -> Option<String> {
             let needle = format!("={value}\"");
             if let Some(end) = trimmed.find(&needle) {
                 let head = &trimmed[..end];
-                let name_start = head.rfind('"').map(|index| index + 1)?;
+                // `continue`, not `?`: a bare `?` here would abandon the whole
+                // line the moment one of the two values failed to parse, which
+                // would silently stop the scan seeing the other.
+                let Some(name_start) = head.rfind('"').map(|index| index + 1) else {
+                    continue;
+                };
                 let name = &head[name_start..];
                 if !name.is_empty()
                     && name
@@ -941,28 +965,39 @@ fn every_skip_rendering_gate_layer_decision_is_executed_by_a_fixture() {
          ran instead of what that command produced."
     );
 
+    // A skip-rendering decision must either name a fixture or carry the debt
+    // marker. `renders_skip` is the obligation; the marker is the escape hatch,
+    // and it is greppable on purpose.
+    for site in GATE_LAYER_SITES
+        .iter()
+        .filter(|site| site.renders_skip && site.fixture.is_none())
+    {
+        assert!(
+            site.note.starts_with("NO FIXTURE:"),
+            "{} -> {} renders a skip with no fixture, and its note does not open with \
+             `NO FIXTURE:`.\n\nA skip-rendering decision without an executing test is exactly the \
+             state `should-release=false` was in when #10706 laundered a detached HEAD into \
+             `No releasable commits`. If it genuinely cannot be fixtured yet, say so explicitly \
+             so the debt is greppable rather than invisible.",
+            site.file,
+            site.decision
+        );
+    }
+
+    // Every *claimed* fixture must exist. Counted across all sites, not only
+    // the skip-rendering ones: an aspirational fixture name is a false claim
+    // wherever it appears.
     let mut executed = 0;
-    for site in GATE_LAYER_SITES.iter().filter(|site| site.renders_skip) {
+    for site in GATE_LAYER_SITES {
         let Some(fixture) = site.fixture else {
-            assert!(
-                site.note.starts_with("NO FIXTURE:"),
-                "{} -> {} renders a skip with no fixture, and its note does not open with \
-                 `NO FIXTURE:`.\n\nA skip-rendering decision without an executing test is exactly \
-                 the state `should-release=false` was in when #10706 laundered a detached HEAD \
-                 into `No releasable commits`. If it genuinely cannot be fixtured yet, say so \
-                 explicitly so the debt is greppable rather than invisible.",
-                site.file,
-                site.decision
-            );
             continue;
         };
-
         assert!(
             fixtures.contains(&format!("fn {fixture}(")),
             "{} -> {} names fixture `{fixture}`, but no such test exists in \
              {GATE_LAYER_FIXTURE_FILE}.\n\nEither the test was renamed and the registration was \
-             not, or the registration was aspirational. Both leave a skip-rendering decision \
-             unexercised while claiming otherwise.",
+             not, or the registration was aspirational. Both leave a decision unexercised while \
+             claiming otherwise.",
             site.file,
             site.decision
         );
@@ -971,9 +1006,25 @@ fn every_skip_rendering_gate_layer_decision_is_executed_by_a_fixture() {
 
     assert!(
         executed >= 2,
-        "only {executed} skip-rendering gate-layer decision(s) resolved to a real fixture, so \
-         this assertion is close to passing vacuously -- the same absence-of-evidence failure it \
-         exists to prevent."
+        "only {executed} gate-layer decision(s) resolved to a real fixture, so this assertion is \
+         close to passing vacuously -- the same absence-of-evidence failure it exists to prevent."
+    );
+
+    // And the acceptance case specifically. A general floor can drift until it
+    // no longer covers the incident that motivated it; recorded incidents get
+    // replayed by name.
+    let incident = GATE_LAYER_SITES
+        .iter()
+        .find(|site| {
+            site.file == ".github/workflows/release.yml" && site.decision == "should-release=false"
+        })
+        .expect("the #10706 decision must stay registered");
+    let fixture = incident.fixture.expect(
+        "`should-release=false` must keep an executing fixture -- it is the acceptance case",
+    );
+    assert!(
+        fixtures.contains(&format!("fn {fixture}(")),
+        "the #10706 acceptance case names fixture `{fixture}`, which does not exist"
     );
 }
 
