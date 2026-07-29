@@ -2828,6 +2828,7 @@ fn bind_dispatch_workspace_attestations(plan: &mut AgentTaskPlan) -> Result<()> 
 /// recipes may outlive provider metadata, so the filesystem identity is checked
 /// again on local, Lab, retry, and resume paths rather than trusting the plan.
 fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> {
+    let continuation = tracked_promotion_continuation(options)?;
     let direct_path = std::path::Path::new(&options.to_worktree);
     let target = if direct_path.is_dir() {
         direct_path.to_path_buf()
@@ -2847,7 +2848,9 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
         homeboy_core::worktree_providers::resolve_apply_enabled_worktree_provider_from_config(
             &options.to_worktree,
             &homeboy_core::defaults::load_config(),
-            None,
+            continuation
+                .as_ref()
+                .map(|continuation| &continuation.baseline),
         )?
         .worktree
         .path
@@ -2865,6 +2868,9 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
     let target = std::fs::canonicalize(&target).map_err(|error| {
         Error::internal_io(error.to_string(), Some(target.display().to_string()))
     })?;
+    if let Some(continuation) = continuation {
+        authenticate_tracked_promotion_continuation(&target, &continuation)?;
+    }
     let source = std::fs::canonicalize(source).map_err(|error| {
         Error::internal_io(error.to_string(), Some(source.display().to_string()))
     })?;
@@ -2874,6 +2880,159 @@ fn validate_cook_workspace(options: &AgentTaskCookServiceOptions) -> Result<()> 
             "Cook provider workspace differs from its declared task worktree; refusing provider execution",
             Some(options.to_worktree.clone()),
             Some(vec!["Re-run Cook without a source CWD override so Homeboy binds the declared task worktree.".to_string()]),
+        ));
+    }
+    Ok(())
+}
+
+struct TrackedPromotionContinuation {
+    baseline: Value,
+    path: PathBuf,
+    branch: String,
+    candidate: crate::agent_task_promotion::AgentTaskPromotionCandidate,
+}
+
+/// A dirty destination is reusable only for the exact post-apply candidate
+/// checkpoint owned by this Cook attempt. Core verifies the supplied baseline
+/// during provider resolution; Cook binds it to this attempt's target identity.
+fn tracked_promotion_continuation(
+    options: &AgentTaskCookServiceOptions,
+) -> Result<Option<TrackedPromotionContinuation>> {
+    let Some(promotion) = persisted_promotion_for_attempt(&options.initial_run_id)? else {
+        return Ok(None);
+    };
+    if !matches!(
+        promotion.status,
+        AgentTaskPromotionStatus::VerificationPending | AgentTaskPromotionStatus::Applied
+    ) || !["/post_apply", "/resumed_post_apply_promotion"]
+        .into_iter()
+        .any(|pointer| promotion.provenance.pointer(pointer) == Some(&Value::Bool(true)))
+    {
+        return Ok(None);
+    }
+    if promotion.to_worktree != options.to_worktree
+        || promotion.target.worktree != options.to_worktree
+    {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "Cook continuation destination does not match its tracked post-apply promotion",
+            Some(options.to_worktree.clone()),
+            None,
+        ));
+    }
+    let path = promotion.target.path.as_deref().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "latest_promotion.target.path",
+            "Cook continuation requires the tracked post-apply promotion destination path",
+            Some(options.initial_run_id.clone()),
+            None,
+        )
+    })?;
+    let branch = promotion
+        .target
+        .branch
+        .filter(|branch| !branch.is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "latest_promotion.target.branch",
+                "Cook continuation requires the tracked post-apply promotion destination branch",
+                Some(options.initial_run_id.clone()),
+                None,
+            )
+        })?;
+    let candidate = promotion
+        .provenance
+        .get("candidate")
+        .cloned()
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "latest_promotion.provenance.candidate",
+                "Cook continuation requires the tracked post-apply candidate fingerprint",
+                Some(options.initial_run_id.clone()),
+                None,
+            )
+        })?;
+    let candidate = serde_json::from_value(candidate).map_err(|_| {
+        Error::validation_invalid_argument(
+            "latest_promotion.provenance.candidate",
+            "Cook continuation tracked candidate fingerprint is invalid",
+            Some(options.initial_run_id.clone()),
+            None,
+        )
+    })?;
+    let mut baseline = promotion
+        .provenance
+        .get("gate_feedback_baseline")
+        .filter(|baseline| {
+            baseline.get("schema").and_then(Value::as_str)
+                == Some("homeboy/agent-task-gate-feedback-baseline/v1")
+        })
+        .cloned()
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "latest_promotion.provenance.gate_feedback_baseline",
+                "Cook continuation requires the tracked post-apply candidate baseline",
+                Some(options.initial_run_id.clone()),
+                None,
+            )
+        })?;
+    baseline["patch_artifact"] =
+        serde_json::to_value(&promotion.patch_artifact).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize persisted promotion artifact baseline".to_string()),
+            )
+        })?;
+    Ok(Some(TrackedPromotionContinuation {
+        baseline,
+        path: PathBuf::from(path),
+        branch,
+        candidate,
+    }))
+}
+
+fn authenticate_tracked_promotion_continuation(
+    target: &std::path::Path,
+    continuation: &TrackedPromotionContinuation,
+) -> Result<()> {
+    let expected_path = std::fs::canonicalize(&continuation.path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(continuation.path.display().to_string()),
+        )
+    })?;
+    if target != expected_path {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "Cook continuation destination path differs from its tracked post-apply promotion",
+            Some(target.display().to_string()),
+            None,
+        ));
+    }
+    let branch = homeboy_core::git::current_branch(target).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "to_worktree",
+            "Cook continuation destination has no branch",
+            Some(target.display().to_string()),
+            None,
+        )
+    })?;
+    if branch != continuation.branch {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "Cook continuation destination branch differs from its tracked post-apply promotion",
+            Some(target.display().to_string()),
+            None,
+        ));
+    }
+    let actual =
+        crate::agent_task_promotion::candidate_fingerprint(target.to_string_lossy().as_ref())?;
+    if actual != continuation.candidate {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "Cook continuation destination differs from its exact tracked post-apply candidate",
+            Some(target.display().to_string()),
+            None,
         ));
     }
     Ok(())

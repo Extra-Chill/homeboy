@@ -5652,6 +5652,114 @@ fn promotion(run_id: &str) -> AgentTaskPromotionReport {
         })).unwrap()
 }
 
+fn tracked_promotion_continuation_options(
+    cook_id: &str,
+    run_id: &str,
+    target: &std::path::Path,
+) -> AgentTaskCookServiceOptions {
+    let mut options = promotion_claim_options(cook_id, run_id);
+    options.to_worktree = target.display().to_string();
+    options.source_worktree_path = Some(target.to_path_buf());
+    options
+}
+
+fn record_tracked_promotion_continuation(
+    options: &AgentTaskCookServiceOptions,
+    target: &std::path::Path,
+) {
+    agent_task_lifecycle::submit_plan(&options.initial_plan, Some(&options.initial_run_id))
+        .unwrap();
+    let mut checkpoint = serde_json::to_value(promotion(&options.initial_run_id)).unwrap();
+    checkpoint["status"] = serde_json::json!("verification_pending");
+    checkpoint["to_worktree"] = serde_json::json!(options.to_worktree);
+    checkpoint["target"] = serde_json::json!({
+        "worktree": options.to_worktree,
+        "path": target,
+        "branch": "cook-candidate"
+    });
+    checkpoint["provenance"] = serde_json::json!({
+        "post_apply": true,
+        "candidate": crate::agent_task_promotion::candidate_fingerprint(
+            target.to_str().expect("target path")
+        ).unwrap(),
+        "gate_feedback_baseline": {
+            "schema": "homeboy/agent-task-gate-feedback-baseline/v1",
+            "current_diff": "fixture"
+        }
+    });
+    agent_task_lifecycle::record_promotion(&options.initial_run_id, checkpoint).unwrap();
+}
+
+#[test]
+fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let target = temp.path().join("candidate");
+        std::fs::create_dir(&source).unwrap();
+        for args in [
+            vec!["init", "--quiet", "-b", "main"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Homeboy Test"],
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&source)
+                .status()
+                .unwrap()
+                .success());
+        }
+        std::fs::write(source.join("tracked.txt"), "base\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "."])
+            .current_dir(&source)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "--quiet", "-m", "base"])
+            .current_dir(&source)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["worktree", "add", "--quiet", "-b", "cook-candidate"])
+            .arg(&target)
+            .current_dir(&source)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(target.join("tracked.txt"), "promoted\n").unwrap();
+
+        let options = tracked_promotion_continuation_options(
+            "cook-tracked-promotion",
+            "run-tracked-promotion",
+            &target,
+        );
+        record_tracked_promotion_continuation(&options, &target);
+
+        let continuation = tracked_promotion_continuation(&options)
+            .unwrap()
+            .expect("tracked promotion continuation");
+        assert_eq!(continuation.baseline["patch_artifact"]["id"], "patch");
+
+        validate_cook_workspace(&options).expect("exact tracked promotion resumes");
+
+        std::fs::write(target.join("extra.txt"), "unattributed\n").unwrap();
+        let error = validate_cook_workspace(&options).expect_err("extra drift is rejected");
+        assert!(error.message.contains("exact tracked post-apply candidate"));
+        std::fs::remove_file(target.join("extra.txt")).unwrap();
+
+        std::fs::write(target.join("tracked.txt"), "changed\n").unwrap();
+        let error = validate_cook_workspace(&options).expect_err("changed drift is rejected");
+        assert!(error.message.contains("exact tracked post-apply candidate"));
+
+        std::fs::write(target.join("tracked.txt"), "base\n").unwrap();
+        let error = validate_cook_workspace(&options).expect_err("missing candidate is rejected");
+        assert!(error.message.contains("exact tracked post-apply candidate"));
+    });
+}
+
 #[test]
 fn adopted_baseline_gate_outcome_is_candidate_bound_and_recovery_safe() {
     let run_id = "cook-10010-attempt-1";

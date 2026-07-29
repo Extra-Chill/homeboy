@@ -114,10 +114,10 @@ pub(crate) fn continue_cook(args: CookContinueArgs) -> CmdResult<Value> {
             | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
             | agent_task_lifecycle::AgentTaskRunState::PartialRecoverable
     ) {
-        // Claim the same durable queue entry used by daemon workers. This keeps
-        // an interactive continuation from racing a restarted controller.
-        agent_task_service::rearm_failed_terminal_continuation(&recipe.cook_id, &run_id)?;
-        let Some(claim) = agent_task_service::claim_continuation_for(&recipe.cook_id, &run_id)?
+        // Explicit recovery claims the exact Cook without exposing it to the
+        // generic daemon queue between rearm and execution.
+        let Some(claim) =
+            agent_task_service::claim_continuation_for_recovery(&recipe.cook_id, &run_id)?
         else {
             return Ok((
                 cook_continuation_pending(&recipe.cook_id, &run_id, &format!("{:?}", record.state)),

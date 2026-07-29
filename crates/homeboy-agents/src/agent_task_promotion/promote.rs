@@ -140,6 +140,10 @@ pub fn resume_promoted_patch(
                 None,
             )
         })?;
+    let verified_base = match verified_base {
+        Some(verified_base) => Some(verified_base),
+        None => capture_declared_base(target_path, options.base_ref.as_deref())?,
+    };
     let expected_candidate = previous
         .pointer("/provenance/candidate")
         .filter(|candidate| !candidate.is_null())
@@ -290,7 +294,10 @@ fn validate_resume_candidate(
     let recorded_inputs = previous
         .pointer("/provenance/resume_contract/inputs")
         .or_else(|| previous.pointer("/provenance/resume_inputs"));
-    if recorded_inputs.is_some_and(|recorded| recorded != &expected_inputs) {
+    if recorded_inputs.is_some_and(|recorded| {
+        recorded != &expected_inputs
+            && !legacy_base_correction_matches(previous, recorded, &expected_inputs)
+    }) {
         return Err(Error::validation_invalid_argument(
             "promotion",
             "promotion resume base or candidate input does not match the durable post-apply promotion",
@@ -369,6 +376,29 @@ fn validate_resume_candidate(
         }
     }
     Ok(())
+}
+
+/// #9400 checkpoints persisted after applying a patch but before the declared
+/// base was validated. Permit exactly that historical base correction only;
+/// artifact, target, and candidate authentication remain mandatory below.
+fn legacy_base_correction_matches(previous: &Value, recorded: &Value, requested: &Value) -> bool {
+    if previous.get("status").and_then(Value::as_str) != Some("verification_pending")
+        || previous.pointer("/provenance/post_apply") != Some(&Value::Bool(true))
+        || previous
+            .get("verified_base")
+            .is_some_and(|base| !base.is_null())
+    {
+        return false;
+    }
+    let mut recorded = recorded.clone();
+    let Some(recorded_inputs) = recorded.as_object_mut() else {
+        return false;
+    };
+    recorded_inputs.insert(
+        "base_ref".to_string(),
+        requested.get("base_ref").cloned().unwrap_or(Value::Null),
+    );
+    &recorded == requested
 }
 
 fn verify_patch_is_present(
@@ -1235,6 +1265,23 @@ fn promote_committed_changes(
         ));
     }
     let normalized_patch = normalize_promotion_patch(&patch, &options.to_worktree)?;
+    // Keep committed-change promotion on the same atomic base-validation
+    // boundary as artifact promotion: no apply or checkpoint may precede a
+    // failed declared base lookup.
+    let pre_apply_verified_base = if !options.dry_run {
+        match resolve_promotion_target_path(&options.to_worktree)? {
+            Some(target_path) => capture_declared_base(&target_path, options.base_ref.as_deref())?,
+            None => None,
+        }
+    } else {
+        None
+    };
+    let base_verified_before_apply = pre_apply_verified_base.is_some()
+        || options
+            .base_ref
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(str::is_empty);
     let provider_patch = write_normalized_patch(&normalized_patch.content)?;
     let gate_feedback_baseline = bind_gate_feedback_baseline(
         artifact
@@ -1285,7 +1332,7 @@ fn promote_committed_changes(
             artifact
                 .map(|artifact| artifact.metadata.clone())
                 .unwrap_or(Value::Null),
-            None,
+            pre_apply_verified_base.clone(),
         )?;
         checkpoint(&report)?;
         Some(report)
@@ -1293,7 +1340,11 @@ fn promote_committed_changes(
         None
     };
     let verified_base = if let Some(path) = applied_worktree_path.as_deref() {
-        let verified_base = capture_declared_base(path, options.base_ref.as_deref())?;
+        let verified_base = if base_verified_before_apply {
+            pre_apply_verified_base
+        } else {
+            capture_declared_base(path, options.base_ref.as_deref())?
+        };
         (
             run_promotion_gates(
                 options,
