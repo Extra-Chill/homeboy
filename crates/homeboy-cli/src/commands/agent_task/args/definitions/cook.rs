@@ -13,14 +13,16 @@ use super::super::super::review;
 #[derive(Args, Debug, Clone)]
 pub struct VerifyGateArgs {
     /// Deterministic verification command that must pass before the cook
-    /// promotes its work (e.g. `--verify "cargo fmt --check"`). Runs in the
-    /// destination worktree. Repeat to require multiple gates; every one must
-    /// pass. Its output is included in the review evidence.
+    /// promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless
+    /// `--private-verify` is given — a cook that cannot verify its work cannot
+    /// promote it. Runs in the destination worktree. Repeat to require multiple
+    /// gates; every one must pass. Its output is included in the review evidence.
     #[arg(long = "verify", value_name = "COMMAND")]
     pub verify: Vec<String>,
     /// Like `--verify`, but the command's output is treated as private: only a
     /// pass/fail summary is revealed by default (see `--private-gate-reveal`).
-    /// Use for gates whose logs may contain secrets. Repeatable.
+    /// Satisfies the same mandatory-gate requirement as `--verify`. Use for
+    /// gates whose logs may contain secrets. Repeatable.
     #[arg(long = "private-verify", value_name = "COMMAND")]
     pub private_verify: Vec<String>,
     /// How much of a `--private-verify` gate's output to reveal: `summary-only`
