@@ -67,7 +67,10 @@ fn prune_workspaces_previews_orphans_without_deleting_by_default() {
         assert!(output.next_command.is_none());
         assert!(output.drain_command.contains("--apply --min-age-hours 0"));
         assert_eq!(output.candidates[0].remote_path, synced.remote_path);
-        assert_eq!(output.candidates[0].reason, "source_path_missing");
+        assert_eq!(
+            output.candidates[0].reason,
+            "stale_materialized_workspace_lifecycle"
+        );
         assert!(Path::new(&synced.remote_path).exists());
     });
 }
@@ -558,6 +561,51 @@ fn prune_workspaces_reaps_stale_materialized_workspace_with_live_source() {
         );
         assert!(!Path::new(&synced.remote_path).exists());
         assert!(source.exists());
+    });
+}
+
+#[test]
+fn prune_workspaces_prefers_stale_materialized_lifecycle_when_source_is_missing() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let source_parent = tempfile::tempdir().expect("source parent");
+        let source = source_parent.path().join("removed-source");
+        let runner_root = tempfile::tempdir().expect("runner root tempdir");
+        fs::create_dir_all(&source).expect("source dir");
+        fs::write(source.join("file.txt"), "removed\n").expect("source file");
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-local-prune-materialized-missing","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+        let (synced, _) = sync_workspace(
+            "lab-local-prune-materialized-missing",
+            sync_options(source.display().to_string()),
+        )
+        .expect("sync workspace");
+        fs::remove_dir_all(&source).expect("remove source");
+
+        let (output, exit_code) = prune_workspaces(
+            "lab-local-prune-materialized-missing",
+            RunnerWorkspacePruneOptions {
+                apply: true,
+                min_age_hours: 0,
+                limit: 10,
+                passes: 1,
+                cursor: None,
+            },
+        )
+        .expect("prune stale materialized workspace with missing source");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(output.removed.len(), 1);
+        assert_eq!(
+            output.removed[0].reason,
+            "stale_materialized_workspace_lifecycle"
+        );
+        assert!(!Path::new(&synced.remote_path).exists());
     });
 }
 
