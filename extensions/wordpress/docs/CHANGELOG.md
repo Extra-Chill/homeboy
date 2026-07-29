@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.18] - 2026-07-29
+
+### Fixed
+- seed the declared lint.findings sidecar on clean runs
+
 ## [3.34.17] - 2026-07-29
 
 ### Fixed
