@@ -54,6 +54,9 @@ struct RuntimeRunOwner {
 pub struct RuntimeTempCleanupOptions<'a> {
     pub apply: bool,
     pub older_than_days: u64,
+    /// Optional narrower age floor for metadata-backed entries. Unmanaged
+    /// entries always retain `older_than_days` because their liveness is unknown.
+    pub managed_older_than_days: Option<u64>,
     pub prefix: Option<&'a str>,
     pub limit: usize,
     pub run_max_bytes: u64,
@@ -501,6 +504,7 @@ pub struct RuntimeTempCleanupOutput {
     pub dry_run: bool,
     pub runtime_tmp_root: String,
     pub older_than_days: u64,
+    pub managed_older_than_days: u64,
     pub run_max_bytes: u64,
     pub run_max_count: usize,
     pub prefix: Option<String>,
@@ -548,6 +552,7 @@ pub fn cleanup_runtime_tmp(
     cleanup_runtime_tmp_bounded(RuntimeTempCleanupOptions {
         apply,
         older_than_days,
+        managed_older_than_days: None,
         prefix,
         limit,
         run_max_bytes: u64::MAX,
@@ -566,6 +571,9 @@ pub fn cleanup_runtime_tmp_bounded(
         dry_run: !options.apply,
         runtime_tmp_root: root.display().to_string(),
         older_than_days: options.older_than_days,
+        managed_older_than_days: options
+            .managed_older_than_days
+            .unwrap_or(options.older_than_days),
         run_max_bytes: options.run_max_bytes,
         run_max_count: options.run_max_count,
         prefix: options.prefix.map(str::to_string),
@@ -776,7 +784,10 @@ pub fn cleanup_runtime_tmp_bounded(
     });
     let mut managed_decisions = Vec::new();
     for inspection in managed_inspections {
-        let age_expired = inspection.age_seconds >= options.older_than_days.saturating_mul(86_400);
+        let managed_older_than_days = options
+            .managed_older_than_days
+            .unwrap_or(options.older_than_days);
+        let age_expired = inspection.age_seconds >= managed_older_than_days.saturating_mul(86_400);
         let exceeds_count = retained_count >= options.run_max_count;
         let exceeds_bytes =
             retained_bytes.saturating_add(inspection.size_bytes) > options.run_max_bytes;
@@ -1330,6 +1341,7 @@ mod tests {
         RuntimeTempCleanupOptions {
             apply,
             older_than_days: 7,
+            managed_older_than_days: None,
             prefix,
             limit: 100,
             run_max_bytes: 1024 * 1024 * 1024,
@@ -1381,6 +1393,56 @@ mod tests {
         assert_eq!(applied.removed_count, 1);
         assert!(!stale.exists());
 
+        env::remove_var(runtime_tmpdir_env());
+    }
+
+    #[test]
+    fn managed_age_override_preserves_unmanaged_and_active_entries() {
+        let _guard = home_env_guard();
+        let dir = tempfile::tempdir().expect("tempdir");
+        env::set_var(runtime_tmpdir_env(), dir.path());
+
+        let failed = failed_run("managed-failed", 16);
+        let unmanaged = runtime_temp_dir("unmanaged").expect("unmanaged temp dir");
+        fs::write(unmanaged.join("payload"), b"unknown owner").expect("unmanaged payload");
+        let (active, pin) = managed_run_temp_dir("managed-active").expect("active run dir");
+
+        let mut options = bounded_options(false, None);
+        options.managed_older_than_days = Some(0);
+        let dry = cleanup_runtime_tmp_bounded(options).expect("dry-run");
+
+        assert_eq!(dry.older_than_days, 7);
+        assert_eq!(dry.managed_older_than_days, 0);
+        assert_eq!(
+            dry.rows
+                .iter()
+                .find(|row| row.path == failed.display().to_string())
+                .map(|row| row.action.as_str()),
+            Some("remove")
+        );
+        assert!(dry
+            .rows
+            .iter()
+            .find(|row| row.path == active.display().to_string())
+            .is_some_and(|row| row
+                .protection_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("running"))));
+        assert!(dry
+            .rows
+            .iter()
+            .find(|row| row.path == unmanaged.display().to_string())
+            .is_some_and(|row| row.reason == "entry is newer than retention cutoff"));
+
+        options.apply = true;
+        let applied = cleanup_runtime_tmp_bounded(options).expect("apply");
+        assert_eq!(applied.removed_count, 1);
+        assert!(!failed.exists());
+        assert!(active.exists());
+        assert!(unmanaged.exists());
+
+        drop(pin);
+        fs::remove_dir_all(active).expect("remove active fixture");
         env::remove_var(runtime_tmpdir_env());
     }
 

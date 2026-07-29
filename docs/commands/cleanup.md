@@ -65,6 +65,23 @@ homeboy cleanup --include shared-cargo-targets --apply
 
 `retention.shared_store_days` defaults to `30`, `retention.shared_store_max_bytes` defaults to `21474836480` (20 GiB), and `retention.shared_store_lease_seconds` defaults to `21600` (6 hours). The age and size budgets select rebuildable stores; the lease window independently protects active workloads. The output's `storage` object records the resolved root, backing filesystem, free bytes/inodes, reserves, managed bytes, protected bytes, and cleanup command. Configure a dedicated root with `cargo_target_root` or `HOMEBOY_CARGO_TARGET_ROOT`; when the root moves, `storage.legacy_discovery_command` explicitly inventories the historical store rather than silently orphaning it. Inventory output is bounded by `retention.limit`; when `next_command` is present, run it to continue from `next_cursor`.
 
+## Runtime Temp
+
+Runtime temp cleanup defaults to `retention.runtime_tmp_days`. Under disk
+pressure, an operator can narrow the age floor for entries carrying Homeboy's
+owner metadata without making unknown temp directories eligible:
+
+```bash
+homeboy cleanup --include runtime-tmp --runtime-tmp-managed-older-than-days 1
+homeboy cleanup --include runtime-tmp --runtime-tmp-managed-older-than-days 1 --apply
+```
+
+The managed override composes with the existing process identity, pin,
+quarantine, path, count, byte, lock, and apply-time revalidation checks.
+Unmanaged entries continue to use `retention.runtime_tmp_days`. Structured
+output reports these effective floors separately as `runtime_tmp_days` and
+`runtime_tmp_managed_days`.
+
 ## Automatic Retention
 
 Declare the bounded retention pass through Homeboy's scheduler:
@@ -143,6 +160,9 @@ resolve through the shared policy now.
 ### Fail-closed rules
 
 - An unset flag means "use the configured value", never a command-local literal.
+- `--runtime-tmp-managed-older-than-days` narrows only metadata-backed runtime
+  temp entries. Unmanaged entries keep `retention.runtime_tmp_days`, so an age
+  override never turns unknown ownership into deletion authority.
 - A negative window or non-positive limit is rejected on every entry point,
   including when it arrives from configuration rather than from an argument.
 - A record budget that cannot be represented resolves to zero inspected records,

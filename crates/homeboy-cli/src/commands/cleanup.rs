@@ -51,6 +51,11 @@ pub struct CleanupArgs {
     #[arg(long, value_name = "DAYS")]
     pub older_than_days: Option<i64>,
 
+    /// Override the age floor for metadata-backed runtime temp entries only.
+    /// Unmanaged entries retain the configured runtime temp age floor.
+    #[arg(long, value_name = "DAYS")]
+    pub runtime_tmp_managed_older_than_days: Option<u64>,
+
     /// Override the configured maximum number of persisted artifacts inspected.
     #[arg(long, value_name = "N")]
     pub limit: Option<i64>,
@@ -466,6 +471,7 @@ fn retained_storage_report(
         engine::temp::cleanup_runtime_tmp_bounded(engine::temp::RuntimeTempCleanupOptions {
             apply: false,
             older_than_days: policy.runtime_tmp_days,
+            managed_older_than_days: None,
             prefix: None,
             // A read-only accounting pass: the report must total every retained
             // entry, so it is not bounded by the delete-path record budget.
@@ -1118,6 +1124,16 @@ impl CleanupInventoryCategoryMetadata {
     }
 }
 
+fn runtime_tmp_commands(apply: bool, managed_older_than_days: u64) -> (String, String) {
+    let apply_arg = if apply { " --apply" } else { "" };
+    let command = format!(
+        "homeboy cleanup --include runtime-tmp --runtime-tmp-managed-older-than-days {managed_older_than_days}{apply_arg}"
+    );
+    // The legacy specialist age flag applies to unmanaged entries too, so it
+    // cannot faithfully represent this managed-only policy.
+    (command.clone(), command)
+}
+
 const REPO_ARTIFACTS_METADATA: CleanupInventoryCategoryMetadata =
     CleanupInventoryCategoryMetadata {
         category: "repo_artifacts",
@@ -1289,6 +1305,7 @@ fn automatic_retention() -> CmdResult<Value> {
         include: AUTOMATIC_RETENTION_CATEGORIES.to_vec(),
         exclude: Vec::new(),
         older_than_days: None,
+        runtime_tmp_managed_older_than_days: None,
         limit: None,
         full: false,
         cursor: None,
@@ -1341,6 +1358,7 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
         &config.retention,
         CleanupPolicyOverrides {
             terminal_run_days: args.older_than_days,
+            runtime_tmp_managed_days: args.runtime_tmp_managed_older_than_days,
             limit: args.limit,
             ..CleanupPolicyOverrides::default()
         },
@@ -1491,13 +1509,14 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
             engine::temp::cleanup_runtime_tmp_bounded(engine::temp::RuntimeTempCleanupOptions {
                 apply,
                 older_than_days: policy.runtime_tmp_days,
+                managed_older_than_days: Some(policy.runtime_tmp_managed_days),
                 prefix: None,
                 limit: policy.scan_limit(),
                 run_max_bytes: policy.runtime_run_max_bytes,
                 run_max_count: policy.runtime_run_max_count,
                 cursor: args.cursor.as_deref(),
             })?;
-        categories.push(category_from_output(
+        let mut category = category_from_output(
             RUNTIME_TMP_METADATA,
             apply,
             output.planned_count,
@@ -1506,7 +1525,14 @@ fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
             output.totals.planned_size_bytes,
             output.totals.removed_size_bytes,
             output,
-        )?);
+        )?;
+        if let Some(days) = args.runtime_tmp_managed_older_than_days {
+            (
+                category.canonical_cleanup_command,
+                category.specialist_command,
+            ) = runtime_tmp_commands(apply, days);
+        }
+        categories.push(category);
     }
 
     if selected.includes(CleanupCategoryArg::ControllerScratch) {
@@ -2510,6 +2536,24 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_front_door_accepts_managed_runtime_tmp_age_override() {
+        let cli = Cli::parse_from([
+            "homeboy",
+            "cleanup",
+            "--include",
+            "runtime-tmp",
+            "--runtime-tmp-managed-older-than-days",
+            "0",
+        ]);
+
+        let Commands::Cleanup(args) = cli.command else {
+            panic!("expected cleanup command");
+        };
+        assert_eq!(args.include, vec![CleanupCategoryArg::RuntimeTmp]);
+        assert_eq!(args.runtime_tmp_managed_older_than_days, Some(0));
+    }
+
+    #[test]
     fn retained_storage_cli_accepts_a_bounded_example_limit() {
         let cli = Cli::parse_from([
             "homeboy",
@@ -3139,6 +3183,28 @@ mod tests {
                 format!("homeboy cleanup --include {include_arg} --apply")
             );
         }
+    }
+
+    #[test]
+    fn managed_runtime_tmp_override_is_preserved_in_followup_commands() {
+        assert_eq!(
+            runtime_tmp_commands(false, 0),
+            (
+                "homeboy cleanup --include runtime-tmp --runtime-tmp-managed-older-than-days 0"
+                    .to_string(),
+                "homeboy cleanup --include runtime-tmp --runtime-tmp-managed-older-than-days 0"
+                    .to_string(),
+            )
+        );
+        assert_eq!(
+            runtime_tmp_commands(true, 1),
+            (
+                "homeboy cleanup --include runtime-tmp --runtime-tmp-managed-older-than-days 1 --apply"
+                    .to_string(),
+                "homeboy cleanup --include runtime-tmp --runtime-tmp-managed-older-than-days 1 --apply"
+                    .to_string(),
+            )
+        );
     }
 
     #[test]

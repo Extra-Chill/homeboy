@@ -149,6 +149,7 @@ pub fn run(args: SelfArgs) -> CmdResult<Value> {
                 engine::temp::RuntimeTempCleanupOptions {
                     apply: args.apply,
                     older_than_days: policy.runtime_tmp_days,
+                    managed_older_than_days: None,
                     prefix: args.prefix.as_deref(),
                     limit: policy.scan_limit(),
                     run_max_bytes: policy.runtime_run_max_bytes,
