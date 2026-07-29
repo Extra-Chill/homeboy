@@ -586,6 +586,29 @@ fn review_form_from_aggregate(
     crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(&outcome.outputs)
 }
 
+/// Project the PR-dossier contract before the first finalizing provider attempt
+/// is persisted or executed. Standalone and no-finalize requests retain their
+/// caller-defined contract.
+fn project_initial_finalizing_review_form_contract(options: &mut AgentTaskCookServiceOptions) {
+    if options.no_finalize {
+        return;
+    }
+
+    for request in &mut options.initial_plan.tasks {
+        request.output_declarations.retain(|declaration| {
+            declaration.name != crate::agent_task_review_dossier::AI_REVIEW_FORM_OUTPUT_KEY
+        });
+        request
+            .output_declarations
+            .push(crate::agent_task_review_dossier::review_form_output_declaration());
+        if !request.instructions.contains("reviewer-facing PR dossier") {
+            request.instructions.push_str(
+                "\n\nProvide the reviewer-facing PR dossier in `outputs.review_form`. Return an object with `summary` (the change and its purpose), `what_changed` (concrete change bullets), `compatibility` (impact assessment), and `used_for` (a concise reflection of the process used). A successful response supplies specific, complete content for every field so Homeboy can finalize a clear pull request.",
+            );
+        }
+    }
+}
+
 /// Executes one provider attempt while cook retains ownership of promotion,
 /// gates, retries, and finalization.
 pub trait AgentTaskCookAttemptDispatcher: Send + Sync + std::fmt::Debug {
@@ -1696,7 +1719,7 @@ fn durable_cook_error_report(
 }
 
 fn run_cook_with_boundaries_observed_inner<E, S>(
-    options: AgentTaskCookServiceOptions,
+    mut options: AgentTaskCookServiceOptions,
     executor: E,
     mut side_effects: S,
     durable_observer: Option<&CookProgressObserver<'_>>,
@@ -1706,6 +1729,7 @@ where
     E: AgentTaskExecutorAdapter + Clone,
     S: CookSideEffectService,
 {
+    project_initial_finalizing_review_form_contract(&mut options);
     // A configured provider is controller authority. Resolve it before an
     // external runner can spend a provider attempt; explicit transports are
     // caller-owned overrides and retain their existing behavior. A typed

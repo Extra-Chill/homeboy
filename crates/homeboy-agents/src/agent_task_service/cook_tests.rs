@@ -1623,6 +1623,55 @@ fn batch_cook_options(
     }
 }
 
+#[test]
+fn initial_finalizing_provider_request_projects_complete_review_form_dossier() {
+    let mut options = batch_cook_options(
+        "initial-review-form-contract",
+        Arc::new(AcceptedDetachedAttemptDispatcher),
+    );
+    options.no_finalize = false;
+
+    project_initial_finalizing_review_form_contract(&mut options);
+
+    let request = &options.initial_plan.tasks[0];
+    let declaration = request
+        .output_declarations
+        .iter()
+        .find(|declaration| declaration.name == "review_form")
+        .expect("review form declaration");
+    assert!(declaration.required);
+    assert_eq!(declaration.schema, "homeboy/agent-task-review-form/v1");
+    assert_eq!(
+        declaration.structural_schema["required"],
+        serde_json::json!(["summary", "what_changed", "compatibility", "used_for"])
+    );
+    assert!(request.instructions.contains("reviewer-facing PR dossier"));
+    assert!(request.instructions.contains("A successful response"));
+
+    project_initial_finalizing_review_form_contract(&mut options);
+    assert_eq!(
+        options.initial_plan.tasks[0]
+            .output_declarations
+            .iter()
+            .filter(|declaration| declaration.name == "review_form")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn no_finalize_initial_request_preserves_its_existing_contract() {
+    let mut options = batch_cook_options(
+        "no-finalize-review-form-contract",
+        Arc::new(AcceptedDetachedAttemptDispatcher),
+    );
+    let original = options.initial_plan.tasks[0].clone();
+
+    project_initial_finalizing_review_form_contract(&mut options);
+
+    assert_eq!(options.initial_plan.tasks[0], original);
+}
+
 /// A complete externally-prepared candidate: the original cook failed before a
 /// provider was accepted, while a separate immutable source commit is ready to
 /// be promoted and adopted.

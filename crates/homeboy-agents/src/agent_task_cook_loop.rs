@@ -409,7 +409,7 @@ fn build_review_form_follow_up_request(
         .clone()
         .or_else(|| options.source_run_id.clone());
     request.instructions = format!(
-        "Continue the Homeboy cook loop from the current candidate worktree state.\n\nThe change is complete and deterministic gates passed, but the reviewer-facing review form is not yet valid, so the pull request cannot be opened.\n\n{gap_feedback}\n\nDo not modify the code. Emit the `review_form` object in your task outputs and finish.",
+        "Continue the Homeboy cook loop from the current candidate worktree state.\n\nThe change is complete and deterministic gates passed. This attempt supplies the reviewer-facing review form that completes the pull request dossier.\n\n{gap_feedback}\n\nPreserve the candidate code and return the complete `review_form` object in your task outputs.",
     );
     request.inputs = json!({
         "cook_loop": {
@@ -448,6 +448,9 @@ fn build_review_form_follow_up_request(
         .root
         .clone()
         .or_else(|| worktree_root_hint(&options.promotion_report));
+    request.executor.required_capabilities = vec!["structured_outcome".to_string()];
+    request.policy.write = "none".to_string();
+    request.policy.apply = "none".to_string();
     request.metadata = json!({
         "cook_loop": {
             "kind": "review-form-feedback",
@@ -1422,6 +1425,13 @@ mod tests {
         assert!(request.task_id.contains("review-form"));
         assert_eq!(request.inputs["cook_loop"]["review_form_required"], true);
         assert!(request.instructions.contains("review_form"));
+        assert!(request.instructions.contains("Preserve the candidate code"));
+        assert_eq!(
+            request.executor.required_capabilities,
+            vec!["structured_outcome"]
+        );
+        assert_eq!(request.policy.write, "none");
+        assert_eq!(request.policy.apply, "none");
     }
 
     #[test]
@@ -1470,6 +1480,31 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("distinct from summary"));
+    }
+
+    #[test]
+    fn deterministic_gate_feedback_precedes_review_form_recovery() {
+        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+            source_request: source_request(),
+            promotion_report: promotion_report(
+                AgentTaskPromotionStatus::GateFailed,
+                vec![failed_gate()],
+            ),
+            attempt: 1,
+            max_attempts: 3,
+            source_run_id: Some("run-form-gate".to_string()),
+            current_diff: String::new(),
+            require_review_form: true,
+            review_form: None,
+            metadata: Value::Null,
+        });
+
+        let request = report.follow_up_request.expect("failed gate follow-up");
+        assert_eq!(
+            request.metadata["cook_loop"]["kind"],
+            "deterministic-gate-feedback"
+        );
+        assert!(request.inputs["cook_loop"]["review_form_required"].is_null());
     }
 
     #[test]
