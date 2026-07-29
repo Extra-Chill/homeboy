@@ -415,7 +415,7 @@ fn candidate_adoption_cancellation_persists_request_before_group_termination() {
         let run_id = record.run_id.clone();
         let cancellation = std::thread::spawn(move || cancel_run(&run_id, Some("operator cancel")));
         let observed_request = (0..100).any(|_| {
-            let state = status(&record.run_id)
+            let state = exact_record(&record.run_id)
                 .expect("read adoption")
                 .candidate_adoption
                 .expect("adoption")
