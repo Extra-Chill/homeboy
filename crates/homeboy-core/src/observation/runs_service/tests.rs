@@ -211,9 +211,11 @@ fn missing_run_guidance_prints_runner_routed_retrieval_commands() {
     assert_eq!(
         hints,
         vec![
+            "Resolve runner-owned artifacts non-destructively from the controller: `homeboy runs artifacts run-123 --runner homeboy-lab` (routes to the generation that retains the run without rotating the shared tunnel).",
             "Check runner `homeboy-lab` from the controller: `homeboy runs list --runner homeboy-lab --limit 100`.",
             "Inspect run `run-123` directly on runner `homeboy-lab`: `homeboy runner exec homeboy-lab -- homeboy runs show run-123`.",
             "List artifacts for run `run-123` directly on runner `homeboy-lab`: `homeboy runner exec homeboy-lab -- homeboy runs artifacts run-123`.",
+            "If the admission daemon is stale, read retained evidence without a refresh: `homeboy runner exec homeboy-lab --read-only-artifact -- homeboy runs artifacts run-123`.",
             "Export run `run-123` directly on runner `homeboy-lab`: `homeboy runner exec homeboy-lab -- homeboy runs export --run run-123 --output <dir>`.",
         ]
     );
