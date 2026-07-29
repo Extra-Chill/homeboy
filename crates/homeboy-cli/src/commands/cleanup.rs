@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, HashSet};
+use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use clap::{Args, Subcommand, ValueEnum};
+use fs4::fs_std::FileExt;
 use homeboy::core::cleanup::{
     self, ArtifactCleanupOptions, ArtifactCleanupSort, CleanupPolicy, CleanupPolicyOverrides,
     ResourceCleanupOptions,
@@ -63,6 +66,23 @@ pub struct CleanupArgs {
 
     #[command(subcommand)]
     pub command: Option<CleanupCommand>,
+}
+
+const AUTOMATIC_RETENTION_LOCK_FILE: &str = "automatic-retention-controller.lock";
+const AUTOMATIC_RETENTION_STATE_FILE: &str = "automatic-retention-controller.json";
+
+// Advisory file locks are process-scoped on POSIX. Keep the process-local gate
+// so a manual invocation cannot overlap a scheduled pass in this process.
+static AUTOMATIC_RETENTION_ADMISSION: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[derive(Serialize)]
+struct AutomaticRetentionControllerOutput {
+    command: &'static str,
+    status: &'static str,
+    state_path: String,
+    resume_command: &'static str,
+    reconciliation: homeboy::agents::agent_task_service::AgentTaskReconcileReport,
+    cleanup: Value,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -237,16 +257,7 @@ pub fn run(args: CleanupArgs) -> CmdResult<Value> {
                 })
             })
             .map(|output| (output, 0)),
-        Some(CleanupCommand::AutomaticRetention) => cleanup::run_automatic_cargo_retention()
-            .and_then(|output| {
-                serde_json::to_value(output).map_err(|err| {
-                    homeboy::core::Error::internal_json(
-                        err.to_string(),
-                        Some("serialize automatic retention output".to_string()),
-                    )
-                })
-            })
-            .map(|output| (output, 0)),
+        Some(CleanupCommand::AutomaticRetention) => automatic_retention(),
         None => cleanup_inventory(args).map(|output| (output, 0)),
     }
 }
@@ -917,6 +928,114 @@ const CONTROLLER_RUNTIMES_METADATA: CleanupInventoryCategoryMetadata =
         dry_run_command: "homeboy runtime controller-prune",
         apply_command: "homeboy runtime controller-prune --apply",
     };
+
+fn automatic_retention() -> CmdResult<Value> {
+    let data = homeboy::core::paths::homeboy_data()?;
+    fs::create_dir_all(&data).map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some("create automatic retention state directory".to_string()),
+        )
+    })?;
+    let state_path = data.join(AUTOMATIC_RETENTION_STATE_FILE);
+    let admission = AUTOMATIC_RETENTION_ADMISSION
+        .get_or_init(|| Mutex::new(()))
+        .try_lock();
+    let Ok(_admission) = admission else {
+        return Ok((
+            serde_json::json!({
+                "command": "cleanup.automatic_retention",
+                "status": "busy",
+                "state_path": state_path,
+                "resume_command": "homeboy cleanup automatic-retention",
+            }),
+            0,
+        ));
+    };
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(data.join(AUTOMATIC_RETENTION_LOCK_FILE))
+        .map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some("open automatic retention lock".to_string()),
+            )
+        })?;
+    if lock.try_lock_exclusive().is_err() {
+        return Ok((
+            serde_json::json!({
+                "command": "cleanup.automatic_retention",
+                "status": "busy",
+                "state_path": state_path,
+                "resume_command": "homeboy cleanup automatic-retention",
+            }),
+            0,
+        ));
+    }
+
+    fs::write(&state_path, r#"{"status":"running"}"#).map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some("write automatic retention state".to_string()),
+        )
+    })?;
+    let reconciliation = homeboy::agents::agent_task_service::reconcile_stale_active_runs(false)?;
+    let cleanup = cleanup_inventory(CleanupArgs {
+        apply: true,
+        include: vec![
+            CleanupCategoryArg::TerminalRuns,
+            CleanupCategoryArg::PersistedRunArtifacts,
+            CleanupCategoryArg::OrphanedArtifactBytes,
+            CleanupCategoryArg::RuntimeTmp,
+            CleanupCategoryArg::ControllerScratch,
+            CleanupCategoryArg::ControllerRuntimes,
+        ],
+        exclude: Vec::new(),
+        older_than_days: None,
+        limit: None,
+        full: false,
+        cursor: None,
+        command: None,
+    })?;
+    let cargo_targets = cleanup::run_automatic_cargo_retention()?;
+    let status = cargo_targets.status;
+    let output = AutomaticRetentionControllerOutput {
+        command: "cleanup.automatic_retention",
+        status,
+        state_path: state_path.display().to_string(),
+        resume_command: "homeboy cleanup automatic-retention",
+        reconciliation,
+        cleanup: serde_json::json!({
+            "categories": cleanup,
+            "cargo_targets": cargo_targets,
+        }),
+    };
+    let value = serde_json::to_value(&output).map_err(|error| {
+        homeboy::core::Error::internal_json(
+            error.to_string(),
+            Some("serialize automatic retention output".to_string()),
+        )
+    })?;
+    fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&value).map_err(|error| {
+            homeboy::core::Error::internal_json(
+                error.to_string(),
+                Some("serialize automatic retention state".to_string()),
+            )
+        })?,
+    )
+    .map_err(|error| {
+        homeboy::core::Error::internal_io(
+            error.to_string(),
+            Some("write automatic retention state".to_string()),
+        )
+    })?;
+    Ok((value, 0))
+}
 
 fn cleanup_inventory(args: CleanupArgs) -> homeboy::core::Result<Value> {
     let selected = CleanupCategorySelection::new(args.include, args.exclude);
