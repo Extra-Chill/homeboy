@@ -9,7 +9,6 @@ use serde::Serialize;
 
 use crate::{Error, Result};
 
-const STORE_ROOT: &str = "cargo-targets";
 const LOCK_FILE: &str = ".homeboy-lock";
 const LEASE_FILE: &str = ".homeboy-lease";
 const OWNER_FILE: &str = ".homeboy-owner";
@@ -87,7 +86,7 @@ impl Drop for SharedCargoTargetLease {
 }
 
 pub fn acquire_shared_cargo_target(owner: &str) -> Result<SharedCargoTargetLease> {
-    let root = homeboy_paths::homeboy_data()?.join(STORE_ROOT);
+    let root = homeboy_paths::cargo_targets_store()?;
     acquire_shared_cargo_target_in(&root, owner, SystemTime::now())
 }
 
@@ -122,7 +121,7 @@ pub fn cleanup_shared_cargo_targets(
 ) -> Result<CargoTargetCleanupOutput> {
     let root = options
         .root
-        .unwrap_or(homeboy_paths::homeboy_data()?.join(STORE_ROOT));
+        .unwrap_or(homeboy_paths::cargo_targets_store()?);
     let mut stores = inventory(&root, options.now, options.older_than, options.lease_ttl)?;
     let inventory_bytes: u64 = stores.iter().map(|store| store.size_bytes).sum();
     stores.sort_by(order_stores);
@@ -249,7 +248,7 @@ pub fn shared_cargo_target_inventory(
     older_than: Duration,
     lease_ttl: Duration,
 ) -> Result<Vec<CargoTargetStore>> {
-    let root = root.unwrap_or(homeboy_paths::homeboy_data()?.join(STORE_ROOT));
+    let root = root.unwrap_or(homeboy_paths::cargo_targets_store()?);
     let mut stores = inventory(&root, now, older_than, lease_ttl)?;
     stores.sort_by(order_stores);
     Ok(stores)

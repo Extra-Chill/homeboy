@@ -77,7 +77,9 @@ Aggregate cleanup across configured external worktree providers
 homeboy cleanup retained-storage [OPTIONS]
 ```
 
-Explain retained Homeboy storage without deleting or reconciling resources
+Explain retained Homeboy storage without deleting or reconciling resources.
+
+Reports lifecycle aggregates alongside root filesystem accounting, top-level stores, largest child paths, ownership classification, and cleanup guidance.
 
 | Option | Value | Description |
 | --- | --- | --- |

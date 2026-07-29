@@ -1085,7 +1085,7 @@ fn recover_pin_unlocked(
 }
 
 fn runtime_root() -> Result<PathBuf> {
-    let root = paths::homeboy_data()?.join("controller-runtimes");
+    let root = paths::controller_runtimes_store()?;
     fs::create_dir_all(&root).map_err(|error| {
         Error::internal_io(
             error.to_string(),

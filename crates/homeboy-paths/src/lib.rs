@@ -5,6 +5,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 pub const HOMEBOY_DATA_DIR_ENV: &str = "HOMEBOY_DATA_DIR";
+pub const CARGO_TARGETS_STORE: &str = "cargo-targets";
+pub const CONTROLLER_RUNTIMES_STORE: &str = "controller-runtimes";
+pub const CONTROLLER_SCRATCH_STORE: &str = "controller-scratch";
 
 mod locations;
 mod rigs;
@@ -144,6 +147,26 @@ pub fn observation_db() -> Result<PathBuf> {
     Ok(homeboy_data()?.join("homeboy.sqlite"))
 }
 
+/// Resolve a named store below the Homeboy data root.
+///
+/// Storage owners use this rather than rebuilding paths so reporting and future
+/// placement policy can refer to the same stable store identities.
+pub fn homeboy_data_store(name: &str) -> Result<PathBuf> {
+    Ok(homeboy_data()?.join(name))
+}
+
+pub fn cargo_targets_store() -> Result<PathBuf> {
+    homeboy_data_store(CARGO_TARGETS_STORE)
+}
+
+pub fn controller_runtimes_store() -> Result<PathBuf> {
+    homeboy_data_store(CONTROLLER_RUNTIMES_STORE)
+}
+
+pub fn controller_scratch_store() -> Result<PathBuf> {
+    homeboy_data_store(CONTROLLER_SCRATCH_STORE)
+}
+
 /// Root directory for copied run artifacts.
 ///
 /// Precedence:
@@ -172,7 +195,7 @@ pub fn artifact_root() -> Result<PathBuf> {
         }
     }
 
-    Ok(homeboy_data()?.join("artifacts"))
+    homeboy_data_store("artifacts")
 }
 
 /// Expand a leading tilde in a local path.

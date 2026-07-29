@@ -172,6 +172,17 @@ Protected persisted artifacts are summarized as one counted record rather than
 one zero-byte row each: only rows classified for removal carry a measured size,
 and an unmeasured size is reported as zero and never inferred.
 
+The additive `filesystem` object is the root-accounting contract. It inventories
+every top-level data-root entry, including `artifacts`, `cargo-targets`,
+`controller-runtimes`, `controller-scratch`, and the SQLite store, and labels
+unrecognized entries `unknown/unmanaged`. It also includes configured artifact
+roots outside the data root as `managed/external`. `apparent_bytes` is the sum
+of file lengths; `physical_bytes` is allocated filesystem blocks. Sparse files,
+hard links shared across top-level stores, directory metadata, and allocation
+granularity can make the top-level sum differ from root physical usage; the
+report states the direction and byte difference rather than hiding it. Existing
+`retained_bytes` and lifecycle aggregates remain unchanged for consumers.
+
 ## Remaining Scope
 
 The following Issue #8648 portions remain independently owned and are not
