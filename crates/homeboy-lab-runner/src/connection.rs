@@ -1487,7 +1487,7 @@ fn recover_dead_direct_tunnel(runner_id: &str, session: Option<&RunnerSession>) 
         "runner direct SSH tunnel recovery",
         runner_id.to_string(),
         DIRECT_TUNNEL_RECOVERY_WAIT,
-        |_| {},
+        super::lab_selection::emit_runtime_promotion_wait,
     )?;
     if read_session_or_live_peer(runner_id)?
         .as_ref()
