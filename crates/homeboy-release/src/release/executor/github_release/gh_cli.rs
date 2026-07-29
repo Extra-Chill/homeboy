@@ -317,9 +317,11 @@ fn reconcile_release_publications_with(
         if verify_release_publication(publication, remote, verify_digestless)? {
             existing.push(publication.clone());
         } else {
+            let observed = canonical_remote_digest(remote)?
+                .unwrap_or_else(|| "downloaded bytes with no reported digest".to_string());
             return Err(format!(
-                "GitHub Release asset '{}' conflicts with the canonical publication bytes",
-                publication.target_name
+                "GitHub Release asset '{}' conflicts with the canonical publication bytes (expected sha256:{}, found {})",
+                publication.target_name, publication.sha256, observed
             ));
         }
     }
@@ -2453,7 +2455,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_reupload_reuses_verified_asset_and_uploads_only_missing_asset() {
+    fn draft_published_during_build_reuses_verified_asset_and_uploads_only_missing_asset() {
         let dir = tempfile::tempdir().expect("tempdir");
         let first = dir.path().join("first.zip");
         let second = dir.path().join("second.zip");
@@ -2464,20 +2466,88 @@ mod tests {
             artifact(&second, None),
         ]))
         .expect("publication identities");
-
-        let (uploads, existing) = reconcile_release_publications_with(
-            &publications,
-            &[remote_asset(
+        let planned = GitHubReleaseMetadata {
+            tag_name: "v1.2.3".to_string(),
+            is_draft: true,
+            assets: Vec::new(),
+        };
+        assert!(planned.is_draft, "planning observed the matching draft");
+        let finalizing = GitHubReleaseMetadata {
+            tag_name: planned.tag_name.clone(),
+            is_draft: false,
+            assets: vec![remote_asset(
                 "first.zip",
                 publications[0].size,
                 Some(format!("sha256:{}", publications[0].sha256)),
             )],
+        };
+
+        let (uploads, existing) = reconcile_release_publications_with(
+            &publications,
+            &finalizing.assets,
             &mut unexpected_download,
         )
         .expect("partial recovery");
 
+        assert_eq!(finalizing.tag_name, planned.tag_name);
+        assert!(!finalizing.is_draft, "finalization observed publication");
         assert_eq!(existing, vec![publications[0].clone()]);
         assert_eq!(uploads, vec![publications[1].clone()]);
+
+        let mut completed_assets = finalizing.assets;
+        completed_assets.push(remote_asset(
+            "second.zip",
+            publications[1].size,
+            Some(format!("sha256:{}", publications[1].sha256)),
+        ));
+        verify_release_publications_with(
+            &publications,
+            &completed_assets,
+            &mut unexpected_download,
+        )
+        .expect("the missing authoritative upload completes the published release");
+    }
+
+    #[test]
+    fn draft_published_during_build_rejects_conflicting_existing_bytes() {
+        let publication = ReleaseAssetPublication {
+            target_name: "component.zip".to_string(),
+            sha256: "a".repeat(64),
+            size: 15,
+            source_path: "component.zip".to_string(),
+        };
+        let planned = GitHubReleaseMetadata {
+            tag_name: "v1.2.3".to_string(),
+            is_draft: true,
+            assets: Vec::new(),
+        };
+        let finalizing = GitHubReleaseMetadata {
+            tag_name: planned.tag_name.clone(),
+            is_draft: false,
+            assets: vec![remote_asset(
+                "component.zip",
+                publication.size,
+                Some(format!("sha256:{}", "b".repeat(64))),
+            )],
+        };
+
+        let error = reconcile_release_publications_with(
+            &[publication],
+            &finalizing.assets,
+            &mut unexpected_download,
+        )
+        .expect_err("published conflicting bytes must fail closed");
+
+        assert_eq!(finalizing.tag_name, planned.tag_name);
+        assert!(!finalizing.is_draft);
+        assert_eq!(
+            error,
+            format!(
+                "GitHub Release asset 'component.zip' conflicts with the canonical publication bytes (expected sha256:{}, found sha256:{})",
+                "a".repeat(64),
+                "b".repeat(64)
+            )
+        );
     }
 
     #[test]
