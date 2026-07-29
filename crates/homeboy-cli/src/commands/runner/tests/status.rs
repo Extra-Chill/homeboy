@@ -774,8 +774,15 @@ fn compact_status_prioritizes_dirty_controller_before_runner_convergence() {
         .risk
         .iter()
         .any(|risk| risk.contains("homeboy 0.321.1+configured-dirty")));
-    assert!(summary.next_action.starts_with("homeboy upgrade --force"));
-    assert!(summary.next_action.contains("refresh-homeboy homeboy-lab"));
+    assert_eq!(summary.next_action, "homeboy upgrade --force");
+    assert!(!summary.next_action.contains("refresh-homeboy"));
+    assert!(!summary.next_action.contains("--ref"));
+    let warning = report.stale_daemon.as_ref().expect("stale daemon warning");
+    assert_eq!(
+        warning.recovery_commands,
+        vec!["homeboy upgrade --force".to_string()]
+    );
+    assert!(warning.message.contains("rerun `homeboy runner status`"));
     assert!(
         report.connected,
         "liveness remains independently observable"
