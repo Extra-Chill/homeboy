@@ -11,7 +11,6 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::cell::Cell;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 mod json_io;
 mod json_ops;
@@ -41,6 +40,7 @@ pub const CONFIG_LOCK_STRICT_ENV: &str = "HOMEBOY_CONFIG_LOCK_STRICT";
 /// guards small JSON writes and, at worst, a runtime-package refresh), while
 /// staying far below the CI test-phase budget so a wedged holder surfaces as a
 /// named failure rather than consuming the whole phase.
+#[cfg(unix)]
 const DEFAULT_CONFIG_LOCK_TIMEOUT_SECS: u64 = 600;
 
 thread_local! {
@@ -81,13 +81,14 @@ impl Drop for ConfigLockDepthGuard {
     }
 }
 
-fn config_lock_timeout() -> Option<Duration> {
+#[cfg(unix)]
+fn config_lock_timeout() -> Option<std::time::Duration> {
     let seconds = std::env::var(CONFIG_LOCK_TIMEOUT_ENV)
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
         .unwrap_or(DEFAULT_CONFIG_LOCK_TIMEOUT_SECS);
 
-    (seconds > 0).then(|| Duration::from_secs(seconds))
+    (seconds > 0).then(|| std::time::Duration::from_secs(seconds))
 }
 
 fn config_lock_strict() -> bool {
@@ -164,6 +165,7 @@ pub fn with_config_lock<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
 #[cfg(unix)]
 pub fn lock_exclusive_bounded(file: &File, lock_path: &Path, context: &str) -> Result<()> {
     use std::os::fd::AsRawFd;
+    use std::time::{Duration, Instant};
 
     let timeout = config_lock_timeout();
     let started = Instant::now();
@@ -1057,6 +1059,7 @@ fn find_similar_ids_in<T: ConfigEntity>(target: &str, entities: &[T]) -> Vec<Str
 mod tests {
     use super::*;
     use serde::Deserialize;
+    use std::time::Duration;
 
     #[derive(Deserialize, Serialize)]
     struct TestEntity {
