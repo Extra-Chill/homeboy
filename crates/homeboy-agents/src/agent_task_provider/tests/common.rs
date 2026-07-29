@@ -1,5 +1,11 @@
 use super::*;
 
+/// Wall-clock budget for provider subprocess tests. Generous on purpose: these
+/// tests spawn real `node` processes, and the suite runs at default parallelism
+/// on shared machines where a tight window turns a correct terminal status into
+/// a spurious `Timeout` (#7739).
+pub(super) const PROVIDER_TEST_TIMEOUT_MS: u64 = 60_000;
+
 pub(super) fn script(body: &str) -> String {
     let path = std::env::temp_dir().join(format!(
         "homeboy-agent-task-provider-{}-{}.js",
@@ -68,7 +74,19 @@ pub(super) fn request(
         workspace: AgentTaskWorkspace::default(),
         component_contracts: Vec::new(),
         policy: AgentTaskPolicy::default(),
-        limits: AgentTaskLimits::default(),
+        // Pin an explicit, generous wall-clock timeout instead of inheriting the
+        // process-global default. `provider_default_timeout_returns_structured_
+        // outcome_without_explicit_timeout` sets the test default to 50ms through
+        // a process-wide env var, so any sibling test that relied on the default
+        // observed 50ms whenever the two ran concurrently and reported `Timeout`
+        // instead of its real terminal status. Being explicit also makes these
+        // subprocess-spawning tests tolerant of CPU contention on a loaded box
+        // (#7739). Tests that specifically exercise timeout behaviour override
+        // `limits.timeout_ms` themselves.
+        limits: AgentTaskLimits {
+            timeout_ms: Some(PROVIDER_TEST_TIMEOUT_MS),
+            ..AgentTaskLimits::default()
+        },
         expected_artifacts: Vec::new(),
         artifact_declarations: Vec::new(),
         output_declarations: Vec::new(),

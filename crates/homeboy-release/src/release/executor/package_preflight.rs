@@ -4,7 +4,7 @@ use std::process::Command;
 
 use crate::release::types::ReleaseArtifact;
 use homeboy_core::component::{
-    CommandScopeConfig, Component, PackageCoverageArtifactMatch, PackageCoverageConfig,
+    CommandScopeConfig, Component, PackageCoverageArtifactMatch, PackageCoverageConfig, ScopeConfig,
 };
 use homeboy_core::error::{Error, Result};
 
@@ -249,6 +249,7 @@ fn tracked_runtime_files(component: &Component, component_path: &Path) -> Result
         .filter_map(|raw| String::from_utf8(raw.to_vec()).ok())
         .map(|path| normalize_archive_path(&path))
         .filter(|path| runtime_candidate(path))
+        .filter(|path| !homeboy_owned_metadata(path) || explicitly_included(path, &scope))
         .filter(|path| scope_allows(path, &scope))
         .collect())
 }
@@ -299,6 +300,29 @@ fn runtime_candidate(path: &str) -> bool {
             .and_then(|extension| extension.to_str()),
         Some("php" | "inc" | "phtml" | "js" | "mjs" | "cjs" | "css" | "json")
     )
+}
+
+/// Homeboy-owned portable component metadata. These files describe how to
+/// build/release/deploy a component; they are not component runtime content, so
+/// they must not count toward release package completeness by default. Every
+/// component would otherwise have to rediscover and exclude them.
+///
+/// This is deliberately separate from [`runtime_candidate`]: the file extension
+/// is a legitimate runtime extension, and the reason for exclusion is ownership,
+/// not shape. A component with an unusual concrete need can opt the file back
+/// into package coverage with an explicit `scopes.release.include` entry.
+fn homeboy_owned_metadata(path: &str) -> bool {
+    matches!(path, "homeboy.json")
+}
+
+/// Whether an explicit include pattern names this path. Unlike [`scope_allows`],
+/// an empty include list is *not* treated as "includes everything" — opting a
+/// Homeboy-owned metadata file back in requires naming it.
+fn explicitly_included(path: &str, scope: &CommandScopeConfig) -> bool {
+    scope
+        .include
+        .iter()
+        .any(|pattern| path_matches(pattern, path))
 }
 
 fn scope_allows(path: &str, scope: &CommandScopeConfig) -> bool {
@@ -694,6 +718,85 @@ mod tests {
         assert!(!should_validate_package_completeness(true));
         // Default release behavior still enforces completeness.
         assert!(should_validate_package_completeness(false));
+    }
+
+    #[test]
+    fn package_completeness_excludes_homeboy_metadata_by_default() {
+        let repo = tempfile::tempdir().expect("repo");
+        std::fs::create_dir_all(repo.path().join("source")).expect("source dir");
+        std::fs::write(repo.path().join("source/runtime.php"), "<?php\n").expect("runtime");
+        std::fs::write(repo.path().join("homeboy.json"), "{}\n").expect("homeboy metadata");
+        run_git(repo.path(), &["init"]);
+        run_git(repo.path(), &["add", "source/runtime.php", "homeboy.json"]);
+        let artifact_path = repo.path().join("build/package.zip");
+        std::fs::create_dir_all(artifact_path.parent().unwrap()).expect("build dir");
+        write_zip(&artifact_path, &[("source/runtime.php", "<?php\n")]);
+        let component = test_component(repo.path());
+
+        validate_package_completeness(&component, repo.path(), &zip_artifacts("build/package.zip"))
+            .expect("homeboy.json must not count as a missing runtime file by default");
+    }
+
+    #[test]
+    fn package_completeness_admits_homeboy_metadata_when_explicitly_included() {
+        let repo = tempfile::tempdir().expect("repo");
+        std::fs::create_dir_all(repo.path().join("source")).expect("source dir");
+        std::fs::write(repo.path().join("source/runtime.php"), "<?php\n").expect("runtime");
+        std::fs::write(repo.path().join("homeboy.json"), "{}\n").expect("homeboy metadata");
+        run_git(repo.path(), &["init"]);
+        run_git(repo.path(), &["add", "source/runtime.php", "homeboy.json"]);
+        let artifact_path = repo.path().join("build/package.zip");
+        std::fs::create_dir_all(artifact_path.parent().unwrap()).expect("build dir");
+        write_zip(&artifact_path, &[("source/runtime.php", "<?php\n")]);
+        let mut component = test_component(repo.path());
+        component.scopes = Some(ScopeConfig {
+            release: Some(CommandScopeConfig {
+                include: vec!["homeboy.json".to_string(), "source/**".to_string()],
+                exclude: Vec::new(),
+            }),
+            ..ScopeConfig::default()
+        });
+
+        let error = validate_package_completeness(
+            &component,
+            repo.path(),
+            &zip_artifacts("build/package.zip"),
+        )
+        .expect_err("an explicit release include must opt homeboy.json back into coverage");
+        assert!(
+            error.message.contains("homeboy.json"),
+            "unexpected message: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn package_completeness_keeps_unrelated_json_fail_closed() {
+        let repo = tempfile::tempdir().expect("repo");
+        std::fs::create_dir_all(repo.path().join("source")).expect("source dir");
+        std::fs::write(repo.path().join("source/runtime.php"), "<?php\n").expect("runtime");
+        std::fs::write(repo.path().join("source/settings.json"), "{}\n").expect("runtime json");
+        run_git(repo.path(), &["init"]);
+        run_git(
+            repo.path(),
+            &["add", "source/runtime.php", "source/settings.json"],
+        );
+        let artifact_path = repo.path().join("build/package.zip");
+        std::fs::create_dir_all(artifact_path.parent().unwrap()).expect("build dir");
+        write_zip(&artifact_path, &[("source/runtime.php", "<?php\n")]);
+        let component = test_component(repo.path());
+
+        let error = validate_package_completeness(
+            &component,
+            repo.path(),
+            &zip_artifacts("build/package.zip"),
+        )
+        .expect_err("non-Homeboy runtime json must remain fail-closed");
+        assert!(
+            error.message.contains("source/settings.json"),
+            "unexpected message: {}",
+            error.message
+        );
     }
 
     fn test_component(repo: &Path) -> Component {

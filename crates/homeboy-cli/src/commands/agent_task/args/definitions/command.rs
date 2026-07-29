@@ -39,7 +39,7 @@ pub struct AgentTaskArgs {
 #[derive(Subcommand, Debug)]
 pub enum AgentTaskCommand {
     Doctor(AgentTaskDoctorArgs),
-    /// Run an agent task end to end and open a pull request.
+    /// Submit an agent task, run its gates, and open a pull request.
     ///
     /// Provide the work with one `--prompt` and optional `--goal` framing, point
     /// `--to-worktree` at the existing worktree to edit (that checkout is
@@ -50,6 +50,20 @@ pub enum AgentTaskCommand {
     /// before opening the PR). Repeatable `--verify` gates all run; the run
     /// retries up to `--max-attempts` times. Use `agent-task fanout cook-batch`
     /// for independent task waves.
+    ///
+    /// WAIT POLICY: Cook always persists a durable run id before materialization,
+    /// so a returned command is not by itself proof of a completed cook.
+    ///
+    /// `--wait` observes until the lifecycle is terminal and returns the terminal
+    /// Cook report. This is the default when neither flag is passed.
+    ///
+    /// `--detach-after-handoff` returns once the run is durably accepted. Its
+    /// result describes a submission, not an outcome.
+    ///
+    /// Do not infer the wait policy from client interactivity. An orchestration
+    /// client that needs one predictable contract should pass the flag rather than
+    /// rely on the default, and read the terminal outcome from
+    /// `agent-task status <run-id>` in either case.
     Cook(AgentTaskCookArgs),
     /// Continue a detached Cook from its durable Cook ID or provider attempt ID.
     /// The persisted recipe supplies the original prompt, transport, gates,

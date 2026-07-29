@@ -623,17 +623,37 @@ fn expired_execution_deadline_returns_typed_outcome_without_spawning_provider() 
     assert_eq!(outcome.diagnostics[0].data["remaining_budget_ms"], 0);
 }
 
+/// Restores the process-global test timeout override on drop, including on
+/// panic. Without this a failing assertion left the 50ms override set for every
+/// subsequent test in the process (#7739).
+struct DefaultTimeoutOverride;
+
+impl DefaultTimeoutOverride {
+    fn set(value: &str) -> Self {
+        std::env::set_var("HOMEBOY_AGENT_TASK_TEST_DEFAULT_PROVIDER_TIMEOUT_MS", value);
+        Self
+    }
+}
+
+impl Drop for DefaultTimeoutOverride {
+    fn drop(&mut self) {
+        std::env::remove_var("HOMEBOY_AGENT_TASK_TEST_DEFAULT_PROVIDER_TIMEOUT_MS");
+    }
+}
+
 #[test]
 fn provider_default_timeout_returns_structured_outcome_without_explicit_timeout() {
     let _lock = DEFAULT_TIMEOUT_ENV_LOCK
         .lock()
         .expect("default timeout env lock");
-    std::env::set_var("HOMEBOY_AGENT_TASK_TEST_DEFAULT_PROVIDER_TIMEOUT_MS", "50");
+    let _override = DefaultTimeoutOverride::set("50");
     let command = format!("node {}", script("setInterval(() => {}, 1000);"));
-    let (request, provider) = request("task-default-timeout", command);
+    let (mut request, provider) = request("task-default-timeout", command);
+    // This test is specifically about the *default*, so drop the explicit
+    // timeout the shared fixture now pins.
+    request.limits.timeout_ms = None;
 
     let outcome = run_provider_command(&request, &provider, None);
-    std::env::remove_var("HOMEBOY_AGENT_TASK_TEST_DEFAULT_PROVIDER_TIMEOUT_MS");
 
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Timeout);
     assert_eq!(

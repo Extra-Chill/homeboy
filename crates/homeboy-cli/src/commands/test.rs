@@ -97,8 +97,12 @@ pub struct TestArgs {
     #[arg(last = true)]
     pub args: Vec<String>,
 
-    /// Print compact machine-readable summary (for CI wrappers)
-    #[arg(long)]
+    // The `--summary` alias keeps one compact-output convention working across
+    // the `review` umbrella and every phase subcommand. `review/mod.rs` already
+    // maps its own `--summary` onto this field for the test phase (#10428).
+    /// Print compact machine-readable summary (for CI wrappers).
+    /// Also accepts `--summary`.
+    #[arg(long, alias = "summary")]
     pub json_summary: bool,
 
     #[arg(skip)]

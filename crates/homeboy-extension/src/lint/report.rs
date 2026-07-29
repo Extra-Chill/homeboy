@@ -99,8 +99,24 @@ fn lint_phase_report(
             phase_status_from_exit_code(exit_code)
         },
         exit_code: Some(exit_code),
-        summary: if exit_code == 0 {
+        summary: if exit_code == 0 && finding_count == 0 {
             "lint phase passed with no findings".to_string()
+        } else if exit_code == 0 {
+            // A passing exit code with retained findings is the advisory/warning-only
+            // case. The phase really did pass, but claiming "no findings" contradicts
+            // the structured `findings` and `producer_summaries` in the same envelope.
+            if producer_summaries.is_empty() {
+                format!(
+                    "lint phase passed with {} advisory finding(s)",
+                    finding_count
+                )
+            } else {
+                format!(
+                    "lint phase passed with {} advisory finding(s) across {}",
+                    finding_count,
+                    producer_summary_label(producer_summaries)
+                )
+            }
         } else if infrastructure_failure || exit_code >= 2 {
             format!("lint phase infrastructure failure (exit {})", exit_code)
         } else if !producer_summaries.is_empty() {
@@ -287,6 +303,66 @@ mod tests {
             output.phase.summary,
             "lint phase failed with 2 finding(s) across phpcs passed: 0, eslint failed: 1, phpstan failed: 1"
         );
+    }
+
+    #[test]
+    fn passing_lint_with_advisory_findings_does_not_claim_no_findings() {
+        let result = LintRunWorkflowResult {
+            status: "passed".to_string(),
+            component: "fixture".to_string(),
+            exit_code: 0,
+            harness_error: false,
+            infrastructure_failure: false,
+            autofix: None,
+            hints: None,
+            baseline_comparison: None,
+            formatting_findings: None,
+            findings: Some(vec![HomeboyFinding::builder("phpcs", "phpcs warning")
+                .severity("warning")
+                .build()]),
+            producer_summaries: vec![
+                FindingProducerSummary::new("phpcs", "passed").finding_count(1)
+            ],
+            summary: None,
+            self_check_capture: None,
+            extension_phase_timings: Vec::new(),
+        };
+
+        let (output, exit_code) = from_main_workflow(result);
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(output.phase.status, crate::PhaseStatus::Passed);
+        assert_eq!(
+            output.phase.summary,
+            "lint phase passed with 1 advisory finding(s) across phpcs passed: 1"
+        );
+    }
+
+    #[test]
+    fn passing_lint_without_findings_still_reports_no_findings() {
+        let result = LintRunWorkflowResult {
+            status: "passed".to_string(),
+            component: "fixture".to_string(),
+            exit_code: 0,
+            harness_error: false,
+            infrastructure_failure: false,
+            autofix: None,
+            hints: None,
+            baseline_comparison: None,
+            formatting_findings: None,
+            findings: Some(Vec::new()),
+            producer_summaries: vec![
+                FindingProducerSummary::new("phpcs", "passed").finding_count(0)
+            ],
+            summary: None,
+            self_check_capture: None,
+            extension_phase_timings: Vec::new(),
+        };
+
+        let (output, exit_code) = from_main_workflow(result);
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(output.phase.summary, "lint phase passed with no findings");
     }
 
     #[test]

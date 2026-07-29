@@ -7,6 +7,49 @@ use crate::{
 use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 use homeboy_core::test_support;
 
+/// Environment variables that redirect Cargo's output directory. A nested Cargo
+/// fixture that asserts a fixture-local `target/` path must not inherit these
+/// from the controller, `homeboy review`, or CI — otherwise the nested build
+/// succeeds while writing somewhere else entirely, and the assertion fails on a
+/// path that was never going to exist (#9846).
+const CARGO_TARGET_DIR_OVERRIDES: [&str; 3] = [
+    "CARGO_TARGET_DIR",
+    "CARGO_BUILD_TARGET_DIR",
+    "HOMEBOY_CARGO_TARGET_DIR",
+];
+
+/// A shell for nested Cargo fixtures, hermetic with respect to shared
+/// target-directory configuration.
+fn fixture_build_shell(script: &str) -> Command {
+    let mut command = Command::new("bash");
+    command.args(["-c", script]);
+    for key in CARGO_TARGET_DIR_OVERRIDES {
+        command.env_remove(key);
+    }
+    command
+}
+
+/// Deterministic coverage for the hermeticity contract itself: the fixture shell
+/// must clear every shared target-directory override regardless of what the
+/// surrounding review/CI environment set. This asserts the command's configured
+/// environment rather than mutating process-global state (#9846).
+#[test]
+fn fixture_build_shell_clears_shared_cargo_target_overrides() {
+    let command = fixture_build_shell("true");
+    let removed: Vec<&str> = command
+        .get_envs()
+        .filter(|(_, value)| value.is_none())
+        .filter_map(|(key, _)| key.to_str())
+        .collect();
+
+    for key in CARGO_TARGET_DIR_OVERRIDES {
+        assert!(
+            removed.contains(&key),
+            "fixture shell must clear {key}; cleared: {removed:?}"
+        );
+    }
+}
+
 fn fixture_commits_are_ancestral(repository: &Path, older: &str, newer: &str) -> Result<bool> {
     let status = Command::new("git")
         .args(["merge-base", "--is-ancestor", older, newer])
@@ -802,8 +845,7 @@ fn materialize_script_records_the_peeled_commit_for_tags_and_direct_commits() {
             binary_path.to_str().expect("binary path"),
             false,
         );
-        let output = Command::new("bash")
-            .args(["-c", &script])
+        let output = fixture_build_shell(&script)
             .output()
             .expect("run materialize script");
         assert!(

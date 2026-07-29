@@ -1412,11 +1412,19 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
     let mut binary = None;
     if sync_homeboy_binary {
         let source_path = options.homeboy_source.as_deref().map(expand_path);
+        // Resolve the runner and refuse an impossible cross-architecture source
+        // sync BEFORE compiling. A controller-local build always produces a
+        // controller-native binary, so building first and then rejecting the
+        // Mach-O output costs several minutes to reach a verdict that was
+        // knowable up front (#8963).
+        let runner = load(&options.runner_id)?;
+        if options.homeboy_binary.is_none() {
+            validate_dev_sync_source_build_for_runner(&runner)?;
+        }
         let (local_binary, _target_lease) = match options.homeboy_binary.as_deref() {
             Some(path) => (expand_path(path), None),
             None => build_local_homeboy_binary(source_path.as_deref())?,
         };
-        let runner = load(&options.runner_id)?;
         validate_dev_sync_binary_for_runner(&runner, &local_binary)?;
         let sha256 = sha256_file(&local_binary)?;
         let hash = sha256[..16].to_string();
@@ -2010,6 +2018,35 @@ fn sha256_file(path: &Path) -> Result<String> {
             None,
         )
     })
+}
+
+/// Refuse a controller-local source build that could never satisfy an SSH runner,
+/// before paying for the compile. A Darwin controller can only emit Mach-O, which
+/// [`validate_dev_sync_binary_for_runner`] rejects for SSH runners — so the
+/// verdict is decidable from the controller platform alone (#8963).
+///
+/// This deliberately does not replace the post-build binary guard: an explicitly
+/// supplied `--homeboy-binary` is still inspected by magic bytes, because its
+/// architecture is not implied by the controller platform.
+fn validate_dev_sync_source_build_for_runner(runner: &super::Runner) -> Result<()> {
+    if runner.kind == RunnerKind::Ssh && cfg!(target_os = "macos") {
+        return Err(Error::validation_invalid_argument(
+            "homeboy_source",
+            "runner dev-sync cannot build a Homeboy binary for an SSH runner on a Darwin controller",
+            None,
+            Some(vec![
+                format!(
+                    "Build/select Homeboy on the runner with `homeboy runner refresh-homeboy {} --ref main --reconnect`.",
+                    shell_arg(&runner.id)
+                ),
+                format!(
+                    "For extension-only sync, run `homeboy runner dev-sync {} --extensions <id>=<path>` without --homeboy-binary or --homeboy-source.",
+                    shell_arg(&runner.id)
+                ),
+            ]),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_dev_sync_binary_for_runner(runner: &super::Runner, binary: &Path) -> Result<()> {

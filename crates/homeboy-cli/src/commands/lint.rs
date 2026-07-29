@@ -101,6 +101,9 @@ pub struct LintArgs {
     #[command(flatten)]
     pub baseline_args: BaselineArgs,
 
+    // No `--summary` alias here: lint already declares `--summary` above as its
+    // compact-output selector, and that is the field `review --summary` maps
+    // onto for this phase. Aliasing it again collides in clap (#10428).
     /// Print compact machine-readable summary (for CI wrappers)
     #[arg(long)]
     pub json_summary: bool,

@@ -72,7 +72,7 @@ Audit code conventions and detect architectural drift
 | `--ignore-baseline` | flag | Skip baseline comparison for this run |
 | `--ratchet` | flag | Auto-update the baseline when the current run improves on it |
 | `--changed-since` | `<CHANGED_SINCE>` | Only audit files changed since a git ref (branch, tag, or SHA) |
-| `--json-summary` | flag | Include compact machine-readable summary for CI wrappers |
+| `--json-summary` | flag | Include compact machine-readable summary for CI wrappers. Also accepts `--summary` |
 | `--fixability` | flag | Include automated-fixability metadata. This can be expensive because it runs the refactor planner after audit completes |
 
 ## `homeboy review lint`
@@ -143,7 +143,7 @@ Run tests for a component
 | `--settings-json-file` | `<FILE>` | Load typed setting overrides from a JSON object file. Repeatable |
 | `--setting` | `<KEY=VALUE>` | String setting override. Repeatable |
 | `--setting-json` | `<SETTING_JSON>` | Typed-JSON setting override. Repeatable |
-| `--json-summary` | flag | Print compact machine-readable summary (for CI wrappers) |
+| `--json-summary` | flag | Print compact machine-readable summary (for CI wrappers). Also accepts `--summary` |
 
 ## `homeboy review build`
 

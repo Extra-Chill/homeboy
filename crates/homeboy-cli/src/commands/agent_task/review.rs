@@ -893,19 +893,29 @@ pub(crate) fn providers(args: ProvidersArgs) -> CmdResult<Value> {
     let executor = ExtensionProviderAgentTaskExecutor::from_catalog(catalog);
     let all_providers = executor.providers();
     if args.validate_readiness {
-        let backend = args.backend.as_deref().ok_or_else(|| {
+        // Fall back to the configured default backend the same way Cook selection
+        // does, so readiness validation does not demand a flag that policy already
+        // answers. `default_backend_for_component` resolves component, then
+        // extension, then Homeboy config `agent_task.default_backend` (#9651).
+        let resolved_backend = match args.backend.clone() {
+            Some(backend) => Some(backend),
+            None => homeboy::agents::agent_tasks::provider::default_backend_for_component(None)?,
+        };
+        let backend = resolved_backend.ok_or_else(|| {
             homeboy::core::Error::validation_invalid_argument(
                 "backend",
-                "agent-task providers --validate-readiness requires --backend",
+                "agent-task providers --validate-readiness requires --backend because no default backend policy is configured",
                 None,
                 Some(vec![
                     "Pass the same --backend value that the agent-task cook command will use."
+                        .to_string(),
+                    "Or set agent_task.default_backend in component, extension, or Homeboy config policy so Cook and readiness validation agree."
                         .to_string(),
                 ]),
             )
         })?;
         homeboy::agents::agent_tasks::provider::validate_provider_runner_readiness_for_backend(
-            backend,
+            &backend,
             args.selector.as_deref(),
         )?;
     }
