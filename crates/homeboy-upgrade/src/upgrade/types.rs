@@ -85,6 +85,16 @@ pub struct UpgradeResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
     pub upgraded: bool,
+    /// Independent controller mutation outcome. Additive so persisted and
+    /// older callers can continue using `upgraded` and `partial` unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller: Option<UpgradeComponentStatus>,
+    /// Independent extension refresh outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<UpgradeComponentStatus>,
+    /// Independent configured-runner convergence outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runners: Option<UpgradeComponentStatus>,
     /// True when a requested controller/runner fleet upgrade could not fully
     /// converge. Omitted for successful responses so existing consumers keep
     /// their current payload shape; accepted when reading persisted responses.
@@ -121,6 +131,14 @@ pub struct UpgradeResult {
     /// exact recovery command so the operator can restart it manually.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services_pending_restart: Vec<ServiceRestartEntry>,
+}
+
+/// Compact named outcome for one upgrade dimension. Detailed build output stays
+/// in the existing per-runner evidence fields rather than obscuring the result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpgradeComponentStatus {
+    pub status: String,
+    pub summary: String,
 }
 
 /// Outcome of attempting to restart one declared binary-resident service after

@@ -37,6 +37,13 @@ pub fn source_checkout_build_identity(source_path: &Path) -> Option<String> {
     ))
 }
 
+/// Immutable source input used for runner remediation. A branch name is not a
+/// convergence target because it can move after the controller was selected.
+pub fn source_checkout_revision(source_path: &Path) -> Option<String> {
+    output_allow_empty(source_path, &["rev-parse", "HEAD"])
+        .filter(|revision| !revision.trim().is_empty())
+}
+
 pub fn prepare_runner_source_checkout_for_upgrade(
     runner: &Runner,
     method_override: Option<InstallMethod>,

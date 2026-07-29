@@ -232,11 +232,115 @@ fn fails_when_managed_bare_homeboy_repair_leaves_path_drift() {
         .contains("managed PATH-visible `homeboy` repair left bare `homeboy` at 0.228.4"));
     assert!(skipped[0]
         .recovery_commands
-        .contains(&"homeboy upgrade --force --upgrade-runner lab".to_string()));
+        .contains(&"homeboy runner refresh-homeboy lab --reconnect".to_string()));
     assert!(skipped[0]
         .detail
         .contains("managed PATH-visible `homeboy` repair completed"));
     assert!(skipped[0].detail.contains("runner PATH drift detected"));
+}
+
+#[test]
+fn recovery_never_emits_bare_homeboy_for_a_selected_binary() {
+    let commands = runner_upgrade_recovery_commands(
+        "homeboy-lab",
+        "/home/user/Developer/_homeboy_binaries/homeboy-current/target/release/homeboy",
+    );
+
+    assert!(commands
+        .iter()
+        .any(|command| command.contains("target/release/homeboy upgrade")));
+    assert!(!commands
+        .iter()
+        .any(|command| command.contains("-- homeboy upgrade")));
+}
+
+#[test]
+fn source_recovery_rejects_mismatched_bare_identity_without_mutating_config() {
+    let runner = ssh_runner(
+        "lab",
+        Some("/home/user/Developer/_homeboy_binaries/homeboy-stale/target/release/homeboy"),
+    );
+    let mut updates = Vec::new();
+    let mut calls = 0;
+
+    let result = recover_runner_homeboy_path_after_failed_upgrade(
+        &runner,
+        runner.settings.homeboy_path.as_deref().unwrap(),
+        Some("0.228.4"),
+        Some("homeboy 0.228.5+selected"),
+        &mut |runner_id, path| {
+            updates.push((runner_id.to_string(), path.to_string()));
+            Ok(())
+        },
+        &mut |runner_id, options| {
+            calls += 1;
+            let stdout = match calls {
+                1 => "homeboy 0.228.5\n",
+                2 => "homeboy 0.228.5+shadowed\n",
+                _ => panic!("unexpected command: {:?}", options.command),
+            };
+            Ok((exec_output(runner_id, options.command, stdout, "", 0), 0))
+        },
+    );
+
+    let error = result.err().expect("mismatched identity is rejected");
+    assert!(error.contains("expected controller identity"));
+    assert!(updates.is_empty());
+}
+
+#[test]
+fn source_recovery_rejects_unverifiable_bare_identity_without_mutating_config() {
+    let runner = ssh_runner(
+        "lab",
+        Some("/home/user/Developer/_homeboy_binaries/homeboy-stale/target/release/homeboy"),
+    );
+    let mut updates = Vec::new();
+    let mut calls = 0;
+
+    let result = recover_runner_homeboy_path_after_failed_upgrade(
+        &runner,
+        runner.settings.homeboy_path.as_deref().unwrap(),
+        Some("0.228.4"),
+        Some("homeboy 0.228.5+selected"),
+        &mut |runner_id, path| {
+            updates.push((runner_id.to_string(), path.to_string()));
+            Ok(())
+        },
+        &mut |runner_id, options| {
+            calls += 1;
+            let (stdout, exit_code) = match calls {
+                1 => ("homeboy 0.228.5\n", 0),
+                2 => ("", 1),
+                _ => panic!("unexpected command: {:?}", options.command),
+            };
+            Ok((
+                exec_output(runner_id, options.command, stdout, "", exit_code),
+                exit_code,
+            ))
+        },
+    );
+
+    let error = result.err().expect("unverifiable identity is rejected");
+    assert!(error.contains("unverifiable build identity"));
+    assert!(updates.is_empty());
+}
+
+#[test]
+fn source_drift_recovery_retains_selected_immutable_revision() {
+    let revision = "a".repeat(40);
+    let commands = runner_recovery_commands(
+        "lab",
+        "/home/user/Developer/_homeboy_binaries/homeboy-stale/target/release/homeboy",
+        Some(&"identity mismatch".to_string()),
+        Some("0.228.4"),
+        Some("0.228.5"),
+        Some(&revision),
+    );
+
+    assert_eq!(
+        commands[0],
+        format!("homeboy runner refresh-homeboy lab --ref {revision} --reconnect")
+    );
 }
 
 #[test]

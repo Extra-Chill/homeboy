@@ -24,6 +24,7 @@ pub fn runner_upgrade_failure_entry(
     exit_code: i32,
     detail: String,
 ) -> RunnerUpgradeEntry {
+    let recovery_commands = runner_upgrade_recovery_commands(runner_id, &homeboy_path);
     RunnerUpgradeEntry {
         runner_id: runner_id.to_string(),
         homeboy_path,
@@ -33,7 +34,7 @@ pub fn runner_upgrade_failure_entry(
         new_version: None,
         bare_homeboy_version: None,
         path_drift: None,
-        recovery_commands: runner_upgrade_recovery_commands(runner_id),
+        recovery_commands,
         extensions_synced: Vec::new(),
         extensions_skipped: Vec::new(),
         extensions_failed: Vec::new(),
@@ -60,6 +61,8 @@ pub fn recover_and_retry_failed_upgrade(
     command_source_path: Option<&str>,
     original_homeboy_path: &str,
     previous_version: Option<&str>,
+    expected_build_identity: Option<&str>,
+    selected_source_revision: Option<&str>,
     failure: FailedUpgradeOutcome,
     update_homeboy_path: &mut impl FnMut(&str, &str) -> Result<()>,
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
@@ -68,6 +71,7 @@ pub fn recover_and_retry_failed_upgrade(
         runner,
         original_homeboy_path,
         previous_version,
+        expected_build_identity,
         update_homeboy_path,
         exec,
     ) {
@@ -126,8 +130,14 @@ pub fn recover_and_retry_failed_upgrade(
                 ),
             );
             entry.path_drift = Some(recovery_detail.clone());
-            entry.recovery_commands =
-                runner_recovery_commands(&runner.id, "homeboy", Some(&recovery_detail), None, None);
+            entry.recovery_commands = runner_recovery_commands(
+                &runner.id,
+                original_homeboy_path,
+                Some(&recovery_detail),
+                None,
+                None,
+                selected_source_revision,
+            );
             Err(entry)
         }
     }

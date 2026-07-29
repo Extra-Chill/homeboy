@@ -277,6 +277,9 @@ pub fn run_upgrade_with_method(
                 new_build_identity: None,
                 source_revision: None,
                 upgraded: false,
+                controller: Some(component_status("unchanged", "controller already current")),
+                extensions: Some(extension_component_status(!skip_extensions, skip_extensions, &extensions_updated, &extensions_skipped)),
+                runners: Some(runner_component_status(runner_disposition, &runners_updated, &runners_skipped)),
                 partial,
                 runner_convergence: Some(runner_disposition),
                 message: match runner_disposition {
@@ -376,6 +379,25 @@ pub fn run_upgrade_with_method(
         new_build_identity: new_build_identity.clone(),
         source_revision,
         upgraded: success,
+        controller: Some(component_status(
+            if success { "updated" } else { "failed" },
+            if success {
+                "controller installation completed"
+            } else {
+                "controller installation did not complete"
+            },
+        )),
+        extensions: Some(extension_component_status(
+            upgrade_completed,
+            skip_extensions,
+            &extensions_updated,
+            &extensions_skipped,
+        )),
+        runners: Some(runner_component_status(
+            runner_disposition,
+            &runners_updated,
+            &runners_skipped,
+        )),
         partial: runner_convergence_failed(
             &runners_updated,
             &runners_skipped,
@@ -419,6 +441,12 @@ fn source_upgrade_noop_result(
         new_build_identity: None,
         source_revision: None,
         upgraded: false,
+        controller: Some(component_status("unchanged", "controller was not promoted")),
+        extensions: Some(component_status("skipped", "extensions were not refreshed")),
+        runners: Some(component_status(
+            "not_run",
+            "runner convergence was not attempted",
+        )),
         partial: false,
         // No upgrade occurred, so there is no runner-convergence claim to make.
         runner_convergence: None,
@@ -497,6 +525,24 @@ fn run_targeted_runner_upgrade(
         new_build_identity: Some(previous_build_identity),
         source_revision: None,
         upgraded: false,
+        controller: Some(component_status(
+            "unchanged",
+            "targeted runner operation did not promote controller",
+        )),
+        extensions: Some(component_status(
+            "skipped",
+            "controller extensions were not refreshed",
+        )),
+        runners: Some(runner_component_status(
+            runner_convergence_disposition(
+                false,
+                &runners_updated,
+                &runners_skipped,
+                Some(previous_version.as_str()),
+            ),
+            &runners_updated,
+            &runners_skipped,
+        )),
         partial: runner_convergence_failed(
             &runners_updated,
             &runners_skipped,
@@ -525,6 +571,55 @@ fn run_targeted_runner_upgrade(
         services_restarted: Vec::new(),
         services_pending_restart: Vec::new(),
     })
+}
+
+fn component_status(status: &str, summary: &str) -> UpgradeComponentStatus {
+    UpgradeComponentStatus {
+        status: status.to_string(),
+        summary: summary.to_string(),
+    }
+}
+
+fn extension_component_status(
+    attempted: bool,
+    skipped_by_flag: bool,
+    updated: &[ExtensionUpgradeEntry],
+    skipped: &[String],
+) -> UpgradeComponentStatus {
+    let status = if skipped_by_flag {
+        "skipped"
+    } else if !attempted {
+        "not_run"
+    } else if skipped.is_empty() {
+        "completed"
+    } else {
+        "partial"
+    };
+    component_status(
+        status,
+        &format!("{} updated, {} skipped", updated.len(), skipped.len()),
+    )
+}
+
+fn runner_component_status(
+    disposition: RunnerConvergenceDisposition,
+    updated: &[RunnerUpgradeEntry],
+    skipped: &[RunnerUpgradeEntry],
+) -> UpgradeComponentStatus {
+    let status = match disposition {
+        RunnerConvergenceDisposition::Converged => "converged",
+        RunnerConvergenceDisposition::Partial => "partial",
+        RunnerConvergenceDisposition::Skipped => "skipped",
+        RunnerConvergenceDisposition::NoRunnersConfigured => "not_configured",
+    };
+    component_status(
+        status,
+        &format!(
+            "{} converged, {} require repair",
+            updated.len(),
+            skipped.len()
+        ),
+    )
 }
 
 fn runner_convergence_failed(
@@ -1936,6 +2031,22 @@ mod convergence_tests {
         runner.success = false;
 
         assert!(runner_convergence_failed(&[], &[runner], None));
+    }
+
+    #[test]
+    fn extension_status_distinguishes_skipped_and_not_run() {
+        assert_eq!(
+            extension_component_status(false, true, &[], &[]).status,
+            "skipped"
+        );
+        assert_eq!(
+            extension_component_status(false, false, &[], &[]).status,
+            "not_run"
+        );
+        assert_eq!(
+            extension_component_status(true, false, &[], &[]).status,
+            "completed"
+        );
     }
 
     #[test]

@@ -321,6 +321,7 @@ pub fn upgrade_runner_with_executor(
                 .then(|| source_path.and_then(source_checkout_build_identity))
                 .flatten()
         });
+    let selected_source_revision = source_path.and_then(source_checkout_revision);
     let command_source_path = match runner_upgrade_source_path(
         runner,
         method_override,
@@ -380,6 +381,8 @@ pub fn upgrade_runner_with_executor(
             command_source_path.as_deref(),
             &original_homeboy_path,
             previous_version.as_deref(),
+            expected_build_identity.as_deref(),
+            selected_source_revision.as_deref(),
             FailedUpgradeOutcome {
                 exit_code,
                 detail: runner_upgrade_detail(&output),
@@ -394,6 +397,8 @@ pub fn upgrade_runner_with_executor(
             command_source_path.as_deref(),
             &original_homeboy_path,
             previous_version.as_deref(),
+            expected_build_identity.as_deref(),
+            selected_source_revision.as_deref(),
             FailedUpgradeOutcome {
                 exit_code: 1,
                 detail: err.message,
@@ -607,6 +612,7 @@ pub fn upgrade_runner_with_executor(
         path_drift.as_ref(),
         new_version.as_deref(),
         bare_homeboy_version.as_deref(),
+        selected_source_revision.as_deref(),
     );
     let mut stale_daemon_repair_detail = None;
     let mut stale_daemon = runner_stale_daemon(runner, status);

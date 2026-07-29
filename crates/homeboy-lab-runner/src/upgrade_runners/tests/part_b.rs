@@ -263,7 +263,7 @@ fn fails_when_configured_runner_path_remains_older_than_local_after_successful_u
         .contains("but local/current reports"));
     assert!(skipped[0]
         .recovery_commands
-        .contains(&"homeboy runner exec homeboy-lab -- homeboy upgrade --no-restart".to_string()));
+        .contains(&"homeboy runner refresh-homeboy homeboy-lab --reconnect".to_string()));
     assert!(skipped[0]
         .detail
         .contains("runner version check: local/current"));
@@ -271,9 +271,60 @@ fn fails_when_configured_runner_path_remains_older_than_local_after_successful_u
     assert!(skipped[0].detail.contains("runner after 0.0.1"));
     assert!(skipped[0]
         .detail
-        .contains("homeboy runner exec homeboy-lab -- homeboy upgrade --no-restart"));
+        .contains("homeboy upgrade --force --upgrade-runner homeboy-lab"));
     assert_eq!(commands[1][0], "/home/user/.cargo/bin/homeboy");
     assert!(commands[1].contains(&"--force".to_string()));
+}
+
+#[test]
+fn binary_store_source_pin_realigns_to_materialized_controller_binary() {
+    let source_dir = git_source_checkout();
+    let expected_identity = source_checkout_build_identity(source_dir.path()).unwrap();
+    let stale_path =
+        "/home/user/Developer/_homeboy_binaries/homeboy-2f9a1eb64e0bb84d/target/release/homeboy";
+    let remote_source = "/home/user/Developer/_homeboy_binaries/homeboy-current";
+    let selected_binary = format!("{remote_source}/target/release/homeboy");
+    let runner = ssh_runner("lab", Some(stale_path));
+    let mut commands = Vec::new();
+    let mut updates = Vec::new();
+
+    let (updated, skipped) = upgrade_runners_with_executor_source_materializer_and_path_updater(
+        &[runner],
+        true,
+        Some(InstallMethod::Source),
+        Some(source_dir.path()),
+        &[],
+        |runner_id, options| {
+            commands.push(options.command.clone());
+            let (stdout, code) = match commands.len() {
+                1 => (format!("homeboy {}+stale\n", current_version()), 0),
+                2 => ("prepared\n".to_string(), 0),
+                3 => ("{\"success\":true}\n".to_string(), 0),
+                4 | 5 => (format!("homeboy {}+stale\n", current_version()), 0),
+                6 => (format!("homeboy {}\n", current_version()), 0),
+                7..=10 => (format!("{expected_identity}\n"), 0),
+                _ => (String::new(), 1),
+            };
+            Ok((
+                exec_output(runner_id, options.command, &stdout, "", code),
+                code,
+            ))
+        },
+        runner_status,
+        |_runner, _path| Ok(remote_source.to_string()),
+        |runner_id, path| {
+            updates.push((runner_id.to_string(), path.to_string()));
+            Ok(())
+        },
+    );
+
+    assert!(skipped.is_empty());
+    assert_eq!(updated[0].homeboy_path, selected_binary);
+    assert_eq!(updates, vec![("lab".to_string(), selected_binary)]);
+    assert!(is_homeboy_source_build_path(stale_path));
+    assert!(!commands
+        .iter()
+        .any(|command| command.first() == Some(&"homeboy".to_string())));
 }
 
 #[test]
