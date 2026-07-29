@@ -514,6 +514,10 @@ fn rejects_stale_source_runner_identity_before_extension_sync() {
                 11 => format!("homeboy {}\n", current_version()),
                 12 => format!("homeboy {}+stale\n", current_version()),
                 13 => format!("homeboy {}+stale\n", current_version()),
+                14 => format!("homeboy {}\n", current_version()),
+                15 => format!("homeboy {}+stale\n", current_version()),
+                16 => format!("homeboy {}\n", current_version()),
+                17 => format!("{expected_identity}\n"),
                 other => panic!("unexpected runner command {other}: {:?}", options.command),
             };
             Ok((exec_output(runner_id, options.command, &stdout, "", 0), 0))
