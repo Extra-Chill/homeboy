@@ -482,6 +482,7 @@ fn aligned_runner_identity_protocol_with_shell_preamble_accepts_jobs() {
         daemon_version,
         "0.298.0",
         &configured.version,
+        &configured.version,
         compare_identities(Some(daemon_identity), configured.build_identity.as_deref()),
         &daemon_runtime_stale_paths_from_body(&daemon),
         &changed_runtime_paths(
@@ -535,6 +536,20 @@ fn equal_version_build_identity_and_runtime_paths_are_current() {
         "0.296.3",
         "homeboy 0.296.3",
         "0.296.3",
+        "0.296.3",
+        IdentityComparison::Match,
+        &[],
+        &[],
+    ));
+}
+
+#[test]
+fn controller_version_skew_is_incompatible_even_when_daemon_matches_configured_binary() {
+    assert!(!daemon_runtime_is_current(
+        "0.321.1",
+        "0.321.1",
+        "0.321.1",
+        "0.322.1",
         IdentityComparison::Match,
         &[],
         &[],
@@ -566,6 +581,7 @@ fn observed_matching_daemon_identity_reconciles_stale_session_metadata() {
         "0.298.1",
         &session.homeboy_version,
         &configured.version,
+        &configured.version,
         IdentityComparison::Match,
         &[],
         &[],
@@ -583,6 +599,7 @@ fn equal_versions_with_different_build_identities_are_stale_and_name_both_builds
     );
 
     assert!(!daemon_runtime_is_current(
+        "0.296.3",
         "0.296.3",
         "0.296.3",
         "0.296.3",
@@ -620,6 +637,7 @@ fn runtime_path_drift_is_stale_and_names_the_changed_generation() {
         "0.296.3",
         "0.296.3",
         "0.296.3",
+        "0.296.3",
         IdentityComparison::Match,
         &warning.stale_runtime_paths,
         &warning.changed_runtime_paths,
@@ -642,6 +660,7 @@ fn differing_versions_are_stale_and_name_both_versions() {
     assert!(!daemon_runtime_is_current(
         "0.296.2",
         "0.296.2",
+        "0.296.3",
         "0.296.3",
         IdentityComparison::Mismatch,
         &[],

@@ -16,8 +16,8 @@ use super::super::jobs::format_job_event;
 use super::super::status::{
     declared_executable_requirement_diagnostics, declared_run_followups,
     declared_runtime_diagnostics, declared_runtime_source_diagnostics, declared_tool_diagnostics,
-    lab_runner_homeboy_output, runner_artifact_feature_diagnostics, runner_followups,
-    runner_status_operator_commands,
+    lab_runner_homeboy_output, operator_summary, runner_artifact_feature_diagnostics,
+    runner_followups, runner_status_operator_commands,
 };
 
 #[test]
@@ -685,6 +685,98 @@ fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
         Some("/opt/homeboy/bin/homeboy")
     );
     assert_eq!(output.active_daemon_version.as_deref(), Some("0.262.0"));
+}
+
+#[test]
+fn compact_status_marks_live_runner_with_controller_skew_degraded_and_actionable() {
+    let controller = homeboy_product_identity::build_identity();
+    let report = RunnerStatusReport {
+        runner_id: "homeboy-lab".to_string(),
+        connected: true,
+        state: runner::RunnerSessionState::Connected,
+        session: Some(RunnerSession {
+            runner_id: "homeboy-lab".to_string(),
+            mode: RunnerTunnelMode::DirectSsh,
+            role: runner::RunnerSessionRole::Controller,
+            server_id: Some("homeboy-lab".to_string()),
+            controller_id: None,
+            broker_url: None,
+            remote_daemon_address: Some("127.0.0.1:7357".to_string()),
+            local_port: Some(7357),
+            local_url: Some("http://127.0.0.1:7357".to_string()),
+            tunnel_pid: Some(123),
+            remote_daemon_pid: Some(456),
+            remote_daemon_lease_id: Some("lease-456".to_string()),
+            homeboy_version: "0.321.1".to_string(),
+            homeboy_build_identity: Some("homeboy 0.321.1+daemon".to_string()),
+            connected_at: "2026-07-29T00:00:00Z".to_string(),
+            worker_identity: None,
+            worker_pid: None,
+            last_seen_at: None,
+            leaseless_recovery_evidence: None,
+        }),
+        stale_daemon: Some(homeboy::runner::runners::RunnerStaleDaemonWarning::new(
+            "homeboy-lab",
+            "0.321.1".to_string(),
+            "0.321.1".to_string(),
+            Some("homeboy 0.321.1+daemon".to_string()),
+            Some("homeboy 0.321.1+configured".to_string()),
+        )),
+        daemon_freshness: Some(DaemonFreshnessReport {
+            fresh: true,
+            stale_reason_code: None,
+            restartable: true,
+            lease_id: Some("lease-456".to_string()),
+            pid: Some(456),
+            recovery_evidence: None,
+            ownership_evidence: None,
+            adoption_command: None,
+            binary_hash: None,
+            daemon_version: Some("0.321.1".to_string()),
+            daemon_build_identity: Some("homeboy 0.321.1+daemon".to_string()),
+            runtime_paths: None,
+            active_jobs: 0,
+            termination_evidence: None,
+            repair_plan: Vec::new(),
+        }),
+        active_jobs: Vec::new(),
+        active_runner_jobs: Vec::new(),
+        stale_runner_jobs: Vec::new(),
+        active_job_count: 0,
+        stale_runner_job_count: 0,
+        active_job_state: RunnerActiveJobState::Available,
+        active_job_source: Some(RunnerActiveJobSource::DirectDaemon),
+        active_job_error: None,
+        active_job_recovery_evidence: None,
+        session_path: "/tmp/session.json".to_string(),
+    };
+
+    let summary = operator_summary(&report);
+    let admission = report.admission_summary(0);
+
+    assert!(summary
+        .risk
+        .iter()
+        .any(|risk| risk.contains("compatibility_skew")));
+    assert!(summary
+        .risk
+        .iter()
+        .any(|risk| risk.contains(&controller.display)));
+    assert!(summary.next_action.contains("refresh-homeboy homeboy-lab"));
+    assert!(summary.next_action.contains("--ref"));
+    assert!(
+        report.connected,
+        "liveness remains independently observable"
+    );
+    assert!(report.daemon_freshness.expect("live daemon").fresh);
+    assert!(
+        !admission.daemon_fresh,
+        "compatibility skew blocks admission"
+    );
+    assert!(
+        !admission.accepting_jobs,
+        "a live daemon is not necessarily compatible"
+    );
 }
 
 fn selected_runtime_tool_declaration() -> AgentRuntimeToolDiagnosticDeclaration {

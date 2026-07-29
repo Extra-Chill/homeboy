@@ -2479,6 +2479,7 @@ fn stale_daemon_warning(
             build_identity: None,
         });
     let current_version = current_identity.version.clone();
+    let controller_identity = homeboy_product_identity::build_identity();
     let observed_session_version = session
         .local_url
         .as_deref()
@@ -2509,6 +2510,7 @@ fn stale_daemon_warning(
         &observed_session_version,
         &session.homeboy_version,
         &current_version,
+        &controller_identity.version,
         identity_comparison,
         &stale_runtime_paths,
         &changed_runtime_paths,
@@ -2602,12 +2604,14 @@ fn daemon_runtime_is_current(
     observed_daemon_version: &str,
     session_version: &str,
     command_version: &str,
+    controller_version: &str,
     identity_comparison: IdentityComparison,
     stale_runtime_paths: &[RunnerStaleRuntimePath],
     changed_runtime_paths: &[RunnerChangedRuntimePath],
 ) -> bool {
     versions_match(observed_daemon_version, command_version)
         && versions_match(session_version, command_version)
+        && versions_match(command_version, controller_version)
         && identity_comparison == IdentityComparison::Match
         && stale_runtime_paths.is_empty()
         && changed_runtime_paths.is_empty()
