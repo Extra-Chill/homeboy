@@ -202,6 +202,24 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
             &serde_json::to_value(&record).unwrap_or(Value::Null),
         )
     });
+    let cook_base = agent_task_service::load_recipe_for_attempt(&record.run_id)?
+        .map(|recipe| {
+            recipe
+                .finalization
+                .get("base")
+                .and_then(Value::as_str)
+                .filter(|base| !base.trim().is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    homeboy::core::Error::validation_invalid_argument(
+                        "cook_recipe.finalization.base",
+                        "durable Cook recipe is missing its declared promotion base",
+                        Some(recipe.cook_id),
+                        None,
+                    )
+                })
+        })
+        .transpose()?;
     let promotion_candidates = aggregate_review
         .as_ref()
         .map(|review| {
@@ -212,6 +230,7 @@ pub(crate) fn review(args: ReviewArgs) -> CmdResult<Value> {
                         Some(&record.run_id),
                         aggregate_source.as_ref().map(|(_, path)| path.as_str()),
                         args.to_worktree.as_deref(),
+                        cook_base.as_deref(),
                         args.provider_command.as_deref(),
                         &args.provider_argv,
                         record.metadata.get("latest_promotion"),
@@ -1179,6 +1198,7 @@ fn promotion_candidates(
     source_run_id: Option<&str>,
     aggregate_path: Option<&str>,
     to_worktree: Option<&str>,
+    cook_base: Option<&str>,
     provider_command: Option<&str>,
     provider_argv: &[String],
     latest_promotion: Option<&Value>,
@@ -1262,6 +1282,8 @@ fn promotion_candidates(
                     .and_then(|promotion| promotion.pointer("/provenance/resume_contract"))
                 {
                     append_resume_contract(&mut command, contract);
+                } else if let Some(base) = cook_base {
+                    command.extend(["--base".to_string(), base.to_string()]);
                 }
                 if let Some(provider_command) = provider_command {
                     command.push("--provider-command".to_string());
@@ -1634,6 +1656,7 @@ mod tests {
             None,
             Some("fixture@target"),
             None,
+            None,
             &[
                 "homeboy".to_string(),
                 "agent-task".to_string(),
@@ -1662,6 +1685,64 @@ mod tests {
                 "--provider-argv=agent-task",
                 "--provider-argv=promotion-provider",
                 "--provider-argv=--workspace=/tmp/target",
+            ])
+        );
+    }
+
+    #[test]
+    fn promotion_candidates_preserve_the_declared_cook_base() {
+        let review = AgentTaskAggregateReport {
+            schema: "homeboy/agent-task-aggregate-report/v1".to_string(),
+            summary: AgentTaskAggregateSummary::default(),
+            tasks: Vec::new(),
+            artifact_inventory: Vec::new(),
+            apply_candidates: vec![AgentTaskDecisionRef {
+                task_id: "task-1".to_string(),
+                decision: AgentTaskReconciliationDecision::ApplyCandidate,
+                reason: "patch available".to_string(),
+                artifact_ids: vec!["patch-1".to_string()],
+            }],
+            issue_report_candidates: Vec::new(),
+            retry_plan: Vec::new(),
+            review_candidates: Vec::new(),
+            matrix: Vec::new(),
+        };
+        let aggregate: AgentTaskAggregate = serde_json::from_value(serde_json::json!({
+            "schema": "homeboy/agent-task-aggregate/v1",
+            "plan_id": "test",
+            "status": "succeeded",
+            "totals": { "skipped": 0 },
+        }))
+        .expect("aggregate");
+
+        let candidates = promotion_candidates(
+            "cook-attempt-9400",
+            Some("cook-attempt-9400"),
+            None,
+            Some("fixture@target"),
+            Some("trunk"),
+            None,
+            &[],
+            None,
+            &aggregate,
+            &review,
+        );
+
+        assert_eq!(
+            candidates[0]["command"],
+            serde_json::json!([
+                "homeboy",
+                "agent-task",
+                "promote",
+                "cook-attempt-9400",
+                "--task-id",
+                "task-1",
+                "--artifact-id",
+                "patch-1",
+                "--to-worktree",
+                "fixture@target",
+                "--base",
+                "trunk",
             ])
         );
     }
@@ -1731,6 +1812,7 @@ mod tests {
             None,
             Some("fixture@target"),
             None,
+            None,
             &[],
             None,
             &equivalent_aggregate,
@@ -1748,6 +1830,7 @@ mod tests {
             None,
             None,
             Some("fixture@target"),
+            None,
             None,
             &[],
             None,

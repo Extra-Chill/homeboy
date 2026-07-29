@@ -1038,6 +1038,87 @@ fn resume_promoted_patch_rebuilds_green_proof_from_pending_post_apply_checkpoint
 }
 
 #[test]
+fn legacy_post_apply_checkpoint_recovers_only_with_corrected_non_main_base() {
+    // #9400 regression sequence: review selected a Cook artifact for a trunk
+    // repository, a legacy generated promote command defaulted to main after
+    // applying it, then the corrected review command resumes the exact target.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let remote = temp.path().join("origin.git");
+    let target = temp.path().join("target");
+    git(
+        temp.path(),
+        &[
+            "init",
+            "--bare",
+            "--initial-branch=trunk",
+            remote.to_str().unwrap(),
+        ],
+    );
+    std::fs::create_dir(&target).expect("target");
+    git(&target, &["init", "--initial-branch=trunk"]);
+    git(&target, &["config", "user.email", "test@example.com"]);
+    git(&target, &["config", "user.name", "Test"]);
+    std::fs::create_dir_all(target.join("src")).expect("src");
+    std::fs::write(target.join("src/lib.rs"), "old\n").expect("base");
+    git(&target, &["add", "."]);
+    git(&target, &["commit", "-m", "base"]);
+    git(
+        &target,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&target, &["push", "-u", "origin", "trunk"]);
+    std::fs::write(target.join("src/lib.rs"), "new\n").expect("legacy applied patch");
+    let candidate = crate::agent_task_promotion::candidate_fingerprint(target.to_str().unwrap())
+        .expect("legacy candidate");
+    let (source_path, source) = write_patch_source(&temp);
+    let options = AgentTaskPromotionOptions {
+        source,
+        source_run_id: Some("cook-9400-attempt-1".to_string()),
+        source_path: Some(source_path),
+        source_worktree_path: None,
+        base_ref: Some("trunk".to_string()),
+        task_base_sha: None,
+        candidate_ref: None,
+        to_worktree: "fixture@target".to_string(),
+        task_id: None,
+        artifact_id: None,
+        dry_run: false,
+        gates: VerifyGateOptions::default(),
+        provider_command: None,
+        provider_invocation: None,
+    };
+    let checkpoint = serde_json::json!({
+        "schema": "homeboy/agent-task-promotion-report/v1",
+        "status": "verification_pending",
+        "source_run_id": "cook-9400-attempt-1",
+        "source": { "task_id": "task-1" },
+        "to_worktree": "fixture@target",
+        "target": { "worktree": "fixture@target", "path": target },
+        "patch_artifact": { "id": "patch", "kind": "patch", "sha256": sha256_hex(VALID_PATCH) },
+        "provenance": {
+            "post_apply": true,
+            "candidate": candidate,
+            "resume_contract": {
+                "inputs": { "base_ref": "main", "task_base_sha": null, "candidate_ref": null },
+                "gates": serde_json::to_value(&options.gates).expect("gate contract"),
+            },
+        },
+    });
+
+    let resumed = resume_promoted_patch(options.clone(), &target, &checkpoint)
+        .expect("corrected trunk command resumes the legacy checkpoint");
+    assert_eq!(resumed.status, AgentTaskPromotionStatus::Applied);
+    assert_eq!(resumed.verified_base.expect("corrected base").base, "trunk");
+
+    std::fs::write(target.join("unrelated.rs"), "conflict\n").expect("conflicting edit");
+    let error = resume_promoted_patch(options, &target, &checkpoint)
+        .expect_err("conflicting target edits fail closed");
+    assert!(error
+        .message
+        .contains("differs from the exact checkpointed"));
+}
+
+#[test]
 fn resume_applied_promotion_reruns_gates_for_exact_dirty_candidate() {
     let temp = tempfile::tempdir().expect("tempdir");
     let target = temp.path().join("target");
