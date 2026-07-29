@@ -61,6 +61,11 @@ pub struct LintRunWorkflowResult {
     /// non-blocking warning rather than a hard failure.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub harness_error: bool,
+    /// True when the extension runner failed before yielding source findings.
+    /// This is an internal normalization signal used to render the existing
+    /// phase infrastructure status without adding a second public envelope.
+    #[serde(skip)]
+    pub infrastructure_failure: bool,
     pub autofix: Option<AppliedRefactor>,
     pub hints: Option<Vec<String>>,
     pub baseline_comparison: Option<lint_baseline::BaselineComparison>,

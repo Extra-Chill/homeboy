@@ -47,6 +47,7 @@ pub fn from_main_workflow_with_ci_context(
         &result.status,
         finding_count,
         &result.producer_summaries,
+        result.infrastructure_failure,
     );
     let failure = if exit_code == 0 {
         None
@@ -55,6 +56,7 @@ pub fn from_main_workflow_with_ci_context(
             exit_code,
             finding_count,
             result.formatting_findings.as_ref(),
+            result.infrastructure_failure,
         ))
     };
 
@@ -87,14 +89,19 @@ fn lint_phase_report(
     status: &str,
     finding_count: usize,
     producer_summaries: &[FindingProducerSummary],
+    infrastructure_failure: bool,
 ) -> PhaseReport {
     PhaseReport {
         phase: VerificationPhase::Lint,
-        status: phase_status_from_exit_code(exit_code),
+        status: if infrastructure_failure {
+            crate::PhaseStatus::Error
+        } else {
+            phase_status_from_exit_code(exit_code)
+        },
         exit_code: Some(exit_code),
         summary: if exit_code == 0 {
             "lint phase passed with no findings".to_string()
-        } else if exit_code >= 2 {
+        } else if infrastructure_failure || exit_code >= 2 {
             format!("lint phase infrastructure failure (exit {})", exit_code)
         } else if !producer_summaries.is_empty() {
             format!(
@@ -198,6 +205,7 @@ fn lint_phase_failure(
     exit_code: i32,
     finding_count: usize,
     formatting_findings: Option<&FormattingFindings>,
+    infrastructure_failure: bool,
 ) -> PhaseFailure {
     if let Some(formatting) = formatting_findings {
         let count = formatting.files.len();
@@ -219,7 +227,11 @@ fn lint_phase_failure(
             },
         };
     }
-    let category = phase_failure_category_from_exit_code(exit_code);
+    let category = if infrastructure_failure {
+        PhaseFailureCategory::Infrastructure
+    } else {
+        phase_failure_category_from_exit_code(exit_code)
+    };
     PhaseFailure {
         phase: VerificationPhase::Lint,
         summary: match category {
@@ -249,6 +261,7 @@ mod tests {
             component: "fixture".to_string(),
             exit_code: 1,
             harness_error: false,
+            infrastructure_failure: false,
             autofix: None,
             hints: None,
             baseline_comparison: None,
@@ -283,6 +296,7 @@ mod tests {
             component: "fixture".to_string(),
             exit_code: 1,
             harness_error: false,
+            infrastructure_failure: false,
             autofix: None,
             hints: None,
             baseline_comparison: None,
@@ -307,6 +321,46 @@ mod tests {
         assert_eq!(
             failure.summary,
             "format check found 2 unformatted file(s): src/lib.rs, src/main.rs; run `cargo fmt`"
+        );
+    }
+
+    #[test]
+    fn infrastructure_producer_overrides_exit_one_finding_classification() {
+        let result = LintRunWorkflowResult {
+            status: "error".to_string(),
+            component: "fixture".to_string(),
+            exit_code: 1,
+            harness_error: false,
+            infrastructure_failure: true,
+            autofix: None,
+            hints: None,
+            baseline_comparison: None,
+            formatting_findings: None,
+            findings: Some(Vec::new()),
+            producer_summaries: vec![FindingProducerSummary::new(
+                "homeboy-extension-runner",
+                "error",
+            )
+            .finding_count(0)],
+            summary: None,
+            self_check_capture: None,
+            extension_phase_timings: Vec::new(),
+        };
+
+        let (output, exit_code) = from_main_workflow(result);
+
+        assert_eq!(exit_code, 1);
+        assert_eq!(output.status, "error");
+        assert_eq!(output.phase.status, crate::PhaseStatus::Error);
+        assert_eq!(
+            output.phase.summary,
+            "lint phase infrastructure failure (exit 1)"
+        );
+        let failure = output.failure.expect("infrastructure failure");
+        assert_eq!(failure.category, PhaseFailureCategory::Infrastructure);
+        assert_eq!(
+            failure.summary,
+            "lint runner infrastructure failure (exit 1)"
         );
     }
 }

@@ -158,6 +158,46 @@ exit 1
 }
 
 #[test]
+fn runner_failure_without_findings_is_an_infrastructure_error_without_autofix() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let source = tempfile::tempdir().expect("source dir");
+        let component = routed_lint_component(
+            home.path(),
+            source.path(),
+            r#"#!/bin/sh
+printf '%s\n' 'toolchain unavailable' >&2
+exit 127
+"#,
+        );
+        let run_dir = RunDir::create().expect("run dir");
+
+        let workflow =
+            run_main_lint_workflow(&component, source.path(), routed_lint_args(), &run_dir)
+                .expect("runner failure should normalize into a result");
+
+        assert_eq!(workflow.status, "error");
+        assert_eq!(workflow.exit_code, 127);
+        assert!(workflow.infrastructure_failure);
+        assert!(workflow.findings.as_ref().is_some_and(Vec::is_empty));
+        assert_eq!(
+            workflow
+                .summary
+                .as_ref()
+                .map(|summary| summary.total_findings),
+            Some(0)
+        );
+        assert!(workflow
+            .producer_summaries
+            .iter()
+            .all(|summary| summary.finding_count == 0));
+        assert!(!workflow
+            .hints
+            .as_ref()
+            .is_some_and(|hints| hints.iter().any(|hint| hint.starts_with("Auto-fix:"))));
+    });
+}
+
+#[test]
 fn multi_route_failure_retains_later_success_evidence() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let source = tempfile::tempdir().expect("source dir");
