@@ -456,6 +456,87 @@ homeboy_write_test_results 2 2 0 0
 }
 
 #[test]
+fn nested_runner_artifact_handoff_supplies_declared_parser() {
+    with_isolated_home(|home| {
+        let dir = tempfile::tempdir().expect("temp dir");
+        fs::write(
+            dir.path().join("homeboy.json"),
+            r#"{
+  "id": "fixture",
+  "extensions": { "fixture-extension": {} }
+}"#,
+        )
+        .expect("homeboy.json should be written");
+
+        let extension_dir = home
+            .path()
+            .join(".config/homeboy/extensions/fixture-extension");
+        fs::create_dir_all(&extension_dir).expect("extension dir should be created");
+        fs::write(
+            extension_dir.join("fixture-extension.json"),
+            r#"{
+  "name": "Fixture extension",
+  "version": "1.0.0",
+  "test": {
+    "extension_script": "test.sh",
+    "result_parse": { "extension_script": "parse-results.sh", "adapters": ["provider-json"] }
+  }
+}"#,
+        )
+        .expect("extension manifest should be written");
+        let extension_script = extension_dir.join("test.sh");
+        fs::write(
+            &extension_script,
+            r#"#!/bin/sh
+set -eu
+root="$HOMEBOY_INVOCATION_ARTIFACT_DIR"
+mkdir -p "$root/nested/files" "$root/decoy/files"
+printf '{"schema":"provider/test-results/v1","summary":{"total":3,"passed":3,"failed":0,"skipped":0}}\n' > "$root/nested/files/test-results.json"
+printf '{"schema":"provider/test-results/v1","summary":{"total":1,"passed":0,"failed":1,"skipped":0}}\n' > "$root/decoy/files/test-results.json"
+printf 'passing provider output\n' > "$root/nested/files/phpunit-output.log"
+printf '{"schema":"homeboy/artifact-manifest/v1","artifacts":[{"id":"test-results.json","path":"nested/files/test-results.json","kind":"test-results","semantic_key":"test_results"},{"id":"decoy-results.json","path":"decoy/files/test-results.json","kind":"test-results"},{"id":"phpunit-output.log","path":"nested/files/phpunit-output.log","kind":"phpunit-output","semantic_key":"phpunit_output"}]}\n' > "$root/homeboy-artifact-manifest.json"
+printf 'artifact://files/test-results.json artifact://files/phpunit-output.log\n'
+"#,
+        )
+        .expect("extension script should be written");
+        let parser_script = extension_dir.join("parse-results.sh");
+        fs::write(
+            &parser_script,
+            r#"#!/bin/sh
+set -eu
+test "${2:-}" = provider-json
+grep -q 'provider/test-results/v1' "$1"
+source "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
+homeboy_write_test_results 3 3 0 0
+"#,
+        )
+        .expect("parser script should be written");
+        for script in [&extension_script, &parser_script] {
+            let mut perms = fs::metadata(script).expect("script metadata").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(script, perms).expect("script should be executable");
+        }
+
+        let (output, exit_code) =
+            run_test(test_command_args(dir.path())).expect("extension test should run");
+
+        assert_eq!(exit_code, 0);
+        assert!(output.passed);
+        assert_eq!(output.test_counts.expect("test counts").passed, 3);
+        let artifacts = output
+            .extension_phase_timings
+            .iter()
+            .flat_map(|timing| timing.artifacts.iter())
+            .collect::<Vec<_>>();
+        assert_eq!(artifacts.len(), 2);
+        assert!(artifacts.iter().all(|artifact| artifact
+            .get("available")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)));
+    });
+}
+
+#[test]
 fn changed_wordpress_php_smoke_test_executes_with_generic_result_adapter() {
     with_isolated_home(|home| {
         let dir = tempfile::tempdir().expect("temp dir");
