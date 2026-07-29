@@ -1,7 +1,13 @@
-use std::process::Command;
+use std::process::{Command, Output};
 
-fn homeboy() -> Command {
+fn homeboy(args: &[&str]) -> Output {
+    let home = tempfile::tempdir().expect("isolated home");
     Command::new(env!("CARGO_BIN_EXE_homeboy"))
+        .args(args)
+        .env("HOME", home.path())
+        .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+        .output()
+        .expect("run homeboy")
 }
 
 #[test]
@@ -10,23 +16,20 @@ fn cook_rejects_invalid_controller_transport_before_worktree_resolution() {
     // `--placement` is contradictory and rejected at argument parsing (see
     // `runner_and_placement_are_mutually_exclusive`). That rejection happens
     // before any worktree provider resolution.
-    let output = homeboy()
-        .args([
-            "--placement",
-            "local",
-            "--runner",
-            "homeboy-lab",
-            "agent-task",
-            "cook",
-            "--prompt",
-            "implement the fix",
-            "--to-worktree",
-            "missing@worktree",
-            "--verify",
-            "true",
-        ])
-        .output()
-        .expect("run homeboy");
+    let output = homeboy(&[
+        "--placement",
+        "local",
+        "--runner",
+        "homeboy-lab",
+        "agent-task",
+        "cook",
+        "--prompt",
+        "implement the fix",
+        "--to-worktree",
+        "missing@worktree",
+        "--verify",
+        "true",
+    ]);
 
     assert!(!output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -38,22 +41,19 @@ fn cook_rejects_invalid_controller_transport_before_worktree_resolution() {
 
 #[test]
 fn cook_rejects_local_detach_before_worktree_resolution() {
-    let output = homeboy()
-        .args([
-            "--placement",
-            "local",
-            "--detach-after-handoff",
-            "agent-task",
-            "cook",
-            "--prompt",
-            "implement the fix",
-            "--to-worktree",
-            "missing@worktree",
-            "--verify",
-            "true",
-        ])
-        .output()
-        .expect("run homeboy");
+    let output = homeboy(&[
+        "--placement",
+        "local",
+        "--detach-after-handoff",
+        "agent-task",
+        "cook",
+        "--prompt",
+        "implement the fix",
+        "--to-worktree",
+        "missing@worktree",
+        "--verify",
+        "true",
+    ]);
 
     assert!(!output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -66,21 +66,18 @@ fn non_tty_client_must_choose_one_lab_observation_mode() {
     // Command::output supplies pipes, matching an interruptible bridge client
     // rather than an interactive terminal. Reject ambiguity before any worktree
     // or provider work can begin.
-    let output = homeboy()
-        .args([
-            "--wait",
-            "--detach-after-handoff",
-            "agent-task",
-            "cook",
-            "--prompt",
-            "implement the fix",
-            "--to-worktree",
-            "missing@worktree",
-            "--verify",
-            "true",
-        ])
-        .output()
-        .expect("run homeboy");
+    let output = homeboy(&[
+        "--wait",
+        "--detach-after-handoff",
+        "agent-task",
+        "cook",
+        "--prompt",
+        "implement the fix",
+        "--to-worktree",
+        "missing@worktree",
+        "--verify",
+        "true",
+    ]);
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -90,20 +87,17 @@ fn non_tty_client_must_choose_one_lab_observation_mode() {
 
 #[test]
 fn cook_rejects_queue_only_before_worktree_resolution() {
-    let output = homeboy()
-        .args([
-            "agent-task",
-            "cook",
-            "--prompt",
-            "implement the fix",
-            "--to-worktree",
-            "missing@worktree",
-            "--verify",
-            "true",
-            "--queue-only",
-        ])
-        .output()
-        .expect("run homeboy");
+    let output = homeboy(&[
+        "agent-task",
+        "cook",
+        "--prompt",
+        "implement the fix",
+        "--to-worktree",
+        "missing@worktree",
+        "--verify",
+        "true",
+        "--queue-only",
+    ]);
 
     assert!(!output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -113,10 +107,7 @@ fn cook_rejects_queue_only_before_worktree_resolution() {
 
 #[test]
 fn cook_help_does_not_advertise_queue_only() {
-    let output = homeboy()
-        .args(["agent-task", "cook", "--help"])
-        .output()
-        .expect("run homeboy help");
+    let output = homeboy(&["agent-task", "cook", "--help"]);
 
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
