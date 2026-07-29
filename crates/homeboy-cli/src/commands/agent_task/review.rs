@@ -397,6 +397,9 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
     let run_id = args
         .run_id
         .expect("clap requires --run-id without --recover");
+    // Retained for the finalization handoff, which names the exact apply command
+    // after a validated preflight (#9867). `run_id` itself moves into the options.
+    let handoff_run_id = run_id.clone();
     let path = args.path.expect("clap requires --path without --recover");
     let title = args.title.expect("clap requires --title without --recover");
     let commit_message = args
@@ -516,7 +519,11 @@ pub(crate) fn finalize_pull_request(args: FinalizePrArgs) -> CmdResult<Value> {
     };
 
     let mut value = serde_json::to_value(&report).unwrap_or(Value::Null);
-    value["handoff"] = finalization_handoff(&report.status, report.pr_url.as_deref());
+    value["handoff"] = finalization_handoff(
+        &report.status,
+        report.pr_url.as_deref(),
+        Some(handoff_run_id.as_str()),
+    );
 
     Ok((value, exit_code))
 }
@@ -1467,22 +1474,61 @@ fn promotion_handoff(report: &AgentTaskPromotionReport, _to_worktree: &str) -> V
     })
 }
 
-fn finalization_handoff(status: &str, pr_url: Option<&str>) -> Value {
+/// Render the finalization boundary.
+///
+/// A successful `--preflight` deliberately suppresses publication, so it must
+/// not be described with the same "PR was not opened; inspect … errors" wording
+/// as a failed publication attempt. Reporting a validated safety check as an
+/// apparent failure sent an agent toward error inspection instead of the apply
+/// command it had just earned (#9867).
+fn finalization_handoff(status: &str, pr_url: Option<&str>, run_id: Option<&str>) -> Value {
     let pr_opened = status == "review_ready" && pr_url.is_some();
+    // `validated` is the terminal success status for a non-mutating preflight;
+    // `finalize_pr` never returns it.
+    let publication_validated = status == "validated";
+
+    let boundary = if pr_opened {
+        "pr_opened"
+    } else if publication_validated {
+        "publication_validated_not_executed"
+    } else {
+        "pr_not_opened"
+    };
+
+    let finalize_command =
+        run_id.map(|run_id| format!("homeboy agent-task finalize-pr --recover {run_id}"));
+
+    let next_actions = if pr_opened {
+        vec!["PR opened or updated; continue review in GitHub".to_string()]
+    } else if publication_validated {
+        let mut actions = vec![
+            "Publication validated; no commit, push, or PR mutation occurred by design."
+                .to_string(),
+        ];
+        match finalize_command.as_deref() {
+            Some(command) => actions.push(format!("Run `{command}` to execute the validated publication.")),
+            None => actions.push(
+                "Rerun the same finalize-pr invocation without --preflight to execute the validated publication."
+                    .to_string(),
+            ),
+        }
+        actions
+    } else {
+        vec!["PR was not opened; inspect finalization status and git/PR errors".to_string()]
+    };
+
     serde_json::json!({
         "schema": "homeboy/agent-task-finalization-handoff/v1",
         "states": {
             "patch_artifact_produced": true,
             "patch_promoted": true,
-            "pr_opened": pr_opened
+            "pr_opened": pr_opened,
+            "publication_mutated": !publication_validated && pr_opened
         },
-        "boundary": if pr_opened { "pr_opened" } else { "pr_not_opened" },
+        "boundary": boundary,
         "pr_url": pr_url,
-        "next_actions": if pr_opened {
-            vec!["PR opened or updated; continue review in GitHub".to_string()]
-        } else {
-            vec!["PR was not opened; inspect finalization status and git/PR errors".to_string()]
-        }
+        "finalize_command": if publication_validated { finalize_command.clone() } else { None },
+        "next_actions": next_actions
     })
 }
 
@@ -2061,6 +2107,7 @@ mod tests {
         let handoff = finalization_handoff(
             "review_ready",
             Some("https://github.com/Extra-Chill/homeboy/pull/9999"),
+            Some("agent-task-1234"),
         );
 
         assert_eq!(handoff["states"]["patch_artifact_produced"], true);
@@ -2070,6 +2117,58 @@ mod tests {
         assert_eq!(
             handoff["pr_url"],
             "https://github.com/Extra-Chill/homeboy/pull/9999"
+        );
+        assert!(
+            handoff["finalize_command"].is_null(),
+            "an executed publication has nothing left to apply"
+        );
+    }
+
+    /// A validated preflight suppressed publication on purpose, so it must not
+    /// be rendered with failed-publication wording (#9867).
+    #[test]
+    fn finalization_handoff_distinguishes_validated_preflight_from_failed_publication() {
+        let handoff = finalization_handoff("validated", None, Some("agent-task-9867"));
+
+        assert_eq!(handoff["boundary"], "publication_validated_not_executed");
+        assert_eq!(handoff["states"]["pr_opened"], false);
+        assert_eq!(handoff["states"]["publication_mutated"], false);
+        assert_eq!(
+            handoff["finalize_command"],
+            "homeboy agent-task finalize-pr --recover agent-task-9867"
+        );
+
+        let actions = handoff["next_actions"]
+            .as_array()
+            .expect("next actions")
+            .iter()
+            .filter_map(|action| action.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            actions.contains("no commit, push, or PR mutation occurred by design"),
+            "must state the suppression was intentional: {actions}"
+        );
+        assert!(
+            actions.contains("homeboy agent-task finalize-pr --recover agent-task-9867"),
+            "must name the exact apply command: {actions}"
+        );
+        assert!(
+            !actions.contains("inspect finalization status"),
+            "error-inspection guidance is reserved for real failures: {actions}"
+        );
+    }
+
+    /// A genuinely failed publication keeps the error-inspection guidance.
+    #[test]
+    fn finalization_handoff_keeps_error_guidance_for_failed_publication() {
+        let handoff = finalization_handoff("failed", None, Some("agent-task-9867"));
+
+        assert_eq!(handoff["boundary"], "pr_not_opened");
+        assert!(handoff["finalize_command"].is_null());
+        assert_eq!(
+            handoff["next_actions"][0],
+            "PR was not opened; inspect finalization status and git/PR errors"
         );
     }
 
