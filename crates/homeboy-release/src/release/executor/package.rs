@@ -9,7 +9,9 @@ use homeboy_core::error::{Error, Result};
 use homeboy_extension as extension;
 use homeboy_extension::ExtensionCapability;
 use homeboy_extension::{self, ExtensionManifest};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::super::types::{ReleaseArtifact, ReleaseState, ReleaseStepResult};
@@ -37,38 +39,39 @@ pub(crate) fn run_package(
     skip_build_validation: bool,
 ) -> Result<ReleaseStepResult> {
     let cleanup_before = package_cleanup_snapshot(component)?;
-    let package_extensions: Vec<&ExtensionManifest> = extensions
-        .iter()
-        .filter(|m| m.actions.iter().any(|a| a.id == "release.package"))
-        .collect();
+    let result = (|| {
+        let package_extensions: Vec<&ExtensionManifest> = extensions
+            .iter()
+            .filter(|m| m.actions.iter().any(|a| a.id == "release.package"))
+            .collect();
 
-    let declared_artifact_built =
-        build_declared_component_artifact(component, declared_build_artifact)?;
-    if declared_artifact_built {
-        collect_declared_build_artifact(
-            state,
-            declared_build_artifact,
-            component_id,
-            component_local_path,
-        )?;
-    }
-
-    if package_extensions.is_empty() {
+        let declared_artifact_built =
+            build_declared_component_artifact(component, declared_build_artifact)?;
         if declared_artifact_built {
-            record_package_owned_paths(state, component, &cleanup_before)?;
-            return Ok(step_success(
-                "package",
-                "package",
-                Some(serde_json::json!({
-                    "action": "scripts.build",
-                    "artifact": declared_build_artifact,
-                    "package_owned_paths": state.package_owned_paths,
-                })),
-                Vec::new(),
-            ));
+            collect_declared_build_artifact(
+                state,
+                declared_build_artifact,
+                component_id,
+                component_local_path,
+            )?;
         }
 
-        return Err(Error::validation_invalid_argument(
+        if package_extensions.is_empty() {
+            if declared_artifact_built {
+                record_package_owned_paths(state, component, &cleanup_before)?;
+                return Ok(step_success(
+                    "package",
+                    "package",
+                    Some(serde_json::json!({
+                        "action": "scripts.build",
+                        "artifact": declared_build_artifact,
+                        "package_owned_paths": state.package_owned_paths,
+                    })),
+                    Vec::new(),
+                ));
+            }
+
+            return Err(Error::validation_invalid_argument(
             "release.package",
             "No extension provides release.package action and the component has no scripts.build + build_artifact contract",
             None,
@@ -76,65 +79,256 @@ pub(crate) fn run_package(
                 "Add an extension with a release.package action or configure scripts.build and build_artifact on the component".to_string(),
             ]),
         ));
-    }
-
-    let extra_config = package_build_config(skip_build_validation);
-    let mut responses = Vec::new();
-    for extension in package_extensions {
-        let payload = build_release_payload(
-            state,
-            component_id,
-            component_local_path,
-            component_source_path,
-            extra_config.as_ref(),
-        );
-        let response = run_package_action_with_retry(&extension.id, &payload)
-            .map_err(|err| package_provider_error(&extension.id, err))?;
-
-        let artifact_start = state.artifacts.len();
-        store_artifacts_from_output(state, &response)
-            .map_err(|err| package_provider_error(&extension.id, err))?;
-        for artifact in &mut state.artifacts[artifact_start..] {
-            artifact.phase = "final".to_string();
-            artifact.producer = format!("extension:{}", extension.id);
         }
-        persist_package_artifacts(state, artifact_start, component_id, component_local_path)
-            .map_err(|err| package_provider_error(&extension.id, err))?;
-        responses.push(serde_json::json!({
-            "extension": extension.id,
-            "response": response,
-        }));
+
+        let extra_config = package_build_config(skip_build_validation);
+        let mut responses = Vec::new();
+        for extension in package_extensions {
+            let payload = build_release_payload(
+                state,
+                component_id,
+                component_local_path,
+                component_source_path,
+                extra_config.as_ref(),
+            );
+            let response = run_package_action_with_retry(&extension.id, &payload)
+                .map_err(|err| package_provider_error(&extension.id, err))?;
+
+            let artifact_start = state.artifacts.len();
+            store_artifacts_from_output(state, &response)
+                .map_err(|err| package_provider_error(&extension.id, err))?;
+            for artifact in &mut state.artifacts[artifact_start..] {
+                artifact.phase = "final".to_string();
+                artifact.producer = format!("extension:{}", extension.id);
+            }
+            persist_package_artifacts(state, artifact_start, component_id, component_local_path)
+                .map_err(|err| package_provider_error(&extension.id, err))?;
+            responses.push(serde_json::json!({
+                "extension": extension.id,
+                "response": response,
+            }));
+        }
+
+        if !declared_artifact_built {
+            collect_declared_build_artifact(
+                state,
+                declared_build_artifact,
+                component_id,
+                component_local_path,
+            )?;
+        }
+
+        record_package_owned_paths(state, component, &cleanup_before)?;
+
+        let data = if responses.len() == 1 {
+            let response = responses.pop().expect("single package response");
+            serde_json::json!({
+                "extension": response["extension"],
+                "action": "release.package",
+                "response": response["response"],
+                "package_owned_paths": state.package_owned_paths,
+            })
+        } else {
+            serde_json::json!({
+                "action": "release.package",
+                "extensions": responses.iter().map(|response| response["extension"].clone()).collect::<Vec<_>>(),
+                "responses": responses,
+                "package_owned_paths": state.package_owned_paths,
+            })
+        };
+
+        Ok(step_success("package", "package", Some(data), Vec::new()))
+    })();
+
+    if result.is_err() {
+        record_failed_package_owned_paths(component, &cleanup_before)?;
     }
 
-    if !declared_artifact_built {
-        collect_declared_build_artifact(
-            state,
-            declared_build_artifact,
-            component_id,
-            component_local_path,
-        )?;
+    result
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FailedPackageOwnership {
+    component_id: String,
+    component_path: String,
+    head_commit: Option<String>,
+    paths: Vec<OwnedPackagePath>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OwnedPackagePath {
+    path: String,
+    fingerprint: String,
+}
+
+/// Persist the exact outputs left by a failed package attempt outside the
+/// checkout. A later successful release can clean them only if the same
+/// component, checkout revision, and output bytes are still present.
+fn record_failed_package_owned_paths(
+    component: &Component,
+    before: &BTreeSet<String>,
+) -> Result<()> {
+    let after = package_cleanup_snapshot(component)?;
+    let paths = after
+        .difference(before)
+        .filter_map(|path| {
+            package_path_fingerprint(Path::new(&component.local_path).join(path))
+                .ok()
+                .map(|fingerprint| OwnedPackagePath {
+                    path: path.clone(),
+                    fingerprint,
+                })
+        })
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        return Ok(());
     }
 
-    record_package_owned_paths(state, component, &cleanup_before)?;
-
-    let data = if responses.len() == 1 {
-        let response = responses.pop().expect("single package response");
-        serde_json::json!({
-            "extension": response["extension"],
-            "action": "release.package",
-            "response": response["response"],
-            "package_owned_paths": state.package_owned_paths,
-        })
-    } else {
-        serde_json::json!({
-            "action": "release.package",
-            "extensions": responses.iter().map(|response| response["extension"].clone()).collect::<Vec<_>>(),
-            "responses": responses,
-            "package_owned_paths": state.package_owned_paths,
-        })
+    let record = FailedPackageOwnership {
+        component_id: component.id.clone(),
+        component_path: canonical_component_path(&component.local_path),
+        head_commit: homeboy_core::git::get_head_commit(&component.local_path).ok(),
+        paths,
     };
+    write_failed_package_ownership(&record)
+}
 
-    Ok(step_success("package", "package", Some(data), Vec::new()))
+pub(crate) fn failed_package_owned_paths(component: &Component) -> Result<Vec<String>> {
+    let Some(record) = read_failed_package_ownership(&component.id)? else {
+        return Ok(Vec::new());
+    };
+    if record.component_path != canonical_component_path(&component.local_path)
+        || record.head_commit != homeboy_core::git::get_head_commit(&component.local_path).ok()
+    {
+        return Ok(Vec::new());
+    }
+
+    Ok(record
+        .paths
+        .into_iter()
+        .filter(|owned| {
+            package_path_fingerprint(Path::new(&component.local_path).join(&owned.path)).ok()
+                == Some(owned.fingerprint.clone())
+        })
+        .map(|owned| owned.path)
+        .collect())
+}
+
+pub(crate) fn acknowledge_failed_package_owned_paths(
+    component: &Component,
+    removed_paths: &[String],
+) -> Result<()> {
+    if removed_paths.is_empty() {
+        return Ok(());
+    }
+    let Some(mut record) = read_failed_package_ownership(&component.id)? else {
+        return Ok(());
+    };
+    if record.component_path != canonical_component_path(&component.local_path) {
+        return Ok(());
+    }
+    record
+        .paths
+        .retain(|owned| !removed_paths.contains(&owned.path));
+    if record.paths.is_empty() {
+        let path = failed_package_ownership_path(&component.id)?;
+        if path.exists() {
+            fs::remove_file(path).map_err(|error| Error::internal_io(error.to_string(), None))?;
+        }
+    } else {
+        write_failed_package_ownership(&record)?;
+    }
+    Ok(())
+}
+
+fn failed_package_ownership_path(component_id: &str) -> Result<PathBuf> {
+    Ok(homeboy_core::paths::homeboy_data()?
+        .join("release-package-ownership")
+        .join(format!(
+            "{}.json",
+            homeboy_core::paths::sanitize_path_segment(component_id)
+        )))
+}
+
+fn read_failed_package_ownership(component_id: &str) -> Result<Option<FailedPackageOwnership>> {
+    let path = failed_package_ownership_path(component_id)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    serde_json::from_slice(
+        &fs::read(&path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        })?,
+    )
+    .map(Some)
+    .map_err(|error| Error::internal_json(error.to_string(), Some(path.display().to_string())))
+}
+
+fn write_failed_package_ownership(record: &FailedPackageOwnership) -> Result<()> {
+    let path = failed_package_ownership_path(&record.component_id)?;
+    fs::create_dir_all(path.parent().expect("ownership parent"))
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    let temporary = path.with_extension("json.tmp");
+    fs::write(
+        &temporary,
+        serde_json::to_vec(record)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+    )
+    .map_err(|error| {
+        Error::internal_io(error.to_string(), Some(temporary.display().to_string()))
+    })?;
+    fs::rename(&temporary, &path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))
+}
+
+fn canonical_component_path(path: &str) -> String {
+    fs::canonicalize(path)
+        .unwrap_or_else(|_| PathBuf::from(path))
+        .display()
+        .to_string()
+}
+
+fn package_path_fingerprint(path: PathBuf) -> Result<String> {
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    if metadata.file_type().is_symlink() {
+        return fs::read_link(&path)
+            .map(|target| {
+                homeboy_engine_primitives::content_hash::sha256_hex(
+                    target.as_os_str().as_encoded_bytes(),
+                )
+            })
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(path.display().to_string()))
+            });
+    }
+    if metadata.is_file() {
+        return homeboy_engine_primitives::content_hash::sha256_file(&path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        });
+    }
+    if !metadata.is_dir() {
+        return Err(Error::validation_invalid_argument(
+            "package output",
+            "Package output is not a regular file, directory, or symlink",
+            Some(path.display().to_string()),
+            None,
+        ));
+    }
+
+    let mut entries = fs::read_dir(&path)
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| Error::internal_io(error.to_string(), Some(path.display().to_string())))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    let mut bytes = Vec::new();
+    for entry in entries {
+        bytes.extend_from_slice(entry.file_name().as_encoded_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(package_path_fingerprint(entry.path())?.as_bytes());
+        bytes.push(0);
+    }
+    Ok(homeboy_engine_primitives::content_hash::sha256_hex(&bytes))
 }
 
 fn record_package_owned_paths(

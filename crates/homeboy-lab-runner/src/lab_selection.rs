@@ -8,6 +8,7 @@ use crate::resolve_lab_runner_hint;
 use homeboy_core::daemon::DaemonRepairStep;
 use homeboy_core::error::{ActionSafety, ExecutableAction};
 use homeboy_core::lab_contract::LabCommandPortability;
+use homeboy_core::runtime_promotion::RuntimePromotionWaitEvent;
 use homeboy_core::{Error, ErrorCode, Result};
 
 use super::{
@@ -262,12 +263,7 @@ fn connect_runner_for_offload(
         "Lab runner handoff",
         runner_id.to_string(),
         HANDOFF_ADMISSION_TIMEOUT,
-        |owner| {
-            eprintln!(
-                "Lab runner handoff: queued behind runtime promotion owner pid {} operation `{}` target `{}`; waiting for a compatible ready generation.",
-                owner.pid, owner.operation, owner.target
-            );
-        },
+        emit_runtime_promotion_wait,
     )?;
     if let Ok(report) = status(runner_id) {
         if report.connected {
@@ -340,6 +336,17 @@ fn connect_runner_for_offload(
         },
         exit_code,
     ))
+}
+
+/// Emit queue admission separately from the terminal command envelope so a
+/// human and a streaming caller see progress before the bounded wait ends.
+pub(super) fn emit_runtime_promotion_wait(event: RuntimePromotionWaitEvent) {
+    eprintln!(
+        "{}",
+        serde_json::to_string(&event).unwrap_or_else(|_| {
+            "{\"schema\":\"homeboy/runtime-promotion-admission/v1\",\"state\":\"queued\",\"resource_class\":\"runtime_promotion\"}".to_string()
+        })
+    );
 }
 
 pub(super) fn wait_for_live_session<Session>(

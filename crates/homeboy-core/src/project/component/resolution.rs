@@ -18,11 +18,15 @@ pub fn resolve_project_component_with_standalone_snapshot(
     component_id: &str,
     standalone_snapshot: Option<&StandaloneComponentConfigSnapshot>,
 ) -> Result<crate::component::Component> {
-    let (mut component, attachment_local_path, attachment_remote_path) = if let Some(attachment) =
-        project
-            .components
-            .iter()
-            .find(|component| component.id == component_id)
+    let (
+        mut component,
+        attachment_local_path,
+        attachment_remote_path,
+        attachment_deployment_provider,
+    ) = if let Some(attachment) = project
+        .components
+        .iter()
+        .find(|component| component.id == component_id)
     {
         super::super::validate_component_local_path(project, component_id)?;
         crate::component::resolution::validate_duplicate_portable_component_ids(
@@ -44,6 +48,7 @@ pub fn resolve_project_component_with_standalone_snapshot(
             })?,
             attachment.local_path.clone(),
             attachment.remote_path.clone(),
+            attachment.deployment_provider.clone(),
         )
     } else {
         return Err(Error::validation_invalid_argument(
@@ -61,6 +66,9 @@ pub fn resolve_project_component_with_standalone_snapshot(
         if !remote_path.trim().is_empty() {
             component.remote_path = remote_path;
         }
+    }
+    if attachment_deployment_provider.is_some() {
+        component.deployment_provider = attachment_deployment_provider;
     }
 
     apply_standalone_component_fallbacks(&mut component, standalone_snapshot);

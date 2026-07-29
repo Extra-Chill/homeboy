@@ -70,8 +70,9 @@ pub(crate) use execution::build_settings_json_from_manifest;
 pub use execution::execute_action;
 pub use execution::{
     extension_ready_status, extension_ready_status_with, is_extension_compatible, run_action,
-    run_extension, run_setup, ExtensionExecutionMode, ExtensionReadinessMode, ExtensionReadyStatus,
-    ExtensionRunResult, ExtensionSetupResult, ExtensionStepFilter,
+    run_deployment_provider, run_extension, run_setup, ExtensionExecutionMode,
+    ExtensionReadinessMode, ExtensionReadyStatus, ExtensionRunResult, ExtensionSetupResult,
+    ExtensionStepFilter,
 };
 pub use fingerprint::{
     run_fingerprint_script, AggregateConstructionSeam, AggregateDefinitionFact, AggregateFieldFact,
@@ -104,13 +105,14 @@ pub use lifecycle::{
 };
 pub use maintenance::{exec_tool, update_all};
 pub use manifest::{
-    structured_sidecar_schema_version, structured_sidecars, ActionConfig, ActionType,
-    AgentRuntimeManifestConfig, AuditCapability, AutofixVerifyConfig, BehaviorScenarioNames,
-    BenchConfig, BuildConfig, CiCapability, CiJobFidelity, CiJobMapping, CiJobSpec, CiLocalContext,
-    CiProfileSpec, CliAutoFlag, CliAutoFlagCondition, CliConfig, CliHelpConfig, ComponentEnvConfig,
-    DatabaseCliConfig, DatabaseConfig, DeployCapability, DeployOverride, DeployOwnerHint,
-    DeployVerification, DepsConfig, DiscoveryConfig, DiscoveryMarkerConfig, DocTarget,
-    ExecutableCapability, ExtensionContractProducer, ExtensionContractProducerInvocation,
+    deployment_providers, structured_sidecar_schema_version, structured_sidecars, ActionConfig,
+    ActionType, AgentRuntimeManifestConfig, AuditCapability, AutofixVerifyConfig,
+    BehaviorScenarioNames, BenchConfig, BuildConfig, CiCapability, CiJobFidelity, CiJobMapping,
+    CiJobSpec, CiLocalContext, CiProfileSpec, CliAutoFlag, CliAutoFlagCondition, CliConfig,
+    CliHelpConfig, ComponentEnvConfig, DatabaseCliConfig, DatabaseConfig, DeployCapability,
+    DeployOverride, DeployOwnerHint, DeployVerification, DeploymentProviderManifest, DepsConfig,
+    DiscoveryConfig, DiscoveryMarkerConfig, DocTarget, ExecutableCapability,
+    ExtensionContractProducer, ExtensionContractProducerInvocation,
     ExtensionContractProducerOutput, ExtensionContractProducerOutputKind,
     ExtensionContractProducerPhase, ExtensionDiagnosticsConfig, ExtensionManifest,
     ExtensionMaterializationHelperManifestRef, ExtensionMaterializationSourceContract,

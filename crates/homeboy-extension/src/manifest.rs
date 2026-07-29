@@ -71,6 +71,46 @@ pub use homeboy_extension_contract::notification_transport_config::{
 
 pub use homeboy_extension_contract::ExtensionManifest;
 
+/// Generic provider metadata owned by an extension manifest.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DeploymentProviderManifest {
+    pub id: String,
+    pub command: String,
+}
+
+/// Extension manifests retain provider descriptors as extension-owned data until
+/// the shared manifest contract publishes this capability.
+pub fn deployment_providers(manifest: &ExtensionManifest) -> Vec<DeploymentProviderManifest> {
+    manifest
+        .extra
+        .get("deployment_providers")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod deployment_provider_tests {
+    use super::*;
+
+    #[test]
+    fn reads_multiple_generic_provider_descriptors() {
+        let manifest: ExtensionManifest = serde_json::from_value(serde_json::json!({
+            "name": "fixture", "version": "1.0.0",
+            "deployment_providers": [
+                { "id": "fixture.alpha", "command": "fixture-alpha --contract {{payload.contract}}" },
+                { "id": "fixture.beta", "command": "fixture-beta --contract {{payload.contract}}" }
+            ]
+        }))
+        .expect("fixture manifest");
+
+        let providers = deployment_providers(&manifest);
+        assert_eq!(providers.len(), 2);
+        assert_eq!(providers[0].id, "fixture.alpha");
+        assert_eq!(providers[1].id, "fixture.beta");
+    }
+}
+
 // Sidecar-declaration helpers depend on core run-dir constants, so they stay
 // in core as free functions rather than moving with the manifest data model.
 /// Structured sidecars this extension explicitly declares.

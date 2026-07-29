@@ -12,6 +12,8 @@ pub struct ProjectComponentAttachment {
     /// rewriting the repo-tracked `remote_path` for each environment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment_provider: Option<crate::component::DeploymentProviderAttachment>,
 }
 
 pub type ProjectComponentOverrides = crate::component::ComponentOverrideConfig;

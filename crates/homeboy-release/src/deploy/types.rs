@@ -503,6 +503,10 @@ pub struct ComponentDeployResult {
     /// Project policy proof that authorized this component's source.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment_provenance: Option<DeploymentProvenanceEvidence>,
+    /// Extension-owned structured provider result (version, gates, rollback,
+    /// and remediation evidence). Core preserves it without interpreting it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment_provider: Option<serde_json::Value>,
 }
 
 impl ComponentDeployResult {
@@ -539,6 +543,7 @@ impl ComponentDeployResult {
             build_provenance: None,
             prepared_artifact: None,
             deployment_provenance: None,
+            deployment_provider: None,
         }
     }
 

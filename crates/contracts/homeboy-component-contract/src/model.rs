@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::config::{
     is_default_github_config, ArtifactInput, CleanupArtifactDeclaration, ComponentDeployConfig,
-    ComponentReleaseConfig, ComponentScriptsConfig, DependencyStackEdge, GitDeployConfig,
-    GithubConfig, ScopeConfig, ScopedExtensionConfig, VersionTarget,
+    ComponentReleaseConfig, ComponentScriptsConfig, DependencyStackEdge,
+    DeploymentProviderAttachment, GitDeployConfig, GithubConfig, ScopeConfig,
+    ScopedExtensionConfig, VersionTarget,
 };
 use homeboy_audit_contract::AuditConfig;
 use homeboy_engine_primitives::canonical_json::canonical_json;
@@ -102,6 +103,8 @@ pub struct Component {
     pub remote_owner: Option<String>,
     pub deploy_strategy: Option<String>,
     pub git_deploy: Option<GitDeployConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_provider: Option<DeploymentProviderAttachment>,
     /// Git remote URL for the component's source repository (e.g., GitHub URL).
     /// Used by deploy to download release artifacts or initialize server-side git repos.
     pub remote_url: Option<String>,
@@ -221,6 +224,8 @@ struct RawComponent {
     deploy_strategy: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     git_deploy: Option<GitDeployConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    deployment_provider: Option<DeploymentProviderAttachment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     remote_url: Option<String>,
     #[serde(default, skip_serializing_if = "is_default_github_config")]
@@ -288,6 +293,7 @@ impl From<RawComponent> for Component {
             remote_owner: raw.remote_owner,
             deploy_strategy: raw.deploy_strategy,
             git_deploy: raw.git_deploy,
+            deployment_provider: raw.deployment_provider,
             remote_url: raw.remote_url,
             github: raw.github,
             release: raw.release,
@@ -336,6 +342,7 @@ impl From<Component> for RawComponent {
             remote_owner: c.remote_owner,
             deploy_strategy: c.deploy_strategy,
             git_deploy: c.git_deploy,
+            deployment_provider: c.deployment_provider,
             remote_url: c.remote_url,
             github: c.github,
             release: c.release,
@@ -415,6 +422,7 @@ impl Component {
             remote_owner: None,
             deploy_strategy: None,
             git_deploy: None,
+            deployment_provider: None,
             remote_url: None,
             github: GithubConfig::default(),
             release: ComponentReleaseConfig::default(),

@@ -91,6 +91,43 @@ pub fn get_head_commit(path: &str) -> Result<String> {
     crate::engine::command::run_in(path, "git", &["rev-parse", "HEAD"], "get HEAD commit")
 }
 
+/// Return local tag names whose peeled object is `commit`.
+///
+/// Resolving HEAD before querying tags keeps this identity check independent of
+/// whether the checkout presents that commit through a branch or detached HEAD.
+pub fn tags_pointing_at_commit(path: &str, commit: &str) -> Result<Vec<String>> {
+    let output = execute_git_for_release(
+        path,
+        &[
+            "for-each-ref",
+            "--points-at",
+            commit,
+            "--format=%(refname:strip=2)",
+            "refs/tags",
+        ],
+    )
+    .map_err(|error| {
+        Error::internal_io(
+            format!("Failed to inspect tags at commit {commit}: {error}"),
+            Some(format!("git for-each-ref --points-at {commit} refs/tags")),
+        )
+    })?;
+
+    if !output.status.success() {
+        return Err(Error::git_command_failed(format!(
+            "git for-each-ref --points-at {commit} refs/tags failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
 /// Get the commit SHA the `origin` remote currently has for a branch, without
 /// fetching. Returns `Ok(None)` when the branch does not exist on the remote.
 ///

@@ -483,7 +483,85 @@ fn inventory_directory_files(
             publication_authority: false,
         });
     }
+    collapse_ordinal_durable_duplicates(&mut artifacts)?;
     Ok(artifacts)
+}
+
+/// Package persistence stores numbered durable copies. A recovery directory can
+/// also retain their canonical publication names; keep that authoritative name
+/// only after proving both paths contain the same bytes.
+fn collapse_ordinal_durable_duplicates(artifacts: &mut Vec<ReleaseArtifact>) -> Result<()> {
+    let canonical_by_name = artifacts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, artifact)| {
+            std::path::Path::new(&artifact.path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| (name.to_string(), index))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut discard = vec![false; artifacts.len()];
+
+    for (index, artifact) in artifacts.iter().enumerate() {
+        let Some(name) = std::path::Path::new(&artifact.path)
+            .file_name()
+            .and_then(|name| name.to_str())
+        else {
+            continue;
+        };
+        let Some(canonical_name) = ordinal_durable_suffix(name) else {
+            continue;
+        };
+        let Some(&canonical_index) = canonical_by_name.get(canonical_name) else {
+            continue;
+        };
+        let canonical = &artifacts[canonical_index];
+        let ordinal_path = artifact.durable_path.as_deref().unwrap_or(&artifact.path);
+        let canonical_path = canonical.durable_path.as_deref().unwrap_or(&canonical.path);
+        let ordinal_size = std::fs::metadata(ordinal_path)
+            .map_err(|error| {
+                Error::internal_io(
+                    format!("Failed to read recovered release asset '{ordinal_path}': {error}"),
+                    Some(ordinal_path.to_string()),
+                )
+            })?
+            .len();
+        let canonical_size = std::fs::metadata(canonical_path)
+            .map_err(|error| {
+                Error::internal_io(
+                    format!("Failed to read recovered release asset '{canonical_path}': {error}"),
+                    Some(canonical_path.to_string()),
+                )
+            })?
+            .len();
+        if ordinal_size != canonical_size
+            || sha256_file(ordinal_path)? != sha256_file(canonical_path)?
+        {
+            return Err(Error::validation_invalid_argument(
+                "release assets",
+                format!(
+                    "numbered durable release asset '{name}' conflicts with canonical asset '{canonical_name}'"
+                ),
+                None,
+                None,
+            ));
+        }
+        discard[index] = true;
+    }
+    let mut index = 0;
+    artifacts.retain(|_| {
+        let keep = !discard[index];
+        index += 1;
+        keep
+    });
+    Ok(())
+}
+
+fn ordinal_durable_suffix(name: &str) -> Option<&str> {
+    let (ordinal, suffix) = name.split_once('-')?;
+    (!ordinal.is_empty() && ordinal.bytes().all(|byte| byte.is_ascii_digit()) && !suffix.is_empty())
+        .then_some(suffix)
 }
 
 fn inventory_package_recovery_manifest(
@@ -755,6 +833,56 @@ mod tests {
         )
         .expect_err("incomplete recovery inventory must fail closed");
         assert!(error.message.contains("Recovered release asset"));
+    }
+
+    #[test]
+    fn recovery_inventory_adopts_identical_canonical_assets_over_ordinal_durable_copies() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let canonical = temp.path().join("plugin.zip");
+        let ordinal = temp.path().join("01-plugin.zip");
+        std::fs::write(&canonical, b"plugin bytes").expect("canonical artifact");
+        std::fs::write(&ordinal, b"plugin bytes").expect("ordinal artifact");
+
+        let mut state = ReleaseState::default();
+        run_artifact_inventory(
+            &mut state,
+            &temp.path().to_string_lossy(),
+            &recovery_context(),
+        )
+        .expect("recovery inventory");
+        establish_publication_authority(&mut state).expect("publication authority");
+        let publications = github_release_publications(&state).expect("canonical publication");
+
+        assert_eq!(state.artifacts.len(), 1);
+        assert_eq!(publications.len(), 1);
+        assert_eq!(publications[0].target_name, "plugin.zip");
+        assert_eq!(
+            publications[0].source_path,
+            std::fs::canonicalize(canonical)
+                .expect("canonical artifact path")
+                .display()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn recovery_inventory_rejects_ordinal_copy_with_mismatched_canonical_bytes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("plugin.zip"), b"canonical bytes")
+            .expect("canonical artifact");
+        std::fs::write(temp.path().join("01-plugin.zip"), b"ordinal---bytes")
+            .expect("ordinal artifact");
+
+        let error = run_artifact_inventory(
+            &mut ReleaseState::default(),
+            &temp.path().to_string_lossy(),
+            &recovery_context(),
+        )
+        .expect_err("mismatched durable copies must fail closed");
+
+        assert!(error
+            .message
+            .contains("conflicts with canonical asset 'plugin.zip'"));
     }
 
     #[test]
