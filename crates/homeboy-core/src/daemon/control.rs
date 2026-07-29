@@ -1759,12 +1759,49 @@ fn start_or_return_live_unlocked_with_startup_token(
 ) -> Result<DaemonStartResult> {
     let _repaired_legacy_lease = repair_legacy_lease_for_start()?;
     reattach_exact_live_owner()?;
+    refuse_unleased_process_conflict()?;
     start_or_return_live_with_operations(
         read_status,
         try_acquire_daemon_owner_lock,
         || stop_unlocked().map(|_| ()),
         || spawn_and_wait_for_lease(addr, startup_token),
     )
+}
+
+/// A missing lease cannot authorize replacement when another foreground daemon
+/// may still own this store. Starting a child in this state only delays the
+/// diagnosis until that child fails to acquire `owner.lock`; return the typed
+/// evidence immediately and never signal a process we cannot prove we own.
+fn refuse_unleased_process_conflict() -> Result<()> {
+    let state_path = crate::paths::daemon_state_file()?;
+    if state_path.exists() {
+        return Ok(());
+    }
+    let candidates = daemon_process_candidates(&crate::paths::daemon_jobs_file()?)?
+        .into_iter()
+        .filter(|candidate| {
+            matches!(
+                candidate.ownership,
+                DaemonProcessOwnership::Owning | DaemonProcessOwnership::Ambiguous
+            )
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Ok(());
+    }
+
+    let mut error = Error::internal_unexpected(
+        "daemon lease is missing while foreground daemon candidates remain live; refusing replacement without an authoritative lease",
+    );
+    error.details = serde_json::json!({
+        "classification": "daemon_unleased_process_conflict",
+        "state_path": state_path,
+        "candidates": candidates,
+        "safe_next_action": "Run `homeboy daemon status` and reconcile only a daemon whose PID, binary identity, durable-store path, and startup token are all attributable to this state directory.",
+    });
+    Err(error.with_hint(
+        "No process was terminated. Preserve active jobs and inspect the reported candidates before an explicit lease-bound stop or recovery.".to_string(),
+    ))
 }
 
 /// Restore the lease only for one process whose executable and explicit HOME
