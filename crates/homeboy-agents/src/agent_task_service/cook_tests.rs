@@ -5720,20 +5720,44 @@ fn record_tracked_promotion_continuation(
         .unwrap();
     let mut checkpoint = serde_json::to_value(promotion(&options.initial_run_id)).unwrap();
     checkpoint["status"] = serde_json::json!("verification_pending");
+    let patch = Command::new("git")
+        .args(["diff", "--binary", "--full-index"])
+        .current_dir(target)
+        .output()
+        .expect("capture promoted patch");
+    assert!(patch.status.success());
+    let patch = String::from_utf8(patch.stdout).expect("patch is UTF-8");
+    let patch_path = target
+        .parent()
+        .expect("candidate parent")
+        .join("candidate.patch");
+    std::fs::write(&patch_path, &patch).expect("persist patch artifact");
+    let candidate =
+        crate::agent_task_promotion::candidate_fingerprint(target.to_str().expect("target path"))
+            .expect("candidate fingerprint");
+    let crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { fingerprint } = &candidate
+    else {
+        panic!("fixture target is a Git worktree");
+    };
     checkpoint["to_worktree"] = serde_json::json!(options.to_worktree);
     checkpoint["target"] = serde_json::json!({
         "worktree": options.to_worktree,
         "path": target,
         "branch": "cook-candidate"
     });
+    checkpoint["patch_artifact"] = serde_json::json!({
+        "id": "patch",
+        "kind": "patch",
+        "path": patch_path,
+        "sha256": format!("{:x}", sha2::Sha256::digest(patch.as_bytes())),
+    });
+    checkpoint["changed_files"] = serde_json::json!(fingerprint.changed_files);
     checkpoint["provenance"] = serde_json::json!({
         "post_apply": true,
-        "candidate": crate::agent_task_promotion::candidate_fingerprint(
-            target.to_str().expect("target path")
-        ).unwrap(),
+        "candidate": candidate,
         "gate_feedback_baseline": {
             "schema": "homeboy/agent-task-gate-feedback-baseline/v1",
-            "current_diff": "fixture"
+            "current_diff": patch
         }
     });
     agent_task_lifecycle::record_promotion(&options.initial_run_id, checkpoint).unwrap();
@@ -5795,32 +5819,90 @@ fn cook_continuation_authenticates_only_its_exact_tracked_promotion_candidate() 
             .success());
         std::fs::write(target.join("tracked.txt"), "promoted\n").unwrap();
 
-        let options = tracked_promotion_continuation_options(
+        let mut options = tracked_promotion_continuation_options(
             "cook-tracked-promotion",
             "run-tracked-promotion",
             &target,
         );
+        options.to_worktree = "fixture@cook-candidate".to_string();
         record_tracked_promotion_continuation(&options, &target);
+
+        let provider = temp.path().join("provider");
+        std::fs::write(
+            &provider,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+                serde_json::json!({ "worktrees": [{
+                    "handle": options.to_worktree,
+                    "path": target,
+                    "branch": "cook-candidate",
+                    "safety": { "dirty": true, "unpushed": false, "primary": false },
+                }] })
+            ),
+        )
+        .expect("write provider");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&provider).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&provider, permissions).unwrap();
+        }
+        let mut config = homeboy_core::defaults::HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            homeboy_core::defaults::WorktreeProviderConfig {
+                enabled: true,
+                kind: homeboy_core::defaults::WorktreeProviderKind::Command,
+                apply_enabled: true,
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                commands: homeboy_core::defaults::WorktreeProviderCommands {
+                    resolve: Some(vec![provider.display().to_string()]),
+                    ..Default::default()
+                },
+                list_result_mapping: Some(
+                    homeboy_core::defaults::WorktreeProviderListResultMapping {
+                        items: "$.worktrees".to_string(),
+                        handle: "$.handle".to_string(),
+                        path: "$.path".to_string(),
+                        branch: "$.branch".to_string(),
+                        dirty: "$.safety.dirty".to_string(),
+                        unpushed: "$.safety.unpushed".to_string(),
+                        primary: "$.safety.primary".to_string(),
+                    },
+                ),
+            },
+        );
+        homeboy_core::defaults::save_config(&config).expect("save provider config");
+        crate::agent_task_candidate_baseline::register();
 
         let continuation = tracked_promotion_continuation(&options)
             .unwrap()
             .expect("tracked promotion continuation");
         assert_eq!(continuation.baseline["patch_artifact"]["id"], "patch");
 
-        validate_cook_workspace(&options).expect("exact tracked promotion resumes");
+        validate_cook_workspace(&options)
+            .expect("exact dirty promoted provider destination resumes");
 
         std::fs::write(target.join("extra.txt"), "unattributed\n").unwrap();
         let error = validate_cook_workspace(&options).expect_err("extra drift is rejected");
-        assert!(error.message.contains("exact tracked post-apply candidate"));
+        assert!(error
+            .message
+            .contains("promoted candidate baseline could not be verified"));
         std::fs::remove_file(target.join("extra.txt")).unwrap();
 
         std::fs::write(target.join("tracked.txt"), "changed\n").unwrap();
         let error = validate_cook_workspace(&options).expect_err("changed drift is rejected");
-        assert!(error.message.contains("exact tracked post-apply candidate"));
+        assert!(error
+            .message
+            .contains("promoted candidate baseline could not be verified"));
 
         std::fs::write(target.join("tracked.txt"), "base\n").unwrap();
         let error = validate_cook_workspace(&options).expect_err("missing candidate is rejected");
-        assert!(error.message.contains("exact tracked post-apply candidate"));
+        assert!(error
+            .message
+            .contains("promoted candidate baseline could not be verified"));
     });
 }
 

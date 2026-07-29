@@ -3010,6 +3010,15 @@ fn tracked_promotion_continuation(
                 Some("serialize persisted promotion artifact baseline".to_string()),
             )
         })?;
+    // Provider preflight runs before this function can authenticate the resolved
+    // target below. Carry the complete immutable continuation claim through its
+    // baseline verifier so a dirty destination is never admitted provisionally.
+    baseline["tracked_promotion"] = serde_json::json!({
+        "target_path": path,
+        "branch": branch,
+        "candidate": candidate,
+        "changed_files": promotion.changed_files,
+    });
     Ok(Some(TrackedPromotionContinuation {
         baseline,
         path: PathBuf::from(path),
