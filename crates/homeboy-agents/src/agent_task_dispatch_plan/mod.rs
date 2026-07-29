@@ -467,7 +467,7 @@ fn dispatch_instructions(instructions: String, task_url: Option<&str>) -> String
     }
 
     format!(
-        "{instructions}\n\nGenerated change guardrails:\n- First look for nearby existing predicates, contracts, or implementation families that already cover the requested behavior.\n- Keep generated changes bounded to the source evidence and task scope; preserve evidence-specific discriminators unless the task explicitly asks for broader behavior.\n- If dependency freshness, lifecycle, or validation gates fail, update and verify the relevant dependency checkout or declared component reference; do not bypass, disable, or skip the gate to reach a PR.\n- If existing behavior plus evidence/test coverage already resolves the task, prefer evidence-only or test-only output over a broader runtime change.\n- In PR evidence, report source relationship, change kind, verification capability, and why any runtime change is not broader than the source evidence."
+        "{instructions}\n\nGenerated change guardrails:\n- First look for nearby existing predicates, contracts, or implementation families that already cover the requested behavior.\n- Keep generated changes bounded to the source evidence and task scope; preserve evidence-specific discriminators when the task retains their semantics.\n- When dependency freshness, lifecycle, or validation gates fail, update and verify the relevant dependency checkout or declared component reference; successful gates remain authoritative for PR eligibility.\n- When existing behavior plus evidence and test coverage resolves the task, prefer evidence-only or test-only output.\n- In PR evidence, report source relationship, change kind, verification capability, and the evidence boundary for each runtime change."
     )
 }
 
@@ -724,6 +724,18 @@ mod tests {
     use homeboy_core::test_support::with_isolated_home;
     use std::collections::HashMap;
     use std::process::Command;
+
+    #[test]
+    fn generated_change_guardrails_describe_positive_success_criteria() {
+        let instructions = dispatch_instructions(
+            "Implement the tracked change.".to_string(),
+            Some("https://example.test/issues/1"),
+        );
+
+        assert!(instructions.contains("successful gates remain authoritative"));
+        assert!(instructions.contains("prefer evidence-only or test-only output"));
+        assert!(instructions.contains("the evidence boundary for each runtime change"));
+    }
 
     #[test]
     fn builds_dispatch_plan_from_prompt_file_and_client_context() {

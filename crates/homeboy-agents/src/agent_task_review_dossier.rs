@@ -139,6 +139,34 @@ pub struct AgentTaskReviewOverride {
 
 /// Schema key the agent emits its review form under inside `AgentTaskOutcome.outputs`.
 pub const AI_REVIEW_FORM_OUTPUT_KEY: &str = "review_form";
+pub const AI_REVIEW_FORM_OUTPUT_SCHEMA: &str = "homeboy/agent-task-review-form/v1";
+
+/// The provider-facing declaration for the reviewer-facing portion of a PR
+/// dossier. Homeboy owns the surrounding dossier and uses this form for the
+/// prose only an agent can author.
+pub fn review_form_output_declaration() -> crate::agent_task::AgentTaskOutputDeclaration {
+    crate::agent_task::AgentTaskOutputDeclaration {
+        name: AI_REVIEW_FORM_OUTPUT_KEY.to_string(),
+        required: true,
+        schema: AI_REVIEW_FORM_OUTPUT_SCHEMA.to_string(),
+        structural_schema: serde_json::json!({
+            "type": "object",
+            "required": ["summary", "what_changed", "compatibility", "used_for"],
+            "properties": {
+                "summary": { "type": "string" },
+                "what_changed": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "minItems": 1
+                },
+                "compatibility": { "type": "string" },
+                "used_for": { "type": "string" }
+            }
+        }),
+        max_bytes: None,
+        evidence_relationship: None,
+    }
+}
 
 /// The single AI-authored "form" — every non-deterministic slot of the review
 /// dossier. The orchestrator owns everything else (AI-assistance tool/model,
@@ -189,10 +217,10 @@ impl AiFilledReviewForm {
     /// Surfaced to the agent when the form is missing or incomplete so the
     /// nudge loop can converge.
     pub fn requirement_feedback() -> &'static str {
-        "Emit a `review_form` object in your task outputs with: `summary` (what is changing and why), \
+        "Return a `review_form` object in your task outputs with: `summary` (what is changing and why), \
 `what_changed` (a non-empty list of concrete change bullets), `compatibility` (impact/compatibility \
 assessment), and `used_for` (a concise, self-reflective description of the process you took — distinct \
-from the summary of what changed). `used_for` must be a genuine reflection, not a restatement of the summary."
+from the summary of what changed). A successful `used_for` is a genuine process reflection."
     }
 
     /// Validate that the agent filled every required slot with real content.
