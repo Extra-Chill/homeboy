@@ -55,6 +55,8 @@ pub(super) fn initial_executable_preflight_ids() -> &'static [&'static str] {
         "preflight.default_branch",
         "preflight.git_identity",
         "preflight.working_tree",
+        "preflight.head_identity",
+        "preflight.recovery_artifacts",
         "preflight.remote_sync",
         "preflight.tag_availability",
         "preflight.dependencies",
@@ -169,14 +171,6 @@ fn resolve_head_release(
         ));
     }
 
-    if let Some((tag, version)) = tags
-        .iter()
-        .filter_map(|tag| release_tag_version(tag, tag_prefix).map(|version| (tag, version)))
-        .max_by(|(_, a), (_, b)| a.cmp(b))
-    {
-        return Ok((tag.to_string(), version.to_string()));
-    }
-
     let latest_local = latest_release_tag(local_path, tag_prefix).unwrap_or(None);
     let latest_remote = latest_remote_release_tag(local_path, tag_prefix).unwrap_or(None);
     let latest_known = latest_remote.as_ref().or(latest_local.as_ref());
@@ -289,8 +283,8 @@ fn read_current_release_notes(component: &Component) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_dry_run_preflight_plan, execute_plan_steps, initial_executable_preflight_ids,
-        release_tag_version, resolve_head_release,
+        build_dry_run_preflight_plan, build_initial_preflight_plan, execute_plan_steps,
+        initial_executable_preflight_ids, release_tag_version, resolve_head_release,
     };
     use crate::release::types::{ReleaseOptions, ReleaseStepStatus};
     use homeboy_core::plan::PlanStepStatus;
@@ -390,6 +384,8 @@ mod tests {
                 "preflight.default_branch",
                 "preflight.git_identity",
                 "preflight.working_tree",
+                "preflight.head_identity",
+                "preflight.recovery_artifacts",
                 "preflight.remote_sync",
                 "preflight.tag_availability",
                 "preflight.dependencies",
@@ -471,6 +467,8 @@ mod tests {
                 "preflight.default_branch",
                 "preflight.git_identity",
                 "preflight.working_tree",
+                "preflight.head_identity",
+                "preflight.recovery_artifacts",
                 "preflight.remote_sync",
                 "preflight.dependencies",
                 "preflight.lint",
@@ -559,20 +557,20 @@ mod tests {
     }
 
     #[test]
-    fn head_release_uses_release_tag_pointing_at_head() {
+    fn head_release_rejects_a_different_release_tag_at_head() {
         let (_remote, checkout) = release_repo_with_remote_tag("0.11.10", "v0.11.11");
         run_in(checkout.path(), &["git", "tag", "v0.11.11"]);
 
-        let (tag, version) = resolve_head_release(
+        let error = resolve_head_release(
             checkout.path().to_str().expect("checkout path"),
             "v0.11.10",
             None,
             "fixture",
         )
-        .expect("release tag at HEAD should be used");
+        .expect_err("a tag for another version must not satisfy --head");
 
-        assert_eq!(tag, "v0.11.11");
-        assert_eq!(version, "0.11.11");
+        assert!(error.message.contains("Expected 'v0.11.10'"));
+        assert!(error.message.contains("tags at that commit: v0.11.11"));
     }
 
     #[test]
@@ -623,6 +621,100 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("homeboy release fixture --head")));
+    }
+
+    #[test]
+    fn missing_expected_head_tag_never_invokes_project_scripts_or_creates_source_outputs() {
+        let (_remote, checkout) = release_repo_with_remote_tag("0.11.10", "v0.11.11");
+        let options = ReleaseOptions {
+            bump_type: "head".to_string(),
+            path_override: Some(checkout.path().to_string_lossy().to_string()),
+            pipeline: crate::release::types::ReleasePipelineOptions {
+                head: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let plan = build_initial_preflight_plan("fixture", &options);
+        let mut results = Vec::new();
+
+        let error = execute_plan_steps(
+            &plan.plan.steps,
+            "fixture",
+            &options,
+            &mut results,
+            &HashSet::new(),
+        )
+        .expect_err("a mismatched release tag must fail before project scripts run");
+
+        assert!(error
+            .message
+            .contains("--head requires a release tag at the resolved HEAD commit"));
+        assert_project_scripts_were_not_invoked(checkout.path());
+    }
+
+    #[test]
+    fn wrong_version_tag_at_head_never_invokes_project_scripts_or_creates_source_outputs() {
+        let (_remote, checkout) = release_repo_with_remote_tag("0.11.10", "v0.11.11");
+        run_in(checkout.path(), &["git", "tag", "v0.11.11"]);
+
+        assert_invalid_head_identity_has_no_project_side_effects(checkout.path());
+    }
+
+    #[test]
+    fn expected_tag_away_from_head_never_invokes_project_scripts_or_creates_source_outputs() {
+        let (_remote, checkout) = release_repo_with_remote_tag("0.11.10", "v0.11.10");
+        std::fs::write(checkout.path().join("README.md"), "later commit\n").expect("write commit");
+        run_in(checkout.path(), &["git", "add", "README.md"]);
+        run_in(
+            checkout.path(),
+            &["git", "commit", "-q", "-m", "fix: later change"],
+        );
+
+        assert_invalid_head_identity_has_no_project_side_effects(checkout.path());
+    }
+
+    #[test]
+    fn invalid_recovery_manifest_never_invokes_project_scripts_or_creates_source_outputs() {
+        let (_remote, checkout) = release_repo_with_remote_tag("0.11.10", "v0.11.10");
+        run_in(checkout.path(), &["git", "tag", "v0.11.10"]);
+        let artifacts = tempfile::tempdir().expect("artifact tempdir");
+        std::fs::write(
+            artifacts.path().join("manifest.json"),
+            r#"{"schema":"homeboy.package-recovery"}"#,
+        )
+        .expect("write malformed manifest");
+        let options = ReleaseOptions {
+            bump_type: "head".to_string(),
+            path_override: Some(checkout.path().to_string_lossy().to_string()),
+            pipeline: crate::release::types::ReleasePipelineOptions {
+                head: true,
+                from_artifacts: Some(artifacts.path().to_string_lossy().to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let plan = build_initial_preflight_plan("fixture", &options);
+        let mut results = Vec::new();
+
+        let stopped = execute_plan_steps(
+            &plan.plan.steps,
+            "fixture",
+            &options,
+            &mut results,
+            &HashSet::new(),
+        )
+        .expect("manifest validation is reported as a failed preflight");
+
+        assert!(
+            stopped,
+            "invalid manifest must stop before dependency hydration"
+        );
+        assert!(results.iter().any(|result| {
+            result.id == "preflight.recovery_artifacts"
+                && result.status == ReleaseStepStatus::Failed
+        }));
+        assert_project_scripts_were_not_invoked(checkout.path());
     }
 
     #[test]
@@ -725,6 +817,11 @@ mod tests {
             checkout.path().join("homeboy.json"),
             r#"{
                 "id": "fixture",
+                "scripts": {
+                    "lint": ["sh -c 'printf lint >> .preflight-scripts; touch generated-by-script'"],
+                    "test": ["sh -c 'printf test >> .preflight-scripts; touch generated-by-script'"],
+                    "build": ["sh -c 'printf build >> .preflight-scripts; touch generated-by-script'"]
+                },
                 "version_targets": [
                     {"file": "plugin.php", "pattern": "(?m)^Version:\\s*([0-9.]+)"}
                 ]
@@ -742,6 +839,49 @@ mod tests {
         run_in(checkout.path(), &["git", "tag", "-d", tag]);
 
         (remote, checkout)
+    }
+
+    fn assert_project_scripts_were_not_invoked(checkout: &Path) {
+        let invocations = checkout.join(".preflight-scripts");
+        let count = std::fs::read_to_string(&invocations)
+            .map(|contents| contents.lines().count())
+            .unwrap_or(0);
+        assert_eq!(
+            count, 0,
+            "invalid recovery must invoke zero project scripts"
+        );
+        assert!(
+            !checkout.join("generated-by-script").exists(),
+            "invalid recovery must not create project source outputs"
+        );
+    }
+
+    fn assert_invalid_head_identity_has_no_project_side_effects(checkout: &Path) {
+        let options = ReleaseOptions {
+            bump_type: "head".to_string(),
+            path_override: Some(checkout.to_string_lossy().to_string()),
+            pipeline: crate::release::types::ReleasePipelineOptions {
+                head: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let plan = build_initial_preflight_plan("fixture", &options);
+        let mut results = Vec::new();
+
+        let error = execute_plan_steps(
+            &plan.plan.steps,
+            "fixture",
+            &options,
+            &mut results,
+            &HashSet::new(),
+        )
+        .expect_err("invalid --head identity must fail before project scripts run");
+
+        assert!(error
+            .message
+            .contains("--head requires a release tag at the resolved HEAD commit"));
+        assert_project_scripts_were_not_invoked(checkout);
     }
 
     fn run_in(dir: &Path, args: &[&str]) {

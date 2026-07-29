@@ -43,15 +43,57 @@ pub(in crate::release) fn build_preflight_steps(
             StepConfig::new(),
         )
     };
+    let head_identity_step = if options.pipeline.head {
+        ready_step(
+            "preflight.head_identity",
+            "preflight.head_identity",
+            "Validate release identity at HEAD",
+            vec!["preflight.working_tree".to_string()],
+            StepConfig::new(),
+        )
+    } else {
+        disabled_step(
+            "preflight.head_identity",
+            "preflight.head_identity",
+            "Validate release identity at HEAD",
+            string_config("reason", "not-head-release"),
+        )
+    };
+    let recovery_artifacts_step =
+        if options.pipeline.head && options.pipeline.from_artifacts.is_some() {
+            ready_step(
+                "preflight.recovery_artifacts",
+                "preflight.recovery_artifacts",
+                "Validate recovery artifact manifest",
+                vec!["preflight.head_identity".to_string()],
+                StepConfig::new(),
+            )
+        } else {
+            disabled_step(
+                "preflight.recovery_artifacts",
+                "preflight.recovery_artifacts",
+                "Validate recovery artifact manifest",
+                string_config("reason", "not-head-release-artifacts"),
+            )
+        };
+    let remote_sync_needs = if options.pipeline.head && options.pipeline.from_artifacts.is_some() {
+        vec!["preflight.recovery_artifacts".to_string()]
+    } else if options.pipeline.head {
+        vec!["preflight.head_identity".to_string()]
+    } else {
+        vec!["preflight.working_tree".to_string()]
+    };
 
     let mut steps = vec![
         default_branch_step,
         working_tree_step,
+        head_identity_step,
+        recovery_artifacts_step,
         ready_step(
             "preflight.remote_sync",
             "preflight.remote_sync",
             "Validate remote sync",
-            vec!["preflight.working_tree".to_string()],
+            remote_sync_needs,
             StepConfig::new(),
         ),
         build_bump_policy_step(options, semver_recommendation),
