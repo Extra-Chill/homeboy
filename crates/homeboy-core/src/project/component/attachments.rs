@@ -290,6 +290,7 @@ mod tests {
                 id: id.to_string(),
                 local_path: format!("/workspace/{}", id),
                 remote_path: None,
+                deployment_provider: None,
             });
         }
         project
