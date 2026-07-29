@@ -71,7 +71,22 @@ if [ -n "${MOCK_GIT_LOG:-}" ]; then
 fi
 case "$1 $2" in
   "rev-parse --abbrev-ref")
+    # Returns the literal string "HEAD" on a detached checkout, which is
+    # exactly what `actions/checkout` with `ref: <sha>` produces.
     echo "${MOCK_BRANCH:-main}"
+    ;;
+  "rev-parse HEAD")
+    # Commit identity of the detached HEAD. Empty models a checkout so broken
+    # that even this fails.
+    [ -n "${MOCK_HEAD_SHA:-}" ] || exit 1
+    echo "${MOCK_HEAD_SHA}"
+    ;;
+  "rev-parse -q")
+    # `git rev-parse -q --verify <ref>`. Empty MOCK_RELEASE_BRANCH_SHA models a
+    # checkout with no ref for the release branch (e.g. a shallow clone), which
+    # is the genuinely undeterminable case.
+    [ -n "${MOCK_RELEASE_BRANCH_SHA:-}" ] || exit 1
+    echo "${MOCK_RELEASE_BRANCH_SHA}"
     ;;
   "symbolic-ref --short")
     echo "origin/${MOCK_DEFAULT_BRANCH:-main}"
@@ -193,6 +208,8 @@ run_wrapper() {
   RELEASE_HEAD="${RELEASE_HEAD:-false}" \
   RELEASE_FROM_ARTIFACTS="${RELEASE_FROM_ARTIFACTS:-}" \
   MOCK_BRANCH="${MOCK_BRANCH:-main}" \
+  MOCK_HEAD_SHA="${MOCK_HEAD_SHA:-}" \
+  MOCK_RELEASE_BRANCH_SHA="${MOCK_RELEASE_BRANCH_SHA:-}" \
   GH_TOKEN="${GH_TOKEN:-}" \
   bash "${RUN_RELEASE}"
 }
@@ -319,6 +336,11 @@ assert_output_line 'release-version=2.1.0' "${OUTPUT_FILE}" "dry-run preserves p
 assert_output_line 'release-tag=v2.1.0' "${OUTPUT_FILE}" "dry-run preserves planned tag"
 assert_output_line 'release-bump-type=minor' "${OUTPUT_FILE}" "dry-run preserves planned bump"
 assert_output_line 'skipped-reason=dry-run' "${OUTPUT_FILE}" "dry-run reason is action glue"
+# RELEASE_DRY_RUN leaked into every test below this point — each `run_wrapper`
+# defaults it with `${RELEASE_DRY_RUN:-false}`, so once set it stays set for the
+# rest of the file. The later assertions happened not to depend on it, so
+# nothing caught it. Unset it so each block starts from the documented default.
+unset RELEASE_DRY_RUN
 
 # Extra-Chill/homeboy#10441: a release that fails a step returns the v3
 # envelope, which has no `.error`. Reading only `.error.message` printed
@@ -358,5 +380,102 @@ if [ "${LEGACY_EXIT}" -eq 0 ]; then
 fi
 printf 'PASS: legacy failure exits non-zero\n'
 assert_contains 'Release failed: mock failure' "${LEGACY_OUTPUT}" "legacy .error.message envelope still reports its message"
+
+
+# ── Detached HEAD (Extra-Chill/homeboy#10703) ──
+#
+# `actions/checkout` with `ref: <sha>` detaches HEAD, so
+# `git rev-parse --abbrev-ref HEAD` returns the LITERAL string "HEAD". The
+# branch guard compared that to RELEASE_BRANCH, decided "not on main" for a
+# commit that WAS main's tip, and exited 0 without invoking homeboy. The caller
+# read the missing release-version as "nothing to release" and skipped every
+# job while reporting success — for 131 commits.
+#
+# These assert the EFFECT: what the wrapper decides and whether homeboy ran at
+# all, not which strings the script contains.
+
+# HEAD detached AT the release branch tip: this IS main. Release must proceed.
+setup_fixture
+HOMEBOY_MOCK_SCENARIO="released"
+MOCK_BRANCH="HEAD"
+MOCK_HEAD_SHA="86c1afc9b8db41ef029345a1b47201d95563942e"
+MOCK_RELEASE_BRANCH_SHA="86c1afc9b8db41ef029345a1b47201d95563942e"
+GH_TOKEN="secret123"
+DETACHED_OUTPUT="$(run_wrapper 2>&1)"
+assert_contains 'releasing as main' "${DETACHED_OUTPUT}" "detached HEAD at the tip is recognised as the release branch"
+assert_not_contains 'skipping release' "${DETACHED_OUTPUT}" "detached HEAD at the tip must not be skipped as wrong-branch"
+# The load-bearing assertion: homeboy actually RAN. The bug's signature is that
+# it never did, so no args file existed and no version was ever computed.
+if [ ! -f "${HOMEBOY_ARGS_FILE}" ]; then
+  printf 'FAIL: homeboy release was never invoked from a detached HEAD at the release branch tip\n%s\n' "${DETACHED_OUTPUT}"
+  exit 1
+fi
+printf 'PASS: homeboy release is invoked from a detached HEAD at the release branch tip\n'
+assert_output_line 'release-version=2.1.0' "${OUTPUT_FILE}" "detached HEAD at the tip still computes a version"
+assert_not_contains '--head' "$(cat "${HOMEBOY_ARGS_FILE}")" "resolving the branch must NOT smuggle in --head, which would skip version computation"
+unset MOCK_BRANCH MOCK_HEAD_SHA MOCK_RELEASE_BRANCH_SHA
+
+# HEAD detached at some OTHER commit: genuinely not the release branch. This is
+# a measured negative, so the quiet skip is correct and must be preserved.
+setup_fixture
+HOMEBOY_MOCK_SCENARIO="released"
+MOCK_BRANCH="HEAD"
+MOCK_HEAD_SHA="1111111111111111111111111111111111111111"
+MOCK_RELEASE_BRANCH_SHA="2222222222222222222222222222222222222222"
+GH_TOKEN="secret123"
+set +e
+OTHER_OUTPUT="$(run_wrapper 2>&1)"
+OTHER_EXIT=$?
+set -e
+if [ "${OTHER_EXIT}" -ne 0 ]; then
+  printf 'FAIL: a determinable non-release commit must skip quietly, not fail\n%s\n' "${OTHER_OUTPUT}"
+  exit 1
+fi
+printf 'PASS: a determinable non-release commit skips quietly\n'
+assert_output_line 'skipped-reason=wrong-branch' "${OUTPUT_FILE}" "a commit that is not the release branch tip is still wrong-branch"
+if [ -f "${HOMEBOY_ARGS_FILE}" ]; then
+  printf 'FAIL: homeboy must not run for a commit that is not the release branch\n'
+  exit 1
+fi
+printf 'PASS: homeboy does not run for a commit that is not the release branch\n'
+unset MOCK_BRANCH MOCK_HEAD_SHA MOCK_RELEASE_BRANCH_SHA
+
+# HEAD detached and NO ref for the release branch exists: the branch cannot be
+# determined at all. Extra-Chill/homeboy#10685 — absence of evidence must never
+# be evidence of success. This must FAIL, with a reason that cannot be mistaken
+# for a measurement, rather than exit 0 as "wrong-branch".
+setup_fixture
+HOMEBOY_MOCK_SCENARIO="released"
+MOCK_BRANCH="HEAD"
+MOCK_HEAD_SHA="86c1afc9b8db41ef029345a1b47201d95563942e"
+MOCK_RELEASE_BRANCH_SHA=""
+GH_TOKEN="secret123"
+set +e
+UNKNOWN_OUTPUT="$(run_wrapper 2>&1)"
+UNKNOWN_EXIT=$?
+set -e
+if [ "${UNKNOWN_EXIT}" -eq 0 ]; then
+  printf 'FAIL: an undeterminable branch must not exit 0 — that is how "unknown" becomes "nothing to release"\n%s\n' "${UNKNOWN_OUTPUT}"
+  exit 1
+fi
+printf 'PASS: an undeterminable branch exits non-zero\n'
+assert_contains '::error::' "${UNKNOWN_OUTPUT}" "an undeterminable branch is loud"
+assert_output_line 'skipped-reason=branch-undeterminable' "${OUTPUT_FILE}" "an undeterminable branch reports a reason distinct from the measured wrong-branch"
+assert_not_contains 'skipped-reason=wrong-branch' "$(cat "${OUTPUT_FILE}")" "unknown must never be reported as the measured wrong-branch negative"
+unset MOCK_BRANCH MOCK_HEAD_SHA MOCK_RELEASE_BRANCH_SHA
+
+# release-head still bypasses the branch guard entirely: it finishes an
+# already-tagged HEAD, where the branch is irrelevant by construction.
+setup_fixture
+HOMEBOY_MOCK_SCENARIO="released"
+RELEASE_HEAD="true"
+MOCK_BRANCH="HEAD"
+MOCK_HEAD_SHA=""
+MOCK_RELEASE_BRANCH_SHA=""
+GH_TOKEN="secret123"
+run_wrapper >/dev/null 2>&1
+assert_contains '--head' "$(cat "${HOMEBOY_ARGS_FILE}")" "release-head still finishes an already-tagged HEAD without a resolvable branch"
+assert_output_line 'released=true' "${OUTPUT_FILE}" "release-head is unaffected by branch resolution"
+unset RELEASE_HEAD MOCK_BRANCH MOCK_HEAD_SHA MOCK_RELEASE_BRANCH_SHA
 
 printf 'All run-release wrapper checks passed.\n'
