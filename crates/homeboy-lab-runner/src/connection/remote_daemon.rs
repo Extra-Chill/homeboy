@@ -207,8 +207,13 @@ pub(super) enum IdentityComparison {
 
 pub(super) fn compare_identities(left: Option<&str>, right: Option<&str>) -> IdentityComparison {
     match (left, right) {
-        (Some(left), Some(right)) if versions_match(left, right) => IdentityComparison::Match,
-        (Some(_), Some(_)) => IdentityComparison::Mismatch,
+        (Some(left), Some(right))
+            if immutable_build_identity(left) && immutable_build_identity(right) =>
+        {
+            (left.trim() == right.trim())
+                .then_some(IdentityComparison::Match)
+                .unwrap_or(IdentityComparison::Mismatch)
+        }
         _ => IdentityComparison::Unverifiable,
     }
 }

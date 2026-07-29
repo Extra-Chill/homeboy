@@ -282,9 +282,17 @@ pub(super) fn operator_summary(report: &RunnerStatusReport) -> RunnerOperatorSum
         .stale_daemon
         .as_ref()
         .map(|warning| {
-            let controller = homeboy_product_identity::build_identity().display;
+            let controller = warning
+                .controller_homeboy_build_identity
+                .as_deref()
+                .map(str::to_string)
+                .unwrap_or_else(|| homeboy_product_identity::build_identity().display);
             risk.push(format!(
-                "compatibility_skew: controller `{controller}`; configured executable `{}`; daemon `{}`",
+                "compatibility_skew{}: controller `{controller}`; configured executable `{}`; daemon `{}`",
+                warning
+                    .compatibility_reason
+                    .map(|reason| format!(" ({reason})"))
+                    .unwrap_or_default(),
                 warning.job_command_binary_build_identity.as_deref().unwrap_or(&warning.job_command_binary_version),
                 warning.active_daemon_control_plane_build_identity.as_deref().unwrap_or(&warning.active_daemon_control_plane_version),
             ));

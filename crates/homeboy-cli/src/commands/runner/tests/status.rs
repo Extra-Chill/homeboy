@@ -689,7 +689,6 @@ fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
 
 #[test]
 fn compact_status_marks_live_runner_with_controller_skew_degraded_and_actionable() {
-    let controller = homeboy_product_identity::build_identity();
     let report = RunnerStatusReport {
         runner_id: "homeboy-lab".to_string(),
         connected: true,
@@ -715,13 +714,21 @@ fn compact_status_marks_live_runner_with_controller_skew_degraded_and_actionable
             last_seen_at: None,
             leaseless_recovery_evidence: None,
         }),
-        stale_daemon: Some(homeboy::runner::runners::RunnerStaleDaemonWarning::new(
-            "homeboy-lab",
-            "0.321.1".to_string(),
-            "0.321.1".to_string(),
-            Some("homeboy 0.321.1+daemon".to_string()),
-            Some("homeboy 0.321.1+configured".to_string()),
-        )),
+        stale_daemon: Some(
+            homeboy::runner::runners::RunnerStaleDaemonWarning::new(
+                "homeboy-lab",
+                "0.321.1".to_string(),
+                "0.321.1".to_string(),
+                Some("homeboy 0.321.1+daemon".to_string()),
+                Some("homeboy 0.321.1+configured".to_string()),
+            )
+            .with_controller_compatibility(
+                "0.321.1".to_string(),
+                "homeboy 0.321.1+controller".to_string(),
+                true,
+                true,
+            ),
+        ),
         daemon_freshness: Some(DaemonFreshnessReport {
             fresh: true,
             stale_reason_code: None,
@@ -761,7 +768,11 @@ fn compact_status_marks_live_runner_with_controller_skew_degraded_and_actionable
     assert!(summary
         .risk
         .iter()
-        .any(|risk| risk.contains(&controller.display)));
+        .any(|risk| risk.contains("controller_configured_identity_skew")));
+    assert!(summary
+        .risk
+        .iter()
+        .any(|risk| risk.contains("homeboy 0.321.1+controller")));
     assert!(summary.next_action.contains("refresh-homeboy homeboy-lab"));
     assert!(summary.next_action.contains("--ref"));
     assert!(

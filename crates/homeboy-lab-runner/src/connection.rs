@@ -2495,6 +2495,10 @@ fn stale_daemon_warning(
         session_identity.as_deref(),
         current_identity.build_identity.as_deref(),
     );
+    let controller_identity_comparison = compare_identities(
+        current_identity.build_identity.as_deref(),
+        Some(&controller_identity.display),
+    );
     let stale_runtime_paths = session
         .local_url
         .as_deref()
@@ -2506,15 +2510,19 @@ fn stale_daemon_warning(
         .and_then(|local_url| daemon_http_runtime_loaded_paths(local_url).ok())
         .map(|loaded| changed_runtime_paths(&runner.env, &loaded))
         .unwrap_or_default();
-    if daemon_runtime_is_current(
+    let daemon_matches_configured = daemon_runtime_is_current(
         &observed_session_version,
         &session.homeboy_version,
         &current_version,
-        &controller_identity.version,
         identity_comparison,
         &stale_runtime_paths,
         &changed_runtime_paths,
-    ) {
+    );
+    let controller_matches_configured =
+        versions_match(&current_version, &controller_identity.version)
+            && controller_identity_comparison == IdentityComparison::Match;
+    let controller_version_matches = versions_match(&current_version, &controller_identity.version);
+    if daemon_matches_configured && controller_matches_configured {
         return Ok(None);
     }
     Ok(Some(
@@ -2529,6 +2537,12 @@ fn stale_daemon_warning(
             &runner.id,
             homeboy,
             identity_comparison == IdentityComparison::Unverifiable,
+        )
+        .with_controller_compatibility(
+            controller_identity.version,
+            controller_identity.display,
+            controller_version_matches,
+            daemon_matches_configured,
         )
         .with_runtime_paths(&runner.id, stale_runtime_paths, changed_runtime_paths),
     ))
@@ -2604,14 +2618,12 @@ fn daemon_runtime_is_current(
     observed_daemon_version: &str,
     session_version: &str,
     command_version: &str,
-    controller_version: &str,
     identity_comparison: IdentityComparison,
     stale_runtime_paths: &[RunnerStaleRuntimePath],
     changed_runtime_paths: &[RunnerChangedRuntimePath],
 ) -> bool {
     versions_match(observed_daemon_version, command_version)
         && versions_match(session_version, command_version)
-        && versions_match(command_version, controller_version)
         && identity_comparison == IdentityComparison::Match
         && stale_runtime_paths.is_empty()
         && changed_runtime_paths.is_empty()
