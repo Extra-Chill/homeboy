@@ -564,6 +564,9 @@ fn release_prepare_uses_prepared_output_to_unlock_publish_jobs() {
     ));
     assert!(prepare.contains("release-tag: ${{ steps.outputs.outputs['release-tag'] }}"));
     assert!(prepare.contains("downstream jobs will publish it in this run"));
+    assert!(prepare.contains(
+        "Release check selected work, but Prepare Release produced an incomplete handoff"
+    ));
     assert!(
         prepare.contains("Skipping release preparation; downstream jobs will publish existing tag")
     );
@@ -587,6 +590,30 @@ fn release_prepare_uses_prepared_output_to_unlock_publish_jobs() {
     assert!(
         plan.contains("needs.prepare.result == 'success'"),
         "plan must gate on prepare's result explicitly instead of the implicit success()"
+    );
+}
+
+#[test]
+fn release_prepare_carries_the_check_verified_branch_identity_to_the_action() {
+    let check = job_section(release_workflow(), "check");
+    let prepare = job_section(release_workflow(), "prepare");
+    let attach = step_run_script(prepare, "name: Attach verified release branch");
+    let release = release_step_block(prepare, "uses: Extra-Chill/homeboy-action@v2");
+
+    assert!(
+        check.contains("verified-release-branch: ${{ steps.attach.outputs['release-branch'] }}")
+    );
+    assert!(check.contains("verified-release-sha: ${{ steps.attach.outputs['release-sha'] }}"));
+    assert!(prepare.contains(
+        "VERIFIED_RELEASE_BRANCH: ${{ needs.check.outputs['verified-release-branch'] }}"
+    ));
+    assert!(prepare
+        .contains("VERIFIED_RELEASE_SHA: ${{ needs.check.outputs['verified-release-sha'] }}"));
+    assert!(attach.contains("[ \"${HEAD_SHA}\" != \"${GITHUB_SHA}\" ]"));
+    assert!(attach
+        .contains("git checkout -q -B \"${VERIFIED_RELEASE_BRANCH}\" \"${VERIFIED_RELEASE_SHA}\""));
+    assert!(
+        release.contains("release-branch: ${{ needs.check.outputs['verified-release-branch'] }}")
     );
 }
 
@@ -1158,6 +1185,72 @@ fn run_decide_step(subs: &[(&str, &str)]) -> (i32, String) {
     );
     let _ = std::fs::remove_dir_all(&dir);
     (output.status.code().unwrap_or(-1), combined)
+}
+
+/// Execute Prepare's output handoff exactly as GitHub Actions does. This is the
+/// boundary between a release selected by `check` and every artifact/publish
+/// job, so an absent action output must fail rather than become a green skip.
+fn run_prepare_outputs_step(subs: &[(&str, &str)]) -> (i32, String) {
+    let prepare = job_section(release_workflow(), "prepare");
+    let script = interpolate(
+        &step_run_script(prepare, "name: Resolve release outputs"),
+        subs,
+    );
+
+    let dir = std::env::temp_dir().join(format!(
+        "homeboy-prepare-outputs-{}-{:p}",
+        std::process::id(),
+        &script
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let script_path = dir.join("outputs.sh");
+    let output_path = dir.join("github_output");
+    std::fs::write(&script_path, &script).expect("write script");
+    std::fs::write(&output_path, "").expect("write output file");
+
+    let output = std::process::Command::new("bash")
+        .arg("-e")
+        .arg(&script_path)
+        .env("GITHUB_OUTPUT", &output_path)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("prepare output step should run");
+
+    let combined = format!(
+        "{}{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        std::fs::read_to_string(&output_path).unwrap_or_default()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    (output.status.code().unwrap_or(-1), combined)
+}
+
+#[test]
+fn release_prepare_requires_a_complete_handoff_before_publication() {
+    let (code, out) = run_prepare_outputs_step(&[]);
+    assert_ne!(
+        code, 0,
+        "an empty prepare handoff must fail before downstream jobs can skip green: {out}"
+    );
+    assert!(out.contains("Release check selected work"));
+
+    let (code, out) = run_prepare_outputs_step(&[
+        ("steps.release.outputs['release-version']", "0.322.2"),
+        ("steps.release.outputs['release-tag']", "v0.322.2"),
+        ("steps.prepared.outputs.prepared", "true"),
+    ]);
+    assert_eq!(
+        code, 0,
+        "a complete prepare handoff must publish outputs: {out}"
+    );
+    for output in [
+        "release-version=0.322.2",
+        "release-tag=v0.322.2",
+        "prepared=true",
+    ] {
+        assert!(out.contains(output), "missing {output} from handoff: {out}");
+    }
 }
 
 /// Regression for #10703, and the fifth instance of the #10685 invariant.
