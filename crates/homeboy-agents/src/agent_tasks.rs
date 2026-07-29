@@ -253,8 +253,6 @@ pub mod gate {
 
 /// Durable run lifecycle: submit, run-record state, log/artifact loaders.
 pub mod lifecycle {
-    #[cfg(feature = "test-support")]
-    pub use super::super::agent_task_lifecycle::rewrite_record_for_test;
     pub use super::super::agent_task_lifecycle::{
         aggregate_source, artifacts, cancel, cancel_run, claim_next_queued_run,
         cook_attempt_run_id, cook_index, cook_index_exists, has_accepted_runner_handoff,
@@ -279,6 +277,10 @@ pub mod lifecycle {
         AgentTaskStatusOutcome, ControllerRuntimePruneResult, DetachedLabRunRecord,
         LabOffloadProxyPlan, RunnerPinnedRuntime, RUNNER_PROBE_SKIPPED_CALLER_OPTED_OUT,
         RUNNER_PROBE_SKIPPED_CONTROLLER_LOCAL, RUNNER_PROBE_SKIPPED_NOT_RUNNING,
+    };
+    #[cfg(feature = "test-support")]
+    pub use super::super::agent_task_lifecycle::{
+        inject_raw_record_metadata_for_corruption_test, rewrite_record_for_test,
     };
 }
 

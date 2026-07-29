@@ -238,6 +238,26 @@ pub(super) fn read_record(run_id: &str) -> Result<AgentTaskRunRecord> {
     record_from_run(&run)
 }
 
+/// Bypass typed record validation solely to seed corruption-recovery fixtures.
+/// Production writes and normal test rewrites must use `write_record`.
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn inject_raw_record_metadata_for_corruption_test(
+    run_id: &str,
+    inject: impl FnOnce(&mut Value),
+) -> Result<()> {
+    let store = ObservationStore::open_initialized()?;
+    let mut run = store.get_run(run_id)?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "run_id",
+            format!("agent-task run record not found: {run_id}"),
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    inject(&mut run.metadata_json);
+    store.upsert_imported_run(&run)
+}
+
 pub(super) fn write_cook_index_attempt(
     cook_id: &str,
     attempt: u32,

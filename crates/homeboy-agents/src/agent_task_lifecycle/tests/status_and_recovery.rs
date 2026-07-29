@@ -1896,7 +1896,13 @@ fn record_health_migrates_legacy_and_quarantines_conflicting_projections() {
 fn malformed_typed_pending_handoff_is_health_malformed_and_unreconciled() {
     with_isolated_home(|_| {
         submit_plan(&test_plan(), Some("malformed-typed-pending")).expect("submitted");
-        rewrite_record_for_test("malformed-typed-pending", |record| {
+        let malformed_handoff = json!({
+            "state": "pending",
+            "authority": "controller",
+            "runner_id": "homeboy-lab",
+            "submitted_at": "invalid"
+        });
+        let validation_error = rewrite_record_for_test("malformed-typed-pending", |record| {
             record.lab_handoff = Some(AgentTaskLabHandoff {
                 state: AgentTaskLabHandoffState::Pending,
                 authority: AgentTaskLabHandoffAuthority::Controller,
@@ -1910,7 +1916,13 @@ fn malformed_typed_pending_handoff_is_health_malformed_and_unreconciled() {
                 expired_at: None,
             });
         })
-        .expect("malformed typed state stored");
+        .expect_err("validated test rewrite rejects malformed typed handoff");
+        assert_eq!(validation_error.code, ErrorCode::InternalJsonError);
+
+        inject_raw_record_metadata_for_corruption_test("malformed-typed-pending", |metadata| {
+            metadata["agent_task_run"]["lab_handoff"] = malformed_handoff;
+        })
+        .expect("raw corruption fixture stored");
 
         let health = record_health_summary().expect("health report");
         assert_eq!(health.malformed, 1);
