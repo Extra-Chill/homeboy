@@ -542,45 +542,52 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_directory_artifact_normalizes_group_write_and_setgid() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let source = temp.path().join("source");
-        let target = temp.path().join("plugins").join("sample-plugin");
-        fs::create_dir_all(&source).expect("source dir");
-        fs::create_dir_all(target.parent().expect("target parent")).expect("target parent dir");
-        fs::write(source.join("plugin.php"), "<?php").expect("source file");
-        fs::set_permissions(source.join("plugin.php"), fs::Permissions::from_mode(0o644))
-            .expect("source permissions");
+        // `deploy_artifact` resolves its permission modes through
+        // `defaults::load_defaults()`, which reads the host's Homeboy config. An
+        // operator-configured `permissions.remote` therefore decided whether
+        // this assertion held, so the test could fail on a correct build purely
+        // because of machine state (#10126).
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let source = temp.path().join("source");
+            let target = temp.path().join("plugins").join("sample-plugin");
+            fs::create_dir_all(&source).expect("source dir");
+            fs::create_dir_all(target.parent().expect("target parent")).expect("target parent dir");
+            fs::write(source.join("plugin.php"), "<?php").expect("source file");
+            fs::set_permissions(source.join("plugin.php"), fs::Permissions::from_mode(0o644))
+                .expect("source permissions");
 
-        let result = deploy_artifact(
-            &local_client(),
-            &source,
-            target.to_str().expect("target path"),
-            None,
-            None,
-            None,
-        )
-        .expect("deploy result");
+            let result = deploy_artifact(
+                &local_client(),
+                &source,
+                target.to_str().expect("target path"),
+                None,
+                None,
+                None,
+            )
+            .expect("deploy result");
 
-        assert!(result.success, "{}", result.error.unwrap_or_default());
-        let file_mode = fs::metadata(target.join("plugin.php"))
-            .expect("target file")
-            .permissions()
-            .mode();
-        let dir_mode = fs::metadata(&target)
-            .expect("target dir")
-            .permissions()
-            .mode();
-        assert_ne!(
-            0,
-            file_mode & 0o020,
-            "deployed file should be group-writable"
-        );
-        assert_ne!(0, dir_mode & 0o020, "deployed dir should be group-writable");
-        assert_ne!(
-            0,
-            dir_mode & 0o2000,
-            "deployed dir should inherit its group"
-        );
+            assert!(result.success, "{}", result.error.unwrap_or_default());
+            let file_mode = fs::metadata(target.join("plugin.php"))
+                .expect("target file")
+                .permissions()
+                .mode();
+            let dir_mode = fs::metadata(&target)
+                .expect("target dir")
+                .permissions()
+                .mode();
+            assert_ne!(
+                0,
+                file_mode & 0o020,
+                "deployed file should be group-writable"
+            );
+            assert_ne!(0, dir_mode & 0o020, "deployed dir should be group-writable");
+            assert_ne!(
+                0,
+                dir_mode & 0o2000,
+                "deployed dir should inherit its group"
+            );
+        });
     }
 
     #[test]
