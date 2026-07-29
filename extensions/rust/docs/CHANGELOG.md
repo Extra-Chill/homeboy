@@ -2,6 +2,14 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.31.0] - 2026-07-29
+
+### Added
+- declare lint toolchain readiness
+
+### Fixed
+- seed the declared lint.findings sidecar on clean runs
+
 ## [1.29.5] - 2026-07-28
 
 ### Changed
