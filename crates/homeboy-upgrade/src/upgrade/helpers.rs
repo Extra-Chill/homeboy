@@ -278,7 +278,7 @@ pub fn run_upgrade_with_method(
                 source_revision: None,
                 upgraded: false,
                 controller: Some(component_status("unchanged", "controller already current")),
-                extensions: Some(extension_component_status(&extensions_updated, &extensions_skipped)),
+                extensions: Some(extension_component_status(!skip_extensions, skip_extensions, &extensions_updated, &extensions_skipped)),
                 runners: Some(runner_component_status(runner_disposition, &runners_updated, &runners_skipped)),
                 partial,
                 runner_convergence: Some(runner_disposition),
@@ -388,6 +388,8 @@ pub fn run_upgrade_with_method(
             },
         )),
         extensions: Some(extension_component_status(
+            upgrade_completed,
+            skip_extensions,
             &extensions_updated,
             &extensions_skipped,
         )),
@@ -579,10 +581,16 @@ fn component_status(status: &str, summary: &str) -> UpgradeComponentStatus {
 }
 
 fn extension_component_status(
+    attempted: bool,
+    skipped_by_flag: bool,
     updated: &[ExtensionUpgradeEntry],
     skipped: &[String],
 ) -> UpgradeComponentStatus {
-    let status = if skipped.is_empty() {
+    let status = if skipped_by_flag {
+        "skipped"
+    } else if !attempted {
+        "not_run"
+    } else if skipped.is_empty() {
         "completed"
     } else {
         "partial"
@@ -2023,6 +2031,22 @@ mod convergence_tests {
         runner.success = false;
 
         assert!(runner_convergence_failed(&[], &[runner], None));
+    }
+
+    #[test]
+    fn extension_status_distinguishes_skipped_and_not_run() {
+        assert_eq!(
+            extension_component_status(false, true, &[], &[]).status,
+            "skipped"
+        );
+        assert_eq!(
+            extension_component_status(false, false, &[], &[]).status,
+            "not_run"
+        );
+        assert_eq!(
+            extension_component_status(true, false, &[], &[]).status,
+            "completed"
+        );
     }
 
     #[test]

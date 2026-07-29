@@ -257,6 +257,7 @@ pub fn recover_runner_homeboy_path_after_failed_upgrade(
     runner: &Runner,
     homeboy_path: &str,
     configured_version: Option<&str>,
+    expected_build_identity: Option<&str>,
     update_homeboy_path: &mut impl FnMut(&str, &str) -> Result<()>,
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
 ) -> std::result::Result<Option<FailedUpgradePathRecovery>, String> {
@@ -279,6 +280,18 @@ pub fn recover_runner_homeboy_path_after_failed_upgrade(
     let Some(new_path) = alignment.update_to.as_deref() else {
         return Ok(None);
     };
+
+    if let Some(expected_identity) = expected_build_identity {
+        let observed_identity = runner_homeboy_identity(runner, new_path, exec)
+            .ok()
+            .flatten();
+        if observed_identity.as_deref() != Some(expected_identity) {
+            return Err(format!(
+                "refusing to update runner homeboy_path from `{homeboy_path}` to PATH-visible `{new_path}`: expected controller identity `{expected_identity}`, observed `{}`",
+                observed_identity.as_deref().unwrap_or("unverifiable build identity")
+            ));
+        }
+    }
 
     update_homeboy_path(&runner.id, new_path).map_err(|err| {
         format!(

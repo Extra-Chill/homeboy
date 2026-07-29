@@ -69,14 +69,15 @@ pub fn runner_recovery_commands(
     path_drift: Option<&String>,
     configured_version: Option<&str>,
     bare_version: Option<&str>,
+    selected_source_revision: Option<&str>,
 ) -> Vec<String> {
     let mut commands = if path_drift.is_some() {
         // The attempted upgrade left the same selected identity in place. Rotate
         // through the runner's managed materialization path instead of suggesting
         // the command that just proved ineffective.
-        vec![format!(
-            "homeboy runner refresh-homeboy {} --reconnect",
-            shell_arg(runner_id)
+        vec![runner_refresh_homeboy_command(
+            runner_id,
+            selected_source_revision,
         )]
     } else {
         runner_upgrade_recovery_commands(runner_id, homeboy_path)
@@ -98,6 +99,20 @@ pub fn runner_recovery_commands(
         ));
     }
     commands
+}
+
+fn runner_refresh_homeboy_command(
+    runner_id: &str,
+    selected_source_revision: Option<&str>,
+) -> String {
+    let revision = selected_source_revision
+        .map(|revision| format!(" --ref {}", shell_arg(revision)))
+        .unwrap_or_default();
+    format!(
+        "homeboy runner refresh-homeboy {}{} --reconnect",
+        shell_arg(runner_id),
+        revision
+    )
 }
 
 pub fn runner_inspect_bare_homeboy_command(runner_id: &str) -> String {
