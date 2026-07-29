@@ -122,8 +122,8 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 | `--to-worktree` | `<HANDLE>` | Workspace handle the cook edits, verifies, and finalizes into (e.g. `repo@branch-slug`). Existing destinations are reused. A missing managed destination is created through its configured provider when --repo, --base, --head, and --task-url declare explicit intent |
 | `--provider-command` | `<COMMAND>` | Deprecated promotion apply-provider command string. Migrate `--provider-command 'provider --flag value'` to `--provider-argv provider --provider-argv --flag --provider-argv value`; argv preserves exact arguments without shell splitting. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with `workspace_path`. |
 | `--provider-argv` | `<ARG>` | Promotion-only apply-provider invocation argument. Repeat once per exact argv element: the first is the executable and later values are its arguments; values are never shell-split. This cannot select an executor. The provider reads stdin request schema `homeboy/agent-task-promotion-apply-request/v1` and writes response schema `homeboy/agent-task-promotion-apply-response/v1` with required `workspace_path`. |
-| `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
-| `--private-verify` | `<COMMAND>` | Like `--verify`, but the command's output is treated as private: only a pass/fail summary is revealed by default (see `--private-gate-reveal`). Use for gates whose logs may contain secrets. Repeatable |
+| `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless `--private-verify` is given — a cook that cannot verify its work cannot promote it. Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
+| `--private-verify` | `<COMMAND>` | Like `--verify`, but the command's output is treated as private: only a pass/fail summary is revealed by default (see `--private-gate-reveal`). Satisfies the same mandatory-gate requirement as `--verify`. Use for gates whose logs may contain secrets. Repeatable |
 | `--private-gate-reveal` | `<POLICY>` | How much of a `--private-verify` gate's output to reveal: `summary-only` (default) shows just pass/fail; other policies expose more detail Values: `full-evidence`, `summary-only`, `redacted`, `no-detail`. |
 | `--gate-execution-policy` | `<POLICY>` | Gate scheduling policy: `ordered-fail-fast` (default) skips downstream gates after the first failure; `continue-all` runs every declared gate Values: `ordered-fail-fast`, `continue-all`. |
 | `--gate-timeout-seconds` | `<SECONDS>` | Wall-clock timeout, in seconds, for each verification gate command (default 1800 = 30 min). A gate exceeding this fails |
@@ -604,7 +604,7 @@ _This command declares no clap help text, so no description can be generated for
 
 | Subcommand | Summary |
 | --- | --- |
-| `homeboy agent-task fanout cook-batch` | _no help text_ |
+| `homeboy agent-task fanout cook-batch` | Cook a wave of independent tasks, one child cook per issue |
 | `homeboy agent-task fanout plan` | _no help text_ |
 | `homeboy agent-task fanout submit` | _no help text_ |
 | `homeboy agent-task fanout submit-batch` | _no help text_ |
@@ -619,7 +619,9 @@ _This command declares no clap help text, so no description can be generated for
 homeboy agent-task fanout cook-batch [OPTIONS] <ISSUE_URL>...
 ```
 
-_This command declares no clap help text, so no description can be generated for it._
+Cook a wave of independent tasks, one child cook per issue.
+
+Requires at least one deterministic gate: pass `--verify` or `--private-verify`. The gate is not optional — a child cook that cannot verify its work cannot promote it (#9838).
 
 | Argument | Required | Description |
 | --- | --- | --- |
@@ -639,8 +641,8 @@ _This command declares no clap help text, so no description can be generated for
 | `--provider-profile` | `<PROFILE>` | _no help text_ |
 | `--secret-env` | `<ENV>` | _no help text_ |
 | `--provider-config` | `<JSON>` | _no help text_ |
-| `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
-| `--private-verify` | `<COMMAND>` | Like `--verify`, but the command's output is treated as private: only a pass/fail summary is revealed by default (see `--private-gate-reveal`). Use for gates whose logs may contain secrets. Repeatable |
+| `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless `--private-verify` is given — a cook that cannot verify its work cannot promote it. Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
+| `--private-verify` | `<COMMAND>` | Like `--verify`, but the command's output is treated as private: only a pass/fail summary is revealed by default (see `--private-gate-reveal`). Satisfies the same mandatory-gate requirement as `--verify`. Use for gates whose logs may contain secrets. Repeatable |
 | `--private-gate-reveal` | `<POLICY>` | How much of a `--private-verify` gate's output to reveal: `summary-only` (default) shows just pass/fail; other policies expose more detail Values: `full-evidence`, `summary-only`, `redacted`, `no-detail`. |
 | `--gate-execution-policy` | `<POLICY>` | Gate scheduling policy: `ordered-fail-fast` (default) skips downstream gates after the first failure; `continue-all` runs every declared gate Values: `ordered-fail-fast`, `continue-all`. |
 | `--gate-timeout-seconds` | `<SECONDS>` | Wall-clock timeout, in seconds, for each verification gate command (default 1800 = 30 min). A gate exceeding this fails |
@@ -797,8 +799,8 @@ _This command declares no clap help text, so no description can be generated for
 | `--task-id` | `<TASK_ID>` | _no help text_ |
 | `--artifact-id` | `<ARTIFACT_ID>` | _no help text_ |
 | `--dry-run` | flag | _no help text_ |
-| `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
-| `--private-verify` | `<COMMAND>` | Like `--verify`, but the command's output is treated as private: only a pass/fail summary is revealed by default (see `--private-gate-reveal`). Use for gates whose logs may contain secrets. Repeatable |
+| `--verify` | `<COMMAND>` | Deterministic verification command that must pass before the cook promotes its work (e.g. `--verify "cargo fmt --check"`). Required unless `--private-verify` is given — a cook that cannot verify its work cannot promote it. Runs in the destination worktree. Repeat to require multiple gates; every one must pass. Its output is included in the review evidence |
+| `--private-verify` | `<COMMAND>` | Like `--verify`, but the command's output is treated as private: only a pass/fail summary is revealed by default (see `--private-gate-reveal`). Satisfies the same mandatory-gate requirement as `--verify`. Use for gates whose logs may contain secrets. Repeatable |
 | `--private-gate-reveal` | `<POLICY>` | How much of a `--private-verify` gate's output to reveal: `summary-only` (default) shows just pass/fail; other policies expose more detail Values: `full-evidence`, `summary-only`, `redacted`, `no-detail`. |
 | `--gate-execution-policy` | `<POLICY>` | Gate scheduling policy: `ordered-fail-fast` (default) skips downstream gates after the first failure; `continue-all` runs every declared gate Values: `ordered-fail-fast`, `continue-all`. |
 | `--gate-timeout-seconds` | `<SECONDS>` | Wall-clock timeout, in seconds, for each verification gate command (default 1800 = 30 min). A gate exceeding this fails |

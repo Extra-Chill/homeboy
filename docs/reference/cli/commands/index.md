@@ -56,7 +56,7 @@ Hand-written narrative lives in the [commands index](../../../commands/commands-
 
 ## Commands shipping without help text
 
-41 visible commands declare no clap `about`/`long_about`, so no description can be generated for them. The fix is a doc comment on the clap variant, not prose in this file.
+40 visible commands declare no clap `about`/`long_about`, so no description can be generated for them. The fix is a doc comment on the clap variant, not prose in this file.
 
 - `homeboy agent-task doctor`
 - `homeboy agent-task loop`
@@ -82,7 +82,6 @@ Hand-written narrative lives in the [commands index](../../../commands/commands-
 - `homeboy agent-task resume`
 - `homeboy agent-task retry`
 - `homeboy agent-task fanout`
-- `homeboy agent-task fanout cook-batch`
 - `homeboy agent-task fanout plan`
 - `homeboy agent-task fanout submit`
 - `homeboy agent-task fanout submit-batch`

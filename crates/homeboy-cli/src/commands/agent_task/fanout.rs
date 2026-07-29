@@ -370,9 +370,19 @@ fn cook_batch_inner(
     mut args: AgentTaskFanoutCookBatchArgs,
     attempt_dispatcher: Option<&CookAttemptDispatcherFactory>,
 ) -> CmdResult<Value> {
+    // Checked before provider readiness, worktree creation, or any other
+    // expensive preflight, so an operator who followed --help does not discover
+    // the requirement only after discovery succeeds (#9838).
     if !args.gates.has_deterministic_gate() {
-        return Err(invalid_fanout(
-            "agent-task fanout cook-batch requires --verify or --private-verify",
+        return Err(Error::validation_invalid_argument(
+            "verify",
+            "agent-task fanout cook-batch requires at least one deterministic gate: pass --verify or --private-verify",
+            None,
+            Some(vec![
+                "Add a public gate, e.g. --verify 'cargo test --workspace'.".to_string(),
+                "Use --private-verify for a gate whose output may contain secrets.".to_string(),
+                "A child cook that cannot verify its work cannot promote it, so the gate is not optional.".to_string(),
+            ]),
         ));
     }
     apply_provider_profile(&mut args);

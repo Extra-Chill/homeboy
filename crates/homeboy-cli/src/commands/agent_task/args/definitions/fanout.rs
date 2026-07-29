@@ -10,6 +10,11 @@ pub struct AgentTaskFanoutArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AgentTaskFanoutCommand {
+    /// Cook a wave of independent tasks, one child cook per issue.
+    ///
+    /// Requires at least one deterministic gate: pass `--verify` or
+    /// `--private-verify`. The gate is not optional — a child cook that cannot
+    /// verify its work cannot promote it (#9838).
     CookBatch(AgentTaskFanoutCookBatchArgs),
     Plan(AgentTaskFanoutPlanArgs),
     Submit(AgentTaskFanoutSubmitArgs),
