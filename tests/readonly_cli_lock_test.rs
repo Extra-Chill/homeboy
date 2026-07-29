@@ -43,17 +43,21 @@ fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
                 "{} produced no diagnostic output",
                 args.join(" ")
             );
-            assert_eq!(
-                git_metadata_snapshot(&repository),
-                git_before,
-                "{} changed Git metadata while bypassing the mutation lock",
-                args.join(" ")
+            assert_snapshot_unchanged(
+                &git_metadata_snapshot(&repository),
+                &git_before,
+                &format!(
+                    "{} changed Git metadata while bypassing the mutation lock",
+                    args.join(" ")
+                ),
             );
-            assert_eq!(
-                filesystem_snapshot(home),
-                home_before,
-                "{} changed config or runtime state while bypassing the mutation lock",
-                args.join(" ")
+            assert_snapshot_unchanged(
+                &filesystem_snapshot(home),
+                &home_before,
+                &format!(
+                    "{} changed config or runtime state while bypassing the mutation lock",
+                    args.join(" ")
+                ),
             );
         }
 
@@ -75,15 +79,15 @@ fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
             String::from_utf8_lossy(&output.stdout).contains("runtime_promotion.contended"),
             "refresh serialization must report typed promotion contention"
         );
-        assert_eq!(
-            git_metadata_snapshot(&repository),
-            git_before,
-            "blocked refresh changed Git metadata"
+        assert_snapshot_unchanged(
+            &git_metadata_snapshot(&repository),
+            &git_before,
+            "blocked refresh changed Git metadata",
         );
-        assert_eq!(
-            filesystem_snapshot(&promotion_namespace.join("runtime-promotion")),
-            promotion_before,
-            "blocked refresh changed the held promotion lease"
+        assert_snapshot_unchanged(
+            &filesystem_snapshot(&promotion_namespace.join("runtime-promotion")),
+            &promotion_before,
+            "blocked refresh changed the held promotion lease",
         );
 
         let output = run_with_timeout(
@@ -100,15 +104,15 @@ fn read_only_cli_commands_complete_while_runtime_promotion_is_held() {
             "mutation exclusion must report typed promotion contention: {}",
             String::from_utf8_lossy(&output.stdout)
         );
-        assert_eq!(
-            git_metadata_snapshot(&repository),
-            git_before,
-            "blocked upgrade changed Git metadata"
+        assert_snapshot_unchanged(
+            &git_metadata_snapshot(&repository),
+            &git_before,
+            "blocked upgrade changed Git metadata",
         );
-        assert_eq!(
-            filesystem_snapshot(&promotion_namespace.join("runtime-promotion")),
-            promotion_before,
-            "blocked upgrade changed the held promotion lease"
+        assert_snapshot_unchanged(
+            &filesystem_snapshot(&promotion_namespace.join("runtime-promotion")),
+            &promotion_before,
+            "blocked upgrade changed the held promotion lease",
         );
     });
 }
@@ -190,6 +194,79 @@ fn create_repository(home: &std::path::Path) -> PathBuf {
     repository
 }
 
+/// Maximum characters a snapshot-mismatch message may occupy. A raw
+/// `assert_eq!` on `BTreeMap<PathBuf, Vec<u8>>` prints every file as a decimal
+/// byte vector, which has exceeded log and tool record limits and buried the
+/// one changed path that mattered (#10633).
+const SNAPSHOT_DIFF_MAX_CHARS: usize = 4_000;
+
+type Snapshot = BTreeMap<PathBuf, Vec<u8>>;
+
+/// Assert two filesystem snapshots match, reporting a bounded semantic diff —
+/// added, removed and content-changed paths with size metadata — instead of raw
+/// bytes.
+#[track_caller]
+fn assert_snapshot_unchanged(actual: &Snapshot, expected: &Snapshot, context: &str) {
+    if actual == expected {
+        return;
+    }
+    panic!("{context}\n{}", describe_snapshot_diff(expected, actual));
+}
+
+fn describe_snapshot_diff(before: &Snapshot, after: &Snapshot) -> String {
+    let mut lines = Vec::new();
+
+    for (path, bytes) in after {
+        match before.get(path) {
+            None => lines.push(format!(
+                "  + added   {} ({} bytes)",
+                path.display(),
+                bytes.len()
+            )),
+            Some(previous) if previous != bytes => lines.push(format!(
+                "  ~ changed {} ({} -> {} bytes)",
+                path.display(),
+                previous.len(),
+                bytes.len()
+            )),
+            Some(_) => {}
+        }
+    }
+    for (path, bytes) in before {
+        if !after.contains_key(path) {
+            lines.push(format!(
+                "  - removed {} ({} bytes)",
+                path.display(),
+                bytes.len()
+            ));
+        }
+    }
+
+    if lines.is_empty() {
+        return "  (snapshots differ but no per-path delta was derived)".to_string();
+    }
+
+    let total = lines.len();
+    let mut rendered = String::from("snapshot delta:\n");
+    let mut shown = 0;
+    // Reserve room for the truncation notice up front, so appending it can never
+    // push the message back over the bound it exists to enforce.
+    let remainder_budget = format!("  … and {total} more path(s)\n").len();
+    let line_budget = SNAPSHOT_DIFF_MAX_CHARS.saturating_sub(remainder_budget);
+    for line in &lines {
+        if rendered.len() + line.len() + 1 > line_budget {
+            break;
+        }
+        rendered.push_str(line);
+        rendered.push('\n');
+        shown += 1;
+    }
+    if shown < total {
+        rendered.push_str(&format!("  … and {} more path(s)\n", total - shown));
+    }
+    rendered
+}
+
 fn git_metadata_snapshot(repository: &std::path::Path) -> BTreeMap<PathBuf, Vec<u8>> {
     filesystem_snapshot(&repository.join(".git"))
 }
@@ -218,4 +295,84 @@ fn snapshot_directory(
             );
         }
     }
+}
+
+/// The #10621 delta: two added paths hidden inside a full byte-map dump. The
+/// diff must name them directly (#10633).
+#[test]
+fn snapshot_diff_names_the_added_paths_from_the_10621_regression() {
+    let before = Snapshot::new();
+    let mut after = Snapshot::new();
+    after.insert(
+        PathBuf::from(".config/homeboy/deferred-workloads.json"),
+        b"{}".to_vec(),
+    );
+    after.insert(
+        PathBuf::from(".config/homeboy/deferred-workloads.lock"),
+        Vec::new(),
+    );
+
+    let diff = describe_snapshot_diff(&before, &after);
+
+    assert!(
+        diff.contains(".config/homeboy/deferred-workloads.json"),
+        "diff must name the added JSON record: {diff}"
+    );
+    assert!(
+        diff.contains(".config/homeboy/deferred-workloads.lock"),
+        "diff must name the added lock: {diff}"
+    );
+    assert!(
+        diff.contains("+ added"),
+        "added paths must be labelled: {diff}"
+    );
+}
+
+/// A single oversized file must not reintroduce the unbounded byte dump.
+#[test]
+fn snapshot_diff_reports_sizes_not_bytes_and_stays_bounded() {
+    let mut before = Snapshot::new();
+    before.insert(PathBuf::from("big.bin"), vec![b'a'; 200_000]);
+    let mut after = Snapshot::new();
+    after.insert(PathBuf::from("big.bin"), vec![b'b'; 300_000]);
+
+    let diff = describe_snapshot_diff(&before, &after);
+
+    assert!(
+        diff.len() <= SNAPSHOT_DIFF_MAX_CHARS,
+        "diff must stay bounded"
+    );
+    assert!(
+        diff.contains("200000 -> 300000 bytes"),
+        "changed files report size metadata: {diff}"
+    );
+    assert!(
+        !diff.contains("97, 97"),
+        "raw byte vectors must never be rendered: {diff}"
+    );
+}
+
+/// Many changed paths are truncated with an explicit remainder count rather
+/// than being allowed to grow without limit.
+#[test]
+fn snapshot_diff_truncates_a_large_path_set_with_a_remainder_count() {
+    let before = Snapshot::new();
+    let mut after = Snapshot::new();
+    for index in 0..500 {
+        after.insert(
+            PathBuf::from(format!(".config/homeboy/generated-path-{index:04}.json")),
+            b"{}".to_vec(),
+        );
+    }
+
+    let diff = describe_snapshot_diff(&before, &after);
+
+    assert!(
+        diff.len() <= SNAPSHOT_DIFF_MAX_CHARS,
+        "diff must stay bounded"
+    );
+    assert!(
+        diff.contains("more path(s)"),
+        "truncation must be explicit: {diff}"
+    );
 }
