@@ -741,6 +741,16 @@ mod tests {
             ["homeboy", "agent-task", "list"].as_slice(),
             ["homeboy", "agent-task", "active"].as_slice(),
             ["homeboy", "agent-task", "latest"].as_slice(),
+            [
+                "homeboy",
+                "agent-task",
+                "gate-feedback",
+                "--promotion",
+                "{}",
+                "--source-task",
+                "{}",
+            ]
+            .as_slice(),
             ["homeboy", "agent-task", "fanout", "status", "batch-123"].as_slice(),
             ["homeboy", "agent-task", "fanout", "artifacts", "batch-123"].as_slice(),
             ["homeboy", "agent-task", "loop", "status", "loop-123"].as_slice(),

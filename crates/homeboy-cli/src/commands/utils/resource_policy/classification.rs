@@ -53,7 +53,6 @@ pub(super) fn agent_task_resource_behavior(
         | agent_task::AgentTaskCommand::Adopt(_)
         | agent_task::AgentTaskCommand::PromotionProvider(_)
         | agent_task::AgentTaskCommand::FinalizePr(_)
-        | agent_task::AgentTaskCommand::GateFeedback(_)
         | agent_task::AgentTaskCommand::Tool(_) => AgentTaskResourceBehavior::AdmittedWorkload,
         agent_task::AgentTaskCommand::Retry(retry) if retry.run => {
             AgentTaskResourceBehavior::AdmittedWorkload
@@ -66,6 +65,7 @@ pub(super) fn agent_task_resource_behavior(
         | agent_task::AgentTaskCommand::Artifacts(_)
         | agent_task::AgentTaskCommand::Evidence(_)
         | agent_task::AgentTaskCommand::Diagnose(_)
+        | agent_task::AgentTaskCommand::GateFeedback(_)
         // Provider discovery reads controller-local extension and runtime
         // manifests under bounded probes. Classifying it as an admitted
         // workload put it behind resource admission, which captured a
