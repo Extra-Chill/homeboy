@@ -6,23 +6,33 @@ pub fn require_run(store: &ObservationStore, run_id: &str) -> Result<RunRecord> 
     if let Some(run) = store.get_run(run_id)? {
         return Ok(run);
     }
+    // Resolve durable local aliases before consulting the runner. A runner
+    // probe can reconcile generations and hydrate artifacts, so it must not
+    // delay metadata already indexed in the observation store.
+    if let Some(run) = resolve_local_run_label(store, run_id)? {
+        return Ok(run);
+    }
     if let Ok(Some(run)) =
         runner_evidence::with_runner_evidence(|p| p.mirror_connected_runner_run(run_id))
     {
         return Ok(run);
     }
-    if let Some(run) = resolve_run_label(store, run_id)? {
+    if let Some(run) = resolve_remote_run_label(run_id)? {
         return Ok(run);
     }
     Err(missing_run_error(run_id))
 }
 
-fn resolve_run_label(store: &ObservationStore, label: &str) -> Result<Option<RunRecord>> {
+fn resolve_local_run_label(store: &ObservationStore, label: &str) -> Result<Option<RunRecord>> {
     let runs = store.list_runs(RunListFilter {
         limit: Some(1000),
         ..Default::default()
     })?;
-    let mut matches = matching_run_labels(&runs, label);
+    resolve_run_label_matches(label, matching_run_labels(&runs, label))
+}
+
+fn resolve_remote_run_label(label: &str) -> Result<Option<RunRecord>> {
+    let mut matches = Vec::new();
     let connected_runners: Vec<RunnerConnectionInfo> = runner_evidence::with_runner_evidence(|p| {
         p.statuses().into_iter().filter(|r| r.connected).collect()
     });
@@ -63,19 +73,21 @@ fn canonicalize_lab_run_label_matches(matches: Vec<RunRecord>) -> Vec<RunRecord>
 /// logical execution (`run_lookup` disambiguation; `runs list` dedup #9629).
 /// Returns `None` for local runs with no Lab lineage.
 pub fn lab_run_lineage(run: &RunRecord) -> Option<(String, String)> {
-    runner_evidence::with_runner_evidence(|provider| provider.mirrored_runner_job_identity(run))
-        .or_else(|| {
-            let lab = run.metadata_json.get("lab")?;
-            let runner_id = lab
-                .pointer("/runner/id")
-                .or_else(|| lab.get("runner_id"))
-                .and_then(Value::as_str)?;
-            let job_id = lab
-                .pointer("/remote_job/id")
-                .or_else(|| lab.get("remote_job_id"))
-                .and_then(Value::as_str)?;
-            Some((runner_id.to_string(), job_id.to_string()))
-        })
+    let local = || {
+        let lab = run.metadata_json.get("lab")?;
+        let runner_id = lab
+            .pointer("/runner/id")
+            .or_else(|| lab.get("runner_id"))
+            .and_then(Value::as_str)?;
+        let job_id = lab
+            .pointer("/remote_job/id")
+            .or_else(|| lab.get("remote_job_id"))
+            .and_then(Value::as_str)?;
+        Some((runner_id.to_string(), job_id.to_string()))
+    };
+    local().or_else(|| {
+        runner_evidence::with_runner_evidence(|provider| provider.mirrored_runner_job_identity(run))
+    })
 }
 
 /// Outcome of collapsing a run list to one canonical row per logical execution.

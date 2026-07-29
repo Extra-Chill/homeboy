@@ -259,16 +259,29 @@ pub fn has_runner_evidence_provider() -> bool {
 }
 
 #[cfg(test)]
+pub(crate) fn clear_runner_evidence_provider() {
+    provider_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+}
+
+#[cfg(test)]
+pub(crate) fn runner_evidence_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{Arc, Mutex};
 
     use crate::observation::{ObservationStore, RunStatus};
     use crate::test_support::with_isolated_home;
 
     fn provider_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        super::runner_evidence_test_lock()
     }
 
     fn run(id: &str) -> RunRecord {
