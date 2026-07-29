@@ -132,6 +132,7 @@ mod tests {
                 id: "plugin".to_string(),
                 local_path: "/repo/plugin".to_string(),
                 remote_path: None,
+                deployment_provider: None,
             }],
             ..Default::default()
         };
@@ -162,11 +163,13 @@ mod tests {
                         id: "remove-me".to_string(),
                         local_path: "/tmp/homeboy-remove-me-missing".to_string(),
                         remote_path: None,
+                        deployment_provider: None,
                     },
                     ProjectComponentAttachment {
                         id: "stale-remaining".to_string(),
                         local_path: "/tmp/homeboy-stale-remaining-missing".to_string(),
                         remote_path: None,
+                        deployment_provider: None,
                     },
                 ],
                 ..Default::default()

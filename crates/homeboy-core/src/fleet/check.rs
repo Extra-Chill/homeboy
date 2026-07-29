@@ -195,6 +195,7 @@ mod tests {
                 id: "tooling-component".to_string(),
                 local_path: component_dir.to_string_lossy().to_string(),
                 remote_path: None,
+                deployment_provider: None,
             });
             project::save(&project).expect("project config");
 
