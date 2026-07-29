@@ -1162,6 +1162,23 @@ mod tests {
             r#"{"artifacts":[{"path":"homeboy-x86_64-unknown-linux-gnu.tar.xz"},{"path":"homeboy-x86_64-unknown-linux-gnu.tar.xz.sha256"}]}"#,
         )
         .expect("write manifest");
+        let artifact_manifest = serde_json::json!({
+            "schema": super::artifacts::ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA,
+            "schema_version": super::artifacts::ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA_VERSION,
+            "component_id": "homeboy",
+            "tag": "v1.2.3",
+            "version": "1.2.3",
+            "commit": "commit-for-v1.2.3",
+            "artifacts": [
+                { "path": archive, "sha256": homeboy_engine_primitives::content_hash::sha256_file(&archive).expect("archive hash") },
+                { "path": checksum, "sha256": homeboy_engine_primitives::content_hash::sha256_file(&checksum).expect("checksum hash") }
+            ]
+        });
+        std::fs::write(
+            artifact_dir.path().join("manifest.json"),
+            artifact_manifest.to_string(),
+        )
+        .expect("write source-authority manifest");
 
         let mut state = ReleaseState {
             tag: Some("v1.2.3".to_string()),
@@ -1174,7 +1191,7 @@ mod tests {
                 component_id: "homeboy",
                 tag: "v1.2.3",
                 version: "1.2.3",
-                commit: "unused-for-external-artifacts",
+                commit: "commit-for-v1.2.3",
             },
         )
         .expect("inventory external artifacts");

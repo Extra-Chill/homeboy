@@ -9,6 +9,9 @@ use crate::release::types::DraftAdoptionIntent;
 const PACKAGE_RECOVERY_MANIFEST: &str = "manifest.json";
 pub(crate) const PACKAGE_RECOVERY_MANIFEST_SCHEMA: &str = "homeboy.package-recovery";
 pub(crate) const PACKAGE_RECOVERY_MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub(crate) const ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA: &str =
+    "homeboy.artifact-source-authority";
+pub(crate) const ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const DRAFT_ADOPTION_MANIFEST_SCHEMA: &str = "homeboy.draft-adoption";
 const DRAFT_ADOPTION_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
@@ -115,9 +118,9 @@ pub(crate) struct PackageRecoveryContext<'a> {
     pub(crate) commit: &'a str,
 }
 
-/// Inventory artifacts that were already built by an external release build.
-/// This lets `homeboy release --head --from-artifacts <dir>` reuse the normal
-/// github.release and publish steps without re-running release.package.
+/// Inventory artifact bytes whose source identity is explicitly declared by
+/// their producer. This prevents a bare directory from being relabeled as the
+/// currently checked-out release after its tag or HEAD has advanced.
 pub(crate) fn run_artifact_inventory(
     state: &mut ReleaseState,
     artifact_dir: &str,
@@ -158,10 +161,21 @@ pub(crate) fn run_artifact_inventory(
     }
     let mut artifacts = if manifest_path.is_file() && is_package_recovery_manifest(&manifest_path) {
         inventory_package_recovery_manifest(dir, &manifest_path, recovery_context)?
+    } else if manifest_path.is_file() && is_artifact_source_authority_manifest(&manifest_path) {
+        inventory_artifact_source_authority_manifest(dir, &manifest_path, recovery_context)?
     } else {
-        inventory_directory_files(dir, artifact_dir)?
+        return Err(Error::validation_invalid_argument(
+            "from-artifacts",
+            format!(
+                "Artifact directory '{}' has no source-authority manifest. External CI artifacts must include manifest.json with schema '{}', the active component/tag/version/commit, and a sha256 for every artifact.",
+                artifact_dir, ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA
+            ),
+            Some(artifact_dir.to_string()),
+            None,
+        ));
     };
 
+    collapse_ordinal_durable_duplicates(&mut artifacts)?;
     artifacts.sort_by(|a, b| a.path.cmp(&b.path));
     if artifacts.is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -321,6 +335,17 @@ fn is_draft_adoption_manifest(manifest_path: &std::path::Path) -> bool {
         == Some(DRAFT_ADOPTION_MANIFEST_SCHEMA)
 }
 
+fn is_artifact_source_authority_manifest(manifest_path: &std::path::Path) -> bool {
+    let Ok(contents) = std::fs::read_to_string(manifest_path) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return false;
+    };
+    manifest.get("schema").and_then(serde_json::Value::as_str)
+        == Some(ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA)
+}
+
 fn inventory_draft_adoption_manifest(
     manifest_path: &std::path::Path,
     context: &PackageRecoveryContext,
@@ -435,56 +460,6 @@ fn valid_asset_name(name: &str) -> bool {
             == Some(name)
         && name != "."
         && name != ".."
-}
-
-fn inventory_directory_files(
-    dir: &std::path::Path,
-    artifact_dir: &str,
-) -> Result<Vec<ReleaseArtifact>> {
-    let mut artifacts = Vec::new();
-    for entry in std::fs::read_dir(dir).map_err(|e| {
-        Error::internal_io(
-            format!(
-                "Failed to read artifact directory '{}': {}",
-                artifact_dir, e
-            ),
-            Some(artifact_dir.to_string()),
-        )
-    })? {
-        let entry = entry.map_err(|e| {
-            Error::internal_io(
-                format!("Failed to read artifact directory entry: {}", e),
-                Some(artifact_dir.to_string()),
-            )
-        })?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let canonical = std::fs::canonicalize(&path).map_err(|e| {
-            Error::internal_io(
-                format!(
-                    "Failed to resolve artifact path '{}': {}",
-                    path.display(),
-                    e
-                ),
-                Some(path.display().to_string()),
-            )
-        })?;
-        let canonical = canonical.display().to_string();
-        artifacts.push(ReleaseArtifact {
-            path: canonical.clone(),
-            durable_path: Some(canonical),
-            artifact_type: None,
-            platform: None,
-            phase: "recovery".to_string(),
-            producer: "from-artifacts".to_string(),
-            sha256: None,
-            publication_authority: false,
-        });
-    }
-    collapse_ordinal_durable_duplicates(&mut artifacts)?;
-    Ok(artifacts)
 }
 
 /// Package persistence stores numbered durable copies. A recovery directory can
@@ -664,6 +639,95 @@ fn inventory_package_recovery_manifest(
         .collect()
 }
 
+fn inventory_artifact_source_authority_manifest(
+    artifact_dir: &std::path::Path,
+    manifest_path: &std::path::Path,
+    recovery_context: &PackageRecoveryContext,
+) -> Result<Vec<ReleaseArtifact>> {
+    let mut manifest: PackageRecoveryManifest = read_recovery_manifest(manifest_path)?;
+    if manifest.schema != ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA
+        || manifest.schema_version != ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA_VERSION
+    {
+        return Err(Error::validation_invalid_argument(
+            "from-artifacts",
+            format!(
+                "Artifact source-authority manifest '{}' has an unsupported schema or schema version",
+                manifest_path.display()
+            ),
+            Some(manifest_path.display().to_string()),
+            None,
+        ));
+    }
+    if [
+        manifest.component_id.as_str(),
+        manifest.tag.as_str(),
+        manifest.version.as_str(),
+        manifest.commit.as_str(),
+    ]
+    .iter()
+    .any(|value| value.trim().is_empty())
+    {
+        return Err(Error::validation_invalid_argument(
+            "from-artifacts",
+            format!(
+                "Artifact source-authority manifest '{}' has incomplete release identity",
+                manifest_path.display()
+            ),
+            Some(manifest_path.display().to_string()),
+            None,
+        ));
+    }
+    validate_recovery_identity(&manifest, manifest_path, recovery_context)?;
+    if manifest.artifacts.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "from-artifacts",
+            format!(
+                "Artifact source-authority manifest '{}' contains no release assets",
+                manifest_path.display()
+            ),
+            Some(manifest_path.display().to_string()),
+            None,
+        ));
+    }
+    let artifact_dir = std::fs::canonicalize(artifact_dir).map_err(|error| {
+        Error::internal_io(
+            format!(
+                "Failed to resolve artifact directory '{}': {error}",
+                artifact_dir.display()
+            ),
+            Some(artifact_dir.display().to_string()),
+        )
+    })?;
+    manifest
+        .artifacts
+        .drain(..)
+        .map(|artifact| validate_recovery_artifact(&artifact_dir, artifact))
+        .collect()
+}
+
+fn read_recovery_manifest(manifest_path: &std::path::Path) -> Result<PackageRecoveryManifest> {
+    let manifest = std::fs::read_to_string(manifest_path).map_err(|error| {
+        Error::internal_io(
+            format!(
+                "Failed to read release artifact manifest '{}': {error}",
+                manifest_path.display()
+            ),
+            Some(manifest_path.display().to_string()),
+        )
+    })?;
+    serde_json::from_str(&manifest).map_err(|error| {
+        Error::validation_invalid_argument(
+            "from-artifacts",
+            format!(
+                "Release artifact manifest '{}' is invalid: {error}",
+                manifest_path.display()
+            ),
+            Some(manifest_path.display().to_string()),
+            None,
+        )
+    })
+}
+
 fn validate_recovery_identity(
     manifest: &PackageRecoveryManifest,
     manifest_path: &std::path::Path,
@@ -703,16 +767,21 @@ fn validate_recovery_artifact(
     artifact_dir: &std::path::Path,
     mut artifact: ReleaseArtifact,
 ) -> Result<ReleaseArtifact> {
-    let path = std::path::Path::new(&artifact.path);
-    let canonical = std::fs::canonicalize(path).map_err(|error| {
+    let declared_path = std::path::Path::new(&artifact.path);
+    let path = if declared_path.is_absolute() {
+        declared_path.to_path_buf()
+    } else {
+        artifact_dir.join(declared_path)
+    };
+    let canonical = std::fs::canonicalize(&path).map_err(|error| {
         Error::validation_invalid_argument(
             "from-artifacts",
             format!(
                 "Recovered release asset '{}' is missing: {}",
-                path.display(),
+                declared_path.display(),
                 error
             ),
-            Some(path.display().to_string()),
+            Some(declared_path.display().to_string()),
             None,
         )
     })?;
@@ -728,8 +797,38 @@ fn validate_recovery_artifact(
             None,
         ));
     }
+    let expected_sha256 = artifact
+        .sha256
+        .as_deref()
+        .filter(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "from-artifacts",
+                format!(
+                    "Recovered release asset '{}' is missing a valid sha256",
+                    declared_path.display()
+                ),
+                Some(declared_path.display().to_string()),
+                None,
+            )
+        })?;
+    let actual_sha256 = sha256_file(&canonical.display().to_string())?;
+    if !expected_sha256.eq_ignore_ascii_case(&actual_sha256) {
+        return Err(Error::validation_invalid_argument(
+            "from-artifacts",
+            format!(
+                "Recovered release asset '{}' sha256 '{}' does not match declared sha256 '{}'",
+                canonical.display(),
+                actual_sha256,
+                expected_sha256
+            ),
+            Some(canonical.display().to_string()),
+            None,
+        ));
+    }
     artifact.path = canonical.display().to_string();
     artifact.durable_path = Some(artifact.path.clone());
+    artifact.sha256 = Some(actual_sha256);
     Ok(artifact)
 }
 
@@ -738,8 +837,9 @@ mod tests {
     use super::{
         classify_recovery_lineage, establish_publication_authority, run_artifact_inventory,
         PackageRecoveryContext, RecoveryLineage, ReleaseStepResult, Result,
-        PACKAGE_RECOVERY_MANIFEST, PACKAGE_RECOVERY_MANIFEST_SCHEMA,
-        PACKAGE_RECOVERY_MANIFEST_SCHEMA_VERSION,
+        ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA,
+        ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA_VERSION, PACKAGE_RECOVERY_MANIFEST,
+        PACKAGE_RECOVERY_MANIFEST_SCHEMA, PACKAGE_RECOVERY_MANIFEST_SCHEMA_VERSION,
     };
     use crate::release::executor::github_release::github_release_publications;
     use crate::release::types::ReleaseArtifact;
@@ -752,6 +852,11 @@ mod tests {
         let artifact_path = temp.path().join("homeboy.tar.gz");
         std::fs::write(&artifact_path, "artifact").expect("write artifact");
         std::fs::create_dir(temp.path().join("nested")).expect("nested dir");
+        std::fs::write(
+            temp.path().join(PACKAGE_RECOVERY_MANIFEST),
+            source_authority_manifest(&artifact_path).to_string(),
+        )
+        .expect("source authority manifest");
 
         let mut state = ReleaseState::default();
         let result = run_artifact_inventory(
@@ -801,12 +906,14 @@ mod tests {
                     {
                         "path": npm,
                         "durable_path": npm,
-                        "artifact_type": "npm"
+                        "artifact_type": "npm",
+                        "sha256": sha256(&npm)
                     },
                     {
                         "path": wordpress,
                         "durable_path": wordpress,
-                        "artifact_type": "archive"
+                        "artifact_type": "archive",
+                        "sha256": sha256(&wordpress)
                     }
                 ]
             })
@@ -842,6 +949,11 @@ mod tests {
         let ordinal = temp.path().join("01-plugin.zip");
         std::fs::write(&canonical, b"plugin bytes").expect("canonical artifact");
         std::fs::write(&ordinal, b"plugin bytes").expect("ordinal artifact");
+        std::fs::write(
+            temp.path().join(PACKAGE_RECOVERY_MANIFEST),
+            source_authority_manifest_for(&[&canonical, &ordinal]).to_string(),
+        )
+        .expect("source authority manifest");
 
         let mut state = ReleaseState::default();
         run_artifact_inventory(
@@ -868,10 +980,15 @@ mod tests {
     #[test]
     fn recovery_inventory_rejects_ordinal_copy_with_mismatched_canonical_bytes() {
         let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(temp.path().join("plugin.zip"), b"canonical bytes")
-            .expect("canonical artifact");
-        std::fs::write(temp.path().join("01-plugin.zip"), b"ordinal---bytes")
-            .expect("ordinal artifact");
+        let canonical = temp.path().join("plugin.zip");
+        let ordinal = temp.path().join("01-plugin.zip");
+        std::fs::write(&canonical, b"canonical bytes").expect("canonical artifact");
+        std::fs::write(&ordinal, b"ordinal---bytes").expect("ordinal artifact");
+        std::fs::write(
+            temp.path().join(PACKAGE_RECOVERY_MANIFEST),
+            source_authority_manifest_for(&[&canonical, &ordinal]).to_string(),
+        )
+        .expect("source authority manifest");
 
         let error = run_artifact_inventory(
             &mut ReleaseState::default(),
@@ -953,26 +1070,18 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_manifest_json_remains_an_external_artifact() {
+    fn bare_or_unrecognized_artifact_directories_fail_closed() {
         let temp = tempfile::tempdir().expect("tempdir");
         let manifest = temp.path().join(PACKAGE_RECOVERY_MANIFEST);
         std::fs::write(&manifest, r#"{"component_id":"unrelated"}"#).expect("manifest");
 
-        let mut state = ReleaseState::default();
-        run_artifact_inventory(
-            &mut state,
+        let error = run_artifact_inventory(
+            &mut ReleaseState::default(),
             &temp.path().to_string_lossy(),
             &recovery_context(),
         )
-        .expect("ordinary external manifest inventory");
-        assert_eq!(state.artifacts.len(), 1);
-        assert_eq!(
-            state.artifacts[0].path,
-            std::fs::canonicalize(manifest)
-                .unwrap()
-                .display()
-                .to_string()
-        );
+        .expect_err("unrecognized artifact manifest must not inherit active identity");
+        assert!(error.message.contains("source-authority manifest"));
     }
 
     fn recovery_context() -> PackageRecoveryContext<'static> {
@@ -992,8 +1101,81 @@ mod tests {
             "tag": "v1.2.3",
             "version": "1.2.3",
             "commit": "abc123",
-            "artifacts": [{ "path": artifact }]
+            "artifacts": [{ "path": artifact, "sha256": sha256(artifact) }]
         })
+    }
+
+    fn source_authority_manifest(artifact: &std::path::Path) -> serde_json::Value {
+        source_authority_manifest_for(&[artifact])
+    }
+
+    fn source_authority_manifest_for(artifacts: &[&std::path::Path]) -> serde_json::Value {
+        serde_json::json!({
+            "schema": ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA,
+            "schema_version": ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA_VERSION,
+            "component_id": "plugin",
+            "tag": "v1.2.3",
+            "version": "1.2.3",
+            "commit": "abc123",
+            "artifacts": artifacts.iter().map(|artifact| serde_json::json!({
+                "path": artifact
+                    .file_name()
+                    .expect("artifact file name")
+                    .to_string_lossy(),
+                "sha256": sha256(artifact)
+            })).collect::<Vec<_>>()
+        })
+    }
+
+    fn sha256(path: &std::path::Path) -> String {
+        super::sha256_file(&path.display().to_string()).expect("sha256")
+    }
+
+    #[test]
+    fn source_authority_manifest_rejects_old_bytes_after_the_release_commit_advances() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact = temp.path().join("homeboy.tar.gz");
+        std::fs::write(&artifact, "bytes built at commit A").expect("artifact");
+        let mut manifest = source_authority_manifest(&artifact);
+        manifest["commit"] = serde_json::json!("commit-a");
+        std::fs::write(
+            temp.path().join(PACKAGE_RECOVERY_MANIFEST),
+            manifest.to_string(),
+        )
+        .expect("manifest");
+
+        let context = PackageRecoveryContext {
+            commit: "commit-b",
+            ..recovery_context()
+        };
+        let error = run_artifact_inventory(
+            &mut ReleaseState::default(),
+            &temp.path().to_string_lossy(),
+            &context,
+        )
+        .expect_err("commit A artifacts must not finalize for commit B");
+        assert!(error.message.contains("commit-a") && error.message.contains("commit-b"));
+    }
+
+    #[test]
+    fn source_authority_manifest_rejects_tampered_bytes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact = temp.path().join("plugin.zip");
+        std::fs::write(&artifact, "declared bytes").expect("artifact");
+        std::fs::write(
+            temp.path().join(PACKAGE_RECOVERY_MANIFEST),
+            source_authority_manifest(&artifact).to_string(),
+        )
+        .expect("manifest");
+        std::fs::write(&artifact, "replacement bytes").expect("tamper artifact");
+
+        let error = run_artifact_inventory(
+            &mut ReleaseState::default(),
+            &temp.path().to_string_lossy(),
+            &recovery_context(),
+        )
+        .expect_err("tampered artifact must not be published");
+        assert!(error.message.contains("does not match declared sha256"));
     }
 
     #[test]

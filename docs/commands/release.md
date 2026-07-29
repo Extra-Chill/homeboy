@@ -23,7 +23,7 @@ By default Homeboy auto-detects the bump from commit history. Use `--bump <major
 - `--package-only`: Regenerate release assets for an existing tag at the checked-out commit; use with `--head --tag <TAG> --apply`
 - `--tag <TAG>`: Existing release tag to use with `--package-only`
 - `--head`: Finish the release pipeline for the version commit and tag already checked out at HEAD
-- `--from-artifacts <DIR>`: With `--head`, attach/publish existing artifacts from a directory instead of running `release.package`
+- `--from-artifacts <DIR>`: With `--head`, attach/publish existing artifacts from a source-authority manifest in this directory instead of running `release.package`
 - `--skip-checks`: Skip pre-release lint/test checks
 - `--bump <BUMP>`: Force `major`, `minor`, `patch`, or an explicit version like `2.0.0`
 - `--force-lower-bump`: Allow a forced bump lower than the commit-derived recommendation
@@ -39,7 +39,21 @@ By default Homeboy auto-detects the bump from commit history. Use `--bump <major
 
 GitHub Release asset uploads use a 30-minute timeout by default. Set `HOMEBOY_GITHUB_RELEASE_UPLOAD_TIMEOUT_SECS` to a positive number of seconds when a slower connection or larger release assets need a longer budget. When `--head` finds an existing draft release, Homeboy resumes it, verifies attached asset metadata, and publishes it only after every requested asset is present.
 
-`--head --package-only --tag <TAG> --apply` is for operator recovery when the release tag already exists but its release assets need to be regenerated. It requires the checked-out `HEAD` to match the existing tag, runs the component build and extension-owned `release.package` actions, copies every release asset into Homeboy's artifact root under `release-packages/<component>/<tag>/`, writes `manifest.json`, and prints both paths. The manifest is a versioned `homeboy.package-recovery` inventory bound to its component, tag, version, and commit; finalization rejects it unless all four match the active tagged HEAD. Other `--from-artifacts` directories remain ordinary file inventories. This recovery does not create tags, push history, create GitHub Releases, publish registries, deploy, or clean up the component build output.
+`--head --package-only --tag <TAG> --apply` is for operator recovery when the release tag already exists but its release assets need to be regenerated. It requires the checked-out `HEAD` to match the existing tag, runs the component build and extension-owned `release.package` actions, copies every release asset into Homeboy's artifact root under `release-packages/<component>/<tag>/`, writes `manifest.json`, and prints both paths. The manifest is a versioned `homeboy.package-recovery` inventory bound to its component, tag, version, and commit; finalization rejects it unless all four match the active tagged HEAD and every declared SHA-256 matches the durable bytes. This recovery does not create tags, push history, create GitHub Releases, publish registries, deploy, or clean up the component build output.
+
+External CI artifacts must also provide `manifest.json`; bare directories are rejected. Use schema `homeboy.artifact-source-authority`, schema version `1`, the active `component_id`, `tag`, `version`, and `commit`, plus an `artifacts` array. Each artifact must name a file inside the directory and include its exact `sha256`. For example:
+
+```json
+{
+  "schema": "homeboy.artifact-source-authority",
+  "schema_version": 1,
+  "component_id": "example-plugin",
+  "tag": "v1.2.3",
+  "version": "1.2.3",
+  "commit": "<tagged HEAD SHA>",
+  "artifacts": [{ "path": "example-plugin.zip", "sha256": "<64-char SHA-256>" }]
+}
+```
 
 Risky real release modes require explicit `--apply`: `--deploy`, `--recover`, `--retag`, `--head`, and bare `--skip-checks`. Dry-run previews never require `--apply`, and granular skips such as `--skip-checks=lint` keep the normal release flow because other quality gates remain active.
 

@@ -693,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn prepared_artifact_accepts_authoritative_bare_directory_recovery() {
+    fn prepared_artifact_accepts_source_authority_manifest_recovery() {
         let temp = tempfile::tempdir().expect("temp dir");
         let root = temp.path();
         run_git(root, &["init", "-q", "-b", "main"]);
@@ -708,6 +708,24 @@ mod tests {
         std::fs::create_dir(&artifact_dir).expect("artifact dir");
         let artifact_path = artifact_dir.join("fixture.zip");
         std::fs::write(&artifact_path, b"canonical release bytes").expect("artifact");
+        let commit = run_git(root, &["rev-parse", "HEAD"]);
+        std::fs::write(
+            artifact_dir.join("manifest.json"),
+            serde_json::json!({
+                "schema": crate::release::executor::artifacts::ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA,
+                "schema_version": crate::release::executor::artifacts::ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA_VERSION,
+                "component_id": "fixture",
+                "tag": "v1.2.3",
+                "version": "1.2.3",
+                "commit": commit,
+                "artifacts": [{
+                    "path": artifact_path,
+                    "sha256": homeboy_engine_primitives::content_hash::sha256_file(&artifact_path).expect("artifact hash")
+                }]
+            })
+            .to_string(),
+        )
+        .expect("source-authority manifest");
 
         let mut state = ReleaseState::default();
         crate::release::executor::artifacts::run_artifact_inventory(
@@ -717,7 +735,7 @@ mod tests {
                 component_id: "fixture",
                 tag: "v1.2.3",
                 version: "1.2.3",
-                commit: &run_git(root, &["rev-parse", "HEAD"]),
+                commit: &commit,
             },
         )
         .expect("recovery inventory");
