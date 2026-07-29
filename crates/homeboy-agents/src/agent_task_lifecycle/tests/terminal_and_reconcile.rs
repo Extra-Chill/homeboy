@@ -142,9 +142,14 @@ fn execution_budget_legacy_plan_migrates_only_for_execution_reads() {
     });
 }
 
+#[cfg(unix)]
 #[test]
 fn pinned_runtime_recovery_retains_the_existing_lab_proxy_identity() {
     with_isolated_home(|_| {
+        let temporary = tempfile::tempdir().expect("temporary controller directory");
+        let pinned = temporary.path().join("runtime-a-homeboy");
+        let identity = "homeboy runtime-a";
+        let digest = fake_controller_artifact(&pinned, identity, "runtime A");
         record_lab_offload_planned(LabOffloadProxyPlan {
             run_id: "runtime-a-lab-proxy",
             runner_id: "homeboy-lab",
@@ -158,8 +163,15 @@ fn pinned_runtime_recovery_retains_the_existing_lab_proxy_identity() {
         })
         .expect("runtime A created proxy");
         rewrite_record_for_test("runtime-a-lab-proxy", |record| {
-            record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
-                ["originating"]["build_identity"] = json!("homeboy runtime-a");
+            let runtime = &mut record.metadata
+                [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY];
+            runtime["requested"] = json!(identity);
+            runtime["originating"]["build_identity"] = json!(identity);
+            runtime["originating"]["executable"] = json!(&pinned);
+            runtime["originating"]["pinned_executable"] = json!(&pinned);
+            runtime["originating"]["sha256"] = json!(digest);
+            runtime["current"] = json!(identity);
+            runtime["executed"] = json!(identity);
         })
         .expect("record runtime A provenance");
 
@@ -1081,7 +1093,7 @@ fn accepted_runner_cancellation_does_not_signal_a_controller_local_pid() {
 }
 
 #[test]
-fn terminal_transport_recovery_replaces_lossy_historical_compact_aggregate() {
+fn terminal_transport_recovery_replaces_lossy_aggregate_from_persisted_authoritative_result() {
     with_isolated_home(|_| {
         let run_id = "cook-ssi-510-after-9849-v5-attempt-1-4f0b66a4";
         let runner_job_id = "00000000-0000-0000-0000-000000000123";
@@ -1174,6 +1186,15 @@ fn terminal_transport_recovery_replaces_lossy_historical_compact_aggregate() {
             "tasks_omitted": 0,
             "run_id": run_id,
         });
+        let mut authoritative = succeeded_aggregate(&test_plan());
+        authoritative.outcomes[0].summary =
+            compact["tasks"][0]["summary"].as_str().map(str::to_string);
+        authoritative.outcomes[0].artifacts =
+            serde_json::from_value(compact["tasks"][0]["artifacts"].clone())
+                .expect("authoritative artifacts");
+        authoritative.outcomes[0].evidence_refs =
+            serde_json::from_value(compact["tasks"][0]["evidence_refs"].clone())
+                .expect("authoritative evidence refs");
         let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
         snapshot.events[0].kind = JobEventKind::Result;
         snapshot.events[0].data = Some(json!({
@@ -1184,7 +1205,7 @@ fn terminal_transport_recovery_replaces_lossy_historical_compact_aggregate() {
                 "command": "agent-task",
                 "success": true,
                 "exit_code": 0,
-                "data": compact,
+                "data": authoritative,
             })),
             "stderr": "",
         }));
@@ -1202,10 +1223,6 @@ fn terminal_transport_recovery_replaces_lossy_historical_compact_aggregate() {
 
         let aggregate = store::read_aggregate(run_id).expect("recovered aggregate persisted");
         assert_eq!(aggregate.outcomes.len(), 1);
-        assert_eq!(
-            aggregate.outcomes[0].metadata["terminal_recovery"],
-            "authenticated_compact_summary"
-        );
         for evidence in &aggregate.outcomes[0].evidence_refs {
             assert!(
                 !evidence.uri.starts_with("file://"),
@@ -1289,16 +1306,7 @@ fn terminal_transport_recovery_accepts_a_verified_older_controller_pin() {
         let mut lossy = succeeded_aggregate(&test_plan());
         lossy.outcomes.clear();
         store::write_aggregate(run_id, &lossy).expect("lossy aggregate");
-        let compact = json!({
-            "schema": "homeboy/agent-task-aggregate/v1",
-            "view": "summary",
-            "plan_id": "plan-a",
-            "status": "succeeded",
-            "totals": { "skipped": 0, "succeeded": 1, "failed": 0 },
-            "tasks": [{ "task_id": "task-a", "status": "succeeded" }],
-            "tasks_omitted": 0,
-            "run_id": run_id,
-        });
+        let authoritative = succeeded_aggregate(&test_plan());
         let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
         snapshot.events[0].kind = JobEventKind::Result;
         snapshot.events[0].data = Some(json!({
@@ -1309,7 +1317,7 @@ fn terminal_transport_recovery_accepts_a_verified_older_controller_pin() {
                 "command": "agent-task",
                 "success": true,
                 "exit_code": 0,
-                "data": compact,
+                "data": authoritative,
             }).to_string(),
             "stderr": "",
         }));

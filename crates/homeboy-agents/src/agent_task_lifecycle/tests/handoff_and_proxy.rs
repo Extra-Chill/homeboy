@@ -506,7 +506,7 @@ fn retry_rebuilds_follow_up_candidate_from_durable_promotion() {
 }
 
 #[test]
-fn controller_proxy_records_pending_handoff_then_binds_runner_child() {
+fn controller_proxy_is_queued_before_handoff_then_binds_runner_child() {
     with_isolated_home(|_| {
         let command = vec![
             "homeboy".to_string(),
@@ -525,10 +525,7 @@ fn controller_proxy_records_pending_handoff_then_binds_runner_child() {
         assert_eq!(planned.state, AgentTaskRunState::Queued);
         assert!(planned.metadata.get("runner_job_id").is_none());
         assert_eq!(planned.metadata["lifecycle_store_owner"], "controller");
-        let pending = planned.lab_handoff.as_ref().expect("pending handoff");
-        assert_eq!(pending.state, AgentTaskLabHandoffState::Pending);
-        assert_eq!(pending.runner_id, "homeboy-lab");
-        assert!(pending.runner_job_id.is_none());
+        assert!(planned.lab_handoff.is_none());
         assert!(planned.metadata.get("handoff_acceptance").is_none());
         assert!(load_plan("agent-task-controller-proxy")
             .expect("proxy plan")
@@ -1002,10 +999,7 @@ fn preacceptance_snapshot_binds_planned_runner_job_before_validation() {
             Some(&plan),
         )
         .expect("persist planned controller execution");
-        let pending = record.lab_handoff.as_ref().expect("pending handoff");
-        assert_eq!(pending.state, AgentTaskLabHandoffState::Pending);
-        assert_eq!(pending.runner_id, "homeboy-lab");
-        assert!(pending.runner_job_id.is_none());
+        assert!(record.lab_handoff.is_none());
         assert_eq!(record.metadata["runner_id"], "homeboy-lab");
         let mut snapshot = terminal_child_snapshot(&succeeded_aggregate(&plan));
         snapshot.job.status = homeboy_core::api_jobs::JobStatus::Running;
