@@ -144,6 +144,7 @@ pub struct ArtifactCleanupOutput {
     pub skipped: Vec<ArtifactCleanupSkipped>,
     pub applied: Vec<ArtifactCleanupApplied>,
     pub failed: Vec<ArtifactCleanupFailed>,
+    pub registry_quarantines: Vec<crate::worktree::TaskWorktreeRegistryQuarantine>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -341,10 +342,11 @@ fn canonical_or_owned(path: &Path) -> PathBuf {
 }
 
 pub fn cleanup_artifacts(options: ArtifactCleanupOptions) -> Result<ArtifactCleanupOutput> {
+    let registry_quarantines = crate::worktree::quarantine_malformed_task_worktree_records()?;
     crate::worktree::with_task_worktree_registry_read_lock(|| {
         let root = resolve_root(&options)?;
         let worktrees = discover_worktrees(&root)?;
-        cleanup_artifacts_in_worktrees(root, worktrees, &options, true)
+        cleanup_artifacts_in_worktrees(root, worktrees, &options, true, registry_quarantines)
     })
 }
 
@@ -373,6 +375,7 @@ fn artifact_cleanup_run_status(failure_count: usize) -> crate::observation::RunS
 /// Remove declared rebuildable artifacts from one completed worktree without
 /// inspecting sibling worktrees that may still be owned by active tasks.
 pub fn cleanup_worktree_artifacts(worktree: &Path) -> Result<ArtifactCleanupOutput> {
+    let registry_quarantines = crate::worktree::quarantine_malformed_task_worktree_records()?;
     crate::worktree::with_task_worktree_registry_read_lock(|| {
         let root = git_root(worktree)?;
         let worktree = root.clone();
@@ -384,6 +387,7 @@ pub fn cleanup_worktree_artifacts(worktree: &Path) -> Result<ArtifactCleanupOutp
                 ..Default::default()
             },
             false,
+            registry_quarantines,
         )
     })
 }
@@ -573,10 +577,14 @@ fn cleanup_artifacts_in_worktrees(
     worktrees: Vec<WorktreeInfo>,
     options: &ArtifactCleanupOptions,
     include_self_temp_artifacts: bool,
+    registry_quarantines: Vec<crate::worktree::TaskWorktreeRegistryQuarantine>,
 ) -> Result<ArtifactCleanupOutput> {
     let mut candidates = Vec::new();
     let mut skipped = Vec::new();
-    let active = ActiveWorktrees::resolve();
+    let mut active = ActiveWorktrees::resolve();
+    if !registry_quarantines.is_empty() {
+        active.available = false;
+    }
 
     for worktree in &worktrees {
         // A single stale/non-Git/vanished worktree candidate must not abort the
@@ -683,6 +691,7 @@ fn cleanup_artifacts_in_worktrees(
         skipped,
         applied,
         failed,
+        registry_quarantines,
     };
     if let Some((store, run_id)) = cleanup_run {
         store.finish_run(
@@ -2968,6 +2977,7 @@ mod tests {
             ],
             &ArtifactCleanupOptions::default(),
             false,
+            Vec::new(),
         )
         .expect("batch must not abort on one bad worktree");
 
@@ -3348,6 +3358,23 @@ mod tests {
                 row.relative_path == "target" && row.reason.contains("registry could not be read")
             }));
             assert_eq!(output.worktrees[0].liveness, LIVENESS_UNKNOWN);
+            assert_eq!(output.registry_quarantines.len(), 1);
+            let quarantine = &output.registry_quarantines[0];
+            assert!(!std::path::Path::new(&quarantine.record_path).exists());
+            assert!(std::path::Path::new(&quarantine.quarantine_path).exists());
+            assert!(std::path::Path::new(&quarantine.provenance_path).exists());
+
+            let repaired = cleanup_artifacts(ArtifactCleanupOptions {
+                apply: true,
+                ..dry_run_options(repo.path())
+            })
+            .expect("cleanup after registry repair");
+            assert!(repaired.registry_quarantines.is_empty());
+            assert!(repaired
+                .applied
+                .iter()
+                .any(|row| row.relative_path == "target"));
+            assert!(!repo.path().join("target").exists());
         });
     }
 
