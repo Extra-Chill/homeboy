@@ -1,6 +1,6 @@
 use homeboy_core::component::Component;
 use homeboy_core::engine::run_dir::RunDir;
-use homeboy_core::error::{CommandEvidence, Error, Result};
+use homeboy_core::error::{ActionSafety, CommandEvidence, Error, ExecutableAction, Result};
 use homeboy_extension as extension;
 use homeboy_extension::{self, ExtensionCapability};
 use std::path::Path;
@@ -69,11 +69,16 @@ pub(super) fn validate_lint_quality(
     component: &Component,
     component_id: &str,
 ) -> LintQualityOutcome {
-    // Shared mapping for a lint-runner construction/execution error into the
-    // standard hard-blocking outcome, used by both the scripts.lint and the
-    // extension-resolved lint paths below.
-    let runner_error = |e: Error| {
-        LintQualityOutcome::Failed(quality_error("lint", format!("Lint runner error: {}", e)))
+    // Preserve infrastructure errors verbatim. Reclassifying them as invalid
+    // lint arguments discards their typed diagnostics and evidence.
+    let runner_error = |error: Error, extension_id: Option<&str>, changed_since: Option<&str>| {
+        LintQualityOutcome::Failed(lint_runner_error(
+            error,
+            component,
+            component_id,
+            extension_id,
+            changed_since,
+        ))
     };
 
     if component.has_script(ExtensionCapability::Lint) {
@@ -86,7 +91,7 @@ pub(super) fn validate_lint_quality(
             false,
         ) {
             Ok(workflow) => workflow,
-            Err(e) => return runner_error(e),
+            Err(error) => return runner_error(error, None, None),
         };
 
         if workflow.status == "passed" {
@@ -107,7 +112,7 @@ pub(super) fn validate_lint_quality(
         ) {
             Ok(Some(context)) => context,
             Ok(None) => return LintQualityOutcome::Passed { ran: false },
-            Err(error) => return runner_error(error),
+            Err(error) => return runner_error(error, None, None),
         };
 
     homeboy_core::log_status!("release", "Running lint ({})...", lint_context.extension_id);
@@ -121,7 +126,7 @@ pub(super) fn validate_lint_quality(
             Ok(tag) => tag,
             Err(e) => {
                 release_run_dir.finish(false);
-                return runner_error(e);
+                return runner_error(e, Some(&lint_context.extension_id), None);
             }
         };
     let workflow = extension::lint::run_main_lint_workflow(
@@ -136,7 +141,7 @@ pub(super) fn validate_lint_quality(
             file: None,
             glob: None,
             changed_only: false,
-            changed_since,
+            changed_since: changed_since.clone(),
             precomputed_changed_files: None,
             sniff_filters: extension::lint::LintSniffFilters::default(),
             category: None,
@@ -150,7 +155,11 @@ pub(super) fn validate_lint_quality(
         Ok(workflow) => workflow,
         Err(error) => {
             release_run_dir.finish(false);
-            return runner_error(error);
+            return runner_error(
+                error,
+                Some(&lint_context.extension_id),
+                changed_since.as_deref(),
+            );
         }
     };
 
@@ -162,6 +171,52 @@ pub(super) fn validate_lint_quality(
         release_run_dir.finish(false);
         LintQualityOutcome::Failed(lint_workflow_failure(&workflow, &release_run_dir))
     }
+}
+
+/// Attach a diagnostic action without changing the original infrastructure
+/// error's code, message, details, or evidence. The command intentionally says
+/// "fresh" because a new CLI invocation cannot promise the release process's
+/// complete runtime identity.
+fn lint_runner_error(
+    error: Error,
+    component: &Component,
+    component_id: &str,
+    extension_id: Option<&str>,
+    changed_since: Option<&str>,
+) -> Error {
+    let mut args = vec![
+        "--placement".to_string(),
+        "local".to_string(),
+        "lint".to_string(),
+        component_id.to_string(),
+        "--path".to_string(),
+        component.local_path.clone(),
+    ];
+    if let Some(extension_id) = extension_id {
+        args.extend(["--extension".to_string(), extension_id.to_string()]);
+    }
+    if let Some(changed_since) = changed_since {
+        args.extend(["--changed-since".to_string(), changed_since.to_string()]);
+    }
+
+    error.with_action(
+        ExecutableAction::new(
+            "release.lint.fresh_diagnostic",
+            "run a fresh local lint diagnostic with the release lint scope",
+            "homeboy",
+            args,
+            ActionSafety::ReadOnly,
+        )
+        .with_evidence(serde_json::json!({
+            "kind": "fresh_diagnostic",
+            "release_execution_location": "local",
+            "source_path": component.local_path,
+            "component_id": component_id,
+            "extension_id": extension_id,
+            "changed_since": changed_since,
+            "settings": {},
+        })),
+    )
 }
 
 fn lint_workflow_failure(
@@ -417,6 +472,7 @@ mod tests {
         validate_test_quality, LintQualityOutcome,
     };
     use homeboy_core::component::{Component, ComponentScriptsConfig, ScopedExtensionConfig};
+    use homeboy_core::error::Error;
     use homeboy_extension::RunnerOutput;
     use std::collections::HashMap;
     use std::fs;
@@ -584,6 +640,60 @@ mod tests {
             !validate_lint_quality(&component_without_quality_runners(), "fixture")
                 .expect_passed_with_value(false)
         );
+    }
+
+    #[test]
+    fn lint_runner_error_preserves_nested_io_diagnostics_and_emits_fresh_action() {
+        let component = Component {
+            id: "fixture".to_string(),
+            local_path: "/workspace/fixture".to_string(),
+            ..Default::default()
+        };
+        let error = super::lint_runner_error(
+            Error::internal_io(
+                "No such file or directory (os error 2)",
+                Some("read lint evidence /tmp/run/findings.json".to_string()),
+            ),
+            &component,
+            "fixture",
+            Some("rust"),
+            Some("v1.2.3"),
+        );
+
+        assert_eq!(error.code.as_str(), "internal.io_error");
+        assert_eq!(
+            error.details["error"].as_str(),
+            Some("No such file or directory (os error 2)")
+        );
+        assert_eq!(
+            error.details["context"].as_str(),
+            Some("read lint evidence /tmp/run/findings.json")
+        );
+
+        let action = &error.details["_homeboy_actions"][0];
+        assert_eq!(action["id"], "release.lint.fresh_diagnostic");
+        assert!(action["label"]
+            .as_str()
+            .is_some_and(|label| label.contains("fresh local lint diagnostic")));
+        assert_eq!(
+            action["args"],
+            serde_json::json!([
+                "--placement",
+                "local",
+                "lint",
+                "fixture",
+                "--path",
+                "/workspace/fixture",
+                "--extension",
+                "rust",
+                "--changed-since",
+                "v1.2.3",
+            ])
+        );
+        assert_eq!(action["evidence"]["source_path"], "/workspace/fixture");
+        assert_eq!(action["evidence"]["extension_id"], "rust");
+        assert_eq!(action["evidence"]["changed_since"], "v1.2.3");
+        assert_eq!(action["evidence"]["settings"], serde_json::json!({}));
     }
 
     #[test]

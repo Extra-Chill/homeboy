@@ -685,7 +685,10 @@ fn failed_result(id: &str, step_type: &str, err: Error) -> ReleaseStepResult {
         step_type: step_type.to_string(),
         status: ReleaseStepStatus::Failed,
         hints: err.hints.clone(),
-        data: Some(serde_json::json!({ "error_details": err.details })),
+        data: Some(serde_json::json!({
+            "error_code": err.code.as_str(),
+            "error_details": err.details,
+        })),
         error: Some(err.message),
         ..Default::default()
     }
@@ -2124,13 +2127,23 @@ mod tests {
 
     #[test]
     fn test_failed_result() {
-        let err = homeboy_core::error::Error::internal_unexpected("boom".to_string());
+        let err = homeboy_core::error::Error::internal_io(
+            "No such file or directory (os error 2)",
+            Some("read lint evidence".to_string()),
+        );
 
         let result = super::failed_result("package", "package", err);
 
         assert_eq!(result.id, "package");
         assert_eq!(result.status, ReleaseStepStatus::Failed);
-        assert_eq!(result.error.as_deref(), Some("boom"));
+        assert_eq!(result.error.as_deref(), Some("IO error"));
+        let data = result.data.expect("failed release step has error data");
+        assert_eq!(data["error_code"], "internal.io_error");
+        assert_eq!(
+            data["error_details"]["error"],
+            "No such file or directory (os error 2)"
+        );
+        assert_eq!(data["error_details"]["context"], "read lint evidence");
     }
 
     fn plan_step(step_type: &str) -> PlanStep {

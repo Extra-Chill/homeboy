@@ -776,7 +776,8 @@ fn release_failure_digest(data: &Value) -> Option<CommandFailureDigest> {
         None => cause.to_string(),
     };
 
-    let mut next_actions = release_repair_actions(step_data);
+    let mut next_actions = release_error_actions(step_data);
+    next_actions.extend(release_repair_actions(step_data));
     if next_actions.is_empty() {
         next_actions.push(release_gate_repro_action(step_id, step_type, component_id));
     }
@@ -792,6 +793,21 @@ fn release_failure_digest(data: &Value) -> Option<CommandFailureDigest> {
         next_actions,
         retryable: None,
     })
+}
+
+/// Preserve explicit typed-error actions emitted by a release step. These are
+/// more specific than the generic gate fallback and may declare that a command
+/// is a fresh diagnostic rather than an exact reproduction.
+fn release_error_actions(step_data: Option<&Value>) -> Vec<CommandNextAction> {
+    step_data
+        .and_then(|data| data.get("error_details"))
+        .and_then(|details| details.get(ACTIONS_DETAILS_KEY))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| serde_json::from_value::<ExecutableAction>(value.clone()).ok())
+        .map(CommandNextAction::from_action)
+        .collect()
 }
 
 /// Lift a failed release step's own `repair` block into executable next
@@ -1295,6 +1311,56 @@ mod tests {
                 "{step} must not recommend a plan-only dry run"
             );
         }
+    }
+
+    #[test]
+    fn release_failure_prefers_explicit_fresh_diagnostic_action() {
+        let mut payload = release_failure_payload("preflight.lint", "preflight.lint");
+        payload["result"]["run"]["result"]["steps"][0]["data"] = json!({
+            "error_code": "internal.io_error",
+            "error_details": {
+                "error": "No such file or directory (os error 2)",
+                "context": "read lint evidence /tmp/run/findings.json",
+                "_homeboy_actions": [{
+                    "id": "release.lint.fresh_diagnostic",
+                    "label": "run a fresh local lint diagnostic with the release lint scope",
+                    "program": "homeboy",
+                    "args": ["--placement", "local", "lint", "fixture", "--path", "/workspace/fixture", "--extension", "rust", "--changed-since", "v1.2.3"],
+                    "safety": "read_only",
+                    "evidence": {
+                        "kind": "fresh_diagnostic",
+                        "source_path": "/workspace/fixture",
+                        "extension_id": "rust",
+                        "changed_since": "v1.2.3",
+                        "settings": {}
+                    }
+                }]
+            }
+        });
+
+        let digest = release_failure_digest(&payload).expect("release digest");
+        let action = digest.next_actions.first().expect("explicit action");
+        assert_eq!(
+            action.label,
+            "run a fresh local lint diagnostic with the release lint scope"
+        );
+        assert_eq!(
+            action.command,
+            "homeboy --placement local lint fixture --path /workspace/fixture --extension rust --changed-since v1.2.3"
+        );
+        assert_eq!(
+            action
+                .action
+                .as_ref()
+                .and_then(|action| action.evidence.as_ref())
+                .and_then(|evidence| evidence["source_path"].as_str()),
+            Some("/workspace/fixture")
+        );
+        assert_eq!(
+            digest.next_actions.len(),
+            1,
+            "explicit action must replace the generic purported reproducer"
+        );
     }
 
     /// Steps with no non-mutating reproduction surface still fall back to the
