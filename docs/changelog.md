@@ -4,6 +4,27 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.322.1] - 2026-07-29
+
+### Added
+- converge owned stores automatically
+
+### Changed
+- memoize executable digests per observed file identity
+- drop the reverse Cook queue acceptance test
+- make the reverse cook acceptance failure self-describing
+
+### Fixed
+- Fix retained storage filesystem reconciliation
+- expose result writer to extension runners
+- persist terminal authority outside config lock
+- preserve published bytes during recovery
+- complete published recovery assets
+- materialize fresh lifecycle before promotion lookup
+- propagate declared test secrets to local children
+- fail fast on unleased daemon conflicts
+- skip a superseded push instead of failing it
+
 ## [0.322.0] - 2026-07-29
 
 ### Added
