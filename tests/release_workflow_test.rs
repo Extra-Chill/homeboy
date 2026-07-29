@@ -174,6 +174,105 @@ fn release_quality_policy_blocks_review_test_failures_and_allows_passing_gates()
     assert!(passed.status.success());
 }
 
+/// The fixture that was missing, and the sixth instance of #10685 (#10741).
+///
+/// `release_quality_policy` was called exactly twice before this, both times
+/// with a well-formed `"review lint,review test"`. Nothing exercised a blocking
+/// set that matched *nothing*, so nothing noticed that when no command matched,
+/// all three `check_command` calls took the "tracked but not release-blocking"
+/// branch, `failed` stayed 0, and the policy exited green having enforced
+/// nothing.
+///
+/// The blast radius is narrower than "empty input" and it is worth being exact:
+/// `release.yml` interpolates
+/// `${{ inputs.release_blocking_commands || 'review lint,review test' }}`, and
+/// GitHub treats the empty string as falsy, so the automated push path can
+/// never arrive here with an empty set. What is reachable is a **malformed
+/// non-empty** set — a `workflow_dispatch` typo such as `review tests`.
+///
+/// This asserts the EFFECT by running the real script.
+#[test]
+fn release_quality_policy_refuses_a_blocking_set_that_matches_nothing() {
+    // Contradicted: a non-empty configured population, zero of it matched. The
+    // instrument is provably broken, so this is a hard error rather than an
+    // `unknown` — the same call `homeboy-code-audit`'s engine makes.
+    let contradicted =
+        release_quality_policy("review tests,review lints", "failure", "failure", "failure");
+    let output = String::from_utf8_lossy(&contradicted.stdout).into_owned();
+
+    assert!(
+        !contradicted.status.success(),
+        "a blocking set that matches nothing enforced nothing, and must not exit green: {output}"
+    );
+    assert!(
+        output.contains("outcome=contradicted"),
+        "the refusal must be attributable to the measurement, not just to an exit code: {output}"
+    );
+    assert!(
+        output.contains("::error::"),
+        "a broken policy must be loud: {output}"
+    );
+
+    // A partially-matched set is the same defect wearing one typo instead of
+    // two: `test` silently stops blocking while the policy still reports
+    // `outcome=measured`, so the emptiness check alone would let it through.
+    let partial =
+        release_quality_policy("review lint,review tests", "success", "success", "failure");
+    let partial_output = String::from_utf8_lossy(&partial.stdout).into_owned();
+
+    assert!(
+        !partial.status.success(),
+        "an entry naming a command this policy cannot check declares a requirement that is never \
+         enforced, and must not pass: {partial_output}"
+    );
+    assert!(
+        partial_output.contains("cannot check"),
+        "the unenforceable entry must be named so the typo is fixable from the log: \
+         {partial_output}"
+    );
+
+    // Measured zero vs no measurement. An empty configured set is an honest
+    // zero — splitting the string is independent of the matcher and it says
+    // there was genuinely nothing to match — so it passes, loudly. This branch
+    // is unreachable from `release.yml`; hard-failing it would add red no
+    // current run can produce.
+    let empty = release_quality_policy("", "failure", "failure", "failure");
+    let empty_output = String::from_utf8_lossy(&empty.stdout).into_owned();
+
+    assert!(
+        empty.status.success(),
+        "an independently-confirmed empty population is a legitimate pass: {empty_output}"
+    );
+    assert!(
+        empty_output.contains("outcome=empty-population"),
+        "a measured zero must be distinguishable in the log from a broken matcher: {empty_output}"
+    );
+    assert!(
+        empty_output.contains("::warning::"),
+        "enforcing nothing must never be silent, even when it is honest: {empty_output}"
+    );
+    assert_ne!(
+        empty_output.contains("outcome=contradicted"),
+        empty_output.contains("outcome=empty-population"),
+        "the two zero states must never render identically -- that collapse is the defect"
+    );
+
+    // The default set still measures and still enforces. A guard that made the
+    // normal path red would be the same end state as the bug.
+    let normal = release_quality_policy("review lint,review test", "failure", "success", "success");
+    let normal_output = String::from_utf8_lossy(&normal.stdout).into_owned();
+
+    assert!(
+        normal.status.success(),
+        "the default release path must be unaffected: {normal_output}"
+    );
+    assert!(
+        normal_output.contains("population=2 units=2 outcome=measured"),
+        "the default path must record that it actually measured both blocking gates: \
+         {normal_output}"
+    );
+}
+
 #[test]
 fn release_audit_is_advisory_without_losing_raw_failure_outcome() {
     let gate_audit = job_section(release_workflow(), "gate-audit");
