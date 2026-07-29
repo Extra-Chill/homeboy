@@ -85,6 +85,48 @@ impl Drop for ReverseSessionHeartbeat {
     }
 }
 
+/// Wall-clock ledger for the acceptance run.
+///
+/// This test is the slowest binary in the suite and its deadlines are wall
+/// clock, so a bare panic message says nothing about which phase consumed the
+/// budget. Record each boundary and render the ledger into every panic so a CI
+/// log is sufficient evidence — the machine that reproduces it is not
+/// available to whoever reads the failure.
+struct PhaseLedger {
+    started: Instant,
+    previous: Instant,
+    phases: Vec<(&'static str, Duration)>,
+}
+
+impl PhaseLedger {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            started: now,
+            previous: now,
+            phases: Vec::new(),
+        }
+    }
+
+    fn mark(&mut self, phase: &'static str) {
+        let now = Instant::now();
+        self.phases.push((phase, now.duration_since(self.previous)));
+        self.previous = now;
+    }
+
+    fn render(&self) -> String {
+        let mut rendered = String::from("phase timings (seconds):");
+        for (phase, elapsed) in &self.phases {
+            rendered.push_str(&format!("\n  {phase}: {:.2}", elapsed.as_secs_f64()));
+        }
+        rendered.push_str(&format!(
+            "\n  TOTAL: {:.2}",
+            self.started.elapsed().as_secs_f64()
+        ));
+        rendered
+    }
+}
+
 fn output(command: &mut Command) -> std::process::Output {
     let output = command.output().expect("run homeboy fixture command");
     assert!(
@@ -127,6 +169,7 @@ fn json_field<'a>(value: &'a serde_json::Value, field: &str) -> Option<&'a serde
 fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
     use std::os::unix::fs::PermissionsExt;
 
+    let mut ledger = PhaseLedger::new();
     let _env_guard = homeboy_core::test_support::home_env_guard();
     let context = HermeticTestContext::new();
     std::env::set_var("HOME", context.home());
@@ -139,6 +182,7 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
         homeboy_core::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV,
         "0000000000000000000000000000000000000000000000000000000000000000",
     );
+    ledger.mark("hermetic_context");
     let broker = ReverseBrokerFixture::start("lab");
     let (_checkout_guard, checkout) =
         homeboy_core::test_support::shared_committed_git_repo_fixture("cook-source");
@@ -160,6 +204,7 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
             task_worktree.to_str().expect("task worktree path"),
         ],
     );
+    ledger.mark("git_fixtures");
     let provider = context.root().join("provider.sh");
     std::fs::write(
         &provider,
@@ -212,6 +257,7 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
     let daemon_pid = json_field(&daemon_status, "pid")
         .and_then(serde_json::Value::as_u64)
         .expect("daemon pid");
+    ledger.mark("daemon_ready");
 
     output(context.command(TestBinary::HomeboyFixture).args([
         "server",
@@ -239,6 +285,7 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
         ]),
     );
 
+    ledger.mark("server_and_runner_configured");
     let session_path = context
         .config_dir()
         .join("runner-sessions/lab/fixture-controller.json");
@@ -302,14 +349,45 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
         ))
         .status()
         .expect("run Cook fixture command");
+    ledger.mark("detached_cook_cli");
     let cook_stdout = std::fs::read(&cook_stdout_path).expect("read Cook stdout");
     let cook_stderr = std::fs::read(&cook_stderr_path).expect("read Cook stderr");
-    assert!(
-        cook_status.success(),
-        "stdout={}\nstderr={}",
-        String::from_utf8_lossy(&cook_stdout),
-        String::from_utf8_lossy(&cook_stderr),
-    );
+    if !cook_status.success() {
+        // The summary Cook view carries no `failure_context`, so the exit
+        // status alone names no cause (#10237). A failing Cook is exactly when
+        // the controller's own record and the daemon it delegated to are worth
+        // reading, so hydrate both before panicking.
+        let reported_run_id = serde_json::from_slice::<serde_json::Value>(&cook_stdout)
+            .ok()
+            .and_then(|report| {
+                report["latest_run_id"]
+                    .as_str()
+                    .or_else(|| report["cook_id"].as_str())
+                    .map(str::to_string)
+            });
+        let full_status = reported_run_id.map(|run_id| {
+            let status = context
+                .command(TestBinary::HomeboyFixture)
+                .env("PATH", &path)
+                .args(["agent-task", "status", &run_id, "--full"])
+                .output()
+                .expect("inspect failed Cook run");
+            format!(
+                "stdout={}\nstderr={}",
+                String::from_utf8_lossy(&status.stdout),
+                String::from_utf8_lossy(&status.stderr),
+            )
+        });
+        panic!(
+            "detached Cook CLI failed\n{}\ncook stdout={}\ncook stderr={}\nagent-task status --full: {}\ndaemon stderr={}",
+            ledger.render(),
+            String::from_utf8_lossy(&cook_stdout),
+            String::from_utf8_lossy(&cook_stderr),
+            full_status.as_deref().unwrap_or("<no run id reported>"),
+            std::fs::read_to_string(&daemon_stderr_path)
+                .unwrap_or_else(|error| format!("<unavailable: {error}>")),
+        );
+    }
     let accepted: serde_json::Value = serde_json::from_slice(&cook_stdout).expect("cook JSON");
     assert!(
         accepted["status"] == "in_flight"
@@ -334,13 +412,17 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
                 .output()
                 .expect("inspect stalled controller parent");
             panic!(
-                "controller did not enqueue reverse job\nstatus stdout={}\nstatus stderr={}",
+                "controller did not enqueue reverse job\n{}\nstatus stdout={}\nstatus stderr={}\ndaemon stderr={}",
+                ledger.render(),
                 String::from_utf8_lossy(&status.stdout),
                 String::from_utf8_lossy(&status.stderr),
+                std::fs::read_to_string(&daemon_stderr_path)
+                    .unwrap_or_else(|error| format!("<unavailable: {error}>")),
             );
         }
         std::thread::sleep(Duration::from_millis(25));
     };
+    ledger.mark("controller_enqueued_reverse_job");
     assert_eq!(queued.len(), 1, "detached Cook submits one durable job");
     assert_eq!(queued[0].status, JobStatus::Queued);
 
@@ -366,6 +448,7 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
         "worker={worker:#?} events={:#?}",
         broker.store.events(queued[0].id).expect("events")
     );
+    ledger.mark("reverse_worker_first_wave");
     assert!(worker.claimed);
     let completed = broker
         .store
@@ -446,6 +529,7 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
             broker_retry_limit: 1,
         })
         .expect("duplicate worker wake");
+    ledger.mark("reverse_worker_duplicate_wave");
     assert_eq!(duplicate_code, 0);
     // Both worker waves have returned, so the reverse worker is gone and its
     // controller-session heartbeat stops. That is the steady state of a
@@ -457,7 +541,16 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
     // `daemon serve` is intentionally un-tokenized, so terminate the test-owned
     // foreground child only after that durable parent lifecycle is terminal.
     let run_id = accepted["latest_run_id"].as_str().expect("accepted run id");
+    // Bound this on observations as well as wall clock. Each poll is a whole
+    // `homeboy` subprocess, so on a loaded machine a single observation can
+    // outlast a bare wall-clock deadline and the controller is declared stalled
+    // having been asked exactly once. The deadline then measures how long the
+    // probe took, not whether the controller made progress. Requiring a minimum
+    // number of observations keeps the assertion about the controller while
+    // leaving the failure bounded.
+    const MINIMUM_TERMINAL_OBSERVATIONS: u32 = 8;
     let deadline = Instant::now() + Duration::from_secs(10);
+    let mut observations = 0u32;
     let terminal = loop {
         let status = context
             .command(TestBinary::HomeboyFixture)
@@ -468,6 +561,7 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
             .args(["agent-task", "status", run_id])
             .output()
             .expect("read terminal parent status");
+        observations += 1;
         let parsed: serde_json::Value =
             serde_json::from_slice(&status.stdout).expect("parse terminal parent status");
         if matches!(
@@ -478,9 +572,10 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
         ) {
             break parsed;
         }
-        if Instant::now() >= deadline {
+        if observations >= MINIMUM_TERMINAL_OBSERVATIONS && Instant::now() >= deadline {
             panic!(
-                "controller did not project terminal broker result\nstatus={}\ndaemon stderr={}",
+                "controller did not project terminal broker result after {observations} observations\n{}\nstatus={}\ndaemon stderr={}",
+                ledger.render(),
                 parsed,
                 std::fs::read_to_string(&daemon_stderr_path)
                     .unwrap_or_else(|error| format!("<unavailable: {error}>")),
@@ -488,13 +583,20 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
         }
         std::thread::sleep(Duration::from_millis(25));
     };
+    ledger.mark("controller_terminal_projection");
     assert_eq!(
         terminal
             .pointer("/data/state")
             .and_then(serde_json::Value::as_str),
         Some("succeeded"),
-        "controller terminal projection: {terminal}"
+        "controller terminal projection: {terminal}\n{}",
+        ledger.render(),
     );
     daemon.kill().expect("stop test-owned controller daemon");
     daemon.wait().expect("controller daemon fixture exits");
+    // Slow-test findings key off this binary's duration (#10655). Publish the
+    // phase ledger unconditionally so a passing run still explains where its
+    // budget went; libtest hides it unless the test fails or `--nocapture` is
+    // set, and `--nocapture` is exactly how this gets investigated.
+    println!("{}", ledger.render());
 }
