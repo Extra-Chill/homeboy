@@ -29,10 +29,11 @@ multi-user service.
 
 When a recorded daemon is stale or unreachable but its PID is still live, an
 operator can use a lease-bound local force stop. It never uses the daemon HTTP
-endpoint, sends SIGTERM only after the persisted lease matches exactly, waits
-for process death, and refuses while durable jobs are active. Forced process
-termination currently requires Linux `/proc` evidence that the target owns the
-persisted daemon startup token:
+endpoint, revalidates the exact persisted lease and zero-job state before every
+signal, and refuses while durable jobs are active. It uses Linux `/proc` token
+evidence on Linux and the explicit startup-token command argument on other Unix
+controllers, with bounded SIGTERM-to-SIGKILL escalation for the exact supervised
+daemon pair:
 
 ```sh
 homeboy daemon stop --force --lease-id <exact-live-lease>

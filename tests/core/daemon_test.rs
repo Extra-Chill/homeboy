@@ -2156,6 +2156,59 @@ fn force_stop_escalates_when_a_token_owned_daemon_ignores_sigterm() {
     assert!(!pid_is_running(pid));
 }
 
+#[cfg(unix)]
+#[test]
+fn lease_bound_stop_converges_term_resistant_mixed_version_supervisor_and_daemon() {
+    let _home = HomeGuard::new();
+    let startup_token = "mixed-version-supervised-daemon";
+    let marker = tempfile::NamedTempFile::new().expect("child PID marker");
+    let marker_path = marker.path().to_string_lossy().into_owned();
+    let supervisor = Command::new("sh")
+        .args([
+            "-c",
+            ": daemon supervise; trap '' TERM; sh -c 'trap \"\" TERM; while :; do sleep 1; done' homeboy daemon serve --startup-token \"$2\" & echo $! > \"$3\"; child=$!; while kill -0 \"$child\" 2>/dev/null; do sleep 1; done; while :; do sleep 1; done",
+            "homeboy",
+            "--startup-token",
+            startup_token,
+            marker_path.as_str(),
+        ])
+        .env(DAEMON_STARTUP_TOKEN_ENV, startup_token)
+        .spawn()
+        .expect("start TERM-resistant mixed-version supervisor");
+    let supervisor_pid = supervisor.id();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let daemon_pid = loop {
+        if let Ok(pid) = std::fs::read_to_string(&marker_path)
+            .map(|pid| pid.trim().parse::<u32>().expect("child PID"))
+        {
+            break pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "supervisor did not start daemon child"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let mut state = daemon_state_for_test(daemon_pid, "127.0.0.1:1");
+    state.build_identity.version = "0.321.1".to_string();
+    state.build_identity.display = "homeboy 0.321.1+92323a8adef6".to_string();
+    state.binary_sha256 = Some("recorded-homeboy-0.321.1".to_string());
+    state.startup_token = startup_token.to_string();
+    write_daemon_state_for_test(&state);
+
+    let started = Instant::now();
+    let result = stop_for_lease(&state.lease_id).expect("managed lease stop converges pair");
+
+    assert!(result.stopped);
+    assert!(started.elapsed() < Duration::from_secs(10));
+    let evidence = result.termination_evidence.expect("termination evidence");
+    assert!(evidence.os_evidence.contains("daemon pid"));
+    assert!(evidence.os_evidence.contains("supervisor SIGKILL"));
+    assert!(!pid_is_running(daemon_pid));
+    assert!(!pid_is_running(supervisor_pid));
+    assert!(!state_path().expect("state path").exists());
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn lease_bound_stop_recovers_only_the_exact_daemon_after_binary_rebuild() {
