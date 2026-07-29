@@ -72,6 +72,7 @@ pub struct InvocationGuard {
     /// entry so cleanup can resolve its durable owner after this guard exits.
     cleanup_paths: [PathBuf; 2],
     runtime_tmp_dir: PathBuf,
+    runtime_tmp_alias: Option<PathBuf>,
     runtime_tmp_pin: Option<super::temp::RuntimeTempPin>,
 }
 
@@ -214,13 +215,24 @@ impl InvocationGuard {
             let _ = fs::remove_dir_all(&artifact_dir);
             return Err(error);
         }
+        let (exported_tmp_dir, runtime_tmp_alias) =
+            match exported_runtime_tmp_dir(&runtime_root, &short, &runtime_tmp_dir) {
+                Ok(exported) => exported,
+                Err(error) => {
+                    let _ = fs::remove_dir_all(&runtime_tmp_dir);
+                    let _ = fs::remove_file(lease_path(&id)?);
+                    let _ = fs::remove_dir_all(&state_dir);
+                    let _ = fs::remove_dir_all(&artifact_dir);
+                    return Err(error);
+                }
+            };
         let cleanup_paths = [state_dir.clone(), artifact_dir.clone()];
         Ok(Self {
             env: InvocationEnv {
                 id: id.clone(),
                 state_dir,
                 artifact_dir,
-                tmp_dir: runtime_tmp_dir.clone(),
+                tmp_dir: exported_tmp_dir,
                 port_base,
                 port_max,
             },
@@ -228,6 +240,7 @@ impl InvocationGuard {
             named_leases: requirements.named_leases.clone(),
             cleanup_paths,
             runtime_tmp_dir,
+            runtime_tmp_alias,
             runtime_tmp_pin: Some(runtime_tmp_pin),
         })
     }
@@ -333,7 +346,11 @@ impl InvocationGuard {
 
 impl Drop for InvocationGuard {
     fn drop(&mut self) {
-        // Best-effort cleanup of all three sibling invocation directories.
+        // Best-effort cleanup of the short-lived invocation directories and
+        // the socket-safe alias to durable managed temp.
+        if let Some(alias) = &self.runtime_tmp_alias {
+            let _ = fs::remove_file(alias);
+        }
         // Decoupled from any caller-provided `RunDir` cleanup so concurrent
         // invocations do not accumulate stale state under the short
         // platform runtime root.
@@ -362,6 +379,36 @@ impl Drop for InvocationGuard {
             let _ = fs::remove_file(path);
         }
     }
+}
+
+#[cfg(unix)]
+fn exported_runtime_tmp_dir(
+    runtime_root: &Path,
+    short: &str,
+    runtime_tmp_dir: &Path,
+) -> Result<(PathBuf, Option<PathBuf>)> {
+    let alias = runtime_root.join(format!("{short}.t"));
+    enforce_path_budget(&alias)?;
+    std::os::unix::fs::symlink(runtime_tmp_dir, &alias).map_err(|error| {
+        Error::internal_io(
+            format!(
+                "Failed to create invocation temp alias {} -> {}: {error}",
+                alias.display(),
+                runtime_tmp_dir.display()
+            ),
+            Some("invocation.tmp.alias".to_string()),
+        )
+    })?;
+    Ok((alias.clone(), Some(alias)))
+}
+
+#[cfg(not(unix))]
+fn exported_runtime_tmp_dir(
+    _runtime_root: &Path,
+    _short: &str,
+    runtime_tmp_dir: &Path,
+) -> Result<(PathBuf, Option<PathBuf>)> {
+    Ok((runtime_tmp_dir.to_path_buf(), None))
 }
 
 fn validate_named_leases(invocation_id: &str, wanted: &[String]) -> Result<()> {

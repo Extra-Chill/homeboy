@@ -28,10 +28,10 @@
 //! - `<root>/<short-id>`     → `HOMEBOY_INVOCATION_STATE_DIR` (the leaf the
 //!   workload owns; downstream sockets bind directly here).
 //! - `<root>/<short-id>.a`   → `HOMEBOY_INVOCATION_ARTIFACT_DIR`
-//! - `<runtime-tmp>/homeboy-invocation-tmp-*` → `HOMEBOY_INVOCATION_TMP_DIR`
-//!   and `TMPDIR`. This is a metadata-backed durable runtime-temp owner rather
-//!   than a sibling here, so cleanup can classify child-created bytes after the
-//!   invocation exits.
+//! - `<root>/<short-id>.t` → Unix-only socket-safe alias exported as
+//!   `HOMEBOY_INVOCATION_TMP_DIR` and `TMPDIR`. It resolves to a
+//!   metadata-backed durable runtime-temp owner so cleanup can classify
+//!   child-created bytes after the invocation exits.
 //!
 //! There is no `s/a` subdir layer — that would burn `sockaddr_un` budget for
 //! no isolation gain since the invocation is already 1:1 with a single

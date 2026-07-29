@@ -11,7 +11,11 @@ fn active_invocation_lease_survives_transient_pin_loss() {
         &super::super::super::invocation::InvocationRequirements::default(),
     )
     .expect("invocation");
-    let path = invocation.context().tmp_dir;
+    let exported_path = invocation.context().tmp_dir;
+    #[cfg(unix)]
+    let path = fs::read_link(&exported_path).expect("managed invocation temp target");
+    #[cfg(not(unix))]
+    let path = exported_path.clone();
     fs::remove_file(path.join(RUNTIME_TEMP_PIN_FILE)).expect("simulate pin loss");
     let mut options = bounded_options(false, Some("homeboy-invocation-tmp"));
     options.older_than_days = 0;
@@ -36,6 +40,11 @@ fn active_invocation_lease_survives_transient_pin_loss() {
     assert!(path.exists());
 
     drop(invocation);
+    #[cfg(unix)]
+    assert!(
+        !exported_path.exists(),
+        "short temp alias is removed on drop"
+    );
     let removed = cleanup_runtime_tmp_bounded(options).expect("released cleanup");
     assert_eq!(removed.removed_count, 1);
     assert!(!path.exists());

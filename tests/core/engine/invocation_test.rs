@@ -317,7 +317,17 @@ fn invocation_socket_dirs_fit_under_sockaddr_un_budget() {
             assert!(
                 headroom >= SOCKET_HEADROOM_BYTES,
                 "{key} = {dir} only leaves {headroom} bytes of headroom, \
-                 less than required {SOCKET_HEADROOM_BYTES}"
+                less than required {SOCKET_HEADROOM_BYTES}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            let dir = value_for(&env, "HOMEBOY_INVOCATION_TMP_DIR");
+            let needed = dir.len() + 1 + SOCKET_HEADROOM_BYTES;
+            assert!(
+                needed <= SUN_PATH_CAPACITY,
+                "HOMEBOY_INVOCATION_TMP_DIR = {dir} needs {needed} bytes, exceeds \
+                 sockaddr_un capacity {SUN_PATH_CAPACITY}"
             );
         }
 
@@ -412,14 +422,16 @@ fn invocation_dir_permission_error_names_runtime_root_and_remediation() {
 fn invocation_drop_retains_managed_temp_directory() {
     with_isolated_home(|_| {
         let run_dir = RunDir::create().expect("run dir");
-        let (state_dir, artifact_dir, tmp_dir) = {
+        let (state_dir, artifact_dir, tmp_dir, managed_tmp_dir) = {
             let guard = InvocationGuard::acquire(&run_dir, &InvocationRequirements::default())
                 .expect("invocation guard");
             let env = guard.env_vars();
+            let tmp_dir = std::path::PathBuf::from(value_for(&env, "HOMEBOY_INVOCATION_TMP_DIR"));
             (
                 std::path::PathBuf::from(value_for(&env, "HOMEBOY_INVOCATION_STATE_DIR")),
                 std::path::PathBuf::from(value_for(&env, "HOMEBOY_INVOCATION_ARTIFACT_DIR")),
-                std::path::PathBuf::from(value_for(&env, "HOMEBOY_INVOCATION_TMP_DIR")),
+                tmp_dir.clone(),
+                std::fs::canonicalize(&tmp_dir).expect("managed temp target"),
             )
         };
         for path in [&state_dir, &artifact_dir] {
@@ -430,11 +442,14 @@ fn invocation_drop_retains_managed_temp_directory() {
             );
         }
         assert!(
-            tmp_dir.is_dir(),
+            managed_tmp_dir.is_dir(),
             "managed temp survives for lifecycle cleanup"
         );
+        #[cfg(unix)]
+        assert!(!tmp_dir.exists(), "short temp alias is removed on drop");
         let owner: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(tmp_dir.join(".homeboy-run-owner-v1.json")).expect("owner record"),
+            &std::fs::read(managed_tmp_dir.join(".homeboy-run-owner-v1.json"))
+                .expect("owner record"),
         )
         .expect("owner json");
         assert_eq!(owner["producer"], "invocation");
@@ -443,7 +458,7 @@ fn invocation_drop_retains_managed_temp_directory() {
             .as_array()
             .is_some_and(|ids| !ids.is_empty()));
 
-        std::fs::remove_dir_all(&tmp_dir).expect("remove managed temp fixture");
+        std::fs::remove_dir_all(&managed_tmp_dir).expect("remove managed temp fixture");
 
         run_dir.cleanup();
     });
