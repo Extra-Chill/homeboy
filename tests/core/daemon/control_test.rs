@@ -344,7 +344,7 @@ fn leaseless_store_aborts_on_ambiguous_or_live_owner_probe() {
 }
 
 #[test]
-fn daemon_process_attribution_matches_only_explicit_store_and_binary_identity() {
+fn daemon_process_attribution_falls_back_to_conventional_home_store() {
     let home = tempfile::tempdir().expect("home");
     let jobs = home.path().join(".config/homeboy/daemon/jobs.json");
     let executable = std::env::current_exe().expect("current executable");
@@ -363,6 +363,55 @@ fn daemon_process_attribution_matches_only_explicit_store_and_binary_identity() 
     );
     assert_eq!(candidate.bind_endpoint.as_deref(), Some("127.0.0.1:7421"));
     assert_eq!(candidate.durable_store_path.as_deref(), jobs.to_str());
+}
+
+#[test]
+fn daemon_process_attribution_matches_explicit_state_directory_store() {
+    let home = tempfile::tempdir().expect("home");
+    let state_dir = tempfile::tempdir().expect("state directory");
+    let jobs = state_dir.path().join("jobs.json");
+    let executable = std::env::current_exe().expect("current executable");
+    let line = format!(
+        "4243 {} HOME={} HOMEBOY_DAEMON_STATE_DIR={} {} daemon serve --addr 127.0.0.1:7421",
+        executable.display(),
+        home.path().display(),
+        state_dir.path().display(),
+        executable.display()
+    );
+
+    let candidate =
+        super::parse_daemon_process_candidate(&line, &jobs, Some(&executable)).expect("candidate");
+    assert_eq!(
+        candidate.ownership,
+        super::super::DaemonProcessOwnership::Owning
+    );
+    assert_eq!(candidate.durable_store_path.as_deref(), jobs.to_str());
+}
+
+#[test]
+fn daemon_process_attribution_proves_explicit_different_state_directory_unrelated() {
+    let home = tempfile::tempdir().expect("home");
+    let other_state_dir = tempfile::tempdir().expect("other state directory");
+    let jobs = home.path().join(".config/homeboy/daemon/jobs.json");
+    let executable = std::env::current_exe().expect("current executable");
+    let line = format!(
+        "4244 {} HOME={} HOMEBOY_DAEMON_STATE_DIR={} {} daemon serve --addr 127.0.0.1:7421",
+        executable.display(),
+        home.path().display(),
+        other_state_dir.path().display(),
+        executable.display()
+    );
+
+    let candidate =
+        super::parse_daemon_process_candidate(&line, &jobs, Some(&executable)).expect("candidate");
+    assert_eq!(
+        candidate.ownership,
+        super::super::DaemonProcessOwnership::Unrelated
+    );
+    assert_eq!(
+        candidate.durable_store_path.as_deref(),
+        other_state_dir.path().join("jobs.json").to_str()
+    );
 }
 
 #[test]
