@@ -160,10 +160,13 @@ JSON
 esac
 SH
 
+  # MOCK_RELEASE_DRAFT_STATE drives the publish-state read the wrapper uses to
+  # confirm a release actually shipped. Defaults to a published release.
   cat > "${BIN_DIR}/gh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-if [ "$*" = "release view v2.1.0 --repo Extra-Chill/homeboy-action" ]; then
+if [ "$*" = "release view v2.1.0 --repo Extra-Chill/homeboy-action --json isDraft --jq .isDraft" ]; then
+  printf '%s\n' "${MOCK_RELEASE_DRAFT_STATE:-false}"
   exit 0
 fi
 echo "unexpected gh args: $*" >&2
@@ -182,6 +185,7 @@ run_wrapper() {
   HOMEBOY_AUTH_FILE="${HOMEBOY_AUTH_FILE}" \
   HOMEBOY_MOCK_SCENARIO="${HOMEBOY_MOCK_SCENARIO}" \
   HOMEBOY_SUPPORTS_CONFIRM_FLAG="${HOMEBOY_SUPPORTS_CONFIRM_FLAG:-true}" \
+  MOCK_RELEASE_DRAFT_STATE="${MOCK_RELEASE_DRAFT_STATE:-false}" \
   MOCK_GIT_LOG="${MOCK_GIT_LOG}" \
   RELEASE_DRY_RUN="${RELEASE_DRY_RUN:-false}" \
   RELEASE_SKIP_PUBLISH="${RELEASE_SKIP_PUBLISH:-false}" \
@@ -225,6 +229,28 @@ assert_output_line 'release-tag=v2.1.0' "${OUTPUT_FILE}" "release tag output is 
 assert_output_line 'release-bump-type=minor' "${OUTPUT_FILE}" "release bump type output is translated"
 assert_output_line 'bump-type=minor' "${OUTPUT_FILE}" "legacy step bump type output is preserved"
 assert_no_git_pull "wrapper does not run its own git pull (core owns tip-sync)"
+
+# THE STRANDED-DRAFT REGRESSION (homeboy#10685).
+# `homeboy release` can report success while its github.release step leaves an
+# unpublished draft over the pushed tag — that is exactly how homeboy-action
+# v2.8.26/v2.8.27/v2.9.0/v2.9.1 stranded on 2026-07-28 with the floating v2 tag
+# frozen. A green `homeboy release` is therefore NOT proof of a shipped
+# release, so the wrapper must independently assert the published state and go
+# red when it finds a draft.
+setup_fixture
+HOMEBOY_MOCK_SCENARIO="released"
+GH_TOKEN="secret123"
+MOCK_RELEASE_DRAFT_STATE="true"
+DRAFT_OUTPUT="$(run_wrapper 2>&1)" && {
+  printf 'FAIL: wrapper reported success over an unpublished draft release\n%s\n' "${DRAFT_OUTPUT}"
+  exit 1
+}
+printf 'PASS: successful homeboy release over an unpublished draft exits non-zero\n'
+assert_contains 'is still an unpublished DRAFT' "${DRAFT_OUTPUT}" "stranded draft is named in the CI annotation"
+assert_contains 'gh release edit v2.1.0 --draft=false' "${DRAFT_OUTPUT}" "operator repair command is printed next to the stranded draft"
+assert_output_line 'released=false' "${OUTPUT_FILE}" "stranded draft is not reported as released"
+assert_output_line 'skipped-reason=release-not-published' "${OUTPUT_FILE}" "stranded draft reports the release-not-published reason"
+unset MOCK_RELEASE_DRAFT_STATE
 
 setup_fixture
 HOMEBOY_MOCK_SCENARIO="skipped"

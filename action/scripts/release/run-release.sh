@@ -263,6 +263,20 @@ if [ "${DRY_RUN}" = "true" ]; then
   exit 0
 fi
 
+# `homeboy release` reporting success is not proof that the release shipped.
+# The github.release step creates a DRAFT and publishes it in a later call; if
+# that publish never lands, the tag exists over an unpublished draft and the
+# pipeline still looks green. Assert the published effect before announcing a
+# release. Skipped when this component's GitHub Release is created elsewhere
+# (--no-github-release), because then there is nothing for us to assert.
+if [ "${RELEASE_SKIP_GITHUB_RELEASE}" != "true" ]; then
+  if ! homeboy_verify_github_release_published "${TAG:-v${VERSION}}" "${GITHUB_REPOSITORY:-}"; then
+    write_release_outputs "${RELEASE_OUTPUT_FILE}" "false" "release-not-published"
+    rm -f "${RELEASE_OUTPUT_FILE}"
+    exit 1
+  fi
+fi
+
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Released ${TAG} (${BUMP_TYPE})"
