@@ -618,16 +618,19 @@ pub fn upgrade_runner_with_executor(
         &mut extensions_skipped,
         &mut extensions_failed,
     );
-    let selected_materialized_binary = (path_drift.is_some() && selected_source_url.is_none())
-        .then(|| {
-            verified_materialized_source_binary(
-                runner,
-                command_source_path.as_deref(),
-                expected_build_identity.as_deref(),
-                exec,
-            )
-        })
-        .flatten();
+    let selected_materialized_binary = (path_drift.is_some()
+        && !selected_source_url
+            .as_deref()
+            .is_some_and(source_url_is_runner_reachable))
+    .then(|| {
+        verified_materialized_source_binary(
+            runner,
+            command_source_path.as_deref(),
+            expected_build_identity.as_deref(),
+            exec,
+        )
+    })
+    .flatten();
     let recovery_commands = runner_recovery_commands(
         &runner.id,
         &homeboy_path,
