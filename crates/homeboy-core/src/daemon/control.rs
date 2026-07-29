@@ -1774,9 +1774,6 @@ fn start_or_return_live_unlocked_with_startup_token(
 /// evidence immediately and never signal a process we cannot prove we own.
 fn refuse_unleased_process_conflict() -> Result<()> {
     let state_path = crate::paths::daemon_state_file()?;
-    if state_path.exists() {
-        return Ok(());
-    }
     let candidates = daemon_process_candidates(&crate::paths::daemon_jobs_file()?)?
         .into_iter()
         .filter(|candidate| {
@@ -1786,17 +1783,35 @@ fn refuse_unleased_process_conflict() -> Result<()> {
             )
         })
         .collect::<Vec<_>>();
+    refuse_unleased_process_conflict_with_candidates(&state_path, candidates)
+}
+
+/// A stale lease does not authorize replacement when foreground process
+/// evidence is still ambiguous. Bound the returned evidence so status and
+/// recovery errors remain safe to render in control-plane callers.
+fn refuse_unleased_process_conflict_with_candidates(
+    state_path: &Path,
+    candidates: Vec<DaemonProcessCandidate>,
+) -> Result<()> {
     if candidates.is_empty() {
         return Ok(());
     }
+    const EVIDENCE_LIMIT: usize = 8;
+    let candidate_count = candidates.len();
+    let candidates = candidates
+        .into_iter()
+        .take(EVIDENCE_LIMIT)
+        .collect::<Vec<_>>();
 
     let mut error = Error::internal_unexpected(
-        "daemon lease is missing while foreground daemon candidates remain live; refusing replacement without an authoritative lease",
+        "daemon lease is absent or stale while foreground daemon candidates remain live; refusing replacement without an authoritative lease",
     );
     error.details = serde_json::json!({
         "classification": "daemon_unleased_process_conflict",
         "state_path": state_path,
         "candidates": candidates,
+        "candidate_count": candidate_count,
+        "candidates_truncated": candidate_count > EVIDENCE_LIMIT,
         "safe_next_action": "Run `homeboy daemon status` and reconcile only a daemon whose PID, binary identity, durable-store path, and startup token are all attributable to this state directory.",
     });
     Err(error.with_hint(
