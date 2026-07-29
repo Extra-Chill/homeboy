@@ -8,9 +8,10 @@ use sha2::{Digest, Sha256};
 
 use super::apply::{
     preflight_configured_workspace_provider_with_config, run_provider_command,
-    AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace,
-    AgentTaskPromotionWorkspaceProvider, ExternalPromotionWorkspaceProvider,
-    AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
+    run_provider_command_with_timeout_for_test, AgentTaskPromotionApplyRequest,
+    AgentTaskPromotionWorkspace, AgentTaskPromotionWorkspaceProvider,
+    ExternalPromotionWorkspaceProvider, AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA,
+    AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
 
 use super::promote::{

@@ -1969,17 +1969,19 @@ fn configured_provider_timeout_is_bounded_and_retains_command_evidence() {
         trusted_unpushed_candidate_destination: None,
     };
     let started = std::time::Instant::now();
-    let error = run_provider_command(
+    let error = run_provider_command_with_timeout_for_test(
         &CommandInvocation {
             argv: vec!["sh".to_string(), "-c".to_string(), "sleep 2".to_string()],
             ..Default::default()
         },
         &request,
+        std::time::Duration::from_millis(100),
     )
     .expect_err("silent provider must be terminated");
 
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
     assert!(error.message.contains("timed out"));
+    assert!(error.message.contains("100 milliseconds"));
     assert_eq!(
         error.details["command_evidence"]["command"],
         "sh -c sleep 2"
