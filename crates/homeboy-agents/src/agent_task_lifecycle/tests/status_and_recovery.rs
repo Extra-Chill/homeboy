@@ -934,6 +934,70 @@ fn retry_uses_controller_plan_when_runner_projection_replaces_plan_path() {
     });
 }
 
+/// Persisting a terminal Lab-bound record from inside a config-lock section is
+/// the deadlock class behind #10751.
+///
+/// `store::write_record` reaches `workspace_authority::persist_terminal_from_record`,
+/// which acquires the config lock, but only when the record is terminal *and*
+/// Lab-runner bound *and* carries a `remote_workspace`. `flock(2)` is owned by
+/// the open file description, so before the reentrancy repair that nested
+/// acquisition blocked in the kernel forever, poisoning the process-wide
+/// isolated-home mutex and wedging every remaining test in this binary.
+///
+/// #10754 removed the one nesting site it found (`store::mutate_record`); the
+/// stall reappeared at `agent_task_service::execution`, which holds the lock
+/// across `record_cook_attempt` -> `store::write_record`. This pins the shape
+/// rather than either individual call site.
+///
+/// The write runs on a worker thread under a bounded wait so a regression fails
+/// this test by name instead of consuming the entire CI test phase silently.
+#[test]
+fn terminal_lab_record_persists_from_inside_a_config_lock_section() {
+    with_isolated_home(|_| {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let mut record = record_detached_lab_run(DetachedLabRunRecord {
+            run_id: "config-lock-nested-terminal",
+            runner_id: "homeboy-lab",
+            runner_job_id: "job-nested",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &command,
+        })
+        .expect("detached lab run");
+        record.state = AgentTaskRunState::Succeeded;
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(homeboy_core::config::with_config_lock(|| {
+                store::write_record(&record)
+            }));
+        });
+
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(90))
+            .expect(
+                "persisting a terminal Lab-bound record inside a config-lock section deadlocked; \
+                 the config lock is not reentrancy-safe",
+            )
+            .expect("terminal record persists");
+
+        let stored = store::read_record("config-lock-nested-terminal").expect("stored record");
+        assert_eq!(stored.state, AgentTaskRunState::Succeeded);
+
+        let authority =
+            crate::agent_task_lifecycle::workspace_authority::resolve_workspace_terminal_authority(
+                "config-lock-nested-terminal",
+                "homeboy-lab",
+                "/runner/workspace/homeboy",
+                Some("job-nested"),
+            )
+            .expect("terminal authority resolves");
+        assert!(
+            authority.is_some(),
+            "the nested write must still persist terminal workspace authority, not skip it"
+        );
+    });
+}
+
 #[test]
 fn logs_expose_mirrored_live_runner_events_before_terminal_aggregate() {
     with_isolated_home(|_| {

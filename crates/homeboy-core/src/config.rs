@@ -1098,6 +1098,137 @@ mod tests {
             vec!["beta-project (alias: staging)".to_string()]
         );
     }
+
+    /// Run `body` on a worker thread and fail, rather than hang, if it does not
+    /// finish in time.
+    ///
+    /// A regression in config-lock reentrancy blocks in the kernel forever. If
+    /// these tests called the nesting directly, that regression would wedge the
+    /// whole lib-test binary and libtest would report no failure at all — the
+    /// exact 45-minute silent CI timeout this module exists to prevent. Bounding
+    /// the wait converts it into a named assertion failure.
+    fn bounded<T: Send + 'static>(
+        label: &str,
+        body: impl FnOnce() -> T + Send + 'static,
+    ) -> std::thread::Result<T> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)));
+        });
+        receiver
+            .recv_timeout(Duration::from_secs(90))
+            .unwrap_or_else(|_| {
+                panic!("{label} did not finish within 90s; the config lock deadlocked")
+            })
+    }
+
+    #[test]
+    fn nested_config_lock_on_one_thread_does_not_deadlock() {
+        crate::test_support::with_isolated_home(|_home| {
+            let value = bounded("nested config lock", || {
+                with_config_lock(|| with_config_lock(|| Ok(7u32)))
+            })
+            .expect("nested config lock panicked")
+            .expect("nested config lock returned an error");
+
+            assert_eq!(value, 7);
+        });
+    }
+
+    #[test]
+    fn nested_config_lock_reports_depth_and_restores_it() {
+        crate::test_support::with_isolated_home(|_home| {
+            // Depth is thread-local, so the probe has to observe it from the
+            // same thread that holds the lock.
+            let depths = bounded("config lock depth", || {
+                let before = config_lock_depth();
+                let (outer, inner, after_inner) = with_config_lock(|| {
+                    let outer = config_lock_depth();
+                    let inner = with_config_lock(|| Ok(config_lock_depth()))?;
+                    Ok((outer, inner, config_lock_depth()))
+                })?;
+                Ok::<_, Error>((before, outer, inner, after_inner, config_lock_depth()))
+            })
+            .expect("depth probe panicked")
+            .expect("depth probe returned an error");
+
+            assert_eq!(
+                depths,
+                (0, 1, 2, 1, 0),
+                "re-entry must nest and unwind, not re-acquire"
+            );
+        });
+    }
+
+    #[test]
+    fn strict_mode_names_the_reentrancy_instead_of_joining_it() {
+        crate::test_support::with_isolated_home(|_home| {
+            let error = bounded("strict nested config lock", || {
+                std::env::set_var(CONFIG_LOCK_STRICT_ENV, "1");
+                let result = with_config_lock(|| with_config_lock(|| Ok(())));
+                std::env::remove_var(CONFIG_LOCK_STRICT_ENV);
+                result
+            })
+            .expect("strict probe panicked")
+            .expect_err("strict mode must reject re-entry");
+
+            assert_eq!(error.code, crate::error::ErrorCode::InternalIoError);
+            assert!(
+                error.details["error"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("re-entered at depth 2")),
+                "strict re-entry must name the depth: {:?}",
+                error.details
+            );
+        });
+    }
+
+    #[test]
+    fn a_held_config_lock_times_out_with_an_attributable_error() {
+        crate::test_support::with_isolated_home(|_home| {
+            // A second open file description on the same file is exactly what a
+            // competing process looks like to flock(2), so this exercises the
+            // real contended path rather than a simulated one.
+            let lock_path = paths::homeboy().expect("config root").join("config.lock");
+            std::fs::create_dir_all(lock_path.parent().expect("lock parent")).expect("config dir");
+            let holder = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .expect("holder handle");
+
+            #[cfg(unix)]
+            {
+                use std::os::fd::AsRawFd;
+                assert_eq!(
+                    unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX) },
+                    0,
+                    "holder acquires the lock"
+                );
+            }
+
+            let error = bounded("bounded config lock acquire", || {
+                std::env::set_var(CONFIG_LOCK_TIMEOUT_ENV, "1");
+                let result = with_config_lock(|| Ok(()));
+                std::env::remove_var(CONFIG_LOCK_TIMEOUT_ENV);
+                result
+            })
+            .expect("bounded acquire panicked")
+            .expect_err("a held lock must time out rather than block forever");
+
+            assert_eq!(error.code, crate::error::ErrorCode::InternalIoError);
+            assert!(
+                error.details["error"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("waiting for the Homeboy config lock")),
+                "timeout must name the lock: {:?}",
+                error.details
+            );
+
+            drop(holder);
+        });
+    }
 }
 
 // ============================================================================
