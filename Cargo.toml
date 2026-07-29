@@ -88,6 +88,29 @@ slow-tests = []
 # this crate's integration tests.
 test-support = ["homeboy-core/test-support"]
 
+# Hash and compression crates run at optimization even in dev/test builds.
+#
+# `agent-task cook` pins an immutable content-addressed controller runtime, which
+# means SHA-256 over the homeboy executable. That binary is ~700 MB unoptimized,
+# and `sha2` compiled at opt-level 0 hashes it roughly 40x slower than an
+# optimized build: ~40 s per digest instead of ~0.5 s.
+#
+# Every cook integration test spawns the real binary, so each one paid ~44 s of
+# pure hashing. That is the dominant cost in the test gate's 2700 s budget
+# (#10687). Optimizing just these dependencies keeps our own crates fully
+# debuggable while removing the cost.
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.sha1]
+opt-level = 3
+
+[profile.dev.package.digest]
+opt-level = 3
+
+[profile.dev.package.crypto-common]
+opt-level = 3
+
 [profile.dist]
 inherits = "release"
 lto = "thin"
