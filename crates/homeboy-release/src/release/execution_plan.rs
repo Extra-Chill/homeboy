@@ -159,20 +159,8 @@ fn resolve_head_release(
     tag_prefix: Option<&str>,
     component_id: &str,
 ) -> Result<(String, String)> {
-    let output = git::execute_git_for_release(local_path, &["tag", "--points-at", "HEAD"])
-        .map_err(|e| {
-            Error::internal_io(
-                format!("Failed to inspect tags pointing at HEAD: {}", e),
-                Some("git tag --points-at HEAD".to_string()),
-            )
-        })?;
-
-    let tags: Vec<String> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
-        .collect();
+    let head_commit = git::get_head_commit(local_path)?;
+    let tags = git::tags_pointing_at_commit(local_path, &head_commit)?;
 
     if tags.iter().any(|tag| tag == expected_tag) {
         return Ok((
@@ -213,8 +201,9 @@ fn resolve_head_release(
     Err(Error::validation_invalid_argument(
         "head",
         format!(
-            "--head requires a release tag at HEAD. Expected '{}'; tags at HEAD: {}; latest local release tag: {}; latest origin release tag: {}",
+            "--head requires a release tag at the resolved HEAD commit. Expected '{}'; resolved HEAD commit: {}; tags at that commit: {}; latest local release tag: {}; latest origin release tag: {}",
             expected_tag,
+            head_commit,
             if tags.is_empty() {
                 "none".to_string()
             } else {
@@ -618,7 +607,8 @@ mod tests {
         .expect_err("missing tag at HEAD should fail with recovery diagnostic");
 
         assert!(err.message.contains("Expected 'v0.11.10'"));
-        assert!(err.message.contains("tags at HEAD: none"));
+        assert!(err.message.contains("resolved HEAD commit:"), "{err:?}");
+        assert!(err.message.contains("tags at that commit: none"));
         assert!(err.message.contains("latest origin release tag: v0.11.11"));
         let tried = err
             .details
@@ -633,6 +623,50 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("homeboy release fixture --head")));
+    }
+
+    #[test]
+    fn head_release_resolves_annotated_tag_from_attached_branch_after_main_advances() {
+        let repo = tagged_release_repo("annotated");
+        let path = repo.path().to_str().expect("checkout path");
+
+        let (tag, version) = resolve_head_release(path, "v1.2.3", None, "fixture")
+            .expect("attached release branch must resolve its annotated tag");
+
+        assert_eq!((tag.as_str(), version.as_str()), ("v1.2.3", "1.2.3"));
+    }
+
+    #[test]
+    fn head_release_resolves_lightweight_tag_from_detached_checkout_after_main_advances() {
+        let repo = tagged_release_repo("lightweight");
+        run_in(repo.path(), &["git", "switch", "--detach", "v1.2.3"]);
+        let path = repo.path().to_str().expect("checkout path");
+
+        let (tag, version) = resolve_head_release(path, "v1.2.3", None, "fixture")
+            .expect("detached tag checkout must resolve its lightweight tag");
+
+        assert_eq!((tag.as_str(), version.as_str()), ("v1.2.3", "1.2.3"));
+    }
+
+    #[test]
+    fn head_release_rejects_tag_on_another_commit_from_attached_and_detached_checkouts() {
+        let repo = tagged_release_repo("annotated");
+        let path = repo.path().to_str().expect("checkout path");
+        run_in(
+            repo.path(),
+            &["git", "commit", "--allow-empty", "-m", "after release"],
+        );
+
+        for checkout in ["attached", "detached"] {
+            if checkout == "detached" {
+                run_in(repo.path(), &["git", "switch", "--detach", "HEAD"]);
+            }
+
+            let err = resolve_head_release(path, "v1.2.3", None, "fixture")
+                .expect_err("tag on another commit must fail closed");
+            assert!(err.message.contains("resolved HEAD commit:"), "{err:?}");
+            assert!(err.message.contains("tags at that commit: none"));
+        }
     }
 
     #[test]
@@ -722,5 +756,36 @@ mod tests {
             args,
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn tagged_release_repo(tag_kind: &str) -> tempfile::TempDir {
+        let repo = tempfile::tempdir().expect("repo");
+        run_in(repo.path(), &["git", "init", "-b", "main", "-q"]);
+        run_in(
+            repo.path(),
+            &["git", "config", "user.email", "test@example.com"],
+        );
+        run_in(repo.path(), &["git", "config", "user.name", "Homeboy Test"]);
+        run_in(
+            repo.path(),
+            &["git", "commit", "--allow-empty", "-m", "base"],
+        );
+        run_in(repo.path(), &["git", "switch", "-c", "release/1.2.3"]);
+        run_in(
+            repo.path(),
+            &["git", "commit", "--allow-empty", "-m", "release: v1.2.3"],
+        );
+        match tag_kind {
+            "annotated" => run_in(repo.path(), &["git", "tag", "-a", "v1.2.3", "-m", "v1.2.3"]),
+            "lightweight" => run_in(repo.path(), &["git", "tag", "v1.2.3"]),
+            other => panic!("unknown tag kind {other}"),
+        }
+        run_in(repo.path(), &["git", "switch", "main"]);
+        run_in(
+            repo.path(),
+            &["git", "commit", "--allow-empty", "-m", "main advanced"],
+        );
+        run_in(repo.path(), &["git", "switch", "release/1.2.3"]);
+        repo
     }
 }
