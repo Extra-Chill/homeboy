@@ -451,9 +451,11 @@ fn redact_resolved_secret_values(value: &str, secret_env: &[(String, String)]) -
     secrets.sort_by_key(|value| std::cmp::Reverse(value.len()));
     secrets.dedup();
 
-    let redacted = secrets.into_iter().fold(value.to_string(), |output, secret| {
-        output.replace(secret, "[REDACTED]")
-    });
+    let redacted = secrets
+        .into_iter()
+        .fold(value.to_string(), |output, secret| {
+            output.replace(secret, "[REDACTED]")
+        });
     homeboy_core::redaction::redact_string(&redacted)
 }
 

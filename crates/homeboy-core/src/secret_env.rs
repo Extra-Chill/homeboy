@@ -50,7 +50,10 @@ mod tests {
         let resolved = resolve_local_required([name.clone()], "test.secret_env", "test child")
             .expect("declared secret resolves");
 
-        assert_eq!(resolved, vec![(name.clone(), "fixture-local-secret".to_string())]);
+        assert_eq!(
+            resolved,
+            vec![(name.clone(), "fixture-local-secret".to_string())]
+        );
         std::env::remove_var(&name);
 
         let error = resolve_local_required([name.clone()], "test.secret_env", "test child")

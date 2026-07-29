@@ -795,7 +795,10 @@ mod tests {
                 .expect_err("release preflight must reject missing secret before spawn");
 
             assert!(error.message.contains("DECLARED_RELEASE_SECRET"));
-            assert!(error.details.to_string().contains("agent-task auth map-env"));
+            assert!(error
+                .details
+                .to_string()
+                .contains("agent-task auth map-env"));
             assert!(!marker.exists(), "release test child must not start");
         });
     }
