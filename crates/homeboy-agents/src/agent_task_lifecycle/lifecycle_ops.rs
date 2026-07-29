@@ -999,6 +999,18 @@ where
     Ok(record)
 }
 
+/// Inject raw observation metadata for a corruption-recovery fixture.
+///
+/// This intentionally bypasses typed record and Lab handoff validation. Normal
+/// test rewrites must use `rewrite_record_for_test`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn inject_raw_record_metadata_for_corruption_test(
+    run_id: &str,
+    inject: impl FnOnce(&mut Value),
+) -> Result<()> {
+    store::inject_raw_record_metadata_for_corruption_test(&sanitize_run_id(run_id), inject)
+}
+
 /// Reconcile the ownership captured at the local provider boundary. A local
 /// provider has no opaque remote handle, so its reserving process is the only
 /// durable authority that can prove the reservation is still executing.
