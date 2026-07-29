@@ -50,7 +50,10 @@ homeboy_normalize_validation_dependencies() {
         raw=$(printf '%s' "$raw" | jq -r '.')
     fi
 
-    raw=${raw//,/\n}
+    # Bash parameter substitution does not interpret escape sequences, so
+    # `${raw//,/\n}` would splice a literal `n` between entries and weld
+    # neighbouring tokens together. Translate commas to real newlines instead.
+    raw=$(printf '%s' "$raw" | tr ',' '\n')
 
     while IFS= read -r entry; do
         entry="${entry#${entry%%[![:space:]]*}}"
@@ -993,7 +996,12 @@ _homeboy_prepare_cloned_dependency() {
         return 0
     fi
 
-    if ! ( cd "$clone_path" && composer install --no-dev --no-interaction --quiet ); then
+    # `--no-plugins`: dependencies are installed only to supply an autoloader
+    # and vendor tree for analysis and test bootstrapping. Composer plugins
+    # such as `composer/installers` exist to relocate packages inside a real
+    # WordPress tree, which this copy is not, and running them would make
+    # preparation depend on the host's ambient `allow-plugins` policy.
+    if ! ( cd "$clone_path" && composer install --no-dev --no-interaction --no-plugins --quiet ); then
         echo "Warning: Could not install Composer dependencies for validation dependency '${clone_path}'." >&2
         return 1
     fi
@@ -1097,12 +1105,29 @@ homeboy_resolve_validation_dependency_path() {
     # 1. Direct path. Relative settings paths are anchored to the component
     # workspace, then canonicalized before callers embed them in generated
     # config files that may live outside that workspace.
+    #
+    # A bare slug is only satisfied by a directory that is actually a plugin.
+    # Components legitimately contain subdirectories named after a dependency
+    # for other reasons — a bbPress theme-compat template override directory is
+    # the canonical example — and treating those as the dependency mounts a
+    # non-plugin as a plugin and hides the real one. Explicit paths keep their
+    # existing behaviour below, so a deliberate `./path` or `/abs/path` still
+    # reports the location the operator named.
     if [ -d "$direct_path" ]; then
-        direct_path=$(cd "$direct_path" && pwd -P)
-        _homeboy_report_resolved_dependency "$dependency" "direct path" "$direct_path"
-        _homeboy_warn_if_dependency_stale "$dependency" "$direct_path"
-        printf '%s\n' "$direct_path"
-        return 0
+        local direct_path_is_slug=1
+        case "$dependency" in
+            /*|./*|../*) direct_path_is_slug=0 ;;
+        esac
+
+        if [ "$direct_path_is_slug" -eq 0 ] || _homeboy_is_plugin_shaped_path "$direct_path"; then
+            direct_path=$(cd "$direct_path" && pwd -P)
+            _homeboy_report_resolved_dependency "$dependency" "direct path" "$direct_path"
+            _homeboy_warn_if_dependency_stale "$dependency" "$direct_path"
+            printf '%s\n' "$direct_path"
+            return 0
+        fi
+
+        echo "Note: Ignoring '${direct_path}' for validation dependency '${dependency}': directory is not plugin-shaped (no root PHP file with a 'Plugin Name:' header). Continuing dependency resolution." >&2
     fi
 
     # An explicitly relative or absolute path is not a dependency slug. Return
@@ -1860,7 +1885,7 @@ homeboy_prepare_validation_dependency_for_wp_codebox_bench() {
     fi
 
     if ! command -v composer >/dev/null 2>&1; then
-        _homeboy_record_bench_dependency_build_failure "$artifacts_dir" "$dependency_slug" "$dependency_path" "$package_root" "$package_root" "$package_root" 'composer install --no-dev --no-interaction --no-progress --prefer-dist --classmap-authoritative' 127 ''
+        _homeboy_record_bench_dependency_build_failure "$artifacts_dir" "$dependency_slug" "$dependency_path" "$package_root" "$package_root" "$package_root" 'composer install --no-dev --no-interaction --no-progress --prefer-dist --classmap-authoritative --no-plugins' 127 ''
         echo "Error: WordPress bench dependency '${dependency_path}' has composer.json but no vendor autoload files, and composer is not available." >&2
         return 1
     fi
@@ -1928,12 +1953,15 @@ homeboy_prepare_validation_dependency_for_wp_codebox_bench() {
     local composer_output composer_exit
     composer_output=$(mktemp "${TMPDIR:-/tmp}/homeboy-wp-bench-dependency-composer-${dependency_slug}.XXXXXX")
     set +e
-    composer install --working-dir="$tmp_prepared_plugin_path" --no-dev --no-interaction --no-progress --prefer-dist --classmap-authoritative >"$composer_output" 2>&1
+    # `--no-plugins`: see _homeboy_install_git_dependency_composer_packages().
+    # The prepared copy only needs an autoloader, so Composer plugins must not
+    # make preparation depend on the host's `allow-plugins` policy.
+    composer install --working-dir="$tmp_prepared_plugin_path" --no-dev --no-interaction --no-progress --prefer-dist --classmap-authoritative --no-plugins >"$composer_output" 2>&1
     composer_exit=$?
     set -e
     if [ "$composer_exit" -ne 0 ]; then
         cat "$composer_output" >&2
-        _homeboy_record_bench_dependency_build_failure "$artifacts_dir" "$dependency_slug" "$dependency_path" "$package_root" "$prepare_root" "$tmp_prepared_plugin_path" "composer install --working-dir=${tmp_prepared_plugin_path} --no-dev --no-interaction --no-progress --prefer-dist --classmap-authoritative" "$composer_exit" "$composer_output"
+        _homeboy_record_bench_dependency_build_failure "$artifacts_dir" "$dependency_slug" "$dependency_path" "$package_root" "$prepare_root" "$tmp_prepared_plugin_path" "composer install --working-dir=${tmp_prepared_plugin_path} --no-dev --no-interaction --no-progress --prefer-dist --classmap-authoritative --no-plugins" "$composer_exit" "$composer_output"
         rm -rf "$tmp_entry"
         rm -f "$composer_output"
         echo "Error: Could not prepare WordPress bench dependency '${dependency_slug}' with Composer at ${tmp_prepared_plugin_path}." >&2
