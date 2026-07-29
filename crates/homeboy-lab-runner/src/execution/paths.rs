@@ -139,11 +139,28 @@ pub(super) fn validate_remote_cwd(root: &str, cwd: &str) -> Result<()> {
     if cwd == root || cwd.starts_with(&format!("{root}/")) {
         return Ok(());
     }
+    // A path outside the remote root that exists locally is almost always a
+    // controller-local checkout handed to a remote-only field. Naming the
+    // built-in materialization path turns an unusable "use a path under
+    // /home/..." hint into the exact command that does what was intended,
+    // instead of sending the operator through a manual `workspace sync` plus
+    // remote-path plumbing (#10364).
+    let mut tried = Vec::new();
+    if std::path::Path::new(&cwd).exists() {
+        tried.push(format!(
+            "`{cwd}` exists on this controller, so it looks like a local checkout passed to a remote-only field."
+        ));
+        tried.push(format!(
+            "To run against it on the runner, replace `--cwd {cwd}` with `--sync-workspace {cwd}`, keeping the rest of the command unchanged."
+        ));
+    }
+    tried.push(format!("Use a remote path under {root}"));
+
     Err(Error::validation_invalid_argument(
         "cwd",
         "remote cwd must be inside the configured runner workspace_root",
         Some(cwd),
-        Some(vec![format!("Use a path under {root}")]),
+        Some(tried),
     ))
 }
 
@@ -153,5 +170,79 @@ pub(super) fn trim_trailing_slashes(path: &str) -> String {
         "/".to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod validate_remote_cwd_tests {
+    use super::*;
+
+    fn tried(error: &Error) -> String {
+        error.details["tried"]
+            .as_array()
+            .expect("tried remediation")
+            .iter()
+            .filter_map(|hint| hint.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn remote_cwd_inside_the_workspace_root_is_accepted() {
+        validate_remote_cwd("/home/chubes/Developer", "/home/chubes/Developer").expect("root");
+        validate_remote_cwd(
+            "/home/chubes/Developer",
+            "/home/chubes/Developer/homeboy@fix",
+        )
+        .expect("nested path");
+    }
+
+    /// A local checkout handed to the remote-only `--cwd` must be diagnosed as
+    /// such and answered with the equivalent `--sync-workspace` command (#10364).
+    #[test]
+    fn existing_local_cwd_outside_the_root_recommends_sync_workspace() {
+        let local = tempfile::tempdir().expect("local checkout");
+        let local_path = local.path().to_str().expect("utf-8 path");
+
+        let error = validate_remote_cwd("/home/chubes/Developer", local_path)
+            .expect_err("a local path is not a valid remote cwd");
+
+        let hints = tried(&error);
+        assert!(
+            hints.contains("exists on this controller"),
+            "must classify the value as a local path: {hints}"
+        );
+        assert!(
+            hints.contains(&format!("--sync-workspace {local_path}")),
+            "must name the equivalent one-command path: {hints}"
+        );
+    }
+
+    /// A path that does not exist locally stays fail-closed with the original
+    /// remote-root guidance and no misleading sync suggestion.
+    #[test]
+    fn missing_cwd_outside_the_root_keeps_the_remote_root_guidance() {
+        let error = validate_remote_cwd(
+            "/home/chubes/Developer",
+            "/definitely/not/a/real/path/for/10364",
+        )
+        .expect_err("a nonexistent path is not a valid remote cwd");
+
+        let hints = tried(&error);
+        assert!(
+            hints.contains("Use a remote path under /home/chubes/Developer"),
+            "must retain remote-root guidance: {hints}"
+        );
+        assert!(
+            !hints.contains("--sync-workspace"),
+            "must not suggest syncing a path that does not exist: {hints}"
+        );
+    }
+
+    #[test]
+    fn relative_paths_are_rejected_before_local_classification() {
+        let error = validate_remote_cwd("/home/chubes/Developer", "relative/path")
+            .expect_err("relative remote cwd is rejected");
+        assert!(error.message.contains("must be absolute paths"));
     }
 }
