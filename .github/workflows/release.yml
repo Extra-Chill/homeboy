@@ -66,6 +66,8 @@ jobs:
       recovery-attempts: ${{ steps.check.outputs.recovery-attempts }}
       release-version: ${{ steps.check.outputs['release-version'] }}
       release-tag: ${{ steps.check.outputs['release-tag'] }}
+      verified-release-branch: ${{ steps.attach.outputs['release-branch'] }}
+      verified-release-sha: ${{ steps.attach.outputs['release-sha'] }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -121,6 +123,8 @@ jobs:
 
           git checkout -q -B "${RELEASE_BRANCH}" "${HEAD_SHA}"
           git branch --quiet --set-upstream-to "origin/${RELEASE_BRANCH}" "${RELEASE_BRANCH}" 2>/dev/null || true
+          echo "release-branch=${RELEASE_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "release-sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
           echo "::notice::HEAD attached to ${RELEASE_BRANCH} at ${HEAD_SHA:0:8}"
 
       - name: Restore failed release marker
@@ -596,6 +600,28 @@ jobs:
           persist-credentials: true
           token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
 
+      # The check job proved that this immutable push SHA was the release
+      # branch tip before selecting a fresh release. Re-establish precisely
+      # that verified identity here; never relabel an arbitrary detached
+      # checkout as a release branch.
+      - name: Attach verified release branch
+        if: inputs.release_tag == '' && needs.check.outputs.recovery-release != 'true'
+        env:
+          VERIFIED_RELEASE_BRANCH: ${{ needs.check.outputs['verified-release-branch'] }}
+          VERIFIED_RELEASE_SHA: ${{ needs.check.outputs['verified-release-sha'] }}
+        run: |
+          set -euo pipefail
+          HEAD_SHA="$(git rev-parse HEAD)"
+
+          if [ "${VERIFIED_RELEASE_BRANCH}" != "${RELEASE_BRANCH}" ] || [ -z "${VERIFIED_RELEASE_SHA}" ] || [ "${VERIFIED_RELEASE_SHA}" != "${HEAD_SHA}" ] || [ "${HEAD_SHA}" != "${GITHUB_SHA}" ]; then
+            echo "::error::Prepare release branch identity is not the check-verified ${RELEASE_BRANCH}@${GITHUB_SHA}. Refusing to attach detached HEAD ${HEAD_SHA}."
+            exit 1
+          fi
+
+          git checkout -q -B "${VERIFIED_RELEASE_BRANCH}" "${VERIFIED_RELEASE_SHA}"
+          git branch --quiet --set-upstream-to "origin/${VERIFIED_RELEASE_BRANCH}" "${VERIFIED_RELEASE_BRANCH}" 2>/dev/null || true
+          echo "::notice::Prepare attached the check-verified ${VERIFIED_RELEASE_BRANCH} at ${VERIFIED_RELEASE_SHA:0:8}"
+
       - name: Preflight release runner disk
         shell: bash
         run: |
@@ -654,6 +680,7 @@ jobs:
           expected-commands: review audit,review lint,review test
           args: --skip-checks=audit,lint,test
           release-dry-run: ${{ inputs.dry-run || 'false' }}
+          release-branch: ${{ needs.check.outputs['verified-release-branch'] }}
           release-skip-publish: 'true'
           release-skip-github-release: 'true'
           app-token: ${{ steps.app-token.outputs.token || '' }}
@@ -689,6 +716,11 @@ jobs:
           PREPARED="${{ steps.recovery.outputs.prepared || steps.prepared.outputs.prepared }}"
           RELEASED="${{ steps.recovery.outputs.released || steps.release.outputs.released }}"
           RECOVERY_RELEASE="${{ needs.check.outputs.recovery-release }}"
+
+          if [ -z "${RELEASE_VERSION}" ] || [ -z "${RELEASE_TAG}" ] || [ "${PREPARED}" != "true" ]; then
+            echo "::error::Release check selected work, but Prepare Release produced an incomplete handoff (release-version='${RELEASE_VERSION:-<empty>}', release-tag='${RELEASE_TAG:-<empty>}', prepared='${PREPARED:-<empty>}'). Refusing to skip artifact and publication jobs."
+            exit 1
+          fi
 
           echo "release-version=${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
           echo "release-tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
