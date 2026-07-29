@@ -1513,6 +1513,7 @@
         "enum_dispatch_contracts::crates/homeboy-cli/src/commands/self_cmd.rs::RepeatedEnumDispatchContract",
         "enum_dispatch_contracts::crates/homeboy-rig/src/workloads.rs::RepeatedEnumDispatchContract",
         "global_env_guard::crates/homeboy-agents/tests/durable_promotion.rs::GlobalEnvMutationGuard",
+        "global_env_guard::tests/reverse_cook_queue_acceptance.rs::GlobalEnvMutationGuard",
         "intra-method-duplication::crates/homeboy-agents/src/agent_task/matrix.rs::IntraMethodDuplicate",
         "intra-method-duplication::crates/homeboy-agents/src/agent_task_config_materialization.rs::IntraMethodDuplicate",
         "intra-method-duplication::crates/homeboy-agents/src/agent_task_contract.rs::IntraMethodDuplicate",
