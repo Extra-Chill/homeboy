@@ -219,6 +219,16 @@ pub struct RunnerToolCapabilityRequirement {
     pub capabilities: Vec<String>,
 }
 
+/// Extension-owned command that proves a runner toolchain is usable.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunnerToolchainReadinessProbe {
+    pub extension_id: String,
+    pub id: String,
+    pub command: String,
+    pub repair_command: Option<String>,
+    pub diagnostic_env: Vec<String>,
+}
+
 /// A resolved set of capability requirements to preflight before running a
 /// command on a runner.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -227,6 +237,7 @@ pub struct RunnerCapabilityPreflight {
     pub required_tools: Vec<RunnerRequiredTool>,
     pub required_commands: Vec<String>,
     pub required_tool_capabilities: Vec<RunnerToolCapabilityRequirement>,
+    pub required_toolchain_probes: Vec<RunnerToolchainReadinessProbe>,
     pub required_components: Vec<String>,
     pub required_env: Vec<String>,
     pub timeout: Option<std::time::Duration>,
@@ -237,6 +248,7 @@ impl RunnerCapabilityPreflight {
         self.required_tools.is_empty()
             && self.required_commands.is_empty()
             && self.required_tool_capabilities.is_empty()
+            && self.required_toolchain_probes.is_empty()
             && self.required_components.is_empty()
             && self.required_env.is_empty()
     }
@@ -260,6 +272,7 @@ impl From<PreparedLabRunnerCapability> for RunnerCapabilityPreflight {
             required_tools: plan.required_tools,
             required_commands: Vec::new(),
             required_tool_capabilities: Vec::new(),
+            required_toolchain_probes: Vec::new(),
             required_components: Vec::new(),
             required_env: Vec::new(),
             timeout: None,

@@ -1571,7 +1571,19 @@ pub(crate) fn run_lab_offload_inner(
         }
     }
 
-    let capability_preflight: Option<RunnerCapabilityPreflight> = capability_plan.map(Into::into);
+    let mut capability_preflight: Option<RunnerCapabilityPreflight> =
+        capability_plan.map(Into::into);
+    if let Some(toolchain_preflight) = toolchain_readiness_preflight(&contract)? {
+        match &mut capability_preflight {
+            Some(preflight) => preflight
+                .required_toolchain_probes
+                .extend(toolchain_preflight.required_toolchain_probes),
+            None => capability_preflight = Some(toolchain_preflight),
+        }
+    }
+    if let Some(preflight) = capability_preflight.as_ref() {
+        preflight_runner_toolchain_readiness(&runner, preflight)?;
+    }
     // Detached agent-task work is controller-owned from this point.
     // It must never fall through to caller-side workspace staging after admission.
     if request.detach_after_handoff

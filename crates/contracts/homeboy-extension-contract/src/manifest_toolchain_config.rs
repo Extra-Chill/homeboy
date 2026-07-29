@@ -6,6 +6,20 @@ use homeboy_engine_primitives::output_parse::ParseSpec;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
+/// An extension-owned executable readiness probe for portable operations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ToolchainReadinessProbe {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostic_env: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RequirementsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]

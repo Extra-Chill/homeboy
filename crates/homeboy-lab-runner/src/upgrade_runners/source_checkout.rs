@@ -113,6 +113,7 @@ pub fn runner_source_checkout_prepare_options(
         source_snapshot: None,
         path_materialization_plan: None,
         capability_preflight: Some(RunnerCapabilityPreflight {
+            required_toolchain_probes: Vec::new(),
             command: "prepare source checkout for homeboy upgrade".to_string(),
             required_tools: vec![RunnerRequiredTool::git()],
             required_commands: Vec::new(),

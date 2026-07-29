@@ -412,6 +412,7 @@ pub(super) fn source_cli_workspace_has_package_lock(file_path: &Path) -> bool {
 /// so the runner must expose the declared commands before remote dispatch.
 pub(super) fn source_cli_bootstrap_capability_preflight() -> RunnerCapabilityPreflight {
     RunnerCapabilityPreflight {
+        required_toolchain_probes: Vec::new(),
         command: "lab.source_cli_bootstrap".to_string(),
         required_tools: Vec::new(),
         required_commands: Vec::new(),

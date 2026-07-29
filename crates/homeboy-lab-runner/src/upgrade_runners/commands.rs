@@ -175,6 +175,7 @@ pub fn runner_exec_options(runner: &Runner, command: Vec<String>) -> RunnerExecO
 
 pub fn runner_upgrade_capability_plan() -> RunnerCapabilityPreflight {
     RunnerCapabilityPreflight {
+        required_toolchain_probes: Vec::new(),
         command: "homeboy upgrade".to_string(),
         required_tools: vec![RunnerRequiredTool::homeboy()],
         required_commands: Vec::new(),
