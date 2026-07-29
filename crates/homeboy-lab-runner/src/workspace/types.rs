@@ -329,6 +329,12 @@ pub struct RunnerWorkspacePruneOptions {
     pub passes: usize,
     /// Opaque cursor returned by a prior incomplete workspace-prune scan.
     pub cursor: Option<String>,
+    /// Continue pages in one bounded invocation, persisting each completed page.
+    pub converge: bool,
+    /// Resume the durable convergence receipt for this runner and policy.
+    pub resume: bool,
+    /// Optional wall-clock budget for a convergence invocation.
+    pub max_wall_time_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -370,6 +376,37 @@ pub struct RunnerWorkspacePruneOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_command: Option<String>,
     pub drain_command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub convergence: Option<RunnerWorkspacePruneConvergence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerWorkspacePrunePageReceipt {
+    pub pass: usize,
+    pub cursor_before: Option<String>,
+    pub cursor_after: Option<String>,
+    pub scanned_workspace_count: usize,
+    pub candidate_count: usize,
+    pub applied_count: usize,
+    pub skipped_count: usize,
+    pub reclaimed_bytes: u64,
+    pub scan_complete: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerWorkspacePruneConvergence {
+    pub receipt_path: String,
+    pub pass_count: usize,
+    pub cursor_history: Vec<Option<String>>,
+    pub inspected_count: usize,
+    pub candidate_count: usize,
+    pub applied_count: usize,
+    pub skipped_count: usize,
+    pub verified_reclaimed_bytes: u64,
+    pub terminal_reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume_command: Option<String>,
+    pub page_receipts: Vec<RunnerWorkspacePrunePageReceipt>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
