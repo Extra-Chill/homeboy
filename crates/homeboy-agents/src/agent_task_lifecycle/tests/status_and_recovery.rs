@@ -811,6 +811,18 @@ fn expired_or_cancelled_pending_submission_binds_and_cancels_the_accepted_job() 
                 assert_eq!(record.state, AgentTaskRunState::Cancelled);
                 let job_id = job.id.to_string();
                 assert_eq!(record.runner_job_id(), Some(job_id.as_str()));
+                assert_eq!(
+                    crate::agent_task_lifecycle::workspace_authority::resolve_workspace_terminal_authority(
+                        run_id,
+                        "homeboy-lab",
+                        "/runner/workspace/homeboy",
+                        Some(&job_id),
+                    )
+                    .expect("terminal authority resolves")
+                    .expect("terminal authority persisted")
+                    .runner_job_id,
+                    job_id,
+                );
             }
         }
         record_lab_offload_planned(LabOffloadProxyPlan {
