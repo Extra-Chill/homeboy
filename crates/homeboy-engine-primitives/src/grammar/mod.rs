@@ -328,6 +328,56 @@ mod tests {
         assert_eq!(lines[1].depth, 0);
     }
 
+    /// A trailing line comment containing an apostrophe must not open a string
+    /// region that swallows every following symbol (#10362).
+    #[test]
+    fn trailing_comment_apostrophe_does_not_hide_later_methods() {
+        let content = "<?php\nclass A {\n    public function registerCallback(): void {\n        $s = [\n            'properties' => [\n                'title' => [ 'type' => 'string' ], // the post's title\n            ],\n        ];\n    }\n    public function execute(): void {}\n}\n";
+        let grammar = php_grammar();
+
+        assert_eq!(
+            method_names(&extract(content, &grammar)),
+            vec!["registerCallback", "execute"]
+        );
+    }
+
+    /// PHP `#` comments have the same hazard as `//`.
+    #[test]
+    fn trailing_hash_comment_apostrophe_does_not_hide_later_methods() {
+        let content = "<?php\nclass A {\n    public function first(): void {\n        $x = 1; # don't do this\n    }\n    public function execute(): void {}\n}\n";
+        let grammar = php_grammar();
+
+        assert_eq!(
+            method_names(&extract(content, &grammar)),
+            vec!["first", "execute"]
+        );
+    }
+
+    /// A brace in comment prose is not structure, so it must not shift depth.
+    #[test]
+    fn trailing_comment_brace_does_not_shift_block_depth() {
+        let content = "<?php\nclass A {\n    public function first(): void {\n        $x = 1; // open { but never close\n    }\n    public function execute(): void {}\n}\n";
+        let grammar = php_grammar();
+
+        assert_eq!(
+            method_names(&extract(content, &grammar)),
+            vec!["first", "execute"]
+        );
+    }
+
+    /// A comment marker inside a string is not a comment, so the string must
+    /// still be scanned for real unclosed quotes.
+    #[test]
+    fn comment_marker_inside_a_string_is_not_treated_as_a_comment() {
+        let content = "<?php\nclass A {\n    public function first(): void {\n        $url = 'https://example.test/#frag';\n    }\n    public function execute(): void {}\n}\n";
+        let grammar = php_grammar();
+
+        assert_eq!(
+            method_names(&extract(content, &grammar)),
+            vec!["first", "execute"]
+        );
+    }
+
     #[test]
     fn php_hash_comments() {
         let content = "<?php\n# this is a comment\n$x = 1;\n";
