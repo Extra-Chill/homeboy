@@ -3170,6 +3170,26 @@ mod tests {
             .current_dir(repository.path())
             .output()
             .expect("initialize repository");
+        std::fs::write(repository.path().join(".gitignore"), "target/\n")
+            .expect("target ignore rule");
+        Command::new("git")
+            .args(["add", ".gitignore"])
+            .current_dir(repository.path())
+            .output()
+            .expect("stage ignore rule");
+        Command::new("git")
+            .args([
+                "-c",
+                "user.name=Homeboy Test",
+                "-c",
+                "user.email=homeboy@example.test",
+                "commit",
+                "-m",
+                "initial",
+            ])
+            .current_dir(repository.path())
+            .output()
+            .expect("commit ignore rule");
         std::fs::create_dir_all(repository.path().join("target/debug")).expect("target directory");
         std::fs::write(repository.path().join("target/debug/app"), "artifact")
             .expect("target artifact");
