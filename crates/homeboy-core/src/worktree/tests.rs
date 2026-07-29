@@ -1,5 +1,47 @@
 use super::*;
 
+#[test]
+fn registry_read_lease_blocks_active_worktree_publication() {
+    crate::test_support::with_isolated_home(|_| {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let (reader_ready_tx, reader_ready_rx) = std::sync::mpsc::channel();
+        let (reader_release_tx, reader_release_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            with_task_worktree_registry_read_lock(|| {
+                reader_ready_tx.send(()).expect("announce read lease");
+                reader_release_rx.recv().expect("release read lease");
+                Ok(())
+            })
+        });
+        reader_ready_rx.recv().expect("read lease acquired");
+
+        let path = worktree.path().to_path_buf();
+        let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            record_active_for_test("admitted-during-cleanup", &path);
+            writer_done_tx.send(()).expect("announce published record");
+        });
+        assert!(
+            writer_done_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "active worktree publication must wait for the cleanup read lease"
+        );
+
+        reader_release_tx.send(()).expect("release reader");
+        reader.join().expect("join reader").expect("reader result");
+        writer_done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("writer completes after read lease release");
+        writer.join().expect("join writer");
+        assert!(list()
+            .expect("list worktrees")
+            .worktrees
+            .iter()
+            .any(|record| record.id == "admitted-during-cleanup"));
+    });
+}
+
 fn run_git(dir: &Path, args: &[&str]) {
     let output = std::process::Command::new("git")
         .args(args)

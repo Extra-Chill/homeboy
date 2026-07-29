@@ -1,14 +1,20 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::{OnceLock, RwLock};
 
 use crate::component::{self, TargetSpec};
 use crate::error::{Error, Result};
 use crate::ownership;
 use crate::{git, paths};
+use fs4::fs_std::FileExt;
+use serde::{Deserialize, Serialize};
 
 mod queue_ops;
 mod store_ops;
 mod types;
+
+static TASK_WORKTREE_REGISTRY_GATE: OnceLock<RwLock<()>> = OnceLock::new();
+const MALFORMED_RECORD_REPAIR_LIMIT: usize = 20;
 
 pub use types::{
     AdoptedWorkspaceRecord, BranchCleanupIntent, BranchCleanupStatus, CleanupPolicy,
@@ -30,7 +36,283 @@ pub fn adopt(options: WorktreeAdoptOptions) -> Result<WorktreeAdoptOutput> {
 }
 
 pub fn list() -> Result<WorktreeListOutput> {
+    with_task_worktree_registry_read_lock(list_unlocked)
+}
+
+pub(crate) fn list_unlocked() -> Result<WorktreeListOutput> {
     list_with_store(&metadata_dir()?)
+}
+
+/// Evidence retained when a malformed task-worktree record is removed from the
+/// active registry. The original bytes and this provenance sidecar remain under
+/// `.quarantine`, so uncertain activity is never silently discarded.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskWorktreeRegistryQuarantine {
+    pub record_path: String,
+    pub quarantine_path: String,
+    pub provenance_path: String,
+    pub reason: String,
+    #[serde(default)]
+    pub planned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleared_at: Option<String>,
+    pub quarantined_at: String,
+}
+
+/// Plan or apply bounded malformed-record quarantine. Every returned record
+/// remains active protection until `clear_task_worktree_registry_quarantine`
+/// records an explicit verified terminal reconciliation.
+pub(crate) fn reconcile_malformed_task_worktree_records(
+    apply: bool,
+) -> Result<Vec<TaskWorktreeRegistryQuarantine>> {
+    with_task_worktree_registry_write_lock(|| {
+        let store = metadata_dir()?;
+        if !store.exists() {
+            return Ok(Vec::new());
+        }
+        let quarantine = store.join(".quarantine");
+        let mut entries: Vec<_> = fs::read_dir(&store)
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(store.display().to_string()))
+            })?
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(store.display().to_string()))
+            })?;
+        entries.sort_by_key(|entry| entry.file_name());
+
+        let mut quarantined = active_task_worktree_registry_quarantines(&quarantine)?;
+        let mut repaired_count = 0;
+        for entry in entries {
+            if repaired_count == MALFORMED_RECORD_REPAIR_LIMIT
+                || entry
+                    .path()
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    != Some("json")
+            {
+                continue;
+            }
+            let path = entry.path();
+            let Err(error) = read_record_path(&path) else {
+                continue;
+            };
+            let quarantined_at = chrono::Utc::now().to_rfc3339();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let quarantined_path = quarantine.join(format!("{name}-{}.json", uuid::Uuid::new_v4()));
+            let provenance_path = quarantined_path.with_extension("provenance.json");
+            let mut record = TaskWorktreeRegistryQuarantine {
+                record_path: path.display().to_string(),
+                quarantine_path: quarantined_path.display().to_string(),
+                provenance_path: provenance_path.display().to_string(),
+                reason: error.message,
+                planned: !apply,
+                cleared_at: None,
+                quarantined_at,
+            };
+            if !apply {
+                quarantined.push(record);
+                repaired_count += 1;
+                continue;
+            }
+            fs::create_dir_all(&quarantine).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(quarantine.display().to_string()))
+            })?;
+            record.planned = false;
+            let provenance = serde_json::to_string_pretty(&record).map_err(|error| {
+                Error::internal_json(error.to_string(), Some(record.provenance_path.clone()))
+            })?;
+            crate::io::write_output_file_atomically(
+                &provenance_path,
+                format!("{provenance}\n"),
+                crate::io::OutputWriteOptions::file(),
+            )
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(record.provenance_path.clone()))
+            })?;
+            if let Err(error) = fs::rename(&path, &quarantined_path) {
+                let _ = fs::remove_file(&provenance_path);
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some(path.display().to_string()),
+                ));
+            }
+            quarantined.push(record);
+            repaired_count += 1;
+        }
+        Ok(quarantined)
+    })
+}
+
+/// Mark one retained quarantine as terminally reconciled without deleting its
+/// original bytes. The caller supplies the explicit verified-terminal decision.
+pub fn clear_task_worktree_registry_quarantine(
+    provenance_path: &Path,
+    verified_terminal: bool,
+) -> Result<TaskWorktreeRegistryQuarantine> {
+    if !verified_terminal {
+        return Err(Error::validation_invalid_argument(
+            "verified_terminal",
+            "clearing quarantined worktree evidence requires verified terminal reconciliation",
+            Some(provenance_path.display().to_string()),
+            None,
+        ));
+    }
+    with_task_worktree_registry_write_lock(|| {
+        let quarantine = metadata_dir()?.join(".quarantine");
+        if !provenance_path.starts_with(&quarantine) {
+            return Err(Error::validation_invalid_argument(
+                "provenance_path",
+                "quarantine provenance path is outside the task-worktree registry",
+                Some(provenance_path.display().to_string()),
+                None,
+            ));
+        }
+        let raw = fs::read_to_string(provenance_path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(provenance_path.display().to_string()),
+            )
+        })?;
+        let mut record: TaskWorktreeRegistryQuarantine =
+            serde_json::from_str(&raw).map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some(provenance_path.display().to_string()),
+                )
+            })?;
+        if !Path::new(&record.quarantine_path).exists() {
+            return Err(Error::validation_invalid_argument(
+                "provenance_path",
+                "quarantined worktree evidence is missing",
+                Some(record.quarantine_path.clone()),
+                None,
+            ));
+        }
+        record.planned = false;
+        record.cleared_at = Some(chrono::Utc::now().to_rfc3339());
+        let raw = serde_json::to_string_pretty(&record).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some(provenance_path.display().to_string()),
+            )
+        })?;
+        crate::io::write_output_file_atomically(
+            provenance_path,
+            format!("{raw}\n"),
+            crate::io::OutputWriteOptions::file(),
+        )
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(provenance_path.display().to_string()),
+            )
+        })?;
+        Ok(record)
+    })
+}
+
+pub fn list_task_worktree_registry_quarantines() -> Result<Vec<TaskWorktreeRegistryQuarantine>> {
+    with_task_worktree_registry_read_lock(|| {
+        active_task_worktree_registry_quarantines(&metadata_dir()?.join(".quarantine"))
+    })
+}
+
+fn active_task_worktree_registry_quarantines(
+    quarantine: &Path,
+) -> Result<Vec<TaskWorktreeRegistryQuarantine>> {
+    if !quarantine.exists() {
+        return Ok(Vec::new());
+    }
+    let mut quarantines = Vec::new();
+    for entry in fs::read_dir(quarantine).map_err(|error| {
+        Error::internal_io(error.to_string(), Some(quarantine.display().to_string()))
+    })? {
+        let path = entry
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(quarantine.display().to_string()))
+            })?
+            .path();
+        if !path.to_string_lossy().ends_with(".provenance.json") {
+            continue;
+        }
+        let raw = fs::read_to_string(&path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(path.display().to_string()))
+        })?;
+        let record: TaskWorktreeRegistryQuarantine =
+            serde_json::from_str(&raw).map_err(|error| {
+                Error::internal_json(error.to_string(), Some(path.display().to_string()))
+            })?;
+        if record.cleared_at.is_none() {
+            quarantines.push(record);
+        }
+    }
+    quarantines.sort_by(|left, right| left.provenance_path.cmp(&right.provenance_path));
+    Ok(quarantines)
+}
+
+/// Hold a shared lease over the task-worktree registry while a caller reads
+/// liveness and mutates a worktree-local resource. Registry writers take the
+/// matching exclusive lease before atomically publishing their next snapshot.
+pub(crate) fn with_task_worktree_registry_read_lock<T>(
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let _gate = TASK_WORKTREE_REGISTRY_GATE
+        .get_or_init(|| RwLock::new(()))
+        .read()
+        .map_err(|_| Error::internal_unexpected("task worktree registry read gate poisoned"))?;
+    let lock = open_task_worktree_registry_lock()?;
+    lock.lock_shared().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("lock task worktree registry for read".to_string()),
+        )
+    })?;
+    operation()
+}
+
+pub(super) fn with_task_worktree_registry_write_lock<T>(
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let _gate = TASK_WORKTREE_REGISTRY_GATE
+        .get_or_init(|| RwLock::new(()))
+        .write()
+        .map_err(|_| Error::internal_unexpected("task worktree registry write gate poisoned"))?;
+    let lock = open_task_worktree_registry_lock()?;
+    lock.lock_exclusive().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("lock task worktree registry for write".to_string()),
+        )
+    })?;
+    operation()
+}
+
+fn open_task_worktree_registry_lock() -> Result<std::fs::File> {
+    let store = metadata_dir()?;
+    let parent = store.parent().ok_or_else(|| {
+        Error::internal_unexpected(format!(
+            "task worktree store has no parent: {}",
+            store.display()
+        ))
+    })?;
+    fs::create_dir_all(parent).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create {}", parent.display())),
+        )
+    })?;
+    OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(parent.join("task-worktrees.lock"))
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("open task worktree registry lock".to_string()),
+            )
+        })
 }
 
 pub fn status(id: &str) -> Result<WorktreeStatusOutput> {
@@ -117,6 +399,12 @@ pub(crate) fn record_active_for_test(id: &str, worktree_path: &Path) {
     };
     let store = metadata_dir().expect("task worktree store");
     write_record(&store, &record).expect("write task worktree record");
+}
+
+#[cfg(test)]
+pub(crate) fn remove_record_for_test(id: &str) {
+    let store = metadata_dir().expect("task worktree store");
+    fs::remove_file(record_path(&store, id)).expect("remove task worktree record");
 }
 
 use store_ops::*;
