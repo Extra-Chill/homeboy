@@ -1220,15 +1220,19 @@ fn release_head_attach_refuses_any_commit_that_is_not_the_branch_tip() {
     git(&["clone", "-q", upstream.to_str().unwrap(), "work"], &dir);
     let work = dir.join("work");
 
+    let step_output = dir.join("attach_output");
     let attach = |cwd: &std::path::Path| {
+        std::fs::write(&step_output, "").expect("reset step output");
         std::process::Command::new("bash")
             .arg("-e")
             .arg(&script_path)
             .env("RELEASE_BRANCH", "main")
+            .env("GITHUB_OUTPUT", &step_output)
             .current_dir(cwd)
             .output()
             .expect("attach step should run")
     };
+    let recorded = || std::fs::read_to_string(&step_output).unwrap_or_default();
     let branch_of = |cwd: &std::path::Path| {
         String::from_utf8_lossy(&git(&["rev-parse", "--abbrev-ref", "HEAD"], cwd).stdout)
             .trim()
@@ -1250,6 +1254,13 @@ fn release_head_attach_refuses_any_commit_that_is_not_the_branch_tip() {
         "main",
         "HEAD at the branch tip must be re-attached so the branch guard resolves"
     );
+    // The tip is not superseded. This is what keeps the #10703 hard failure
+    // armed: without this output, `wrong-branch` must stay unmeasured.
+    assert!(
+        !recorded().contains("superseded=true"),
+        "the branch tip must never be recorded as superseded: {}",
+        recorded()
+    );
 
     // An older commit is NOT the branch tip. Attaching it would let a release
     // be cut from an arbitrary SHA — the exact thing the guard exists to stop.
@@ -1265,9 +1276,100 @@ fn release_head_attach_refuses_any_commit_that_is_not_the_branch_tip() {
         "a commit that is not the branch tip must stay detached"
     );
     assert!(
-        String::from_utf8_lossy(&out.stdout).contains("::warning::"),
+        String::from_utf8_lossy(&out.stdout).contains("::notice::"),
         "refusing to attach must be visible"
+    );
+    // Refusal must leave EVIDENCE, not just a log line. The decide step keys
+    // its measured skip off these outputs; without them a superseded push is
+    // indistinguishable from the #10703 laundering bug and fails the run.
+    let recorded_refusal = recorded();
+    assert!(
+        recorded_refusal.contains("superseded=true"),
+        "a superseded commit must record that it was superseded: {recorded_refusal}"
+    );
+    let tip = String::from_utf8_lossy(&git(&["rev-parse", "origin/main"], &work).stdout)
+        .trim()
+        .to_string();
+    assert!(
+        recorded_refusal.contains(&format!("branch-tip={tip}")),
+        "a superseded commit must name the tip that beat it: {recorded_refusal}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A push that is overtaken by the next merge must skip quietly, and ONLY when
+/// this job proved the supersession itself.
+///
+/// #10706 made an unmeasured `wrong-branch` fail loudly, which was right for
+/// #10703 (HEAD *was* the tip and the guard misread a detached checkout). But
+/// at this repo's merge rate a push is routinely overtaken before its check job
+/// starts, and that is a measured, benign skip — the newer tip's run cuts the
+/// release, covering this commit's range too. Failing it turns a healthy merge
+/// train red.
+#[test]
+fn release_check_skips_a_superseded_push_but_still_fails_an_unmeasured_one() {
+    // Superseded: the attach step measured it and named the winning tip.
+    for reason in ["wrong-branch", ""] {
+        let (code, out) = run_decide_step(&[
+            ("steps.release-check.outcome", "success"),
+            ("steps.release-check.outputs['skipped-reason']", reason),
+            ("steps.attach.outputs.superseded", "true"),
+            ("steps.attach.outputs['branch-tip']", "0123456789abcdef"),
+        ]);
+        assert_eq!(
+            code, 0,
+            "a superseded push must not fail the release check (reason {reason:?}): {out}"
+        );
+        assert!(
+            out.contains("should-release=false"),
+            "a superseded push must skip the release (reason {reason:?}): {out}"
+        );
+        assert!(
+            !out.contains("should-release=true"),
+            "a superseded push must never release (reason {reason:?}): {out}"
+        );
+        assert!(
+            out.contains("Superseded"),
+            "the skip must name supersession as the reason (reason {reason:?}): {out}"
+        );
+        assert!(
+            out.contains("01234567"),
+            "the skip must name the tip that owns the release (reason {reason:?}): {out}"
+        );
+    }
+
+    // NOT superseded — HEAD really was the tip. This is #10703 itself, and it
+    // must still fail closed. This is the assertion that stops the fix above
+    // from being widened into a blanket `wrong-branch` amnesty.
+    let (code, out) = run_decide_step(&[
+        ("steps.release-check.outcome", "success"),
+        (
+            "steps.release-check.outputs['skipped-reason']",
+            "wrong-branch",
+        ),
+    ]);
+    assert_ne!(
+        code, 0,
+        "wrong-branch without a proven supersession must still fail: {out}"
+    );
+    assert!(
+        out.contains("::error::"),
+        "an unmeasured wrong-branch must still be loud: {out}"
+    );
+
+    // Supersession must not rescue a genuinely unmeasured reason either.
+    let (code, out) = run_decide_step(&[
+        ("steps.release-check.outcome", "success"),
+        (
+            "steps.release-check.outputs['skipped-reason']",
+            "release-output-missing",
+        ),
+        ("steps.attach.outputs.superseded", "true"),
+        ("steps.attach.outputs['branch-tip']", "0123456789abcdef"),
+    ]);
+    assert_ne!(
+        code, 0,
+        "release-output-missing is unmeasured even when superseded: {out}"
+    );
 }

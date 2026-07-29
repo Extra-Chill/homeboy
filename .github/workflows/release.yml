@@ -93,6 +93,7 @@ jobs:
       # the guard fires, and the decide step turns that into a hard failure
       # rather than a silent green.
       - name: Attach HEAD to the release branch
+        id: attach
         if: inputs.release_tag == ''
         run: |
           HEAD_SHA="$(git rev-parse HEAD)"
@@ -103,8 +104,18 @@ jobs:
             exit 0
           fi
 
+          # A newer commit reached the branch tip between this push and this
+          # checkout. That is not an unknown: we measured it right here, and it
+          # names the exact commit whose own run owns the release. Record it so
+          # the decide step can skip on evidence instead of failing on mystery.
+          #
+          # Superseding is expected at this repo's merge rate, and no work is
+          # lost: `homeboy release` computes its range from the last tag, so the
+          # newest tip's run covers this commit too.
           if [ "${HEAD_SHA}" != "${BRANCH_SHA}" ]; then
-            echo "::warning::HEAD ${HEAD_SHA:0:8} is not the ${RELEASE_BRANCH} tip ${BRANCH_SHA:0:8} - leaving HEAD detached"
+            echo "superseded=true" >> "$GITHUB_OUTPUT"
+            echo "branch-tip=${BRANCH_SHA}" >> "$GITHUB_OUTPUT"
+            echo "::notice::HEAD ${HEAD_SHA:0:8} is not the ${RELEASE_BRANCH} tip ${BRANCH_SHA:0:8} - superseded, the newer tip's run owns this release"
             exit 0
           fi
 
@@ -228,8 +239,33 @@ jobs:
           BUMP_TYPE="${{ steps.recovery.outputs['release-bump-type'] || steps.release-check.outputs['release-bump-type'] }}"
           DRY_RUN_OUTCOME="${{ steps.release-check.outcome }}"
           SKIPPED_REASON="${{ steps.release-check.outputs['skipped-reason'] }}"
+          SUPERSEDED="${{ steps.attach.outputs.superseded }}"
+          BRANCH_TIP="${{ steps.attach.outputs['branch-tip'] }}"
 
           echo "recovery-attempts=${STRANDED_ATTEMPTS:-0}" >> "$GITHUB_OUTPUT"
+
+          # A superseded push is a MEASURED negative, and the only one this job
+          # measures itself rather than reading back from the dry run.
+          #
+          # The attach step compared this commit against the branch tip and
+          # found a newer one, so `wrong-branch` here is the branch guard
+          # working correctly, not the #10703 laundering bug. Failing it turns
+          # every merge that is overtaken by the next merge into a red run.
+          #
+          # This deliberately does NOT widen the #10685 hole: the reason is
+          # only accepted when THIS job proved the supersession and recorded
+          # the winning tip. If HEAD really is the tip, `superseded` is empty,
+          # `wrong-branch` stays unmeasured, and the hard failure below still
+          # fires — which is exactly the #10703 regression signal.
+          if [ "${SUPERSEDED}" = "true" ] && [ -z "${RELEASE_VERSION}" ]; then
+            case "${SKIPPED_REASON}" in
+              wrong-branch|'')
+                echo "should-release=false" >> "$GITHUB_OUTPUT"
+                echo "::notice::Superseded: ${HEAD_SHA:0:8} is behind the ${RELEASE_BRANCH} tip ${BRANCH_TIP:0:8}, whose own run owns this release. Skipping (skipped-reason='${SKIPPED_REASON:-<empty>}')."
+                exit 0
+                ;;
+            esac
+          fi
 
           # #10685: absence of evidence must never be evidence of success.
           # An empty release-version has two very different causes, and this
