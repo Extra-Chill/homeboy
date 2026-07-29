@@ -40,9 +40,9 @@ pub use audit::{
 pub use config::{
     ArtifactInput, CleanupArtifactDeclaration, CommandScopeConfig, ComponentDeployConfig,
     ComponentGithubReleaseConfig, ComponentOverrideConfig, ComponentReleaseConfig,
-    ComponentScriptsConfig, DependencyStackEdge, GitDeployConfig, GithubConfig, GithubHostConfig,
-    GithubReleaseOwner, PackageCoverageArtifactMatch, PackageCoverageConfig, ScopeConfig,
-    ScopedExtensionConfig, VersionTarget,
+    ComponentScriptsConfig, DependencyStackEdge, DeploymentProviderAttachment, GitDeployConfig,
+    GithubConfig, GithubHostConfig, GithubReleaseOwner, PackageCoverageArtifactMatch,
+    PackageCoverageConfig, ScopeConfig, ScopedExtensionConfig, VersionTarget,
 };
 pub use inventory::{
     exists, extension_provides_artifact_pattern, inventory, list, list_ids, load,

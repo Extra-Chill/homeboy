@@ -210,6 +210,83 @@ pub fn run_extension(
     })
 }
 
+/// Run an extension-owned deployment provider command and retain its structured
+/// stdout for the deploy result. Provider-specific validation and mutation stay
+/// entirely inside the extension command.
+pub fn run_deployment_provider(
+    extension_id: &str,
+    provider_id: &str,
+    project_id: &str,
+    component_id: &str,
+    contract: &std::path::Path,
+) -> Result<ExtensionRunResult> {
+    let extension = load_extension(extension_id)?;
+    let provider = super::deployment_providers(&extension)
+        .into_iter()
+        .find(|provider| provider.id == provider_id)
+        .ok_or_else(|| Error::validation_invalid_argument(
+            "deployment_provider.provider",
+            format!("Extension '{extension_id}' does not declare deployment provider '{provider_id}'"),
+            None,
+            None,
+        ))?;
+    let readiness = extension_ready_status(&extension);
+    if !readiness.ready {
+        return Err(Error::validation_invalid_argument(
+            "deployment_provider.extension",
+            format!("Deployment extension '{extension_id}' is not ready"),
+            readiness.detail.or(readiness.reason),
+            None,
+        ));
+    }
+    let extension_path = validation::require(
+        extension.extension_path.as_ref(),
+        "extension",
+        "extension_path not set",
+    )?;
+    let contract = contract.to_str().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "deployment_provider.contract",
+            "Contract path is not valid UTF-8",
+            None,
+            None,
+        )
+    })?;
+    let quoted_contract = shell_quote(contract);
+    let command = template::render(
+        &provider.command,
+        &[
+            ("extension_path", extension_path),
+            ("payload.contract", &quoted_contract),
+        ],
+    );
+    let execution = execute_extension_command(
+        &command,
+        &[],
+        Some(extension_path),
+        &build_exec_env(
+            extension_id,
+            Some(project_id),
+            Some(component_id),
+            "{}",
+            Some(extension_path),
+            None,
+            None,
+            None,
+        ),
+        ExtensionExecutionMode::Captured,
+    )?;
+    Ok(ExtensionRunResult {
+        exit_code: execution.exit_code,
+        project_id: Some(project_id.to_string()),
+        output: Some(execution.output),
+    })
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 /// Execute a extension action (API call).
 pub fn run_action(
     extension_id: &str,
@@ -895,6 +972,7 @@ mod tests {
                     id: "fixture".to_string(),
                     local_path: attachment.path().to_string_lossy().to_string(),
                     remote_path: None,
+                    deployment_provider: None,
                 }],
                 ..Default::default()
             })

@@ -1002,6 +1002,7 @@ mod tests {
                             .display()
                             .to_string(),
                         remote_path: Some(format!("plugins/{id}")),
+                        deployment_provider: None,
                     }],
                     ..Project::default()
                 })

@@ -1049,11 +1049,13 @@ mod tests {
                     id: "a".to_string(),
                     local_path: "/stale/a".to_string(),
                     remote_path: Some("plugins/a".to_string()),
+                    deployment_provider: None,
                 },
                 homeboy_core::project::ProjectComponentAttachment {
                     id: "b".to_string(),
                     local_path: "/stale/b".to_string(),
                     remote_path: Some("plugins/b".to_string()),
+                    deployment_provider: None,
                 },
             ],
             ..Default::default()
@@ -1546,6 +1548,7 @@ mod tests {
                 id: id.to_string(),
                 local_path: dir.to_string_lossy().to_string(),
                 remote_path: None,
+                deployment_provider: None,
             };
 
             let project = Project {
