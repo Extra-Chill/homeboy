@@ -67,13 +67,16 @@ homeboy cleanup --include shared-cargo-targets --apply
 
 ## Automatic Retention
 
-An external scheduler can invoke one bounded Cargo-target retention pass:
+Declare the bounded Cargo-target retention pass through Homeboy's scheduler:
 
 ```bash
-homeboy cleanup automatic-retention
+homeboy schedule add automatic-retention \
+  --command "cleanup automatic-retention" \
+  --every 1h \
+  --on-overlap skip
 ```
 
-Set `retention.automatic_retention_enabled` to `true` to admit mutation. The hook remains disabled by default. `retention.automatic_retention_interval_seconds` controls cadence, `retention.limit` caps inspected stores per pass, and the existing Cargo byte budget and active-lease predicate remain authoritative. State, continuation cursor, and the exact forced resume command are written under the Homeboy data directory. Use `--force` only to resume a reported partial or no-progress pass before its next cadence.
+The schedule declaration is the explicit opt-in to unattended mutation. The Homeboy daemon owns cadence, overlap prevention, and stale-run recovery; no external timer is needed. `retention.limit` caps inspected stores per pass, while the existing Cargo byte budget and active-lease predicate remain authoritative. The cleanup command retains its own single-flight lock so a manual invocation cannot overlap a scheduled run. State, continuation cursor, and the exact resume command are written under the Homeboy data directory.
 
 ## Runner Binary Caches
 

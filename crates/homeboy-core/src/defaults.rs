@@ -212,13 +212,6 @@ pub struct RetentionConfig {
     pub shared_store_max_bytes: u64,
     #[serde(default = "default_shared_store_lease_seconds")]
     pub shared_store_lease_seconds: u64,
-    /// Explicit admission for an external scheduler to run automatic retention.
-    /// Disabled by default because this path mutates local stores unattended.
-    #[serde(default)]
-    pub automatic_retention_enabled: bool,
-    /// Minimum interval between automatic retention passes.
-    #[serde(default = "default_automatic_retention_interval_seconds")]
-    pub automatic_retention_interval_seconds: u64,
     /// Cooperative wall-clock budget for one automatic pass. Category owners
     /// finish an in-progress safe mutation before the executor yields.
     #[serde(default = "default_automatic_retention_max_run_seconds")]
@@ -238,8 +231,6 @@ impl Default for RetentionConfig {
             shared_store_days: default_shared_store_retention_days(),
             shared_store_max_bytes: default_shared_store_max_bytes(),
             shared_store_lease_seconds: default_shared_store_lease_seconds(),
-            automatic_retention_enabled: false,
-            automatic_retention_interval_seconds: default_automatic_retention_interval_seconds(),
             automatic_retention_max_run_seconds: default_automatic_retention_max_run_seconds(),
         }
     }
@@ -283,10 +274,6 @@ fn default_shared_store_max_bytes() -> u64 {
 
 fn default_shared_store_lease_seconds() -> u64 {
     6 * 60 * 60
-}
-
-fn default_automatic_retention_interval_seconds() -> u64 {
-    60 * 60
 }
 
 fn default_automatic_retention_max_run_seconds() -> u64 {

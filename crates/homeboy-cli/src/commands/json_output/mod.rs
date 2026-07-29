@@ -104,7 +104,7 @@ pub fn run_command_output(
                 args.command,
                 Some(crate::commands::cleanup::CleanupCommand::Artifacts(_))
                     | Some(crate::commands::cleanup::CleanupCommand::Worktrees(_))
-                    | Some(crate::commands::cleanup::CleanupCommand::AutomaticRetention(_))
+                    | Some(crate::commands::cleanup::CleanupCommand::AutomaticRetention)
             ) && !homeboy::core::lab_routing::is_lab_offload_subprocess();
             command_run_with_summary(dispatch(Commands::Cleanup(args), spec), |payload, _| {
                 summarize

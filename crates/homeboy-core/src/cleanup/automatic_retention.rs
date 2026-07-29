@@ -21,8 +21,6 @@ static IN_PROCESS_ADMISSION: OnceLock<Mutex<()>> = OnceLock::new();
 pub struct AutomaticRetentionOutput {
     pub command: &'static str,
     pub status: &'static str,
-    pub enabled: bool,
-    pub cadence_seconds: u64,
     pub max_run_seconds: u64,
     pub row_limit: usize,
     pub state_path: String,
@@ -39,27 +37,20 @@ struct AutomaticRetentionState {
     status: String,
 }
 
-pub fn run_automatic_cargo_retention(force: bool) -> Result<AutomaticRetentionOutput> {
+pub fn run_automatic_cargo_retention() -> Result<AutomaticRetentionOutput> {
     let retention = crate::defaults::load_config().retention;
     let data = homeboy_paths::homeboy_data()?;
-    run_automatic_cargo_retention_in(&retention, &data, None, force, SystemTime::now())
+    run_automatic_cargo_retention_in(&retention, &data, None, SystemTime::now())
 }
 
 fn run_automatic_cargo_retention_in(
     retention: &RetentionConfig,
     data: &Path,
     cargo_root: Option<PathBuf>,
-    force: bool,
     now: SystemTime,
 ) -> Result<AutomaticRetentionOutput> {
     let state_path = data.join(STATE_FILE);
     let base = output_base(retention, &state_path);
-    if !retention.automatic_retention_enabled {
-        return Ok(AutomaticRetentionOutput {
-            status: "disabled",
-            ..base
-        });
-    }
     let admission = IN_PROCESS_ADMISSION
         .get_or_init(|| Mutex::new(()))
         .try_lock();
@@ -85,12 +76,6 @@ fn run_automatic_cargo_retention_in(
     }
 
     let mut state = read_state(&state_path);
-    if !force && !due(&state, retention.automatic_retention_interval_seconds, now) {
-        return Ok(AutomaticRetentionOutput {
-            status: "deferred",
-            ..base
-        });
-    }
     state.last_started_unix_ms = unix_ms(now);
     state.status = "running".to_string();
     write_state(&state_path, &state)?;
@@ -133,23 +118,13 @@ fn run_automatic_cargo_retention_in(
 fn output_base(retention: &RetentionConfig, state_path: &Path) -> AutomaticRetentionOutput {
     AutomaticRetentionOutput {
         command: "cleanup.automatic_retention",
-        status: "disabled",
-        enabled: retention.automatic_retention_enabled,
-        cadence_seconds: retention.automatic_retention_interval_seconds,
+        status: "busy",
         max_run_seconds: retention.automatic_retention_max_run_seconds,
         row_limit: usize::try_from(retention.limit).unwrap_or(0),
         state_path: state_path.display().to_string(),
-        resume_command: "homeboy cleanup automatic-retention --force".to_string(),
+        resume_command: "homeboy cleanup automatic-retention".to_string(),
         cargo_targets: None,
     }
-}
-
-fn due(state: &AutomaticRetentionState, interval_seconds: u64, now: SystemTime) -> bool {
-    state.last_started_unix_ms == 0
-        || now
-            .duration_since(UNIX_EPOCH + Duration::from_millis(state.last_started_unix_ms))
-            .unwrap_or_default()
-            >= Duration::from_secs(interval_seconds)
 }
 
 fn unix_ms(now: SystemTime) -> u64 {
@@ -189,7 +164,6 @@ mod tests {
 
     fn enabled_retention() -> RetentionConfig {
         RetentionConfig {
-            automatic_retention_enabled: true,
             limit: 1,
             shared_store_days: 30,
             shared_store_max_bytes: 4,
@@ -224,7 +198,6 @@ mod tests {
             &config,
             data.path(),
             Some(cargo.path().to_path_buf()),
-            false,
             now,
         )
         .unwrap();
@@ -238,7 +211,6 @@ mod tests {
             &config,
             data.path(),
             Some(cargo.path().to_path_buf()),
-            true,
             now,
         )
         .unwrap();
@@ -262,7 +234,6 @@ mod tests {
             &enabled_retention(),
             data.path(),
             Some(cargo.path().to_path_buf()),
-            false,
             now,
         )
         .unwrap();
@@ -290,7 +261,6 @@ mod tests {
             &enabled_retention(),
             data.path(),
             Some(cargo.path().to_path_buf()),
-            false,
             SystemTime::now(),
         )
         .unwrap();

@@ -94,16 +94,8 @@ pub enum CleanupCommand {
     /// Explain retained Homeboy storage without deleting or reconciling resources.
     RetainedStorage(CleanupRetainedStorageArgs),
 
-    /// Run one configured, bounded automatic retention pass. Invoke this from a
-    /// scheduler at the configured cadence; it is disabled until explicitly enabled.
-    AutomaticRetention(CleanupAutomaticRetentionArgs),
-}
-
-#[derive(Args)]
-pub struct CleanupAutomaticRetentionArgs {
-    /// Run despite the configured cadence. The explicit enablement gate remains in force.
-    #[arg(long)]
-    pub force: bool,
+    /// Run one configured, bounded retention pass
+    AutomaticRetention,
 }
 
 #[derive(Args)]
@@ -245,18 +237,16 @@ pub fn run(args: CleanupArgs) -> CmdResult<Value> {
                 })
             })
             .map(|output| (output, 0)),
-        Some(CleanupCommand::AutomaticRetention(args)) => {
-            cleanup::run_automatic_cargo_retention(args.force)
-                .and_then(|output| {
-                    serde_json::to_value(output).map_err(|err| {
-                        homeboy::core::Error::internal_json(
-                            err.to_string(),
-                            Some("serialize automatic retention output".to_string()),
-                        )
-                    })
+        Some(CleanupCommand::AutomaticRetention) => cleanup::run_automatic_cargo_retention()
+            .and_then(|output| {
+                serde_json::to_value(output).map_err(|err| {
+                    homeboy::core::Error::internal_json(
+                        err.to_string(),
+                        Some("serialize automatic retention output".to_string()),
+                    )
                 })
-                .map(|output| (output, 0))
-        }
+            })
+            .map(|output| (output, 0)),
         None => cleanup_inventory(args).map(|output| (output, 0)),
     }
 }
