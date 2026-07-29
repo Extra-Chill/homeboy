@@ -528,6 +528,7 @@ const PROJECT_MUTATING_PATHS: &[&str] = &[
     "init",
     "components set",
     "components attach-path",
+    "components attach-paths",
     "components remove",
     "components clear",
     "pin add",
