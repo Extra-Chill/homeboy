@@ -487,6 +487,9 @@ where
     let provision = provision_cook_destination(&args)?;
 
     let mut dispatch_args = dispatch_args_for_cook(&args);
+    // Resolve @file / stdin / stored-ref prompts before anything consumes the
+    // prompt, so the executor receives the exact bytes (#10100).
+    resolve_dispatch_prompt(&mut dispatch_args)?;
     let requested_cook_id = dispatch_args.run_id.clone();
     if let Some(cook_id) = requested_cook_id.as_deref() {
         dispatch_args.run_id = Some(
@@ -609,6 +612,102 @@ pub(super) fn dispatch_args_for_cook(args: &AgentTaskCookArgs) -> DispatchArgs {
         dispatch_args.prompt = args.goal.clone();
     }
     dispatch_args
+}
+
+/// Resolve `--prompt` through the structured-input contract its help already
+/// advertises: `@file`, `-` for stdin, and stored `@prompt:<id>` references.
+///
+/// Cook previously took `--prompt` as a literal string, so a large Markdown
+/// prompt had to travel as one shell argument. Backticks, `$` expressions and
+/// quotes were then interpreted by the caller's shell before Homeboy ever saw
+/// them — in one case executing prompt text as commands (#10100).
+///
+/// Bytes and newlines are preserved exactly; no trimming.
+pub(super) fn resolve_dispatch_prompt(
+    dispatch_args: &mut DispatchArgs,
+) -> homeboy::core::Result<()> {
+    let Some(spec) = dispatch_args.prompt.as_deref() else {
+        return Ok(());
+    };
+    let resolved = homeboy::agents::agent_task_prompts::read_prompt_input(spec)?;
+    dispatch_args.prompt = Some(resolved);
+    Ok(())
+}
+
+#[cfg(test)]
+mod prompt_input_tests {
+    use super::*;
+
+    fn dispatch_with_prompt(prompt: Option<&str>) -> DispatchArgs {
+        DispatchArgs {
+            prompt: prompt.map(str::to_string),
+            tasks: Vec::new(),
+            cwd: None,
+            workspace: None,
+            repo: None,
+            task_url: None,
+            backend: None,
+            selector: None,
+            model: None,
+            required_capabilities: Vec::new(),
+            secret_env: Vec::new(),
+            concurrency: 1,
+            run_id: None,
+            core: crate::commands::agent_task_dispatch::DispatchCoreArgs {
+                tasks_json: None,
+                provider_config: None,
+                client_context: None,
+                attempts: 1,
+                same_provider_retries: 0,
+                provider_rotations: 0,
+                queue_only: false,
+                timeout_ms: None,
+                resolved_provider_policy: None,
+            },
+        }
+    }
+
+    /// Shell-sensitive prompt content must reach the executor byte-for-byte,
+    /// with no interpolation and no trimming (#10100).
+    #[test]
+    fn at_file_prompt_is_read_verbatim() {
+        let file = tempfile::NamedTempFile::new().expect("prompt file");
+        let body = "Run `cargo test` for $HOME\n\nUse \"quotes\" and 'apostrophes'.\n";
+        std::fs::write(file.path(), body).expect("write prompt");
+
+        let mut args = dispatch_with_prompt(Some(&format!("@{}", file.path().display())));
+        resolve_dispatch_prompt(&mut args).expect("resolve @file prompt");
+
+        assert_eq!(args.prompt.as_deref(), Some(body));
+    }
+
+    #[test]
+    fn inline_prompt_is_unchanged() {
+        let mut args = dispatch_with_prompt(Some("fix the flaky test"));
+        resolve_dispatch_prompt(&mut args).expect("resolve inline prompt");
+
+        assert_eq!(args.prompt.as_deref(), Some("fix the flaky test"));
+    }
+
+    #[test]
+    fn missing_at_file_is_reported_not_passed_through() {
+        let mut args = dispatch_with_prompt(Some("@/definitely/not/a/prompt/file/10100"));
+        resolve_dispatch_prompt(&mut args).expect_err("a missing prompt file must fail");
+    }
+
+    #[test]
+    fn empty_at_prefix_is_rejected() {
+        let mut args = dispatch_with_prompt(Some("@"));
+        let error = resolve_dispatch_prompt(&mut args).expect_err("bare @ is not a path");
+        assert!(error.message.contains("missing file path"), "{error:?}");
+    }
+
+    #[test]
+    fn absent_prompt_is_a_no_op() {
+        let mut args = dispatch_with_prompt(None);
+        resolve_dispatch_prompt(&mut args).expect("no prompt is fine");
+        assert!(args.prompt.is_none());
+    }
 }
 
 /// Compile the one durable provider-cell plan used by local Cook and Lab handoff.

@@ -99,7 +99,7 @@ Do not infer the wait policy from client interactivity. An orchestration client 
 
 | Option | Value | Description |
 | --- | --- | --- |
-| `--prompt` | `<PROMPT>` | Inline prompt, @file, or - for stdin |
+| `--prompt` | `<PROMPT>` | Inline prompt, `@<path>` to read a file, `-` to read stdin, or `@prompt:<id>` for a stored prompt |
 | `--cwd` | `<PATH>` | Existing local repo checkout or worktree path to cook in |
 | `--workspace` | `<ID_OR_PATH>` | Homeboy workspace ID or existing local workspace path to cook in |
 | `--repo` | `<REPO>` | Repo/component slug for metadata and task grouping, e.g. sample-plugin |

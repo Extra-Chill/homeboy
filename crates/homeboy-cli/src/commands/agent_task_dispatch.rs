@@ -97,7 +97,15 @@ impl From<DispatchCoreArgs> for DispatchCoreInputs {
 
 #[derive(Args, Debug, Clone)]
 pub struct DispatchArgs {
-    /// Inline prompt, @file, or - for stdin.
+    /// Inline prompt, `@<path>` to read a file, `-` to read stdin, or
+    /// `@prompt:<id>` for a stored prompt.
+    ///
+    /// Prefer `@<path>` or `-` for anything containing Markdown code spans,
+    /// quotes, or `$` expressions: an inline prompt is interpreted by your shell
+    /// before Homeboy receives it. Bytes and newlines are preserved exactly.
+    ///
+    ///   --prompt @task.md
+    ///   cat task.md | homeboy agent-task cook --prompt - ...
     #[arg(long, value_name = "PROMPT")]
     pub prompt: Option<String>,
 
