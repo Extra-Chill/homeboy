@@ -1463,7 +1463,7 @@ struct CookAttemptExecution {
     task_summary: String,
     form: Option<crate::agent_task_review_dossier::AiFilledReviewForm>,
     tool: String,
-    model: String,
+    model: Option<String>,
     review_form_only: bool,
 }
 
@@ -1488,9 +1488,10 @@ fn selected_outcome_for_attempt(run_id: &str) -> Result<crate::agent_task::Agent
         })
 }
 
-/// Read provider identity from the durable execution record rather than the
-/// recipe or finalization flags. The plan records the dispatched tool while the
-/// selected outcome records the model the provider actually ran.
+/// Read provider identity from the durable attempt record rather than the
+/// recipe or finalization flags. A pre-provider adopted source has task context
+/// but no executed model; any attempt used as an execution is validated by its
+/// caller before disclosure.
 fn cook_attempt_execution(run_id: &str) -> Result<CookAttemptExecution> {
     let plan = agent_task_lifecycle::load_plan(run_id)?;
     let outcome = selected_outcome_for_attempt(run_id)?;
@@ -1506,15 +1507,8 @@ fn cook_attempt_execution(run_id: &str) -> Result<CookAttemptExecution> {
                 None,
             )
         })?;
-    let model = outcome.selected_model().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "provider_model",
-            "Cook lineage attempt has no concrete executed model",
-            Some(run_id.to_string()),
-            None,
-        )
-    })?;
-    if let Some(planned_model) = task.executor.model() {
+    let model = outcome.selected_model();
+    if let (Some(planned_model), Some(model)) = (task.executor.model(), model) {
         if planned_model != model {
             return Err(Error::validation_invalid_argument(
                 "provider_model",
@@ -1545,8 +1539,19 @@ fn cook_attempt_execution(run_id: &str) -> Result<CookAttemptExecution> {
         )?
         .filter(|form| form.validate().is_ok()),
         tool: task.executor.backend.clone(),
-        model: model.to_string(),
+        model: model.map(str::to_string),
         review_form_only: task.inputs["cook_loop"]["review_form_required"] == true,
+    })
+}
+
+fn required_execution_model(execution: &CookAttemptExecution, run_id: &str) -> Result<String> {
+    execution.model.clone().ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "provider_model",
+            "Cook lineage attempt has no concrete executed model",
+            Some(run_id.to_string()),
+            None,
+        )
     })
 }
 
@@ -1575,16 +1580,18 @@ fn cook_ai_lineage(
     // recovery instead makes each authenticated role visible to reviewers.
     if terminal_index == 0 {
         let execution = cook_attempt_execution(successful_run_id)?;
+        let model = required_execution_model(&execution, successful_run_id)?;
         return Ok(CookAiLineage {
             summary: terminal_form.summary.clone(),
             what_changed: terminal_form.what_changed.clone(),
             compatibility: terminal_form.compatibility.clone(),
             tool: crate::agent_task_review_dossier::homeboy_tool_disclosure(&execution.tool),
-            model: execution.model,
+            model,
             used_for: terminal_form.used_for.clone(),
         });
     }
     let terminal = cook_attempt_execution(successful_run_id)?;
+    let terminal_model = required_execution_model(&terminal, successful_run_id)?;
     if !terminal.review_form_only {
         return Err(Error::validation_invalid_argument(
             "cook_recipe.attempts",
@@ -1644,24 +1651,40 @@ fn cook_ai_lineage(
                 ),
             )
         });
+    let (tool, model, used_for) = implementation.model.map_or_else(
+        || {
+            let tool = crate::agent_task_review_dossier::homeboy_tool_disclosure(&terminal.tool);
+            (
+                tool.clone(),
+                terminal_model.clone(),
+                format!(
+                    "Review form: {tool} reviewed the validated adopted candidate and supplied the reviewer metadata."
+                ),
+            )
+        },
+        |implementation_model| {
+            let implementation_tool =
+                crate::agent_task_review_dossier::homeboy_tool_disclosure(&implementation.tool);
+            let terminal_tool =
+                crate::agent_task_review_dossier::homeboy_tool_disclosure(&terminal.tool);
+            (
+                format!("Implementation: {implementation_tool}; review form: {terminal_tool}"),
+                format!(
+                    "Implementation: {implementation_model}; review form: {terminal_model}"
+                ),
+                format!(
+                    "Implementation: {implementation_tool} authored the delivered candidate changes and deterministic verification evidence. Review form: {terminal_tool} reviewed the validated candidate and supplied the reviewer metadata."
+                ),
+            )
+        },
+    );
     Ok(CookAiLineage {
         summary,
         what_changed,
         compatibility,
-        tool: format!(
-            "Implementation: {}; review form: {}",
-            crate::agent_task_review_dossier::homeboy_tool_disclosure(&implementation.tool),
-            crate::agent_task_review_dossier::homeboy_tool_disclosure(&terminal.tool),
-        ),
-        model: format!(
-            "Implementation: {}; review form: {}",
-            implementation.model, terminal.model
-        ),
-        used_for: format!(
-            "Implementation: {} authored the delivered candidate changes and deterministic verification evidence. Review form: {} reviewed the validated candidate and supplied the reviewer metadata.",
-            crate::agent_task_review_dossier::homeboy_tool_disclosure(&implementation.tool),
-            crate::agent_task_review_dossier::homeboy_tool_disclosure(&terminal.tool),
-        ),
+        tool,
+        model,
+        used_for,
     })
 }
 

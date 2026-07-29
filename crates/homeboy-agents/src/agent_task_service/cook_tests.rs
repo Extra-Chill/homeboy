@@ -1773,7 +1773,7 @@ impl CandidateAdoptionFixture {
         std::fs::write(
             &provider,
             format!(
-                "#!/bin/sh\ncat >/dev/null\ngit -C {target} fetch origin {candidate}\ngit -C {target} diff HEAD FETCH_HEAD | git -C {target} apply\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{target}\",\"command_evidence\":[]}}'\n",
+                "#!/bin/sh\ncat >/dev/null\ngit -C {target} fetch origin {candidate}\ngit -C {target} reset --hard --quiet FETCH_HEAD\nprintf '{{\"schema\":\"homeboy/agent-task-promotion-apply-response/v1\",\"workspace_path\":\"{target}\",\"command_evidence\":[]}}'\n",
                 target = target.display(),
             ),
         )
@@ -1794,9 +1794,7 @@ impl CandidateAdoptionFixture {
         options.source_worktree_path = Some(source.clone());
         options.task_base_sha = Some(base.clone());
         options.provider_command = Some(provider.display().to_string());
-        // This fixture establishes the persisted multi-attempt disclosure
-        // prerequisite. Gate-proof behavior is covered by promotion fixtures.
-        options.gates.verify = Vec::new();
+        options.gates.verify = vec!["test \"$(cat lib.rs)\" = candidate".to_string()];
         options.max_attempts = max_attempts;
         options.initial_plan.options.execution_budget =
             crate::agent_task_scheduler::AgentTaskExecutionBudget::new(
@@ -4247,6 +4245,7 @@ fn pre_provider_adoption_retries_only_the_missing_form_binds_model_and_reaches_r
             .unwrap();
         assert_eq!(adoption.ai_model, "openai/gpt-5.6-terra");
         assert_eq!(adoption.candidate_sha, fixture.candidate);
+        assert!(backend.body.contains("- **Model:** openai/gpt-5.6-terra"));
         assert!(backend.committed && backend.pushed && backend.created);
     });
 }
