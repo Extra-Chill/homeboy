@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.34.19] - 2026-07-29
+
+### Fixed
+- correct validation dependency slug resolution and parsing
+
 ## [3.34.18] - 2026-07-29
 
 ### Fixed
