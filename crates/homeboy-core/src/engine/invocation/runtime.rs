@@ -22,16 +22,19 @@
 //!    not a real macOS configuration.
 //! 5. `~/.cache/homeboy/inv` fallback on every platform.
 //!
-//! Each invocation owns one short id; the directories are siblings of that
-//! id under the chosen root:
+//! Each invocation owns one short id; its socket-capable directories are
+//! siblings under the chosen root:
 //!
 //! - `<root>/<short-id>`     → `HOMEBOY_INVOCATION_STATE_DIR` (the leaf the
 //!   workload owns; downstream sockets bind directly here).
 //! - `<root>/<short-id>.a`   → `HOMEBOY_INVOCATION_ARTIFACT_DIR`
-//! - `<root>/<short-id>.t`   → `HOMEBOY_INVOCATION_TMP_DIR`
+//! - `<runtime-tmp>/homeboy-invocation-tmp-*` → `HOMEBOY_INVOCATION_TMP_DIR`
+//!   and `TMPDIR`. This is a metadata-backed durable runtime-temp owner rather
+//!   than a sibling here, so cleanup can classify child-created bytes after the
+//!   invocation exits.
 //!
-//! There is no `s/a/t` subdir layer — that would burn `sockaddr_un` budget
-//! for no isolation gain since the invocation is already 1:1 with a single
+//! There is no `s/a` subdir layer — that would burn `sockaddr_un` budget for
+//! no isolation gain since the invocation is already 1:1 with a single
 //! workload run. Workloads that need internal subdirs under STATE_DIR can
 //! still create them, but they own the path-length budget at that point.
 //!

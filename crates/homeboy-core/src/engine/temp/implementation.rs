@@ -48,6 +48,10 @@ struct RuntimeRunOwner {
     completed_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+    /// The generic Homeboy subsystem that created this managed storage.
+    /// Absent values are legacy entries and retain their existing treatment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    producer: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -180,6 +184,18 @@ pub(crate) fn pin_runtime_temp_dir(dir: &Path) -> Result<RuntimeTempPin> {
 }
 
 pub(crate) fn managed_run_temp_dir(prefix: &str) -> Result<(PathBuf, RuntimeTempPin)> {
+    managed_run_temp_dir_for_producer(prefix, None)
+}
+
+/// Create a managed runtime-temp directory for a named generic producer.
+///
+/// The owner record is deliberately written at allocation time, before a
+/// workload can inherit the path. This makes child-created bytes attributable
+/// even if the producer is interrupted before it can write any result data.
+pub(crate) fn managed_run_temp_dir_for_producer(
+    prefix: &str,
+    producer: Option<&str>,
+) -> Result<(PathBuf, RuntimeTempPin)> {
     let root = ensure_runtime_tmp_dir()?;
     let _lock = acquire_cleanup_lock(&root)?;
     let path = root.join(unique_name(prefix, ""));
@@ -199,6 +215,7 @@ pub(crate) fn managed_run_temp_dir(prefix: &str) -> Result<(PathBuf, RuntimeTemp
         created_at: chrono::Utc::now().to_rfc3339(),
         completed_at: None,
         reason: None,
+        producer: producer.map(str::to_string),
     };
     if let Err(error) = write_run_owner(&path, &owner) {
         let _ = fs::remove_dir_all(&path);
@@ -708,6 +725,7 @@ pub fn cleanup_runtime_tmp_bounded(
                     created_at: chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339(),
                     completed_at: None,
                     reason: Some(error.message.clone()),
+                    producer: None,
                 };
                 let warning = format!("owner metadata is corrupt: {}", error.message);
                 if age < CORRUPT_OWNER_GRACE {
