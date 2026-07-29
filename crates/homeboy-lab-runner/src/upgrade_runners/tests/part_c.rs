@@ -386,6 +386,7 @@ fn source_drift_recovery_retains_selected_immutable_revision() {
         Some(&revision),
         Some("https://example.test/homeboy.git"),
         None,
+        None,
     );
 
     assert_eq!(
@@ -405,6 +406,7 @@ fn snapshot_recovery_selects_the_verified_materialized_binary() {
         Some("aabbccddeeff"),
         None,
         Some("/home/user/Developer/_lab_workspaces/snapshot/target/release/homeboy"),
+        None,
     );
 
     assert_eq!(
@@ -427,6 +429,7 @@ fn filesystem_origin_recovery_selects_the_verified_materialized_binary() {
         Some("aabbccddeeff"),
         Some("/Users/chubes/Developer/homeboy"),
         Some("/srv/homeboy/target/release/homeboy"),
+        None,
     );
 
     assert_eq!(
@@ -449,6 +452,7 @@ fn file_origin_recovery_selects_the_verified_materialized_binary() {
         Some("aabbccddeeff"),
         Some("file:///Users/chubes/Developer/homeboy"),
         Some("/srv/homeboy/target/release/homeboy"),
+        None,
     );
 
     assert_eq!(
@@ -475,6 +479,7 @@ fn remote_origin_recovery_preserves_reachable_source_provenance() {
             Some(revision),
             Some(source),
             None,
+            None,
         );
 
         assert_eq!(
@@ -484,6 +489,62 @@ fn remote_origin_recovery_preserves_reachable_source_provenance() {
             )
         );
     }
+}
+
+#[test]
+fn filesystem_origin_without_materialized_binary_only_inspects_selected_provenance() {
+    let source = "/Users/chubes/Developer/homeboy";
+    let identity = "homeboy 0.228.5+selected";
+    let commands = runner_recovery_commands(
+        "lab",
+        "/srv/homeboy/target/release/homeboy",
+        Some(&"identity mismatch".to_string()),
+        Some("0.228.4"),
+        Some("0.228.5"),
+        Some("aabbccddeeff"),
+        Some(source),
+        None,
+        Some(identity),
+    );
+
+    assert!(commands[0].contains("self identity"));
+    assert!(commands[0].contains(source));
+    assert!(commands[0].contains(identity));
+    assert!(!commands
+        .iter()
+        .any(|command| command.contains("refresh-homeboy")));
+    assert!(!commands.iter().any(|command| command.contains("main")));
+    assert!(!commands
+        .iter()
+        .any(|command| command.contains("runner set")));
+}
+
+#[test]
+fn file_origin_without_materialized_binary_only_inspects_selected_provenance() {
+    let source = "file:///Users/chubes/Developer/homeboy";
+    let identity = "homeboy 0.228.5+selected";
+    let commands = runner_recovery_commands(
+        "lab",
+        "/srv/homeboy/target/release/homeboy",
+        Some(&"identity mismatch".to_string()),
+        Some("0.228.4"),
+        Some("0.228.5"),
+        Some("aabbccddeeff"),
+        Some(source),
+        None,
+        Some(identity),
+    );
+
+    assert!(commands[0].contains("self identity"));
+    assert!(commands[0].contains(source));
+    assert!(commands[0].contains(identity));
+    assert!(!commands
+        .iter()
+        .any(|command| command.contains("refresh-homeboy")));
+    assert!(!commands.iter().any(|command| command.contains("main")));
+    assert!(!commands
+        .iter()
+        .any(|command| command.contains("runner set")));
 }
 
 #[test]

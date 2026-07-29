@@ -151,6 +151,7 @@ pub fn recover_and_retry_failed_upgrade(
                 selected_source_revision,
                 selected_source_url,
                 selected_materialized_binary.as_deref(),
+                expected_build_identity,
             );
             Err(entry)
         }

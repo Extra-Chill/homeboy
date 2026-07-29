@@ -72,17 +72,31 @@ pub fn runner_recovery_commands(
     selected_source_revision: Option<&str>,
     selected_source_url: Option<&str>,
     selected_materialized_binary: Option<&str>,
+    expected_build_identity: Option<&str>,
 ) -> Vec<String> {
+    let requires_non_mutating_recovery = selected_source_url
+        .is_some_and(|source| !source_url_is_runner_reachable(source))
+        && selected_materialized_binary.is_none();
     let mut commands = if path_drift.is_some() {
         // The attempted upgrade left the same selected identity in place. Rotate
         // through the runner's managed materialization path instead of suggesting
         // the command that just proved ineffective.
-        vec![runner_refresh_homeboy_command(
-            runner_id,
-            selected_source_revision,
-            selected_source_url,
-            selected_materialized_binary,
-        )]
+        vec![if requires_non_mutating_recovery {
+            runner_inspect_unreachable_source_command(
+                runner_id,
+                homeboy_path,
+                selected_source_url,
+                selected_source_revision,
+                expected_build_identity,
+            )
+        } else {
+            runner_refresh_homeboy_command(
+                runner_id,
+                selected_source_revision,
+                selected_source_url,
+                selected_materialized_binary,
+            )
+        }]
     } else {
         runner_upgrade_recovery_commands(runner_id, homeboy_path)
     };
@@ -90,6 +104,7 @@ pub fn runner_recovery_commands(
         commands.push(runner_inspect_bare_homeboy_command(runner_id));
     }
     if path_drift.is_some()
+        && !requires_non_mutating_recovery
         && homeboy_path != "homeboy"
         && matches!((configured_version, bare_version), (Some(configured), Some(bare)) if version_is_newer(bare, configured))
     {
@@ -103,6 +118,30 @@ pub fn runner_recovery_commands(
         ));
     }
     commands
+}
+
+fn runner_inspect_unreachable_source_command(
+    runner_id: &str,
+    homeboy_path: &str,
+    selected_source_url: Option<&str>,
+    selected_source_revision: Option<&str>,
+    expected_build_identity: Option<&str>,
+) -> String {
+    let inspect = if std::path::Path::new(homeboy_path).is_absolute() {
+        format!(
+            "homeboy runner exec --ssh {} -- {} self identity",
+            shell_arg(runner_id),
+            shell_arg(homeboy_path)
+        )
+    } else {
+        runner_inspect_bare_homeboy_command(runner_id)
+    };
+    format!(
+        "{inspect} # controller-local source {}; selected revision {}; expected identity {}",
+        shell_arg(selected_source_url.unwrap_or("unavailable")),
+        shell_arg(selected_source_revision.unwrap_or("unavailable")),
+        shell_arg(expected_build_identity.unwrap_or("unavailable")),
+    )
 }
 
 fn runner_refresh_homeboy_command(

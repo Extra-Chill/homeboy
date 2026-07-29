@@ -640,6 +640,7 @@ pub fn upgrade_runner_with_executor(
         selected_source_revision.as_deref(),
         selected_source_url.as_deref(),
         selected_materialized_binary.as_deref(),
+        expected_build_identity.as_deref(),
     );
     let mut stale_daemon_repair_detail = None;
     let mut stale_daemon = runner_stale_daemon(runner, status);
