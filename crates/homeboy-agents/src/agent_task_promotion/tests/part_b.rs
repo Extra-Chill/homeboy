@@ -3,7 +3,7 @@
 
 use super::super::apply::{
     preflight_configured_workspace_provider_with_config, run_provider_command,
-    AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace,
+    run_provider_command_with_timeout, AgentTaskPromotionApplyRequest, AgentTaskPromotionWorkspace,
     AgentTaskPromotionWorkspaceProvider, ExternalPromotionWorkspaceProvider,
     AGENT_TASK_PROMOTION_APPLY_REQUEST_SCHEMA, AGENT_TASK_PROMOTION_APPLY_RESPONSE_SCHEMA,
 };
@@ -1969,17 +1969,18 @@ fn configured_provider_timeout_is_bounded_and_retains_command_evidence() {
         trusted_unpushed_candidate_destination: None,
     };
     let started = std::time::Instant::now();
-    let error = run_provider_command(
+    let error = run_provider_command_with_timeout(
         &CommandInvocation {
             argv: vec!["sh".to_string(), "-c".to_string(), "sleep 2".to_string()],
             ..Default::default()
         },
         &request,
+        std::time::Duration::from_millis(100),
     )
     .expect_err("silent provider must be terminated");
 
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
-    assert!(error.message.contains("timed out"));
+    assert!(error.message.contains("timed out after 100 ms"));
     assert_eq!(
         error.details["command_evidence"]["command"],
         "sh -c sleep 2"
