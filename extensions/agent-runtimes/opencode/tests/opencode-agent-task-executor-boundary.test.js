@@ -10,6 +10,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { agentTaskPolicyToolPermissions } = require('../../../agent-task-contracts');
 
 /**
  * Internal dependencies
@@ -76,6 +77,17 @@ function concretePath(candidate) {
 
 (async () => {
 const provider = providerContract();
+const policyToolSets = {
+	native: { readonly: ['read', 'glob', 'grep'], readwrite: ['edit', 'bash'] },
+	workspace: OPENCODE_WORKSPACE_TOOLS,
+};
+assert.deepEqual(agentTaskPolicyToolPermissions({ write: 'none' }, policyToolSets).native, ['read', 'glob', 'grep']);
+assert.deepEqual(agentTaskPolicyToolPermissions({ write: 'none' }, policyToolSets).workspace, OPENCODE_WORKSPACE_TOOLS.readonly);
+assert.deepEqual(agentTaskPolicyToolPermissions({ write: 'patch' }, policyToolSets).native, ['read', 'glob', 'grep', 'edit', 'bash']);
+assert.deepEqual(agentTaskPolicyToolPermissions({ write: 'patch' }, policyToolSets).workspace, [
+	...OPENCODE_WORKSPACE_TOOLS.readonly,
+	...OPENCODE_WORKSPACE_TOOLS.readwrite,
+]);
 assert.equal(provider.id, 'opencode.agent-task-executor');
 assert.equal(provider.backend, 'opencode');
 assert.equal(provider.runtime_id, 'opencode');
@@ -379,6 +391,7 @@ process.exit(0);
 		const workspaceRequest = {
 			...request,
 			task_id: `opencode-permission-${permissionWorkspace.label}`,
+			policy: { write: 'patch' },
 			executor: {
 				...request.executor,
 				config: {
@@ -976,10 +989,32 @@ process.exit(0);
 	const reviewCapturePath = path.join(root, 'opencode-review-config.json');
 	const reviewCliPath = path.join(root, 'mock-opencode-review.cjs');
 	fs.writeFileSync(reviewCliPath, `#!/usr/bin/env node
+const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || '{}');
+const prompt = process.argv.at(-1);
+const declarations = JSON.parse(prompt.match(/Output declarations: (\\[.*\\])\\.$/s)?.[1] || 'null');
+assert.deepEqual(declarations, [{
+ name: 'review_form', required: true, schema: 'homeboy/agent-task-review-form/v1', json_schema: {
+  type: 'object', required: ['summary', 'what_changed', 'compatibility', 'used_for'],
+  properties: {
+   summary: { type: 'string' },
+   what_changed: { type: 'array', items: { type: 'string' } },
+   compatibility: { type: 'string' },
+   used_for: { type: 'string' }
+  }
+ }
+}]);
 fs.writeFileSync(${JSON.stringify(reviewCapturePath)}, JSON.stringify(config));
-process.stdout.write(JSON.stringify({ type: 'result', result: { summary: 'Reviewed candidate; no changes required.' } }));
+process.stdout.write(JSON.stringify({
+ type: 'text',
+ part: { type: 'text', text: JSON.stringify({ outputs: { review_form: {
+   summary: 'Reviewed candidate; no changes required.',
+   what_changed: [],
+   compatibility: 'No compatibility impact.',
+   used_for: 'Pull request review.'
+ } } }), metadata: { openai: { phase: 'final_answer' } } }
+}));
 `);
 	// A review-only cook whose workspace is referenced by a *relative* cwd (the
 	// #8829 trigger): it names a real, existing directory but does not resolve to
@@ -1005,6 +1040,22 @@ process.stdout.write(JSON.stringify({ type: 'result', result: { summary: 'Review
 		...request,
 		task_id: 'opencode-review-only',
 		instructions: 'Review the existing candidate and preserve it when correct.',
+		policy: { write: 'none' },
+		output_declarations: [{
+			name: 'review_form',
+			required: true,
+			schema: 'homeboy/agent-task-review-form/v1',
+			structural_schema: {
+				type: 'object',
+				required: ['summary', 'what_changed', 'compatibility', 'used_for'],
+				properties: {
+					summary: { type: 'string' },
+					what_changed: { type: 'array', items: { type: 'string' } },
+					compatibility: { type: 'string' },
+					used_for: { type: 'string' },
+				},
+			},
+		}],
 		executor: {
 			...request.executor,
 			config: {
@@ -1018,13 +1069,25 @@ process.stdout.write(JSON.stringify({ type: 'result', result: { summary: 'Review
 		},
 	}, { env: fixtureEnv });
 
-	assert.equal(reviewResult.status, 'succeeded', JSON.stringify(reviewResult.diagnostics));
+	assert.equal(reviewResult.status, 'no_op', JSON.stringify(reviewResult.diagnostics));
+	assert.deepEqual(reviewResult.outputs, {
+		review_form: {
+			summary: 'Reviewed candidate; no changes required.',
+			what_changed: [],
+			compatibility: 'No compatibility impact.',
+			used_for: 'Pull request review.',
+		},
+	});
 	const reviewConfig = JSON.parse(fs.readFileSync(reviewCapturePath, 'utf8'));
 	// Read-only inspection is permitted within the workspace...
 	assert.equal(reviewConfig.permission.read['*'], 'allow');
 	assert.equal(reviewConfig.agent.build.permission.read['*'], 'allow');
 	assert.equal(nativeToolAction(reviewConfig, 'build', 'glob', 'src/**/*.js'), 'allow');
 	assert.equal(nativeToolAction(reviewConfig, 'build', 'grep', 'TODO'), 'allow');
+	assert.equal(nativeToolAction(reviewConfig, 'build', 'edit', 'src/index.js'), 'deny');
+	assert.equal(nativeToolAction(reviewConfig, 'build', 'bash', 'git status --short'), 'deny');
+	assert.deepEqual(reviewConfig.permission.edit, { '*': 'deny' });
+	assert.deepEqual(reviewConfig.permission.bash, { '*': 'deny' });
 	// ...while reads outside the workspace and the pre-existing secret deny remain denied.
 	assert.equal(reviewConfig.permission.read['..'], 'deny');
 	assert.equal(reviewConfig.permission.read['../*'], 'deny');
