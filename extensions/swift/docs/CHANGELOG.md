@@ -2,6 +2,11 @@
 
 All notable changes to the **swift** extension will be documented in this file.
 
+## [2.8.2] - 2026-07-29
+
+### Fixed
+- seed the declared lint.findings sidecar on clean runs
+
 ## [2.8.1] - 2026-07-28
 
 ### Changed
