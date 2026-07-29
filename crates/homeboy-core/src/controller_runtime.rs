@@ -88,9 +88,47 @@ static TEST_ADMISSION_OWNER_CAS_REPLACEMENT: OnceLock<Mutex<Option<Value>>> = On
 static TEST_CONTROLLER_FIXTURE_DIGESTS: OnceLock<
     Mutex<BTreeMap<TestExecutableFileIdentity, String>>,
 > = OnceLock::new();
+/// Digests this process has already computed, keyed by observed file identity.
+///
+/// Sealing a cook into an immutable runtime hashes the same bytes repeatedly:
+/// `pin_executable` hashes its source, `publish_pin` hashes the staged copy or
+/// an existing destination, `validate_pin` hashes the destination, and
+/// `admit_current_for` then validates the resulting pin a second time -- before
+/// the re-exec'd child repeats the whole sequence against the pin it is already
+/// executing. Each of those is a full SHA-256 of the controller binary, which
+/// for an unoptimized build is a multi-hundred-megabyte read costing tens of
+/// seconds.
+///
+/// Memoizing is sound because the key is the file's observed identity, not its
+/// path alone: writing to a file moves its modification and change times, and
+/// replacing it moves its inode. A hit therefore means nothing has touched
+/// those bytes since this process hashed them. The memo is process local and
+/// never persisted, so it cannot outlive the observation it was derived from.
+#[cfg(unix)]
+static EXECUTABLE_DIGESTS: OnceLock<Mutex<BTreeMap<ExecutableFileIdentity, String>>> =
+    OnceLock::new();
+#[cfg(all(test, unix))]
+static EXECUTABLE_DIGEST_COMPUTATIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 #[cfg(all(test, unix))]
 static TEST_CONTROLLER_FIXTURE_DIGEST_CALLS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+
+/// One executable file as this process observed it. Inode and change time are
+/// part of the identity so replacing or modifying a path cannot reuse its prior
+/// digest.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ExecutableFileIdentity {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+}
 
 /// A source fixture is immutable for a hermetic test context. Include inode and
 /// change time so replacing or modifying a path cannot reuse its prior digest.
@@ -2155,14 +2193,76 @@ fn activated_executable_identity(path: &Path) -> Result<String> {
 }
 
 fn executable_digest(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).map_err(|error| {
+    let identity = observed_executable_identity(path);
+    if let Some(digest) = memoized_executable_digest(identity.as_ref()) {
+        return Ok(digest);
+    }
+    // Stream the file. A controller binary is hundreds of megabytes in an
+    // unoptimized build and `fs::read` would hold all of it resident purely to
+    // hash it, in a process that is about to fork a controller runtime.
+    #[cfg(all(test, unix))]
+    EXECUTABLE_DIGEST_COMPUTATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let digest = content_hash::sha256_file(path).map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some("hash pinned controller executable".to_string()),
         )
     })?;
-    Ok(content_hash::sha256_hex(&bytes))
+    memoize_executable_digest(identity, &digest);
+    Ok(digest)
 }
+
+#[cfg(unix)]
+fn observed_executable_identity(path: &Path) -> Option<ExecutableFileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = fs::metadata(path).ok()?;
+    Some(ExecutableFileIdentity {
+        path: path.to_path_buf(),
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        size: metadata.size(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
+        changed_seconds: metadata.ctime(),
+        changed_nanoseconds: metadata.ctime_nsec(),
+    })
+}
+
+#[cfg(not(unix))]
+fn observed_executable_identity(_path: &Path) -> Option<()> {
+    None
+}
+
+#[cfg(unix)]
+fn memoized_executable_digest(identity: Option<&ExecutableFileIdentity>) -> Option<String> {
+    EXECUTABLE_DIGESTS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .expect("controller executable digest memo is not poisoned")
+        .get(identity?)
+        .cloned()
+}
+
+#[cfg(not(unix))]
+fn memoized_executable_digest(_identity: Option<&()>) -> Option<String> {
+    None
+}
+
+#[cfg(unix)]
+fn memoize_executable_digest(identity: Option<ExecutableFileIdentity>, digest: &str) {
+    let Some(identity) = identity else {
+        return;
+    };
+    EXECUTABLE_DIGESTS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .expect("controller executable digest memo is not poisoned")
+        .insert(identity, digest.to_string());
+}
+
+#[cfg(not(unix))]
+fn memoize_executable_digest(_identity: Option<()>, _digest: &str) {}
 
 fn make_executable_read_only(path: &Path) -> Result<()> {
     #[cfg(unix)]
@@ -3246,6 +3346,66 @@ mod tests {
                 TEST_CONTROLLER_FIXTURE_DIGEST_CALLS.load(std::sync::atomic::Ordering::Relaxed),
                 4,
                 "replacement misses the cache and rehashes before failing"
+            );
+        });
+    }
+
+    /// Sealing one cook hashes the same controller executable up to seven times
+    /// across two processes. Each of those is a full read of a binary that is
+    /// hundreds of megabytes unoptimized, which is why
+    /// `detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once`
+    /// spends minutes of wall clock doing nothing but SHA-256 (#10659).
+    #[cfg(unix)]
+    #[test]
+    fn executable_digests_are_memoized_per_observed_file_identity() {
+        use std::os::unix::fs::PermissionsExt;
+
+        crate::test_support::with_isolated_home(|_| {
+            EXECUTABLE_DIGESTS
+                .get_or_init(|| Mutex::new(BTreeMap::new()))
+                .lock()
+                .expect("controller executable digest memo is not poisoned")
+                .clear();
+            EXECUTABLE_DIGEST_COMPUTATIONS.store(0, std::sync::atomic::Ordering::Relaxed);
+
+            let temporary = tempfile::tempdir().expect("temporary executable directory");
+            let executable = temporary.path().join("homeboy");
+            fs::write(&executable, b"controller bytes").expect("write controller");
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+                .expect("make controller executable");
+
+            let first = executable_digest(&executable).expect("hash controller");
+            let second = executable_digest(&executable).expect("rehash controller");
+            assert_eq!(first, second);
+            assert_eq!(
+                EXECUTABLE_DIGEST_COMPUTATIONS.load(std::sync::atomic::Ordering::Relaxed),
+                1,
+                "an unchanged executable is read once per process"
+            );
+
+            // A memo that survived a content change would report the previous
+            // digest for different bytes, which is the one failure mode that
+            // matters: it would let a replaced controller validate.
+            fs::write(&executable, b"different controller bytes").expect("mutate controller");
+            let mutated = executable_digest(&executable).expect("hash mutated controller");
+            assert_ne!(
+                mutated, first,
+                "a mutated executable never reuses its prior digest"
+            );
+            assert_eq!(
+                EXECUTABLE_DIGEST_COMPUTATIONS.load(std::sync::atomic::Ordering::Relaxed),
+                2,
+                "mutation misses the memo and rehashes"
+            );
+
+            assert_eq!(
+                executable_digest(&executable).expect("rehash mutated controller"),
+                mutated
+            );
+            assert_eq!(
+                EXECUTABLE_DIGEST_COMPUTATIONS.load(std::sync::atomic::Ordering::Relaxed),
+                2,
+                "the mutated executable is then memoized under its new identity"
             );
         });
     }
