@@ -52,6 +52,7 @@ fn prune_workspaces_previews_orphans_without_deleting_by_default() {
                 limit: 10,
                 passes: 1,
                 cursor: None,
+                ..RunnerWorkspacePruneOptions::default()
             },
         )
         .expect("prune preview");
@@ -120,6 +121,7 @@ fn prune_workspaces_apply_removes_only_metadata_backed_orphans() {
                 limit: 10,
                 passes: 1,
                 cursor: None,
+                ..RunnerWorkspacePruneOptions::default()
             },
         )
         .expect("prune apply");
@@ -172,6 +174,7 @@ fn prune_preserves_process_owned_workspace_in_preview_and_apply() {
                     limit: 10,
                     passes: 1,
                     cursor: None,
+                    ..RunnerWorkspacePruneOptions::default()
                 },
             )
             .expect("prune process-owned workspace");
@@ -229,6 +232,7 @@ fn prune_preserves_job_lifecycle_lease_when_authority_is_unavailable() {
                 limit: 10,
                 passes: 1,
                 cursor: None,
+                ..RunnerWorkspacePruneOptions::default()
             },
         )
         .expect("prune active lease workspace");
@@ -284,6 +288,7 @@ fn retained_terminal_receipt_reclassifies_and_releases_compacted_workspace() {
                 limit: 10,
                 passes: 1,
                 cursor: None,
+                ..RunnerWorkspacePruneOptions::default()
             },
         )
         .expect("preview receipt-authorized workspace");
@@ -305,6 +310,7 @@ fn retained_terminal_receipt_reclassifies_and_releases_compacted_workspace() {
                 limit: 10,
                 passes: 1,
                 cursor: None,
+                ..RunnerWorkspacePruneOptions::default()
             },
         )
         .expect("remove receipt-authorized workspace");
@@ -506,6 +512,7 @@ fn prune_workspaces_reaps_ttl_expired_lifecycle_workspace_with_live_source() {
                 limit: 10,
                 passes: 1,
                 cursor: None,
+                ..RunnerWorkspacePruneOptions::default()
             },
         )
         .expect("prune preview");
@@ -549,6 +556,7 @@ fn prune_workspaces_reaps_stale_materialized_workspace_with_live_source() {
                 limit: 10,
                 passes: 1,
                 cursor: None,
+                ..RunnerWorkspacePruneOptions::default()
             },
         )
         .expect("prune stale materialized workspace");
@@ -595,6 +603,7 @@ fn prune_workspaces_prefers_stale_materialized_lifecycle_when_source_is_missing(
                 limit: 10,
                 passes: 1,
                 cursor: None,
+                ..RunnerWorkspacePruneOptions::default()
             },
         )
         .expect("prune stale materialized workspace with missing source");
@@ -671,6 +680,7 @@ fn preserved_failure_lifecycle_is_registered_for_ttl_pruning() {
                 limit: 10,
                 passes: 1,
                 cursor: None,
+                ..RunnerWorkspacePruneOptions::default()
             },
         )
         .expect("prune preview");
@@ -687,6 +697,7 @@ fn preserved_failure_lifecycle_is_registered_for_ttl_pruning() {
                 limit: 10,
                 passes: 1,
                 cursor: None,
+                ..RunnerWorkspacePruneOptions::default()
             },
         )
         .expect("apply ttl prune");
@@ -751,6 +762,7 @@ fn uncertain_handoff_disarms_ttl_pruning() {
                 limit: 10,
                 passes: 1,
                 cursor: None,
+                ..RunnerWorkspacePruneOptions::default()
             },
         )
         .expect("prune preview");
@@ -801,6 +813,7 @@ fn prune_workspaces_preview_reports_synthetic_odd_path_without_deleting() {
                 limit: 10,
                 passes: 1,
                 cursor: None,
+                ..RunnerWorkspacePruneOptions::default()
             },
         )
         .expect("prune preview");
@@ -861,6 +874,7 @@ fn prune_workspaces_reports_remaining_bytes_and_drain_command_when_limited() {
                 limit: 1,
                 passes: 1,
                 cursor: None,
+                ..RunnerWorkspacePruneOptions::default()
             },
         )
         .expect("prune preview");
@@ -926,6 +940,7 @@ fn prune_workspaces_apply_passes_drain_until_empty() {
                 limit: 1,
                 passes: 10,
                 cursor: None,
+                ..RunnerWorkspacePruneOptions::default()
             },
         )
         .expect("prune drain");
@@ -941,6 +956,69 @@ fn prune_workspaces_apply_passes_drain_until_empty() {
         assert!(output.next_command.is_none());
         assert!(!Path::new(&workspace_a.remote_path).exists());
         assert!(!Path::new(&workspace_b.remote_path).exists());
+    });
+}
+
+#[test]
+fn prune_convergence_resumes_durable_receipts_across_more_than_twenty_pages() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        const WORKSPACE_COUNT: usize = 25;
+        let runner_root = tempfile::tempdir().expect("runner root");
+        let workspaces_root = runner_root.path().join("_lab_workspaces");
+        for index in 0..WORKSPACE_COUNT {
+            write_orphan_workspace(&workspaces_root.join(format!("orphan-{index:02}")));
+        }
+        crate::create(
+            &format!(
+                r#"{{"id":"lab-local-prune-convergence","kind":"local","workspace_root":"{}"}}"#,
+                runner_root.path().display()
+            ),
+            false,
+        )
+        .expect("create runner");
+
+        let (interrupted, _) = prune_workspaces(
+            "lab-local-prune-convergence",
+            RunnerWorkspacePruneOptions {
+                apply: true,
+                min_age_hours: 0,
+                limit: 1,
+                passes: 7,
+                converge: true,
+                ..RunnerWorkspacePruneOptions::default()
+            },
+        )
+        .expect("bounded convergence");
+        let interrupted = interrupted.convergence.expect("convergence evidence");
+        assert_eq!(interrupted.pass_count, 7);
+        assert_eq!(interrupted.terminal_reason, "max_passes");
+        assert!(interrupted.resume_command.is_some());
+        assert!(Path::new(&interrupted.receipt_path).is_file());
+
+        let (resumed, _) = prune_workspaces(
+            "lab-local-prune-convergence",
+            RunnerWorkspacePruneOptions {
+                apply: true,
+                min_age_hours: 0,
+                limit: 1,
+                passes: 30,
+                converge: true,
+                resume: true,
+                ..RunnerWorkspacePruneOptions::default()
+            },
+        )
+        .expect("resume convergence");
+        let resumed = resumed.convergence.expect("resumed convergence evidence");
+        assert_eq!(resumed.pass_count, WORKSPACE_COUNT);
+        assert_eq!(resumed.applied_count, WORKSPACE_COUNT);
+        assert_eq!(resumed.terminal_reason, "scan_complete");
+        assert!(resumed.resume_command.is_none());
+        assert_eq!(
+            fs::read_dir(workspaces_root)
+                .expect("remaining workspaces")
+                .count(),
+            0
+        );
     });
 }
 
@@ -985,6 +1063,7 @@ fn prune_workspaces_advances_through_thousands_of_mixed_entries() {
                     limit: 127,
                     passes: 3,
                     cursor,
+                    ..RunnerWorkspacePruneOptions::default()
                 },
             )
             .expect("bounded mixed-entry drain");

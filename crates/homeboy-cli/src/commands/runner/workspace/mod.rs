@@ -144,6 +144,18 @@ pub(super) enum RunnerWorkspaceCommand {
         #[arg(long, default_value_t = 1)]
         passes: usize,
 
+        /// Persist each apply page and converge through the bounded pass budget.
+        #[arg(long)]
+        converge: bool,
+
+        /// Resume the durable convergence receipt for this runner and policy.
+        #[arg(long, requires = "converge")]
+        resume: bool,
+
+        /// Stop convergence after this many seconds, preserving an exact resume receipt.
+        #[arg(long, requires = "converge")]
+        max_wall_time_seconds: Option<u64>,
+
         /// Opaque continuation cursor returned by an incomplete workspace-prune scan.
         #[arg(long)]
         cursor: Option<String>,
@@ -221,6 +233,9 @@ pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceO
             min_age_hours,
             limit,
             passes,
+            converge,
+            resume,
+            max_wall_time_seconds,
             cursor,
         } => runner::prune_workspaces(
             &runner_id,
@@ -233,6 +248,9 @@ pub(super) fn run(command: RunnerWorkspaceCommand) -> CmdResult<RunnerWorkspaceO
                 limit: limit.unwrap_or(cleanup::RUNNER_WORKSPACE_PAGE_LIMIT),
                 passes,
                 cursor,
+                converge,
+                resume,
+                max_wall_time_seconds,
             },
         )
         .map(|(output, exit_code)| (RunnerWorkspaceOutput::Prune(output), exit_code)),

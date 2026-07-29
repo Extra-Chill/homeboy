@@ -1835,6 +1835,7 @@ fn remote_lab_workspace_categories(
                 limit: policy.runner_workspace_page_limit,
                 passes: CleanupPolicy::runner_workspace_passes(apply),
                 cursor: None,
+                ..RunnerWorkspacePruneOptions::default()
             },
         ) {
             Ok((output, _)) => output,

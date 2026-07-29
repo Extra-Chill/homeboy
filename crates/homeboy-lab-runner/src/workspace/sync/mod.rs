@@ -38,11 +38,12 @@ use super::snapshot::{
 use super::types::{
     canonical_workspace_path, ByteFileCounts, LocalGitState, RunnerWorkspaceCurrentSummary,
     RunnerWorkspaceLivenessEvidence, RunnerWorkspaceMaterializationPlan, RunnerWorkspaceMetadata,
-    RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions, RunnerWorkspacePruneOutput,
-    RunnerWorkspacePruneSkippedEntry, RunnerWorkspacePruneWithheldReason,
-    RunnerWorkspaceSnapshotEntry, RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSyncMode,
-    RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput, RunnerWorkspaceTerminalEvidence,
-    RunnerWorkspaceUpdateOptions, RunnerWorkspaceUpdateOutput, DEFAULT_EXCLUDES,
+    RunnerWorkspacePruneConvergence, RunnerWorkspacePruneEntry, RunnerWorkspacePruneOptions,
+    RunnerWorkspacePruneOutput, RunnerWorkspacePrunePageReceipt, RunnerWorkspacePruneSkippedEntry,
+    RunnerWorkspacePruneWithheldReason, RunnerWorkspaceSnapshotEntry,
+    RunnerWorkspaceSnapshotFilters, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
+    RunnerWorkspaceSyncOutput, RunnerWorkspaceTerminalEvidence, RunnerWorkspaceUpdateOptions,
+    RunnerWorkspaceUpdateOutput, DEFAULT_EXCLUDES,
 };
 use super::util::{
     deterministic_remote_path, git_output, parent_remote_path, ssh_client_for_runner,
@@ -72,6 +73,7 @@ const TERMINAL_RESOURCE_LIFECYCLE_REASON: &str = "terminal_resource_lifecycle";
 // whose size cannot be measured. Size is advisory, never a deletion proof.
 const WORKSPACE_PRUNE_SCAN_BUDGET: Duration = Duration::from_secs(20);
 const WORKSPACE_PRUNE_SIZE_TIMEOUT: Duration = Duration::from_secs(1);
+const WORKSPACE_PRUNE_CONVERGENCE_SCHEMA: &str = "homeboy/workspace-prune-convergence/v1";
 // Prepared sources include hydrated dependency trees, so retain a small fixed
 // working set instead of making every historical commit permanent runner state.
 const PREPARED_SOURCE_CACHE_MAX_ENTRIES: usize = 8;
@@ -1146,6 +1148,139 @@ pub(crate) fn workspace_materialization_plan(
     )
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DurablePruneConvergenceReceipt {
+    schema: String,
+    runner_id: String,
+    workspace_root: String,
+    min_age_hours: u64,
+    limit: usize,
+    cursor: Option<String>,
+    convergence: RunnerWorkspacePruneConvergence,
+}
+
+fn prune_convergence_receipt_path(
+    runner_id: &str,
+    workspace_root: &str,
+) -> Result<std::path::PathBuf> {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("{runner_id}\0{workspace_root}").as_bytes());
+    let name = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&digest[..12]);
+    Ok(homeboy_core::paths::homeboy_data()?
+        .join("cleanup")
+        .join("workspace-prune")
+        .join(format!("{name}.json")))
+}
+
+fn write_prune_convergence_receipt(
+    path: &Path,
+    receipt: &DurablePruneConvergenceReceipt,
+) -> Result<()> {
+    let parent = path.parent().expect("receipt has parent");
+    fs::create_dir_all(parent).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create workspace prune receipt directory".to_string()),
+        )
+    })?;
+    let temporary = path.with_extension("json.tmp");
+    let payload = serde_json::to_vec_pretty(receipt).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize workspace prune receipt".to_string()),
+        )
+    })?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&temporary)
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("write workspace prune receipt".to_string()),
+            )
+        })?;
+    file.write_all(&payload)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("durably write workspace prune receipt".to_string()),
+            )
+        })?;
+    fs::rename(&temporary, path).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("publish workspace prune receipt".to_string()),
+        )
+    })
+}
+
+fn record_prune_convergence_page(
+    convergence: Option<&mut RunnerWorkspacePruneConvergence>,
+    pass: usize,
+    cursor_before: Option<String>,
+    cursor_after: Option<String>,
+    scanned_workspace_count: usize,
+    candidate_count: usize,
+    applied_count: usize,
+    skipped_count: usize,
+    reclaimed_bytes: u64,
+    scan_complete: bool,
+) {
+    let Some(convergence) = convergence else {
+        return;
+    };
+    convergence.pass_count += 1;
+    convergence.cursor_history.push(cursor_before.clone());
+    convergence.cursor_history.push(cursor_after.clone());
+    convergence.inspected_count += scanned_workspace_count;
+    convergence.candidate_count += candidate_count;
+    convergence.applied_count += applied_count;
+    convergence.skipped_count += skipped_count;
+    convergence.verified_reclaimed_bytes += reclaimed_bytes;
+    convergence
+        .page_receipts
+        .push(RunnerWorkspacePrunePageReceipt {
+            pass,
+            cursor_before,
+            cursor_after,
+            scanned_workspace_count,
+            candidate_count,
+            applied_count,
+            skipped_count,
+            reclaimed_bytes,
+            scan_complete,
+        });
+}
+
+fn persist_prune_convergence(
+    path: Option<&Path>,
+    convergence: Option<&RunnerWorkspacePruneConvergence>,
+    runner_id: &str,
+    workspace_root: &str,
+    min_age_hours: u64,
+    limit: usize,
+    cursor: Option<String>,
+) -> Result<()> {
+    let (Some(path), Some(convergence)) = (path, convergence) else {
+        return Ok(());
+    };
+    write_prune_convergence_receipt(
+        path,
+        &DurablePruneConvergenceReceipt {
+            schema: WORKSPACE_PRUNE_CONVERGENCE_SCHEMA.to_string(),
+            runner_id: runner_id.to_string(),
+            workspace_root: workspace_root.to_string(),
+            min_age_hours,
+            limit,
+            cursor,
+            convergence: convergence.clone(),
+        },
+    )
+}
+
 pub fn prune_workspaces(
     runner_id: &str,
     options: RunnerWorkspacePruneOptions,
@@ -1164,7 +1299,7 @@ pub fn prune_workspaces(
     validate_absolute_path("workspace_root", workspace_root)?;
     let lab_workspaces_root = format!("{}/_lab_workspaces", workspace_root.trim_end_matches('/'));
     let limit = options.limit.max(1);
-    let passes = if options.apply {
+    let passes = if options.apply || options.converge {
         options.passes.max(1)
     } else {
         1
@@ -1180,9 +1315,69 @@ pub fn prune_workspaces(
     let mut total_candidate_bytes = 0;
     let mut scanned_workspace_count = 0;
     let mut scan_complete = true;
+    let receipt_path = options
+        .converge
+        .then(|| prune_convergence_receipt_path(runner_id, workspace_root))
+        .transpose()?;
+    let mut convergence = receipt_path
+        .as_ref()
+        .map(|path| RunnerWorkspacePruneConvergence {
+            receipt_path: path.display().to_string(),
+            pass_count: 0,
+            cursor_history: Vec::new(),
+            inspected_count: 0,
+            candidate_count: 0,
+            applied_count: 0,
+            skipped_count: 0,
+            verified_reclaimed_bytes: 0,
+            terminal_reason: "running".to_string(),
+            resume_command: None,
+            page_receipts: Vec::new(),
+        });
     let mut continuation_cursor = options.cursor.clone();
+    if options.resume {
+        let path = receipt_path.as_ref().ok_or_else(|| {
+            Error::validation_invalid_argument("resume", "--resume requires --converge", None, None)
+        })?;
+        let contents = fs::read(path).map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("read workspace prune receipt".to_string()),
+            )
+        })?;
+        let durable: DurablePruneConvergenceReceipt =
+            serde_json::from_slice(&contents).map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("parse workspace prune receipt".to_string()),
+                )
+            })?;
+        if durable.schema != WORKSPACE_PRUNE_CONVERGENCE_SCHEMA
+            || durable.runner_id != runner.id
+            || durable.workspace_root != workspace_root
+            || durable.min_age_hours != options.min_age_hours
+            || durable.limit != limit
+        {
+            return Err(Error::validation_invalid_argument(
+                "resume",
+                "workspace prune receipt does not match this runner and policy",
+                None,
+                None,
+            ));
+        }
+        continuation_cursor = durable.cursor;
+        convergence = Some(durable.convergence);
+    }
+    let started = Instant::now();
     let remaining_candidates: Vec<RunnerWorkspacePruneEntry> = Vec::new();
     for pass in 0..passes {
+        if options
+            .max_wall_time_seconds
+            .is_some_and(|seconds| started.elapsed() >= Duration::from_secs(seconds))
+        {
+            break;
+        }
+        let cursor_before = continuation_cursor.clone();
         let scan = prune_candidates_for_runner(
             &runner,
             &lab_workspaces_root,
@@ -1190,6 +1385,8 @@ pub fn prune_workspaces(
             limit,
             continuation_cursor.as_deref(),
         )?;
+        let page_scanned = scan.scanned_workspace_count;
+        let skipped_before = skipped.len();
         scanned_workspace_count += scan.scanned_workspace_count;
         scan_complete = scan.scan_complete;
         continuation_cursor = scan.continuation_cursor;
@@ -1234,11 +1431,36 @@ pub fn prune_workspaces(
             total_candidate_bytes = candidates.iter().map(|entry| entry.bytes).sum();
         }
         if candidates.is_empty() {
+            record_prune_convergence_page(
+                convergence.as_mut(),
+                pass + 1,
+                cursor_before,
+                continuation_cursor.clone(),
+                page_scanned,
+                0,
+                0,
+                skipped.len() - skipped_before,
+                0,
+                scan_complete,
+            );
+            if options.apply {
+                persist_prune_convergence(
+                    receipt_path.as_deref(),
+                    convergence.as_ref(),
+                    &runner.id,
+                    workspace_root,
+                    options.min_age_hours,
+                    limit,
+                    continuation_cursor.clone(),
+                )?;
+            }
             if options.apply && !scan_complete {
                 continue;
             }
             break;
         }
+        let candidate_count = candidates.len();
+        let removed_before = removed.len();
         for candidate in candidates {
             if !options.apply {
                 candidate_entries.push(candidate);
@@ -1305,7 +1527,48 @@ pub fn prune_workspaces(
             }
         }
         if !options.apply || scan_complete {
+            record_prune_convergence_page(
+                convergence.as_mut(),
+                pass + 1,
+                cursor_before,
+                continuation_cursor.clone(),
+                page_scanned,
+                candidate_count,
+                removed.len() - removed_before,
+                skipped.len() - skipped_before,
+                removed[removed_before..]
+                    .iter()
+                    .map(|entry| entry.bytes)
+                    .sum(),
+                scan_complete,
+            );
             break;
+        }
+        record_prune_convergence_page(
+            convergence.as_mut(),
+            pass + 1,
+            cursor_before,
+            continuation_cursor.clone(),
+            page_scanned,
+            candidate_count,
+            removed.len() - removed_before,
+            skipped.len() - skipped_before,
+            removed[removed_before..]
+                .iter()
+                .map(|entry| entry.bytes)
+                .sum(),
+            scan_complete,
+        );
+        if options.apply {
+            persist_prune_convergence(
+                receipt_path.as_deref(),
+                convergence.as_ref(),
+                &runner.id,
+                workspace_root,
+                options.min_age_hours,
+                limit,
+                continuation_cursor.clone(),
+            )?;
         }
     }
 
@@ -1338,6 +1601,41 @@ pub fn prune_workspaces(
     let total_removed_bytes = removed.iter().map(|entry| entry.bytes).sum();
     let runner_id = runner.id.clone();
     let workspace_root = workspace_root.to_string();
+    let terminal_reason = if scan_complete {
+        "scan_complete"
+    } else if options
+        .max_wall_time_seconds
+        .is_some_and(|seconds| started.elapsed() >= Duration::from_secs(seconds))
+    {
+        "wall_time_budget"
+    } else {
+        "max_passes"
+    };
+    if let Some(convergence) = convergence.as_mut() {
+        convergence.terminal_reason = terminal_reason.to_string();
+        convergence.resume_command = (!scan_complete).then(|| {
+            let wall_time = options
+                .max_wall_time_seconds
+                .map(|seconds| format!(" --max-wall-time-seconds {seconds}"))
+                .unwrap_or_default();
+            format!(
+                "homeboy runner workspace prune {} --apply --converge --min-age-hours {} --limit {limit} --passes {passes}{wall_time} --resume",
+                shell_arg(&runner.id),
+                options.min_age_hours,
+            )
+        });
+        if options.apply {
+            persist_prune_convergence(
+                receipt_path.as_deref(),
+                Some(convergence),
+                &runner.id,
+                &workspace_root,
+                options.min_age_hours,
+                limit,
+                continuation_cursor.clone(),
+            )?;
+        }
+    }
     Ok((
         RunnerWorkspacePruneOutput {
             variant: "workspace_prune",
@@ -1388,6 +1686,7 @@ pub fn prune_workspaces(
             has_more,
             next_command,
             drain_command,
+            convergence,
         },
         0,
     ))
