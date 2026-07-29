@@ -1091,6 +1091,41 @@ jobs:
         run: |
           rm -f artifacts/*-dist-manifest.json
 
+      - name: Preserve existing published asset bytes
+        if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete != 'true'
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
+          EXPECTED_ASSETS: ${{ needs.plan.outputs.expected-assets }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "${RELEASE_TAG}" --json isDraft,assets > existing-release.json; then
+            exit 0
+          fi
+          if [ "$(jq -r '.isDraft' existing-release.json)" != "false" ]; then
+            exit 0
+          fi
+
+          mkdir -p existing-assets
+          gh release download "${RELEASE_TAG}" --dir existing-assets
+          while IFS= read -r name; do
+            path="existing-assets/${name}"
+            if [ ! -f "${path}" ]; then
+              continue
+            fi
+            test -s "${path}"
+            remote_digest="$(jq -r --arg name "${name}" '.assets[] | select(.name == $name) | .digest // empty' existing-release.json)"
+            if [[ "${remote_digest}" != sha256:* ]]; then
+              echo "::error::GitHub metadata did not provide a SHA-256 digest for existing asset ${name}"
+              exit 1
+            fi
+            actual_digest="sha256:$(sha256sum "${path}" | cut -d' ' -f1)"
+            if [ "${actual_digest}" != "${remote_digest}" ]; then
+              echo "::error::Downloaded ${name} digest ${actual_digest} does not match GitHub metadata ${remote_digest}"
+              exit 1
+            fi
+            cp "${path}" "artifacts/${name}"
+          done < <(jq -r '.[]' <<< "${EXPECTED_ASSETS}")
+
       - name: Create authoritative recovery manifest
         if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete != 'true'
         env:

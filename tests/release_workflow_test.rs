@@ -867,9 +867,17 @@ fn release_recovery_skips_the_artifact_rebuild_when_the_draft_is_already_complet
 #[test]
 fn incomplete_recovery_delivers_identity_bound_artifacts_to_the_finalizer() {
     let host = job_section(release_workflow(), "host");
+    let preserve = release_step_block(host, "name: Preserve existing published asset bytes");
     let recovery = release_step_block(host, "name: Create authoritative recovery manifest");
     let adoption = release_step_block(host, "name: Create remote draft adoption manifest");
 
+    assert!(preserve.contains(
+        "if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete != 'true'"
+    ));
+    assert!(preserve.contains(".isDraft' existing-release.json)\" != \"false\""));
+    assert!(preserve.contains("done < <(jq -r '.[]' <<< \"${EXPECTED_ASSETS}\")"));
+    assert!(preserve.contains("actual_digest=\"sha256:$(sha256sum"));
+    assert!(preserve.contains("cp \"${path}\" \"artifacts/${name}\""));
     assert!(recovery.contains(
         "if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete != 'true'"
     ));
