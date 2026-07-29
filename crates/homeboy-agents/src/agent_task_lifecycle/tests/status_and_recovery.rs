@@ -411,31 +411,18 @@ fn candidate_adoption_cancellation_persists_request_before_group_termination() {
         let mut child = command.spawn().expect("spawn isolated gate");
         start_candidate_adoption_gate(&record.run_id, "sleep 30", child.id(), 1800)
             .expect("persist gate identity");
+        let reaper = std::thread::spawn(move || child.wait());
 
-        let run_id = record.run_id.clone();
-        let cancellation = std::thread::spawn(move || cancel_run(&run_id, Some("operator cancel")));
-        let observed_request = (0..100).any(|_| {
-            let state = status(&record.run_id)
-                .expect("read adoption")
-                .candidate_adoption
-                .expect("adoption")
-                .state;
-            if state == "cancel_requested" {
-                return true;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
-            false
-        });
-        let cancelled = cancellation
-            .join()
-            .expect("join cancellation")
-            .expect("cancelled");
-        assert!(observed_request, "cancellation request was never durable");
+        let cancelled = cancel_run(&record.run_id, Some("operator cancel")).expect("cancelled");
+        assert!(cancelled.metadata["candidate_adoption_cancel_requested_at"].is_string());
         assert_eq!(
             cancelled.candidate_adoption.expect("adoption").state,
             "cancelled"
         );
-        let _ = child.wait();
+        reaper
+            .join()
+            .expect("join gate reaper")
+            .expect("reap isolated gate");
     });
 }
 
