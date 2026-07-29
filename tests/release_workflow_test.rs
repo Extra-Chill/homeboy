@@ -947,3 +947,327 @@ fn release_recovery_records_control_binary_lineage_against_the_release_target() 
         "only git's definitive non-ancestor exit code may block a recovery"
     );
 }
+
+/// Extract the shell body of a `run: |` step so its BEHAVIOUR can be exercised
+/// rather than string-matched. Asserting the effect is the whole point: the
+/// audit gate in #10685 passed for weeks because its test asserted the command
+/// it ran instead of what that command produced.
+fn step_run_script(job: &str, marker_line: &str) -> String {
+    let block = release_step_block(job, marker_line);
+    let start = block
+        .find("run: |\n")
+        .expect("step should have a run block");
+    block[start + "run: |\n".len()..]
+        .lines()
+        .take_while(|line| line.trim().is_empty() || line.starts_with("          "))
+        .map(|line| line.get(10..).unwrap_or("").to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Substitute `${{ ... }}` expressions the way the runner does — by value, as
+/// literal text. `subs` is scanned in order, so the caller controls precedence
+/// when one expression mentions several outputs (the `release-version`
+/// fallback chain mentions both `recovery` and `release-check`). Unmatched
+/// expressions become the empty string, exactly as an unset step output does.
+fn interpolate(script: &str, subs: &[(&str, &str)]) -> String {
+    let mut out = String::new();
+    let mut rest = script;
+
+    while let Some(open) = rest.find("${{") {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 3..];
+        let close = after.find("}}").expect("unterminated ${{ expression");
+        let expr = &after[..close];
+        let value = subs
+            .iter()
+            .find(|(key, _)| expr.contains(key))
+            .map_or("", |(_, value)| *value);
+        out.push_str(value);
+        rest = &after[close + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Run the release `check` job's decide step under the runner's own shell
+/// (`bash -e`) and return (exit code, combined output).
+fn run_decide_step(subs: &[(&str, &str)]) -> (i32, String) {
+    let check = job_section(release_workflow(), "check");
+    let script = interpolate(
+        &step_run_script(check, "name: Decide whether to release"),
+        subs,
+    );
+
+    let dir = std::env::temp_dir().join(format!(
+        "homeboy-decide-{}-{:p}",
+        std::process::id(),
+        &script
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let script_path = dir.join("decide.sh");
+    let output_path = dir.join("github_output");
+    std::fs::write(&script_path, &script).expect("write script");
+    std::fs::write(&output_path, "").expect("write output file");
+
+    let output = std::process::Command::new("bash")
+        .arg("-e")
+        .arg(&script_path)
+        .env("GITHUB_OUTPUT", &output_path)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("decide step should run");
+
+    let combined = format!(
+        "{}{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        std::fs::read_to_string(&output_path).unwrap_or_default()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    (output.status.code().unwrap_or(-1), combined)
+}
+
+/// Regression for #10703, and the fifth instance of the #10685 invariant.
+///
+/// The `check` job checks out by SHA, which leaves HEAD detached, so
+/// `git rev-parse --abbrev-ref HEAD` — how homeboy-action's release wrapper
+/// identifies the branch — returned the literal string `HEAD`. Its guard read
+/// that as "not on main", exited 0 before `homeboy release` ever ran, and
+/// wrote no `release-version`. The decide step then reported "No releasable
+/// commits" and skipped Build, Audit, Test, Lint, Prepare and Create GitHub
+/// Release while concluding `success` — for 131 commits, 86 of them
+/// conventional `fix:`/`feat:` (run 30410721084).
+///
+/// This asserts the EFFECT: an unmeasured skip reason must FAIL the job, and a
+/// measured one must still skip quietly. If someone reverts the measurement
+/// check, the `wrong-branch` case starts exiting 0 and this test fails.
+#[test]
+fn release_check_never_reports_nothing_to_release_without_measuring() {
+    // Reasons core emits from planning_policy.rs after it evaluated the commit
+    // range. These are measured negatives and must skip quietly, exit 0.
+    for reason in [
+        "no-releasable-commits",
+        "release-already-at-head",
+        "major-requires-flag",
+    ] {
+        let (code, out) = run_decide_step(&[
+            ("steps.release-check.outcome", "success"),
+            ("steps.release-check.outputs['skipped-reason']", reason),
+        ]);
+        assert_eq!(
+            code, 0,
+            "measured skip reason {reason} must not fail the release check: {out}"
+        );
+        assert!(
+            out.contains("should-release=false"),
+            "measured skip reason {reason} must skip the release: {out}"
+        );
+        // The reason must be reported by name. Collapsing every measured
+        // negative into "no releasable commits" is how a deliberate refusal
+        // (major-requires-flag) became indistinguishable from an empty commit
+        // range in the first place.
+        assert!(
+            out.contains(reason),
+            "decide step must name the measured skip reason {reason}: {out}"
+        );
+    }
+
+    // Reasons homeboy-action's wrapper emits BEFORE invoking `homeboy release`
+    // (run-release.sh:122 and :209). Nothing was measured, so "nothing to
+    // release" is unknowable and the job must fail rather than skip green.
+    for reason in ["wrong-branch", "release-output-missing"] {
+        let (code, out) = run_decide_step(&[
+            ("steps.release-check.outcome", "success"),
+            ("steps.release-check.outputs['skipped-reason']", reason),
+        ]);
+        assert_ne!(
+            code, 0,
+            "unmeasured skip reason {reason} must fail the release check, not skip it: {out}"
+        );
+        assert!(
+            !out.contains("should-release=true"),
+            "unmeasured skip reason {reason} must never release: {out}"
+        );
+        assert!(
+            out.contains("::error::"),
+            "unmeasured skip reason {reason} must be loud: {out}"
+        );
+    }
+
+    // An empty reason with no version is equally unknowable — fail closed.
+    let (code, out) = run_decide_step(&[("steps.release-check.outcome", "success")]);
+    assert_ne!(
+        code, 0,
+        "a dry run that produced neither a version nor a reason must fail closed: {out}"
+    );
+
+    // A measured version still releases.
+    let (code, out) = run_decide_step(&[
+        ("steps.release-check.outcome", "success"),
+        ("steps.release-check.outputs['release-version']", "0.322.0"),
+        ("steps.release-check.outputs['release-tag']", "v0.322.0"),
+        ("steps.release-check.outputs['release-bump-type']", "minor"),
+    ]);
+    assert_eq!(code, 0, "a measured version must release: {out}");
+    assert!(
+        out.contains("should-release=true") && out.contains("release-version=0.322.0"),
+        "a measured version must release: {out}"
+    );
+
+    // Paths where the dry run legitimately never ran (stranded recovery, hold)
+    // must not be caught by the measurement check — the dry-run step is
+    // `skipped` there and earlier branches own the decision.
+    let (code, out) = run_decide_step(&[
+        ("steps.release-check.outcome", "skipped"),
+        ("steps.stranded.outputs['stranded-tag']", "v0.322.0"),
+        ("steps.stranded.outputs['stranded-version']", "0.322.0"),
+    ]);
+    assert_eq!(code, 0, "stranded recovery must still work: {out}");
+    assert!(
+        out.contains("recovery-release=true"),
+        "stranded recovery must still publish the prepared tag: {out}"
+    );
+
+    let (code, out) = run_decide_step(&[
+        ("steps.release-check.outcome", "skipped"),
+        ("steps.stranded.outputs['hold-reason']", "in-flight release"),
+    ]);
+    assert_eq!(code, 0, "an in-flight hold must not fail the job: {out}");
+    assert!(
+        out.contains("should-release=false"),
+        "an in-flight hold must not release: {out}"
+    );
+}
+
+/// The branch guard must be satisfied by establishing the branch, NOT by
+/// setting `release-head`.
+///
+/// `release-head: 'true'` makes homeboy-action append `--head`, which means
+/// "finish an already-versioned, already-tagged HEAD" and SKIPS the changelog
+/// and version computation (crates/homeboy-cli/src/commands/release/mod.rs).
+/// The `host` publish job checks out a real tag and legitimately wants that.
+/// The dry run exists to compute a fresh bump, so it must never set it — the
+/// asymmetry between the two steps is correct and must stay.
+#[test]
+fn release_dry_run_establishes_its_branch_instead_of_claiming_release_head() {
+    let check = job_section(release_workflow(), "check");
+    let host = job_section(release_workflow(), "host");
+
+    // The two steps must DISAGREE: publish finishes a tagged HEAD, the dry run
+    // must not claim to.
+    assert!(
+        host.contains("release-head: 'true'"),
+        "the publish step finishes an already-tagged HEAD and must keep release-head"
+    );
+    let dry_run = release_step_block(check, "name: Dry-run release check");
+    assert!(
+        !dry_run.contains("release-head"),
+        "the dry run computes a fresh version bump; --head would skip exactly that"
+    );
+
+    // Because it cannot use release-head, the check job must make the branch
+    // resolvable instead, and only when HEAD really is the branch tip.
+    let attach = step_run_script(check, "name: Attach HEAD to the release branch");
+    assert!(
+        attach.contains("git checkout -q -B \"${RELEASE_BRANCH}\""),
+        "the check job must re-attach HEAD so the action's branch guard can resolve it"
+    );
+    assert!(
+        attach.contains("refs/remotes/origin/${RELEASE_BRANCH}")
+            && attach.contains("[ \"${HEAD_SHA}\" != \"${BRANCH_SHA}\" ]"),
+        "attaching must be guarded on HEAD actually being the release branch tip, \
+         otherwise it would launder an arbitrary SHA into a release"
+    );
+
+    // The guard needs full history to resolve the remote branch ref.
+    assert!(
+        check.contains("fetch-depth: 0"),
+        "resolving origin/<branch> requires unshallowed history"
+    );
+}
+
+/// The attach step's real git behaviour: attach at the tip, refuse otherwise.
+/// Asserting the effect, not the shape of the script.
+#[test]
+fn release_head_attach_refuses_any_commit_that_is_not_the_branch_tip() {
+    let check = job_section(release_workflow(), "check");
+    let script = step_run_script(check, "name: Attach HEAD to the release branch");
+
+    let dir = std::env::temp_dir().join(format!("homeboy-attach-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let script_path = dir.join("attach.sh");
+    std::fs::write(&script_path, &script).expect("write script");
+
+    let git = |args: &[&str], cwd: &std::path::Path| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git should run")
+    };
+
+    let upstream = dir.join("upstream");
+    std::fs::create_dir_all(&upstream).expect("upstream dir");
+    git(&["init", "-q", "-b", "main", "."], &upstream);
+    git(&["commit", "-q", "--allow-empty", "-m", "c1"], &upstream);
+    git(&["commit", "-q", "--allow-empty", "-m", "c2"], &upstream);
+    git(&["clone", "-q", upstream.to_str().unwrap(), "work"], &dir);
+    let work = dir.join("work");
+
+    let attach = |cwd: &std::path::Path| {
+        std::process::Command::new("bash")
+            .arg("-e")
+            .arg(&script_path)
+            .env("RELEASE_BRANCH", "main")
+            .current_dir(cwd)
+            .output()
+            .expect("attach step should run")
+    };
+    let branch_of = |cwd: &std::path::Path| {
+        String::from_utf8_lossy(&git(&["rev-parse", "--abbrev-ref", "HEAD"], cwd).stdout)
+            .trim()
+            .to_string()
+    };
+
+    // A SHA checkout of the branch tip — exactly what `ref: ${{ github.sha }}`
+    // produces — starts detached and reports the literal string "HEAD".
+    git(&["checkout", "-q", "--detach", "HEAD"], &work);
+    assert_eq!(
+        branch_of(&work),
+        "HEAD",
+        "a detached checkout must reproduce the bug's precondition"
+    );
+    let out = attach(&work);
+    assert!(out.status.success(), "attach should succeed at the tip");
+    assert_eq!(
+        branch_of(&work),
+        "main",
+        "HEAD at the branch tip must be re-attached so the branch guard resolves"
+    );
+
+    // An older commit is NOT the branch tip. Attaching it would let a release
+    // be cut from an arbitrary SHA — the exact thing the guard exists to stop.
+    git(&["checkout", "-q", "--detach", "HEAD~1"], &work);
+    let out = attach(&work);
+    assert!(
+        out.status.success(),
+        "refusing to attach is not an error in this step"
+    );
+    assert_eq!(
+        branch_of(&work),
+        "HEAD",
+        "a commit that is not the branch tip must stay detached"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("::warning::"),
+        "refusing to attach must be visible"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
