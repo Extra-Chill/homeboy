@@ -426,7 +426,11 @@ fn live_peer_session_in(
 /// Only controller session records participate in peer scans. Other state in a
 /// runner directory has its own schema and must not be parsed as a session.
 fn is_controller_session_file(path: &std::path::Path) -> bool {
-    const RESERVED_SIDECARS: &[&str] = &["generations.json"];
+    const RESERVED_SIDECARS: &[&str] = &[
+        "generations.json",
+        "pending-replacement.json",
+        "replacement-operation.json",
+    ];
 
     path.is_file()
         && path
@@ -683,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn peer_scans_ignore_reserved_generation_sidecars() {
+    fn peer_scans_ignore_reserved_sidecars() {
         let root = TempDir::new().expect("session directory");
         let owner = session("controller-owner", "lease-live");
         let peer = session("controller-peer", "lease-live");
@@ -691,8 +695,13 @@ mod tests {
             .expect("write owner session");
         write_session_at(&root.path().join("controller-peer.json"), &peer)
             .expect("write peer session");
-        std::fs::write(root.path().join("generations.json"), "{}")
-            .expect("write generation sidecar");
+        for sidecar in [
+            "generations.json",
+            "pending-replacement.json",
+            "replacement-operation.json",
+        ] {
+            std::fs::write(root.path().join(sidecar), "{}").expect("write reserved sidecar");
+        }
 
         let live_peer = live_peer_session_in(
             &root.path().to_path_buf(),
