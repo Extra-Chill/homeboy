@@ -35,7 +35,7 @@ Plan release workflows
 | `--recover` | flag | Recover from an interrupted release (tag + push current version) |
 | `--retag` | flag | With --recover: if the release tag exists but points at a commit behind HEAD (e.g. config-only commits landed after tagging), move the tag to HEAD instead of refusing. Guarded — the tagged commit must be an ancestor of HEAD, HEAD must satisfy the version targets, and no GitHub Release may exist for the tag |
 | `--head` | flag | Finish the release pipeline for an already-versioned, already-tagged HEAD. Skips changelog/version/git mutation steps and runs package, GitHub Release, publish, cleanup, and post-release hooks against the tag pointing at HEAD |
-| `--from-artifacts` | `<DIR>` | Use existing source-authority-manifested release artifacts from this directory instead of running release.package. Requires --head |
+| `--from-artifacts` | `<DIR>` | Use existing release artifacts from this directory instead of running release.package. Requires --head |
 | `--package-only` | flag | Regenerate only the release package for an existing tag at HEAD. Combine with --head --tag <tag> --apply to write a durable artifact inventory for later --head --from-artifacts finalization |
 | `--tag` | `<TAG>` | Existing release tag to package with --package-only |
 | `--skip-checks` | `<CHECK>` | Skip pre-release quality checks |
@@ -127,3 +127,4 @@ Show current version (default: discovered component, fallback: homeboy binary)
 | Option | Value | Description |
 | --- | --- | --- |
 | `--path` | `<PATH>` | Override local_path for version file lookup |
+

@@ -991,8 +991,11 @@ fn run_declared_result_parser(
     })?;
 
     let results_file = run_dir.step_file(run_dir::files::TEST_RESULTS);
+    let provider_results_file = run_dir.path().join("files/test-results.json");
     let source_file = if results_file.is_file() {
         results_file
+    } else if provider_results_file.is_file() {
+        provider_results_file
     } else {
         let stdout_file = run_dir.path().join("test-output.txt");
         if let Some(parent) = stdout_file.parent() {

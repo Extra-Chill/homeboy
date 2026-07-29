@@ -120,12 +120,36 @@ fn preflight_prepared_payload_binding(
             )
         })
         .collect::<Result<Vec<_>>>()?;
-    binding::bind_project_payloads(
+    let payloads =
+        std::collections::HashMap::from([(artifact.component_id.clone(), artifact.clone())]);
+    match binding::bind_project_payloads(project, &base_path, &components, &payloads) {
+        Ok(_) => return Ok(()),
+        Err(error)
+            if error
+                .details
+                .get("field")
+                .and_then(serde_json::Value::as_str)
+                == Some("remotePath")
+                && error
+                    .details
+                    .get("problem")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|problem| problem.contains("requires path_root")) =>
+        {
+            // Detector-backed roots require read-only remote inspection before binding.
+        }
+        Err(error) => return Err(error),
+    }
+
+    let (ctx, base_path) = resolve_project_ssh_with_base_path(project_id)?;
+    let project = path_roots::project_with_detected_path_roots(
         project,
-        &base_path,
         &components,
-        &std::collections::HashMap::from([(artifact.component_id.clone(), artifact.clone())]),
-    )?;
+        &base_path,
+        &ctx.client,
+        "deploy",
+    );
+    binding::bind_project_payloads(&project, &base_path, &components, &payloads)?;
     Ok(())
 }
 
@@ -518,8 +542,12 @@ pub fn resolve_shared_targets(component_ids: &[String]) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homeboy_core::component::{Component, ScopedExtensionConfig};
     use homeboy_core::project::{Project, ProjectComponentAttachment};
+    use homeboy_core::server::{self, Server};
     use homeboy_core::test_support::with_isolated_home;
+    use homeboy_extension::{DeployCapability, ExtensionManifest, RemotePathRootRule};
+    use std::collections::{BTreeMap, HashMap};
     use std::path::Path;
 
     fn deploy_config() -> DeployConfig {
@@ -610,6 +638,98 @@ mod tests {
                 error.details.to_string().contains("prepared-artifact.zip"),
                 "prepared artifact validation must fail before SSH resolution: {error:?}"
             );
+        });
+    }
+
+    #[test]
+    fn prepared_payload_preflight_detects_managed_path_roots() {
+        with_isolated_home(|home| {
+            let base_path = home.path().join("runtime");
+            std::fs::create_dir_all(&base_path).expect("runtime root");
+            let managed_root = base_path.join("wp-content");
+            homeboy_extension::save_manifest(&ExtensionManifest {
+                id: "managed-paths".to_string(),
+                name: "Managed Paths".to_string(),
+                version: "1.0.0".to_string(),
+                deploy: Some(DeployCapability {
+                    verifications: Vec::new(),
+                    overrides: Vec::new(),
+                    protected_path_suffixes: Vec::new(),
+                    owner_hints: Vec::new(),
+                    archive_install: Vec::new(),
+                    remote_path_inference: Vec::new(),
+                    path_roots: vec![RemotePathRootRule {
+                        path_prefix: "wp-content".to_string(),
+                        root: "wp_content".to_string(),
+                        strip_prefix: true,
+                        detect_command: Some(format!("printf {}", managed_root.to_string_lossy())),
+                    }],
+                    version_patterns: Vec::new(),
+                    since_tag: None,
+                }),
+                ..serde_json::from_value(serde_json::json!({
+                    "name": "Managed Paths",
+                    "version": "1.0.0"
+                }))
+                .expect("extension manifest")
+            })
+            .expect("save extension");
+            server::save(&Server {
+                id: "local".to_string(),
+                host: "localhost".to_string(),
+                user: "test".to_string(),
+                port: 22,
+                identity_file: None,
+                aliases: vec![],
+                kind: None,
+                auth: None,
+                env: Default::default(),
+                runner: None,
+            })
+            .expect("save local server");
+            let project = Project {
+                id: "site".to_string(),
+                server_id: Some("local".to_string()),
+                base_path: Some(base_path.display().to_string()),
+                components: vec![ProjectComponentAttachment {
+                    id: "plugin".to_string(),
+                    local_path: "/stale/plugin".to_string(),
+                    remote_path: Some("../wp-content/plugins/plugin".to_string()),
+                    deployment_provider: None,
+                }],
+                ..Project::default()
+            };
+            project::save(&project).expect("save project");
+            let component = Component {
+                id: "plugin".to_string(),
+                local_path: "/release/plugin".to_string(),
+                remote_path: "../wp-content/plugins/plugin".to_string(),
+                extensions: Some(HashMap::from([(
+                    "managed-paths".to_string(),
+                    ScopedExtensionConfig::default(),
+                )])),
+                ..Default::default()
+            };
+            let config = DeployConfig {
+                expected_version: Some("1.2.3".to_string()),
+                prepared_projection: Some(PreparedDeployProjection {
+                    components: BTreeMap::from([("site:plugin".to_string(), component)]),
+                }),
+                prepared_artifact: Some(PreparedDeployArtifact {
+                    component_id: "plugin".to_string(),
+                    path: "/source/plugin.zip".to_string(),
+                    durable_path: "/durable/plugin.zip".to_string(),
+                    size_bytes: 7,
+                    sha256: "hash".to_string(),
+                    version: "1.2.3".to_string(),
+                    tag: "v1.2.3".to_string(),
+                    source_commit: "commit".to_string(),
+                }),
+                ..deploy_config()
+            };
+
+            preflight_prepared_payload_binding(&project, "site", &config)
+                .expect("detector-backed managed path binds before lifecycle creation");
         });
     }
 }

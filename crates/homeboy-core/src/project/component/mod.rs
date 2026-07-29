@@ -9,8 +9,9 @@ pub use attachments::{
 };
 pub use overrides::apply_component_overrides;
 pub use report::{
-    attach_component_path_report, clear_components, list_components, remove_components_report,
-    set_components, ProjectComponentsOutput,
+    attach_component_path_report, attach_component_paths_report, clear_components, list_components,
+    remove_components_report, set_components, BatchComponentAttachmentFailurePolicy,
+    BatchComponentAttachmentInput, BatchComponentAttachmentWorktreePolicy, ProjectComponentsOutput,
 };
 pub use resolution::{
     resolve_project_component, resolve_project_component_with_standalone_snapshot,

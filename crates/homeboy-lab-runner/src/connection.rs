@@ -2479,6 +2479,7 @@ fn stale_daemon_warning(
             build_identity: None,
         });
     let current_version = current_identity.version.clone();
+    let controller_identity = homeboy_product_identity::build_identity();
     let observed_session_version = session
         .local_url
         .as_deref()
@@ -2494,6 +2495,10 @@ fn stale_daemon_warning(
         session_identity.as_deref(),
         current_identity.build_identity.as_deref(),
     );
+    let controller_commit_comparison = compare_build_commits(
+        current_identity.build_identity.as_deref(),
+        Some(&controller_identity.display),
+    );
     let stale_runtime_paths = session
         .local_url
         .as_deref()
@@ -2505,14 +2510,20 @@ fn stale_daemon_warning(
         .and_then(|local_url| daemon_http_runtime_loaded_paths(local_url).ok())
         .map(|loaded| changed_runtime_paths(&runner.env, &loaded))
         .unwrap_or_default();
-    if daemon_runtime_is_current(
+    let daemon_matches_configured = daemon_runtime_is_current(
         &observed_session_version,
         &session.homeboy_version,
         &current_version,
         identity_comparison,
         &stale_runtime_paths,
         &changed_runtime_paths,
-    ) {
+    );
+    let controller_matches_configured =
+        versions_match(&current_version, &controller_identity.version)
+            && controller_commit_comparison == IdentityComparison::Match
+            && controller_identity.git_dirty != Some(true);
+    let controller_version_matches = versions_match(&current_version, &controller_identity.version);
+    if daemon_matches_configured && controller_matches_configured {
         return Ok(None);
     }
     Ok(Some(
@@ -2527,6 +2538,13 @@ fn stale_daemon_warning(
             &runner.id,
             homeboy,
             identity_comparison == IdentityComparison::Unverifiable,
+        )
+        .with_controller_compatibility(
+            controller_identity.version,
+            controller_identity.display,
+            controller_version_matches,
+            daemon_matches_configured,
+            controller_identity.git_dirty == Some(true),
         )
         .with_runtime_paths(&runner.id, stale_runtime_paths, changed_runtime_paths),
     ))

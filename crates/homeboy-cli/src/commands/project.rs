@@ -123,6 +123,22 @@ enum ProjectComponentsCommand {
         /// Local repo path containing homeboy.json
         local_path: String,
     },
+    /// Attach multiple repo paths, retaining per-path diagnostics
+    AttachPaths {
+        /// Project ID
+        project_id: String,
+        /// Local repo paths containing homeboy.json
+        local_paths: Vec<String>,
+        /// JSON array of {"path":"/repo","reference":"caller-owned-ref"} inputs
+        #[arg(long)]
+        input: Option<String>,
+        /// Continue all inputs or stop after the first failure
+        #[arg(long, value_enum, default_value_t = BatchFailurePolicyArg::Continue)]
+        failure_policy: BatchFailurePolicyArg,
+        /// Include git worktrees or report them as skipped
+        #[arg(long, value_enum, default_value_t = BatchWorktreePolicyArg::Include)]
+        worktree_policy: BatchWorktreePolicyArg,
+    },
     /// Remove one or more components
     Remove {
         /// Project ID
@@ -207,6 +223,18 @@ enum ProjectPinCommand {
 enum ProjectPinType {
     File,
     Log,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum BatchFailurePolicyArg {
+    Continue,
+    FailFast,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum BatchWorktreePolicyArg {
+    Include,
+    Skip,
 }
 
 pub type ProjectOutput = homeboy::core::project::ProjectReportOutput;
@@ -356,12 +384,75 @@ fn components(command: ProjectComponentsCommand) -> CmdResult<ProjectOutput> {
             project_id,
             local_path,
         } => components_attach_path(&project_id, &local_path),
+        ProjectComponentsCommand::AttachPaths {
+            project_id,
+            local_paths,
+            input,
+            failure_policy,
+            worktree_policy,
+        } => components_attach_paths(
+            &project_id,
+            local_paths,
+            input.as_deref(),
+            failure_policy,
+            worktree_policy,
+        ),
         ProjectComponentsCommand::Remove {
             project_id,
             component_ids,
         } => components_remove(&project_id, component_ids),
         ProjectComponentsCommand::Clear { project_id } => components_clear(&project_id),
     }
+}
+
+fn components_attach_paths(
+    project_id: &str,
+    local_paths: Vec<String>,
+    input: Option<&str>,
+    failure_policy: BatchFailurePolicyArg,
+    worktree_policy: BatchWorktreePolicyArg,
+) -> CmdResult<ProjectOutput> {
+    let mut inputs: Vec<project::BatchComponentAttachmentInput> = local_paths
+        .into_iter()
+        .map(|path| project::BatchComponentAttachmentInput {
+            path,
+            reference: None,
+        })
+        .collect();
+    if let Some(input) = input {
+        let raw = homeboy::core::config::read_json_spec_to_string(input)?;
+        let mut parsed = serde_json::from_str(&raw).map_err(|error| {
+            homeboy::core::Error::validation_invalid_json(
+                error,
+                Some("parse batch component attachment inputs".to_string()),
+                None,
+            )
+        })?;
+        inputs.append(&mut parsed);
+    }
+    let failure_policy = match failure_policy {
+        BatchFailurePolicyArg::Continue => project::BatchComponentAttachmentFailurePolicy::Continue,
+        BatchFailurePolicyArg::FailFast => project::BatchComponentAttachmentFailurePolicy::FailFast,
+    };
+    let worktree_policy = match worktree_policy {
+        BatchWorktreePolicyArg::Include => project::BatchComponentAttachmentWorktreePolicy::Include,
+        BatchWorktreePolicyArg::Skip => project::BatchComponentAttachmentWorktreePolicy::Skip,
+    };
+    let components = project::attach_component_paths_report(
+        project_id,
+        inputs,
+        failure_policy,
+        worktree_policy,
+    )?;
+    let exit_code = components
+        .batch
+        .as_ref()
+        .map(|batch| batch.exit_code)
+        .unwrap_or(0);
+    Ok((
+        project::build_components_output(project_id, "attach_paths", components),
+        exit_code,
+    ))
 }
 
 fn components_list(project_id: &str) -> CmdResult<ProjectOutput> {
@@ -507,6 +598,50 @@ fn pin_update(
         project::build_pin_output("project.pin.update", project_id, pin),
         0,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use crate::cli_surface::Cli;
+
+    #[test]
+    fn component_attach_path_and_batch_surface_parse() {
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "project",
+            "components",
+            "attach-path",
+            "site",
+            "/repo/component",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "project",
+            "components",
+            "attach-paths",
+            "site",
+            "/repo/first",
+            "/repo/second",
+            "--failure-policy",
+            "continue",
+            "--worktree-policy",
+            "skip",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "project",
+            "components",
+            "attach-paths",
+            "site",
+            "--input",
+            r#"[{"path":"/repo/component","reference":"primary:component"}]"#,
+        ])
+        .is_ok());
+    }
 }
 
 fn pin_rename(
