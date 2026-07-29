@@ -9,6 +9,7 @@ import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 const settings = parseSettings(process.env.HOMEBOY_SETTINGS_JSON);
 const componentPath = required(process.env.HOMEBOY_COMPONENT_PATH, 'HOMEBOY_COMPONENT_PATH');
@@ -520,9 +521,12 @@ async function publishPhpunitArtifacts(artifactDirectory, status) {
     for (const file of files.slice(0, 2)) {
       await atomicCopy(path.join(artifactDirectory, 'files', file.name), path.join(publishedFilesDirectory, file.name));
     }
-    // The parser replaces this durable placeholder atomically. Its registration
-    // survives a parser crash so reviewers can still locate the expected evidence.
-    await atomicWrite(path.join(publishedFilesDirectory, 'test-failures.json'), '{}\n');
+    // The parser replaces this valid fallback atomically. Its registration and
+    // aggregate counts survive a parser crash without poisoning Homeboy's sidecar.
+    await atomicWrite(
+      path.join(publishedFilesDirectory, 'test-failures.json'),
+      await fallbackTestFailures(publishedFilesDirectory),
+    );
     await registerInvocationArtifacts(invocationArtifacts, files.map((file) => ({
       ...file,
       path: path.join('wp-codebox-phpunit', 'files', file.name).replaceAll(path.sep, '/'),
@@ -551,6 +555,18 @@ async function parsePublishedArtifacts(published) {
           await atomicCopy(published.failuresPath, requestedFailuresPath);
         }
       }
+    } catch (error) {
+      if (published.failuresPath) {
+        const fallback = await fallbackTestFailures(path.dirname(published.failuresPath), error);
+        await withInvocationArtifactLock(process.env.HOMEBOY_INVOCATION_ARTIFACT_DIR, async () => {
+          await assertDirectoryTree(process.env.HOMEBOY_INVOCATION_ARTIFACT_DIR, ['wp-codebox-phpunit', 'files']);
+          await atomicWrite(published.failuresPath, fallback);
+        });
+        if (requestedFailuresPath && requestedFailuresPath !== published.failuresPath) {
+          await atomicCopy(published.failuresPath, requestedFailuresPath);
+        }
+      }
+      throw error;
     } finally {
       if (published.failuresPath) { await unlink(temporaryFailuresPath).catch(() => {}); }
       if (requestedFailuresPath) {
@@ -561,6 +577,48 @@ async function parsePublishedArtifacts(published) {
     }
   }
   return published.status;
+}
+async function fallbackTestFailures(publishedFilesDirectory, error = null) {
+  let summary = {};
+  try {
+    const results = JSON.parse(await readFile(path.join(publishedFilesDirectory, 'test-results.json'), 'utf8'));
+    summary = isObject(results?.summary) ? results.summary : {};
+  } catch {}
+
+  const failures = [];
+  if (error) {
+    const testId = 'wp-codebox-phpunit-failure-parser';
+    const errorType = 'WPCodeboxFailureParserError';
+    const message = `Unable to parse preserved WP Codebox PHPUnit failure evidence: ${error.message}`;
+    failures.push({
+      test_name: testId,
+      test_file: null,
+      error_type: errorType,
+      message,
+      source_file: null,
+      source_line: 0,
+      test_id: testId,
+      suite: 'wp-codebox-harness',
+      file: null,
+      line: 0,
+      failure_type: errorType,
+      fingerprint: createHash('sha256').update(`${testId}|${errorType}|${message}`).digest('hex'),
+      stdout_excerpt: '',
+      stderr_excerpt: '',
+    });
+  }
+
+  return `${JSON.stringify({
+    failures,
+    total: Number(summary.total) || 0,
+    passed: Number(summary.passed) || 0,
+    metadata: {
+      assertions: 0,
+      failures: Number(summary.failed) || 0,
+      errors: 0,
+      skipped: Number(summary.skipped) || 0,
+    },
+  }, null, 2)}\n`;
 }
 async function registerInvocationArtifacts(invocationRoot, publishedArtifacts) {
   const manifestPath = path.join(invocationRoot, 'homeboy-artifact-manifest.json');

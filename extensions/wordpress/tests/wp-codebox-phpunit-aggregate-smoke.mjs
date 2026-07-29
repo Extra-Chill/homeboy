@@ -185,7 +185,17 @@ printf '%s\\n' '${JSON.stringify({ data: { entity: { local_path: conflictingData
   assert.notEqual(parserFailureRun.status, 0);
   const parserFailureManifest = JSON.parse(await readFile(path.join(parserFailureInvocation, 'homeboy-artifact-manifest.json'), 'utf8'));
   assert.ok(parserFailureManifest.artifacts.some((artifact) => artifact.path === 'wp-codebox-phpunit/files/test-failures.json'));
-  assert.equal(await readFile(path.join(parserFailureInvocation, 'wp-codebox-phpunit/files/test-failures.json'), 'utf8'), '{}\n');
+  const parserFailureDirectory = path.join(parserFailureInvocation, 'wp-codebox-phpunit/files');
+  const parserFailureSidecar = JSON.parse(await readFile(path.join(parserFailureDirectory, 'test-failures.json'), 'utf8'));
+  assert.equal(parserFailureSidecar.total, 3);
+  assert.equal(parserFailureSidecar.passed, 3);
+  assert.equal(parserFailureSidecar.failures.length, 1);
+  assert.equal(parserFailureSidecar.failures[0].test_id, 'wp-codebox-phpunit-failure-parser');
+  assert.equal(parserFailureSidecar.failures[0].failure_type, 'WPCodeboxFailureParserError');
+  assert.equal(parserFailureSidecar.failures[0].fingerprint.length, 64);
+  assert.match(parserFailureSidecar.failures[0].message, /parse-test-failures\.sh failed with exit code 1/);
+  assert.match(await readFile(path.join(parserFailureDirectory, 'phpunit-output.log'), 'utf8'), /OK \(3 tests, 76 assertions\)/);
+  assert.deepEqual(JSON.parse(await readFile(path.join(root, 'parser-failure-failures.json'), 'utf8')), parserFailureSidecar);
 
   const concurrentInvocation = path.join(root, 'concurrent-invocation');
   await mkdir(concurrentInvocation);

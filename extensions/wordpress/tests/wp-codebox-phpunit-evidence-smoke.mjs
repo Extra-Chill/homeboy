@@ -130,7 +130,12 @@ try {
     'wp-codebox-phpunit/files/phpunit-output.log',
     'wp-codebox-phpunit/files/test-failures.json',
   ]);
-  assert.deepEqual(JSON.parse(await readFile(path.join(invocationArtifacts, 'wp-codebox-phpunit/files/test-failures.json'), 'utf8')).failures.length, 2);
+  const publishedDirectory = path.join(invocationArtifacts, 'wp-codebox-phpunit/files');
+  assert.equal(await readFile(path.join(publishedDirectory, 'phpunit-output.log'), 'utf8'), expectedOutput);
+  assert.deepEqual(JSON.parse(await readFile(path.join(publishedDirectory, 'test-results.json'), 'utf8')), artifactResults);
+  const publishedFailures = JSON.parse(await readFile(path.join(publishedDirectory, 'test-failures.json'), 'utf8'));
+  assert.equal(publishedFailures.failures.length, 2);
+  assert.doesNotMatch(await readFile(path.join(publishedDirectory, 'phpunit-output.log'), 'utf8'), /fixture-secret-value/);
 
   const analysisInput = JSON.parse(await readFile(failuresFile, 'utf8'));
   assert.equal(analysisInput.total, 3);
