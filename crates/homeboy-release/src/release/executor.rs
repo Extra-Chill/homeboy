@@ -338,7 +338,12 @@ pub(crate) fn run_cleanup(
     component: &Component,
     state: &ReleaseState,
 ) -> Result<ReleaseStepResult> {
-    let cleanup_paths = release_cleanup_paths(&component.local_path, &state.package_owned_paths);
+    let failed_package_paths = package::failed_package_owned_paths(component)?;
+    let mut package_owned_paths = state.package_owned_paths.clone();
+    package_owned_paths.extend(failed_package_paths.iter().cloned());
+    package_owned_paths.sort();
+    package_owned_paths.dedup();
+    let cleanup_paths = release_cleanup_paths(&component.local_path, &package_owned_paths);
     let mut removed_paths = Vec::new();
 
     for path in &cleanup_paths {
@@ -353,6 +358,7 @@ pub(crate) fn run_cleanup(
         })?;
         removed_paths.push(path.display().to_string());
     }
+    package::acknowledge_failed_package_owned_paths(component, &failed_package_paths)?;
 
     let data = serde_json::json!({
         "action": "cleanup",

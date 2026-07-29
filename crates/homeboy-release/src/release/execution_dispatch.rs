@@ -1048,7 +1048,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_package_retains_outputs_without_claiming_cleanup_ownership() {
+    fn failed_package_outputs_converge_after_successful_retry_without_claiming_unrelated_paths() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let repo = tempfile::tempdir().expect("repo");
             std::fs::write(repo.path().join("plugin.php"), "<?php\n").expect("plugin");
@@ -1056,6 +1056,8 @@ mod tests {
             configure_git_user(repo.path());
             run_in(repo.path(), &["git", "add", "plugin.php"]);
             run_in(repo.path(), &["git", "commit", "-qm", "Initial commit"]);
+            let unrelated = repo.path().join("operator.tgz");
+            std::fs::write(&unrelated, "operator artifact").expect("unrelated artifact");
             let package = package_extension(
                 "mkdir -p build; printf diagnostic > build/output; \
                  printf partial > fixture-1.2.3.tgz; printf failed >&2; exit 1",
@@ -1093,6 +1095,41 @@ mod tests {
             assert!(context.state.package_owned_paths.is_empty());
             assert!(repo.path().join("build/output").is_file());
             assert!(repo.path().join("fixture-1.2.3.tgz").is_file());
+
+            let package = package_extension(
+                "mkdir -p build; printf diagnostic > build/output; \
+                 printf partial > fixture-1.2.3.tgz; \
+                 printf '[{\"path\":\"fixture-1.2.3.tgz\",\"type\":\"archive\"}]'",
+            );
+            homeboy_extension::save_manifest(&package).expect("replace package extension");
+            let recovery_extensions = vec![package];
+            let mut recovery = ReleaseExecutionContext {
+                component: &component,
+                extensions: &recovery_extensions,
+                component_id: "fixture",
+                options: &options,
+                state: ReleaseState {
+                    version: Some("1.2.3".to_string()),
+                    ..ReleaseState::default()
+                },
+                publish_failed: false,
+            };
+            let result = execute_release_plan_step(&plan_step("package"), &mut recovery)
+                .expect("recovery package dispatch")
+                .expect("recovery package result");
+            assert_eq!(result.status, ReleaseStepStatus::Success);
+            assert!(recovery.state.package_owned_paths.is_empty());
+
+            let cleanup = execute_release_plan_step(&plan_step("cleanup"), &mut recovery)
+                .expect("cleanup dispatch")
+                .expect("cleanup result");
+            assert_eq!(cleanup.status, ReleaseStepStatus::Success);
+            assert!(!repo.path().join("build").exists());
+            assert!(!repo.path().join("fixture-1.2.3.tgz").exists());
+            assert_eq!(
+                std::fs::read_to_string(unrelated).expect("unrelated remains"),
+                "operator artifact"
+            );
         });
     }
 
