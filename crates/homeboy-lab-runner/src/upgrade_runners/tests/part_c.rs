@@ -548,6 +548,35 @@ fn file_origin_without_materialized_binary_only_inspects_selected_provenance() {
 }
 
 #[test]
+fn local_snapshot_without_materialized_binary_only_inspects_selected_provenance() {
+    let revision = "aabbccddeeff";
+    let identity = "homeboy 0.228.5+selected";
+    let commands = runner_recovery_commands(
+        "lab",
+        "/srv/homeboy/target/release/homeboy",
+        Some(&"identity mismatch".to_string()),
+        Some("0.228.4"),
+        Some("0.228.5"),
+        Some(revision),
+        None,
+        None,
+        Some(identity),
+    );
+
+    assert!(commands[0].contains("self identity"));
+    assert!(commands[0].contains("local snapshot without remote URL"));
+    assert!(commands[0].contains(revision));
+    assert!(commands[0].contains(identity));
+    assert!(!commands
+        .iter()
+        .any(|command| command.contains("refresh-homeboy")));
+    assert!(!commands.iter().any(|command| command.contains("main")));
+    assert!(!commands
+        .iter()
+        .any(|command| command.contains("runner set")));
+}
+
+#[test]
 fn realigns_stale_source_checkout_homeboy_path_after_upgrade_failure() {
     let _local_version = pin_local_version_for_fixtures();
     let stale_path = "/home/user/Developer/homeboy@upgrade-bootstrap/target/release/homeboy";
