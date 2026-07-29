@@ -2264,6 +2264,17 @@ fn memoize_executable_digest(identity: Option<ExecutableFileIdentity>, digest: &
 #[cfg(not(unix))]
 fn memoize_executable_digest(_identity: Option<()>, _digest: &str) {}
 
+/// Record a pin whose bytes this process just verified.
+///
+/// `pin_executable` validates the pin immediately after publishing it, which
+/// would otherwise re-read the file it has just hashed. Observe the destination
+/// once publication has finished mutating it -- sealing its mode and linking it
+/// both move the inode's change time -- so the validation that follows resolves
+/// from the memo instead of from disk.
+fn memoize_published_pin(destination: &Path, digest: &str) {
+    memoize_executable_digest(observed_executable_identity(destination), digest);
+}
+
 fn make_executable_read_only(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -2319,6 +2330,7 @@ fn publish_pin(source: &Path, destination: &Path, expected_digest: &str) -> Resu
         let actual = executable_digest(destination)?;
         if actual == expected_digest {
             register_test_fixture_candidate(source, destination, expected_digest);
+            memoize_published_pin(destination, expected_digest);
             return Ok(());
         }
         return Err(Error::validation_invalid_argument(
@@ -2366,6 +2378,7 @@ fn publish_pin(source: &Path, destination: &Path, expected_digest: &str) -> Resu
         Ok(()) => {
             let _ = fs::remove_file(&staging);
             register_test_fixture_candidate(source, destination, expected_digest);
+            memoize_published_pin(destination, expected_digest);
             Ok(())
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -2373,6 +2386,7 @@ fn publish_pin(source: &Path, destination: &Path, expected_digest: &str) -> Resu
             let actual = executable_digest(destination)?;
             if actual == expected_digest {
                 register_test_fixture_candidate(source, destination, expected_digest);
+                memoize_published_pin(destination, expected_digest);
                 Ok(())
             } else {
                 Err(Error::validation_invalid_argument(
@@ -3406,6 +3420,60 @@ mod tests {
                 EXECUTABLE_DIGEST_COMPUTATIONS.load(std::sync::atomic::Ordering::Relaxed),
                 2,
                 "the mutated executable is then memoized under its new identity"
+            );
+        });
+    }
+
+    /// Publishing a pin verifies the staged bytes and then validates the
+    /// published pin, which used to read the same file twice more. Sealing the
+    /// pin's mode and linking it both move the inode's change time, so the
+    /// memo has to be seeded from the destination as publication left it.
+    #[cfg(unix)]
+    #[test]
+    fn publishing_a_pin_seeds_the_digest_its_validation_needs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        crate::test_support::with_isolated_home(|_| {
+            EXECUTABLE_DIGESTS
+                .get_or_init(|| Mutex::new(BTreeMap::new()))
+                .lock()
+                .expect("controller executable digest memo is not poisoned")
+                .clear();
+            EXECUTABLE_DIGEST_COMPUTATIONS.store(0, std::sync::atomic::Ordering::Relaxed);
+
+            let temporary = tempfile::tempdir().expect("temporary executable directory");
+            let source = temporary.path().join("homeboy");
+            fs::write(&source, b"controller bytes").expect("write controller");
+            fs::set_permissions(&source, fs::Permissions::from_mode(0o755))
+                .expect("make controller executable");
+
+            let runtime = pin_executable(&source, "homeboy 0.0.0+fixture").expect("pin executable");
+            assert_eq!(
+                EXECUTABLE_DIGEST_COMPUTATIONS.load(std::sync::atomic::Ordering::Relaxed),
+                2,
+                "publication reads the source and the staged copy, and nothing else"
+            );
+
+            validate_pin(&runtime).expect("published pin validates");
+            assert_eq!(
+                EXECUTABLE_DIGEST_COMPUTATIONS.load(std::sync::atomic::Ordering::Relaxed),
+                2,
+                "revalidating a published pin resolves from the memo"
+            );
+
+            // The memo must not survive the pin being replaced underneath it,
+            // which is the whole reason the pin is validated at all.
+            let pinned = runtime
+                .pointer("/originating/pinned_executable")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .expect("pinned executable");
+            fs::set_permissions(&pinned, fs::Permissions::from_mode(0o700))
+                .expect("unseal pinned executable");
+            fs::write(&pinned, b"tampered controller bytes").expect("tamper pinned executable");
+            assert!(
+                validate_pin(&runtime).is_err(),
+                "a tampered pin fails closed rather than reusing its memoized digest"
             );
         });
     }

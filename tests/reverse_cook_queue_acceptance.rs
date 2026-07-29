@@ -337,6 +337,11 @@ fn detached_cook_accepts_reverse_capacity_queue_and_worker_completes_once() {
             "--max-attempts",
             "1",
             "--no-finalize",
+            // The compacted Cook view drops `failure_context` (#10237), so a
+            // failing detached Cook reports a status and no cause. Take the
+            // lossless report: this test asserts the durable staging lifecycle,
+            // which the full view is a superset of.
+            "--full",
         ]);
     let cook_stdout_path = context.root().join("cook.stdout");
     let cook_stderr_path = context.root().join("cook.stderr");
