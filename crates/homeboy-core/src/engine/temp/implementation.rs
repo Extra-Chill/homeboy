@@ -31,6 +31,58 @@ pub(crate) struct RuntimeTempPin {
     path: PathBuf,
 }
 
+/// A durable, process-scoped owner for temporary bytes created by a Homeboy
+/// workload. Dropping the owner records a terminal, reconstructable lifecycle
+/// state while retaining the directory for normal managed cleanup.
+#[derive(Debug)]
+pub struct RuntimeTempOwner {
+    path: PathBuf,
+    pin: Option<RuntimeTempPin>,
+}
+
+impl RuntimeTempOwner {
+    /// Allocate a metadata-backed child temp root before launching a workload.
+    pub fn allocate(prefix: &str, producer: &str) -> Result<Self> {
+        let (path, pin) = managed_run_temp_dir_for_producer(prefix, Some(producer))?;
+        Ok(Self {
+            path,
+            pin: Some(pin),
+        })
+    }
+
+    /// The directory inherited by child processes as their temporary root.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Bind the durable run that owns this workload when one is available.
+    pub fn bind_run_id(&self, run_id: &str) -> Result<()> {
+        bind_run_dir_owner(&self.path, Some(run_id), None)
+    }
+
+    /// Bind an invocation lease that independently proves this workload is live.
+    pub fn bind_invocation_id(&self, invocation_id: &str) -> Result<()> {
+        bind_run_dir_owner(&self.path, None, Some(invocation_id))
+    }
+
+    /// Environment variables understood by common child toolchains.
+    pub fn child_env_vars(&self) -> Vec<(String, String)> {
+        let path = self.path.display().to_string();
+        vec![
+            ("TMPDIR".to_string(), path.clone()),
+            ("TMP".to_string(), path.clone()),
+            ("TEMP".to_string(), path),
+        ]
+    }
+}
+
+impl Drop for RuntimeTempOwner {
+    fn drop(&mut self) {
+        mark_run_dir_succeeded(&self.path);
+        self.pin.take();
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct RuntimeRunOwner {
     schema: String,
@@ -555,6 +607,10 @@ pub struct RuntimeTempCleanupRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub producer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub age_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protection_reason: Option<String>,
@@ -858,6 +914,8 @@ pub fn cleanup_runtime_tmp_bounded(
             owner_id: Some(inspection.owner.owner_id.clone()),
             owner_pid: Some(inspection.owner.owner_pid),
             owner_state: Some(inspection.owner.state.clone()),
+            producer: inspection.owner.producer.clone(),
+            run_id: inspection.owner.run_id.clone(),
             age_seconds: Some(inspection.age_seconds),
             protection_reason: inspection.protection_reason.clone(),
         };
@@ -961,6 +1019,8 @@ pub fn cleanup_runtime_tmp_bounded(
             owner_id: None,
             owner_pid: None,
             owner_state: None,
+            producer: None,
+            run_id: None,
             age_seconds: None,
             protection_reason: None,
         };
@@ -1082,6 +1142,8 @@ mod cleanup_support {
             owner_id: None,
             owner_pid: None,
             owner_state: None,
+            producer: None,
+            run_id: None,
             age_seconds: None,
             protection_reason: Some(reason.to_string()),
         }

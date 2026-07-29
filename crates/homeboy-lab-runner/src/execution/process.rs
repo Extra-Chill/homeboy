@@ -427,9 +427,10 @@ pub(crate) fn prepare_daemon_local_process(
 }
 
 pub(crate) fn execute_runner_process(plan: &PreparedRunnerProcess) -> Result<ProcessOutput> {
+    let temp_owner = runner_temp_owner(&plan.env)?;
     let mut command = std::process::Command::new(&plan.command[0]);
     command.args(&plan.command[1..]).current_dir(&plan.cwd);
-    apply_runner_process_env(&mut command, plan)?;
+    apply_runner_process_env(&mut command, plan, &temp_owner)?;
 
     command_output(
         &mut command,
@@ -445,9 +446,10 @@ pub(crate) fn execute_runner_process_until_cancelled_with_progress(
     require_child_identity_acknowledgement: bool,
     child_started: Option<Arc<dyn Fn(u32) -> Result<()> + Send + Sync + 'static>>,
 ) -> Result<ProcessOutput> {
+    let temp_owner = runner_temp_owner(&plan.env)?;
     let mut command = std::process::Command::new(&plan.command[0]);
     command.args(&plan.command[1..]).current_dir(&plan.cwd);
-    apply_runner_process_env(&mut command, plan)?;
+    apply_runner_process_env(&mut command, plan, &temp_owner)?;
 
     command_output_until_cancelled_with_progress(
         &mut command,
@@ -730,11 +732,79 @@ mod tests {
             0
         );
     }
+
+    #[test]
+    fn runner_temp_owner_scopes_workload_bytes_and_preserves_unknown_entries() {
+        let _guard = homeboy_core::test_support::home_env_guard();
+        let root = tempfile::tempdir().expect("runtime temp root");
+        std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", root.path());
+        let run_id = "runner-workload-1";
+        let owner = runner_temp_owner(&HashMap::from([(
+            "HOMEBOY_RUN_ID".to_string(),
+            run_id.to_string(),
+        )]))
+        .expect("runner temp owner");
+        let path = owner.path().to_path_buf();
+        let child = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "mkdir -p \"$TMPDIR/compiler-target\" \"$TMPDIR/input-materialization\" && printf target > \"$TMPDIR/compiler-target/object\" && printf input > \"$TMPDIR/input-materialization/input\"",
+            ])
+            .env_clear()
+            .envs(owner.child_env_vars())
+            .status()
+            .expect("launch representative runner workload");
+        assert!(child.success());
+        let unknown = root.path().join("legacy-external");
+        fs::create_dir(&unknown).expect("legacy external directory");
+        fs::write(unknown.join("payload"), b"unknown bytes").expect("unknown payload");
+
+        let mut options = homeboy_core::engine::temp::RuntimeTempCleanupOptions {
+            apply: false,
+            older_than_days: 7,
+            managed_older_than_days: Some(0),
+            prefix: None,
+            limit: 100,
+            run_max_bytes: u64::MAX,
+            run_max_count: usize::MAX,
+            cursor: None,
+        };
+        let active = homeboy_core::engine::temp::cleanup_runtime_tmp_bounded(options)
+            .expect("active cleanup preview");
+        let active_row = active
+            .rows
+            .iter()
+            .find(|row| row.path == path.display().to_string())
+            .expect("managed runner row");
+        assert_eq!(active_row.producer.as_deref(), Some("runner_execution"));
+        assert_eq!(active_row.run_id.as_deref(), Some(run_id));
+        assert!(active_row.reason.contains("pin owner PID"));
+        assert!(active.rows.iter().any(|row| {
+            row.path == unknown.display().to_string()
+                && row.reason == "entry is newer than retention cutoff"
+        }));
+
+        options.apply = true;
+        let protected = homeboy_core::engine::temp::cleanup_runtime_tmp_bounded(options)
+            .expect("active cleanup apply");
+        assert_eq!(protected.removed_count, 0);
+        assert!(path.exists());
+        assert!(unknown.exists());
+
+        drop(owner);
+        let terminal = homeboy_core::engine::temp::cleanup_runtime_tmp_bounded(options)
+            .expect("terminal cleanup apply");
+        assert_eq!(terminal.removed_count, 1);
+        assert!(!path.exists());
+        assert!(unknown.exists());
+        std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR");
+    }
 }
 
 pub(super) fn apply_runner_process_env(
     command: &mut std::process::Command,
     plan: &PreparedRunnerProcess,
+    temp_owner: &homeboy_core::engine::temp::RuntimeTempOwner,
 ) -> Result<()> {
     command.env_clear();
     for key in inherited_runner_process_env_keys() {
@@ -744,13 +814,33 @@ pub(super) fn apply_runner_process_env(
             }
         }
     }
-    let env = child_provenance_env(
+    let mut env = child_provenance_env(
         plan.env.clone(),
         serde_json::to_string(&plan.source_snapshot).unwrap_or_default(),
     )?;
+    // The runner envelope is the producer boundary for direct commands, which
+    // do not acquire an InvocationGuard of their own.
+    env.extend(temp_owner.child_env_vars());
     preserve_durable_homeboy_data_dir(command, &env);
     command.envs(env.iter());
     Ok(())
+}
+
+fn runner_temp_owner(
+    env: &HashMap<String, String>,
+) -> Result<homeboy_core::engine::temp::RuntimeTempOwner> {
+    let owner = homeboy_core::engine::temp::RuntimeTempOwner::allocate(
+        "homeboy-runner-tmp",
+        "runner_execution",
+    )?;
+    if let Some(run_id) = RUNNER_EXEC_RUN_ID_ENV_NAMES
+        .iter()
+        .find_map(|name| env.get(*name))
+        .filter(|run_id| !run_id.trim().is_empty())
+    {
+        owner.bind_run_id(run_id)?;
+    }
+    Ok(owner)
 }
 
 const PROVENANCE_ENV_INLINE_MAX_BYTES: usize = 8 * 1024;
