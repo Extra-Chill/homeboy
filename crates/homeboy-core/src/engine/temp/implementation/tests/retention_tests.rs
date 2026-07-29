@@ -6,26 +6,40 @@ fn active_invocation_lease_survives_transient_pin_loss() {
     let root = tempfile::tempdir().expect("tempdir");
     env::set_var(runtime_tmpdir_env(), root.path());
     let run_dir = super::super::super::run_dir::RunDir::create().expect("run dir");
-    let path = run_dir.path().to_path_buf();
     let invocation = super::super::super::invocation::InvocationGuard::acquire(
         &run_dir,
         &super::super::super::invocation::InvocationRequirements::default(),
     )
     .expect("invocation");
+    let path = invocation.context().tmp_dir;
     fs::remove_file(path.join(RUNTIME_TEMP_PIN_FILE)).expect("simulate pin loss");
-    retain_failed_run_dir(&path);
-    let mut options = bounded_options(true, Some("homeboy-run"));
+    let mut options = bounded_options(false, Some("homeboy-invocation-tmp"));
     options.older_than_days = 0;
 
-    let protected = cleanup_runtime_tmp_bounded(options).expect("protected cleanup");
+    let protected = cleanup_runtime_tmp_bounded(options).expect("protected dry run");
     assert_eq!(protected.removed_count, 0);
-    assert!(protected.rows[0].reason.contains("invocation lease"));
+    let protected_row = protected
+        .rows
+        .iter()
+        .find(|row| row.path == path.display().to_string())
+        .expect("managed invocation temp row");
+    assert_eq!(protected_row.action, "skip");
+    assert!(protected_row.reason.contains("invocation lease"));
+    assert!(path.exists());
+
+    options.apply = true;
+    let applied = cleanup_runtime_tmp_bounded(options).expect("protected apply");
+    assert_eq!(applied.removed_count, 0);
+    assert!(applied.rows.iter().any(|row| {
+        row.path == path.display().to_string() && row.reason.contains("invocation lease")
+    }));
     assert!(path.exists());
 
     drop(invocation);
     let removed = cleanup_runtime_tmp_bounded(options).expect("released cleanup");
     assert_eq!(removed.removed_count, 1);
     assert!(!path.exists());
+    run_dir.cleanup();
     env::remove_var(runtime_tmpdir_env());
 }
 
