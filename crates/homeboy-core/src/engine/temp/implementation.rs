@@ -31,6 +31,120 @@ pub(crate) struct RuntimeTempPin {
     path: PathBuf,
 }
 
+/// A durable, process-scoped owner for temporary bytes created by a Homeboy
+/// workload. Dropping the owner records a terminal, reconstructable lifecycle
+/// state while retaining the directory for normal managed cleanup.
+#[derive(Debug)]
+pub struct RuntimeTempOwner {
+    path: PathBuf,
+    pin: Option<RuntimeTempPin>,
+}
+
+impl RuntimeTempOwner {
+    /// Allocate a metadata-backed child temp root before launching a workload.
+    pub fn allocate(prefix: &str, producer: &str) -> Result<Self> {
+        let (path, pin) = managed_run_temp_dir_for_producer(prefix, Some(producer))?;
+        Ok(Self {
+            path,
+            pin: Some(pin),
+        })
+    }
+
+    /// The directory inherited by child processes as their temporary root.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Bind the durable run that owns this workload when one is available.
+    pub fn bind_run_id(&self, run_id: &str) -> Result<()> {
+        bind_run_dir_owner(&self.path, Some(run_id), None)
+    }
+
+    /// Bind an invocation lease that independently proves this workload is live.
+    pub fn bind_invocation_id(&self, invocation_id: &str) -> Result<()> {
+        bind_run_dir_owner(&self.path, None, Some(invocation_id))
+    }
+
+    /// Environment variables understood by common child toolchains.
+    pub fn child_env_vars(&self) -> Vec<(String, String)> {
+        let path = self.path.display().to_string();
+        vec![
+            ("TMPDIR".to_string(), path.clone()),
+            ("TMP".to_string(), path.clone()),
+            ("TEMP".to_string(), path),
+        ]
+    }
+
+    /// Wrap a POSIX-shell workload with the durable ownership protocol on its
+    /// host. This lets direct SSH execution use the same cleanup contract as
+    /// local process owners without assuming its temp filesystem is mounted on
+    /// the controller.
+    pub fn remote_shell_command(command: &str, producer: &str, run_id: Option<&str>) -> String {
+        let owner_id =
+            serde_json::to_string(&uuid::Uuid::new_v4().to_string()).expect("UUID is valid JSON");
+        let producer = serde_json::to_string(producer).expect("producer is valid JSON");
+        let run_id = run_id
+            .map(|run_id| serde_json::to_string(run_id).expect("run ID is valid JSON"))
+            .unwrap_or_else(|| "null".to_string());
+        let runtime_tmpdir_env = runtime_tmpdir_env();
+        let data_dir_env = crate::product_identity::PRODUCT_IDENTITY.env_var("DATA_DIR");
+        let product_id = crate::product_identity::PRODUCT_IDENTITY.data_dirname;
+
+        format!(
+            r#"set -eu
+if [ -n "${{{runtime_tmpdir_env}:-}}" ]; then
+  runtime_tmp_root="${runtime_tmpdir_env}"
+elif [ -n "${{{data_dir_env}:-}}" ]; then
+  runtime_tmp_root="${data_dir_env}/runtime/tmp"
+elif [ -n "${{XDG_DATA_HOME:-}}" ]; then
+  runtime_tmp_root="$XDG_DATA_HOME/{product_id}/runtime/tmp"
+else
+  runtime_tmp_root="$HOME/.local/share/{product_id}/runtime/tmp"
+fi
+mkdir -p "$runtime_tmp_root"
+runtime_tmp_dir="$(mktemp -d "$runtime_tmp_root/homeboy-runner-tmp.XXXXXX")"
+runtime_tmp_owner="$runtime_tmp_dir/{RUN_OWNER_FILE}"
+runtime_tmp_pin="$runtime_tmp_dir/{RUNTIME_TEMP_PIN_FILE}"
+runtime_tmp_created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+runtime_tmp_write_owner() {{
+  runtime_tmp_state="$1"
+  runtime_tmp_reason="$2"
+  runtime_tmp_completed="$3"
+  printf '{{"schema":"{RUN_OWNER_SCHEMA}","owner_id":{owner_id},"owner_pid":%s,"run_id":{run_id},"invocation_ids":[],"state":"%s","created_at":"%s","completed_at":%s,"reason":"%s","producer":{producer}}}\n' "$$" "$runtime_tmp_state" "$runtime_tmp_created" "$runtime_tmp_completed" "$runtime_tmp_reason" > "$runtime_tmp_owner"
+}}
+runtime_tmp_write_owner active "remote workload is running" null
+printf '{RUNTIME_TEMP_PIN_SCHEMA_LINE}\nowner_pid=%s\n' "$$" > "$runtime_tmp_pin"
+runtime_tmp_finish() {{
+  runtime_tmp_status="$1"
+  runtime_tmp_completed="\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
+  if [ "$runtime_tmp_status" -eq 0 ]; then
+    runtime_tmp_write_owner succeeded "successful teardown" "$runtime_tmp_completed"
+  else
+    runtime_tmp_write_owner failed "remote workload exited with status $runtime_tmp_status" "$runtime_tmp_completed"
+  fi
+  rm -f "$runtime_tmp_pin"
+  exit "$runtime_tmp_status"
+}}
+trap 'runtime_tmp_finish 143' HUP INT TERM
+set +e
+(
+  export TMPDIR="$runtime_tmp_dir" TMP="$runtime_tmp_dir" TEMP="$runtime_tmp_dir"
+  {command}
+)
+runtime_tmp_status="$?"
+set -e
+runtime_tmp_finish "$runtime_tmp_status""#
+        )
+    }
+}
+
+impl Drop for RuntimeTempOwner {
+    fn drop(&mut self) {
+        mark_run_dir_succeeded(&self.path);
+        self.pin.take();
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct RuntimeRunOwner {
     schema: String,
@@ -555,6 +669,10 @@ pub struct RuntimeTempCleanupRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub producer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub age_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protection_reason: Option<String>,
@@ -858,6 +976,8 @@ pub fn cleanup_runtime_tmp_bounded(
             owner_id: Some(inspection.owner.owner_id.clone()),
             owner_pid: Some(inspection.owner.owner_pid),
             owner_state: Some(inspection.owner.state.clone()),
+            producer: inspection.owner.producer.clone(),
+            run_id: inspection.owner.run_id.clone(),
             age_seconds: Some(inspection.age_seconds),
             protection_reason: inspection.protection_reason.clone(),
         };
@@ -961,6 +1081,8 @@ pub fn cleanup_runtime_tmp_bounded(
             owner_id: None,
             owner_pid: None,
             owner_state: None,
+            producer: None,
+            run_id: None,
             age_seconds: None,
             protection_reason: None,
         };
@@ -1082,6 +1204,8 @@ mod cleanup_support {
             owner_id: None,
             owner_pid: None,
             owner_state: None,
+            producer: None,
+            run_id: None,
             age_seconds: None,
             protection_reason: Some(reason.to_string()),
         }
@@ -1378,6 +1502,60 @@ mod tests {
         assert!(path.starts_with(dir.path()));
         assert!(path.is_dir());
 
+        env::remove_var(runtime_tmpdir_env());
+    }
+
+    #[test]
+    fn remote_shell_owner_protects_active_workload_and_reclaims_terminal_bytes() {
+        let _guard = home_env_guard();
+        let root = tempfile::tempdir().expect("runtime temp root");
+        env::set_var(runtime_tmpdir_env(), root.path());
+        let ready = root.path().join("ready");
+        let release = root.path().join("release");
+        let command = format!(
+            "printf '%s' \"$TMPDIR\" > {} && mkdir -p \"$TMPDIR/compiler-target\" && printf target > \"$TMPDIR/compiler-target/object\" && while [ ! -f {} ]; do sleep 0.01; done",
+            crate::engine::shell::quote_arg(&ready.display().to_string()),
+            crate::engine::shell::quote_arg(&release.display().to_string()),
+        );
+        let wrapper = RuntimeTempOwner::remote_shell_command(
+            &command,
+            "runner_execution",
+            Some("diagnostic-ssh-run-1"),
+        );
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", &wrapper])
+            .env(runtime_tmpdir_env(), root.path())
+            .spawn()
+            .expect("launch representative remote shell workload");
+
+        for _ in 0..100 {
+            if ready.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let path = PathBuf::from(fs::read_to_string(&ready).expect("remote workload temp path"));
+        assert!(path.exists());
+
+        let mut options = bounded_options(true, Some("homeboy-runner-tmp"));
+        options.managed_older_than_days = Some(0);
+        let active = cleanup_runtime_tmp_bounded(options).expect("active cleanup");
+        let active_row = active
+            .rows
+            .iter()
+            .find(|row| row.path == path.display().to_string())
+            .expect("active remote workload row");
+        assert_eq!(active_row.producer.as_deref(), Some("runner_execution"));
+        assert_eq!(active_row.run_id.as_deref(), Some("diagnostic-ssh-run-1"));
+        assert!(active_row.reason.contains("pin owner PID"));
+        assert_eq!(active.removed_count, 0);
+
+        fs::write(&release, []).expect("release remote workload");
+        assert!(child.wait().expect("wait remote workload").success());
+
+        let terminal = cleanup_runtime_tmp_bounded(options).expect("terminal cleanup");
+        assert_eq!(terminal.removed_count, 1);
+        assert!(!path.exists());
         env::remove_var(runtime_tmpdir_env());
     }
 

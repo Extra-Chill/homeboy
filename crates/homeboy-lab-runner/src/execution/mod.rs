@@ -941,6 +941,7 @@ pub(crate) fn exec_with_status_snapshot(
         return exec_diagnostic_ssh(
             &runner,
             cwd,
+            options.run_id.as_deref(),
             options.command,
             request_env,
             &secret_env_names,
@@ -1035,6 +1036,7 @@ pub(crate) fn exec_with_status_snapshot(
         RunnerTransport::DiagnosticSsh => exec_diagnostic_ssh(
             &runner,
             cwd,
+            options.run_id.as_deref(),
             options.command,
             request_env,
             &secret_env_names,

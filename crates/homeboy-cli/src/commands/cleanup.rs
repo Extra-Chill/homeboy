@@ -330,37 +330,12 @@ fn retained_storage_report(
             run_max_count: policy.runtime_run_max_count,
             cursor: None,
         })?;
-    for row in runtime_tmp
-        .rows
-        .into_iter()
-        .filter(|row| row.owner_id.is_some())
-    {
-        let liveness = if row
-            .protection_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("is running"))
-        {
-            "active"
-        } else if row.owner_state.as_deref() == Some("active") {
-            "stale"
-        } else {
-            "terminal"
-        };
-        records.push(RetainedStorageRecord {
-            category: "runtime_tmp".to_string(),
-            reason: row.reason,
-            owner: row.owner_id.unwrap_or_else(|| "unknown".to_string()),
-            run_id: None,
-            liveness: liveness.to_string(),
-            age: row
-                .age_seconds
-                .map(age_bucket)
-                .unwrap_or_else(|| "unknown".to_string()),
-            age_seconds: row.age_seconds,
-            size_bytes: row.size_bytes,
-            reference: row.path,
-        });
-    }
+    records.extend(
+        runtime_tmp
+            .rows
+            .into_iter()
+            .map(runtime_tmp_retained_record),
+    );
 
     records.extend(artifact_root_records(policy)?);
 
@@ -398,6 +373,44 @@ fn retained_storage_report(
         sqlite,
         filesystem,
     ))
+}
+
+fn runtime_tmp_retained_record(row: engine::temp::RuntimeTempCleanupRow) -> RetainedStorageRecord {
+    let liveness = if row
+        .protection_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("is running"))
+    {
+        "active"
+    } else if row.owner_state.as_deref() == Some("active") {
+        "stale"
+    } else if row.owner_id.is_none() {
+        "external_unknown"
+    } else {
+        "terminal"
+    };
+    let owner = match (row.producer.as_deref(), row.owner_id.as_deref()) {
+        (Some(producer), Some(owner_id)) => format!("{producer} ({owner_id})"),
+        (None, Some(owner_id)) => owner_id.to_string(),
+        (_, None) => "external/unattributed".to_string(),
+    };
+    RetainedStorageRecord {
+        category: "runtime_tmp".to_string(),
+        reason: format!(
+            "{}; cleanup: homeboy cleanup --include runtime-tmp",
+            row.reason
+        ),
+        owner,
+        run_id: row.run_id,
+        liveness: liveness.to_string(),
+        age: row
+            .age_seconds
+            .map(age_bucket)
+            .unwrap_or_else(|| "unknown".to_string()),
+        age_seconds: row.age_seconds,
+        size_bytes: row.size_bytes,
+        reference: row.path,
+    }
 }
 
 fn retained_storage_filesystem_inventory() -> homeboy::core::Result<RetainedStorageFilesystem> {
@@ -2369,6 +2382,51 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn runtime_temp_retained_records_expose_producer_run_and_unknown_boundaries() {
+        let managed = runtime_tmp_retained_record(engine::temp::RuntimeTempCleanupRow {
+            path: "/tmp/managed".to_string(),
+            name: "managed".to_string(),
+            action: "skip".to_string(),
+            reason: "runtime temp pin owner PID 1 is running".to_string(),
+            size_bytes: 42,
+            allocated_bytes: 42,
+            verified_reclaimed_bytes: 0,
+            owner_id: Some("owner-1".to_string()),
+            owner_pid: Some(1),
+            owner_state: Some("active".to_string()),
+            producer: Some("runner_execution".to_string()),
+            run_id: Some("run-1".to_string()),
+            age_seconds: Some(1),
+            protection_reason: Some("runtime temp pin owner PID 1 is running".to_string()),
+        });
+        assert_eq!(managed.owner, "runner_execution (owner-1)");
+        assert_eq!(managed.run_id.as_deref(), Some("run-1"));
+        assert_eq!(managed.liveness, "active");
+        assert!(managed
+            .reason
+            .contains("homeboy cleanup --include runtime-tmp"));
+
+        let unknown = runtime_tmp_retained_record(engine::temp::RuntimeTempCleanupRow {
+            path: "/tmp/external".to_string(),
+            name: "external".to_string(),
+            action: "skip".to_string(),
+            reason: "entry is newer than retention cutoff".to_string(),
+            size_bytes: 11,
+            allocated_bytes: 11,
+            verified_reclaimed_bytes: 0,
+            owner_id: None,
+            owner_pid: None,
+            owner_state: None,
+            producer: None,
+            run_id: None,
+            age_seconds: None,
+            protection_reason: None,
+        });
+        assert_eq!(unknown.owner, "external/unattributed");
+        assert_eq!(unknown.liveness, "external_unknown");
+    }
 
     #[test]
     fn retained_storage_aggregation_is_bounded_and_groups_lifecycle_dimensions() {

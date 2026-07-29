@@ -7,6 +7,7 @@ pub(crate) use implementation::{
 pub use implementation::{
     cleanup_runtime_tmp, cleanup_runtime_tmp_bounded, runtime_temp_dir, unique_name,
     CleanupSizeTotals, RuntimeTempCleanupOptions, RuntimeTempCleanupOutput, RuntimeTempCleanupRow,
+    RuntimeTempOwner,
 };
 
 // Keep implementation references scoped to the engine-owned sibling modules.
