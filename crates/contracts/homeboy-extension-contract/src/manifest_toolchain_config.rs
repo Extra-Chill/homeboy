@@ -301,6 +301,28 @@ pub struct TestConfig {
     /// secret values are resolved by the runner at execution time.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub secret_env: BTreeMap<String, String>,
+
+    /// Conditionally project secret identity names from validated component
+    /// settings. The selected settings leaf must be an object whose values are
+    /// environment identity names; resolved secret values never enter settings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_env_projections: Vec<TestSecretEnvProjection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TestSecretEnvProjection {
+    pub when: TestSettingStringPredicate,
+    pub names_path: Vec<String>,
+    #[serde(default)]
+    pub optional: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TestSettingStringPredicate {
+    pub path: Vec<String>,
+    pub equals: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -403,6 +425,58 @@ pub fn validate_test_secret_env_references(
     Ok(())
 }
 
+pub fn validate_test_secret_env_projections(
+    projections: &[TestSecretEnvProjection],
+) -> homeboy_error::Result<()> {
+    if projections.len() > PortableEnvConfig::MAX_ENTRIES {
+        return Err(homeboy_error::Error::validation_invalid_argument(
+            "test.secret_env_projections",
+            format!(
+                "must declare at most {} projections",
+                PortableEnvConfig::MAX_ENTRIES
+            ),
+            None,
+            None,
+        ));
+    }
+
+    for projection in projections {
+        validate_settings_path(&projection.when.path, "when.path")?;
+        validate_settings_path(&projection.names_path, "names_path")?;
+        if projection.when.equals.is_empty()
+            || projection.when.equals.len() > PortableEnvConfig::MAX_NAME_LEN
+        {
+            return Err(homeboy_error::Error::validation_invalid_argument(
+                "test.secret_env_projections.when.equals",
+                "must be a non-empty string up to 128 characters",
+                None,
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_settings_path(path: &[String], field: &str) -> homeboy_error::Result<()> {
+    let valid = !path.is_empty()
+        && path.len() <= 16
+        && path.iter().all(|segment| {
+            !segment.is_empty()
+                && segment.len() <= PortableEnvConfig::MAX_NAME_LEN
+                && segment != "."
+                && segment != ".."
+        });
+    if valid {
+        return Ok(());
+    }
+    Err(homeboy_error::Error::validation_invalid_argument(
+        format!("test.secret_env_projections.{field}"),
+        "must contain 1 to 16 non-empty settings object path segments",
+        None,
+        None,
+    ))
+}
+
 fn looks_like_secret_env_name(name: &str) -> bool {
     let name = name.to_ascii_uppercase();
     [
@@ -454,7 +528,10 @@ pub struct TestChangedFileExclusiveEnv {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_test_secret_env_references, PortableEnvConfig};
+    use super::{
+        validate_test_secret_env_projections, validate_test_secret_env_references,
+        PortableEnvConfig, TestSecretEnvProjection, TestSettingStringPredicate,
+    };
     use std::collections::BTreeMap;
 
     #[test]
@@ -500,6 +577,60 @@ mod tests {
             "DB_SERVICE_PASSWORD".to_string(),
         )]))
         .expect("runner secret reference");
+    }
+
+    #[test]
+    fn conditional_secret_projection_rejects_malformed_paths() {
+        let projection = TestSecretEnvProjection {
+            when: TestSettingStringPredicate {
+                path: vec!["service".to_string(), "provider".to_string()],
+                equals: "remote".to_string(),
+            },
+            names_path: vec!["service".to_string(), "secret_env".to_string()],
+            optional: false,
+        };
+        validate_test_secret_env_projections(&[projection.clone()])
+            .expect("bounded projection");
+
+        for malformed in [
+            TestSecretEnvProjection {
+                names_path: Vec::new(),
+                ..projection.clone()
+            },
+            TestSecretEnvProjection {
+                when: TestSettingStringPredicate {
+                    path: vec!["service".to_string(), "".to_string()],
+                    equals: "remote".to_string(),
+                },
+                ..projection.clone()
+            },
+            TestSecretEnvProjection {
+                when: TestSettingStringPredicate {
+                    equals: String::new(),
+                    ..projection.when.clone()
+                },
+                ..projection.clone()
+            },
+        ] {
+            assert!(validate_test_secret_env_projections(&[malformed]).is_err());
+        }
+    }
+
+    #[test]
+    fn conditional_secret_projection_rejects_unsupported_predicates_and_value_fields() {
+        for malformed in [
+            serde_json::json!({
+                "when":{"path":["service","mode"],"operator":"equals","value":"remote"},
+                "names_path":["service","secret_env"]
+            }),
+            serde_json::json!({
+                "when":{"path":["service","mode"],"equals":"remote"},
+                "names_path":["service","secret_env"],
+                "value_path":["service","password"]
+            }),
+        ] {
+            assert!(serde_json::from_value::<TestSecretEnvProjection>(malformed).is_err());
+        }
     }
 }
 

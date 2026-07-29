@@ -46,7 +46,8 @@ pub use homeboy_extension_contract::manifest_toolchain_config::{
     LintConfig, PortableEnvConfig, RemotePathInferenceRule, RemotePathRootRule, RequirementsConfig,
     SinceTagConfig, SourceSnapshotConfig, TestChangedFileExclusiveEnv, TestChangedFileRouting,
     TestChangedFileRoutingStrategy, TestConfig, TestNoTestsApplicablePolicy,
-    ToolchainReadinessProbe, VersionPatternConfig,
+    TestSecretEnvProjection, TestSettingStringPredicate, ToolchainReadinessProbe,
+    VersionPatternConfig,
 };
 pub use homeboy_extension_contract::DeployArchiveInstallPolicy;
 pub use homeboy_extension_contract::{TestPassthroughFilter, TestPassthroughFilterStrategy};

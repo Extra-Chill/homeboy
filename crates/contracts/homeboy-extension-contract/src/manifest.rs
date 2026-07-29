@@ -206,6 +206,9 @@ impl ExtensionManifest {
             crate::manifest_toolchain_config::validate_test_secret_env_references(
                 &test.secret_env,
             )?;
+            crate::manifest_toolchain_config::validate_test_secret_env_projections(
+                &test.secret_env_projections,
+            )?;
         }
         let mut ids = std::collections::HashSet::new();
         for transport in &self.notification_transports {

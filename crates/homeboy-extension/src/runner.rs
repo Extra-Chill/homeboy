@@ -2,7 +2,7 @@ use std::io;
 use std::path::{Component as PathComponent, Path, PathBuf};
 use std::time::Duration;
 
-use crate::{ExtensionCapability, ExtensionPhaseTiming};
+use crate::{ExtensionCapability, ExtensionPhaseTiming, TestSecretEnvProjection};
 use homeboy_core::component::Component;
 use homeboy_core::engine::invocation::{InvocationGuard, InvocationRequirements};
 use homeboy_core::engine::resource::{self, ExtensionChildResourceSummary};
@@ -47,6 +47,7 @@ pub struct ExtensionRunner {
     settings_json_overrides: Vec<(String, serde_json::Value)>,
     env_vars: Vec<(String, String)>,
     secret_env_names: Vec<String>,
+    test_secret_env_projections: Vec<TestSecretEnvProjection>,
     env_provider_extensions: Vec<String>,
     script_args: Vec<String>,
     path_override: Option<String>,
@@ -87,6 +88,7 @@ impl ExtensionRunner {
             settings_json_overrides: Vec::new(),
             env_vars: Vec::new(),
             secret_env_names: Vec::new(),
+            test_secret_env_projections: Vec::new(),
             env_provider_extensions: Vec::new(),
             script_args: Vec::new(),
             path_override: None,
@@ -137,6 +139,14 @@ impl ExtensionRunner {
         self.secret_env_names.extend(names);
         self.secret_env_names.sort();
         self.secret_env_names.dedup();
+        self
+    }
+
+    pub fn test_secret_env_projections(
+        mut self,
+        projections: Vec<TestSecretEnvProjection>,
+    ) -> Self {
+        self.test_secret_env_projections = projections;
         self
     }
 
@@ -260,8 +270,13 @@ impl ExtensionRunner {
 
         let project_path = PathBuf::from(&prepared.execution.component.local_path);
         let invocation = self.acquire_invocation_guard()?;
+        let secret_env_names = crate::test::effective_secret_env_names(
+            &self.secret_env_names,
+            &self.test_secret_env_projections,
+            &prepared.settings_json,
+        )?;
         let secret_env = homeboy_core::secret_env::resolve_local_required(
-            self.secret_env_names.clone(),
+            secret_env_names,
             "test.secret_env",
             "extension child",
         )?;

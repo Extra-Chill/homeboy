@@ -13,7 +13,7 @@ use crate::test::drift::DriftOptions;
 use crate::{
     ExtensionCapability, ExtensionExecutionContext, ExtensionRunner, TestChangedFileExclusiveEnv,
     TestChangedFileRouting, TestChangedFileRoutingStrategy, TestPassthroughFilter,
-    TestPassthroughFilterStrategy,
+    TestPassthroughFilterStrategy, TestSecretEnvProjection,
 };
 use homeboy_core::component::Component;
 use homeboy_core::git;
@@ -131,9 +131,14 @@ pub fn build_test_runner(
 ) -> homeboy_core::Result<ExtensionRunner> {
     let resolved = resolve_test_command(component)?;
     let extension_id = resolved.extension_id.clone();
-    let secret_env_names = crate::load_extension(&extension_id)?
-        .test
-        .map(|test| test.secret_env.into_keys().collect::<Vec<_>>())
+    let test_config = crate::load_extension(&extension_id)?.test;
+    let (secret_env_names, secret_env_projections) = test_config
+        .map(|test| {
+            (
+                test.secret_env.into_keys().collect::<Vec<_>>(),
+                test.secret_env_projections,
+            )
+        })
         .unwrap_or_default();
 
     let mut runner = ExtensionRunner::for_context(resolved)
@@ -143,6 +148,7 @@ pub fn build_test_runner(
         .settings_json(settings_json)
         .with_run_dir(run_dir)
         .secret_env_names(secret_env_names)
+        .test_secret_env_projections(secret_env_projections)
         .env_if(skip_lint, "HOMEBOY_SKIP_LINT", "1")
         .env_if(coverage_enabled, "HOMEBOY_COVERAGE", "1");
 
@@ -161,6 +167,122 @@ pub fn build_test_runner(
     }
 
     Ok(runner)
+}
+
+pub(crate) fn effective_secret_env_names(
+    static_names: &[String],
+    projections: &[TestSecretEnvProjection],
+    settings_json: &str,
+) -> homeboy_core::Result<Vec<String>> {
+    let settings: serde_json::Value = serde_json::from_str(settings_json).map_err(|error| {
+        homeboy_core::error::Error::validation_invalid_json(
+            error,
+            Some("evaluate test.secret_env_projections".to_string()),
+            None,
+        )
+    })?;
+    if !settings.is_object() {
+        return Err(projection_error("effective component settings must be an object"));
+    }
+
+    let mut names = BTreeSet::new();
+    for name in static_names {
+        if !names.insert(name.clone()) {
+            return Err(projection_error(&format!(
+                "duplicate static secret identity: {name}"
+            )));
+        }
+    }
+
+    for projection in projections {
+        let Some(predicate) = settings_path(&settings, &projection.when.path)? else {
+            continue;
+        };
+        let Some(predicate) = predicate.as_str() else {
+            return Err(projection_error(
+                "conditional predicate setting must resolve to a string",
+            ));
+        };
+        if predicate != projection.when.equals {
+            continue;
+        }
+
+        let Some(projected) = settings_path(&settings, &projection.names_path)? else {
+            if projection.optional {
+                continue;
+            }
+            return Err(projection_error("required secret identity path is absent"));
+        };
+        let Some(projected) = projected.as_object() else {
+            return Err(projection_error(
+                "secret identity path must resolve to an object of environment names",
+            ));
+        };
+        if projected.is_empty() && !projection.optional {
+            return Err(projection_error(
+                "required secret identity object must not be empty",
+            ));
+        }
+        for value in projected.values() {
+            let Some(name) = value.as_str() else {
+                return Err(projection_error(
+                    "projected secret identities must be strings",
+                ));
+            };
+            if !valid_env_identity(name) {
+                return Err(projection_error(
+                    "projected values must be ASCII uppercase environment identities",
+                ));
+            }
+            if !names.insert(name.to_string()) {
+                return Err(projection_error(&format!(
+                    "duplicate or conflicting projected secret identity: {name}"
+                )));
+            }
+        }
+    }
+
+    Ok(names.into_iter().collect())
+}
+
+fn settings_path<'a>(
+    settings: &'a serde_json::Value,
+    path: &[String],
+) -> homeboy_core::Result<Option<&'a serde_json::Value>> {
+    let mut current = settings;
+    for segment in path {
+        let Some(object) = current.as_object() else {
+            return Err(projection_error(
+                "settings path traverses a value that is not an object",
+            ));
+        };
+        let Some(next) = object.get(segment) else {
+            return Ok(None);
+        };
+        current = next;
+    }
+    Ok(Some(current))
+}
+
+fn valid_env_identity(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_uppercase() || ch.is_ascii_digit())
+        && value
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
+}
+
+fn projection_error(message: &str) -> homeboy_core::error::Error {
+    homeboy_core::error::Error::validation_invalid_argument(
+        "test.secret_env_projections",
+        message,
+        None,
+        None,
+    )
 }
 
 pub fn normalize_test_passthrough_args(
@@ -1024,10 +1146,86 @@ fn is_direct_changed_test_path(file: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TestDriftConfig;
+    use crate::{TestDriftConfig, TestSettingStringPredicate};
     use std::fs;
     use std::process::Command;
     use tempfile::TempDir;
+
+    fn projection(optional: bool) -> TestSecretEnvProjection {
+        TestSecretEnvProjection {
+            when: TestSettingStringPredicate {
+                path: vec!["service".to_string(), "mode".to_string()],
+                equals: "remote".to_string(),
+            },
+            names_path: vec!["service".to_string(), "secret_env".to_string()],
+            optional,
+        }
+    }
+
+    #[test]
+    fn conditional_secret_projection_composes_static_and_matching_names() {
+        let names = effective_secret_env_names(
+            &["STATIC_SECRET".to_string()],
+            &[projection(false)],
+            r#"{"service":{"mode":"remote","secret_env":{"password":"REMOTE_PASSWORD","user":"REMOTE_USER"}}}"#,
+        )
+        .expect("matching projection");
+
+        assert_eq!(names, ["REMOTE_PASSWORD", "REMOTE_USER", "STATIC_SECRET"]);
+        assert_eq!(
+            effective_secret_env_names(
+                &["STATIC_SECRET".to_string()],
+                &[projection(false)],
+                r#"{"service":{"mode":"local"}}"#,
+            )
+            .expect("non-matching projection"),
+            ["STATIC_SECRET"]
+        );
+    }
+
+    #[test]
+    fn conditional_secret_projection_handles_optional_and_malformed_settings() {
+        assert!(effective_secret_env_names(
+            &[],
+            &[projection(true)],
+            r#"{"service":{"mode":"remote"}}"#,
+        )
+        .expect("absent optional path")
+        .is_empty());
+
+        for settings in [
+            r#"{"service":"not-an-object"}"#,
+            r#"{"service":{"mode":7}}"#,
+            r#"{"service":{"mode":"remote","secret_env":"not-an-object"}}"#,
+            r#"{"service":{"mode":"remote","secret_env":{"password":7}}}"#,
+            r#"{"service":{"mode":"remote","secret_env":{"password":"raw-secret-value"}}}"#,
+        ] {
+            let error = effective_secret_env_names(&[], &[projection(false)], settings)
+                .expect_err("malformed projection must fail closed");
+            assert!(!error.to_string().contains("raw-secret-value"));
+        }
+    }
+
+    #[test]
+    fn conditional_secret_projection_rejects_duplicate_identities() {
+        for (static_names, settings) in [
+            (
+                vec!["REMOTE_SECRET".to_string()],
+                r#"{"service":{"mode":"remote","secret_env":{"password":"REMOTE_SECRET"}}}"#,
+            ),
+            (
+                Vec::new(),
+                r#"{"service":{"mode":"remote","secret_env":{"password":"REMOTE_SECRET","user":"REMOTE_SECRET"}}}"#,
+            ),
+        ] {
+            assert!(effective_secret_env_names(
+                &static_names,
+                &[projection(false)],
+                settings,
+            )
+            .is_err());
+        }
+    }
 
     #[test]
     fn drift_options_use_extension_drift_config() {
