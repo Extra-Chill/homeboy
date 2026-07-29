@@ -289,6 +289,10 @@ impl ExtensionRunner {
             &extra_env_vars,
         )?;
 
+        if let Some(run_dir_path) = &self.run_dir_path {
+            initialize_structured_sidecars(run_dir_path, self.execution_context.capability)?;
+        }
+
         let output = self.execute_script(
             &prepared.execution.extension_path,
             &env_vars,
@@ -470,6 +474,23 @@ fn write_structured_failure_sidecar(
         ExtensionCapability::Test => write_test_failure_sidecar(run_dir_path, command, output),
         _ => Ok(()),
     }
+}
+
+fn initialize_structured_sidecars(
+    run_dir_path: &Path,
+    capability: ExtensionCapability,
+) -> Result<()> {
+    if capability == ExtensionCapability::Lint {
+        write_json_sidecar(
+            &run_dir_path.join(run_dir::files::LINT_FINDINGS),
+            &json!([]),
+        )?;
+        write_json_sidecar(
+            &run_dir_path.join(run_dir::files::LINT_PRODUCERS),
+            &json!([]),
+        )?;
+    }
+    Ok(())
 }
 
 fn write_lint_failure_sidecar(
@@ -846,6 +867,29 @@ mod tests {
         assert_eq!(producers[0]["status"], "error");
         assert_eq!(producers[0]["finding_count"], 0);
         assert_eq!(producers[0]["metadata"]["failure"]["exit_code"], 127);
+
+        run_dir.cleanup();
+    }
+
+    #[test]
+    fn initializes_empty_lint_sidecars_for_successful_zero_finding_runs() {
+        let run_dir = RunDir::create().expect("run dir");
+
+        initialize_structured_sidecars(run_dir.path(), ExtensionCapability::Lint)
+            .expect("initialize lint evidence");
+
+        let findings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(run_dir.step_file(run_dir::files::LINT_FINDINGS))
+                .expect("findings file"),
+        )
+        .expect("findings json");
+        let producers: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(run_dir.step_file(run_dir::files::LINT_PRODUCERS))
+                .expect("producers file"),
+        )
+        .expect("producers json");
+        assert_eq!(findings, json!([]));
+        assert_eq!(producers, json!([]));
 
         run_dir.cleanup();
     }

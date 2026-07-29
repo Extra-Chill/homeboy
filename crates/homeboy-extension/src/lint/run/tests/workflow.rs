@@ -228,17 +228,10 @@ exit 0
 }
 
 #[test]
-fn successful_multi_route_lint_cleans_child_route_evidence() {
+fn successful_zero_finding_routes_initialize_and_clean_evidence() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let source = tempfile::tempdir().expect("source dir");
-        let component = routed_lint_component(
-            home.path(),
-            source.path(),
-            r#"#!/bin/sh
-printf '[]' > "$HOMEBOY_LINT_FINDINGS_FILE"
-exit 0
-"#,
-        );
+        let component = routed_lint_component(home.path(), source.path(), "#!/bin/sh\nexit 0\n");
         let run_dir = RunDir::create().expect("run dir");
 
         let workflow =

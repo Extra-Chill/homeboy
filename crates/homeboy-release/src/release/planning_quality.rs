@@ -176,7 +176,8 @@ pub(super) fn validate_lint_quality(
 /// Attach a diagnostic action without changing the original infrastructure
 /// error's code, message, details, or evidence. The command intentionally says
 /// "fresh" because a new CLI invocation cannot promise the release process's
-/// complete runtime identity.
+/// complete runtime identity, and uses automatic placement so configured
+/// release-gate routing remains authoritative.
 fn lint_runner_error(
     error: Error,
     component: &Component,
@@ -186,7 +187,8 @@ fn lint_runner_error(
 ) -> Error {
     let mut args = vec![
         "--placement".to_string(),
-        "local".to_string(),
+        "auto".to_string(),
+        "review".to_string(),
         "lint".to_string(),
         component_id.to_string(),
         "--path".to_string(),
@@ -202,7 +204,7 @@ fn lint_runner_error(
     error.with_action(
         ExecutableAction::new(
             "release.lint.fresh_diagnostic",
-            "run a fresh local lint diagnostic with the release lint scope",
+            "run a fresh lint diagnostic with the release lint scope",
             "homeboy",
             args,
             ActionSafety::ReadOnly,
@@ -711,12 +713,13 @@ mod tests {
         assert_eq!(action["id"], "release.lint.fresh_diagnostic");
         assert!(action["label"]
             .as_str()
-            .is_some_and(|label| label.contains("fresh local lint diagnostic")));
+            .is_some_and(|label| label.contains("fresh lint diagnostic")));
         assert_eq!(
             action["args"],
             serde_json::json!([
                 "--placement",
-                "local",
+                "auto",
+                "review",
                 "lint",
                 "fixture",
                 "--path",
