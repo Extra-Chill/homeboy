@@ -409,7 +409,15 @@ pub fn is_homeboy_source_build_path(homeboy_path: &str) -> bool {
         ancestor
             .file_name()
             .and_then(|name| name.to_str())
-            .map(|name| name.starts_with("homeboy@"))
+            .map(|name| {
+                name.starts_with("homeboy@")
+                    || (ancestor
+                        .parent()
+                        .and_then(|parent| parent.file_name())
+                        .and_then(|parent| parent.to_str())
+                        == Some("_homeboy_binaries")
+                        && name.starts_with("homeboy-"))
+            })
             .unwrap_or(false)
     })
 }

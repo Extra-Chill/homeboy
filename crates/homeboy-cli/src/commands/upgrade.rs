@@ -217,6 +217,29 @@ mod tests {
     }
 
     #[test]
+    fn partial_result_serializes_independent_component_statuses() {
+        let mut result = base_upgrade_result();
+        result.partial = true;
+        result.controller = Some(upgrade::UpgradeComponentStatus {
+            status: "updated".to_string(),
+            summary: "controller installation completed".to_string(),
+        });
+        result.extensions = Some(upgrade::UpgradeComponentStatus {
+            status: "completed".to_string(),
+            summary: "0 updated, 0 skipped".to_string(),
+        });
+        result.runners = Some(upgrade::UpgradeComponentStatus {
+            status: "partial".to_string(),
+            summary: "0 converged, 1 require repair".to_string(),
+        });
+
+        let json = serde_json::to_value(result).expect("upgrade result serializes");
+        assert_eq!(json["controller"]["status"], "updated");
+        assert_eq!(json["extensions"]["status"], "completed");
+        assert_eq!(json["runners"]["status"], "partial");
+    }
+
+    #[test]
     fn non_targeted_runner_failures_keep_best_effort_upgrade_status() {
         let mut result = base_upgrade_result();
         result.runners_skipped.push(upgrade::RunnerUpgradeEntry {
@@ -318,6 +341,9 @@ mod tests {
             new_build_identity: None,
             source_revision: None,
             upgraded: true,
+            controller: None,
+            extensions: None,
+            runners: None,
             partial: false,
             runner_convergence: None,
             message: "Upgraded to 0.228.7".to_string(),

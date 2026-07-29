@@ -103,7 +103,7 @@ pub fn runner_local_version_drift(
     Some(format!(
         "configured runner executable `{homeboy_path}` reports {runner_version}, but local/current reports {local_version}; runner before was {}; remediate with `{}`",
         previous_version.unwrap_or("unknown"),
-        runner_upgrade_recovery_commands(runner_id)[0]
+        runner_upgrade_recovery_commands(runner_id, homeboy_path)[0]
     ))
 }
 

@@ -24,6 +24,7 @@ pub fn runner_upgrade_failure_entry(
     exit_code: i32,
     detail: String,
 ) -> RunnerUpgradeEntry {
+    let recovery_commands = runner_upgrade_recovery_commands(runner_id, &homeboy_path);
     RunnerUpgradeEntry {
         runner_id: runner_id.to_string(),
         homeboy_path,
@@ -33,7 +34,7 @@ pub fn runner_upgrade_failure_entry(
         new_version: None,
         bare_homeboy_version: None,
         path_drift: None,
-        recovery_commands: runner_upgrade_recovery_commands(runner_id),
+        recovery_commands,
         extensions_synced: Vec::new(),
         extensions_skipped: Vec::new(),
         extensions_failed: Vec::new(),

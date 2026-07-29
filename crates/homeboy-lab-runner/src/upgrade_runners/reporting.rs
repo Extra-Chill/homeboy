@@ -92,7 +92,7 @@ pub fn runner_upgrade_final_detail(
         ));
         parts.push(format!(
             "retry failed runner sync with `{}` or retry an individual failed extension using its recovery_commands entry",
-            runner_upgrade_recovery_commands(runner_id).join(" && ")
+            runner_upgrade_recovery_commands(runner_id, homeboy_path).join(" && ")
         ));
     }
 

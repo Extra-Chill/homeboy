@@ -232,11 +232,26 @@ fn fails_when_managed_bare_homeboy_repair_leaves_path_drift() {
         .contains("managed PATH-visible `homeboy` repair left bare `homeboy` at 0.228.4"));
     assert!(skipped[0]
         .recovery_commands
-        .contains(&"homeboy upgrade --force --upgrade-runner lab".to_string()));
+        .contains(&"homeboy runner refresh-homeboy lab --reconnect".to_string()));
     assert!(skipped[0]
         .detail
         .contains("managed PATH-visible `homeboy` repair completed"));
     assert!(skipped[0].detail.contains("runner PATH drift detected"));
+}
+
+#[test]
+fn recovery_never_emits_bare_homeboy_for_a_selected_binary() {
+    let commands = runner_upgrade_recovery_commands(
+        "homeboy-lab",
+        "/home/user/Developer/_homeboy_binaries/homeboy-current/target/release/homeboy",
+    );
+
+    assert!(commands
+        .iter()
+        .any(|command| command.contains("target/release/homeboy upgrade")));
+    assert!(!commands
+        .iter()
+        .any(|command| command.contains("-- homeboy upgrade")));
 }
 
 #[test]

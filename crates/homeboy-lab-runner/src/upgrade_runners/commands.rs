@@ -70,7 +70,17 @@ pub fn runner_recovery_commands(
     configured_version: Option<&str>,
     bare_version: Option<&str>,
 ) -> Vec<String> {
-    let mut commands = runner_upgrade_recovery_commands(runner_id);
+    let mut commands = if path_drift.is_some() {
+        // The attempted upgrade left the same selected identity in place. Rotate
+        // through the runner's managed materialization path instead of suggesting
+        // the command that just proved ineffective.
+        vec![format!(
+            "homeboy runner refresh-homeboy {} --reconnect",
+            shell_arg(runner_id)
+        )]
+    } else {
+        runner_upgrade_recovery_commands(runner_id, homeboy_path)
+    };
     if path_drift.is_some() {
         commands.push(runner_inspect_bare_homeboy_command(runner_id));
     }
@@ -79,6 +89,13 @@ pub fn runner_recovery_commands(
         && matches!((configured_version, bare_version), (Some(configured), Some(bare)) if version_is_newer(bare, configured))
     {
         commands.push(runner_set_homeboy_path_command(runner_id, "homeboy"));
+    }
+    if path_drift.is_some() && std::path::Path::new(homeboy_path).is_absolute() {
+        commands.push(format!(
+            "homeboy runner exec --ssh {} -- {} self identity",
+            shell_arg(runner_id),
+            shell_arg(homeboy_path)
+        ));
     }
     commands
 }
@@ -100,17 +117,25 @@ pub fn runner_set_homeboy_path_command(runner_id: &str, homeboy_path: &str) -> S
     )
 }
 
-pub fn runner_upgrade_recovery_commands(runner_id: &str) -> Vec<String> {
-    vec![
-        format!(
-            "homeboy runner exec {} -- homeboy upgrade --no-restart",
-            shell_arg(runner_id)
-        ),
-        format!(
-            "homeboy upgrade --force --upgrade-runner {}",
-            shell_arg(runner_id)
-        ),
-    ]
+pub fn runner_upgrade_recovery_commands(
+    runner_id: &str,
+    selected_homeboy_path: &str,
+) -> Vec<String> {
+    let mut commands = vec![format!(
+        "homeboy upgrade --force --upgrade-runner {}",
+        shell_arg(runner_id)
+    )];
+    // A nested repair must never re-resolve `homeboy` through the runner's PATH:
+    // PATH can name a third, older binary than both the configured executable and
+    // the daemon. Only an explicit selected executable is safe to invoke remotely.
+    if std::path::Path::new(selected_homeboy_path).is_absolute() {
+        commands.push(format!(
+            "homeboy runner exec --ssh {} -- {} upgrade --no-restart",
+            shell_arg(runner_id),
+            shell_arg(selected_homeboy_path)
+        ));
+    }
+    commands
 }
 
 pub fn runner_exec_recovery_commands(runner: &Runner, command: &[String]) -> Vec<String> {
