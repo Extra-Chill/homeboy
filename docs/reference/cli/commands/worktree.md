@@ -29,6 +29,7 @@ Manage component-backed task worktrees
 | `homeboy worktree status` | Inspect one task worktree and its safety gates |
 | `homeboy worktree remove` | Remove one task worktree after safety checks |
 | `homeboy worktree cleanup` | Remove cleanup-eligible task worktrees after safety checks |
+| `homeboy worktree quarantine` | Inspect or explicitly reconcile quarantined malformed task-worktree records |
 
 ## `homeboy worktree create`
 
@@ -143,4 +144,41 @@ Remove cleanup-eligible task worktrees after safety checks
 | `--cleanup-artifacts` | flag | Also remove declared rebuildable artifacts from the Homeboy checkout that built this binary |
 | `--cleanup-branches` | flag | Delete merged task branches for removed cleanup candidates |
 | `--allow-unmerged-branches` | flag | Permit deleting unmerged task branches. Requires --cleanup-branches |
+
+## `homeboy worktree quarantine`
+
+```sh
+homeboy worktree quarantine <COMMAND>
+```
+
+Inspect or explicitly reconcile quarantined malformed task-worktree records
+
+| Subcommand | Summary |
+| --- | --- |
+| `homeboy worktree quarantine list` | List quarantined records still protecting Cargo targets |
+| `homeboy worktree quarantine clear` | Mark one quarantined record terminally reconciled while retaining its original evidence |
+
+## `homeboy worktree quarantine list`
+
+```sh
+homeboy worktree quarantine list
+```
+
+List quarantined records still protecting Cargo targets
+
+## `homeboy worktree quarantine clear`
+
+```sh
+homeboy worktree quarantine clear [OPTIONS] <PROVENANCE_PATH>
+```
+
+Mark one quarantined record terminally reconciled while retaining its original evidence
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<PROVENANCE_PATH>` | yes | Provenance sidecar reported by cleanup or `worktree quarantine list` |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--verified-terminal` | flag | Confirms terminal state was independently verified before clearing protection |
 
