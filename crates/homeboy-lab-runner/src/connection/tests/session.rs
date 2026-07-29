@@ -542,6 +542,45 @@ fn equal_version_build_identity_and_runtime_paths_are_current() {
 }
 
 #[test]
+fn same_version_different_controller_build_is_incompatible_and_truthful() {
+    let warning = RunnerStaleDaemonWarning::new(
+        "homeboy-lab",
+        "0.321.1".to_string(),
+        "0.321.1".to_string(),
+        Some("homeboy 0.321.1+configured".to_string()),
+        Some("homeboy 0.321.1+configured".to_string()),
+    )
+    .with_controller_compatibility(
+        "0.321.1".to_string(),
+        "homeboy 0.321.1+controller".to_string(),
+        true,
+        true,
+        false,
+    );
+
+    assert_eq!(
+        compare_identities(
+            Some("homeboy 0.321.1+configured"),
+            Some("homeboy 0.321.1+controller"),
+        ),
+        IdentityComparison::Mismatch
+    );
+    assert_eq!(
+        compare_build_commits(
+            Some("homeboy 0.321.1+configured"),
+            Some("homeboy 0.321.1+configured-dirty"),
+        ),
+        IdentityComparison::Match
+    );
+    assert_eq!(
+        warning.compatibility_reason,
+        Some("controller_configured_identity_skew")
+    );
+    assert!(warning.message.contains("configured job command binary"));
+    assert!(warning.message.contains("controller"));
+}
+
+#[test]
 fn observed_matching_daemon_identity_reconciles_stale_session_metadata() {
     let mut session = direct_ssh_session("lease-live");
     session.homeboy_version = "0.298.0".to_string();

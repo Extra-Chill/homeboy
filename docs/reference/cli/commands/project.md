@@ -149,6 +149,7 @@ Manage project components
 | `homeboy project components list` | List associated components |
 | `homeboy project components set` | Replace project components with the provided list |
 | `homeboy project components attach-path` | Attach a repo path for a project component discovered via homeboy.json |
+| `homeboy project components attach-paths` | Attach multiple repo paths, retaining per-path diagnostics |
 | `homeboy project components remove` | Remove one or more components |
 | `homeboy project components clear` | Remove all components |
 
@@ -192,6 +193,25 @@ Attach a repo path for a project component discovered via homeboy.json
 | --- | --- | --- |
 | `<PROJECT_ID>` | yes | Project ID |
 | `<LOCAL_PATH>` | yes | Local repo path containing homeboy.json |
+
+## `homeboy project components attach-paths`
+
+```sh
+homeboy project components attach-paths [OPTIONS] <PROJECT_ID> [LOCAL_PATHS]...
+```
+
+Attach multiple repo paths, retaining per-path diagnostics
+
+| Argument | Required | Description |
+| --- | --- | --- |
+| `<PROJECT_ID>` | yes | Project ID |
+| `[LOCAL_PATHS]...` | no | Local repo paths containing homeboy.json |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--input` | `<INPUT>` | JSON array of {"path":"/repo","reference":"caller-owned-ref"} inputs |
+| `--failure-policy` | `<FAILURE_POLICY>` | Continue all inputs or stop after the first failure Values: `continue`, `fail-fast`. |
+| `--worktree-policy` | `<WORKTREE_POLICY>` | Include git worktrees or report them as skipped Values: `include`, `skip`. |
 
 ## `homeboy project components remove`
 

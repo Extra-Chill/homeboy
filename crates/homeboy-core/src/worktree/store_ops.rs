@@ -664,18 +664,29 @@ pub(super) fn record_path(store_dir: &Path, id: &str) -> PathBuf {
 }
 
 pub(super) fn write_record(store_dir: &Path, record: &TaskWorktreeRecord) -> Result<()> {
-    let store_owner = ownership::owner_for_path_or_ancestor(store_dir)?;
-    fs::create_dir_all(store_dir).map_err(|err| {
-        Error::internal_io(err.to_string(), Some(store_dir.display().to_string()))
-    })?;
-    let json = serde_json::to_string_pretty(record)
-        .map_err(|err| Error::internal_json(err.to_string(), Some(record.id.clone())))?;
-    let path = record_path(store_dir, &record.id);
-    fs::write(&path, format!("{json}\n"))
+    with_task_worktree_registry_write_lock(|| {
+        let store_owner = ownership::owner_for_path_or_ancestor(store_dir)?;
+        fs::create_dir_all(store_dir).map_err(|err| {
+            Error::internal_io(err.to_string(), Some(store_dir.display().to_string()))
+        })?;
+        let json = serde_json::to_string_pretty(record)
+            .map_err(|err| Error::internal_json(err.to_string(), Some(record.id.clone())))?;
+        let path = record_path(store_dir, &record.id);
+        crate::io::write_output_file_atomically(
+            &path,
+            format!("{json}\n"),
+            crate::io::OutputWriteOptions::file(),
+        )
         .map_err(|err| Error::internal_io(err.to_string(), Some(record.id.clone())))?;
-    ownership::normalize_created_path(store_dir, store_owner, false, "write worktree metadata")?;
-    ownership::normalize_created_path(&path, store_owner, false, "write worktree metadata")?;
-    Ok(())
+        ownership::normalize_created_path(
+            store_dir,
+            store_owner,
+            false,
+            "write worktree metadata",
+        )?;
+        ownership::normalize_created_path(&path, store_owner, false, "write worktree metadata")?;
+        Ok(())
+    })
 }
 
 pub(super) fn write_adopted_record(
