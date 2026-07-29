@@ -63,6 +63,7 @@ pub fn recover_and_retry_failed_upgrade(
     previous_version: Option<&str>,
     expected_build_identity: Option<&str>,
     selected_source_revision: Option<&str>,
+    selected_source_url: Option<&str>,
     failure: FailedUpgradeOutcome,
     update_homeboy_path: &mut impl FnMut(&str, &str) -> Result<()>,
     exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
@@ -119,6 +120,17 @@ pub fn recover_and_retry_failed_upgrade(
             failure.detail,
         )),
         Err(recovery_detail) => {
+            let selected_materialized_binary = selected_source_url
+                .is_none()
+                .then(|| {
+                    verified_materialized_source_binary(
+                        runner,
+                        command_source_path,
+                        expected_build_identity,
+                        exec,
+                    )
+                })
+                .flatten();
             let mut entry = runner_upgrade_failure_entry(
                 &runner.id,
                 original_homeboy_path.to_string(),
@@ -137,6 +149,8 @@ pub fn recover_and_retry_failed_upgrade(
                 None,
                 None,
                 selected_source_revision,
+                selected_source_url,
+                selected_materialized_binary.as_deref(),
             );
             Err(entry)
         }

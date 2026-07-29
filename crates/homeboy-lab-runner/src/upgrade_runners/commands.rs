@@ -70,6 +70,8 @@ pub fn runner_recovery_commands(
     configured_version: Option<&str>,
     bare_version: Option<&str>,
     selected_source_revision: Option<&str>,
+    selected_source_url: Option<&str>,
+    selected_materialized_binary: Option<&str>,
 ) -> Vec<String> {
     let mut commands = if path_drift.is_some() {
         // The attempted upgrade left the same selected identity in place. Rotate
@@ -78,6 +80,8 @@ pub fn runner_recovery_commands(
         vec![runner_refresh_homeboy_command(
             runner_id,
             selected_source_revision,
+            selected_source_url,
+            selected_materialized_binary,
         )]
     } else {
         runner_upgrade_recovery_commands(runner_id, homeboy_path)
@@ -104,13 +108,26 @@ pub fn runner_recovery_commands(
 fn runner_refresh_homeboy_command(
     runner_id: &str,
     selected_source_revision: Option<&str>,
+    selected_source_url: Option<&str>,
+    selected_materialized_binary: Option<&str>,
 ) -> String {
+    if let Some(binary) = selected_materialized_binary {
+        return format!(
+            "homeboy runner refresh-homeboy {} --select {} --reconnect",
+            shell_arg(runner_id),
+            shell_arg(binary)
+        );
+    }
+    let source = selected_source_url
+        .map(|source| format!(" --source {}", shell_arg(source)))
+        .unwrap_or_default();
     let revision = selected_source_revision
         .map(|revision| format!(" --ref {}", shell_arg(revision)))
         .unwrap_or_default();
     format!(
-        "homeboy runner refresh-homeboy {}{} --reconnect",
+        "homeboy runner refresh-homeboy {}{}{} --reconnect",
         shell_arg(runner_id),
+        source,
         revision
     )
 }
