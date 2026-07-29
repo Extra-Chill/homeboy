@@ -7,6 +7,7 @@ use super::*;
 use crate::observation::NewRunRecord;
 use crate::test_support::with_isolated_home;
 use serde_json::Value;
+use std::sync::{mpsc, Mutex};
 
 struct XdgGuard(Option<String>);
 
@@ -595,6 +596,126 @@ fn require_run_resolves_requested_run_id_metadata_alias() {
             resolve_run_id_or_label(&store, "proof-label").expect("alias id"),
             run.id
         );
+    });
+}
+
+#[test]
+fn require_run_reads_terminal_lab_review_alias_while_runner_probe_is_stalled() {
+    struct StalledProvider {
+        entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl RunnerEvidenceProvider for StalledProvider {
+        fn mirror_connected_runner_run(&self, _run_id: &str) -> Result<Option<RunRecord>> {
+            self.entered.send(()).expect("signal stalled probe");
+            self.release
+                .lock()
+                .expect("release lock")
+                .recv()
+                .expect("release stalled probe");
+            Ok(None)
+        }
+
+        fn statuses(&self) -> Vec<RunnerConnectionInfo> {
+            Vec::new()
+        }
+
+        fn daemon_api_get(&self, _runner_id: &str, _path: &str) -> Result<Value> {
+            unreachable!("local lookup must not query the daemon")
+        }
+
+        fn runner_artifact_content(
+            &self,
+            _runner_id: &str,
+            _job_id: &str,
+            _artifact_id: &str,
+        ) -> Result<Value> {
+            unreachable!("local lookup must not hydrate artifacts")
+        }
+
+        fn runner_job_cancel(
+            &self,
+            _runner_id: &str,
+            _job_id: &str,
+        ) -> Result<(crate::api_jobs::Job, Vec<crate::api_jobs::JobEvent>)> {
+            unreachable!("local lookup must not mutate runner jobs")
+        }
+
+        fn refresh_mirrored_daemon_evidence(
+            &self,
+            _run_id: &str,
+        ) -> Result<Option<Vec<RunRecord>>> {
+            unreachable!("local lookup must not reconcile runner evidence")
+        }
+
+        fn mirrored_runner_job_identity(&self, _run: &RunRecord) -> Option<(String, String)> {
+            None
+        }
+
+        fn download_remote_artifact(
+            &self,
+            _path: &str,
+            _output: Option<std::path::PathBuf>,
+        ) -> Result<RemoteArtifactDownloadInfo> {
+            unreachable!("local lookup must not hydrate artifacts")
+        }
+    }
+
+    let _provider_lock = runner_evidence::runner_evidence_test_lock()
+        .lock()
+        .expect("provider test lock");
+
+    with_isolated_home(|_home| {
+        let _xdg = XdgGuard::unset();
+        let store = ObservationStore::open_initialized().expect("store");
+        let label = "runner-exec-review-homeboy-lab-terminal-job";
+        let run = RunRecord {
+            id: "terminal-lab-review-mirror".to_string(),
+            kind: "runner-exec".to_string(),
+            started_at: "2026-07-28T00:00:00Z".to_string(),
+            finished_at: Some("2026-07-28T00:01:00Z".to_string()),
+            status: RunStatus::Fail.as_str().to_string(),
+            metadata_json: serde_json::json!({
+                "requested_run_id": label,
+                "lab": {
+                    "runner": { "id": "homeboy-lab" },
+                    "remote_job": { "id": "terminal-job" }
+                }
+            }),
+            ..Default::default()
+        };
+        store
+            .import_run(&run)
+            .expect("persist terminal Lab review run");
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        runner_evidence::register_runner_evidence_provider(Box::new(StalledProvider {
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+        }));
+        let stalled = std::thread::spawn(|| {
+            runner_evidence::with_runner_evidence(|provider| {
+                provider.mirror_connected_runner_run("unrelated-run")
+            })
+        });
+        entered_rx.recv().expect("secondary probe is stalled");
+
+        let resolved = require_run(&store, label).expect("durable local terminal record");
+        assert_eq!(resolved.id, run.id);
+        assert_eq!(resolved.status, RunStatus::Fail.as_str());
+        assert!(
+            !stalled.is_finished(),
+            "lookup completed before probe release"
+        );
+
+        release_tx.send(()).expect("release secondary probe");
+        stalled
+            .join()
+            .expect("secondary probe joined")
+            .expect("secondary probe result");
+        runner_evidence::clear_runner_evidence_provider();
     });
 }
 
