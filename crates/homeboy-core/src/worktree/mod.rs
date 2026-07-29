@@ -1,14 +1,18 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::{OnceLock, RwLock};
 
 use crate::component::{self, TargetSpec};
 use crate::error::{Error, Result};
 use crate::ownership;
 use crate::{git, paths};
+use fs4::fs_std::FileExt;
 
 mod queue_ops;
 mod store_ops;
 mod types;
+
+static TASK_WORKTREE_REGISTRY_GATE: OnceLock<RwLock<()>> = OnceLock::new();
 
 pub use types::{
     AdoptedWorkspaceRecord, BranchCleanupIntent, BranchCleanupStatus, CleanupPolicy,
@@ -30,7 +34,75 @@ pub fn adopt(options: WorktreeAdoptOptions) -> Result<WorktreeAdoptOutput> {
 }
 
 pub fn list() -> Result<WorktreeListOutput> {
+    with_task_worktree_registry_read_lock(list_unlocked)
+}
+
+pub(crate) fn list_unlocked() -> Result<WorktreeListOutput> {
     list_with_store(&metadata_dir()?)
+}
+
+/// Hold a shared lease over the task-worktree registry while a caller reads
+/// liveness and mutates a worktree-local resource. Registry writers take the
+/// matching exclusive lease before atomically publishing their next snapshot.
+pub(crate) fn with_task_worktree_registry_read_lock<T>(
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let _gate = TASK_WORKTREE_REGISTRY_GATE
+        .get_or_init(|| RwLock::new(()))
+        .read()
+        .map_err(|_| Error::internal_unexpected("task worktree registry read gate poisoned"))?;
+    let lock = open_task_worktree_registry_lock()?;
+    lock.lock_shared().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("lock task worktree registry for read".to_string()),
+        )
+    })?;
+    operation()
+}
+
+pub(super) fn with_task_worktree_registry_write_lock<T>(
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let _gate = TASK_WORKTREE_REGISTRY_GATE
+        .get_or_init(|| RwLock::new(()))
+        .write()
+        .map_err(|_| Error::internal_unexpected("task worktree registry write gate poisoned"))?;
+    let lock = open_task_worktree_registry_lock()?;
+    lock.lock_exclusive().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("lock task worktree registry for write".to_string()),
+        )
+    })?;
+    operation()
+}
+
+fn open_task_worktree_registry_lock() -> Result<std::fs::File> {
+    let store = metadata_dir()?;
+    let parent = store.parent().ok_or_else(|| {
+        Error::internal_unexpected(format!(
+            "task worktree store has no parent: {}",
+            store.display()
+        ))
+    })?;
+    fs::create_dir_all(parent).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create {}", parent.display())),
+        )
+    })?;
+    OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(parent.join("task-worktrees.lock"))
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("open task worktree registry lock".to_string()),
+            )
+        })
 }
 
 pub fn status(id: &str) -> Result<WorktreeStatusOutput> {
