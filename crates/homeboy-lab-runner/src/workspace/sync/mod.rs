@@ -2789,9 +2789,6 @@ fn prune_candidate_reason(
         }
     }
 
-    if !Path::new(source_path).exists() {
-        return Ok(Some("source_path_missing".to_string()));
-    }
     if has_terminal_delete_on_success_lifecycle_with(metadata, |run_id| {
         workspace_run_authority(runner, metadata, path, run_id)
     }) {
@@ -2799,6 +2796,9 @@ fn prune_candidate_reason(
     }
     if is_stale_materialized_workspace_lifecycle(metadata, path) {
         return Ok(Some(STALE_MATERIALIZED_WORKSPACE_REASON.to_string()));
+    }
+    if !Path::new(source_path).exists() {
+        return Ok(Some("source_path_missing".to_string()));
     }
     Ok(None)
 }
