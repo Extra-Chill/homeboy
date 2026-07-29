@@ -4,6 +4,58 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.323.0] - 2026-07-29
+
+### Added
+- own direct runner temp workloads
+- batch component path attachment
+- converge paginated workspace pruning
+- scope invocation temp to managed owners
+- run provider dry-run commands
+- lower extension deployment providers
+
+### Changed
+- make deploy guard baselines independent of host state
+- cover mixed convergence resume
+- extract cleanup command contract
+- require complete main gate set
+- Extend the measurement registry to the shell/YAML gate layer
+
+### Fixed
+- preserve malformed record fixtures
+- inject promotion provider timeouts
+- authenticate tracked continuation state
+- Fix initial Cook review-form projection
+- shorten invocation temp socket paths
+- carry verified branch identity to prepare
+- harden local runner recovery
+- recheck after controller upgrade
+- resolve remote default branch + honor cook's @file prompt contract
+- detect managed roots before payload binding
+- retain invocation result artifacts
+- stop trailing comments from hiding every later symbol
+- cover managed invocation temp lease protection
+- surface controller compatibility skew
+- protect active Cargo targets
+- converge runner binary identities
+- make runtime temp retention portable
+- block dead-lease replacement conflicts
+- revalidate supervised stale stops
+- repair reclaimable root fixture
+- preflight head recovery identity
+- quick-win batch wave 2 from the 2026-07-29 issue triage (5 issues)
+- make the config lock reentrancy-safe and bounded
+- require recovered artifact provenance
+- restore workspace test compilation after the deployment provider field
+- contain mutation child trees
+- adopt canonical recovery assets
+- expose runtime promotion admission waits
+- converge failed package outputs
+- resolve head tags by commit identity
+- quick-win batch from the 2026-07-29 issue triage (8 issues)
+- scope runtime temp age override to managed entries
+- guarantee zero-finding lint evidence
+
 ## [0.322.1] - 2026-07-29
 
 ### Added
