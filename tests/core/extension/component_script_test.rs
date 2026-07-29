@@ -419,8 +419,9 @@ fn full_extension_test_supplies_canonical_result_sidecar() {
             r#"#!/bin/sh
 set -eu
 test -n "$HOMEBOY_TEST_RESULTS_FILE"
-mkdir -p "$(dirname "$HOMEBOY_TEST_RESULTS_FILE")"
-printf '{"schema":"fixture/test-results/v1","total":2,"passed":2,"failed":0,"skipped":0}\n' > "$HOMEBOY_TEST_RESULTS_FILE"
+test -f "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
+source "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
+homeboy_write_test_results 2 2 0 0
 "#,
         )
         .expect("extension script should be written");
@@ -431,7 +432,6 @@ printf '{"schema":"fixture/test-results/v1","total":2,"passed":2,"failed":0,"ski
 set -eu
 test "$1" = "$HOMEBOY_TEST_RESULTS_FILE"
 test "${2:-}" = "fixture-json"
-grep -q 'fixture/test-results/v1' "$1"
 source "$HOMEBOY_RUNTIME_WRITE_TEST_RESULTS"
 homeboy_write_test_results 2 2 0 0
 "#,

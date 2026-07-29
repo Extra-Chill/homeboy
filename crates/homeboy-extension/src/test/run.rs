@@ -345,6 +345,7 @@ fn run_main_test_workflow_inner(
         .is_some();
     let no_tests_evidence_file = run_dir.step_file(run_dir::files::NO_TESTS_APPLICABLE);
     let no_tests_nonce = uuid::Uuid::new_v4().to_string();
+    let write_results_helper = write_test_results_helper(run_dir)?;
 
     let runner = build_test_runner(
         component,
@@ -365,6 +366,10 @@ fn run_main_test_workflow_inner(
         .env(
             "HOMEBOY_TEST_RESULTS_FILE",
             results_file.to_string_lossy().as_ref(),
+        )
+        .env(
+            crate::runtime_helper::WRITE_TEST_RESULTS_ENV,
+            write_results_helper.to_string_lossy().as_ref(),
         )
         .env_if(
             no_tests_policy_enabled,
@@ -1013,14 +1018,9 @@ fn run_declared_result_parser(
         settings_json,
         &run_dir.legacy_env_vars(),
     )?;
-    let write_results_helper = run_dir.path().join("write-test-results.sh");
-    local_files::write_file_atomic(
-        &write_results_helper,
-        include_str!("../runtime/write-test-results.sh"),
-        "write parser runtime helper",
-    )?;
+    let write_results_helper = write_test_results_helper(run_dir)?;
     env_vars.push((
-        "HOMEBOY_RUNTIME_WRITE_TEST_RESULTS".to_string(),
+        crate::runtime_helper::WRITE_TEST_RESULTS_ENV.to_string(),
         write_results_helper.to_string_lossy().to_string(),
     ));
     env_vars.push((
@@ -1100,6 +1100,16 @@ fn run_declared_result_parser(
     }
 
     Ok(())
+}
+
+fn write_test_results_helper(run_dir: &RunDir) -> homeboy_core::Result<std::path::PathBuf> {
+    let helper = run_dir.path().join("write-test-results.sh");
+    local_files::write_file_atomic(
+        &helper,
+        include_str!("../runtime/write-test-results.sh"),
+        "write test results runtime helper",
+    )?;
+    Ok(helper)
 }
 
 fn declared_result_parser_error(
