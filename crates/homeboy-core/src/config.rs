@@ -144,69 +144,83 @@ pub fn with_config_lock<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
     operation()
 }
 
+/// Take an exclusive `flock(2)` on `file` under a deadline.
+///
+/// This is the supported way to take an exclusive file lock in Homeboy. Bare
+/// `LOCK_EX` blocks in the kernel indefinitely, so any holder that wedges takes
+/// every other waiter with it: inside a parallel test binary one stuck thread
+/// silently consumes the entire phase and libtest reports no failure at all.
+/// Polling `LOCK_EX | LOCK_NB` against a deadline turns that into a single
+/// attributable error naming the lock file and the wait.
+///
+/// `context` is the short operation label used in error details (for example
+/// `"lock config"`). The bound is shared with the config lock and configurable
+/// through [`CONFIG_LOCK_TIMEOUT_ENV`]; `0` restores unbounded blocking.
+///
+/// Note that this bounds *contention*, not re-entry. `flock` locks belong to
+/// the open file description, so a caller that opens the same lock file twice
+/// on one thread still self-deadlocks — bounded now, but still wrong. Callers
+/// that can nest need re-entry tracking as well; see [`with_config_lock`].
+#[cfg(unix)]
+pub fn lock_exclusive_bounded(file: &File, lock_path: &Path, context: &str) -> Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let timeout = config_lock_timeout();
+    let started = Instant::now();
+    let mut backoff = Duration::from_millis(1);
+
+    loop {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(());
+        }
+
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::EWOULDBLOCK) => {}
+            _ => {
+                return Err(Error::internal_io(
+                    error.to_string(),
+                    Some(context.to_string()),
+                ))
+            }
+        }
+
+        if let Some(timeout) = timeout {
+            let waited = started.elapsed();
+            if waited >= timeout {
+                return Err(Error::internal_io(
+                    format!(
+                        "timed out after {}s waiting for the exclusive lock at {}; another \
+                         thread or process has held it far longer than this operation should \
+                         take. Set {} to change or disable the bound.",
+                        waited.as_secs(),
+                        lock_path.display(),
+                        CONFIG_LOCK_TIMEOUT_ENV
+                    ),
+                    Some(context.to_string()),
+                ));
+            }
+        }
+
+        std::thread::sleep(backoff);
+        backoff = (backoff * 2).min(Duration::from_millis(50));
+    }
+}
+
+#[cfg(not(unix))]
+pub fn lock_exclusive_bounded(_file: &File, _lock_path: &Path, _context: &str) -> Result<()> {
+    Ok(())
+}
+
 struct ConfigLockGuard {
     #[allow(dead_code)]
     file: File,
 }
 
 impl ConfigLockGuard {
-    /// Acquire the lock under a deadline.
-    ///
-    /// `LOCK_EX` alone blocks in the kernel indefinitely, so any holder that
-    /// wedges takes every other waiter with it — one stuck thread silently
-    /// consumes an entire CI phase and reports nothing. Polling `LOCK_EX |
-    /// LOCK_NB` against a deadline converts that into a single attributable
-    /// error naming the lock file.
-    #[cfg(unix)]
     fn lock(file: File, lock_path: &Path) -> Result<Self> {
-        use std::os::fd::AsRawFd;
-
-        let timeout = config_lock_timeout();
-        let started = Instant::now();
-        let mut backoff = Duration::from_millis(1);
-
-        loop {
-            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-            if result == 0 {
-                return Ok(Self { file });
-            }
-
-            let error = std::io::Error::last_os_error();
-            match error.raw_os_error() {
-                Some(libc::EINTR) => continue,
-                Some(libc::EWOULDBLOCK) => {}
-                _ => {
-                    return Err(Error::internal_io(
-                        error.to_string(),
-                        Some("lock config".to_string()),
-                    ))
-                }
-            }
-
-            if let Some(timeout) = timeout {
-                let waited = started.elapsed();
-                if waited >= timeout {
-                    return Err(Error::internal_io(
-                        format!(
-                            "timed out after {}s waiting for the Homeboy config lock at {}; \
-                             another thread or process has held it far longer than any config \
-                             operation should take. Set {} to change or disable the bound.",
-                            waited.as_secs(),
-                            lock_path.display(),
-                            CONFIG_LOCK_TIMEOUT_ENV
-                        ),
-                        Some("lock config".to_string()),
-                    ));
-                }
-            }
-
-            std::thread::sleep(backoff);
-            backoff = (backoff * 2).min(Duration::from_millis(50));
-        }
-    }
-
-    #[cfg(not(unix))]
-    fn lock(file: File, _lock_path: &Path) -> Result<Self> {
+        lock_exclusive_bounded(&file, lock_path, "lock config")?;
         Ok(Self { file })
     }
 }
@@ -1183,8 +1197,13 @@ mod tests {
         });
     }
 
+    /// Unix-only: the bound is implemented with `flock(2)`, and on other
+    /// platforms `lock_exclusive_bounded` is a no-op that cannot time out.
+    #[cfg(unix)]
     #[test]
     fn a_held_config_lock_times_out_with_an_attributable_error() {
+        use std::os::fd::AsRawFd;
+
         crate::test_support::with_isolated_home(|_home| {
             // A second open file description on the same file is exactly what a
             // competing process looks like to flock(2), so this exercises the
@@ -1198,15 +1217,11 @@ mod tests {
                 .open(&lock_path)
                 .expect("holder handle");
 
-            #[cfg(unix)]
-            {
-                use std::os::fd::AsRawFd;
-                assert_eq!(
-                    unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX) },
-                    0,
-                    "holder acquires the lock"
-                );
-            }
+            assert_eq!(
+                unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX) },
+                0,
+                "holder acquires the lock"
+            );
 
             let error = bounded("bounded config lock acquire", || {
                 std::env::set_var(CONFIG_LOCK_TIMEOUT_ENV, "1");
@@ -1221,7 +1236,7 @@ mod tests {
             assert!(
                 error.details["error"]
                     .as_str()
-                    .is_some_and(|message| message.contains("waiting for the Homeboy config lock")),
+                    .is_some_and(|message| message.contains("waiting for the exclusive lock")),
                 "timeout must name the lock: {:?}",
                 error.details
             );
