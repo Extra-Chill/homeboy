@@ -10,6 +10,22 @@ const GENERIC_AGENT_TASK_PLAN_SCHEMA = 'homeboy/agent-task-plan/v1';
 const GENERIC_AGENT_TASK_REQUEST_SCHEMA = AGENT_TASK_REQUEST_SCHEMA;
 const GENERIC_RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA = 'homeboy/runtime-execution/v1';
 
+function agentTaskPolicyToolPermissions(policy = {}, toolSets = {}) {
+  // Read-only behavior is expressed by policy, not workflow names, so every
+  // runtime can map its own native and workspace tool families consistently.
+  const readOnly = policy && typeof policy === 'object' && !Array.isArray(policy)
+    && policy.write === 'none';
+  return {
+    native: policyToolSet(toolSets.native, readOnly),
+    workspace: policyToolSet(toolSets.workspace, readOnly),
+  };
+}
+
+function policyToolSet(toolSet = {}, readOnly) {
+  const readonly = normalizeArray(toolSet.readonly);
+  return readOnly ? readonly : uniqueStrings([...readonly, ...normalizeArray(toolSet.readwrite)]);
+}
+
 function genericAgentTaskRunnerSpec(options = {}) {
   const config = options.config || options.executor_config;
   return agentTaskRunnerSpec({
@@ -46,6 +62,7 @@ function genericAgentTaskRequest(options = {}) {
     inputs: options.inputs,
     source_refs: sourceRefs === undefined ? undefined : normalizeArray(sourceRefs),
     policy: options.policy,
+    output_declarations: options.output_declarations,
     limits: runnerRequest.limits,
     artifact_declarations: runnerRequest.artifact_declarations,
     expected_artifacts: runnerRequest.expected_artifacts,
@@ -178,6 +195,10 @@ function normalizeArray(value) {
   return Array.isArray(value) ? value.filter(Boolean) : [];
 }
 
+function uniqueStrings(values) {
+  return [...new Set(values.filter((value) => typeof value === 'string' && value !== ''))];
+}
+
 function requiredString(value, name) {
   if (typeof value !== 'string' || value.trim() === '') {
     throw new Error(`${name} is required.`);
@@ -198,6 +219,7 @@ module.exports = {
   GENERIC_AGENT_TASK_PLAN_SCHEMA,
   GENERIC_AGENT_TASK_REQUEST_SCHEMA,
   GENERIC_RUNTIME_EXECUTION_DESCRIPTOR_SCHEMA,
+  agentTaskPolicyToolPermissions,
   genericAgentTaskPlan,
   genericAgentTaskRequest,
   genericAgentTaskRunnerSpec,

@@ -6,6 +6,7 @@
 const {
 	AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
 	agentTaskProviderContractFields,
+	agentTaskPolicyToolPermissions,
 	extendRedactedMetadataKeys,
 	providerSecretEnvRequirement,
 } = require('../../../agent-task-contracts');
@@ -299,22 +300,20 @@ function opencodeConfigContentForRequest(request = {}, existingContent = '') {
 			),
 		};
 	}
-	// The native workspace read/inspection tools (read, glob, grep) correspond to
-	// this executor's declared read-only Homeboy workspace capabilities and are
-	// always permitted within the task cwd, with reads outside it still denied.
-	// This must not be gated on resolving concrete workspace read patterns: a
-	// review-only cook (e.g. `--no-finalize` inspecting an existing candidate)
-	// whose cwd does not resolve to an absolute path would otherwise leave the
-	// inherited `read` policy without a `*: allow` rule, so OpenCode falls back to
-	// its default `ask`, is denied non-interactively, and the cook fails with
-	// `opencode.policy_denied` before it can inspect the candidate (#8829).
+	const toolPermissions = agentTaskPolicyToolPermissions(request.policy, {
+		native: OPENCODE_NATIVE_WORKSPACE_PERMISSIONS,
+		workspace: OPENCODE_WORKSPACE_TOOLS,
+	});
+	// The native inspection tools remain available for review-only tasks even
+	// when their cwd is relative. OpenCode otherwise defaults to `ask`.
 	{
-		content.permission = permissionWithWorkspaceToolAllowances(content.permission);
+		content.permission = permissionWithWorkspaceToolAllowances(content.permission, {}, toolPermissions.native);
 		content.agent[primaryAgent] = {
 			...objectValue(content.agent[primaryAgent]),
 			permission: permissionWithWorkspaceToolAllowances(
 				objectValue(content.agent[primaryAgent]).permission,
-				content.permission
+				content.permission,
+				toolPermissions.native
 			),
 		};
 	}
@@ -388,18 +387,21 @@ function permissionWithExternalDirectoryAllowances(permission, patterns) {
 	};
 }
 
-function permissionWithWorkspaceToolAllowances(permission, inheritedPermission = {}) {
+function permissionWithWorkspaceToolAllowances(permission, inheritedPermission = {}, allowedTools) {
 	const rules = typeof permission === 'string'
 		? { '*': permission }
 		: objectValue(permission);
 	const permissionTools = Object.values(OPENCODE_NATIVE_WORKSPACE_PERMISSIONS).flat();
 	return permissionTools.reduce((nextRules, tool) => ({
 		...nextRules,
-		[tool]: workspaceToolPermissionRules(rules[tool], inheritedPermission[tool], tool),
+		[tool]: workspaceToolPermissionRules(rules[tool], inheritedPermission[tool], tool, allowedTools),
 	}), rules);
 }
 
-function workspaceToolPermissionRules(permission, inheritedPermission, tool) {
+function workspaceToolPermissionRules(permission, inheritedPermission, tool, allowedTools) {
+	if (Array.isArray(allowedTools) && !allowedTools.includes(tool)) {
+		return { '*': 'deny' };
+	}
 	const inheritedRules = typeof inheritedPermission === 'string'
 		? { '*': inheritedPermission }
 		: objectValue(inheritedPermission);
@@ -595,10 +597,22 @@ function parseStructuredAnswer(text = '') {
 }
 
 function outputDeclarations(request = {}) {
-	return arrayValue(request.inputs?.required_outputs)
+	const direct = arrayValue(request.output_declarations);
+	const directNames = new Set(direct.map((declaration) => declaration?.name).filter(Boolean));
+	return [...arrayValue(request.inputs?.required_outputs).filter((declaration) => !directNames.has(declaration?.name)), ...direct]
 		.filter((declaration) => declaration && typeof declaration === 'object'
 			&& typeof declaration.name === 'string' && declaration.name.trim() !== '')
-		.map((declaration) => ({ ...declaration, name: declaration.name.trim(), required: declaration.required === true }));
+		.map((declaration) => {
+			const { structural_schema: structuralSchema, ...normalized } = declaration;
+			return {
+				...normalized,
+				name: declaration.name.trim(),
+				required: declaration.required === true,
+				...(declaration.json_schema === undefined && structuralSchema !== undefined
+					? { json_schema: structuralSchema }
+					: {}),
+			};
+		});
 }
 
 function outputDiagnostics(missing, oversized) {
