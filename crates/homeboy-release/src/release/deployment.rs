@@ -569,7 +569,8 @@ mod tests {
     };
     use crate::release::types::{
         ReleaseArtifact, ReleaseCommandInput, ReleaseDeploymentResult, ReleaseDeploymentSummary,
-        ReleasePipelineOptions, ReleaseRun, ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
+        ReleasePipelineOptions, ReleaseRun, ReleaseRunResult, ReleaseState, ReleaseStepResult,
+        ReleaseStepStatus,
     };
     use crate::release::workflow::run_command;
     use homeboy_core::component::{Component, VersionTarget};
@@ -689,6 +690,59 @@ mod tests {
 
         assert_eq!(prepared.tag, scoped_tag);
         assert_eq!(prepared.source_commit, head);
+    }
+
+    #[test]
+    fn prepared_artifact_accepts_authoritative_bare_directory_recovery() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path();
+        run_git(root, &["init", "-q", "-b", "main"]);
+        run_git(root, &["config", "user.email", "test@example.invalid"]);
+        run_git(root, &["config", "user.name", "Test"]);
+        std::fs::write(root.join("file.txt"), "content").expect("write source");
+        run_git(root, &["add", "."]);
+        run_git(root, &["commit", "-q", "-m", "release source"]);
+        run_git(root, &["tag", "v1.2.3"]);
+
+        let artifact_dir = root.join("recovered");
+        std::fs::create_dir(&artifact_dir).expect("artifact dir");
+        let artifact_path = artifact_dir.join("fixture.zip");
+        std::fs::write(&artifact_path, b"canonical release bytes").expect("artifact");
+
+        let mut state = ReleaseState::default();
+        crate::release::executor::artifacts::run_artifact_inventory(
+            &mut state,
+            &artifact_dir.to_string_lossy(),
+            &crate::release::executor::artifacts::PackageRecoveryContext {
+                component_id: "fixture",
+                tag: "v1.2.3",
+                version: "1.2.3",
+                commit: &run_git(root, &["rev-parse", "HEAD"]),
+            },
+        )
+        .expect("recovery inventory");
+        crate::release::executor::artifacts::establish_publication_authority(&mut state)
+            .expect("publication authority");
+
+        let prepared = prepared_release_artifact(
+            &Component {
+                id: "fixture".to_string(),
+                local_path: root.display().to_string(),
+                ..Default::default()
+            },
+            Some("1.2.3"),
+            Some("v1.2.3"),
+            &state.artifacts,
+        )
+        .expect("deployable recovery artifact");
+
+        assert_eq!(
+            prepared.durable_path,
+            std::fs::canonicalize(artifact_path)
+                .expect("canonical artifact")
+                .display()
+                .to_string()
+        );
     }
 
     /// An empty recorded tag must not be treated as authoritative; the derived
