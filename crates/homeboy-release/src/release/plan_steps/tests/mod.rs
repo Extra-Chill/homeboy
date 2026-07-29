@@ -26,6 +26,8 @@ fn test_build_preflight_steps() {
             "preflight.default_branch",
             "preflight.git_identity",
             "preflight.working_tree",
+            "preflight.head_identity",
+            "preflight.recovery_artifacts",
             "preflight.remote_sync",
             "preflight.bump_policy",
             "preflight.dependencies",
@@ -38,6 +40,8 @@ fn test_build_preflight_steps() {
     assert_eq!(steps[0].status, PlanStepStatus::Ready);
     assert_eq!(steps[1].status, PlanStepStatus::Disabled);
     assert_eq!(steps[2].needs, vec!["preflight.git_identity"]);
+    assert_eq!(steps[3].status, PlanStepStatus::Disabled);
+    assert_eq!(steps[4].status, PlanStepStatus::Disabled);
 }
 
 #[test]
@@ -921,6 +925,50 @@ fn head_release_plan_skips_mutation_steps_and_uses_existing_artifacts() {
     assert_eq!(steps[1].needs, vec!["artifacts.inventory"]);
     assert_eq!(steps[2].needs, vec!["artifacts.authority"]);
     assert_eq!(steps[3].needs, vec!["artifacts.authority"]);
+}
+
+#[test]
+fn head_artifact_recovery_validates_identity_and_manifest_before_remote_sync() {
+    let options = ReleaseOptions {
+        bump_type: "head".to_string(),
+        pipeline: ReleasePipelineOptions {
+            head: true,
+            from_artifacts: Some("artifacts".to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let steps = build_preflight_steps(&options, None, &[]);
+    let identity = steps
+        .iter()
+        .position(|step| step.id == "preflight.head_identity")
+        .expect("head identity preflight");
+    let artifacts = steps
+        .iter()
+        .position(|step| step.id == "preflight.recovery_artifacts")
+        .expect("recovery artifact preflight");
+    let remote = steps
+        .iter()
+        .position(|step| step.id == "preflight.remote_sync")
+        .expect("remote sync preflight");
+    let dependencies = steps
+        .iter()
+        .position(|step| step.id == "preflight.dependencies")
+        .expect("dependency preflight");
+    let lint = steps
+        .iter()
+        .position(|step| step.id == "preflight.lint")
+        .expect("lint preflight");
+    let test = steps
+        .iter()
+        .position(|step| step.id == "preflight.test")
+        .expect("test preflight");
+
+    assert!(identity < artifacts && artifacts < remote && remote < dependencies);
+    assert!(artifacts < lint && artifacts < test);
+    assert_eq!(steps[artifacts].needs, vec!["preflight.head_identity"]);
+    assert_eq!(steps[remote].needs, vec!["preflight.recovery_artifacts"]);
 }
 
 #[test]

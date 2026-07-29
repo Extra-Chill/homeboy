@@ -269,7 +269,7 @@ fn build_head_release_steps(
     warnings: &mut Vec<String>,
 ) -> Result<Vec<PlanStep>> {
     let mut steps = Vec::new();
-    let mut artifact_need = "preflight.remote_sync".to_string();
+    let mut artifact_need = "preflight.head_identity".to_string();
     let package_step_needed = options.pipeline.from_artifacts.is_none()
         && head_package_step_needed(component, extensions, publish_targets, options);
 

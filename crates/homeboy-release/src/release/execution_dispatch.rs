@@ -31,6 +31,8 @@ pub(super) fn execute_release_plan_step(
         "preflight.default_branch" => Ok(Some(run_default_branch_preflight(step, context))),
         "preflight.git_identity" => configure_git_identity(step, context).map(Some),
         "preflight.working_tree" => Ok(Some(run_working_tree_preflight(step, context))),
+        "preflight.head_identity" => Ok(Some(run_head_identity_preflight(step, context))),
+        "preflight.recovery_artifacts" => Ok(Some(run_recovery_artifacts_preflight(step, context))),
         "preflight.remote_sync" => Ok(Some(run_remote_sync_preflight(step, context))),
         "preflight.bump_policy" => Ok(Some(run_bump_policy_preflight(step))),
         "preflight.dependencies" => Ok(Some(run_dependencies_preflight(step, context))),
@@ -283,6 +285,8 @@ fn release_step_is_plan_only(step: &PlanStep) -> bool {
         && step.kind != "preflight.default_branch"
         && step.kind != "preflight.git_identity"
         && step.kind != "preflight.working_tree"
+        && step.kind != "preflight.head_identity"
+        && step.kind != "preflight.recovery_artifacts"
         && step.kind != "preflight.remote_sync"
         && step.kind != "preflight.bump_policy"
         && step.kind != "preflight.dependencies"
@@ -349,6 +353,59 @@ fn run_working_tree_preflight(
             ..Default::default()
         },
         Err(err) => failed_result(&step.id, &step.kind, err),
+    }
+}
+
+fn run_head_identity_preflight(
+    step: &PlanStep,
+    context: &ReleaseExecutionContext,
+) -> ReleaseStepResult {
+    ReleaseStepResult {
+        id: step.id.clone(),
+        step_type: step.kind.clone(),
+        status: ReleaseStepStatus::Success,
+        data: Some(serde_json::json!({
+            "tag": context.state.tag,
+            "version": context.state.version,
+        })),
+        ..Default::default()
+    }
+}
+
+fn run_recovery_artifacts_preflight(
+    step: &PlanStep,
+    context: &ReleaseExecutionContext,
+) -> ReleaseStepResult {
+    let dir = context
+        .options
+        .pipeline
+        .from_artifacts
+        .as_deref()
+        .unwrap_or_default();
+    let commit = match git::get_head_commit(&context.component.local_path) {
+        Ok(commit) => commit,
+        Err(error) => return failed_result(&step.id, &step.kind, error),
+    };
+    let tag = context.state.tag.as_deref().unwrap_or_default();
+    let version = context.state.version.as_deref().unwrap_or_default();
+    let recovery_context = executor::artifacts::PackageRecoveryContext {
+        component_id: context.component_id,
+        tag,
+        version,
+        commit: &commit,
+    };
+    let mut state = ReleaseState::default();
+
+    match executor::artifacts::run_artifact_inventory(&mut state, dir, &recovery_context) {
+        Ok(result) => ReleaseStepResult {
+            id: step.id.clone(),
+            step_type: step.kind.clone(),
+            status: result.status,
+            data: result.data,
+            warnings: result.warnings,
+            ..Default::default()
+        },
+        Err(error) => failed_result(&step.id, &step.kind, error),
     }
 }
 
@@ -643,6 +700,8 @@ pub(super) fn release_step_is_show_stopper(result: &ReleaseStepResult) -> bool {
         "changelog.finalize"
             | "preflight.default_branch"
             | "preflight.working_tree"
+            | "preflight.head_identity"
+            | "preflight.recovery_artifacts"
             | "preflight.remote_sync"
             | "preflight.bump_policy"
             | "preflight.dependencies"
@@ -655,6 +714,7 @@ pub(super) fn release_step_is_show_stopper(result: &ReleaseStepResult) -> bool {
             | "release.prepare"
             | "git.commit"
             | "package"
+            | "artifacts.inventory"
             | "artifacts.authority"
             | "git.tag"
             | "git.push"
