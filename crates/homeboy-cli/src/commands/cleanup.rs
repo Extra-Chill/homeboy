@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand, ValueEnum};
 use homeboy::core::cleanup::{
@@ -297,6 +297,9 @@ struct RetainedStorageReport {
     continuation: Option<String>,
     safe_next_commands: Vec<String>,
     sqlite: RetainedStorageSqlite,
+    /// Added in #9824. Existing lifecycle aggregates above retain their
+    /// historical meaning; this is the direct filesystem reconciliation view.
+    filesystem: RetainedStorageFilesystem,
 }
 
 #[derive(Debug, Serialize)]
@@ -306,6 +309,43 @@ struct RetainedStorageSqlite {
     size_bytes: u64,
     status_command: &'static str,
     compaction: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct RetainedStorageFilesystem {
+    root: RetainedStorageFilesystemUsage,
+    top_level: Vec<RetainedStorageFilesystemEntry>,
+    reconciliation: RetainedStorageReconciliation,
+    accounting_notes: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct RetainedStorageFilesystemUsage {
+    path: String,
+    exists: bool,
+    apparent_bytes: u64,
+    physical_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct RetainedStorageFilesystemEntry {
+    path: String,
+    category: &'static str,
+    classification: &'static str,
+    apparent_bytes: u64,
+    physical_bytes: u64,
+    cleanup_or_status_command: &'static str,
+    largest_examples: Vec<RetainedStorageFilesystemUsage>,
+}
+
+#[derive(Debug, Serialize)]
+struct RetainedStorageReconciliation {
+    top_level_apparent_bytes: u64,
+    top_level_physical_bytes: u64,
+    apparent_difference_bytes: u64,
+    physical_difference_bytes: u64,
+    apparent_difference_direction: &'static str,
+    physical_difference_direction: &'static str,
 }
 
 fn retained_storage_report(
@@ -471,12 +511,242 @@ fn retained_storage_report(
         });
     }
 
+    let filesystem = retained_storage_filesystem_inventory()?;
     Ok(build_retained_storage_report(
         records,
         args.limit,
         args.cursor.as_deref(),
         sqlite,
+        filesystem,
     ))
+}
+
+fn retained_storage_filesystem_inventory() -> homeboy::core::Result<RetainedStorageFilesystem> {
+    let root = homeboy::core::paths::homeboy_data()?;
+    let root_usage = filesystem_usage(&root)?;
+    let mut top_level = Vec::new();
+    if root.exists() {
+        for entry in std::fs::read_dir(&root).map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(format!("read Homeboy storage root {}", root.display())),
+            )
+        })? {
+            let entry = entry.map_err(|error| {
+                homeboy::core::Error::internal_io(
+                    error.to_string(),
+                    Some(format!("read Homeboy storage root {}", root.display())),
+                )
+            })?;
+            top_level.push(filesystem_entry(entry.path())?);
+        }
+    }
+
+    // An explicit artifact root can live on a separate volume. It is still a
+    // Homeboy store, but cannot be reconciled into the data-root totals.
+    let artifact_root = homeboy::core::artifacts::root()?;
+    if !artifact_root.starts_with(&root) {
+        top_level.push(filesystem_entry_with_category(
+            artifact_root,
+            "artifacts",
+            "managed/external",
+            "homeboy cleanup --include persisted-run-artifacts",
+        )?);
+    }
+    top_level.sort_by_key(|entry| std::cmp::Reverse(entry.physical_bytes));
+
+    let apparent_total = top_level
+        .iter()
+        .filter(|entry| entry.classification != "managed/external")
+        .map(|entry| entry.apparent_bytes)
+        .sum();
+    let physical_total = top_level
+        .iter()
+        .filter(|entry| entry.classification != "managed/external")
+        .map(|entry| entry.physical_bytes)
+        .sum();
+    Ok(RetainedStorageFilesystem {
+        root: RetainedStorageFilesystemUsage {
+            path: root.display().to_string(),
+            exists: root.exists(),
+            apparent_bytes: root_usage.apparent_bytes,
+            physical_bytes: root_usage.physical_bytes,
+        },
+        top_level,
+        reconciliation: RetainedStorageReconciliation {
+            top_level_apparent_bytes: apparent_total,
+            top_level_physical_bytes: physical_total,
+            apparent_difference_bytes: root_usage.apparent_bytes.abs_diff(apparent_total),
+            physical_difference_bytes: root_usage.physical_bytes.abs_diff(physical_total),
+            apparent_difference_direction: difference_direction(root_usage.apparent_bytes, apparent_total),
+            physical_difference_direction: difference_direction(root_usage.physical_bytes, physical_total),
+        },
+        accounting_notes: vec![
+            "Apparent bytes sum file lengths; physical bytes sum allocated filesystem blocks.",
+            "Sparse files can have greater apparent than physical bytes.",
+            "Root totals de-duplicate hard-linked inodes; independently measured top-level stores can count a cross-store hard link more than once.",
+            "The root directory's own metadata and filesystem allocation granularity can leave a small reconciliation difference.",
+            "Symlinks are measured as links and are not followed.",
+        ],
+    })
+}
+
+fn difference_direction(root: u64, top_level: u64) -> &'static str {
+    match root.cmp(&top_level) {
+        std::cmp::Ordering::Equal => "equal",
+        std::cmp::Ordering::Greater => "root_greater",
+        std::cmp::Ordering::Less => "top_level_greater",
+    }
+}
+
+fn filesystem_entry(path: PathBuf) -> homeboy::core::Result<RetainedStorageFilesystemEntry> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let (category, classification, command) = match name {
+        "artifacts" => (
+            "artifacts",
+            "managed",
+            "homeboy cleanup --include persisted-run-artifacts",
+        ),
+        homeboy::core::paths::CARGO_TARGETS_STORE => (
+            "shared_cargo_targets",
+            "managed/shared",
+            "homeboy cleanup --include shared-cargo-targets",
+        ),
+        homeboy::core::paths::CONTROLLER_RUNTIMES_STORE => (
+            "controller_runtimes",
+            "managed",
+            "homeboy cleanup --include controller-runtimes",
+        ),
+        homeboy::core::paths::CONTROLLER_SCRATCH_STORE => (
+            "controller_scratch",
+            "managed",
+            "homeboy cleanup --include controller-scratch",
+        ),
+        "homeboy.sqlite" => ("sqlite_observation_store", "managed", "homeboy db status"),
+        _ => (
+            "unknown_storage",
+            "unknown/unmanaged",
+            "inspect path ownership before removal",
+        ),
+    };
+    filesystem_entry_with_category(path, category, classification, command)
+}
+
+fn filesystem_entry_with_category(
+    path: PathBuf,
+    category: &'static str,
+    classification: &'static str,
+    command: &'static str,
+) -> homeboy::core::Result<RetainedStorageFilesystemEntry> {
+    let usage = filesystem_usage(&path)?;
+    Ok(RetainedStorageFilesystemEntry {
+        path: path.display().to_string(),
+        category,
+        classification,
+        apparent_bytes: usage.apparent_bytes,
+        physical_bytes: usage.physical_bytes,
+        cleanup_or_status_command: command,
+        largest_examples: largest_children(&path)?,
+    })
+}
+
+#[derive(Default)]
+struct FilesystemUsage {
+    apparent_bytes: u64,
+    physical_bytes: u64,
+}
+
+fn filesystem_usage(path: &Path) -> homeboy::core::Result<FilesystemUsage> {
+    let mut seen = HashSet::new();
+    let mut usage = FilesystemUsage::default();
+    accumulate_filesystem_usage(path, &mut seen, &mut usage)?;
+    Ok(usage)
+}
+
+fn accumulate_filesystem_usage(
+    path: &Path,
+    seen: &mut HashSet<(u64, u64)>,
+    usage: &mut FilesystemUsage,
+) -> homeboy::core::Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(format!("measure Homeboy storage path {}", path.display())),
+            ))
+        }
+    };
+    #[cfg(unix)]
+    let identity = {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.dev(), metadata.ino())
+    };
+    #[cfg(not(unix))]
+    let identity = (0, 0);
+    if seen.insert(identity) {
+        usage.apparent_bytes = usage.apparent_bytes.saturating_add(metadata.len());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            usage.physical_bytes = usage
+                .physical_bytes
+                .saturating_add(metadata.blocks().saturating_mul(512));
+        }
+        #[cfg(not(unix))]
+        {
+            usage.physical_bytes = usage.physical_bytes.saturating_add(metadata.len());
+        }
+    }
+    if metadata.file_type().is_dir() {
+        for entry in std::fs::read_dir(path).map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some(format!("read Homeboy storage path {}", path.display())),
+            )
+        })? {
+            let entry = entry.map_err(|error| {
+                homeboy::core::Error::internal_io(
+                    error.to_string(),
+                    Some(format!("read Homeboy storage path {}", path.display())),
+                )
+            })?;
+            accumulate_filesystem_usage(&entry.path(), seen, usage)?;
+        }
+    }
+    Ok(())
+}
+
+fn largest_children(path: &Path) -> homeboy::core::Result<Vec<RetainedStorageFilesystemUsage>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(homeboy::core::Error::internal_io(error.to_string(), None)),
+    };
+    if !metadata.file_type().is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut children = Vec::new();
+    for entry in std::fs::read_dir(path)
+        .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?
+    {
+        let entry =
+            entry.map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+        let usage = filesystem_usage(&entry.path())?;
+        children.push(RetainedStorageFilesystemUsage {
+            path: entry.path().display().to_string(),
+            exists: true,
+            apparent_bytes: usage.apparent_bytes,
+            physical_bytes: usage.physical_bytes,
+        });
+    }
+    children.sort_by_key(|entry| std::cmp::Reverse(entry.physical_bytes));
+    children.truncate(10);
+    Ok(children)
 }
 
 /// Account for the artifact root — the product's primary output store.
@@ -632,6 +902,7 @@ fn build_retained_storage_report(
     limit: usize,
     cursor: Option<&str>,
     sqlite: RetainedStorageSqlite,
+    filesystem: RetainedStorageFilesystem,
 ) -> RetainedStorageReport {
     records.sort_by(|left, right| {
         right
@@ -691,6 +962,7 @@ fn build_retained_storage_report(
             "homeboy db status".to_string(),
         ],
         sqlite,
+        filesystem,
     }
 }
 
@@ -2166,6 +2438,7 @@ mod tests {
                 status_command: "homeboy db status",
                 compaction: "delegated",
             },
+            test_filesystem(),
         );
 
         assert_eq!(report.retained_count, 3);
@@ -2205,6 +2478,7 @@ mod tests {
                 status_command: "homeboy db status",
                 compaction: "delegated",
             },
+            test_filesystem(),
         );
         assert_eq!(continuation.largest_examples[0].reference, "runtime-a");
         assert_eq!(age_bucket(3_600), "under_1d");
@@ -2238,6 +2512,93 @@ mod tests {
         }
     }
 
+    fn test_filesystem() -> RetainedStorageFilesystem {
+        RetainedStorageFilesystem {
+            root: RetainedStorageFilesystemUsage {
+                path: "/homeboy".to_string(),
+                exists: true,
+                apparent_bytes: 0,
+                physical_bytes: 0,
+            },
+            top_level: Vec::new(),
+            reconciliation: RetainedStorageReconciliation {
+                top_level_apparent_bytes: 0,
+                top_level_physical_bytes: 0,
+                apparent_difference_bytes: 0,
+                physical_difference_bytes: 0,
+                apparent_difference_direction: "equal",
+                physical_difference_direction: "equal",
+            },
+            accounting_notes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn filesystem_inventory_exposes_large_cargo_children_and_unknown_storage() {
+        let root = TempDir::new().expect("storage root");
+        let cargo = root.path().join(homeboy::core::paths::CARGO_TARGETS_STORE);
+        let target = cargo.join("homeboy-b706ed1ffed4");
+        std::fs::create_dir_all(&target).expect("cargo target");
+        let debug = target.join("debug");
+        std::fs::File::create(&debug)
+            .expect("debug artifact")
+            .set_len(42 * 1024 * 1024 * 1024)
+            .expect("sparse 42 GiB debug artifact");
+        let unknown = root.path().join("left-behind-store");
+        std::fs::create_dir_all(&unknown).expect("unknown store");
+        std::fs::write(unknown.join("data"), b"unmanaged").expect("unknown data");
+
+        let cargo_entry = filesystem_entry(cargo).expect("cargo inventory");
+        assert_eq!(cargo_entry.category, "shared_cargo_targets");
+        assert_eq!(
+            cargo_entry.cleanup_or_status_command,
+            "homeboy cleanup --include shared-cargo-targets"
+        );
+        assert!(
+            cargo_entry.largest_examples[0].apparent_bytes >= 42 * 1024 * 1024 * 1024,
+            "the target directory includes its own metadata beside the debug file"
+        );
+        assert!(cargo_entry.largest_examples[0]
+            .path
+            .ends_with("homeboy-b706ed1ffed4"));
+
+        let unknown_entry = filesystem_entry(unknown).expect("unknown inventory");
+        assert_eq!(unknown_entry.category, "unknown_storage");
+        assert_eq!(unknown_entry.classification, "unknown/unmanaged");
+        assert_eq!(
+            unknown_entry.cleanup_or_status_command,
+            "inspect path ownership before removal"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_usage_deduplicates_hard_links_in_root_totals() {
+        let root = TempDir::new().expect("storage root");
+        let first = root.path().join("cargo-targets");
+        let second = root.path().join("controller-runtimes");
+        std::fs::create_dir_all(&first).expect("first store");
+        std::fs::create_dir_all(&second).expect("second store");
+        let original = first.join("shared");
+        std::fs::File::create(&original)
+            .expect("shared file")
+            .set_len(1024 * 1024)
+            .expect("shared file length");
+        std::fs::hard_link(&original, second.join("shared")).expect("hard link");
+
+        let root_usage = filesystem_usage(root.path()).expect("root usage");
+        let per_store_apparent = filesystem_usage(&first)
+            .expect("first usage")
+            .apparent_bytes
+            + filesystem_usage(&second)
+                .expect("second usage")
+                .apparent_bytes;
+        assert!(
+            root_usage.apparent_bytes < per_store_apparent,
+            "root accounting must count one shared inode once"
+        );
+    }
+
     #[test]
     fn reclaimable_storage_is_never_summed_into_the_retained_total() {
         // "cleanup cannot free this" and "cleanup has not freed this yet" are
@@ -2252,6 +2613,7 @@ mod tests {
             10,
             None,
             test_sqlite(),
+            test_filesystem(),
         );
 
         assert_eq!(report.inspected_count, 3);
@@ -2269,7 +2631,8 @@ mod tests {
 
     #[test]
     fn retained_storage_names_a_reclaim_command_for_every_artifact_root_category() {
-        let report = build_retained_storage_report(Vec::new(), 1, None, test_sqlite());
+        let report =
+            build_retained_storage_report(Vec::new(), 1, None, test_sqlite(), test_filesystem());
 
         // The report used to accumulate from five sources and never reach the
         // artifact root, so an operator saw bytes it could not name a command
