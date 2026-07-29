@@ -21,6 +21,7 @@ else
     COMPONENT_PATH="${HOMEBOY_COMPONENT_PATH:-$(pwd)}"
 fi
 homeboy_runner_harness_source_if_file "$SIDECAR_WRITER_HELPER"
+homeboy_lint_findings_init
 
 echo "Running Swift lint for: $(basename "$COMPONENT_PATH")"
 

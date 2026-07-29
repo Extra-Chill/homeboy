@@ -47,3 +47,21 @@ homeboy_lint_findings_write_empty() {
         printf '[]\n' > "$HOMEBOY_LINT_FINDINGS_FILE"
     fi
 }
+
+# Seed the declared lint.findings sidecar so a clean lint run still leaves
+# evidence that it measured.
+#
+# Every extension that declares `"lint.findings": true` owes homeboy the file
+# on *all* exit paths, not just the ones with findings to report. Runners that
+# only wrote it when a tool failed left a clean pass with no evidence at all,
+# which homeboy rejects as a missing-evidence harness error rather than reading
+# it as "nothing to report".
+#
+# Idempotent by construction: an existing sidecar is never clobbered, so this is
+# safe to call before any merge and safe to call more than once.
+homeboy_lint_findings_init() {
+    homeboy_lint_findings_enabled || return 0
+    [ -e "${HOMEBOY_LINT_FINDINGS_FILE}" ] && return 0
+
+    homeboy_lint_findings_write_empty
+}

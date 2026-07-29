@@ -34,6 +34,7 @@ source "${SHARED_LIB_DIR}/runner-harness.sh"
 # shellcheck source=/dev/null
 source "${SHARED_LIB_DIR}/lint-findings-adapter.sh"
 homeboy_runner_harness_init --steps --failure-trap --sidecar-writer
+homeboy_lint_findings_init
 # shellcheck source=/dev/null
 homeboy_runner_harness_source_command_capture
 # shellcheck source=../../scripts/lib/fix-results.sh
