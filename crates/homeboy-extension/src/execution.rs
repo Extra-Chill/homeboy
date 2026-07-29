@@ -219,6 +219,7 @@ pub fn run_deployment_provider(
     project_id: &str,
     component_id: &str,
     contract: &std::path::Path,
+    dry_run: bool,
 ) -> Result<ExtensionRunResult> {
     let extension = load_extension(extension_id)?;
     let provider = super::deployment_providers(&extension)
@@ -253,8 +254,20 @@ pub fn run_deployment_provider(
         )
     })?;
     let quoted_contract = shell_quote(contract);
+    let command_template = if dry_run {
+        provider.dry_run_command.as_deref().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "deployment_provider.dry_run_command",
+                format!("Provider '{provider_id}' does not declare a non-mutating dry-run command"),
+                None,
+                None,
+            )
+        })?
+    } else {
+        &provider.command
+    };
     let command = template::render(
-        &provider.command,
+        command_template,
         &[
             ("extension_path", extension_path),
             ("payload.contract", &quoted_contract),
@@ -993,6 +1006,39 @@ mod tests {
                 result.output.expect("output").stdout,
                 attachment.path().to_string_lossy()
             );
+        });
+    }
+
+    #[test]
+    fn deployment_provider_uses_the_declared_non_mutating_command() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let contract = tempfile::NamedTempFile::new().expect("contract");
+            write_extension(
+                home.path(),
+                "fixture-provider",
+                serde_json::json!({
+                    "name": "fixture-provider", "version": "1.0.0",
+                    "deployment_providers": [{
+                        "id": "fixture.deploy",
+                        "command": "sh {{extension_path}}/run.sh apply {{payload.contract}}",
+                        "dry_run_command": "sh {{extension_path}}/run.sh validate {{payload.contract}}"
+                    }]
+                }),
+                "#!/bin/sh\nprintf '%s' \"$1\"\n",
+            );
+
+            let result = run_deployment_provider(
+                "fixture-provider",
+                "fixture.deploy",
+                "site",
+                "fixture",
+                contract.path(),
+                true,
+            )
+            .expect("provider dry run");
+
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(result.output.expect("output").stdout, "validate");
         });
     }
 
