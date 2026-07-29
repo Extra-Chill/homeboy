@@ -63,7 +63,7 @@ homeboy cleanup --include shared-cargo-targets
 homeboy cleanup --include shared-cargo-targets --apply
 ```
 
-`retention.shared_store_days` defaults to `30`, `retention.shared_store_max_bytes` defaults to `21474836480` (20 GiB), and `retention.shared_store_lease_seconds` defaults to `21600` (6 hours). The age and size budgets select rebuildable stores; the lease window independently protects active workloads. Inventory output is bounded by `retention.limit`; when `next_command` is present, run it to continue from `next_cursor`.
+`retention.shared_store_days` defaults to `30`, `retention.shared_store_max_bytes` defaults to `21474836480` (20 GiB), and `retention.shared_store_lease_seconds` defaults to `21600` (6 hours). The age and size budgets select rebuildable stores; the lease window independently protects active workloads. The output's `storage` object records the resolved root, backing filesystem, free bytes/inodes, reserves, managed bytes, protected bytes, and cleanup command. Configure a dedicated root with `cargo_target_root` or `HOMEBOY_CARGO_TARGET_ROOT`; when the root moves, `storage.legacy_discovery_command` explicitly inventories the historical store rather than silently orphaning it. Inventory output is bounded by `retention.limit`; when `next_command` is present, run it to continue from `next_cursor`.
 
 ## Automatic Retention
 

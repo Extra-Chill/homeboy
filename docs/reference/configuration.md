@@ -38,6 +38,7 @@ the higher-level system model and core/extension boundary, see
 - `settings` — Generic extension and executor settings, addressed through `/settings/...`.
 - `release_gate` — Routing safety policy for release-gate hot commands.
 - `artifact_root` — Optional directory where persisted run artifacts are copied. Override per command with `homeboy --artifact-root <dir>` or per process with `HOMEBOY_ARTIFACT_ROOT`.
+- `cargo_target_root` — Optional dedicated directory for reconstructable shared Cargo targets. `HOMEBOY_CARGO_TARGET_ROOT` overrides it for one process; the compatibility default is `<HOMEBOY_DATA_DIR>/cargo-targets`.
 - `retention` — Bounded cleanup policy shared by terminal-run evidence and runtime resources.
 - `update_check` — Enable automatic update check on startup (default: true). Disable with `homeboy config set /update_check false` or set `HOMEBOY_NO_UPDATE_CHECK=1`.
 - `resident_services` — Long-running services to restart after `homeboy upgrade` swaps the on-disk binary.
@@ -77,6 +78,8 @@ own arguments.
 - `shared_store_days` — Age threshold for shared Cargo target stores.
 - `shared_store_max_bytes` — Byte budget for shared Cargo target stores.
 - `shared_store_lease_seconds` — Lease TTL that keeps an in-use shared Cargo target store alive.
+- `shared_store_reserve_bytes` — Free bytes required on the shared Cargo target filesystem before a build starts (default: 5 GiB).
+- `shared_store_reserve_inodes` — Free inodes required on the shared Cargo target filesystem before a build starts (default: 100000).
 - `automatic_retention_max_run_seconds` — Cooperative wall-clock budget for one automatic pass (default: 60). The executor yields between stores; a category never interrupts an in-progress safe mutation.
 
 Runner-side age floors are deliberately *not* configuration keys. Both the

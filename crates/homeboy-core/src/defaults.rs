@@ -90,6 +90,10 @@ pub struct HomeboyConfig {
     #[serde(default)]
     pub retention: RetentionConfig,
 
+    /// Optional dedicated root for reconstructable shared Cargo build output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cargo_target_root: Option<String>,
+
     /// Directory where persisted run artifacts are copied.
     ///
     /// Defaults to the machine-local product data directory under
@@ -164,6 +168,7 @@ impl Default for HomeboyConfig {
             settings: HashMap::new(),
             release_gate: ReleaseGateConfig::default(),
             retention: RetentionConfig::default(),
+            cargo_target_root: None,
             artifact_root: None,
             artifact_origin: ArtifactOriginConfig::default(),
             update_check: true,
@@ -212,6 +217,10 @@ pub struct RetentionConfig {
     pub shared_store_max_bytes: u64,
     #[serde(default = "default_shared_store_lease_seconds")]
     pub shared_store_lease_seconds: u64,
+    #[serde(default = "default_shared_store_reserve_bytes")]
+    pub shared_store_reserve_bytes: u64,
+    #[serde(default = "default_shared_store_reserve_inodes")]
+    pub shared_store_reserve_inodes: u64,
     /// Cooperative wall-clock budget for one automatic pass. Category owners
     /// finish an in-progress safe mutation before the executor yields.
     #[serde(default = "default_automatic_retention_max_run_seconds")]
@@ -231,6 +240,8 @@ impl Default for RetentionConfig {
             shared_store_days: default_shared_store_retention_days(),
             shared_store_max_bytes: default_shared_store_max_bytes(),
             shared_store_lease_seconds: default_shared_store_lease_seconds(),
+            shared_store_reserve_bytes: default_shared_store_reserve_bytes(),
+            shared_store_reserve_inodes: default_shared_store_reserve_inodes(),
             automatic_retention_max_run_seconds: default_automatic_retention_max_run_seconds(),
         }
     }
@@ -274,6 +285,14 @@ fn default_shared_store_max_bytes() -> u64 {
 
 fn default_shared_store_lease_seconds() -> u64 {
     6 * 60 * 60
+}
+
+fn default_shared_store_reserve_bytes() -> u64 {
+    5 * 1024 * 1024 * 1024
+}
+
+fn default_shared_store_reserve_inodes() -> u64 {
+    100_000
 }
 
 fn default_automatic_retention_max_run_seconds() -> u64 {
