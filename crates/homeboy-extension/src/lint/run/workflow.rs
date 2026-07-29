@@ -95,6 +95,7 @@ pub fn run_main_lint_workflow(
                 component: args.component_label,
                 exit_code: 0,
                 harness_error: false,
+                infrastructure_failure: false,
                 autofix: None,
                 hints,
                 baseline_comparison: None,
@@ -229,13 +230,25 @@ pub fn run_main_lint_workflow(
 
     let harness_error = lint_exit_code != 0
         && self_check_output_is_harness_failure(output.exit_code, &output.stdout, &output.stderr);
+    let infrastructure_failure = producer_summaries.iter().any(|producer| {
+        producer.tool == "homeboy-extension-runner"
+            && producer.status == "error"
+            && producer.metadata.contains_key("failure")
+    });
     let hard_error = output.exit_code >= 2
         || harness_error
         || producer_summaries
             .iter()
             .any(|producer| producer.status == "error");
     let exit_code = effective_lint_exit_code(lint_exit_code, baseline_exit_override, hard_error);
-    let status = if exit_code == 0 { "passed" } else { "failed" }.to_string();
+    let status = if exit_code == 0 {
+        "passed"
+    } else if infrastructure_failure {
+        "error"
+    } else {
+        "failed"
+    }
+    .to_string();
     finish_scoped_lint_run_dirs(&child_run_dirs, exit_code == 0);
     let lint_clean = lint_findings.is_empty() && exit_code == 0;
 
@@ -247,7 +260,7 @@ pub fn run_main_lint_workflow(
     // consistent prose. `homeboy review lint --fix` is the ergonomic adapter and is
     // listed first; the canonical `homeboy refactor --from lint --write`
     // invocation follows for users who want the longer form.
-    if !lint_clean {
+    if !lint_clean && !infrastructure_failure {
         hints.push(build_autofix_hint(&args));
         if args.changed_only {
             hints.push(
@@ -286,6 +299,7 @@ pub fn run_main_lint_workflow(
         component: args.component_label,
         exit_code,
         harness_error,
+        infrastructure_failure,
         autofix: None,
         hints,
         baseline_comparison,
@@ -524,6 +538,7 @@ Re-run `homeboy review lint {}` or skip only this gate with `--skip-checks=lint`
         component: component_label,
         exit_code: output.exit_code,
         harness_error,
+        infrastructure_failure: harness_error,
         autofix: None,
         hints,
         baseline_comparison: None,

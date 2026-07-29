@@ -143,18 +143,21 @@ without scraping raw GitHub logs.
 
 Fallback sidecars preserve the existing file roles:
 
-- `lint-findings.json` remains a JSON array of findings. A pre-result lint
-  failure is emitted as a single `homeboy-extension-runner` infrastructure
-  finding with `metadata.failure` containing `phase`, `command`, `exit_code`,
-  `stdout_tail`, `stderr_tail`, truncation flags, and `parsed_detail` when a
-  JSON object can be recovered from runner output.
+- `lint-findings.json` remains a JSON array of source findings and is empty
+  when a runner fails before it can produce one. The accompanying
+  `lint-producers.json` entry records `homeboy-extension-runner` with
+  `status: "error"`, `finding_count: 0`, and `metadata.failure` containing
+  `phase`, `command`, `exit_code`, `stdout_tail`, `stderr_tail`, truncation
+  flags, and `parsed_detail` when a JSON object can be recovered from runner
+  output.
 - `test-results.json` remains a JSON object. A pre-result test failure contains
   `status: "failed"`, `phase`, `command`, `exit_code`, output tails, and a
   nested `failure` object with the same structured fields. It intentionally does
   not invent test counts when no runner produced them.
 
-Runners that already wrote their structured sidecar keep ownership of it; the
-fallback only fills missing/empty sidecar files after a failed runner exit.
+Runners that already wrote a valid structured sidecar keep ownership of it; the
+fallback replaces missing, empty, or malformed sidecars after a failed runner
+exit.
 
 ## Legacy per-command artifacts
 

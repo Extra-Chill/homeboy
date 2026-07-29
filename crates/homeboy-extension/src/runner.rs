@@ -421,14 +421,13 @@ fn write_lint_failure_sidecar(
     }
 
     let failure = failure_payload("lint", command, output);
+    write_json_sidecar(&path, &json!([]))?;
     write_json_sidecar(
-        &path,
+        &run_dir_path.join(run_dir::files::LINT_PRODUCERS),
         &json!([{
             "tool": "homeboy-extension-runner",
-            "category": "infrastructure",
-            "severity": "error",
-            "message": format!("lint runner failed before producing lint findings (exit {})", output.exit_code),
-            "fingerprint": format!("homeboy-extension-runner:lint:{}", output.exit_code),
+            "status": "error",
+            "finding_count": 0,
             "metadata": {
                 "phase": "lint",
                 "failure": failure,
@@ -473,7 +472,7 @@ fn sidecar_has_payload(path: &Path) -> bool {
         Ok(serde_json::Value::Array(items)) => !items.is_empty(),
         Ok(serde_json::Value::Object(fields)) => !fields.is_empty(),
         Ok(_) => true,
-        Err(_) => true,
+        Err(_) => false,
     }
 }
 
@@ -751,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn writes_lint_failure_sidecar_as_finding() {
+    fn writes_lint_failure_sidecar_as_infrastructure_producer() {
         let run_dir = RunDir::create().expect("run dir");
         let output = CommandOutput {
             stdout: String::new(),
@@ -775,9 +774,52 @@ mod tests {
                 .expect("findings file"),
         )
         .expect("json");
-        assert_eq!(payload[0]["tool"], "homeboy-extension-runner");
-        assert_eq!(payload[0]["metadata"]["phase"], "lint");
-        assert_eq!(payload[0]["metadata"]["failure"]["exit_code"], 127);
+        assert_eq!(payload, json!([]));
+        let producers: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(run_dir.step_file(run_dir::files::LINT_PRODUCERS))
+                .expect("producers file"),
+        )
+        .expect("json");
+        assert_eq!(producers[0]["tool"], "homeboy-extension-runner");
+        assert_eq!(producers[0]["status"], "error");
+        assert_eq!(producers[0]["finding_count"], 0);
+        assert_eq!(producers[0]["metadata"]["failure"]["exit_code"], 127);
+
+        run_dir.cleanup();
+    }
+
+    #[test]
+    fn replaces_malformed_lint_findings_sidecar_with_infrastructure_producer() {
+        let run_dir = RunDir::create().expect("run dir");
+        std::fs::write(
+            run_dir.step_file(run_dir::files::LINT_FINDINGS),
+            "{ malformed",
+        )
+        .expect("malformed findings file");
+        let output = CommandOutput {
+            stdout: String::new(),
+            stderr: "runner failed".to_string(),
+            success: false,
+            exit_code: 1,
+            timed_out: false,
+            child_resource: None,
+        };
+
+        write_structured_failure_sidecar(
+            run_dir.path(),
+            ExtensionCapability::Lint,
+            "./lint.sh",
+            &output,
+        )
+        .expect("write fallback");
+
+        assert_eq!(
+            std::fs::read_to_string(run_dir.step_file(run_dir::files::LINT_FINDINGS))
+                .expect("findings file")
+                .trim(),
+            "[]"
+        );
+        assert!(run_dir.step_file(run_dir::files::LINT_PRODUCERS).is_file());
 
         run_dir.cleanup();
     }
