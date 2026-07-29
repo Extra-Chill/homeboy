@@ -581,6 +581,25 @@ pub fn isolated_process_group_is_running(pgid: u32) -> std::result::Result<bool,
     }
 }
 
+/// Wait for a recorded isolated process group to have no remaining members.
+/// Supervisors may need a scheduling turn to reap a terminated direct child,
+/// which otherwise remains visible as a process-group member on macOS.
+pub fn wait_for_isolated_process_group_exit(
+    pgid: u32,
+    timeout: Duration,
+) -> std::result::Result<bool, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !isolated_process_group_is_running(pgid)? {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Terminate the dedicated process group created for a managed child command.
 /// Callers must only pass a PID they just spawned with process-group isolation.
 pub fn terminate_isolated_process_group(owner_pid: u32) -> Result<()> {

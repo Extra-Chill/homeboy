@@ -24,6 +24,10 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
         attempt.terminal_error = Some(reason.clone());
         attempt.updated_at = now.clone();
         attempt.heartbeat_at = now.clone();
+        record.ensure_metadata_object().insert(
+            "candidate_adoption_cancel_requested_at".to_string(),
+            json!(now),
+        );
         record.updated_at = Some(now);
         store::write_record(&record)?;
 
@@ -36,6 +40,19 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
                 },
             )? {
                 homeboy_core::process::terminate_isolated_process_group(process_group)?;
+                if !homeboy_core::process::wait_for_isolated_process_group_exit(
+                    process_group,
+                    std::time::Duration::from_secs(2),
+                )
+                .map_err(|error| {
+                    Error::internal_unexpected(format!(
+                        "verify adoption gate process group termination: {error}"
+                    ))
+                })? {
+                    return Err(Error::internal_unexpected(format!(
+                        "adoption gate process group {process_group} remains alive after cancellation"
+                    )));
+                }
             }
         }
         let now = now_timestamp();
