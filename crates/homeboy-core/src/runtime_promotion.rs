@@ -27,6 +27,29 @@ const SUBPROCESS_LEASE_ENV: &str = "HOMEBOY_RUNTIME_PROMOTION_LEASE";
 // Give concurrent readers a bounded window to observe that publication.
 const ACQUIRE_DISAPPEARED_LEASE_RETRIES: usize = 20;
 const COMPATIBLE_WAIT_POLL: Duration = Duration::from_millis(50);
+const COMPATIBLE_WAIT_HEARTBEAT: Duration = if cfg!(test) {
+    Duration::from_millis(10)
+} else {
+    Duration::from_secs(5)
+};
+
+/// Observable state for a caller waiting on a compatible runtime mutation.
+///
+/// Runtime promotion is machine-scoped, while `target` keeps unrelated runner
+/// or runtime resources independent. Callers render this event in their own
+/// output protocol rather than making core depend on a CLI format.
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimePromotionWaitEvent {
+    pub schema: &'static str,
+    pub state: &'static str,
+    pub resource_class: &'static str,
+    pub wait_timeout_ms: u128,
+    pub waited_ms: u128,
+    pub owner_pid: u32,
+    pub owner_operation: String,
+    pub target: String,
+    pub owner_generation: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimePromotionLeaseRecord {
@@ -153,12 +176,13 @@ pub fn acquire_waiting_for_compatible(
     operation: &str,
     target: impl Into<String>,
     timeout: Duration,
-    mut progress: impl FnMut(&RuntimePromotionLeaseRecord),
+    mut progress: impl FnMut(RuntimePromotionWaitEvent),
 ) -> Result<RuntimePromotionLease> {
     let target = target.into();
     let generation = current_generation();
     let deadline = Instant::now() + timeout;
     let mut last_owner = None;
+    let mut last_progress = None;
 
     loop {
         match acquire(operation, target.clone()) {
@@ -169,9 +193,25 @@ pub fn acquire_waiting_for_compatible(
                     return Err(error);
                 }
                 let owner_identity = format!("{}:{}:{}", owner.pid, owner.operation, owner.target);
-                if last_owner.as_ref() != Some(&owner_identity) {
-                    progress(&owner);
+                if last_owner.as_ref() != Some(&owner_identity)
+                    || last_progress
+                        .is_none_or(|last: Instant| last.elapsed() >= COMPATIBLE_WAIT_HEARTBEAT)
+                {
+                    progress(RuntimePromotionWaitEvent {
+                        schema: "homeboy/runtime-promotion-admission/v1",
+                        state: "queued",
+                        resource_class: "runtime_promotion",
+                        wait_timeout_ms: timeout.as_millis(),
+                        waited_ms: timeout
+                            .saturating_sub(deadline.saturating_duration_since(Instant::now()))
+                            .as_millis(),
+                        owner_pid: owner.pid,
+                        owner_operation: owner.operation.clone(),
+                        target: owner.target.clone(),
+                        owner_generation: owner.generation.clone(),
+                    });
                     last_owner = Some(owner_identity);
+                    last_progress = Some(Instant::now());
                 }
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
@@ -695,13 +735,16 @@ fn wait_timeout_error(owner: &RuntimePromotionLeaseRecord, timeout: Duration) ->
             owner.target
         ),
         serde_json::json!({
+            "schema": "homeboy/runtime-promotion-admission/v1",
             "queue_state": "timed_out_waiting_for_compatible_owner",
+            "resource_class": "runtime_promotion",
+            "state": "busy",
             "wait_timeout_seconds": timeout.as_secs(),
             "target": owner.target,
             "holder_pid": owner.pid,
             "holder_operation": owner.operation,
             "holder_generation": owner.generation,
-            "tried": ["The compatible promotion owner did not finish before the admission deadline."],
+            "tried": ["The compatible promotion owner did not finish before the admission deadline.", "Retry the same command after the owner completes or inspect its runtime-promotion lease."],
         }),
     )
 }
@@ -887,7 +930,7 @@ mod tests {
                             "contender",
                             "lab",
                             Duration::from_secs(1),
-                            |owner| queued.send(owner.pid).expect("report queued owner"),
+                            |event| queued.send(event.owner_pid).expect("report queued owner"),
                         )
                         .map(drop)
                     })
@@ -918,11 +961,12 @@ mod tests {
     fn compatible_wait_timeout_leaves_no_queue_state() {
         crate::test_support::with_isolated_home(|_| {
             let mut owner = compatible_wait_owner();
+            let events = std::sync::Mutex::new(Vec::new());
             let error = acquire_waiting_for_compatible(
                 "cancelled contender",
                 "lab",
                 Duration::from_millis(25),
-                |_| {},
+                |event| events.lock().expect("collect admission events").push(event),
             )
             .expect_err("bounded contender wait times out");
             assert_eq!(error.code, ErrorCode::RuntimePromotionWaitTimeout);
@@ -930,6 +974,26 @@ mod tests {
                 error.details["queue_state"],
                 "timed_out_waiting_for_compatible_owner"
             );
+            assert_eq!(error.details["resource_class"], "runtime_promotion");
+            assert_eq!(error.details["state"], "busy");
+            let events = events
+                .into_inner()
+                .expect("admission events are not poisoned");
+            assert!(
+                events.len() >= 2,
+                "the queued wait must emit an immediate event and a heartbeat"
+            );
+            assert!(events.iter().all(|event| {
+                event.schema == "homeboy/runtime-promotion-admission/v1"
+                    && event.state == "queued"
+                    && event.resource_class == "runtime_promotion"
+                    && event.target == "lab"
+                    && event.owner_pid == owner.id()
+                    && event.wait_timeout_ms == 25
+            }));
+            assert!(events
+                .windows(2)
+                .all(|events| events[1].waited_ms >= events[0].waited_ms));
 
             owner.wait().expect("owner exits");
             acquire("later contender", "lab")
