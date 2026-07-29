@@ -70,15 +70,37 @@ pub fn runner_recovery_commands(
     configured_version: Option<&str>,
     bare_version: Option<&str>,
     selected_source_revision: Option<&str>,
+    selected_source_url: Option<&str>,
+    selected_materialized_binary: Option<&str>,
+    expected_build_identity: Option<&str>,
 ) -> Vec<String> {
+    let requires_non_mutating_recovery = selected_materialized_binary.is_none()
+        && match selected_source_url {
+            Some(source) => !source_url_is_runner_reachable(source),
+            // A selected revision or identity without an origin describes a
+            // controller-local snapshot, not the runner's default source.
+            None => selected_source_revision.is_some() || expected_build_identity.is_some(),
+        };
     let mut commands = if path_drift.is_some() {
         // The attempted upgrade left the same selected identity in place. Rotate
         // through the runner's managed materialization path instead of suggesting
         // the command that just proved ineffective.
-        vec![runner_refresh_homeboy_command(
-            runner_id,
-            selected_source_revision,
-        )]
+        vec![if requires_non_mutating_recovery {
+            runner_inspect_unreachable_source_command(
+                runner_id,
+                homeboy_path,
+                selected_source_url,
+                selected_source_revision,
+                expected_build_identity,
+            )
+        } else {
+            runner_refresh_homeboy_command(
+                runner_id,
+                selected_source_revision,
+                selected_source_url,
+                selected_materialized_binary,
+            )
+        }]
     } else {
         runner_upgrade_recovery_commands(runner_id, homeboy_path)
     };
@@ -86,6 +108,7 @@ pub fn runner_recovery_commands(
         commands.push(runner_inspect_bare_homeboy_command(runner_id));
     }
     if path_drift.is_some()
+        && !requires_non_mutating_recovery
         && homeboy_path != "homeboy"
         && matches!((configured_version, bare_version), (Some(configured), Some(bare)) if version_is_newer(bare, configured))
     {
@@ -101,18 +124,81 @@ pub fn runner_recovery_commands(
     commands
 }
 
+fn runner_inspect_unreachable_source_command(
+    runner_id: &str,
+    homeboy_path: &str,
+    selected_source_url: Option<&str>,
+    selected_source_revision: Option<&str>,
+    expected_build_identity: Option<&str>,
+) -> String {
+    let inspect = if std::path::Path::new(homeboy_path).is_absolute() {
+        format!(
+            "homeboy runner exec --ssh {} -- {} self identity",
+            shell_arg(runner_id),
+            shell_arg(homeboy_path)
+        )
+    } else {
+        runner_inspect_bare_homeboy_command(runner_id)
+    };
+    format!(
+        "{inspect} # controller-local source {}; selected revision {}; expected identity {}",
+        shell_arg(selected_source_url.unwrap_or("local snapshot without remote URL")),
+        shell_arg(selected_source_revision.unwrap_or("unavailable")),
+        shell_arg(expected_build_identity.unwrap_or("unavailable")),
+    )
+}
+
 fn runner_refresh_homeboy_command(
     runner_id: &str,
     selected_source_revision: Option<&str>,
+    selected_source_url: Option<&str>,
+    selected_materialized_binary: Option<&str>,
 ) -> String {
-    let revision = selected_source_revision
+    if let Some(binary) = selected_materialized_binary {
+        return format!(
+            "homeboy runner refresh-homeboy {} --select {} --reconnect",
+            shell_arg(runner_id),
+            shell_arg(binary)
+        );
+    }
+    let source = selected_source_url.filter(|source| source_url_is_runner_reachable(source));
+    let source_arg = source
+        .map(|source| format!(" --source {}", shell_arg(source)))
+        .unwrap_or_default();
+    let revision = source
+        .and(selected_source_revision)
         .map(|revision| format!(" --ref {}", shell_arg(revision)))
         .unwrap_or_default();
     format!(
-        "homeboy runner refresh-homeboy {}{} --reconnect",
+        "homeboy runner refresh-homeboy {}{}{} --reconnect",
         shell_arg(runner_id),
+        source_arg,
         revision
     )
+}
+
+/// Whether a Git origin can be resolved from a runner rather than only from
+/// the controller filesystem. Local paths and `file://` URLs must be selected
+/// from an already materialized runner binary instead.
+pub fn source_url_is_runner_reachable(source: &str) -> bool {
+    let source = source.trim();
+    if source.is_empty() || source.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        return false;
+    }
+
+    for scheme in ["https://", "ssh://", "git://"] {
+        if let Some(authority) = source.strip_prefix(scheme) {
+            return authority
+                .split('/')
+                .next()
+                .is_some_and(|host| !host.is_empty());
+        }
+    }
+
+    let Some((host, path)) = source.split_once(':') else {
+        return false;
+    };
+    host.contains('@') && !host.ends_with('@') && !path.is_empty()
 }
 
 pub fn runner_inspect_bare_homeboy_command(runner_id: &str) -> String {

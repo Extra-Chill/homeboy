@@ -326,6 +326,55 @@ fn source_recovery_rejects_unverifiable_bare_identity_without_mutating_config() 
 }
 
 #[test]
+fn successful_alignment_rejects_mismatched_bare_identity_without_mutating_config() {
+    let runner = ssh_runner(
+        "lab",
+        Some("/home/user/Developer/_homeboy_binaries/homeboy-stale/target/release/homeboy"),
+    );
+    let mut path = runner.settings.homeboy_path.clone().unwrap();
+    let mut version = Some("0.228.4".to_string());
+    let mut drift = None;
+    let mut detail = None;
+    let mut updates = Vec::new();
+
+    apply_runner_homeboy_path_alignment(
+        &runner,
+        "lab",
+        RunnerHomeboyPathAlignment {
+            drift: Some("semver permits PATH alignment".to_string()),
+            update_to: Some("homeboy".to_string()),
+        },
+        &path.clone(),
+        Some("0.228.5"),
+        &mut path,
+        &mut version,
+        &mut drift,
+        &mut detail,
+        &mut |runner_id, homeboy_path| {
+            updates.push((runner_id.to_string(), homeboy_path.to_string()));
+            Ok(())
+        },
+        Some("homeboy 0.228.5+selected"),
+        &mut |runner_id, options| {
+            Ok((
+                exec_output(
+                    runner_id,
+                    options.command,
+                    "homeboy 0.228.5+shadowed\n",
+                    "",
+                    0,
+                ),
+                0,
+            ))
+        },
+    );
+
+    assert_eq!(path, runner.settings.homeboy_path.clone().unwrap());
+    assert!(drift.unwrap().contains("expected controller identity"));
+    assert!(updates.is_empty());
+}
+
+#[test]
 fn source_drift_recovery_retains_selected_immutable_revision() {
     let revision = "a".repeat(40);
     let commands = runner_recovery_commands(
@@ -335,12 +384,196 @@ fn source_drift_recovery_retains_selected_immutable_revision() {
         Some("0.228.4"),
         Some("0.228.5"),
         Some(&revision),
+        Some("https://example.test/homeboy.git"),
+        None,
+        None,
     );
 
     assert_eq!(
         commands[0],
-        format!("homeboy runner refresh-homeboy lab --ref {revision} --reconnect")
+        format!("homeboy runner refresh-homeboy lab --source https://example.test/homeboy.git --ref {revision} --reconnect")
     );
+}
+
+#[test]
+fn snapshot_recovery_selects_the_verified_materialized_binary() {
+    let commands = runner_recovery_commands(
+        "lab",
+        "/home/user/Developer/_homeboy_binaries/homeboy-stale/target/release/homeboy",
+        Some(&"identity mismatch".to_string()),
+        Some("0.228.4"),
+        Some("0.228.5"),
+        Some("aabbccddeeff"),
+        None,
+        Some("/home/user/Developer/_lab_workspaces/snapshot/target/release/homeboy"),
+        None,
+    );
+
+    assert_eq!(
+        commands[0],
+        "homeboy runner refresh-homeboy lab --select /home/user/Developer/_lab_workspaces/snapshot/target/release/homeboy --reconnect"
+    );
+}
+
+#[test]
+fn filesystem_origin_recovery_selects_the_verified_materialized_binary() {
+    assert!(!source_url_is_runner_reachable(
+        "/Users/chubes/Developer/homeboy"
+    ));
+    let commands = runner_recovery_commands(
+        "lab",
+        "/home/user/Developer/_homeboy_binaries/homeboy-stale/target/release/homeboy",
+        Some(&"identity mismatch".to_string()),
+        Some("0.228.4"),
+        Some("0.228.5"),
+        Some("aabbccddeeff"),
+        Some("/Users/chubes/Developer/homeboy"),
+        Some("/srv/homeboy/target/release/homeboy"),
+        None,
+    );
+
+    assert_eq!(
+        commands[0],
+        "homeboy runner refresh-homeboy lab --select /srv/homeboy/target/release/homeboy --reconnect"
+    );
+}
+
+#[test]
+fn file_origin_recovery_selects_the_verified_materialized_binary() {
+    assert!(!source_url_is_runner_reachable(
+        "file:///Users/chubes/Developer/homeboy"
+    ));
+    let commands = runner_recovery_commands(
+        "lab",
+        "/home/user/Developer/_homeboy_binaries/homeboy-stale/target/release/homeboy",
+        Some(&"identity mismatch".to_string()),
+        Some("0.228.4"),
+        Some("0.228.5"),
+        Some("aabbccddeeff"),
+        Some("file:///Users/chubes/Developer/homeboy"),
+        Some("/srv/homeboy/target/release/homeboy"),
+        None,
+    );
+
+    assert_eq!(
+        commands[0],
+        "homeboy runner refresh-homeboy lab --select /srv/homeboy/target/release/homeboy --reconnect"
+    );
+}
+
+#[test]
+fn remote_origin_recovery_preserves_reachable_source_provenance() {
+    let revision = "aabbccddeeff";
+    for source in [
+        "https://github.com/Extra-Chill/homeboy.git",
+        "ssh://git@github.com/Extra-Chill/homeboy.git",
+        "git@github.com:Extra-Chill/homeboy.git",
+    ] {
+        assert!(source_url_is_runner_reachable(source));
+        let commands = runner_recovery_commands(
+            "lab",
+            "/home/user/Developer/_homeboy_binaries/homeboy-stale/target/release/homeboy",
+            Some(&"identity mismatch".to_string()),
+            Some("0.228.4"),
+            Some("0.228.5"),
+            Some(revision),
+            Some(source),
+            None,
+            None,
+        );
+
+        assert_eq!(
+            commands[0],
+            format!(
+                "homeboy runner refresh-homeboy lab --source {source} --ref {revision} --reconnect"
+            )
+        );
+    }
+}
+
+#[test]
+fn filesystem_origin_without_materialized_binary_only_inspects_selected_provenance() {
+    let source = "/Users/chubes/Developer/homeboy";
+    let identity = "homeboy 0.228.5+selected";
+    let commands = runner_recovery_commands(
+        "lab",
+        "/srv/homeboy/target/release/homeboy",
+        Some(&"identity mismatch".to_string()),
+        Some("0.228.4"),
+        Some("0.228.5"),
+        Some("aabbccddeeff"),
+        Some(source),
+        None,
+        Some(identity),
+    );
+
+    assert!(commands[0].contains("self identity"));
+    assert!(commands[0].contains(source));
+    assert!(commands[0].contains(identity));
+    assert!(!commands
+        .iter()
+        .any(|command| command.contains("refresh-homeboy")));
+    assert!(!commands.iter().any(|command| command.contains("main")));
+    assert!(!commands
+        .iter()
+        .any(|command| command.contains("runner set")));
+}
+
+#[test]
+fn file_origin_without_materialized_binary_only_inspects_selected_provenance() {
+    let source = "file:///Users/chubes/Developer/homeboy";
+    let identity = "homeboy 0.228.5+selected";
+    let commands = runner_recovery_commands(
+        "lab",
+        "/srv/homeboy/target/release/homeboy",
+        Some(&"identity mismatch".to_string()),
+        Some("0.228.4"),
+        Some("0.228.5"),
+        Some("aabbccddeeff"),
+        Some(source),
+        None,
+        Some(identity),
+    );
+
+    assert!(commands[0].contains("self identity"));
+    assert!(commands[0].contains(source));
+    assert!(commands[0].contains(identity));
+    assert!(!commands
+        .iter()
+        .any(|command| command.contains("refresh-homeboy")));
+    assert!(!commands.iter().any(|command| command.contains("main")));
+    assert!(!commands
+        .iter()
+        .any(|command| command.contains("runner set")));
+}
+
+#[test]
+fn local_snapshot_without_materialized_binary_only_inspects_selected_provenance() {
+    let revision = "aabbccddeeff";
+    let identity = "homeboy 0.228.5+selected";
+    let commands = runner_recovery_commands(
+        "lab",
+        "/srv/homeboy/target/release/homeboy",
+        Some(&"identity mismatch".to_string()),
+        Some("0.228.4"),
+        Some("0.228.5"),
+        Some(revision),
+        None,
+        None,
+        Some(identity),
+    );
+
+    assert!(commands[0].contains("self identity"));
+    assert!(commands[0].contains("local snapshot without remote URL"));
+    assert!(commands[0].contains(revision));
+    assert!(commands[0].contains(identity));
+    assert!(!commands
+        .iter()
+        .any(|command| command.contains("refresh-homeboy")));
+    assert!(!commands.iter().any(|command| command.contains("main")));
+    assert!(!commands
+        .iter()
+        .any(|command| command.contains("runner set")));
 }
 
 #[test]

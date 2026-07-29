@@ -18,6 +18,7 @@ use std::path::Path;
 /// recorded as path drift instead.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_runner_homeboy_path_alignment(
+    runner: &Runner,
     runner_id: &str,
     alignment: RunnerHomeboyPathAlignment,
     original_homeboy_path: &str,
@@ -27,10 +28,24 @@ pub fn apply_runner_homeboy_path_alignment(
     path_drift: &mut Option<String>,
     path_update_detail: &mut Option<String>,
     update_homeboy_path: &mut impl FnMut(&str, &str) -> Result<()>,
+    expected_build_identity: Option<&str>,
+    exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
 ) {
     let Some(new_path) = alignment.update_to.as_deref() else {
         return;
     };
+    if let Some(expected_identity) = expected_build_identity {
+        let observed_identity = runner_homeboy_identity(runner, new_path, exec)
+            .ok()
+            .flatten();
+        if observed_identity.as_deref() != Some(expected_identity) {
+            *path_drift = Some(format!(
+                "refusing to update runner homeboy_path from `{original_homeboy_path}` to PATH-visible `{new_path}`: expected controller identity `{expected_identity}`, observed `{}`",
+                observed_identity.as_deref().unwrap_or("unverifiable build identity")
+            ));
+            return;
+        }
+    }
     match update_homeboy_path(runner_id, new_path) {
         Ok(()) => {
             *homeboy_path = new_path.to_string();
@@ -118,6 +133,39 @@ pub fn source_upgrade_homeboy_path_realignment(
         });
     }
 
+    None
+}
+
+/// Return an already-materialized runner binary only after proving it is the
+/// selected controller build. This is the recovery target for local-only and
+/// snapshot sources that have no cloneable remote URL.
+pub fn verified_materialized_source_binary(
+    runner: &Runner,
+    source_path: Option<&str>,
+    expected_identity: Option<&str>,
+    exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
+) -> Option<String> {
+    let source_path = source_path?.trim_end_matches('/');
+    let expected_identity = expected_identity?;
+    for build_dir in ["release", "debug"] {
+        let candidate = format!("{source_path}/target/{build_dir}/homeboy");
+        if runner_homeboy_version(runner, &candidate, exec)
+            .ok()
+            .flatten()
+            .as_deref()
+            != Some(current_version())
+        {
+            continue;
+        }
+        if runner_homeboy_identity(runner, &candidate, exec)
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some(expected_identity)
+        {
+            return Some(candidate);
+        }
+    }
     None
 }
 

@@ -279,7 +279,7 @@ pub fn run_upgrade_with_method(
                 upgraded: false,
                 controller: Some(component_status("unchanged", "controller already current")),
                 extensions: Some(extension_component_status(!skip_extensions, skip_extensions, &extensions_updated, &extensions_skipped)),
-                runners: Some(runner_component_status(runner_disposition, &runners_updated, &runners_skipped)),
+                runners: Some(runner_component_status(runner_disposition, &runners_updated, &runners_skipped, false)),
                 partial,
                 runner_convergence: Some(runner_disposition),
                 message: match runner_disposition {
@@ -364,7 +364,7 @@ pub fn run_upgrade_with_method(
         restart_resident_services_after_swap(success, skip_services);
 
     let runner_disposition = runner_convergence_disposition(
-        skip_runners,
+        skip_runners || !upgrade_completed,
         &runners_updated,
         &runners_skipped,
         new_version.as_deref(),
@@ -397,6 +397,7 @@ pub fn run_upgrade_with_method(
             runner_disposition,
             &runners_updated,
             &runners_skipped,
+            !upgrade_completed && !skip_runners,
         )),
         partial: runner_convergence_failed(
             &runners_updated,
@@ -542,6 +543,7 @@ fn run_targeted_runner_upgrade(
             ),
             &runners_updated,
             &runners_skipped,
+            false,
         )),
         partial: runner_convergence_failed(
             &runners_updated,
@@ -605,7 +607,14 @@ fn runner_component_status(
     disposition: RunnerConvergenceDisposition,
     updated: &[RunnerUpgradeEntry],
     skipped: &[RunnerUpgradeEntry],
+    blocked_by_controller: bool,
 ) -> UpgradeComponentStatus {
+    if blocked_by_controller {
+        return component_status(
+            "not_run",
+            "controller installation prevented runner convergence",
+        );
+    }
     let status = match disposition {
         RunnerConvergenceDisposition::Converged => "converged",
         RunnerConvergenceDisposition::Partial => "partial",
@@ -2046,6 +2055,14 @@ mod convergence_tests {
         assert_eq!(
             extension_component_status(true, false, &[], &[]).status,
             "completed"
+        );
+    }
+
+    #[test]
+    fn runner_status_is_not_run_when_controller_blocks_convergence() {
+        assert_eq!(
+            runner_component_status(RunnerConvergenceDisposition::Skipped, &[], &[], true,).status,
+            "not_run"
         );
     }
 

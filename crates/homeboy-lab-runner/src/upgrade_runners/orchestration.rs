@@ -322,6 +322,7 @@ pub fn upgrade_runner_with_executor(
                 .flatten()
         });
     let selected_source_revision = source_path.and_then(source_checkout_revision);
+    let selected_source_url = source_path.and_then(homeboy_core::git::remote_origin_url);
     let command_source_path = match runner_upgrade_source_path(
         runner,
         method_override,
@@ -383,6 +384,7 @@ pub fn upgrade_runner_with_executor(
             previous_version.as_deref(),
             expected_build_identity.as_deref(),
             selected_source_revision.as_deref(),
+            selected_source_url.as_deref(),
             FailedUpgradeOutcome {
                 exit_code,
                 detail: runner_upgrade_detail(&output),
@@ -399,6 +401,7 @@ pub fn upgrade_runner_with_executor(
             previous_version.as_deref(),
             expected_build_identity.as_deref(),
             selected_source_revision.as_deref(),
+            selected_source_url.as_deref(),
             FailedUpgradeOutcome {
                 exit_code: 1,
                 detail: err.message,
@@ -489,6 +492,7 @@ pub fn upgrade_runner_with_executor(
             path_update_detail = Some(repair.detail);
         } else {
             apply_runner_homeboy_path_alignment(
+                runner,
                 &runner.id,
                 alignment,
                 &original_homeboy_path,
@@ -498,6 +502,8 @@ pub fn upgrade_runner_with_executor(
                 &mut path_drift,
                 &mut path_update_detail,
                 update_homeboy_path,
+                expected_build_identity.as_deref(),
+                exec,
             );
         }
     }
@@ -539,6 +545,7 @@ pub fn upgrade_runner_with_executor(
                 Some(alignment) => {
                     path_drift = alignment.drift.clone();
                     apply_runner_homeboy_path_alignment(
+                        runner,
                         &runner.id,
                         alignment,
                         &original_homeboy_path,
@@ -548,6 +555,8 @@ pub fn upgrade_runner_with_executor(
                         &mut path_drift,
                         &mut path_update_detail,
                         update_homeboy_path,
+                        expected_build_identity.as_deref(),
+                        exec,
                     );
                 }
                 None => {
@@ -568,6 +577,7 @@ pub fn upgrade_runner_with_executor(
         ) {
             path_drift = alignment.drift.clone();
             apply_runner_homeboy_path_alignment(
+                runner,
                 &runner.id,
                 alignment,
                 &original_homeboy_path,
@@ -577,6 +587,8 @@ pub fn upgrade_runner_with_executor(
                 &mut path_drift,
                 &mut path_update_detail,
                 update_homeboy_path,
+                expected_build_identity.as_deref(),
+                exec,
             );
         }
     }
@@ -606,6 +618,19 @@ pub fn upgrade_runner_with_executor(
         &mut extensions_skipped,
         &mut extensions_failed,
     );
+    let selected_materialized_binary = (path_drift.is_some()
+        && !selected_source_url
+            .as_deref()
+            .is_some_and(source_url_is_runner_reachable))
+    .then(|| {
+        verified_materialized_source_binary(
+            runner,
+            command_source_path.as_deref(),
+            expected_build_identity.as_deref(),
+            exec,
+        )
+    })
+    .flatten();
     let recovery_commands = runner_recovery_commands(
         &runner.id,
         &homeboy_path,
@@ -613,6 +638,9 @@ pub fn upgrade_runner_with_executor(
         new_version.as_deref(),
         bare_homeboy_version.as_deref(),
         selected_source_revision.as_deref(),
+        selected_source_url.as_deref(),
+        selected_materialized_binary.as_deref(),
+        expected_build_identity.as_deref(),
     );
     let mut stale_daemon_repair_detail = None;
     let mut stale_daemon = runner_stale_daemon(runner, status);
