@@ -128,14 +128,23 @@ pub(super) fn mutate_record(
     run_id: &str,
     mutate: impl FnOnce(&mut AgentTaskRunRecord) -> bool,
 ) -> Result<Option<AgentTaskRunRecord>> {
-    homeboy_core::config::with_config_lock(|| {
+    let record = homeboy_core::config::with_config_lock(|| {
         let mut record = read_record(run_id)?;
         if !mutate(&mut record) {
             return Ok(None);
         }
-        write_record(&record)?;
-        Ok(Some(record))
-    })
+        let committed = write_record_with_aggregate_without_workspace_authority(
+            &record,
+            read_mirrored_aggregate(&record.run_id)?,
+        )?;
+        Ok(Some(committed))
+    })?;
+    if let Some(record) = record.as_ref() {
+        // Terminal authority has its own config lock. Persist it after releasing
+        // the record mutation lock so a terminal update cannot self-deadlock.
+        super::workspace_authority::persist_terminal_from_record(record)?;
+    }
+    Ok(record)
 }
 
 /// Commit the controller projection and child aggregate in one observation row.
@@ -170,6 +179,14 @@ fn write_record_with_aggregate(
     record: &AgentTaskRunRecord,
     aggregate: Option<AgentTaskAggregate>,
 ) -> Result<()> {
+    let committed = write_record_with_aggregate_without_workspace_authority(record, aggregate)?;
+    super::workspace_authority::persist_terminal_from_record(&committed)
+}
+
+fn write_record_with_aggregate_without_workspace_authority(
+    record: &AgentTaskRunRecord,
+    aggregate: Option<AgentTaskAggregate>,
+) -> Result<AgentTaskRunRecord> {
     #[cfg(test)]
     if FAIL_NEXT_RECORD_WRITE.swap(false, Ordering::SeqCst) {
         return Err(Error::internal_io(
@@ -205,7 +222,7 @@ fn write_record_with_aggregate(
             record.run_id
         ))
     })?;
-    super::workspace_authority::persist_terminal_from_record(&record_from_run(&committed)?)
+    record_from_run(&committed)
 }
 
 pub(super) fn read_record(run_id: &str) -> Result<AgentTaskRunRecord> {
