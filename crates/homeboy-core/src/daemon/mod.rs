@@ -787,16 +787,57 @@ pub fn read_status() -> Result<DaemonStatus> {
         pid_is_running,
     );
     let active_jobs = active_job_recovery_evidence.len();
+    let process_candidates = control::daemon_process_candidates(&jobs_path)?;
+    let mut freshness = freshness_report_from_validation(&validation, active_jobs);
+    let candidate_conflict = validation.stale_reason_code
+        == Some(DaemonStaleReasonCode::LeaseMissing)
+        && process_candidates.iter().any(|candidate| {
+            matches!(
+                candidate.ownership,
+                DaemonProcessOwnership::Owning | DaemonProcessOwnership::Ambiguous
+            )
+        });
+    let stale_reason = if candidate_conflict {
+        let evidence = process_candidates
+            .iter()
+            .filter(|candidate| {
+                matches!(
+                    candidate.ownership,
+                    DaemonProcessOwnership::Owning | DaemonProcessOwnership::Ambiguous
+                )
+            })
+            .map(|candidate| {
+                format!(
+                    "pid={} ownership={:?} endpoint={}",
+                    candidate.pid,
+                    candidate.ownership,
+                    candidate.bind_endpoint.as_deref().unwrap_or("unreported")
+                )
+            })
+            .collect::<Vec<_>>();
+        let message = format!(
+            "daemon lease is missing while foreground daemon candidates remain live: {}; no process was signaled",
+            evidence.join(", ")
+        );
+        freshness.ownership_evidence = Some(message.clone());
+        freshness.repair_plan = vec![DaemonRepairStep {
+            code: "daemon_conflicting_owner_inspect".to_string(),
+            command: "homeboy daemon status".to_string(),
+        }];
+        Some(message)
+    } else {
+        validation.stale_reason.clone()
+    };
     Ok(DaemonStatus {
         running: validation.running && validation.fresh && validation.reachable,
         fresh: validation.fresh,
         reachable: validation.reachable,
-        freshness: freshness_report_from_validation(&validation, active_jobs),
-        stale_reason: validation.stale_reason,
+        freshness,
+        stale_reason,
         state: validation.state,
         state_path,
         state_identity,
-        process_candidates: control::daemon_process_candidates(&jobs_path)?,
+        process_candidates,
         active_job_recovery_evidence,
         termination_evidence: (!validation.running)
             .then(read_termination_evidence)
