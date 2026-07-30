@@ -764,6 +764,19 @@ fn release_finish_head_pipeline_uses_homeboy_action_head_inputs() {
     assert!(host.contains("Download current Homeboy finalizer"));
     assert!(host.contains("binary-path: ${{ needs.prepare.outputs.recovery-release == 'true' && '.homeboy-bin/homeboy' || '' }}"));
     assert!(host.contains("release-from-artifacts: ${{ needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete == 'true' && 'draft-adoption' || 'artifacts' }}"));
+    let authority = release_step_block(
+        host,
+        "name: Create fresh artifact source-authority manifest",
+    );
+    assert!(authority.contains("needs.prepare.outputs.recovery-release != 'true'"));
+    assert!(authority.contains(".homeboy-bin/homeboy release artifact-source-authority homeboy"));
+    assert!(authority.contains("--dir artifacts"));
+    assert!(authority.contains("git rev-parse \"${RELEASE_TAG}^{commit}\""));
+    assert!(
+        host.find("- name: Create fresh artifact source-authority manifest")
+            < host.find("- name: Finish Homeboy release pipeline at tag"),
+        "fresh artifact authority must precede finalization"
+    );
 }
 
 #[test]

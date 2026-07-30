@@ -7,6 +7,7 @@ homeboy release [OPTIONS] [COMPONENTS]...
 homeboy release version show [<component_id>] [--path <path>]
 homeboy release changes [<component_id>] [--path <path>] [--since <tag>] [--git-diffs]
 homeboy release changelog show [<component_id>]
+homeboy release artifact-source-authority <component_id> --dir <DIR> --tag <TAG> --version <VERSION> --commit <SHA>
 ```
 
 By default Homeboy auto-detects the bump from commit history. Use `--bump <major|minor|patch|VERSION>` to force a bump type or explicit version.
@@ -54,6 +55,8 @@ External CI artifacts must also provide `manifest.json`; bare directories are re
   "artifacts": [{ "path": "example-plugin.zip", "sha256": "<64-char SHA-256>" }]
 }
 ```
+
+`release artifact-source-authority` writes this inventory for a completed artifact directory. It recursively records every publication file (except `manifest.json`) in stable path order and binds its SHA-256 bytes to the supplied release identity. Use it after all platform artifacts have been assembled and before `--from-artifacts` finalization.
 
 Risky real release modes require explicit `--apply`: `--deploy`, `--recover`, `--retag`, `--head`, and bare `--skip-checks`. Dry-run previews never require `--apply`, and granular skips such as `--skip-checks=lint` keep the normal release flow because other quality gates remain active.
 

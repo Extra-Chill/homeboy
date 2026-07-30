@@ -1,6 +1,6 @@
 use homeboy_core::error::{Error, Result};
 use homeboy_engine_primitives::content_hash;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use super::{step_success, ReleaseArtifact, ReleaseState, ReleaseStepResult};
@@ -14,6 +14,169 @@ pub(crate) const ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA: &str =
 pub(crate) const ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const DRAFT_ADOPTION_MANIFEST_SCHEMA: &str = "homeboy.draft-adoption";
 const DRAFT_ADOPTION_MANIFEST_SCHEMA_VERSION: u32 = 1;
+
+/// A source-bound inventory for artifacts assembled outside Homeboy's package
+/// step. Its compact shape is intentionally shared with the recovery reader.
+#[derive(Debug, Clone, Serialize)]
+pub struct ArtifactSourceAuthorityManifest {
+    schema: &'static str,
+    schema_version: u32,
+    component_id: String,
+    tag: String,
+    version: String,
+    commit: String,
+    artifacts: Vec<ArtifactSourceAuthorityArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ArtifactSourceAuthorityArtifact {
+    path: String,
+    sha256: String,
+}
+
+/// Write the authority manifest required before externally assembled release
+/// bytes can enter `--from-artifacts` finalization.
+pub fn write_artifact_source_authority_manifest(
+    artifact_dir: &std::path::Path,
+    component_id: &str,
+    tag: &str,
+    version: &str,
+    commit: &str,
+) -> Result<ArtifactSourceAuthorityManifest> {
+    if [component_id, tag, version, commit]
+        .iter()
+        .any(|value| value.trim().is_empty())
+    {
+        return Err(Error::validation_invalid_argument(
+            "artifact-source-authority",
+            "component, tag, version, and commit must all be non-empty",
+            None,
+            None,
+        ));
+    }
+    let artifact_dir = std::fs::canonicalize(artifact_dir).map_err(|error| {
+        Error::validation_invalid_argument(
+            "artifact-source-authority",
+            format!(
+                "Artifact directory '{}' cannot be resolved: {error}",
+                artifact_dir.display()
+            ),
+            Some(artifact_dir.display().to_string()),
+            None,
+        )
+    })?;
+    if !artifact_dir.is_dir() {
+        return Err(Error::validation_invalid_argument(
+            "artifact-source-authority",
+            format!(
+                "Artifact directory '{}' is not a directory",
+                artifact_dir.display()
+            ),
+            Some(artifact_dir.display().to_string()),
+            None,
+        ));
+    }
+
+    let manifest_path = artifact_dir.join(PACKAGE_RECOVERY_MANIFEST);
+    let mut files = Vec::new();
+    collect_artifact_files(&artifact_dir, &artifact_dir, &manifest_path, &mut files)?;
+    files.sort();
+    if files.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "artifact-source-authority",
+            format!(
+                "Artifact directory '{}' contains no files",
+                artifact_dir.display()
+            ),
+            Some(artifact_dir.display().to_string()),
+            None,
+        ));
+    }
+
+    let manifest = ArtifactSourceAuthorityManifest {
+        schema: ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA,
+        schema_version: ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA_VERSION,
+        component_id: component_id.to_string(),
+        tag: tag.to_string(),
+        version: version.to_string(),
+        commit: commit.to_string(),
+        artifacts: files
+            .into_iter()
+            .map(|path| {
+                let relative = path
+                    .strip_prefix(&artifact_dir)
+                    .expect("artifact path is rooted");
+                Ok(ArtifactSourceAuthorityArtifact {
+                    path: relative.to_string_lossy().replace('\\', "/"),
+                    sha256: sha256_file(&path.display().to_string())?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+    };
+    let contents = serde_json::to_vec_pretty(&manifest).map_err(|error| {
+        Error::internal_io(
+            format!("Failed to serialize artifact source-authority manifest: {error}"),
+            Some(manifest_path.display().to_string()),
+        )
+    })?;
+    std::fs::write(&manifest_path, contents).map_err(|error| {
+        Error::internal_io(
+            format!(
+                "Failed to write artifact source-authority manifest '{}': {error}",
+                manifest_path.display()
+            ),
+            Some(manifest_path.display().to_string()),
+        )
+    })?;
+    Ok(manifest)
+}
+
+fn collect_artifact_files(
+    root: &std::path::Path,
+    directory: &std::path::Path,
+    manifest_path: &std::path::Path,
+    files: &mut Vec<std::path::PathBuf>,
+) -> Result<()> {
+    for entry in std::fs::read_dir(directory).map_err(|error| {
+        Error::internal_io(
+            format!(
+                "Failed to read artifact directory '{}': {error}",
+                directory.display()
+            ),
+            Some(directory.display().to_string()),
+        )
+    })? {
+        let path = entry
+            .map_err(|error| {
+                Error::internal_io(format!("Failed to read artifact entry: {error}"), None)
+            })?
+            .path();
+        let canonical = std::fs::canonicalize(&path).map_err(|error| {
+            Error::internal_io(
+                format!("Failed to resolve artifact '{}': {error}", path.display()),
+                Some(path.display().to_string()),
+            )
+        })?;
+        if !canonical.starts_with(root) {
+            return Err(Error::validation_invalid_argument(
+                "artifact-source-authority",
+                format!(
+                    "Artifact '{}' resolves outside '{}'",
+                    path.display(),
+                    root.display()
+                ),
+                Some(path.display().to_string()),
+                None,
+            ));
+        }
+        if canonical.is_dir() {
+            collect_artifact_files(root, &canonical, manifest_path, files)?;
+        } else if canonical.is_file() && canonical != manifest_path {
+            files.push(canonical);
+        }
+    }
+    Ok(())
+}
 
 #[derive(Deserialize)]
 struct PackageRecoveryManifest {
@@ -836,8 +999,8 @@ fn validate_recovery_artifact(
 mod tests {
     use super::{
         classify_recovery_lineage, establish_publication_authority, run_artifact_inventory,
-        PackageRecoveryContext, RecoveryLineage, ReleaseStepResult, Result,
-        ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA,
+        write_artifact_source_authority_manifest, PackageRecoveryContext, RecoveryLineage,
+        ReleaseStepResult, Result, ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA,
         ARTIFACT_SOURCE_AUTHORITY_MANIFEST_SCHEMA_VERSION, PACKAGE_RECOVERY_MANIFEST,
         PACKAGE_RECOVERY_MANIFEST_SCHEMA, PACKAGE_RECOVERY_MANIFEST_SCHEMA_VERSION,
     };
@@ -884,6 +1047,87 @@ mod tests {
                     .to_string()
             )
         );
+    }
+
+    #[test]
+    fn generated_source_authority_manifest_finalizes_only_its_bound_bytes_and_identity() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let artifact = temp.path().join("nested/plugin.zip");
+        std::fs::create_dir_all(artifact.parent().expect("parent")).expect("nested directory");
+        std::fs::write(&artifact, "authoritative bytes").expect("artifact");
+        write_artifact_source_authority_manifest(
+            temp.path(),
+            "plugin",
+            "v1.2.3",
+            "1.2.3",
+            "abc123",
+        )
+        .expect("generate authority manifest");
+
+        let mut state = ReleaseState::default();
+        run_artifact_inventory(
+            &mut state,
+            &temp.path().to_string_lossy(),
+            &recovery_context(),
+        )
+        .expect("generated authority manifest inventories successfully");
+        assert_eq!(state.artifacts.len(), 1);
+        assert_eq!(state.artifacts[0].sha256, Some(sha256(&artifact)));
+
+        let manifest_path = temp.path().join(PACKAGE_RECOVERY_MANIFEST);
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).expect("manifest"))
+                .expect("valid manifest");
+        manifest["commit"] = serde_json::json!("different-commit");
+        std::fs::write(&manifest_path, manifest.to_string()).expect("different commit manifest");
+        assert!(run_artifact_inventory(
+            &mut ReleaseState::default(),
+            &temp.path().to_string_lossy(),
+            &recovery_context(),
+        )
+        .expect_err("different commit must be rejected")
+        .message
+        .contains("different-commit"));
+
+        write_artifact_source_authority_manifest(
+            temp.path(),
+            "plugin",
+            "v1.2.3",
+            "1.2.3",
+            "abc123",
+        )
+        .expect("regenerate authority manifest");
+        let mut manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).expect("manifest"))
+                .expect("valid manifest");
+        manifest["artifacts"][0]["path"] = serde_json::json!("../plugin.zip");
+        std::fs::write(&manifest_path, manifest.to_string()).expect("unsafe path manifest");
+        assert!(run_artifact_inventory(
+            &mut ReleaseState::default(),
+            &temp.path().to_string_lossy(),
+            &recovery_context(),
+        )
+        .expect_err("path outside the authority directory must be rejected")
+        .message
+        .contains("../plugin.zip"));
+
+        write_artifact_source_authority_manifest(
+            temp.path(),
+            "plugin",
+            "v1.2.3",
+            "1.2.3",
+            "abc123",
+        )
+        .expect("regenerate authority manifest");
+        std::fs::write(&artifact, "substituted bytes").expect("tamper artifact");
+        assert!(run_artifact_inventory(
+            &mut ReleaseState::default(),
+            &temp.path().to_string_lossy(),
+            &recovery_context(),
+        )
+        .expect_err("digest substitution must be rejected")
+        .message
+        .contains("does not match declared sha256"));
     }
 
     #[test]
