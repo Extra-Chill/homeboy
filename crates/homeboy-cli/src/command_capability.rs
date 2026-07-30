@@ -46,6 +46,14 @@ pub fn classify(args: &[String]) -> CommandCapability {
         [command, subcommand, ..] if command == "runner" && subcommand == "status" => {
             CommandCapability::ReadOnly
         }
+        [command, subcommand, ..]
+            if matches!(
+                (command.as_str(), subcommand.as_str()),
+                ("runs", "list") | ("daemon", "status")
+            ) =>
+        {
+            CommandCapability::ReadOnly
+        }
         _ => CommandCapability::Mutation,
     }
 }
@@ -81,7 +89,7 @@ mod tests {
     }
 
     #[test]
-    fn classifies_inventory_readers_as_read_only_during_active_controller_work() {
+    fn classifies_inspection_commands_as_read_only_during_active_controller_work() {
         for command in [
             args(&["homeboy", "activity"]),
             args(&["homeboy", "activity", "list"]),
@@ -89,6 +97,10 @@ mod tests {
             args(&["homeboy", "rig", "list"]),
             args(&["homeboy", "server", "list"]),
             args(&["homeboy", "runner", "status"]),
+            args(&["homeboy", "runner", "status", "--full"]),
+            args(&["homeboy", "runs", "list", "--limit", "10"]),
+            args(&["homeboy", "daemon", "status"]),
+            args(&["homeboy", "status", "--all"]),
         ] {
             assert_eq!(
                 classify(&command),
@@ -105,6 +117,8 @@ mod tests {
             args(&["homeboy", "agent-task", "retry", "run-1", "--run"]),
             args(&["homeboy", "runtime", "promotion-takeover"]),
             args(&["homeboy", "status", "--refresh"]),
+            args(&["homeboy", "runs", "reconcile"]),
+            args(&["homeboy", "daemon", "start"]),
         ] {
             assert_eq!(classify(&command), CommandCapability::Mutation);
         }
