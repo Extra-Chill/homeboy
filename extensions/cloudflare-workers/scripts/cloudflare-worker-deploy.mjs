@@ -142,6 +142,7 @@ async function materializeWranglerConfig(contract, root) {
   const sourcePath = resolvePath(root, contract.wrangler.config);
   if (!sourcePath.endsWith('.json') && !sourcePath.endsWith('.jsonc')) throw fail('invalid_contract', 'Private resource overlays require a JSON or JSONC Wrangler config.');
   const config = JSON.parse(stripJsonComments(await readFile(sourcePath, 'utf8')).replace(/,\s*([}\]])/g, '$1'));
+  if (typeof config.main === 'string' && !isAbsolute(config.main)) config.main = resolve(dirname(sourcePath), config.main);
   applyBindingOverrides(config, 'd1_databases', contract.resource_overrides.d1_databases, ['database_name', 'database_id']);
   applyBindingOverrides(config, 'r2_buckets', contract.resource_overrides.r2_buckets, ['bucket_name']);
   applyBindingOverrides(config.queues, 'producers', contract.resource_overrides.queues?.producers, ['queue']);
