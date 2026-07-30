@@ -164,8 +164,20 @@ pub fn pid_is_running(pid: u32) -> bool {
 /// The result of checking a persisted local process identity.
 ///
 /// A PID is not sufficient ownership evidence because operating systems can
-/// reuse it. Linux records pair a PID with `/proc/<pid>/stat` starttime ticks;
-/// platforms without that evidence fail closed when asked to verify one.
+/// reuse it. Supported platforms pair the PID with a kernel-provided process
+/// start identity.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "platform", rename_all = "snake_case")]
+pub enum ProcessStartIdentity {
+    Linux {
+        starttime_ticks: u64,
+    },
+    Macos {
+        start_seconds: u64,
+        start_microseconds: u64,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessIdentityState {
     Dead,
@@ -181,6 +193,17 @@ pub enum ProcessIdentityState {
 pub fn process_identity_state(
     pid: u32,
     expected_linux_starttime_ticks: Option<u64>,
+) -> ProcessIdentityState {
+    process_identity_state_with_start_identity(pid, expected_linux_starttime_ticks, None)
+}
+
+/// Check a persisted local process identity using the strongest available
+/// platform start evidence. `expected_linux_starttime_ticks` remains accepted
+/// for records written before [`ProcessStartIdentity`] existed.
+pub fn process_identity_state_with_start_identity(
+    pid: u32,
+    expected_linux_starttime_ticks: Option<u64>,
+    expected_start_identity: Option<&ProcessStartIdentity>,
 ) -> ProcessIdentityState {
     if pid == 0 || pid > i32::MAX as u32 {
         return ProcessIdentityState::Unverifiable;
@@ -202,15 +225,38 @@ pub fn process_identity_state(
         if linux_process_state_from_stat(&stat) == Some('Z') {
             return ProcessIdentityState::Dead;
         }
-        return match expected_linux_starttime_ticks {
-            Some(expected) if expected != starttime_ticks => ProcessIdentityState::IdentityMismatch,
-            _ => ProcessIdentityState::Live,
+        if matches!(
+            expected_start_identity,
+            Some(ProcessStartIdentity::Linux {
+                starttime_ticks: expected
+            }) if *expected != starttime_ticks
+        ) || expected_start_identity
+            .is_some_and(|identity| !matches!(identity, ProcessStartIdentity::Linux { .. }))
+            || expected_linux_starttime_ticks.is_some_and(|expected| expected != starttime_ticks)
+        {
+            return ProcessIdentityState::IdentityMismatch;
+        }
+        return ProcessIdentityState::Live;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let actual = match process_start_identity(pid) {
+            Ok(Some(identity)) => identity,
+            Ok(None) => return ProcessIdentityState::Dead,
+            Err(_) => return ProcessIdentityState::Unverifiable,
+        };
+        return match expected_start_identity {
+            Some(expected) if expected != &actual => ProcessIdentityState::IdentityMismatch,
+            Some(_) => ProcessIdentityState::Live,
+            None if expected_linux_starttime_ticks.is_some() => ProcessIdentityState::Unverifiable,
+            None => ProcessIdentityState::Live,
         };
     }
 
-    #[cfg(all(unix, not(target_os = "linux")))]
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
     {
-        if expected_linux_starttime_ticks.is_some() {
+        if expected_linux_starttime_ticks.is_some() || expected_start_identity.is_some() {
             return ProcessIdentityState::Unverifiable;
         }
         return unsafe {
@@ -226,12 +272,63 @@ pub fn process_identity_state(
 
     #[cfg(not(unix))]
     {
-        let _ = expected_linux_starttime_ticks;
+        let _ = (expected_linux_starttime_ticks, expected_start_identity);
         if pid == std::process::id() {
             ProcessIdentityState::Live
         } else {
             ProcessIdentityState::Unverifiable
         }
+    }
+}
+
+/// Read the kernel-provided start identity for a process instance. This avoids
+/// shelling out and lets persisted leases reject PID reuse on macOS and Linux.
+pub fn process_start_identity(
+    pid: u32,
+) -> std::result::Result<Option<ProcessStartIdentity>, String> {
+    #[cfg(target_os = "linux")]
+    {
+        return linux_process_starttime_ticks(pid).map(|ticks| {
+            ticks.map(|starttime_ticks| ProcessStartIdentity::Linux { starttime_ticks })
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if pid == 0 || pid > i32::MAX as u32 {
+            return Err(format!("invalid process PID {pid}"));
+        }
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let read = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::c_int,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                &mut info as *mut libc::proc_bsdinfo as *mut libc::c_void,
+                std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int,
+            )
+        };
+        if read == 0 {
+            let error = std::io::Error::last_os_error();
+            return if error.raw_os_error() == Some(libc::ESRCH) {
+                Ok(None)
+            } else {
+                Err(format!("inspect process {pid}: {error}"))
+            };
+        }
+        if read != std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int {
+            return Err(format!("inspect process {pid}: incomplete proc_bsdinfo"));
+        }
+        return Ok(Some(ProcessStartIdentity::Macos {
+            start_seconds: info.pbi_start_tvsec,
+            start_microseconds: info.pbi_start_tvusec,
+        }));
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        Ok(None)
     }
 }
 
