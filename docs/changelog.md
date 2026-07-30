@@ -4,6 +4,23 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.323.1] - 2026-07-30
+
+### Changed
+- optimize hash crates in dev builds, cutting cook tests 26x
+
+### Fixed
+- align Homeboy Cargo artifact path
+- rebind durable replacement replay
+- make promotion capabilities cross-platform
+- cook homeboy
+- project outputs into null inputs
+- report supervised timeouts instead of a bogus SIGKILL failure
+- attribute generation daemon stores
+- restore Lab submission boundary
+- exclude recovery journals from peer scans
+- bind review follow-up model lineage
+
 ## [0.323.0] - 2026-07-29
 
 ### Added
