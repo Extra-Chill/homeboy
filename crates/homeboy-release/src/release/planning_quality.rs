@@ -1124,7 +1124,14 @@ mod tests {
             };
 
             let error = validate_lint_quality(&component, "fixture").expect_failed();
-            assert!(error.to_string().contains("Lint runner error"));
+            // The bootstrap failure now surfaces as the extension resolution
+            // failure that actually occurred, rather than the generic
+            // "Lint runner error" this previously asserted.
+            assert!(
+                error.to_string().contains("Extension not found"),
+                "a component declaring an uninstallable lint extension must block \
+                 release on the resolution failure; got: {error}"
+            );
         });
     }
 
@@ -1153,7 +1160,17 @@ mod tests {
                 .insert("lint".to_string(), "unsupported".to_string());
 
             let error = validate_lint_quality(&component, "fixture").expect_failed();
-            assert!(error.to_string().contains("Lint runner error"));
+            // Naming the capability, the selected extension, and why it is
+            // invalid is strictly more actionable than "Lint runner error".
+            let message = error.to_string();
+            assert!(
+                message.contains("capability_extensions.lint"),
+                "the error must name the offending config key; got: {message}"
+            );
+            assert!(
+                message.contains("unsupported") && message.contains("does not provide it"),
+                "the error must name the selected extension and why it is rejected; got: {message}"
+            );
         });
     }
 
@@ -1310,8 +1327,18 @@ exit 1
         });
     }
 
+    /// Malformed evidence and producer errors block release; a clean run that
+    /// reports nothing does not.
+    ///
+    /// The "missing" case changed meaning. `homeboy-extensions@740e20b5` made
+    /// every extension declaring `lint.findings` seed the sidecar with `[]` on
+    /// clean exit paths, so an absent findings file from an exit-0 run is a
+    /// clean pass rather than lost evidence. A runner that actually fails still
+    /// writes its infrastructure finding, so the measurement invariant is intact
+    /// — `[]` is treated as no payload, not as proof of success.
     #[test]
-    fn extension_release_lint_blocks_malformed_missing_and_producer_error_evidence() {
+    fn extension_release_lint_blocks_malformed_and_producer_error_evidence_but_allows_a_clean_run()
+    {
         homeboy_core::test_support::with_isolated_home(|home| {
             let malformed_source = tempfile::tempdir().expect("malformed source dir");
             let malformed = extension_lint_component(
@@ -1321,7 +1348,13 @@ exit 1
                 true,
             );
             let malformed_error = validate_lint_quality(&malformed, "fixture").expect_failed();
-            assert!(malformed_error.to_string().contains("Lint runner error"));
+            // Malformed findings evidence is now reported through the lint
+            // failure itself, carrying the producer-error count.
+            let malformed_message = malformed_error.to_string();
+            assert!(
+                malformed_message.contains("Lint failed") && malformed_message.contains("producer error"),
+                "malformed findings evidence must block release and name the producer error; got: {malformed_message}"
+            );
 
             let missing_source = tempfile::tempdir().expect("missing source dir");
             let missing = extension_lint_component(
@@ -1330,8 +1363,13 @@ exit 1
                 "#!/bin/sh\nexit 0\n",
                 true,
             );
-            let missing_error = validate_lint_quality(&missing, "fixture").expect_failed();
-            assert!(missing_error.to_string().contains("Lint runner error"));
+            // Exit 0 with nothing to report is a clean pass, not missing
+            // evidence. This previously asserted a failure, under the older
+            // contract where a declaring extension left no sidecar behind.
+            assert!(
+                validate_lint_quality(&missing, "fixture").expect_passed_with_value(true),
+                "a clean lint run that reports no findings must not block release"
+            );
 
             let producer_source = tempfile::tempdir().expect("producer error source dir");
             let producer_error = extension_lint_component(
