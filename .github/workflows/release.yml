@@ -1195,7 +1195,7 @@ jobs:
             --arg version "${RELEASE_VERSION}" \
             --arg commit "${COMMIT}" \
             --argjson expected_assets "${EXPECTED_ASSETS}" \
-            '{schema: $schema, schema_version: $schema_version, component_id: $component_id, tag: $tag, version: $version, commit: $commit, artifacts: [$expected_assets[] | {path: ("artifacts/" + .)}]}' > artifacts/manifest.json
+            '{schema: $schema, schema_version: $schema_version, component_id: $component_id, tag: $tag, version: $version, commit: $commit, artifacts: [$expected_assets[] | {path: .}]}' > artifacts/manifest.json
 
       - name: Create remote draft adoption manifest
         if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete == 'true'
