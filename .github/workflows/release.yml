@@ -1316,7 +1316,9 @@ jobs:
     if: ${{ always() && needs.prepare.outputs.prepared == 'true' && needs.prepare.outputs['release-tag'] != '' }}
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # `write` so an incomplete release can be returned to draft. Detecting a
+      # broken published release and leaving it published is not a guard (#8687).
+      contents: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -1331,7 +1333,14 @@ jobs:
             exit 1
           fi
 
-          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" > release.json
+          # `releases/tags/{tag}` resolves published releases only; a draft 404s
+          # there. Distinguish the two so "never published" cannot be reported as
+          # a malformed API response.
+          if ! gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" > release.json 2>/dev/null; then
+            echo "::error::Release ${RELEASE_TAG} is not published. The tag exists but the GitHub Release is still a draft or absent, so consumers pinning this version get nothing. Recover with a workflow_dispatch run using release_tag=${RELEASE_TAG}."
+            exit 1
+          fi
+
           missing=()
           invalid=()
           while IFS= read -r asset; do
@@ -1346,6 +1355,24 @@ jobs:
           if [ "${#missing[@]}" -gt 0 ] || [ "${#invalid[@]}" -gt 0 ]; then
             [ "${#missing[@]}" -eq 0 ] || echo "::error::Release ${RELEASE_TAG} is missing planned assets: ${missing[*]}"
             [ "${#invalid[@]}" -eq 0 ] || echo "::error::Release ${RELEASE_TAG} has planned assets that are not uploaded or are zero bytes: ${invalid[*]}"
+
+            # Return it to draft. A published release that is missing planned
+            # assets serves 404s for the platforms it dropped, and can become
+            # `latest` if the next release also fails. Failing the run while
+            # leaving it published detects the problem without containing it --
+            # v0.323.1 shipped 2 of 14 assets and stayed live exactly that way.
+            #
+            # This is reversible and non-destructive: the tag, the release body
+            # and every uploaded asset are retained. Only the draft flag flips,
+            # which is what makes the release unreachable to consumers until a
+            # recovery run completes it.
+            if jq -e '.draft == false' release.json >/dev/null; then
+              if gh release edit "${RELEASE_TAG}" --draft=true --repo "${GITHUB_REPOSITORY}"; then
+                echo "::error::Release ${RELEASE_TAG} was returned to DRAFT because it was published without every planned asset. Its tag and uploaded assets are retained. Complete it with a workflow_dispatch run using release_tag=${RELEASE_TAG}, which republishes once the asset set verifies."
+              else
+                echo "::error::Release ${RELEASE_TAG} is published and incomplete, and could not be returned to draft. Un-publish it by hand before any consumer resolves it: gh release edit ${RELEASE_TAG} --draft=true --repo ${GITHUB_REPOSITORY}"
+              fi
+            fi
             exit 1
           fi
           echo "::notice::Release ${RELEASE_TAG} contains every planned asset."
