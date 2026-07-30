@@ -218,6 +218,7 @@ pub fn run_deployment_provider(
     provider_id: &str,
     project_id: &str,
     component_id: &str,
+    component_path: &str,
     contract: &std::path::Path,
     dry_run: bool,
 ) -> Result<ExtensionRunResult> {
@@ -285,7 +286,7 @@ pub fn run_deployment_provider(
             Some(extension_path),
             None,
             None,
-            None,
+            Some(component_path),
         ),
         ExtensionExecutionMode::Captured,
     )?;
@@ -1014,6 +1015,7 @@ mod tests {
     fn deployment_provider_uses_the_declared_non_mutating_command() {
         homeboy_core::test_support::with_isolated_home(|home| {
             let contract = tempfile::NamedTempFile::new().expect("contract");
+            let component = tempfile::tempdir().expect("component");
             write_extension(
                 home.path(),
                 "fixture-provider",
@@ -1025,7 +1027,7 @@ mod tests {
                         "dry_run_command": "sh {{extension_path}}/run.sh validate {{payload.contract}}"
                     }]
                 }),
-                "#!/bin/sh\nprintf '%s' \"$1\"\n",
+                "#!/bin/sh\nprintf '%s|%s' \"$1\" \"$HOMEBOY_COMPONENT_PATH\"\n",
             );
 
             let result = run_deployment_provider(
@@ -1033,13 +1035,17 @@ mod tests {
                 "fixture.deploy",
                 "site",
                 "fixture",
+                component.path().to_str().expect("component path"),
                 contract.path(),
                 true,
             )
             .expect("provider dry run");
 
             assert_eq!(result.exit_code, 0);
-            assert_eq!(result.output.expect("output").stdout, "validate");
+            assert_eq!(
+                result.output.expect("output").stdout,
+                format!("validate|{}", component.path().display())
+            );
         });
     }
 
