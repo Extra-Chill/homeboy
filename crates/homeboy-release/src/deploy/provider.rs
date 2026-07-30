@@ -501,13 +501,12 @@ mod tests {
             None,
         );
         let policy = serde_json::json!({
-            "wrangler": {
-                "config_ref": "wrangler.jsonc",
-                "config": "wrangler.jsonc",
-                "binary": "wrangler"
+            "limits": {
+                "timeout_ms": 120000,
+                "attempts": 3
             },
-            "timeout_ms": 120000,
-            "expected_bindings": ["DATABASE"]
+            "steps": ["prepare", "apply"],
+            "mode": "strict"
         });
         let payload = layered_payload(
             &component,
@@ -528,7 +527,7 @@ mod tests {
         );
         assert_eq!(
             value["policy"]["reference"]["digest"],
-            "13d79940b8c45f3df966296bf3080f254c281aaefd09b3308497ed94aede0486"
+            "949ad67abac10d72ad874d207bff61620811c313540a65be3a9d697d280f5412"
         );
         assert_eq!(value["target"], serde_json::json!({ "target": "one" }));
         assert_eq!(value["source"]["revision"].as_str().map(str::len), Some(40));
