@@ -1146,11 +1146,8 @@ mod tests {
     fn sample_disk_budget() -> DiskBudget {
         DiskBudget {
             path: "/tmp".to_string(),
-            available_bytes: None,
-            total_bytes: None,
-            used_percent: None,
             status: "unavailable".to_string(),
-            warning: None,
+            ..Default::default()
         }
     }
 
