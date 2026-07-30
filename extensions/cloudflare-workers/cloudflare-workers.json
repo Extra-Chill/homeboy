@@ -33,6 +33,11 @@
         "secret_values_in_argv_or_artifacts": false,
         "requires_clean_immutable_source": true
       },
+      "layered_input": {
+        "schema": "homeboy/deployment-provider-payload/v1",
+        "target_required": true,
+        "result_schema": "homeboy/cloudflare-worker-deploy-result/v1"
+      },
       "capabilities": ["preflight", "bounded-predeploy-commands", "private-command-stdin", "secret-stdin", "post-deploy-http-gates", "rollback-on-failed-gate", "same-revision-durability"]
     }
   ]
