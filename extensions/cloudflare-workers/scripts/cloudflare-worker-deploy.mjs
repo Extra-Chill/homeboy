@@ -3,7 +3,7 @@
 import { spawn } from 'node:child_process';
 import { chmod, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
-import { basename, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 const SCHEMA = 'homeboy/cloudflare-worker-deploy-result/v1';
 const MAX_GATE_BODY_BYTES = 65536;
@@ -11,14 +11,17 @@ const MAX_SECRET_INPUT_BYTES = 65536;
 
 async function main() {
   const dryRun = process.argv.includes('--dry-run');
-  const contract = JSON.parse(await readFile(requiredArgument('--contract'), 'utf8'));
+  const contractPath = await realpath(resolve(requiredArgument('--contract')));
+  const contract = JSON.parse(await readFile(contractPath, 'utf8'));
   validate(contract);
-  let root;
-  try { root = await realpath(resolve(contract.repository.worktree)); } catch { throw fail('invalid_contract', 'Declared repository worktree is unavailable.'); }
   const secretValues = [];
   const redact = (value) => secretValues.reduce((text, secret) => String(text).split(String(secret)).join('[REDACTED]'), String(value));
   const childEnvironment = { ...process.env };
   for (const secret of [...contract.secrets, ...contract.secret_inputs]) if (secret.env) delete childEnvironment[secret.env];
+  const root = await repositoryRoot(contract, contractPath, redact, childEnvironment);
+  if (contract.repository.revision === 'HEAD') {
+    contract.repository.revision = await repositoryHead(root, redact, childEnvironment, contract.timeout_ms);
+  }
   const result = resultFor(contract, dryRun);
   try {
     const preflightResult = await preflight(contract, root, result, redact, childEnvironment, dryRun);
@@ -49,6 +52,27 @@ async function main() {
   if (!dryRun) await writeResult(root, contract, result);
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   process.exitCode = ['succeeded', 'validated'].includes(result.status) ? 0 : 1;
+}
+
+async function repositoryRoot(contract, contractPath, redact, env) {
+  try {
+    if (contract.repository.worktree === '.') {
+      const repository = await command('git', ['rev-parse', '--show-toplevel'], dirname(contractPath), redact, env, contract.timeout_ms);
+      return await realpath(repository.stdout.trim());
+    }
+    return await realpath(resolve(contract.repository.worktree));
+  } catch {
+    throw fail('invalid_contract', 'Declared repository worktree is unavailable.');
+  }
+}
+
+async function repositoryHead(root, redact, env, timeoutMs) {
+  try {
+    const head = await command('git', ['rev-parse', 'HEAD'], root, redact, env, timeoutMs);
+    return head.stdout.trim();
+  } catch {
+    throw fail('invalid_contract', 'Declared repository revision is unavailable.');
+  }
 }
 
 async function bootstrapWorker(contract, root, result, redact, env) {
