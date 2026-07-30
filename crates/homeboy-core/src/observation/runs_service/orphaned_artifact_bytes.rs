@@ -56,6 +56,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use crate::output::{OutputBudget, OutputPresentation, OutputTruncation};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -114,6 +115,77 @@ pub struct OrphanedArtifactBytesCleanupOutcome {
     /// True when the sweep stopped at `limit` with candidates still unread.
     pub truncated: bool,
     pub rows: Vec<OrphanedArtifactBytesRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_detail: Option<OutputTruncation>,
+}
+
+pub fn present_orphaned_artifact_bytes_cleanup(
+    output: &mut OrphanedArtifactBytesCleanupOutcome,
+    full: bool,
+    export_command: String,
+) -> Result<()> {
+    let total_items = output.rows.len();
+    if full {
+        let total_bytes = output.rows.iter().try_fold(0usize, |total, row| {
+            serde_json::to_vec(row)
+                .map(|value| total.saturating_add(value.len()))
+                .map_err(|error| {
+                    Error::internal_json(
+                        error.to_string(),
+                        Some("serialize orphaned artifact row".to_string()),
+                    )
+                })
+        })?;
+        output.row_detail = Some(OutputTruncation {
+            presentation: OutputPresentation::LosslessExport,
+            total_items,
+            returned_items: total_items,
+            omitted_items: 0,
+            total_bytes,
+            returned_bytes: total_bytes,
+            omitted_bytes: 0,
+            total_bytes_known: true,
+            truncated: false,
+            continue_command: export_command.clone(),
+            export_command,
+        });
+        return Ok(());
+    }
+    let mut rows = Vec::new();
+    let mut returned_bytes = 0usize;
+    for row in output.rows.drain(..) {
+        let bytes = serde_json::to_vec(&row)
+            .map(|value| value.len())
+            .map_err(|error| {
+                Error::internal_json(
+                    error.to_string(),
+                    Some("serialize orphaned artifact row".to_string()),
+                )
+            })?;
+        if rows.len() >= OutputBudget::COLLECTION.max_items
+            || returned_bytes.saturating_add(bytes) > OutputBudget::COLLECTION.max_bytes
+        {
+            break;
+        }
+        returned_bytes = returned_bytes.saturating_add(bytes);
+        rows.push(row);
+    }
+    let returned_items = rows.len();
+    output.rows = rows;
+    output.row_detail = Some(OutputTruncation {
+        presentation: OutputPresentation::BoundedCollection,
+        total_items,
+        returned_items,
+        omitted_items: total_items.saturating_sub(returned_items),
+        total_bytes: returned_bytes,
+        returned_bytes,
+        omitted_bytes: 0,
+        total_bytes_known: returned_items == total_items,
+        truncated: returned_items < total_items,
+        continue_command: export_command.clone(),
+        export_command,
+    });
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -175,6 +247,7 @@ fn sweep(
         removed_size_bytes: 0,
         truncated: false,
         rows: Vec::new(),
+        row_detail: None,
     };
 
     for top_level in sorted_child_names(artifact_root)? {
