@@ -1260,9 +1260,22 @@ fn lab_cook_attempt_preserves_authorized_dirty_baseline_in_the_run_plan() {
 #[test]
 fn lab_cook_materializes_goal_and_explicit_task_as_one_durable_cell() {
     crate::test_support::with_isolated_home(|_| {
-        let workspace = tempfile::tempdir().expect("workspace");
-        git_init(workspace.path());
-        let workspace = workspace.path().display().to_string();
+        let primary = tempfile::tempdir().expect("primary workspace");
+        git_init(primary.path());
+        let workspace = primary.path().join("provenance-worktree");
+        let linked = Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "provenance-worktree",
+                workspace.to_str().expect("utf8 workspace"),
+            ])
+            .current_dir(primary.path())
+            .output()
+            .expect("create linked workspace");
+        assert!(linked.status.success(), "{linked:?}");
+        let workspace = workspace.display().to_string();
         let cook = Cli::parse_from([
             "homeboy",
             "agent-task",
@@ -1282,7 +1295,7 @@ fn lab_cook_materializes_goal_and_explicit_task_as_one_durable_cell() {
             "cook-lab-goal-task",
         ]);
 
-        let plan = materialize_agent_task_cook_plan(&cook)
+        let plan = materialize_agent_task_cook_plan(&cook, None)
             .expect("materialize Lab Cook plan")
             .expect("Cook plan");
         assert_eq!(plan.tasks.len(), 1);
@@ -1315,6 +1328,112 @@ fn lab_cook_materializes_goal_and_explicit_task_as_one_durable_cell() {
         assert_eq!(handoff.plan.tasks, plan.tasks);
         assert_eq!(handoff.plan.options, plan.options);
         assert_eq!(handoff.plan.metadata, plan.metadata);
+    });
+}
+
+#[test]
+fn lab_cook_plan_preserves_actual_cli_provenance_through_handoff_serialization() {
+    crate::test_support::with_isolated_home(|_| {
+        let primary = tempfile::tempdir().expect("primary workspace");
+        git_init(primary.path());
+        let workspace = primary.path().join("provenance-worktree");
+        let linked = Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                "provenance-worktree",
+                workspace.to_str().expect("utf8 workspace"),
+            ])
+            .current_dir(primary.path())
+            .output()
+            .expect("create linked workspace");
+        assert!(linked.status.success(), "{linked:?}");
+        let workspace = workspace.display().to_string();
+        let matches = Cli::command_with_scoped_lab_args()
+            .try_get_matches_from([
+                "homeboy",
+                "--placement",
+                "lab",
+                "agent-task",
+                "cook",
+                "--prompt",
+                "Repair provenance",
+                "--to-worktree",
+                &workspace,
+                "--backend",
+                "fixture",
+                "--dispatch-provider-id",
+                "fixture-provider",
+                "--max-attempts",
+                "3",
+                "--max-provider-executions",
+                "1",
+                "--protected-branch",
+                "main",
+                "--protected-branch",
+                "release",
+                "--attempt-run-id",
+                "generated-attempt",
+                "--no-finalize",
+            ])
+            .expect("parse Cook");
+        let (compiled, _) = Cli::compile_registered_arg_matches(&matches).expect("compile Cook");
+        let plan = materialize_agent_task_cook_plan(&compiled.value, Some(&compiled.provenance))
+            .expect("materialize Lab Cook plan")
+            .expect("Cook plan");
+
+        for argument in [
+            "placement",
+            "selector",
+            "max_attempts",
+            "attempts",
+            "protected_branches",
+            "attempt_run_id",
+            "no_finalize",
+        ] {
+            assert_eq!(
+                plan.metadata["command_argument_provenance"][argument], "command_line",
+                "{argument} source must survive plan materialization"
+            );
+        }
+
+        let argv = inject_agent_task_cook_attempt_plan(
+            &[
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+            ],
+            Some(&plan),
+        )
+        .expect("inject Lab attempt plan");
+        let serialized = argv
+            .windows(2)
+            .find_map(|pair| (pair[0] == "--attempt-plan").then(|| pair[1].as_str()))
+            .expect("Lab argv contains plan");
+        let handoff_plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan =
+            serde_json::from_str(serialized).expect("decode plan");
+        assert_eq!(
+            handoff_plan.metadata["command_argument_provenance"],
+            plan.metadata["command_argument_provenance"]
+        );
+
+        // Split-placement Cook sends the plan through `run-plan`, rather than
+        // rebuilding it from runner-side command-line arguments.
+        let runner_args = lab_cook_attempt_args(
+            serde_json::to_string(&plan).expect("serialize runner plan"),
+            "generated-attempt",
+        );
+        let runner_plan = runner_args
+            .windows(2)
+            .find_map(|pair| (pair[0] == "--plan").then(|| pair[1].as_str()))
+            .expect("Lab runner invocation contains plan");
+        let rehydrated_plan: homeboy::agents::agent_tasks::scheduler::AgentTaskPlan =
+            serde_json::from_str(runner_plan).expect("rehydrate runner plan");
+        assert_eq!(
+            rehydrated_plan.metadata["command_argument_provenance"],
+            plan.metadata["command_argument_provenance"]
+        );
     });
 }
 
@@ -1743,7 +1862,7 @@ fn explicit_local_cook_does_not_enter_lab_attempt_dispatch() {
     ]);
 
     assert!(
-        run_split_placement_cook(&cli, &[], None, Some("homeboy-lab"))
+        run_split_placement_cook(&cli, &[], None, Some("homeboy-lab"), None)
             .expect("local placement bypasses Lab cook dispatch")
             .is_none()
     );
@@ -1857,7 +1976,7 @@ fn cook_to_worktree_provider_workspace_survives_failed_attempt_and_lab_retry() {
             "--prompt",
             "retry this task",
         ]);
-        let plan = materialize_agent_task_cook_plan(&cook_cli)
+        let plan = materialize_agent_task_cook_plan(&cook_cli, None)
             .expect("materialize cook plan")
             .expect("cook plan");
         let expected_root = provider_workspace.display().to_string();

@@ -362,6 +362,32 @@ pub(crate) fn record_cook_provision(plan: &mut AgentTaskPlan, provision: Value) 
 }
 
 pub(crate) fn validate_cook_request(args: &AgentTaskCookArgs) -> homeboy::core::Result<()> {
+    validate_cook_request_with_provenance(args, None)
+}
+
+/// Validates Cook input authority before destination provisioning, provider
+/// discovery, or any other external effect starts.
+pub(crate) fn validate_cook_request_with_provenance(
+    args: &AgentTaskCookArgs,
+    provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
+) -> homeboy::core::Result<()> {
+    if args.no_finalize {
+        if let Some(provenance) = provenance {
+            provenance
+                .require_sources(
+                    &["no_finalize"],
+                    &[crate::cli_surface::ArgumentSource::CommandLine],
+                )
+                .map_err(|error| {
+                    homeboy::core::Error::validation_invalid_argument(
+                        "no_finalize",
+                        "--no-finalize must be explicitly authorized on the command line",
+                        Some(serde_json::to_string(&error).expect("source policy serializes")),
+                        None,
+                    )
+                })?;
+        }
+    }
     if args.goal.is_some() && !args.dispatch.tasks.is_empty() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "task",
@@ -458,7 +484,13 @@ pub(crate) fn run_cook_with_executor_and_dispatcher<E>(
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
-    run_cook_with_executor_and_dispatcher_with_progress(args, executor, attempt_dispatcher, None)
+    run_cook_with_executor_and_dispatcher_with_progress(
+        args,
+        executor,
+        attempt_dispatcher,
+        None,
+        None,
+    )
 }
 
 pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress<E>(
@@ -470,11 +502,12 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress<E>(
     progress: Option<
         &(dyn Fn(&str, Option<&str>, Option<&str>) -> homeboy::core::Result<()> + Send + Sync),
     >,
+    provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> CmdResult<Value>
 where
     E: AgentTaskExecutorAdapter + Clone,
 {
-    validate_cook_request(&args)?;
+    validate_cook_request_with_provenance(&args, provenance)?;
     // Deterministic gates exist to make *publication* safe: a green gate is the
     // proof a cook may commit, push, and open a PR. A `--no-finalize` cook does
     // none of those, so a gate is not meaningful there — read-only/exploratory
@@ -521,6 +554,9 @@ where
     if args.attempt_plan.is_some() {
         record_cook_provision(&mut initial_plan, provision);
         record_cook_goal(&mut initial_plan, args.goal.as_deref());
+    }
+    if let Some(provenance) = provenance {
+        record_cook_argument_provenance(&mut initial_plan, provenance);
     }
     // Capture the resolved task workspace before dispatch. The provider may
     // commit and leave a clean tree, so resolving this after it runs would
@@ -601,6 +637,13 @@ where
         ),
         result.exit_code,
     ))
+}
+
+pub(crate) fn record_cook_argument_provenance(
+    plan: &mut AgentTaskPlan,
+    provenance: &crate::cli_surface::CommandArgumentProvenance,
+) {
+    provenance.project_into(&mut plan.metadata);
 }
 
 pub(super) fn dispatch_args_for_cook(args: &AgentTaskCookArgs) -> DispatchArgs {

@@ -10,6 +10,12 @@ use crate::commands::{
     stack, status, trace, triage, tunnel, upgrade, worktree,
 };
 
+mod argument_provenance;
+pub use argument_provenance::{
+    ArgumentSource, ArgumentSourcePolicyError, ArgumentSourceViolation, CommandArgumentProvenance,
+    CompiledCommand, TrackerCookArgumentAdapter,
+};
+
 const VERSION: &str = homeboy_product_identity::product_version();
 const DEFAULT_COMMAND_SURFACE_DEPTH: usize = 8;
 
@@ -140,6 +146,23 @@ impl Cli {
             .and_then(crate::command_contract::registered_command)
             .expect("built-in top-level command should be registered");
         Ok((cli, spec))
+    }
+
+    /// Compiles parser matches into typed values plus durable source metadata.
+    pub fn compile_registered_arg_matches(
+        matches: &ArgMatches,
+    ) -> Result<
+        (
+            CompiledCommand<Self>,
+            &'static crate::command_contract::CommandSpec,
+        ),
+        clap::Error,
+    > {
+        let (cli, spec) = Self::from_registered_arg_matches(matches)?;
+        Ok((
+            CompiledCommand::new(cli, CommandArgumentProvenance::from_matches(matches)),
+            spec,
+        ))
     }
 }
 

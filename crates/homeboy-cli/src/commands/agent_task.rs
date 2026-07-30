@@ -100,18 +100,29 @@ pub(crate) fn run_with_cook_progress(
         &(dyn Fn(&str, Option<&str>, Option<&str>) -> homeboy::core::Result<()> + Send + Sync),
     >,
 ) -> CmdResult<Value> {
+    run_with_cook_progress_and_provenance(args, progress, None)
+}
+
+pub(crate) fn run_with_cook_progress_and_provenance(
+    args: AgentTaskArgs,
+    progress: Option<
+        &(dyn Fn(&str, Option<&str>, Option<&str>) -> homeboy::core::Result<()> + Send + Sync),
+    >,
+    provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
+) -> CmdResult<Value> {
     match args.command {
         AgentTaskCommand::Doctor(doctor_args) => doctor::doctor(doctor_args),
         AgentTaskCommand::Cook(cook_args) => {
             // Reject unsupported Cook source shapes before discovering a provider
             // or preparing the local/Lab execution route.
-            run::validate_cook_request(&cook_args)?;
+            run::validate_cook_request_with_provenance(&cook_args, provenance)?;
             if progress.is_some() {
                 run::run_cook_with_executor_and_dispatcher_with_progress(
                     cook_args,
                     homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor::discover(),
                     None,
                     progress,
+                    provenance,
                 )
             } else {
                 run::run_cook(cook_args)
