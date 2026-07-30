@@ -219,4 +219,3 @@ Spec-less inspection of the current branch as a stack of commits. Replaces the p
 | `--no-pr` | flag | Skip the GitHub PR lookup pass |
 | `--repo` | `<OWNER/NAME>` | Scope PR lookups to a specific GitHub repo (`owner/name`) |
 | `--path` | `<PATH>` | Workspace path to operate on directly |
-

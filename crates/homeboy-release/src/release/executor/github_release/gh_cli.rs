@@ -383,6 +383,25 @@ pub(crate) fn github_release_asset_paths(state: &ReleaseState) -> Result<Vec<Str
     }
 }
 
+/// Asset names a cargo-dist manifest declares, for verifying a REMOTE release.
+///
+/// `github_release_asset_paths` answers the same question for local files and
+/// resolves paths; a draft on GitHub has only names, so this returns names.
+/// Sharing `collect_manifest_assets` keeps one definition of "what this
+/// manifest declares" rather than a second, drifting one (#8687).
+pub(crate) fn manifest_declared_asset_names(manifest: &str) -> Option<Vec<String>> {
+    let value: serde_json::Value = serde_json::from_str(manifest).ok()?;
+    let mut paths = Vec::new();
+    collect_manifest_assets(&value, std::path::Path::new(""), &mut paths);
+    let mut names = paths
+        .iter()
+        .map(|path| release_asset_name(path))
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    Some(names)
+}
+
 fn collect_manifest_assets(
     value: &serde_json::Value,
     manifest_dir: &std::path::Path,

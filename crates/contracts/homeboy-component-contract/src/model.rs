@@ -585,6 +585,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn portable_component_round_trips_inline_deployment_policy() {
+        let component: Component = serde_json::from_value(serde_json::json!({
+            "id": "fixture",
+            "deployment_provider": {
+                "extension": "fixture-extension",
+                "provider": "fixture.deploy",
+                "policy": { "mode": "portable" }
+            }
+        }))
+        .expect("portable component");
+
+        let serialized = serde_json::to_value(component).expect("serialize component");
+        assert_eq!(
+            serialized["deployment_provider"]["policy"],
+            serde_json::json!({ "mode": "portable" })
+        );
+        assert!(serialized["deployment_provider"].get("contract").is_none());
+        assert!(serialized.get("deployment_provider_input").is_none());
+    }
+
+    #[test]
     fn canonical_attachment_identity_ignores_build_artifact_but_catches_config_drift() {
         let base = Component::new(
             "agents-api".to_string(),

@@ -79,7 +79,23 @@ pub struct DeploymentProviderManifest {
     pub command: String,
     #[serde(default)]
     pub dry_run_command: Option<String>,
+    #[serde(default)]
+    pub layered_input: Option<DeploymentProviderLayeredInputManifest>,
 }
+
+/// Opt-in capability for providers that receive a versioned layered payload.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DeploymentProviderLayeredInputManifest {
+    pub schema: String,
+    #[serde(default)]
+    pub target_required: bool,
+    /// Schema for provider-produced structured evidence. Providers declaring this
+    /// contract are responsible for emitting already-redacted JSON.
+    #[serde(default)]
+    pub result_schema: Option<String>,
+}
+
+pub const DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA: &str = "homeboy/deployment-provider-payload/v1";
 
 /// Extension manifests retain provider descriptors as extension-owned data until
 /// the shared manifest contract publishes this capability.
@@ -92,6 +108,23 @@ pub fn deployment_providers(manifest: &ExtensionManifest) -> Vec<DeploymentProvi
         .unwrap_or_default()
 }
 
+pub fn deployment_provider_layered_input(
+    extension_id: &str,
+    provider_id: &str,
+) -> Result<Option<DeploymentProviderLayeredInputManifest>> {
+    let extension = super::load_extension(extension_id)?;
+    let provider = deployment_providers(&extension)
+        .into_iter()
+        .find(|provider| provider.id == provider_id)
+        .ok_or_else(|| Error::validation_invalid_argument(
+            "deployment_provider.provider",
+            format!("Extension '{extension_id}' does not declare deployment provider '{provider_id}'"),
+            None,
+            None,
+        ))?;
+    Ok(provider.layered_input)
+}
+
 #[cfg(test)]
 mod deployment_provider_tests {
     use super::*;
@@ -102,7 +135,7 @@ mod deployment_provider_tests {
             "name": "fixture", "version": "1.0.0",
             "deployment_providers": [
                 { "id": "fixture.alpha", "command": "fixture-alpha --contract {{payload.contract}}" },
-                { "id": "fixture.beta", "command": "fixture-beta --contract {{payload.contract}}", "dry_run_command": "fixture-beta --dry-run --contract {{payload.contract}}" }
+                { "id": "fixture.beta", "command": "fixture-beta --contract {{payload.contract}}", "dry_run_command": "fixture-beta --dry-run --contract {{payload.contract}}", "layered_input": { "schema": "homeboy/deployment-provider-payload/v1", "target_required": true, "result_schema": "fixture/deployment-result/v1" } }
             ]
         }))
         .expect("fixture manifest");
@@ -115,6 +148,21 @@ mod deployment_provider_tests {
         assert_eq!(
             providers[1].dry_run_command.as_deref(),
             Some("fixture-beta --dry-run --contract {{payload.contract}}")
+        );
+        assert_eq!(
+            providers[1]
+                .layered_input
+                .as_ref()
+                .expect("layered input")
+                .schema,
+            DEPLOYMENT_PROVIDER_PAYLOAD_SCHEMA
+        );
+        assert!(
+            providers[1]
+                .layered_input
+                .as_ref()
+                .expect("layered input")
+                .target_required
         );
     }
 }

@@ -132,4 +132,3 @@ homeboy contract manifest
 ```
 
 Print the recursive command safety, docs, and output manifest
-

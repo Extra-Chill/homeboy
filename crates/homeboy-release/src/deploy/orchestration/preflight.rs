@@ -598,6 +598,7 @@ mod tests {
     use super::{
         guard_deployment_provenance, guard_head_matches_invocation_checkout,
         guard_local_build_downgrades, guard_local_build_source_freshness, local_build_components,
+        warn_non_default_branch,
     };
     use crate::deploy::DeployConfig;
     use homeboy_core::component::Component;
@@ -875,6 +876,29 @@ mod tests {
         config.expected_version = Some("1.2.3".to_string());
 
         assert!(local_build_components(&[component], &config).is_empty());
+    }
+
+    #[test]
+    fn non_default_head_requires_force_for_dry_run_and_apply() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        init_repo_with_commit(temp.path());
+        git(temp.path(), &["checkout", "-b", "feature"]);
+        let component = component(temp.path());
+
+        for dry_run in [true, false] {
+            let mut config = config();
+            config.head = true;
+            config.dry_run = dry_run;
+            let error = warn_non_default_branch(&[component.clone()], &config)
+                .expect_err("non-default --head requires --force");
+            assert_eq!(error.details["field"], "head");
+            assert!(error.message.contains("branch 'feature', not 'main'"));
+            assert!(error.details.to_string().contains("Use --force"));
+
+            config.force = true;
+            warn_non_default_branch(&[component.clone()], &config)
+                .expect("--force approves non-default --head for dry-run and apply");
+        }
     }
 
     // Serialize the #7599 tests: they mutate the process CWD, which is global.

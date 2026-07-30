@@ -148,7 +148,7 @@ Manage project components
 | --- | --- |
 | `homeboy project components list` | List associated components |
 | `homeboy project components set` | Replace project components with the provided list |
-| `homeboy project components attach-path` | Attach a repo path for a project component discovered via homeboy.json |
+| `homeboy project components attach-path` | Rebase matching project components discovered below a monorepo checkout |
 | `homeboy project components attach-paths` | Attach multiple repo paths, retaining per-path diagnostics |
 | `homeboy project components remove` | Remove one or more components |
 | `homeboy project components clear` | Remove all components |
@@ -184,15 +184,19 @@ Replace project components with the provided list
 ## `homeboy project components attach-path`
 
 ```sh
-homeboy project components attach-path <PROJECT_ID> <LOCAL_PATH>
+homeboy project components attach-path [OPTIONS] <PROJECT_ID> <LOCAL_PATH>
 ```
 
-Attach a repo path for a project component discovered via homeboy.json
+Rebase matching project components discovered below a monorepo checkout
 
 | Argument | Required | Description |
 | --- | --- | --- |
 | `<PROJECT_ID>` | yes | Project ID |
 | `<LOCAL_PATH>` | yes | Local repo path containing homeboy.json |
+
+| Option | Value | Description |
+| --- | --- | --- |
+| `--dry-run` | flag | Preview every nested component path rebase without updating project config |
 
 ## `homeboy project components attach-paths`
 
@@ -382,4 +386,3 @@ Show live server health and component versions for a project
 | Option | Value | Description |
 | --- | --- | --- |
 | `--health-only` | flag | Show only server health metrics, skip component versions |
-

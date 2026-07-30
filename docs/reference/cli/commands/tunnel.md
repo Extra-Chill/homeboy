@@ -471,4 +471,3 @@ Capture DOM bounding boxes for data-figma-node-id elements in static HTML pages
 | `--entrypoint` | `<ENTRYPOINT>` | HTML entrypoint path, relative to --root; repeat for multiple pages |
 | `--report` | `<REPORT>` | Write the schema payload directly to this JSON file |
 | `--text-sample-limit` | `<TEXT_SAMPLE_LIMIT>` | Maximum normalized characters captured from each element text sample |
-

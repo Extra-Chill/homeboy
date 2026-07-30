@@ -225,4 +225,3 @@ Report or remove declared reconstructable artifacts for a component
 | --- | --- | --- |
 | `--path` | `<PATH>` | Discover component from a directory's homeboy.json instead of the registry |
 | `--apply` | flag | Remove reported artifact paths instead of dry-run reporting only |
-

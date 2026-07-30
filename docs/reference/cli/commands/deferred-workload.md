@@ -44,4 +44,3 @@ homeboy deferred-workload status
 ```
 
 Inspect deferred workloads and the controller worker
-

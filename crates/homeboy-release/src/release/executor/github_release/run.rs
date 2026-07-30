@@ -6,6 +6,7 @@ use homeboy_core::error::{Error, Result};
 
 use super::super::step_success;
 use super::delivery::{existing_release_action, ExistingReleaseAction};
+use super::gh_cli::manifest_declared_asset_names;
 use super::gh_cli::{
     gh_command, gh_is_authenticated, gh_is_available, gh_release_exists,
     github_release_publications,
@@ -279,10 +280,36 @@ pub(crate) fn run_github_release(
             ));
         }
 
+        // Resolve the completeness contract the release declares for itself.
+        // A draft's own `dist-manifest.json` names every archive it is supposed
+        // to carry, so a partially uploaded draft can be recognised without any
+        // out-of-band plan. An adoption manifest, when present, is authoritative
+        // over it (#8687).
+        let existing_asset_names = metadata
+            .assets
+            .iter()
+            .map(|asset| asset.name.clone())
+            .collect::<Vec<_>>();
+        let declared_assets = state
+            .draft_adoption
+            .as_ref()
+            .map(|adoption| adoption.expected_assets.clone())
+            .or_else(|| {
+                let manifest = metadata
+                    .assets
+                    .iter()
+                    .find(|asset| asset.name == "dist-manifest.json")?;
+                let contents =
+                    download_small_release_asset(&github, &component.github, &repo_flag, manifest)
+                        .ok()?;
+                manifest_declared_asset_names(&contents)
+            });
+
         match existing_release_action(
             metadata.is_draft,
             has_artifacts,
-            metadata.assets.len(),
+            &existing_asset_names,
+            declared_assets.as_deref(),
             component.build_artifact.is_some(),
         ) {
             ExistingReleaseAction::AlreadyPublished => {
@@ -313,6 +340,23 @@ pub(crate) fn run_github_release(
                     &tag,
                     &github,
                     "draft-release-has-no-assets",
+                    &detail,
+                    repair,
+                    &[],
+                ));
+            }
+            ExistingReleaseAction::PartialDraft { missing } => {
+                let detail = format!(
+                    "GitHub Release {tag} for {repo_flag} is an unpublished draft missing {} asset(s) declared by its own distribution manifest: {}. Publishing it would ship a release whose missing platforms return 404.",
+                    missing.len(),
+                    missing.join(", ")
+                );
+                homeboy_core::log_status!("release", "{}", detail);
+                let repair = repair_commands(None, None);
+                return Ok(unfinished_release_result(
+                    &tag,
+                    &github,
+                    "draft-release-incomplete",
                     &detail,
                     repair,
                     &[],

@@ -128,6 +128,8 @@ pub struct DeployOutput {
     pub summary: DeploySummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub release_set_identity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deploy_run_id: Option<String>,
     #[serde(
         rename = "_homeboy_actionable",
         skip_serializing_if = "Option::is_none"
@@ -279,6 +281,7 @@ pub fn run(mut args: DeployArgs) -> CmdResult<DeployCommandOutput> {
             results: result.results,
             summary: result.summary,
             release_set_identity: release_set.map(|value| value.identity.clone()),
+            deploy_run_id: result.deploy_run_id,
             actionable: Some(deploy_actionable(&project_id)),
         }),
         exit_code,

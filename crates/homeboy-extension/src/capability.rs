@@ -135,6 +135,7 @@ mod tests {
                     local_path: component_dir.path().to_string_lossy().to_string(),
                     remote_path: None,
                     deployment_provider: None,
+                    deployment_provider_input: None,
                 }],
                 ..Default::default()
             };

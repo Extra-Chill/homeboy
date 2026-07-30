@@ -269,4 +269,3 @@ Delete a snapshot without restoring
 | Argument | Required | Description |
 | --- | --- | --- |
 | `<ID>` | yes | Snapshot ID to delete |
-

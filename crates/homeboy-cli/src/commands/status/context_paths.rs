@@ -1,16 +1,14 @@
 //! Registered-context detection for the default `status` view.
 //!
-//! Determines whether the current (or git-root) directory maps to a registered
-//! component/project checkout, so `homeboy status` can fast-return an
-//! actionable "unregistered context" hint instead of scanning every configured
-//! component.
+//! Keeps the unregistered fast path cheap for ordinary directories while using
+//! canonical worktree resolution for linked task checkouts.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use homeboy::core::git;
+use homeboy::core::{component, git};
 
 use super::types::UnregisteredContextStatusOutput;
 
@@ -55,7 +53,26 @@ pub(super) fn unregistered_cwd_status_output() -> Option<UnregisteredContextStat
 fn path_is_registered_context(path: &Path) -> bool {
     registered_local_paths().into_iter().any(|registered| {
         path_is_at_or_inside(&registered, path) || path_is_at_or_inside(path, &registered)
+    }) || linked_worktree_resolves_to_registered_component(path)
+}
+
+fn linked_worktree_resolves_to_registered_component(path: &Path) -> bool {
+    let Some(git_root) = component::resolution::detect_git_root(path) else {
+        return false;
+    };
+    // A regular checkout has a `.git` directory. Restrict the inventory-backed
+    // resolver to linked worktrees so unregistered CWD status remains fast.
+    if !git_root.join(".git").is_file() {
+        return false;
+    }
+
+    component::resolve_target(component::TargetSpec {
+        path_override: Some(git_root.to_string_lossy().as_ref()),
+        allow_synthetic: true,
+        accept_bare_directory: true,
+        ..component::TargetSpec::default()
     })
+    .is_ok_and(|target| !target.synthetic)
 }
 
 fn registered_local_paths() -> Vec<PathBuf> {

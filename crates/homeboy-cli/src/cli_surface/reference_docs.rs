@@ -51,6 +51,7 @@
 
 use super::Cli;
 use clap::{Arg, ArgAction, Command, CommandFactory};
+use homeboy_command_contract::cli_reference::checked_in_cli_reference;
 use std::collections::BTreeMap;
 
 /// Repo-root-relative directory owned entirely by this generator.
@@ -72,6 +73,12 @@ const NO_HELP_CELL: &str = "_no help text_";
 
 /// Renders the full generated tree as `file name -> markdown body`.
 pub(super) fn generated_reference_docs() -> BTreeMap<String, String> {
+    checked_in_cli_reference().documents
+}
+
+/// Projects the live runtime Clap tree into the serializable reference contract.
+/// This remains the sole source used when deliberately updating the contract.
+pub(super) fn live_generated_reference_docs() -> BTreeMap<String, String> {
     let root = Cli::command();
 
     let mut files = BTreeMap::new();
@@ -120,7 +127,7 @@ fn render_command_page(name: &str, command: &Command) -> String {
     );
 
     render_node(&mut out, &[name.to_string()], command);
-    out
+    format!("{}\n", out.trim_end())
 }
 
 fn render_node(out: &mut String, path: &[String], command: &Command) {

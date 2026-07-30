@@ -132,4 +132,3 @@ Run downstream update commands for an upstream component/repo
 | `--dry-run` | flag | Print the command plan without running commands |
 | `--no-install` | flag | Skip provider-owned install/lockfile refresh after each manifest update |
 | `--rebuild` | flag | Rebuild each downstream component through its generic build capability |
-

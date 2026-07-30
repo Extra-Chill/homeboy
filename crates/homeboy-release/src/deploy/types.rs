@@ -317,6 +317,30 @@ pub enum BuildSource {
     FileCopy,
 }
 
+/// The deploy lifecycle phase in which the reported build ran.
+///
+/// A payload can be built during lifecycle preparation, then transferred by the
+/// deploy phase as a prepared artifact. Keeping this distinct from `source`
+/// makes both facts visible without treating the transfer as a skipped build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildPhase {
+    /// The deploy phase built the payload directly.
+    Deploy,
+    /// Lifecycle payload preparation built the payload before deploy transfer.
+    PayloadPreparation,
+    /// No build ran in this deploy lifecycle.
+    NotRun,
+    /// The phase was not recorded by an older persisted result.
+    Unknown,
+}
+
+impl Default for BuildPhase {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
 /// Content identity of a deployed artifact file, so stale artifacts are detectable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ArtifactIdentity {
@@ -344,8 +368,14 @@ pub struct ArtifactIdentity {
 pub struct BuildProvenance {
     /// Where the deployed payload came from.
     pub source: BuildSource,
+    /// The lifecycle phase in which a build ran. Older persisted provenance did
+    /// not include a phase and deserializes as `unknown`.
+    #[serde(default)]
+    pub phase: BuildPhase,
     /// Whether a fresh build ran for this deploy (vs. a reused or downloaded
-    /// artifact, or a strategy that ships source directly).
+    /// artifact, or a strategy that ships source directly). When the source is
+    /// `prepared_artifact`, `phase` distinguishes an upstream preparation build
+    /// from an externally supplied artifact.
     pub build_ran: bool,
     /// The git ref the payload was built/deployed from (tag, or `"<branch> (HEAD)"`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1291,4 +1321,6 @@ pub struct DeploySummary {
 pub struct DeployOrchestrationResult {
     pub results: Vec<ComponentDeployResult>,
     pub summary: DeploySummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deploy_run_id: Option<String>,
 }

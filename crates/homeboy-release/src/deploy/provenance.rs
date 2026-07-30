@@ -13,7 +13,7 @@ use homeboy_core::component::Component;
 use homeboy_core::engine::command;
 
 use super::generated_artifacts::uncommitted_file_report_excluding_known_generated;
-use super::types::{ArtifactIdentity, BuildProvenance, BuildSource};
+use super::types::{ArtifactIdentity, BuildPhase, BuildProvenance, BuildSource};
 
 /// Capture explicit build provenance for a prepared deploy.
 ///
@@ -46,12 +46,23 @@ pub(super) fn capture_build_provenance(
 
     BuildProvenance {
         source,
+        phase: if build_ran {
+            BuildPhase::Deploy
+        } else {
+            BuildPhase::NotRun
+        },
         build_ran,
         built_from_ref: None,
         built_from_commit,
         working_tree_dirty,
         artifact_identity,
     }
+}
+
+/// Mark a payload that was built before the deploy transfer began.
+pub(super) fn record_payload_preparation_build(provenance: &mut BuildProvenance) {
+    provenance.phase = BuildPhase::PayloadPreparation;
+    provenance.build_ran = true;
 }
 
 fn resolve_artifact_identity(path: &Path) -> Option<ArtifactIdentity> {
@@ -138,6 +149,7 @@ mod provenance_tests {
         );
 
         assert_eq!(provenance.source, BuildSource::FreshBuild);
+        assert_eq!(provenance.phase, BuildPhase::Deploy);
         assert!(provenance.build_ran);
         assert!(provenance.built_from_ref.is_none());
         assert_eq!(
@@ -183,6 +195,7 @@ mod provenance_tests {
         );
 
         assert_eq!(provenance.source, BuildSource::DownloadedRelease);
+        assert_eq!(provenance.phase, BuildPhase::NotRun);
         assert!(!provenance.build_ran);
         // Local tree dirtiness is not meaningful provenance for a downloaded asset.
         assert_eq!(provenance.working_tree_dirty, None);
@@ -203,7 +216,40 @@ mod provenance_tests {
         );
 
         assert_eq!(provenance.source, BuildSource::ReusedArtifact);
+        assert_eq!(provenance.phase, BuildPhase::NotRun);
         assert!(!provenance.build_ran);
         assert!(provenance.artifact_identity.is_some());
+    }
+
+    #[test]
+    fn prepared_artifact_preserves_an_earlier_lifecycle_build() {
+        let temp = committed_repo();
+        let dir = temp.path();
+        let artifact = dir.join("plugin.zip");
+        std::fs::write(&artifact, b"prepared").expect("artifact");
+
+        let mut provenance = capture_build_provenance(
+            &component_at(dir),
+            BuildSource::PreparedArtifact,
+            false,
+            Some(artifact.as_path()),
+        );
+        record_payload_preparation_build(&mut provenance);
+
+        assert_eq!(provenance.source, BuildSource::PreparedArtifact);
+        assert_eq!(provenance.phase, BuildPhase::PayloadPreparation);
+        assert!(provenance.build_ran);
+    }
+
+    #[test]
+    fn legacy_provenance_without_a_phase_remains_readable() {
+        let provenance: BuildProvenance = serde_json::from_value(serde_json::json!({
+            "source": "fresh_build",
+            "build_ran": true
+        }))
+        .expect("legacy provenance");
+
+        assert_eq!(provenance.phase, BuildPhase::Unknown);
+        assert!(provenance.build_ran);
     }
 }

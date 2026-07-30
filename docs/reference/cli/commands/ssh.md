@@ -42,4 +42,3 @@ homeboy ssh list
 ```
 
 List configured SSH server targets
-
