@@ -754,24 +754,14 @@ fn stale_daemon_warning_includes_explicit_refresh_recovery_command() {
     );
     assert_eq!(
         warning.refresh_command,
-        format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
-            homeboy_product_identity::build_identity()
-                .git_commit
-                .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()))
-        )
+        "homeboy runner refresh-homeboy homeboy-lab --ref new --reconnect"
     );
     assert!(warning.message.contains("daemon control plane"));
     assert!(warning.message.contains("job command binary"));
     assert!(warning.message.contains("active jobs are drained"));
     assert_eq!(
         warning.recovery_commands,
-        vec![format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
-            homeboy_product_identity::build_identity()
-                .git_commit
-                .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()))
-        )]
+        ["homeboy runner refresh-homeboy homeboy-lab --ref new --reconnect"]
     );
     assert_ne!(
         warning.refresh_command,
@@ -853,12 +843,7 @@ fn runtime_path_warning_uses_rebuild_specific_message() {
     assert!(warning.message.contains("runtime paths are stale"));
     assert_eq!(
         warning.recovery_commands,
-        vec![format!(
-            "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
-            homeboy_product_identity::build_identity()
-                .git_commit
-                .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()))
-        )]
+        ["homeboy runner refresh-homeboy homeboy-lab --ref same --reconnect"]
     );
 }
 

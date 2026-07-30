@@ -956,6 +956,34 @@ mod status_serialization_tests {
     }
 
     #[test]
+    fn recovery_command_targets_the_configured_job_binary_commit() {
+        let initiating = homeboy_product_identity::BuildIdentity {
+            version: "0.323.1".to_string(),
+            git_commit: Some("6899aabbccdd".to_string()),
+            git_dirty: Some(false),
+            display: "homeboy 0.323.1+6899aabbccdd".to_string(),
+        };
+
+        assert_eq!(
+            recovery_command(
+                "homeboy-lab",
+                Some("homeboy 0.323.1+c8a6673b6abc"),
+                &initiating,
+            ),
+            ["homeboy runner refresh-homeboy homeboy-lab --ref c8a6673b6abc --reconnect"]
+        );
+        for configured in [
+            "homeboy 0.323.1+c8a6673b6abc-dirty",
+            "homeboy not-a-version",
+        ] {
+            assert_eq!(
+                recovery_command("homeboy-lab", Some(configured), &initiating),
+                Vec::<String>::new(),
+            );
+        }
+    }
+
+    #[test]
     fn admission_summary_disconnected_points_to_connect() {
         let mut report = base_report();
         report.connected = false;
@@ -1044,14 +1072,11 @@ impl RunnerStaleDaemonWarning {
         session_homeboy_build_identity: Option<String>,
         current_homeboy_build_identity: Option<String>,
     ) -> Self {
-        let recovery_ref = homeboy_product_identity::build_identity()
-            .git_commit
-            .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()));
-        let recovery_commands = vec![format!(
-            "homeboy runner refresh-homeboy {} --ref {} --reconnect",
-            shell::quote_arg(runner_id),
-            recovery_ref,
-        )];
+        let recovery_commands = recovery_command(
+            runner_id,
+            current_homeboy_build_identity.as_deref(),
+            &homeboy_product_identity::build_identity(),
+        );
         let message = if !same_homeboy_version(&session_homeboy_version, &current_homeboy_version) {
             format!(
                 "connected runner daemon control plane version `{session_homeboy_version}` differs from configured job command binary version `{current_homeboy_version}`; run recovery_commands in order when runner active jobs are drained"
@@ -1123,6 +1148,13 @@ impl RunnerStaleDaemonWarning {
         self
     }
 
+    pub(crate) fn recovery_ref(&self) -> Option<String> {
+        recovery_ref(
+            self.current_homeboy_build_identity.as_deref(),
+            &homeboy_product_identity::build_identity(),
+        )
+    }
+
     pub fn with_identity_unverifiable(
         mut self,
         runner_id: &str,
@@ -1174,6 +1206,40 @@ impl RunnerStaleDaemonWarning {
             let _ = runner_id;
         }
         self
+    }
+}
+
+fn recovery_command(
+    runner_id: &str,
+    configured_identity: Option<&str>,
+    initiating_identity: &homeboy_product_identity::BuildIdentity,
+) -> Vec<String> {
+    recovery_ref(configured_identity, initiating_identity)
+        .map(|recovery_ref| {
+            format!(
+                "homeboy runner refresh-homeboy {} --ref {recovery_ref} --reconnect",
+                shell::quote_arg(runner_id),
+            )
+        })
+        .into_iter()
+        .collect()
+}
+
+fn recovery_ref(
+    configured_identity: Option<&str>,
+    initiating_identity: &homeboy_product_identity::BuildIdentity,
+) -> Option<String> {
+    match configured_identity {
+        // The runner's configured executable is the desired post-recovery job
+        // binary. A present but dirty or unverifiable identity must not be
+        // replaced with the initiating controller's unrelated commit.
+        Some(identity) => homeboy_upgrade::upgrade::parse_build_identity_display(identity)
+            .filter(|identity| identity.git_dirty != Some(true))
+            .and_then(|identity| identity.git_commit),
+        None if initiating_identity.git_dirty != Some(true) => {
+            initiating_identity.git_commit.clone()
+        }
+        None => None,
     }
 }
 

@@ -1112,12 +1112,7 @@ fn runner_homeboy_metadata_carries_stale_daemon_details() {
     );
     // The explicit refresh owns the reconnect, so the recovery command avoids
     // a redundant disconnect/connect loop.
-    let expected_refresh = format!(
-        "homeboy runner refresh-homeboy lab --ref {} --reconnect",
-        homeboy_product_identity::build_identity()
-            .git_commit
-            .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()))
-    );
+    let expected_refresh = "homeboy runner refresh-homeboy lab --ref new --reconnect";
     assert_eq!(
         metadata["stale_daemon"]["refresh_command"],
         expected_refresh
@@ -1134,9 +1129,7 @@ fn runner_homeboy_metadata_carries_stale_daemon_details() {
         serde_json::json!([
             format!(
                 "homeboy runner refresh-homeboy lab --ref {} --reconnect",
-                homeboy_product_identity::build_identity()
-                    .git_commit
-                    .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()))
+                expected_controller_refresh_ref()
             ),
             "homeboy runner disconnect lab",
             "homeboy runner connect lab"

@@ -1053,7 +1053,7 @@ fn paths_identify_same_binary(a: &Path, b: &Path) -> bool {
 /// the form `homeboy <version>[+<commit>[-dirty]]` (the exact format
 /// `homeboy_product_identity` emits). Returns `None` for an unrecognizable
 /// string so callers can fall back to the safe unverifiable-replacement path.
-pub(crate) fn parse_build_identity_display(
+pub fn parse_build_identity_display(
     display: &str,
 ) -> Option<homeboy_core::build_identity::BuildIdentity> {
     let display = display.trim();

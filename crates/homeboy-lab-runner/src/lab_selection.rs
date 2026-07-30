@@ -716,9 +716,12 @@ fn daemon_repair_command(runner_id: &str, status: &RunnerStatusReport) -> String
 fn daemon_repair_action(runner_id: &str, status: &RunnerStatusReport) -> Option<ExecutableAction> {
     let steps = daemon_repair_steps(runner_id, status);
     let recovery_plan: Vec<&str> = steps.iter().map(|step| step.command.as_str()).collect();
-    let recovery_ref = homeboy_product_identity::build_identity()
-        .git_commit
-        .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version()));
+    let recovery_ref = match status.stale_daemon.as_ref() {
+        Some(warning) => warning.recovery_ref()?,
+        None => homeboy_product_identity::build_identity()
+            .git_commit
+            .unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version())),
+    };
     let action = ExecutableAction::new(
         "runner.refresh_homeboy",
         format!("refresh runner {runner_id}"),
