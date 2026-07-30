@@ -438,9 +438,8 @@ mod tests {
             components: vec![ProjectComponentAttachment {
                 id: "fixture".to_string(),
                 local_path: "/source/fixture".to_string(),
-                remote_path: None,
-                deployment_provider: None,
                 deployment_provider_input: Some(target),
+                ..Default::default()
             }],
             ..Default::default()
         };

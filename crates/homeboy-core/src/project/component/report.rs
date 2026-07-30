@@ -511,9 +511,7 @@ mod tests {
             components: vec![ProjectComponentAttachment {
                 id: "plugin".to_string(),
                 local_path: "/repo/plugin".to_string(),
-                remote_path: None,
-                deployment_provider: None,
-                deployment_provider_input: None,
+                ..Default::default()
             }],
             ..Default::default()
         };
@@ -543,16 +541,12 @@ mod tests {
                     ProjectComponentAttachment {
                         id: "remove-me".to_string(),
                         local_path: "/tmp/homeboy-remove-me-missing".to_string(),
-                        remote_path: None,
-                        deployment_provider: None,
-                        deployment_provider_input: None,
+                        ..Default::default()
                     },
                     ProjectComponentAttachment {
                         id: "stale-remaining".to_string(),
                         local_path: "/tmp/homeboy-stale-remaining-missing".to_string(),
-                        remote_path: None,
-                        deployment_provider: None,
-                        deployment_provider_input: None,
+                        ..Default::default()
                     },
                 ],
                 ..Default::default()

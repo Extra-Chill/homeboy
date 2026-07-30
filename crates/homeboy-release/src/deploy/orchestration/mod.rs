@@ -1163,9 +1163,7 @@ mod tests {
                 .map(|(id, path)| ProjectComponentAttachment {
                     id: (*id).to_string(),
                     local_path: path.to_string_lossy().to_string(),
-                    remote_path: None,
-                    deployment_provider: None,
-                    deployment_provider_input: None,
+                    ..Default::default()
                 })
                 .collect(),
             ..Default::default()

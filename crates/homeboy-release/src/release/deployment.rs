@@ -938,8 +938,7 @@ mod tests {
                         id: "demo".to_string(),
                         local_path: "/stale/demo".to_string(),
                         remote_path: Some(remote_path.to_string()),
-                        deployment_provider: None,
-                        deployment_provider_input: None,
+                        ..Default::default()
                     }],
                     ..Default::default()
                 })
@@ -1079,8 +1078,7 @@ mod tests {
                             .display()
                             .to_string(),
                         remote_path: Some(format!("plugins/{id}")),
-                        deployment_provider: None,
-                        deployment_provider_input: None,
+                        ..Default::default()
                     }],
                     ..Project::default()
                 })
