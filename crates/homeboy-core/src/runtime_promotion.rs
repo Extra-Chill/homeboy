@@ -195,7 +195,7 @@ pub fn acquire_waiting_for_compatible(
     operation: &str,
     target: impl Into<String>,
     timeout: Duration,
-    mut progress: impl FnMut(RuntimePromotionWaitEvent),
+    progress: impl FnMut(RuntimePromotionWaitEvent),
 ) -> Result<RuntimePromotionLease> {
     acquire_waiting_for_compatible_key(operation, target, "", timeout, progress)
 }
