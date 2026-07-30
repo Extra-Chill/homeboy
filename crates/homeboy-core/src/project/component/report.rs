@@ -11,7 +11,8 @@ use crate::project::{
 
 use super::{
     attach_discovered_component_path, clear_component_attachments, project_component_ids,
-    remove_components, set_component_attachments,
+    rebase_monorepo_component_paths, remove_components, set_component_attachments,
+    MonorepoComponentPathChange, MonorepoComponentPathStatus,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -30,6 +31,25 @@ pub struct ProjectComponentsOutput {
     pub warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch: Option<BatchComponentAttachmentOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monorepo: Option<MonorepoComponentAttachmentOutput>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MonorepoComponentAttachmentOutput {
+    pub dry_run: bool,
+    pub attached_count: usize,
+    pub unchanged_count: usize,
+    pub missing_count: usize,
+    pub unrelated_count: usize,
+    pub components: Vec<MonorepoComponentAttachmentItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MonorepoComponentAttachmentItem {
+    pub id: String,
+    pub path: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -125,16 +145,63 @@ pub fn set_components(project_id: &str, json_spec: &str) -> Result<ProjectCompon
 pub fn attach_component_path_report(
     project_id: &str,
     local_path: &Path,
+    dry_run: bool,
 ) -> Result<ProjectComponentsOutput> {
-    let attached_component_id = attach_discovered_component_path(project_id, local_path)?;
+    let changes = rebase_monorepo_component_paths(project_id, local_path, dry_run)?;
     let project = load(project_id)?;
-    build_components_summary(
+    let attached_component_id = changes
+        .iter()
+        .find(|change| change.path == local_path.to_string_lossy())
+        .map(|change| change.id.clone());
+    let mut output = build_components_summary(
         project_id,
         "attach_path",
         &project,
-        Some(attached_component_id),
+        attached_component_id,
         Some(local_path.to_string_lossy().to_string()),
-    )
+    )?;
+    output.monorepo = Some(build_monorepo_attachment_output(changes, dry_run));
+    Ok(output)
+}
+
+fn build_monorepo_attachment_output(
+    changes: Vec<MonorepoComponentPathChange>,
+    dry_run: bool,
+) -> MonorepoComponentAttachmentOutput {
+    let mut output = MonorepoComponentAttachmentOutput {
+        dry_run,
+        attached_count: 0,
+        unchanged_count: 0,
+        missing_count: 0,
+        unrelated_count: 0,
+        components: Vec::with_capacity(changes.len()),
+    };
+    for change in changes {
+        let status = match change.status {
+            MonorepoComponentPathStatus::Attached => {
+                output.attached_count += 1;
+                "attached"
+            }
+            MonorepoComponentPathStatus::Unchanged => {
+                output.unchanged_count += 1;
+                "unchanged"
+            }
+            MonorepoComponentPathStatus::Missing => {
+                output.missing_count += 1;
+                "missing"
+            }
+            MonorepoComponentPathStatus::Unrelated => {
+                output.unrelated_count += 1;
+                "unrelated"
+            }
+        };
+        output.components.push(MonorepoComponentAttachmentItem {
+            id: change.id,
+            path: change.path,
+            status: status.to_string(),
+        });
+    }
+    output
 }
 
 pub fn attach_component_paths_report(
@@ -286,6 +353,7 @@ pub fn attach_component_paths_report(
             .map(component_local_path_blockers)
             .unwrap_or_default(),
         batch: Some(batch),
+        monorepo: None,
     })
 }
 
@@ -370,6 +438,7 @@ fn build_components_output(
         components,
         warnings: Vec::new(),
         batch: None,
+        monorepo: None,
     })
 }
 
@@ -390,6 +459,7 @@ fn build_components_summary(
         components: Vec::new(),
         warnings: component_local_path_blockers(project),
         batch: None,
+        monorepo: None,
     })
 }
 

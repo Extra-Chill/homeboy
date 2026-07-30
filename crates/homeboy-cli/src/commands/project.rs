@@ -116,12 +116,15 @@ enum ProjectComponentsCommand {
         #[arg(long)]
         json: String,
     },
-    /// Attach a repo path for a project component discovered via homeboy.json
+    /// Rebase matching project components discovered below a monorepo checkout
     AttachPath {
         /// Project ID
         project_id: String,
         /// Local repo path containing homeboy.json
         local_path: String,
+        /// Preview every nested component path rebase without updating project config
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Attach multiple repo paths, retaining per-path diagnostics
     AttachPaths {
@@ -383,7 +386,8 @@ fn components(command: ProjectComponentsCommand) -> CmdResult<ProjectOutput> {
         ProjectComponentsCommand::AttachPath {
             project_id,
             local_path,
-        } => components_attach_path(&project_id, &local_path),
+            dry_run,
+        } => components_attach_path(&project_id, &local_path, dry_run),
         ProjectComponentsCommand::AttachPaths {
             project_id,
             local_paths,
@@ -469,8 +473,13 @@ fn components_set(project_id: &str, json: &str) -> CmdResult<ProjectOutput> {
     ))
 }
 
-fn components_attach_path(project_id: &str, local_path: &str) -> CmdResult<ProjectOutput> {
-    let components = project::attach_component_path_report(project_id, Path::new(local_path))?;
+fn components_attach_path(
+    project_id: &str,
+    local_path: &str,
+    dry_run: bool,
+) -> CmdResult<ProjectOutput> {
+    let components =
+        project::attach_component_path_report(project_id, Path::new(local_path), dry_run)?;
     Ok(write_project_components_response(
         project_id,
         "attach_path",
@@ -615,6 +624,7 @@ mod tests {
             "attach-path",
             "site",
             "/repo/component",
+            "--dry-run",
         ])
         .is_ok());
         assert!(Cli::try_parse_from([
