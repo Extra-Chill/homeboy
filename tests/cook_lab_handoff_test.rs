@@ -6,17 +6,13 @@ use homeboy_core::test_support::{HermeticTestContext, TestBinary};
 ///
 /// Every case in this file asserts that a contradictory invocation is rejected
 /// during argument validation, *before* any worktree or provider resolution.
-/// `route_after_parse` returns early when it detects a Lab-offload or
-/// runner-hosted execution context, and that bail-out sits above the validation
-/// under test. A single inherited controller-transport variable therefore skips
-/// the rejection silently and lets cook proceed into real worktree work, which
-/// can block forever. Because `cargo test` runs integration binaries serially,
-/// one blocked binary strands every binary ordered after it (#10917).
 ///
 /// `HermeticTestContext::command` owns the complete isolation contract — HOME,
 /// XDG config and data roots, artifact root, runtime and temp dirs — and strips
 /// the Lab transport variables. Overriding only HOME on a hand-rolled `Command`
-/// leaves that leak open (#10717, #10718).
+/// leaves that leak open (#10717, #10718). These cases run with a default
+/// operator context; the transport variables are injected explicitly only by
+/// the case that asserts they cannot change a validation outcome (#10917).
 fn homeboy(args: &[&str]) -> Output {
     let context = HermeticTestContext::new();
     context
@@ -46,6 +42,76 @@ fn cook_handoff_subprocesses_do_not_inherit_controller_transport() {
     assert!(
         removed_env.contains(homeboy_core::observation::SOURCE_SNAPSHOT_METADATA_ENV),
         "cook handoff fixtures must not inherit the controller source snapshot"
+    );
+}
+
+#[test]
+fn contradictory_cook_arguments_survive_controller_transport_context() {
+    // The routing bail-outs skip *routing*, not validation. Injecting the exact
+    // transport context that used to suppress these rejections must not change
+    // the outcome: a contradictory flag combination is contradictory wherever
+    // the process runs.
+    //
+    // Before #10917 this context sent both invocations past validation into
+    // real worktree and provider work, where they blocked indefinitely instead
+    // of failing fast.
+    let cook = |args: &[&str]| {
+        let context = HermeticTestContext::new();
+        context
+            .command(TestBinary::HomeboyFixture)
+            .env(
+                homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV,
+                r#"{"runner_id":"homeboy-lab"}"#,
+            )
+            .args(args)
+            .output()
+            .expect("run homeboy")
+    };
+
+    let detach = cook(&[
+        "--placement",
+        "local",
+        "--detach-after-handoff",
+        "agent-task",
+        "cook",
+        "--prompt",
+        "implement the fix",
+        "--to-worktree",
+        "missing@worktree",
+        "--verify",
+        "true",
+    ]);
+    assert!(!detach.status.success());
+    let detach_stdout = String::from_utf8_lossy(&detach.stdout);
+    assert!(
+        detach_stdout.contains("cannot detach after handoff with --placement local"),
+        "{detach_stdout}"
+    );
+    assert!(
+        !detach_stdout.contains("worktree provider"),
+        "{detach_stdout}"
+    );
+
+    let queue_only = cook(&[
+        "agent-task",
+        "cook",
+        "--prompt",
+        "implement the fix",
+        "--to-worktree",
+        "missing@worktree",
+        "--verify",
+        "true",
+        "--queue-only",
+    ]);
+    assert!(!queue_only.status.success());
+    let queue_only_stdout = String::from_utf8_lossy(&queue_only.stdout);
+    assert!(
+        queue_only_stdout.contains("cannot queue its controller-owned lifecycle"),
+        "{queue_only_stdout}"
+    );
+    assert!(
+        !queue_only_stdout.contains("worktree provider"),
+        "{queue_only_stdout}"
     );
 }
 
