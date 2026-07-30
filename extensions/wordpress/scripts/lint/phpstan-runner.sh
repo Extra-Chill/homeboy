@@ -295,9 +295,11 @@ generate_dependency_config() {
         fi
         printf '%s\n' '    scanDirectories:'
 
+        local dependency_paths=""
         while IFS= read -r dependency_path; do
             [ -z "$dependency_path" ] && continue
             has_dependencies=1
+            dependency_paths+="${dependency_path}"$'\n'
             printf '        - %s\n' "$dependency_path"
         done < <(homeboy_resolve_validation_dependency_paths "$PLUGIN_PATH")
 
@@ -318,6 +320,21 @@ generate_dependency_config() {
                 printf '        - %s\n' "$context_path"
             done < <(homeboy_resolve_phpstan_context_files "$PLUGIN_PATH")
         fi
+
+        # Pin dependency function signatures so test scaffolding in the
+        # component cannot shadow them. See
+        # homeboy_resolve_phpstan_dependency_signature_files().
+        while IFS= read -r dependency_path; do
+            [ -z "$dependency_path" ] && continue
+            while IFS= read -r signature_file; do
+                [ -z "$signature_file" ] && continue
+                if [ "$scan_file_count" -eq 0 ]; then
+                    printf '%s\n' '    scanFiles:'
+                fi
+                scan_file_count=$((scan_file_count + 1))
+                printf '        - %s\n' "$signature_file"
+            done < <(homeboy_resolve_phpstan_dependency_signature_files "$dependency_path")
+        done <<< "$dependency_paths"
 
         if [ -f "$wordpress_api_overrides" ]; then
             if [ "$scan_file_count" -eq 0 ]; then
@@ -363,6 +380,41 @@ homeboy_resolve_phpstan_context_files() {
     local component_path="$1"
 
     find "$component_path" -mindepth 1 -maxdepth 1 -type f -name '*.php' -print 2>/dev/null
+}
+
+# Dependency PHP sources registered as `scanFiles:` rather than only through
+# `scanDirectories:`.
+#
+# `scanDirectories:` declarations lose to project-source declarations during
+# signature resolution, exactly like the `bootstrapFiles:` case documented in
+# phpstan.neon.dist. A test file that defines `function bbp_get_template_part()
+# {}` for an isolated standalone run therefore shadows the dependency's real
+# `bbp_get_template_part( $slug, $name = null )`, and every genuine two-argument
+# call in component source is reported as `invoked with 2 parameters, 0
+# required`. The findings look like component defects but are artifacts of test
+# scaffolding winning the symbol graph.
+#
+# `scanFiles:` entries are scanned alongside project source and win, so the
+# dependency's real signature governs analysis. Both mechanisms are emitted:
+# `scanDirectories:` keeps whole-tree discovery for autoloaded classes, and
+# `scanFiles:` pins the function signatures that shadowing would otherwise
+# corrupt. Depth is bounded so large dependency trees stay affordable — the
+# shadowed symbols in practice are top-level plugin API surface.
+homeboy_resolve_phpstan_dependency_signature_files() {
+    local dependency_path="$1"
+    local depth="${HOMEBOY_PHPSTAN_DEPENDENCY_SIGNATURE_DEPTH:-4}"
+
+    [ -d "$dependency_path" ] || return 0
+
+    find "$dependency_path" -mindepth 1 -maxdepth "$depth" -type f -name '*.php' \
+        -not -path '*/vendor/*' \
+        -not -path '*/vendor_prefixed/*' \
+        -not -path '*/node_modules/*' \
+        -not -path '*/build/*' \
+        -not -path '*/dist/*' \
+        -not -path '*/tests/*' \
+        -not -path '*/tools/*' \
+        -print 2>/dev/null
 }
 
 cleanup_dependency_config() {
