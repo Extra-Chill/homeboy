@@ -6,8 +6,9 @@ use homeboy::core::component;
 use homeboy::core::scope::{self, Scope};
 use homeboy_release::deploy::{self, ReleaseStateStatus};
 use homeboy_release::release::{
-    self, BatchReleaseResult, ReleaseCommandInput, ReleaseCommandResult, ReleaseExecutionPlan,
-    ReleasePackageResult, ReleasePhase, ReleasePipelineOptions,
+    self, ArtifactSourceAuthorityManifest, BatchReleaseResult, ReleaseCommandInput,
+    ReleaseCommandResult, ReleaseExecutionPlan, ReleasePackageResult, ReleasePhase,
+    ReleasePipelineOptions,
 };
 
 use super::utils::args::DryRunArgs;
@@ -53,6 +54,26 @@ enum ReleaseSubcommand {
     Changelog(changelog::ChangelogArgs),
     /// Version inspection helpers
     Version(ReleaseVersionArgs),
+    /// Write a source-authority manifest for assembled release artifacts
+    ArtifactSourceAuthority(ArtifactSourceAuthorityArgs),
+}
+
+#[derive(Args)]
+struct ArtifactSourceAuthorityArgs {
+    /// Component prepared for finalization
+    component_id: String,
+    /// Directory containing the assembled publication files
+    #[arg(long, value_name = "DIR")]
+    dir: String,
+    /// Prepared release tag
+    #[arg(long)]
+    tag: String,
+    /// Prepared release version
+    #[arg(long)]
+    version: String,
+    /// Exact commit the prepared tag resolves to
+    #[arg(long)]
+    commit: String,
 }
 
 #[derive(Args)]
@@ -227,11 +248,19 @@ pub struct ReleasePackageOutput {
 }
 
 #[derive(Serialize)]
+#[serde(tag = "command", rename = "release.artifact-source-authority")]
+pub struct ArtifactSourceAuthorityOutput {
+    pub variant: &'static str,
+    pub manifest: ArtifactSourceAuthorityManifest,
+}
+
+#[derive(Serialize)]
 #[serde(untagged)]
 pub enum ReleaseCommandOutput {
     Single(ReleaseOutput),
     Batch(BatchReleaseOutput),
     Package(ReleasePackageOutput),
+    ArtifactSourceAuthority(ArtifactSourceAuthorityOutput),
     Changes(changes::ChangesCommandOutput),
     Changelog(changelog::ChangelogOutput),
     Version(version::VersionOutput),
@@ -390,6 +419,22 @@ pub fn run(args: ReleaseArgs) -> CmdResult<ReleaseCommandOutput> {
                 version::run_command(args.command),
                 ReleaseCommandOutput::Version,
             );
+        }
+        Some(ReleaseSubcommand::ArtifactSourceAuthority(args)) => {
+            let manifest = release::write_artifact_source_authority_manifest(
+                Path::new(&args.dir),
+                &args.component_id,
+                &args.tag,
+                &args.version,
+                &args.commit,
+            )?;
+            return Ok((
+                ReleaseCommandOutput::ArtifactSourceAuthority(ArtifactSourceAuthorityOutput {
+                    variant: "artifact-source-authority",
+                    manifest,
+                }),
+                0,
+            ));
         }
         None => {}
     }

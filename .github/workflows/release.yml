@@ -1123,6 +1123,26 @@ jobs:
         run: |
           rm -f artifacts/*-dist-manifest.json
 
+      - name: Download current Homeboy finalizer
+        uses: actions/download-artifact@v4
+        with:
+          name: homeboy-binary
+          path: .homeboy-bin
+
+      - name: Create fresh artifact source-authority manifest
+        if: needs.prepare.outputs.recovery-release != 'true' && needs.plan.outputs.draft-complete != 'true'
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs['release-tag'] }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs['release-version'] }}
+        run: |
+          set -euo pipefail
+          chmod +x .homeboy-bin/homeboy
+          .homeboy-bin/homeboy release artifact-source-authority homeboy \
+            --dir artifacts \
+            --tag "${RELEASE_TAG}" \
+            --version "${RELEASE_VERSION}" \
+            --commit "$(git rev-parse "${RELEASE_TAG}^{commit}")"
+
       - name: Preserve existing published asset bytes
         if: needs.prepare.outputs.recovery-release == 'true' && needs.plan.outputs.draft-complete != 'true'
         env:
@@ -1231,13 +1251,6 @@ jobs:
             --argjson contains_target "${CONTAINS_TARGET}" \
             '{schema: $schema, schema_version: $schema_version, component_id: $component_id, tag: $tag, version: $version, commit: $commit, expected_assets: $expected_assets, control: {commit: $control_commit, contains_target: $contains_target}}' > draft-adoption/manifest.json
           echo "::notice::Recovery control lineage: control ${CONTROL_SHA} vs target ${COMMIT} (contains_target=${CONTAINS_TARGET})"
-
-      - name: Download current Homeboy finalizer
-        if: needs.prepare.outputs.recovery-release == 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: homeboy-binary
-          path: .homeboy-bin
 
       # Recovery has two independent provenances that must never be conflated
       # (issue #10519): the *control binary* that performs publication, and the
