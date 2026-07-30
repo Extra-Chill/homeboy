@@ -56,6 +56,23 @@ pub(crate) struct GitHubReleaseMetadataError {
     pub diagnostics: Vec<GitHubCommandFailureDiagnostic>,
 }
 
+impl GitHubReleaseMetadataError {
+    /// Combine two resolution failures so neither is lost.
+    ///
+    /// A stranded release is diagnosed from why EVERY lookup failed. Collapsing
+    /// the later failure into the earlier one is what made run 30313665269
+    /// unreadable: it reported only the expected 404 and no trace of why the
+    /// draft lookup did not recover it (#10441).
+    fn join(self, other: Self) -> Self {
+        let mut diagnostics = self.diagnostics;
+        diagnostics.extend(other.diagnostics);
+        Self {
+            message: format!("{}; {}", self.message, other.message),
+            diagnostics,
+        }
+    }
+}
+
 impl std::fmt::Display for GitHubReleaseMetadataError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.message)
@@ -505,8 +522,106 @@ pub(crate) fn gh_release_metadata(
     // that strands a release undiagnosable -- which is exactly what run
     // 30313665269 left behind for v0.321.1: a step error naming only the
     // expected 404, with no trace of why the draft lookup did not recover it.
-    gh_draft_release_metadata(github, config, tag, repo_flag)
-        .map_err(|draft_error| metadata_fallback_error(&endpoint, &output, draft_error))
+    // Resolve the release id directly, then read REST metadata by id.
+    //
+    // `gh release view` is GraphQL-backed and DOES see drafts, so it answers
+    // "which release is this tag" in one call. Reading `releases/{id}` then
+    // returns the REST shape -- including the asset digests recovery depends
+    // on, which the GraphQL asset shape omits.
+    //
+    // This replaces scanning the release list. That scan paginated the whole
+    // repository: `Extra-Chill/homeboy-extensions` carries 920 releases, so
+    // finding a draft created seconds earlier cost ~31 sequential API calls and
+    // intermittently returned nothing at all, leaving
+    // "the draft fallback also failed: no GitHub Release matched tag" and a
+    // stranded draft. The list scan is kept as a last resort so a repository
+    // where `gh release view` cannot resolve the tag still has a path.
+    match gh_release_metadata_by_id(github, config, tag, repo_flag) {
+        Ok(metadata) => Ok(metadata),
+        Err(by_id_error) => {
+            gh_draft_release_metadata(github, config, tag, repo_flag).map_err(|draft_error| {
+                metadata_fallback_error(&endpoint, &output, by_id_error.join(draft_error))
+            })
+        }
+    }
+}
+
+/// Resolve a release (published or draft) by id.
+///
+/// Two calls, both O(1): `gh release view --json databaseId` sees drafts
+/// because it is GraphQL-backed, and `repos/{owner}/{repo}/releases/{id}`
+/// returns the REST shape whose `digest` field recovery requires.
+fn gh_release_metadata_by_id(
+    github: &GitHubRepo,
+    config: &GithubConfig,
+    tag: &str,
+    repo_flag: &str,
+) -> Result<GitHubReleaseMetadata, GitHubReleaseMetadataError> {
+    let view = run_gh_command(
+        gh_command(
+            github,
+            config,
+            &[
+                "release",
+                "view",
+                tag,
+                "--repo",
+                repo_flag,
+                "--json",
+                "databaseId",
+                "--jq",
+                ".databaseId",
+            ],
+        ),
+        github_release_upload_timeout(),
+    );
+    if view.timed_out || view.exit_code != Some(0) {
+        return Err(GitHubReleaseMetadataError {
+            message: gh_failure_detail("gh release view databaseId", &view),
+            diagnostics: vec![gh_failure_diagnostic(
+                "gh release view databaseId",
+                tag,
+                &view,
+            )],
+        });
+    }
+    let release_id = view.stdout.trim();
+    if release_id.is_empty() || !release_id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(GitHubReleaseMetadataError {
+            message: format!(
+                "gh release view returned no usable release id for {tag} on {repo_flag}"
+            ),
+            diagnostics: vec![gh_failure_diagnostic(
+                "gh release view databaseId",
+                tag,
+                &view,
+            )],
+        });
+    }
+
+    let endpoint = format!("repos/{repo_flag}/releases/{release_id}");
+    let output = run_gh_command(
+        gh_command(github, config, &["api", &endpoint]),
+        github_release_upload_timeout(),
+    );
+    if output.timed_out || output.exit_code != Some(0) {
+        return Err(GitHubReleaseMetadataError {
+            message: gh_failure_detail("gh api release metadata by id", &output),
+            diagnostics: vec![gh_failure_diagnostic(
+                "gh api release metadata by id",
+                &endpoint,
+                &output,
+            )],
+        });
+    }
+    serde_json::from_str(&output.stdout).map_err(|error| GitHubReleaseMetadataError {
+        message: format!("GitHub REST release metadata by id was invalid: {error}"),
+        diagnostics: vec![gh_failure_diagnostic(
+            "gh api release metadata by id",
+            &endpoint,
+            &output,
+        )],
+    })
 }
 
 fn metadata_fallback_error(
@@ -1511,6 +1626,80 @@ pub(crate) fn github_cli_env(github: &GitHubRepo, config: &GithubConfig) -> Vec<
 
 #[cfg(test)]
 mod tests {
+    /// #10519: resolving a just-created draft must not scan the release list.
+    ///
+    /// `releases/tags/{tag}` 404s for a draft by design, so the readback after
+    /// `gh release create --draft` always falls through. The fallback used to
+    /// page the entire repository: `Extra-Chill/homeboy-extensions` carries 920
+    /// releases, so finding a draft created seconds earlier cost ~31 sequential
+    /// API calls and intermittently returned nothing, stranding the release with
+    /// "the draft fallback also failed: no GitHub Release matched tag".
+    ///
+    /// The id path is two O(1) calls regardless of repository size.
+    #[test]
+    fn draft_resolution_prefers_the_id_lookup_over_scanning_every_release() {
+        let source = include_str!("gh_cli.rs");
+        let body = source
+            .split("pub(crate) fn gh_release_metadata(")
+            .nth(1)
+            .expect("gh_release_metadata should exist");
+        let by_id = body
+            .find("gh_release_metadata_by_id")
+            .expect("the id lookup must be attempted");
+        let by_scan = body
+            .find("gh_draft_release_metadata")
+            .expect("the list scan must remain as a last resort");
+
+        assert!(
+            by_id < by_scan,
+            "the O(1) id lookup must be attempted before the O(releases) list scan"
+        );
+    }
+
+    /// Both failures must survive into the message. A stranded release is
+    /// diagnosed from why every lookup failed, not just the first (#10441).
+    #[test]
+    fn joined_resolution_failures_retain_both_messages_and_diagnostics() {
+        let first = GitHubReleaseMetadataError {
+            message: "id lookup failed".to_string(),
+            diagnostics: vec![GitHubCommandFailureDiagnostic {
+                operation: "gh release view databaseId".to_string(),
+                endpoint: "v1.2.3".to_string(),
+                summary: "first".to_string(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: Some(1),
+                timed_out: false,
+                http_status: None,
+                github_request_id: None,
+            }],
+        };
+        let second = GitHubReleaseMetadataError {
+            message: "list scan failed".to_string(),
+            diagnostics: vec![GitHubCommandFailureDiagnostic {
+                operation: "gh api releases list".to_string(),
+                endpoint: "repos/o/r/releases".to_string(),
+                summary: "second".to_string(),
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: Some(1),
+                timed_out: false,
+                http_status: None,
+                github_request_id: None,
+            }],
+        };
+
+        let joined = first.join(second);
+
+        assert!(joined.message.contains("id lookup failed"));
+        assert!(joined.message.contains("list scan failed"));
+        assert_eq!(
+            joined.diagnostics.len(),
+            2,
+            "neither diagnostic may be lost"
+        );
+    }
+
     use super::*;
     use std::sync::mpsc;
 
