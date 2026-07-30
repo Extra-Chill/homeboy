@@ -24,6 +24,10 @@ HOMEBOY_OUTPUT_DIR=$(mktemp -d)
 echo "HOMEBOY_OUTPUT_DIR=${HOMEBOY_OUTPUT_DIR}" >> "${GITHUB_ENV}"
 
 HOMEBOY_CI_RESULTS_DIR="${GITHUB_WORKSPACE:-$(pwd)}/homeboy-ci-results"
+if [ -L "${HOMEBOY_CI_RESULTS_DIR}" ] || { [ -e "${HOMEBOY_CI_RESULTS_DIR}" ] && [ ! -d "${HOMEBOY_CI_RESULTS_DIR}" ]; }; then
+  echo "::error::HOMEBOY_CI_RESULTS_DIR must be a real directory: ${HOMEBOY_CI_RESULTS_DIR}"
+  exit 1
+fi
 mkdir -p "${HOMEBOY_CI_RESULTS_DIR}"
 echo "HOMEBOY_CI_RESULTS_DIR=${HOMEBOY_CI_RESULTS_DIR}" >> "${GITHUB_ENV}"
 
@@ -47,10 +51,25 @@ for CMD in "${CMD_ARRAY[@]}"; do
 
   OUTPUT_STEM="$(command_output_stem "${CMD}")"
   if [ "$(printf '%s' "${CMD}" | awk '{print $1}')" = "bench" ]; then
-    OUTPUT_JSON="${HOMEBOY_CI_RESULTS_DIR}/bench.json"
+    CI_RESULT_JSON="${HOMEBOY_CI_RESULTS_DIR}/bench.json"
+    OUTPUT_JSON="${CI_RESULT_JSON}"
   else
+    CI_RESULT_JSON="${HOMEBOY_CI_RESULTS_DIR}/${OUTPUT_STEM}.json"
     OUTPUT_JSON="${HOMEBOY_OUTPUT_DIR}/${OUTPUT_STEM}.json"
   fi
+
+  if [ -L "${HOMEBOY_CI_RESULTS_DIR}" ] || [ ! -d "${HOMEBOY_CI_RESULTS_DIR}" ]; then
+    echo "::error::HOMEBOY_CI_RESULTS_DIR must remain a real directory: ${HOMEBOY_CI_RESULTS_DIR}"
+    exit 1
+  fi
+  if [ -e "${CI_RESULT_JSON}" ] && [ ! -f "${CI_RESULT_JSON}" ] && [ ! -L "${CI_RESULT_JSON}" ]; then
+    echo "::error::homeboy ${CMD} result target must be a file: ${CI_RESULT_JSON}"
+    exit 1
+  fi
+  # Each command owns exactly one CI result target; remove only that target so
+  # a stale result cannot validate or be uploaded for this invocation.
+  rm -f "${CI_RESULT_JSON}"
+
   FULL_CMD="$(build_run_command "${CMD}" "${COMP_ID}" "${WORKSPACE}" "${OUTPUT_JSON}")"
 
   echo ""
@@ -72,11 +91,23 @@ for CMD in "${CMD_ARRAY[@]}"; do
   echo "::endgroup::"
 
   STRUCTURED_OUTPUT=true
-  if [ ! -s "${OUTPUT_JSON}" ] || ! valid_command_result_output "${OUTPUT_JSON}" "${CMD}" "${CMD_EXIT}"; then
+  if [ -L "${HOMEBOY_CI_RESULTS_DIR}" ] || [ ! -d "${HOMEBOY_CI_RESULTS_DIR}" ]; then
     STRUCTURED_OUTPUT=false
+    echo "::error::HOMEBOY_CI_RESULTS_DIR must remain a real directory: ${HOMEBOY_CI_RESULTS_DIR}"
+  elif [ -L "${CI_RESULT_JSON}" ] || { [ -e "${CI_RESULT_JSON}" ] && [ ! -f "${CI_RESULT_JSON}" ]; } || [ ! -s "${OUTPUT_JSON}" ] || ! valid_command_result_output "${OUTPUT_JSON}" "${CMD}" "${CMD_EXIT}"; then
+    STRUCTURED_OUTPUT=false
+    rm -f "${CI_RESULT_JSON}"
     echo "::error::homeboy ${CMD} did not write valid structured output to ${OUTPUT_JSON}"
   elif [ "$(printf '%s' "${CMD}" | awk '{print $1}')" = "bench" ]; then
     cp "${OUTPUT_JSON}" "${HOMEBOY_OUTPUT_DIR}/${OUTPUT_STEM}.json"
+  else
+    if [ -L "${HOMEBOY_CI_RESULTS_DIR}" ] || [ ! -d "${HOMEBOY_CI_RESULTS_DIR}" ] || [ -L "${CI_RESULT_JSON}" ]; then
+      STRUCTURED_OUTPUT=false
+      rm -f "${CI_RESULT_JSON}"
+      echo "::error::homeboy ${CMD} result target is not safe to publish"
+    else
+      cp "${OUTPUT_JSON}" "${HOMEBOY_CI_RESULTS_DIR}/${OUTPUT_STEM}.json"
+    fi
   fi
 
   if [ "${CMD_EXIT}" -eq 0 ] && [ "${STRUCTURED_OUTPUT}" = true ]; then
