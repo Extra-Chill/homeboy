@@ -1299,4 +1299,6 @@ pub struct DeploySummary {
 pub struct DeployOrchestrationResult {
     pub results: Vec<ComponentDeployResult>,
     pub summary: DeploySummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deploy_run_id: Option<String>,
 }

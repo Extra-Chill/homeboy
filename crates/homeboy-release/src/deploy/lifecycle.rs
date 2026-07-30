@@ -4,12 +4,108 @@ use std::fs;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use homeboy_core::error::{Error, Result};
+use homeboy_core::observation::{NewRunRecord, ObservationStore, RunStatus};
 use homeboy_core::paths;
 use homeboy_core::phase_timing::PhaseTimingReport;
 
 const SCHEMA_VERSION: u32 = 1;
+
+/// A durable activity projection for the single-project deploy lifecycle.
+///
+/// The observation store is the generic activity surface. The file-backed
+/// multi-project lifecycle below remains the resumable aggregate checkpoint.
+pub(super) struct DeployObservation {
+    store: ObservationStore,
+    run_id: String,
+    metadata: serde_json::Value,
+    finished: bool,
+}
+
+impl DeployObservation {
+    pub(super) fn start(project_id: &str, source: &str) -> Result<Self> {
+        let store = ObservationStore::open_initialized()?;
+        let metadata = json!({
+            "schema": "homeboy/deploy-lifecycle/v1",
+            "source": source,
+            "phase": "admitted",
+            "phase_history": [{ "phase": "admitted", "at": chrono::Utc::now().to_rfc3339() }],
+            "remote_mutation_started": false,
+        });
+        let run = store.start_run(
+            NewRunRecord::builder("deploy")
+                .component_id(project_id)
+                .command(format!("homeboy deploy {project_id}"))
+                .current_homeboy_version()
+                .metadata(metadata.clone())
+                .build(),
+        )?;
+        Ok(Self {
+            store,
+            run_id: run.id,
+            metadata,
+            finished: false,
+        })
+    }
+
+    pub(super) fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    pub(super) fn phase(&mut self, phase: &str, remote_mutation_started: bool) -> Result<()> {
+        let at = chrono::Utc::now().to_rfc3339();
+        let object = self
+            .metadata
+            .as_object_mut()
+            .expect("deploy metadata object");
+        object.insert("phase".to_string(), json!(phase));
+        if remote_mutation_started {
+            object.insert("remote_mutation_started".to_string(), json!(true));
+        }
+        object
+            .get_mut("phase_history")
+            .and_then(serde_json::Value::as_array_mut)
+            .expect("deploy phase history")
+            .push(json!({ "phase": phase, "at": at }));
+        self.store
+            .update_run_metadata(&self.run_id, self.metadata.clone())?;
+        Ok(())
+    }
+
+    pub(super) fn finish(&mut self, status: RunStatus, error: Option<String>) {
+        if self.finished {
+            return;
+        }
+        let _ = self.phase(
+            if status == RunStatus::Pass {
+                "completed"
+            } else {
+                "failed"
+            },
+            false,
+        );
+        if let Some(error) = error {
+            self.metadata["error"] = json!(error);
+        }
+        let _ = self
+            .store
+            .finish_running_run(&self.run_id, status, Some(self.metadata.clone()));
+        self.finished = true;
+    }
+}
+
+impl Drop for DeployObservation {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.finish(
+                RunStatus::Error,
+                Some("deploy process ended before a terminal result; inspect this run before retrying".to_string()),
+            );
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeployRunIdentity {
@@ -249,6 +345,59 @@ mod tests {
                     .map(|span| span.status),
                 Some(homeboy_core::phase_timing::PhaseStatus::Failed)
             );
+        });
+    }
+
+    #[test]
+    fn deploy_observation_persists_phase_progress_and_terminal_success() {
+        with_isolated_home(|_| {
+            let mut observation = DeployObservation::start("site", "HEAD").expect("admit run");
+            let run_id = observation.run_id().to_string();
+            observation
+                .phase("artifact_preparation", false)
+                .expect("persist preparation phase");
+            observation
+                .phase("transfer", true)
+                .expect("persist transfer phase");
+            observation.finish(RunStatus::Pass, None);
+
+            let run = ObservationStore::open_initialized()
+                .expect("store")
+                .get_run(&run_id)
+                .expect("read run")
+                .expect("run");
+            assert_eq!(run.status, RunStatus::Pass.as_str());
+            assert_eq!(run.metadata_json["phase"], "completed");
+            assert_eq!(run.metadata_json["remote_mutation_started"], true);
+            assert_eq!(
+                run.metadata_json["phase_history"].as_array().map(Vec::len),
+                Some(4)
+            );
+        });
+    }
+
+    #[test]
+    fn dropped_deploy_observation_terminalizes_before_remote_mutation() {
+        with_isolated_home(|_| {
+            let run_id = {
+                let mut observation =
+                    DeployObservation::start("site", "refs/heads/fix").expect("admit run");
+                observation
+                    .phase("artifact_preparation", false)
+                    .expect("persist preparation phase");
+                observation.run_id().to_string()
+            };
+
+            let run = ObservationStore::open_initialized()
+                .expect("store")
+                .get_run(&run_id)
+                .expect("read run")
+                .expect("run");
+            assert_eq!(run.status, RunStatus::Error.as_str());
+            assert_eq!(run.metadata_json["remote_mutation_started"], false);
+            assert!(run.metadata_json["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("terminal result")));
         });
     }
 }

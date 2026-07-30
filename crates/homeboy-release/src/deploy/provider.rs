@@ -41,6 +41,7 @@ pub(super) fn run_if_configured(
                 failed,
                 skipped: 0,
             },
+            deploy_run_id: None,
         }));
     }
     Ok(None)
