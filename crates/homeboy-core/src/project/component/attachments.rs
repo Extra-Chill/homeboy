@@ -117,7 +117,7 @@ fn clear_component_attachments_unlocked(project_id: &str) -> Result<Vec<String>>
 }
 
 pub fn attach_component_path(project_id: &str, component_id: &str, local_path: &str) -> Result<()> {
-    crate::config::with_config_lock(|| {
+    crate::config::with_config_lock_for("project components attach-path", || {
         attach_component_path_unlocked(project_id, component_id, local_path)
     })
 }
@@ -206,7 +206,7 @@ fn preserve_remote_path_on_reattach(
 }
 
 pub fn attach_discovered_component_path(project_id: &str, local_path: &Path) -> Result<String> {
-    crate::config::with_config_lock(|| {
+    crate::config::with_config_lock_for("project components attach-path", || {
         attach_discovered_component_path_unlocked(project_id, local_path)
     })
 }
@@ -288,6 +288,7 @@ fn rebase_monorepo_component_paths_unlocked(
                         local_path: path.clone(),
                         remote_path: None,
                         deployment_provider: None,
+                        deployment_provider_input: None,
                     });
                 }
             }
@@ -444,8 +445,10 @@ fn find_prefix_match(project: &Project, inferred_id: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{with_config_lock_for, CONFIG_LOCK_TIMEOUT_ENV};
     use crate::test_support::with_isolated_home;
     use std::fs;
+    use std::sync::mpsc;
     use std::sync::{Arc, Barrier};
 
     fn project_with_components(ids: &[&str]) -> Project {
@@ -554,6 +557,57 @@ mod tests {
     }
 
     #[test]
+    fn attach_path_reports_the_contending_lock_holder_within_the_configured_bound() {
+        with_isolated_home(|home| {
+            let project = Project {
+                id: "site".to_string(),
+                ..Default::default()
+            };
+            save(&project).expect("save project");
+
+            let repo = home.path().join("component");
+            fs::create_dir_all(&repo).expect("component directory");
+            fs::write(repo.join("homeboy.json"), r#"{"id":"component"}"#)
+                .expect("component config");
+
+            std::env::set_var(CONFIG_LOCK_TIMEOUT_ENV, "1");
+            let (holder_ready, wait_for_holder) = mpsc::sync_channel(0);
+            let (release_holder, holder_release) = mpsc::sync_channel(0);
+            let holder = std::thread::spawn(move || {
+                with_config_lock_for("test attach-path holder", || {
+                    holder_ready.send(()).expect("report lock holder");
+                    holder_release.recv().expect("release lock holder");
+                    Ok(())
+                })
+            });
+            wait_for_holder.recv().expect("wait for lock holder");
+
+            let error = attach_discovered_component_path("site", &repo)
+                .expect_err("contending attach-path must time out");
+            release_holder.send(()).expect("release holder");
+            holder
+                .join()
+                .expect("holder thread")
+                .expect("holder operation");
+            std::env::remove_var(CONFIG_LOCK_TIMEOUT_ENV);
+
+            assert_eq!(error.code, crate::error::ErrorCode::InternalIoError);
+            assert_eq!(error.details["kind"], "config_lock_timeout");
+            assert_eq!(error.details["operation"], "project components attach-path");
+            assert_eq!(error.details["holder_pid"], std::process::id());
+            assert_eq!(error.details["holder_operation"], "test attach-path holder");
+            assert_eq!(error.details["timeout_ms"], 1_000);
+            assert!(
+                error.details["waited_ms"]
+                    .as_u64()
+                    .is_some_and(|waited| waited >= 1_000),
+                "attach-path must return after the configured bound: {:?}",
+                error.details
+            );
+        });
+    }
+
+    #[test]
     fn monorepo_rebase_previews_then_commits_all_matching_components_together() {
         with_isolated_home(|home| {
             let old = home.path().join("deleted-checkout");
@@ -565,18 +619,21 @@ mod tests {
                         local_path: old.join("root").display().to_string(),
                         remote_path: None,
                         deployment_provider: None,
+                        deployment_provider_input: None,
                     },
                     ProjectComponentAttachment {
                         id: "nested".to_string(),
                         local_path: old.join("nested").display().to_string(),
                         remote_path: None,
                         deployment_provider: None,
+                        deployment_provider_input: None,
                     },
                     ProjectComponentAttachment {
                         id: "other-repo".to_string(),
                         local_path: "/other-repo".to_string(),
                         remote_path: None,
                         deployment_provider: None,
+                        deployment_provider_input: None,
                     },
                 ],
                 ..Default::default()
@@ -629,6 +686,7 @@ mod tests {
                     local_path: "/old-root".to_string(),
                     remote_path: None,
                     deployment_provider: None,
+                    deployment_provider_input: None,
                 }],
                 ..Default::default()
             })

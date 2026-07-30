@@ -7,9 +7,10 @@ use crate::output::{
 };
 use crate::paths;
 use crate::Result;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::cell::Cell;
 use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 mod json_io;
@@ -105,6 +106,15 @@ fn config_lock_strict() -> bool {
 /// so joining it is a no-op on lock semantics, whereas acquiring again is an
 /// unrecoverable self-deadlock (see `CONFIG_LOCK_DEPTH`).
 pub fn with_config_lock<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    with_config_lock_for("config mutation", operation)
+}
+
+/// Run `operation` while holding the exclusive Homeboy config lock, identifying
+/// the mutation in contention diagnostics.
+pub fn with_config_lock_for<T>(
+    operation_name: &str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     if config_lock_depth() > 0 {
         if config_lock_strict() {
             return Err(Error::internal_io(
@@ -140,7 +150,7 @@ pub fn with_config_lock<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
             Error::internal_io(error.to_string(), Some("open config lock".to_string()))
         })?;
 
-    let _guard = ConfigLockGuard::lock(lock_file, &lock_path)?;
+    let _guard = ConfigLockGuard::lock(lock_file, &lock_path, operation_name)?;
     let _depth = ConfigLockDepthGuard::enter();
     operation()
 }
@@ -191,17 +201,14 @@ pub fn lock_exclusive_bounded(file: &File, lock_path: &Path, context: &str) -> R
         if let Some(timeout) = timeout {
             let waited = started.elapsed();
             if waited >= timeout {
-                return Err(Error::internal_io(
-                    format!(
-                        "timed out after {}s waiting for the exclusive lock at {}; another \
-                         thread or process has held it far longer than this operation should \
-                         take. Set {} to change or disable the bound.",
-                        waited.as_secs(),
-                        lock_path.display(),
-                        CONFIG_LOCK_TIMEOUT_ENV
-                    ),
-                    Some(context.to_string()),
-                ));
+                let holder = read_lock_owner(file);
+                return Err(
+                    config_lock_timeout_error(lock_path, context, timeout, waited, holder)
+                        .with_hint(format!(
+                            "Set {} to change or disable the contention bound.",
+                            CONFIG_LOCK_TIMEOUT_ENV
+                        )),
+                );
             }
         }
 
@@ -220,9 +227,75 @@ struct ConfigLockGuard {
     file: File,
 }
 
+#[derive(Deserialize, Serialize)]
+struct ConfigLockOwner {
+    pid: u32,
+    operation: String,
+}
+
+fn read_lock_owner(file: &File) -> Option<ConfigLockOwner> {
+    let mut file = file.try_clone().ok()?;
+    file.seek(SeekFrom::Start(0)).ok()?;
+    let mut owner = String::new();
+    file.read_to_string(&mut owner).ok()?;
+    serde_json::from_str(&owner).ok()
+}
+
+#[cfg(unix)]
+fn config_lock_timeout_error(
+    lock_path: &Path,
+    operation: &str,
+    timeout: std::time::Duration,
+    waited: std::time::Duration,
+    holder: Option<ConfigLockOwner>,
+) -> Error {
+    let holder_pid = holder.as_ref().map(|owner| owner.pid);
+    let holder_operation = holder.as_ref().map(|owner| owner.operation.as_str());
+    let mut error = Error::internal_io(
+        format!(
+            "timed out after {}ms waiting for config lock at {} for '{}'",
+            waited.as_millis(),
+            lock_path.display(),
+            operation,
+        ),
+        Some(operation.to_string()),
+    );
+    error.details = serde_json::json!({
+        "kind": "config_lock_timeout",
+        "path": lock_path,
+        "operation": operation,
+        "timeout_ms": timeout.as_millis(),
+        "waited_ms": waited.as_millis(),
+        "holder_pid": holder_pid,
+        "holder_operation": holder_operation,
+    });
+    error.retryable = Some(true);
+    error
+}
+
 impl ConfigLockGuard {
-    fn lock(file: File, lock_path: &Path) -> Result<Self> {
-        lock_exclusive_bounded(&file, lock_path, "lock config")?;
+    fn lock(mut file: File, lock_path: &Path, operation: &str) -> Result<Self> {
+        lock_exclusive_bounded(&file, lock_path, operation)?;
+        let owner = ConfigLockOwner {
+            pid: std::process::id(),
+            operation: operation.to_string(),
+        };
+        let owner = serde_json::to_vec(&owner).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize config lock owner".to_string()),
+            )
+        })?;
+        file.set_len(0)
+            .and_then(|_| file.seek(SeekFrom::Start(0)).map(|_| ()))
+            .and_then(|_| file.write_all(&owner))
+            .and_then(|_| file.sync_data())
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("write config lock owner".to_string()),
+                )
+            })?;
         Ok(Self { file })
     }
 }
@@ -1205,8 +1278,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_held_config_lock_times_out_with_an_attributable_error() {
-        use std::os::fd::AsRawFd;
-
         crate::test_support::with_isolated_home(|_home| {
             // A second open file description on the same file is exactly what a
             // competing process looks like to flock(2), so this exercises the
@@ -1219,16 +1290,12 @@ mod tests {
                 .write(true)
                 .open(&lock_path)
                 .expect("holder handle");
-
-            assert_eq!(
-                unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX) },
-                0,
-                "holder acquires the lock"
-            );
+            let _holder = ConfigLockGuard::lock(holder, &lock_path, "test holder")
+                .expect("holder acquires the lock");
 
             let error = bounded("bounded config lock acquire", || {
                 std::env::set_var(CONFIG_LOCK_TIMEOUT_ENV, "1");
-                let result = with_config_lock(|| Ok(()));
+                let result = with_config_lock_for("test contender", || Ok(()));
                 std::env::remove_var(CONFIG_LOCK_TIMEOUT_ENV);
                 result
             })
@@ -1236,15 +1303,18 @@ mod tests {
             .expect_err("a held lock must time out rather than block forever");
 
             assert_eq!(error.code, crate::error::ErrorCode::InternalIoError);
+            assert_eq!(error.details["kind"], "config_lock_timeout");
+            assert_eq!(error.details["operation"], "test contender");
+            assert_eq!(error.details["holder_pid"], std::process::id());
+            assert_eq!(error.details["holder_operation"], "test holder");
+            assert_eq!(error.details["timeout_ms"], 1_000);
             assert!(
-                error.details["error"]
-                    .as_str()
-                    .is_some_and(|message| message.contains("waiting for the exclusive lock")),
-                "timeout must name the lock: {:?}",
+                error.details["waited_ms"]
+                    .as_u64()
+                    .is_some_and(|waited| waited >= 1_000),
+                "timeout must respect the configured bound: {:?}",
                 error.details
             );
-
-            drop(holder);
         });
     }
 }
