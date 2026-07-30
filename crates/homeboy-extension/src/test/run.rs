@@ -1460,9 +1460,9 @@ mod tests {
                 assert_artifact_tree_excludes(matching_run.path(), value);
             }
             let supervision = std::fs::read_to_string(
-                matching_run.path().join(
-                    homeboy_core::engine::run_dir::files::CHILD_SUPERVISION,
-                ),
+                matching_run
+                    .path()
+                    .join(homeboy_core::engine::run_dir::files::CHILD_SUPERVISION),
             )
             .expect("child supervision evidence");
             assert!(supervision.contains("[REDACTED]"));
@@ -1497,7 +1497,8 @@ mod tests {
             let marker = source.path().join("child-ran");
             let component = conditional_test_component(home.path(), source.path(), "remote");
             std::fs::write(
-                home.path().join(".config/homeboy/extensions/conditional-secret-fixture/test.sh"),
+                home.path()
+                    .join(".config/homeboy/extensions/conditional-secret-fixture/test.sh"),
                 format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
             )
             .expect("marker script");

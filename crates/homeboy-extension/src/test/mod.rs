@@ -182,7 +182,9 @@ pub(crate) fn effective_secret_env_names(
         )
     })?;
     if !settings.is_object() {
-        return Err(projection_error("effective component settings must be an object"));
+        return Err(projection_error(
+            "effective component settings must be an object",
+        ));
     }
 
     let mut names = BTreeSet::new();
@@ -1218,12 +1220,9 @@ mod tests {
                 r#"{"service":{"mode":"remote","secret_env":{"password":"REMOTE_SECRET","user":"REMOTE_SECRET"}}}"#,
             ),
         ] {
-            assert!(effective_secret_env_names(
-                &static_names,
-                &[projection(false)],
-                settings,
-            )
-            .is_err());
+            assert!(
+                effective_secret_env_names(&static_names, &[projection(false)], settings,).is_err()
+            );
         }
     }
 

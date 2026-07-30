@@ -951,10 +951,7 @@ mod tests {
                 .and_then(|extensions| extensions.get_mut("release-test-fixture"))
                 .expect("release extension")
                 .settings
-                .insert(
-                    "service".to_string(),
-                    serde_json::json!({"mode":"local"}),
-                );
+                .insert("service".to_string(), serde_json::json!({"mode":"local"}));
             std::env::set_var("DECLARED_RELEASE_SECRET", "available-static-secret");
             std::env::remove_var("PROJECTED_RELEASE_SECRET");
 

@@ -126,11 +126,10 @@ pub use manifest::{
     TestChangedFileRouting, TestChangedFileRoutingStrategy, TestConfig, TestDriftConfig,
     TestMappingConfig, TestNoTestsApplicablePolicy, TestPassthroughFilter,
     TestPassthroughFilterStrategy, TestSecretEnvProjection, TestSettingStringPredicate,
-    TestVacuityPolicy, TraceBrowserArtifactMapConfig,
-    TraceBrowserEvidenceAdapterConfig, TraceBrowserMetricAliasConfig,
-    TraceBrowserSummaryAliasConfig, TraceConfig, VersionPatternConfig,
-    EXTENSION_CONTRACT_PRODUCER_SCHEMA, EXTENSION_MATERIALIZATION_SOURCE_SCHEMA,
-    NOTIFICATION_TRANSPORT_SCHEMA,
+    TestVacuityPolicy, TraceBrowserArtifactMapConfig, TraceBrowserEvidenceAdapterConfig,
+    TraceBrowserMetricAliasConfig, TraceBrowserSummaryAliasConfig, TraceConfig,
+    VersionPatternConfig, EXTENSION_CONTRACT_PRODUCER_SCHEMA,
+    EXTENSION_MATERIALIZATION_SOURCE_SCHEMA, NOTIFICATION_TRANSPORT_SCHEMA,
 };
 pub use refactor_protocol::{
     run_refactor_script, run_refactor_script_result, AdjustedItem, ParsedItem,
