@@ -41,7 +41,9 @@ pub(crate) use gh_cli::{
 #[cfg(test)]
 pub(crate) use crate::release::types::ReleaseStepResult;
 #[cfg(test)]
-pub(crate) use delivery::{existing_release_action, ExistingReleaseAction};
+pub(crate) use delivery::{
+    existing_release_action, missing_declared_assets, ExistingReleaseAction,
+};
 #[cfg(test)]
 pub(crate) use gh_cli::{
     github_cli_env, github_release_artifact_paths, parse_listed_release_metadata,
