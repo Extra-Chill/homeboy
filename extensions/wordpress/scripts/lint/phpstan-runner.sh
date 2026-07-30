@@ -685,6 +685,82 @@ if [ -f "$COMPONENT_BASELINE" ] && [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
 fi
 
 # Include component/dependency autoloaders if they exist
+# Class map for dependencies that ship no Composer autoloader.
+#
+# `scanFiles:` and `scanDirectories:` make declarations available for signature
+# resolution, but neither registers a class for member access — PHPStan reports
+# `unknown class` and every property/method access on it. Only an autoloader (or
+# pulling the dependency into `paths:`, which would also report findings inside
+# the dependency) registers classes.
+#
+# WordPress plugins commonly load classes with `require_once` from a bootstrap
+# file instead of Composer, so those dependencies contribute no autoloader at
+# all. Their file names also follow WordPress conventions
+# (`class-wp-agent-materialized-identity.php`) rather than PSR-4, so no path
+# convention can derive the mapping — the declarations have to be indexed.
+#
+# Emits `<fqcn> => <file>` pairs by tokenizing each dependency source once.
+# Tokenizing is used rather than a regex so commented-out or string-literal
+# occurrences of `class Foo` cannot poison the map.
+homeboy_emit_dependency_class_map_entries() {
+    local dependency_path="$1"
+
+    homeboy_resolve_phpstan_dependency_signature_files "$dependency_path" \
+        | "${HOMEBOY_PHP_BIN:-php}" -r '
+            $stdin = fopen("php://stdin", "r");
+            while (false !== ($file = fgets($stdin))) {
+                $file = trim($file);
+                if ($file === "" || !is_readable($file)) {
+                    continue;
+                }
+                $source = @file_get_contents($file);
+                if (!is_string($source) || strpos($source, "<?php") === false) {
+                    continue;
+                }
+                $tokens = @token_get_all($source);
+                if (!is_array($tokens)) {
+                    continue;
+                }
+                $namespace = "";
+                $count = count($tokens);
+                for ($i = 0; $i < $count; $i++) {
+                    $token = $tokens[$i];
+                    if (!is_array($token)) {
+                        continue;
+                    }
+                    if ($token[0] === T_NAMESPACE) {
+                        $namespace = "";
+                        for ($j = $i + 1; $j < $count; $j++) {
+                            if (is_array($tokens[$j]) && in_array($tokens[$j][0], array(T_STRING, T_NAME_QUALIFIED), true)) {
+                                $namespace .= $tokens[$j][1];
+                            } elseif ($tokens[$j] === ";" || $tokens[$j] === "{") {
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                    if (!in_array($token[0], array(T_CLASS, T_INTERFACE, T_TRAIT), true)) {
+                        continue;
+                    }
+                    // Skip anonymous classes and `::class` constant fetches.
+                    if ($i > 0 && is_array($tokens[$i - 1]) && $tokens[$i - 1][0] === T_DOUBLE_COLON) {
+                        continue;
+                    }
+                    for ($j = $i + 1; $j < $count; $j++) {
+                        if (is_array($tokens[$j]) && $tokens[$j][0] === T_STRING) {
+                            $fqcn = ($namespace !== "" ? $namespace . "\\" : "") . $tokens[$j][1];
+                            echo $fqcn . "\t" . $file . "\n";
+                            break;
+                        }
+                        if ($tokens[$j] === "(" || $tokens[$j] === "{") {
+                            break;
+                        }
+                    }
+                }
+            }
+        ' 2>/dev/null
+}
+
 generate_composite_autoload() {
     local tmpfile
     local component_autoload="${PLUGIN_PATH}/vendor/autoload.php"
@@ -696,6 +772,7 @@ generate_composite_autoload() {
         printf '%s\n' '<?php'
         printf '%s\n' '$autoloadFiles = ['
 
+        local autoloaderless_dependencies=""
         while IFS= read -r dependency_path; do
             [ -z "$dependency_path" ] && continue
             local dependency_autoload="${dependency_path}/vendor/autoload.php"
@@ -705,6 +782,9 @@ generate_composite_autoload() {
             fi
             if [ -f "$dependency_prefixed_autoload" ]; then
                 printf '    %s,\n' "$(printf '%s' "$dependency_prefixed_autoload" | jq -Rsa .)"
+            fi
+            if [ ! -f "$dependency_autoload" ] && [ ! -f "$dependency_prefixed_autoload" ]; then
+                autoloaderless_dependencies+="${dependency_path}"$'\n'
             fi
         done < <(homeboy_resolve_validation_dependency_paths "$PLUGIN_PATH")
 
@@ -722,6 +802,34 @@ generate_composite_autoload() {
         printf '%s\n' '        require_once $autoloadFile;'
         printf '%s\n' '    }'
         printf '%s\n' '}'
+
+        # Dependencies without a Composer autoloader still have to register
+        # their classes, otherwise member access on them reports `unknown
+        # class`. See homeboy_emit_dependency_class_map_entries().
+        printf '%s\n' '$homeboyDependencyClassMap = ['
+        local class_map_entries=0
+        while IFS= read -r dependency_path; do
+            [ -z "$dependency_path" ] && continue
+            while IFS=$'\t' read -r fqcn class_file; do
+                [ -z "$fqcn" ] || [ -z "$class_file" ] && continue
+                printf '    %s => %s,\n' \
+                    "$(printf '%s' "$fqcn" | jq -Rsa .)" \
+                    "$(printf '%s' "$class_file" | jq -Rsa .)"
+                class_map_entries=$((class_map_entries + 1))
+            done < <(homeboy_emit_dependency_class_map_entries "$dependency_path")
+        done <<< "$autoloaderless_dependencies"
+        printf '%s\n' '];'
+        printf '%s\n' 'if ($homeboyDependencyClassMap !== []) {'
+        printf '%s\n' '    spl_autoload_register(static function ($class) use ($homeboyDependencyClassMap) {'
+        printf '%s\n' '        if (isset($homeboyDependencyClassMap[$class])) {'
+        printf '%s\n' '            require_once $homeboyDependencyClassMap[$class];'
+        printf '%s\n' '        }'
+        printf '%s\n' '    });'
+        printf '%s\n' '}'
+
+        if [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
+            echo "DEBUG: dependency class map entries: ${class_map_entries}" >&2
+        fi
     } > "$tmpfile"
 
     printf '%s\n' "$tmpfile"
