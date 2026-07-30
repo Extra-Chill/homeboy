@@ -4,8 +4,8 @@
 //! never read or written.
 
 use crate::observation::store::{
-    self, ObservationStore, CURRENT_SCHEMA_VERSION, LAB_OFFLOAD_METADATA_ENV,
-    SOURCE_SNAPSHOT_METADATA_ENV,
+    self, ObservationStore, CURRENT_MIGRATION_COUNT, CURRENT_SCHEMA_VERSION,
+    LAB_OFFLOAD_METADATA_ENV, SOURCE_SNAPSHOT_METADATA_ENV,
 };
 use crate::observation::{
     FindingListFilter, NewFindingRecord, NewRunRecord, RunContext, RunListFilter, RunProvenance,
@@ -112,7 +112,7 @@ mod store_init_tests {
 
             assert!(status.exists);
             assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-            assert_eq!(status.migration_count, 11);
+            assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
             assert_eq!(status.table_count, 8);
         });
     }
@@ -127,7 +127,7 @@ mod store_init_tests {
             let status = second.status().expect("status");
 
             assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-            assert_eq!(status.migration_count, 11);
+            assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
             assert_eq!(status.table_count, 8);
         });
     }
@@ -149,7 +149,7 @@ mod store_init_tests {
             let status = reopened.status().expect("status");
 
             assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-            assert_eq!(status.migration_count, 11);
+            assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
         });
     }
 
@@ -175,7 +175,7 @@ mod store_init_tests {
             for handle in handles {
                 let status = handle.join().expect("worker joined");
                 assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-                assert_eq!(status.migration_count, 11);
+                assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
             }
         });
     }
@@ -198,7 +198,25 @@ mod store_init_tests {
                        (3, '2026-01-01T00:00:00Z'), (4, '2026-01-01T00:00:00Z'),
                        (5, '2026-01-01T00:00:00Z'), (6, '2026-01-01T00:00:00Z'),
                        (7, '2026-01-01T00:00:00Z'), (8, '2026-01-01T00:00:00Z');
-                CREATE TABLE runs (id TEXT PRIMARY KEY);
+                -- Faithful to the migration-1 `runs` table. A stub with only
+                -- `id` used to be enough, but migration 10 indexes
+                -- `json_extract(metadata_json, ...)`, so an unfaithful fixture
+                -- fails the upgrade with `no such column: metadata_json` and
+                -- misreports a fixture gap as a broken migration path.
+                CREATE TABLE runs (
+                    id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL DEFAULT 'test',
+                    component_id TEXT,
+                    started_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z',
+                    finished_at TEXT,
+                    status TEXT NOT NULL DEFAULT 'success',
+                    command TEXT,
+                    cwd TEXT,
+                    homeboy_version TEXT,
+                    git_sha TEXT,
+                    rig_id TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                );
                 CREATE TABLE artifacts (
                     id TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL,
@@ -229,7 +247,7 @@ mod store_init_tests {
             let store = ObservationStore::open_initialized_at(&path).expect("migrate version 8");
             let status = store.status().expect("status");
             assert_eq!(status.schema_version, CURRENT_SCHEMA_VERSION);
-            assert_eq!(status.migration_count, 11);
+            assert_eq!(status.migration_count, CURRENT_MIGRATION_COUNT);
 
             let db = rusqlite::Connection::open(path).expect("inspect migrated db");
             let indexes = db

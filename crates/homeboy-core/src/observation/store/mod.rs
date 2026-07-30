@@ -27,7 +27,17 @@ pub use artifacts::ArtifactPublication;
 
 pub(crate) use helpers::*;
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 11;
+/// The schema version a fully migrated store reports.
+///
+/// Always the last declared migration. Writing it down separately is what let
+/// it fall behind the migration list.
+pub const CURRENT_SCHEMA_VERSION: i64 = schema::LATEST_MIGRATION_VERSION;
+
+/// Migrations a fully initialized store has applied.
+///
+/// Exposed so callers assert against the declared schema rather than a copied
+/// number that goes stale the next time a migration is added.
+pub const CURRENT_MIGRATION_COUNT: i64 = schema::MIGRATION_COUNT;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ObservationDbStatus {

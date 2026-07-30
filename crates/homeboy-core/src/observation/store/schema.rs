@@ -215,6 +215,25 @@ const MIGRATIONS: &[Migration] = &[
     },
 ];
 
+/// The schema version a freshly initialized store lands on.
+///
+/// Derived from `MIGRATIONS` rather than written down separately. A
+/// hand-maintained copy drifted: migration 12 was added and the constant stayed
+/// at 11, so a correctly migrated store reported a version its own code did not
+/// recognise as current. Five store-initialization tests had been failing on
+/// that for as long as the drift existed, unseen because member-crate lib tests
+/// were compiled and never executed (#10477).
+/// How many migrations a fully initialized store has applied.
+///
+/// Derived for the same reason as [`LATEST_MIGRATION_VERSION`]: the test suite
+/// asserted a hand-written `11` and adding migration 12 silently invalidated it.
+pub(crate) const MIGRATION_COUNT: i64 = MIGRATIONS.len() as i64;
+
+pub(crate) const LATEST_MIGRATION_VERSION: i64 = {
+    assert!(!MIGRATIONS.is_empty(), "the store must declare a schema");
+    MIGRATIONS[MIGRATIONS.len() - 1].version
+};
+
 static MIGRATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub(crate) fn database_path() -> Result<PathBuf> {
