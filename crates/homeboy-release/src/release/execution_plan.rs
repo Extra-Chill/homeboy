@@ -97,6 +97,17 @@ pub(super) fn execute_plan_steps(
     results: &mut Vec<ReleaseStepResult>,
     skip_step_ids: &HashSet<&'static str>,
 ) -> Result<bool> {
+    execute_plan_steps_at_source(steps, component_id, options, results, skip_step_ids, None)
+}
+
+pub(super) fn execute_plan_steps_at_source(
+    steps: &[PlanStep],
+    component_id: &str,
+    options: &ReleaseOptions,
+    results: &mut Vec<ReleaseStepResult>,
+    skip_step_ids: &HashSet<&'static str>,
+    staging_source_sha: Option<&str>,
+) -> Result<bool> {
     if steps.is_empty() {
         return Ok(false);
     }
@@ -115,7 +126,17 @@ pub(super) fn execute_plan_steps(
     let run = homeboy_core::execution::execute_plan_steps_filtered(
         steps,
         |step| skip_step_ids.contains(step.id.as_str()),
-        |step| execute_release_plan_step(step, &mut context),
+        |step| {
+            if step.id == "preflight.remote_sync" {
+                Ok(Some(super::execution_dispatch::run_remote_sync_preflight(
+                    step,
+                    &context,
+                    staging_source_sha,
+                )))
+            } else {
+                execute_release_plan_step(step, &mut context)
+            }
+        },
         release_step_is_show_stopper,
     )?;
     results.extend(run.results);

@@ -22,6 +22,24 @@ pub(super) fn validate_remote_sync(component: &Component) -> Result<()> {
     Ok(())
 }
 
+/// Refresh remote refs without changing a provider-selected staging checkout.
+/// The selected SHA remains the authority from provisioning through mutation.
+pub(super) fn validate_remote_sync_at(component: &Component, source_sha: &str) -> Result<()> {
+    git::fetch_origin(&component.local_path)?;
+    let head = git::get_head_commit(&component.local_path)?;
+    if head == source_sha {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "release.workspace",
+        format!(
+            "staging checkout moved from immutable source SHA {source_sha} to {head} before release mutation"
+        ),
+        Some(component.local_path.clone()),
+        Some(vec!["Re-provision the release workspace from the verified source SHA.".to_string()]),
+    ))
+}
+
 pub(super) fn validate_default_branch(component: &Component) -> Result<()> {
     let current_branch = current_branch(component)?;
     let default_branch = default_branch(component);

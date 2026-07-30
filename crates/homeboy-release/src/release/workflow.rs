@@ -7,6 +7,7 @@ use super::types::{
     BatchReleaseComponentResult, BatchReleaseResult, BatchReleaseSummary, ReleaseBumpPolicyOptions,
     ReleaseCommandInput, ReleaseCommandResult, ReleaseExecutionPlan, ReleaseOptions, ReleasePlan,
     ReleaseRun, ReleaseRunResult, ReleaseStepResult, ReleaseStepStatus,
+    ReleaseWorkspaceCommandResult,
 };
 use super::workflow_recover::{recovery_release_plan, run_recover};
 
@@ -31,10 +32,36 @@ pub(super) fn release_execution_plan(input: &ReleaseCommandInput) -> ReleaseExec
 }
 
 pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32)> {
+    run_command_with_recovery_owner(input, None)
+}
+
+/// Additive recovery entry point for callers that have a durable provider
+/// owner reference. `ReleaseCommandInput` remains source-compatible.
+pub fn run_command_with_recovery_owner(
+    input: ReleaseCommandInput,
+    recovery_owner_run_ref: Option<&str>,
+) -> Result<(ReleaseCommandResult, i32)> {
+    let (output, exit_code) = run_command_with_workspace(input, recovery_owner_run_ref)?;
+    Ok((output.result, exit_code))
+}
+
+/// Additive staging-aware command entry point. CLI callers use the workspace
+/// envelope when provider staging or recovery reconciliation produced metadata.
+pub fn run_command_with_workspace(
+    input: ReleaseCommandInput,
+    recovery_owner_run_ref: Option<&str>,
+) -> Result<(ReleaseWorkspaceCommandResult, i32)> {
     let execution = release_execution_plan(&input);
 
     if input.recover {
-        return run_recover(&input);
+        return run_recover(&input, recovery_owner_run_ref).map(
+            |(result, workspace, exit_code)| {
+                (
+                    ReleaseWorkspaceCommandResult { result, workspace },
+                    exit_code,
+                )
+            },
+        );
     }
 
     if input.pipeline.from_artifacts.is_some() && !input.pipeline.head {
@@ -183,7 +210,13 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
             &execution,
             &bump_type,
         )? {
-            return Ok((result, 0));
+            return Ok((
+                ReleaseWorkspaceCommandResult {
+                    result,
+                    workspace: None,
+                },
+                0,
+            ));
         }
 
         let early_plan = super::plan(&input.component_id, &options).ok();
@@ -199,21 +232,24 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
             let tag = new_version.as_ref().map(|v| release_scope.tag_name(v));
 
             return Ok((
-                ReleaseCommandResult {
-                    phase: execution.phase,
-                    component_id: input.component_id,
-                    status: release_command_status(true, skipped_reason.as_deref(), None),
-                    bump_type,
-                    dry_run: true,
-                    releasable_commits: releasable_count,
-                    new_version,
-                    tag,
-                    skipped_reason,
-                    plan: Some(plan),
-                    run: None,
-                    deployment: None,
-                    continuation_command: None,
-                    release_summary: release_summary_for_skipped_plan(),
+                ReleaseWorkspaceCommandResult {
+                    result: ReleaseCommandResult {
+                        phase: execution.phase,
+                        component_id: input.component_id,
+                        status: release_command_status(true, skipped_reason.as_deref(), None),
+                        bump_type,
+                        dry_run: true,
+                        releasable_commits: releasable_count,
+                        new_version,
+                        tag,
+                        skipped_reason,
+                        plan: Some(plan),
+                        run: None,
+                        deployment: None,
+                        continuation_command: None,
+                        release_summary: release_summary_for_skipped_plan(),
+                    },
+                    workspace: None,
                 },
                 0,
             ));
@@ -224,21 +260,24 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
             let status = release_command_status(true, skipped_reason.as_deref(), Some(&run));
             let release_summary = release_summary_from_run(&run);
             return Ok((
-                ReleaseCommandResult {
-                    phase: execution.phase,
-                    component_id: input.component_id,
-                    status,
-                    bump_type,
-                    dry_run: true,
-                    releasable_commits: releasable_count,
-                    new_version: None,
-                    tag: None,
-                    skipped_reason,
-                    plan: early_plan,
-                    run: Some(run),
-                    deployment: None,
-                    continuation_command: None,
-                    release_summary,
+                ReleaseWorkspaceCommandResult {
+                    result: ReleaseCommandResult {
+                        phase: execution.phase,
+                        component_id: input.component_id,
+                        status,
+                        bump_type,
+                        dry_run: true,
+                        releasable_commits: releasable_count,
+                        new_version: None,
+                        tag: None,
+                        skipped_reason,
+                        plan: early_plan,
+                        run: Some(run),
+                        deployment: None,
+                        continuation_command: None,
+                        release_summary,
+                    },
+                    workspace: None,
                 },
                 1,
             ));
@@ -259,27 +298,31 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
         let dry_run_exit_code = release_command_exit_code(skipped_reason.as_deref(), 0, 0, 0);
 
         return Ok((
-            ReleaseCommandResult {
-                phase: execution.phase,
-                component_id: input.component_id,
-                status: release_command_status(true, skipped_reason.as_deref(), None),
-                bump_type,
-                dry_run: true,
-                releasable_commits: releasable_count,
-                new_version,
-                tag,
-                skipped_reason,
-                plan: Some(plan),
-                run: None,
-                deployment,
-                continuation_command: None,
-                release_summary: release_summary_for_skipped_plan(),
+            ReleaseWorkspaceCommandResult {
+                result: ReleaseCommandResult {
+                    phase: execution.phase,
+                    component_id: input.component_id,
+                    status: release_command_status(true, skipped_reason.as_deref(), None),
+                    bump_type,
+                    dry_run: true,
+                    releasable_commits: releasable_count,
+                    new_version,
+                    tag,
+                    skipped_reason,
+                    plan: Some(plan),
+                    run: None,
+                    deployment,
+                    continuation_command: None,
+                    release_summary: release_summary_for_skipped_plan(),
+                },
+                workspace: None,
             },
             dry_run_exit_code,
         ));
     }
 
-    let (plan, run_result) = super::pipeline::run_with_plan(&input.component_id, &options)?;
+    let (plan, run_result, workspace) =
+        super::pipeline::run_with_plan(&input.component_id, &options)?;
     display_release_summary(&run_result);
 
     let new_version = if input.pipeline.head {
@@ -289,7 +332,9 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
     };
     let tag = new_version.as_ref().map(|v| release_scope.tag_name(v));
     let release_step_exit = release_run_failure_exit(&run_result);
-    let post_release_exit = if has_post_release_warnings(&run_result) {
+    let post_release_exit = if has_post_release_warnings(&run_result)
+        || workspace_finalization_pending(workspace.as_ref())
+    {
         3
     } else {
         0
@@ -330,21 +375,24 @@ pub fn run_command(input: ReleaseCommandInput) -> Result<(ReleaseCommandResult, 
     );
 
     Ok((
-        ReleaseCommandResult {
-            phase: execution.phase,
-            component_id: input.component_id,
-            status: release_command_status(false, skipped_reason.as_deref(), Some(&run_result)),
-            bump_type,
-            dry_run: false,
-            releasable_commits: releasable_count,
-            new_version,
-            tag,
-            skipped_reason,
-            plan: Some(plan),
-            run: Some(run_result),
-            deployment,
-            continuation_command: None,
-            release_summary,
+        ReleaseWorkspaceCommandResult {
+            result: ReleaseCommandResult {
+                phase: execution.phase,
+                component_id: input.component_id,
+                status: release_command_status(false, skipped_reason.as_deref(), Some(&run_result)),
+                bump_type,
+                dry_run: false,
+                releasable_commits: releasable_count,
+                new_version,
+                tag,
+                skipped_reason,
+                plan: Some(plan),
+                run: Some(run_result),
+                deployment,
+                continuation_command: None,
+                release_summary,
+            },
+            workspace,
         },
         exit_code,
     ))
@@ -739,6 +787,12 @@ fn has_post_release_warnings(run: &ReleaseRun) -> bool {
                 .and_then(|v| v.as_bool())
                 == Some(false)
     })
+}
+
+fn workspace_finalization_pending(
+    workspace: Option<&super::types::ReleaseWorkspaceOutput>,
+) -> bool {
+    workspace.is_some_and(|workspace| workspace.finalization_error.is_some())
 }
 
 fn release_run_failure_exit(run: &ReleaseRun) -> i32 {
@@ -1140,6 +1194,25 @@ mod tests {
         };
 
         assert!(has_post_release_warnings(&run));
+    }
+
+    #[test]
+    fn pending_workspace_finalization_is_a_nonzero_lifecycle_warning() {
+        let workspace = crate::release::ReleaseWorkspaceOutput {
+            kind: "provider_owned".to_string(),
+            path: "/workspace".to_string(),
+            provider_id: Some("fixture".to_string()),
+            handle: Some("release-fixture".to_string()),
+            owner_run_ref: Some("release/owner".to_string()),
+            source_sha: Some("abc".to_string()),
+            final_disposition: Some("finalization_pending".to_string()),
+            continuation_ref: Some("release/owner".to_string()),
+            finalization_error: Some("provider failed".to_string()),
+            reconciliation_ref: Some("release/owner".to_string()),
+        };
+
+        assert!(workspace_finalization_pending(Some(&workspace)));
+        assert_eq!(release_command_exit_code(None, 0, 0, 3), 3);
     }
 
     #[test]
@@ -1843,4 +1916,37 @@ mod tests {
             );
         }
     }
+}
+#[test]
+fn legacy_release_command_input_struct_literal_remains_source_compatible() {
+    let _ = ReleaseCommandInput {
+        component_id: "component".to_string(),
+        path_override: None,
+        dry_run: false,
+        recover: false,
+        retag: false,
+        skip_checks: false,
+        skip_checks_granular: Vec::new(),
+        skip_build_validation: false,
+        skip_deps_hydration: false,
+        bump_override: None,
+        force_lower_bump: false,
+        pipeline: super::types::ReleasePipelineOptions::default(),
+        skip_github_release: false,
+        git_identity: None,
+        execution: None,
+    };
+    let _ = ReleaseOptions {
+        bump_type: "patch".to_string(),
+        dry_run: false,
+        path_override: None,
+        skip_checks: false,
+        skip_checks_granular: Vec::new(),
+        skip_build_validation: false,
+        skip_deps_hydration: false,
+        pipeline: super::types::ReleasePipelineOptions::default(),
+        skip_github_release: false,
+        git_identity: None,
+        bump_policy: Default::default(),
+    };
 }

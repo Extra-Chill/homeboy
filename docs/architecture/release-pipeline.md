@@ -100,6 +100,21 @@ Release execution:
 Release requires a clean working tree except for files the release process owns,
 such as version targets and changelog targets.
 
+## Release Workspace Ownership
+
+A clean checkout already on its default branch remains the authoritative
+in-place release workspace. When that checkout is dirty, detached, or on a
+different branch, release provisions an isolated provider-owned staging
+workspace instead. The staging request is bound to the verified remote default
+branch SHA and carries generic `release_staging` purpose, an owner run
+reference, and `remove_on_success` cleanup policy.
+
+Provider finalization receives the terminal disposition exactly once. A
+successful staging run requests immediate cleanup; a failed or interrupted run
+is preserved for bounded provider-managed inspection and its owner reference is
+returned in structured release output. Provider command templates are argv
+lists, never shell command strings.
+
 ## Historical Terminology
 
 Older docs and changelog entries may mention `extension_run`,

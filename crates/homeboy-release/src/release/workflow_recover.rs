@@ -52,7 +52,23 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-pub(super) fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommandResult, i32)> {
+pub(super) fn run_recover(
+    input: &ReleaseCommandInput,
+    owner_run_ref: Option<&str>,
+) -> Result<(
+    ReleaseCommandResult,
+    Option<super::types::ReleaseWorkspaceOutput>,
+    i32,
+)> {
+    if let Some(record) = super::workspace::reconcile_pending(&input.component_id, owner_run_ref)? {
+        return Ok((ReleaseCommandResult {
+            component_id: input.component_id.clone(), status: if record.attributes.get("release_pushed").and_then(serde_json::Value::as_bool).unwrap_or(false) { "released" } else { "workspace_reconciled" }.to_string(),
+            phase: release_execution_plan(input).phase, bump_type: "recover".to_string(), dry_run: false,
+            releasable_commits: 0, new_version: None, tag: None, skipped_reason: None, plan: None, run: None,
+            deployment: None, continuation_command: None,
+            release_summary: vec![format!("Reconciled provider workspace `{}` without replaying release mutation or push.", record.owner_run_ref)],
+        }, Some(super::workspace::output_from_record(&record)), 0));
+    }
     if let Some(deployment) = super::deployment::resume_deployment(&input.component_id)? {
         let failed = deployment.summary.failed > 0;
         return Ok((
@@ -72,6 +88,7 @@ pub(super) fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommand
                 continuation_command: None,
                 release_summary: vec!["Resumed only incomplete release deployment targets; publication steps were not replayed.".to_string()],
             },
+            None,
             if failed { 1 } else { 0 },
         ));
     }
@@ -285,6 +302,7 @@ pub(super) fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommand
                     true,
                     actions,
                 ),
+                None,
                 0,
             ));
         }
@@ -359,6 +377,7 @@ pub(super) fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommand
                 ]
                 .concat(),
             },
+            None,
             RECOVERY_INCOMPLETE_EXIT_CODE,
         ));
     }
@@ -424,6 +443,7 @@ pub(super) fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommand
                 !tag_exists_remote,
                 actions,
             ),
+            None,
             0,
         ));
     }
@@ -538,6 +558,7 @@ pub(super) fn run_recover(input: &ReleaseCommandInput) -> Result<(ReleaseCommand
             ]
             .concat(),
         },
+        None,
         RECOVERY_INCOMPLETE_EXIT_CODE,
     ))
 }

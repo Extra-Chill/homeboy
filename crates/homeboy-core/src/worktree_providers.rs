@@ -11,6 +11,43 @@ use crate::defaults::{
 };
 use crate::error::{CommandEvidence, Error, Result};
 
+/// `HomeboyConfig.settings` key containing provider lifecycle command settings.
+pub const WORKTREE_PROVIDER_LIFECYCLE_SETTINGS_KEY: &str = "worktree_provider_lifecycle";
+
+#[derive(Debug, Deserialize)]
+struct WorktreeProviderLifecycleSettings {
+    finalize: Vec<String>,
+}
+
+/// Resolve the provider-agnostic terminal lifecycle argv configured through the
+/// generic settings extension map. Keeping this separate from provider command
+/// discovery preserves the public provider configuration struct.
+pub fn worktree_provider_lifecycle_finalizer_argv_from_config(
+    provider_id: &str,
+    config: &HomeboyConfig,
+) -> Result<Option<Vec<String>>> {
+    let Some(value) = config
+        .settings
+        .get(WORKTREE_PROVIDER_LIFECYCLE_SETTINGS_KEY)
+    else {
+        return Ok(None);
+    };
+    let settings = serde_json::from_value::<BTreeMap<String, WorktreeProviderLifecycleSettings>>(
+        value.clone(),
+    )
+    .map_err(|error| {
+        Error::validation_invalid_argument(
+            format!("settings.{WORKTREE_PROVIDER_LIFECYCLE_SETTINGS_KEY}"),
+            format!("provider lifecycle settings must map provider ids to finalize argv: {error}"),
+            Some(provider_id.to_string()),
+            None,
+        )
+    })?;
+    Ok(settings
+        .get(provider_id)
+        .map(|settings| settings.finalize.clone()))
+}
+
 #[cfg(not(test))]
 const PROVIDER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
@@ -134,6 +171,79 @@ pub struct WorktreeProviderCreateIntent {
     pub base: String,
     pub head: String,
     pub task_url: String,
+}
+
+/// Typed lifecycle intent attached to a provider-owned workspace request.
+/// Providers own any product-specific interpretation; Homeboy only preserves
+/// this generic ownership contract through argv substitution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeProviderLifecycleIntent {
+    pub purpose: String,
+    pub owner_run_ref: String,
+    pub cleanup_policy: WorktreeProviderCleanupPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeProviderCleanupPolicy {
+    RemoveOnSuccess,
+    PreserveOnFailure,
+}
+
+impl WorktreeProviderCleanupPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RemoveOnSuccess => "remove_on_success",
+            Self::PreserveOnFailure => "preserve_on_failure",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeProviderTerminalDisposition {
+    Succeeded,
+    Failed,
+    Cancelled,
+    TimedOut,
+    Interrupted,
+}
+
+impl WorktreeProviderTerminalDisposition {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::Interrupted => "interrupted",
+        }
+    }
+
+    fn owner_outcome(self) -> &'static str {
+        match self {
+            Self::Succeeded => "success",
+            Self::Failed | Self::Cancelled | Self::TimedOut | Self::Interrupted => "failure",
+        }
+    }
+
+    fn lifecycle_state(self) -> &'static str {
+        match self {
+            Self::Succeeded => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::Interrupted => "interrupted",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeProviderFinalization {
+    pub provider_id: String,
+    pub handle: String,
+    pub disposition: WorktreeProviderTerminalDisposition,
+    pub owner_outcome: String,
+    pub lifecycle_state: String,
+    pub inspection_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -280,13 +390,108 @@ pub fn provision_apply_enabled_worktree_provider_from_config(
     intent: &WorktreeProviderCreateIntent,
     config: &HomeboyConfig,
 ) -> Result<WorktreeProviderProvision> {
+    provision_apply_enabled_worktree_provider_from_config_with_lifecycle(intent, None, config)
+}
+
+/// Determine the provider that will own an ensure before the external command
+/// runs. Callers that persist lifecycle ownership use this to close the
+/// pre-ensure crash window.
+pub fn select_apply_enabled_worktree_provider_from_config(
+    intent: &WorktreeProviderCreateIntent,
+    config: &HomeboyConfig,
+) -> Result<String> {
     match resolve_apply_enabled_worktree_provider_from_config(&intent.handle, config, None) {
         Ok(resolution) => {
+            validate_lifecycle_provider(&resolution.provider_id, config)?;
+            return Ok(resolution.provider_id);
+        }
+        Err(error)
+            if error
+                .details
+                .get("worktree_provider_lookup")
+                .and_then(Value::as_str)
+                == Some("not_found") => {}
+        Err(error) => return Err(error),
+    }
+    let mut providers = Vec::new();
+    for (id, provider) in &config.worktree_providers {
+        if provider.enabled
+            && provider.apply_enabled
+            && provider.commands.ensure.is_some()
+            && worktree_provider_lifecycle_finalizer_argv_from_config(id, config)?.is_some()
+        {
+            providers.push(id.clone());
+        }
+    }
+    providers.sort();
+    match providers.as_slice() {
+        [provider] => Ok(provider.clone()),
+        [] => Err(Error::validation_invalid_argument("to_worktree", format!("worktree handle `{}` is missing and no enabled apply-enabled provider configures commands.ensure", intent.handle), Some(intent.handle.clone()), None)),
+        _ => Err(Error::validation_invalid_argument("to_worktree", format!("worktree handle `{}` is missing and multiple providers can ensure it: {}", intent.handle, providers.join(", ")), Some(intent.handle.clone()), None)),
+    }
+}
+
+/// A purpose-owned workspace needs all lifecycle phases before ownership is
+/// persisted. This prevents an unreconcilable ensure from ever being invoked.
+fn validate_lifecycle_provider(provider_id: &str, config: &HomeboyConfig) -> Result<()> {
+    let provider = config.worktree_providers.get(provider_id).ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "worktree_provider",
+            "selected provider is no longer configured",
+            Some(provider_id.to_string()),
+            None,
+        )
+    })?;
+    if provider.enabled
+        && provider.apply_enabled
+        && provider.commands.ensure.is_some()
+        && worktree_provider_lifecycle_finalizer_argv_from_config(provider_id, config)?.is_some()
+    {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "worktree_provider",
+        "purpose-owned workspace provider requires enabled, apply_enabled, commands.ensure, and settings.worktree_provider_lifecycle.<provider>.finalize",
+        Some(provider_id.to_string()),
+        None,
+    ))
+}
+
+fn provision_apply_enabled_worktree_provider_from_config_with_lifecycle(
+    intent: &WorktreeProviderCreateIntent,
+    lifecycle: Option<&WorktreeProviderLifecycleIntent>,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderProvision> {
+    match resolve_apply_enabled_worktree_provider_from_config(&intent.handle, config, None) {
+        Ok(resolution) => {
+            if let Some(lifecycle) = lifecycle {
+                let provider = config
+                    .worktree_providers
+                    .get(&resolution.provider_id)
+                    .expect("resolved provider is configured");
+                let command = provider.commands.ensure.as_ref().ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "worktree_providers.commands.ensure",
+                        "purpose-owned workspace requires an ensure command",
+                        Some(resolution.provider_id.clone()),
+                        None,
+                    )
+                })?;
+                run_provider_ensure_command(
+                    &resolution.provider_id,
+                    &expand_lifecycle_ensure_command(
+                        command,
+                        intent,
+                        lifecycle,
+                        &provision_idempotency_key(intent),
+                    ),
+                )?;
+            }
             return Ok(WorktreeProviderProvision {
                 resolution,
                 action: "adopted",
                 idempotency_key: provision_idempotency_key(intent),
-            })
+            });
         }
         Err(error)
             if error
@@ -336,15 +541,28 @@ pub fn provision_apply_enabled_worktree_provider_from_config(
         ));
     };
     let idempotency_key = provision_idempotency_key(intent);
-    let command = expand_ensure_command(
-        provider
-            .commands
-            .ensure
-            .as_ref()
-            .expect("filtered ensure command"),
-        intent,
-        &idempotency_key,
-    );
+    let command = if let Some(lifecycle) = lifecycle {
+        expand_lifecycle_ensure_command(
+            provider
+                .commands
+                .ensure
+                .as_ref()
+                .expect("filtered ensure command"),
+            intent,
+            lifecycle,
+            &idempotency_key,
+        )
+    } else {
+        expand_ensure_command(
+            provider
+                .commands
+                .ensure
+                .as_ref()
+                .expect("filtered ensure command"),
+            intent,
+            &idempotency_key,
+        )
+    };
     let rendered_command = render_provider_command(&command);
     if !provider.apply_enabled {
         return Err(Error::validation_invalid_argument(
@@ -368,11 +586,103 @@ pub fn provision_apply_enabled_worktree_provider_from_config(
     })
 }
 
-fn provision_idempotency_key(intent: &WorktreeProviderCreateIntent) -> String {
+/// Provision a workspace with generic purpose/owner lifecycle intent. The
+/// existing provision contract remains available for callers that do not own a
+/// terminal lifecycle.
+pub fn provision_apply_enabled_worktree_provider_with_lifecycle_from_config(
+    intent: &WorktreeProviderCreateIntent,
+    lifecycle: &WorktreeProviderLifecycleIntent,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderProvision> {
+    let provider_id = select_apply_enabled_worktree_provider_from_config(intent, config)?;
+    validate_lifecycle_provider(&provider_id, config)?;
+    provision_apply_enabled_worktree_provider_from_config_with_lifecycle(
+        intent,
+        Some(lifecycle),
+        config,
+    )
+}
+
+/// Finalize a purpose-owned workspace once its owner has reached a terminal
+/// disposition. The command is argv-only and receives no shell-expanded input.
+pub fn finalize_apply_enabled_worktree_provider_from_config(
+    resolution: &WorktreeProviderResolution,
+    lifecycle: &WorktreeProviderLifecycleIntent,
+    disposition: WorktreeProviderTerminalDisposition,
+    config: &HomeboyConfig,
+) -> Result<WorktreeProviderFinalization> {
+    let provider = config
+        .worktree_providers
+        .get(&resolution.provider_id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "worktree_provider",
+                "resolved provider is no longer configured",
+                Some(resolution.provider_id.clone()),
+                None,
+            )
+        })?;
+    if !provider.enabled || !provider.apply_enabled {
+        return Err(Error::validation_invalid_argument(
+            "worktree_provider",
+            "purpose-owned workspace provider finalization is not apply-enabled",
+            Some(resolution.provider_id.clone()),
+            None,
+        ));
+    }
+    let command =
+        worktree_provider_lifecycle_finalizer_argv_from_config(&resolution.provider_id, config)?
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "settings.worktree_provider_lifecycle",
+                    "purpose-owned workspace provider must configure a lifecycle finalize command",
+                    Some(resolution.provider_id.clone()),
+                    None,
+                )
+            })?;
+    let finalization_idempotency_key = worktree_provider_finalization_idempotency_key(lifecycle);
+    let command = command
+        .iter()
+        .map(|argument| {
+            argument
+                .replace("{handle}", &resolution.worktree.handle)
+                .replace("{purpose}", &lifecycle.purpose)
+                .replace("{owner_run_ref}", &lifecycle.owner_run_ref)
+                .replace("{idempotency_key}", &finalization_idempotency_key)
+                .replace("{cleanup_policy}", lifecycle.cleanup_policy.as_str())
+                .replace("{disposition}", disposition.as_str())
+                .replace("{owner_outcome}", disposition.owner_outcome())
+                .replace("{lifecycle_state}", disposition.lifecycle_state())
+        })
+        .collect::<Vec<_>>();
+    run_provider_ensure_command(&resolution.provider_id, &command)?;
+    Ok(WorktreeProviderFinalization {
+        provider_id: resolution.provider_id.clone(),
+        handle: resolution.worktree.handle.clone(),
+        disposition,
+        owner_outcome: disposition.owner_outcome().to_string(),
+        lifecycle_state: disposition.lifecycle_state().to_string(),
+        inspection_path: resolution.worktree.path.clone(),
+    })
+}
+
+pub fn worktree_provider_idempotency_key(intent: &WorktreeProviderCreateIntent) -> String {
     format!(
         "{}:{}:{}:{}",
         intent.handle, intent.repo, intent.base, intent.head
     )
+}
+
+/// Stable finalization key. A stale lease may cause multiple invocations, so
+/// providers must use this key to deduplicate their logical terminal effect.
+pub fn worktree_provider_finalization_idempotency_key(
+    lifecycle: &WorktreeProviderLifecycleIntent,
+) -> String {
+    format!("finalize:{}", lifecycle.owner_run_ref)
+}
+
+fn provision_idempotency_key(intent: &WorktreeProviderCreateIntent) -> String {
+    worktree_provider_idempotency_key(intent)
 }
 
 fn expand_ensure_command(
@@ -394,6 +704,23 @@ fn expand_ensure_command(
         .collect()
 }
 
+fn expand_lifecycle_ensure_command(
+    command: &[String],
+    intent: &WorktreeProviderCreateIntent,
+    lifecycle: &WorktreeProviderLifecycleIntent,
+    idempotency_key: &str,
+) -> Vec<String> {
+    expand_ensure_command(command, intent, idempotency_key)
+        .into_iter()
+        .map(|argument| {
+            argument
+                .replace("{purpose}", &lifecycle.purpose)
+                .replace("{owner_run_ref}", &lifecycle.owner_run_ref)
+                .replace("{cleanup_policy}", lifecycle.cleanup_policy.as_str())
+        })
+        .collect()
+}
+
 fn render_provider_command(command: &[String]) -> String {
     command
         .iter()
@@ -403,6 +730,16 @@ fn render_provider_command(command: &[String]) -> String {
 }
 
 fn run_provider_ensure_command(provider_id: &str, command: &[String]) -> Result<()> {
+    if let Some(argument) = command.iter().find(|argument| argument.contains('{')) {
+        return Err(Error::validation_invalid_argument(
+            "worktree_providers.commands",
+            format!(
+                "worktree provider `{provider_id}` command contains an unresolved placeholder: {argument}"
+            ),
+            Some(provider_id.to_string()),
+            None,
+        ));
+    }
     let Some((program, args)) = command
         .split_first()
         .filter(|(program, _)| !program.trim().is_empty())
@@ -1796,6 +2133,188 @@ mod tests {
                 .expect("list result mapping")
                 .items,
             "$.result.items"
+        );
+    }
+
+    #[test]
+    fn lifecycle_commands_resolve_all_owner_and_terminal_placeholders() {
+        let intent = WorktreeProviderCreateIntent {
+            handle: "fixture@release".to_string(),
+            repo: "https://example.invalid/repo.git".to_string(),
+            base: "main".to_string(),
+            head: "0123456789abcdef".to_string(),
+            task_url: "release/run-1".to_string(),
+        };
+        let lifecycle = WorktreeProviderLifecycleIntent {
+            purpose: "release_staging".to_string(),
+            owner_run_ref: "release/run-1".to_string(),
+            cleanup_policy: WorktreeProviderCleanupPolicy::RemoveOnSuccess,
+        };
+        let ensure = expand_lifecycle_ensure_command(
+            &[
+                "provider".to_string(),
+                "{handle}".to_string(),
+                "{purpose}".to_string(),
+                "{owner_run_ref}".to_string(),
+                "{cleanup_policy}".to_string(),
+            ],
+            &intent,
+            &lifecycle,
+            "fixture-key",
+        );
+        assert_eq!(
+            ensure,
+            [
+                "provider",
+                "fixture@release",
+                "release_staging",
+                "release/run-1",
+                "remove_on_success"
+            ]
+        );
+
+        let finalization_key = worktree_provider_finalization_idempotency_key(&lifecycle);
+        let finalize = [
+            "{owner_outcome}",
+            "{lifecycle_state}",
+            "{disposition}",
+            "{idempotency_key}",
+        ]
+        .iter()
+        .map(|argument| {
+            argument
+                .replace(
+                    "{owner_outcome}",
+                    WorktreeProviderTerminalDisposition::Succeeded.owner_outcome(),
+                )
+                .replace("{idempotency_key}", &finalization_key)
+                .replace(
+                    "{lifecycle_state}",
+                    WorktreeProviderTerminalDisposition::Succeeded.lifecycle_state(),
+                )
+                .replace(
+                    "{disposition}",
+                    WorktreeProviderTerminalDisposition::Succeeded.as_str(),
+                )
+        })
+        .collect::<Vec<_>>();
+        assert_eq!(
+            finalize,
+            [
+                "success",
+                "completed",
+                "succeeded",
+                "finalize:release/run-1"
+            ]
+        );
+    }
+
+    #[test]
+    fn lifecycle_selection_rejects_missing_finalize_before_ensure_can_run() {
+        let marker = tempfile::NamedTempFile::new().expect("marker");
+        std::fs::remove_file(marker.path()).expect("remove marker");
+        let provider = WorktreeProviderConfig {
+            enabled: true,
+            kind: WorktreeProviderKind::Command,
+            apply_enabled: true,
+            lookup_timeout_ms: 10_000,
+            lookup_output_limit_bytes: 64 * 1024,
+            commands: WorktreeProviderCommands {
+                ensure: Some(vec![fake_provider_script_body(&format!(
+                    "touch '{}'",
+                    marker.path().display()
+                ))]),
+                ..Default::default()
+            },
+            list_result_mapping: Some(worktrees_mapping()),
+        };
+        let error = select_apply_enabled_worktree_provider_from_config(
+            &WorktreeProviderCreateIntent {
+                handle: "missing".to_string(),
+                repo: "repo".to_string(),
+                base: "main".to_string(),
+                head: "abc".to_string(),
+                task_url: "task".to_string(),
+            },
+            &config_with_provider(provider),
+        )
+        .expect_err("missing finalizer must reject lifecycle ownership");
+        assert!(error.message.contains("no enabled apply-enabled provider"));
+        assert!(!marker.path().exists(), "ensure command must not run");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finalization_reuses_a_stable_key_and_provider_deduplicates_the_effect() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let effects = temp.path().join("effects");
+        let script = temp.path().join("provider");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nkey=\"${{10}}\"\nif [ ! -f '{0}' ] || ! grep -Fqx \"$key\" '{0}'; then printf '%s\\n' \"$key\" >> '{0}'; fi\n",
+                effects.display()
+            ),
+        )
+        .expect("write provider");
+        let mut permissions = fs::metadata(&script).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).expect("executable");
+
+        let mut config = HomeboyConfig::default();
+        config.worktree_providers.insert(
+            "fixture".to_string(),
+            WorktreeProviderConfig {
+                enabled: true,
+                kind: WorktreeProviderKind::Command,
+                apply_enabled: true,
+                commands: WorktreeProviderCommands::default(),
+                lookup_timeout_ms: 10_000,
+                lookup_output_limit_bytes: 64 * 1024,
+                list_result_mapping: None,
+            },
+        );
+        config.settings.insert(
+            WORKTREE_PROVIDER_LIFECYCLE_SETTINGS_KEY.to_string(),
+            serde_json::json!({ "fixture": { "finalize": [script.display().to_string(), "finalize", "{handle}", "{purpose}", "{owner_run_ref}", "{cleanup_policy}", "{disposition}", "{owner_outcome}", "{lifecycle_state}", "{idempotency_key}"] } }),
+        );
+        let resolution = WorktreeProviderResolution {
+            provider_id: "fixture".to_string(),
+            worktree: WorktreeProviderHandle {
+                handle: "fixture@release".to_string(),
+                path: temp.path().display().to_string(),
+                branch: "main".to_string(),
+                safety: WorktreeProviderHandleSafety {
+                    dirty: false,
+                    unpushed: false,
+                    primary: false,
+                },
+            },
+        };
+        let lifecycle = WorktreeProviderLifecycleIntent {
+            purpose: "release_staging".to_string(),
+            owner_run_ref: "release/stable-owner".to_string(),
+            cleanup_policy: WorktreeProviderCleanupPolicy::RemoveOnSuccess,
+        };
+
+        for _ in 0..2 {
+            finalize_apply_enabled_worktree_provider_from_config(
+                &resolution,
+                &lifecycle,
+                WorktreeProviderTerminalDisposition::Succeeded,
+                &config,
+            )
+            .expect("provider finalization");
+        }
+
+        assert_eq!(
+            fs::read_to_string(effects)
+                .expect("provider effects")
+                .lines()
+                .count(),
+            1
         );
     }
 
